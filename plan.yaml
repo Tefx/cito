@@ -1,0 +1,335 @@
+# =============================================================
+# MANAGED FILE — DO NOT EDIT DIRECTLY
+# This file is owned by vectl. Direct edits bypass CAS write
+# protection, lock recalculation, and schema validation.
+#
+# Use: vectl_* MCP tools (preferred)  OR  vectl <command> (CLI fallback)
+# Docs: vectl guide  OR  MCP: vectl_guide
+# =============================================================
+version: 1
+project: cito
+strategy_ref: docs/DESIGN.md
+context: 'Deliver and verify Cito V1 inside /Users/tefx/Projects/cito per docs/DESIGN.md
+  and README.md: cito-hub HTTP+WSS relay with SQLite persistence, anti-loop quotas,
+  pairwise circuit breaker, and optional pure-OIDC JWT verification; cito-mcp unified
+  stdio MCP server with two-stage crash-safe batch dispatch, 20s bounded liveness
+  sweep, and rejection-aware double-checked flock OIDC JIT login; ChatGPT/Codex Desktop
+  App adapter; Pi (1.5.0) local Unix socket bridge extension (src/pi-extension/cito-bridge.ts);
+  and macOS single-instance NSPanel HUD banner (src/macos/cito-banner.swift). Exclude
+  Claude Code adapter implementation and tests (docs/DESIGN.md §9 is proposed/TODO
+  only) and forbid mutations to external dotfiles or tela repositories.'
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (§1-§8, §10) and
+  README.md.
+
+  2. Hard exclusions: Do NOT implement or test the Claude Code adapter (docs/DESIGN.md
+  §9 is TODO/proposed only; cito-hub rejects harness=''claude'' with 422 UNSUPPORTED_HARNESS
+  and cito_find accepts only ''codex'' | ''pi''). Do NOT mutate external repositories
+  (/Users/tefx/dotfiles, tela) or live user ~/.cito / ~/.codex state during tests;
+  always isolate test state in temporary directories via CITO_STATE_DIR, CITO_HUB_DB_PATH,
+  and CITO_CODEX_HOME.
+
+  3. Preserve strict wire/error envelopes, SQLite 0600/0700 permissions, lease fencing,
+  and lock-order invariants.'
+phases:
+- id: v1
+  name: Cito V1 Core Relay, Host Adapters, HUD Banner, and MCP Integration
+  status: pending
+  gate: All V1 deliverables (cito-hub, cito-mcp, Codex Desktop adapter, src/pi-extension/cito-bridge.ts,
+    src/macos/cito-banner.swift, and optional OIDC auth) pass their unit and end-to-end
+    acceptance checks covering docs/DESIGN.md §10, with zero Claude Code implementation/test
+    leakage and zero external repository mutations.
+  context: 'Implement and verify the complete V1 Cito signaling system inside /Users/tefx/Projects/cito:
+    cito-hub relay and OIDC JWT verifier, Pi 1.5.0 bridge extension and Codex/Pi host
+    adapters, macOS native single-instance cito-banner HUD, unified cito-mcp server
+    with crash-safe two-stage dispatch and JIT OIDC login, and final project acceptance.'
+  steps:
+  - id: v1.hub
+    name: Toolchain foundation and cito-hub HTTP/WSS relay with SQLite state machine,
+      anti-loop guards, and OIDC verifier
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ tsconfig.json\n    - src/shared/**\n    - src/hub/**\n    - bin/**\n    -\
+      \ tests/hub/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n```\n\
+      \n- **Deliver:**\n  - Initialize the repository Node.js/TypeScript toolchain\
+      \ (`package.json`, `tsconfig.json`, and wildcard test runner scripts so downstream\
+      \ parallel steps do not need to edit `package.json`) and shared wire schemas,\
+      \ error codes, control-character sanitization, and crypto helpers (`src/shared/`).\n\
+      \  - Implement `cito-hub` (`src/hub/`) fulfilling `docs/DESIGN.md` §2.1, §3.1,\
+      \ §4.1, §5.1, §5.2, §6.1–6.3, and §8.1:\n    - Fail-fast startup configuration\
+      \ validation (`CITO_HUB_BIND`, `CITO_HUB_DB_PATH`, `CITO_AUTH_MODE`, `CITO_OIDC_ISSUER`,\
+      \ `CITO_OIDC_CLIENT_ID`) exiting with code `1` and a diagnostic on `stderr`\
+      \ on invalid input.\n    - SQLite persistence (`hub.sqlite` created mode `0600`\
+      \ in `0700` dir) storing persistent 32-byte `hub_secret` in `hub_meta`, canonical\
+      \ `SessionKey = (principal_id, host_id, harness, session_id)` and `owner_user`\
+      \ derivation in both `\"none\"` and `\"oidc\"` modes, and deterministic `listener_id`\
+      \ (`^c_[a-z2-7]{12}$` via `HMAC-SHA256`).\n    - Four-state listener lifecycle\
+      \ (`ACTIVE` with 60s lease, `DISCONNECTED_RETAINED` for 30m, `EXPIRED` returning\
+      \ `410 LISTENER_EXPIRED`, `UNLISTENED` returning `404 LISTENER_NOT_FOUND` or\
+      \ `409 STALE_GENERATION`), monotonic `binding_generation`, and monotonic never-resetting\
+      \ per-listener `latest_seq`.\n    - Anti-loop & human-turn reset rules: durable\
+      \ `unattended_wake_count` (`max_unattended_wakes = 3`) surviving `unlisten ->\
+      \ listen` and 30m expiry; monotonic `last_consumed_human_seq` reset rule (`human_event_seq\
+      \ > last_consumed_human_seq` resets `unattended_wake_count = 0` and clears pairwise\
+      \ rate counters); rolling 120s pairwise circuit breaker per unordered `{SenderEndpointKey,\
+      \ TargetSessionKey}` (4 waking signals permitted, 5th forced to `effective_wake:\
+      \ false` with `held_reason: \"pairwise_rate_limited\"`); and deterministic `held_reason`\
+      \ precedence (`passive_requested` > `peer_wake_disabled` > `wake_quota_exhausted`\
+      \ > `pairwise_rate_limited`).\n    - HTTP endpoints (`POST /v1/listen`, `/v1/unlisten`,\
+      \ `/v1/find`, `/v1/send`) with strict unknown-field rejection (`422 INVALID_INPUT`),\
+      \ control-char stripping & 500-codepoint validation, V1 harness check (`\"codex\"\
+      \ | \"pi\"` only; `\"claude\"` rejected with `422 UNSUPPORTED_HARNESS`), self-send\
+      \ rejection (`422 SELF_SEND_FORBIDDEN`), cross-user scope enforcement (`403\
+      \ FORBIDDEN_TARGET_SCOPE`), 30m idempotency key store (`409 IDEMPOTENCY_KEY_CONFLICT`\
+      \ on mismatch; live milestone reflection on match), and 2000ms WSS `receipt`\
+      \ wait (`wake_accepted` vs `queued_for_reconnect` vs `stored_passive`).\n  \
+      \  - WSS `/v1/stream` server supporting `bind` -> `bound` (`replay_gap`, `min_retained_seq`,\
+      \ `latest_seq`, and retained signal replay `seq > persisted_seq`), `heartbeat`\
+      \ -> `heartbeat_ack`, `receipt`, `unlisten`, `fenced` (`STALE_GENERATION`),\
+      \ `error`, and `auth_expired` (WebSocket close `4401`), plus OIDC `.well-known/openid-configuration`\
+      \ + `jwks_uri` discovery/caching (`5000ms` timeout, `503 AUTH_UNAVAILABLE` on\
+      \ cache-miss fetch failure) and `RS256`/`ES256` JWT validation.\n  - Deliver\
+      \ automated unit and HTTP/WSS integration tests in `tests/hub/` covering all\
+      \ Hub lifecycle, anti-loop, replay-gap, and OIDC verification contracts in `docs/DESIGN.md`\
+      \ §10.1–10.2.\n- **Boundary:** Owner `node-typescript-engineer`; modifies `/Users/tefx/Projects/cito`\
+      \ (`package.json`, `tsconfig.json`, `src/shared/**`, `src/hub/**`, `tests/hub/**`).\
+      \ Uses isolated temp directories for SQLite and loopback sockets in tests; no\
+      \ external network or host state mutation.\n- **Admit:** `docs/DESIGN.md` (§1–§6,\
+      \ §8.1, §10.1–10.2) and `README.md`. Verified by `npm test -- tests/hub/` exiting\
+      \ `0`. Consumed by `v1.host-adapters`, `v1.banner`, and `v1.mcp-and-e2e`.\n\
+      - **Recovery:** Revert uncommitted or broken worktree edits and fix failing\
+      \ Hub unit/integration checks in place; stop and report if a specification conflict\
+      \ is found."
+    verification: npm test -- tests/hub/
+    evidence_template: Commands run, test summary for tests/hub/, and verified docs/DESIGN.md
+      §2.1, §3.1, §5.1-5.2, §6, §8.1 invariants.
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    agent: node-typescript-engineer
+  - id: v1.host-adapters
+    name: Pi 1.5.0 socket bridge extension (src/pi-extension/cito-bridge.ts) and Codex/Pi
+      host caller & wake drivers
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/pi-extension/cito-bridge.ts\n    - src/adapters/**\n\
+      \    - tests/adapters/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n\
+      \    - package.json\n    - tsconfig.json\n```\n\n- **Deliver:**\n  - Implement\
+      \ the self-contained Pi (`1.5.0`) local Unix domain socket bridge extension\
+      \ at `src/pi-extension/cito-bridge.ts` (`docs/DESIGN.md` §6.2.1, §7.4):\n  \
+      \  - Listens on `${CITO_STATE_DIR}/sockets/pi-pid-${process.pid}.sock` (mode\
+      \ `0600`) using one short-lived newline-terminated JSON request/response per\
+      \ connection.\n    - Tracks `pi.on(\"input\", ...)` and increments `human_event_seq`\
+      \ only when `event.source === \"interactive\"` (ignoring extension-triggered\
+      \ turns).\n    - Implements `identify` (returning `pi_pid`, `session_id`, `session_name`,\
+      \ `cwd`, `is_streaming`, `human_event_seq`), `status` (verifying `req.session_id\
+      \ === currentSessionId` or returning `SESSION_MISMATCH`, updating `ctx.ui.setStatus(\"\
+      cito\", req.badge)`), and `deliver` (verifying `req.session_id === currentSessionId`,\
+      \ checking a 200-capacity `processedBatchIds` ring buffer for `deduplicated:\
+      \ true`, calling `pi.sendMessage({ customType: \"cito-notification\", content:\
+      \ req.content, display: true }, { triggerTurn: req.wake, deliverAs: \"followUp\"\
+      \ })`, and recording `req.batch_id` only after `pi.sendMessage` returns without\
+      \ throwing).\n  - Implement the Codex Desktop App and Pi host resolution & wake\
+      \ driver modules (`src/adapters/`, `docs/DESIGN.md` §3.2, §3.3, §7.3):\n   \
+      \ - Receiver caller resolution for Codex (`_meta[\"x-codex-turn-metadata\"]`\
+      \ JSON/object, `_meta[\"openai/threadId\"]`, `_meta[\"codexThreadId\"]`, read-only\
+      \ `${CITO_CODEX_HOME}/state_5.sqlite` `threads` lookup with `1000ms` timeout\
+      \ rejecting `archived == 1` with `SESSION_NOT_OPEN`, and `${CITO_CODEX_HOME}/ipc/ipc.sock`\
+      \ 4-byte `UInt32LE` length-prefixed JSON `initialize` + `thread-owner-discovery`\
+      \ probe with `1500ms` timeout rejecting `no-client-found` with `SESSION_NOT_OPEN`).\n\
+      \    - Receiver caller resolution for Pi (`_meta.pi_pid`/`caller_pid` hint followed\
+      \ by up to 6-level `/bin/ps -o ppid= -p <pid>` parent-PID ancestor walk locating\
+      \ `${CITO_STATE_DIR}/sockets/pi-pid-<pid>.sock` and calling `identify` with\
+      \ `1500ms` timeout, returning `PI_BRIDGE_UNAVAILABLE` or `BINDING_REQUIRED`\
+      \ on failure).\n    - Repository and metadata normalization (`git@github.com:Owner/Repo.git`\
+      \ and `https://github.com/Owner/Repo.git` normalized to `\"Owner/Repo\"`, branch\
+      \ via `git -C <cwd> rev-parse --abbrev-ref HEAD`, title fallback `session_name\
+      \ || basename(cwd)`).\n    - Wake execution drivers for Pi (`deliver` over `pi-pid-<pid>.sock`\
+      \ with `3000ms` timeout andwake card `<`/`>` escaping) and Codex Desktop (`execFile(CITO_CODEX_BIN,\
+      \ [\"queue\", \"--thread\", thread_id, \"--message\", card], { timeout: 5000\
+      \ })` and `execFile(\"/usr/bin/open\", [\"-g\", \"codex://threads/wake/\" +\
+      \ thread_id], { timeout: 3000 })` bound to `AbortSignal`).\n  - Deliver automated\
+      \ tests in `tests/adapters/` exercising `cito-bridge.ts` and the Codex/Pi drivers\
+      \ against real Unix domain sockets, temporary `state_5.sqlite` databases, and\
+      \ mock executables without touching external `~/.cito` or `~/.codex` state.\n\
+      - **Boundary:** Owner `node-typescript-engineer`; modifies only `src/pi-extension/cito-bridge.ts`,\
+      \ `src/adapters/**`, and `tests/adapters/**` so it can execute in parallel with\
+      \ `v1.banner` without file conflicts.\n- **Admit:** Completed `v1.hub` toolchain/shared\
+      \ types and `docs/DESIGN.md` (§3.2, §3.3, §6.2.1, §7.3, §7.4, §10.3). Verified\
+      \ by `npm test -- tests/adapters/` exiting `0`. Consumed by `v1.mcp-and-e2e`.\n\
+      - **Recovery:** Clean up temporary test sockets/processes and fix adapter or\
+      \ extension failures in place within the isolated worktree."
+    verification: npm test -- tests/adapters/
+    evidence_template: Commands run, test summary for tests/adapters/, and verified
+      Pi socket bridge + Codex IPC/queue/wake adapter behaviors.
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v1.hub
+    agent: node-typescript-engineer
+  - id: v1.banner
+    name: macOS single-instance HUD banner (src/macos/cito-banner.swift) and two-lock
+      IPC lifecycle
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/macos/cito-banner.swift\n    - src/banner/**\n\
+      \    - tests/banner/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n\
+      \    - package.json\n    - tsconfig.json\n```\n\n- **Deliver:**\n  - Implement\
+      \ the zero-dependency macOS native HUD banner at `src/macos/cito-banner.swift`\
+      \ compiled via `/usr/bin/swiftc` to `${CITO_STATE_DIR}/bin/cito-banner` and\
+      \ the Node.js sender/compiler client in `src/banner/` (`docs/DESIGN.md` §6.2.2,\
+      \ §7.1, §7.2, §10.4):\n    - Process-lifetime instance lock: upon launch, `cito-banner`\
+      \ acquires an exclusive `flock` on `${CITO_STATE_DIR}/sockets/banner-instance.lock`\
+      \ (waiting up to `2000ms`) and holds the file descriptor open until `exit(0)`.\n\
+      \    - Non-activating `NSPanel` HUD rendering the sender/target metadata and\
+      \ message (prefixing subtitle with `[仅知会]` when `effective_wake == false`),\
+      \ listening on `${CITO_STATE_DIR}/sockets/banner.sock` (`0600`) to coalesce\
+      \ and update content in place while resetting the 6-second auto-dismiss timer,\
+      \ and replying `{\"ok\":true}\\n`.\n    - Unified retirement protocol for both\
+      \ 6-second timer expiry and user click dismissal:\n      1. Attempt non-blocking\
+      \ `flock(LOCK_EX | LOCK_NB)` on `banner.lock` for timer expiry (aborting retirement\
+      \ if `EWOULDBLOCK` to process the incoming sender update) or wait up to `500ms`\
+      \ to acquire `banner.lock` on click dismissal.\n      2. While holding both\
+      \ `banner.lock` and `banner-instance.lock`: unlink `banner.sock`, close the\
+      \ listening socket, perform the click action (for Codex: atomically increment\
+      \ `human_event_seq` for `<thread_id>` in `${CITO_STATE_DIR}/state.sqlite` via\
+      \ `libsqlite3` and open `codex://threads/<thread_id>`; for Pi: dismiss without\
+      \ window switching) or `250ms` fade-out, order out the window, and call `exit(0)`.\n\
+      \    - Sender protocol in `src/banner/` (`cito-mcp` caller side): acquires exclusive\
+      \ blocking `flock` on `banner.lock` (`2500ms` timeout), attempts `banner.sock`\
+      \ delivery (`300ms` connect, `500ms` ack), and on failure probes `banner-instance.lock`\
+      \ with non-blocking `flock(LOCK_EX | LOCK_NB)` to execute Case A (busy instance:\
+      \ poll `banner.sock` every `50ms` for `500ms`, release `banner.lock` for `300ms`,\
+      \ re-acquire `banner.lock`, retry `banner.sock` once, and re-probe `banner-instance.lock`\
+      \ non-blocking before entering Case B or skipping without unlinking/spawning)\
+      \ or Case B (free instance: unlink stale `banner.sock`, compile if needed and\
+      \ spawn `${CITO_STATE_DIR}/bin/cito-banner` detached, poll `banner.sock` every\
+      \ `25ms` up to `1000ms`, write payload, await `{\"ok\":true}\\n`, and release\
+      \ `banner.lock`).\n  - Deliver automated compilation and lock-synchronized lifecycle\
+      \ tests in `tests/banner/` verifying cold start, in-place coalescing, retirement-boundary\
+      \ race handoff (Case A -> Case B transition), and Codex click `human_event_seq`\
+      \ SQLite update without overlapping processes or lost notifications.\n- **Boundary:**\
+      \ Owner `ios-developer`; modifies only `src/macos/cito-banner.swift`, `src/banner/**`,\
+      \ and `tests/banner/**` so it can execute in parallel with `v1.host-adapters`.\
+      \ Uses isolated temp `CITO_STATE_DIR` and headless/non-activating test hooks\
+      \ where needed so tests are deterministic and leave zero stray processes.\n\
+      - **Admit:** Completed `v1.hub` toolchain and `docs/DESIGN.md` (§6.2.2, §7.1,\
+      \ §7.2, §10.4). Verified by `/usr/bin/swiftc` compilation and `npm test -- tests/banner/`\
+      \ exiting `0`. Consumed by `v1.mcp-and-e2e`.\n- **Recovery:** Terminate any\
+      \ test `cito-banner` child processes, remove temp socket/lock files, and fix\
+      \ lock/IPC defects in place."
+    verification: npm test -- tests/banner/
+    evidence_template: Commands run (/usr/bin/swiftc build + tests/banner/), concurrency
+      test results, and verified §7.1-7.2 & §10.4 invariants.
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v1.hub
+    agent: ios-developer
+  - id: v1.mcp-and-e2e
+    name: 'Unified cito-mcp server, crash-safe two-stage dispatcher, OIDC JIT login,
+      E2E suite, and code-hygiene consolidation [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/**\n    - bin/**\n    - tests/**\n    -\
+      \ README.md\n    - package.json\n    - tsconfig.json\n  blocked_paths:\n   \
+      \ - plan.yaml\n    - docs/DESIGN.md\n```\n\n- **Deliver:**\n  - Implement the\
+      \ unified `cito-mcp` stdio MCP server (`src/mcp/`, CLI entrypoint `bin/cito-mcp`)\
+      \ and integrate `cito-hub`, `src/adapters/`, `src/pi-extension/cito-bridge.ts`,\
+      \ and `src/banner/` fulfilling `docs/DESIGN.md` §2.1, §3.1–3.2, §4.1–4.6, §5.3,\
+      \ §7.1, §8.2, and §10:\n    - Persistent `${CITO_STATE_DIR}/host-id` (`0600`\
+      \ lowercase UUIDv4) and local SQLite state store (`${CITO_STATE_DIR}/state.sqlite`,\
+      \ mode `0600`) with `local_listeners` and `local_signals` tables, retaining\
+      \ `(harness, session_id) -> listener_id` across `cito_unlisten` so `cito_inbox`\
+      \ works without an active Hub connection.\n    - Public MCP tools (`cito_listen`,\
+      \ `cito_unlisten`, `cito_find`, `cito_send`, `cito_inbox`) with exact input/output\
+      \ JSON schemas, common `isError` envelope (`§4.1`), and target-driven outbound\
+      \ routing (`cito_find` and `cito_send` never fail with `BINDING_REQUIRED` when\
+      \ caller is unbound, using `SenderEndpointKey = \"${principal_id}|${host_id}|unbound|default\"\
+      `).\n    - Lazy outbound WS/WSS stream client (`/v1/stream`) with automatic\
+      \ reconnect, `bind` handshake, gap-rebasing cursor (`replay_gap: true` sets\
+      \ `replay_gap_detected = 1`, `replay_gap_range`, and rebases `persisted_seq\
+      \ = min_retained_seq - 1`), Stage-1 durable signal insertion (`RECEIVED` vs\
+      \ `STORED_PASSIVE`), and immediate `receipt` transmission.\n    - Bounded 20-second\
+      \ continuous liveness sweep (`Promise.allSettled` with strict `1500ms` per-listener\
+      \ timeout) before each `heartbeat`, revoking immediately on Codex `archived\
+      \ == 1` / `no-client-found` (`reason: \"tab_closed\"`), Pi `session_id` change\
+      \ (`reason: \"session_switched\"`), or dead Pi process (`reason: \"process_exited\"\
+      `), and revoking on the 3rd consecutive transient probe timeout (`reason: \"\
+      probe_timeout\"`).\n    - Stage-2 crash-safe immutable-batch dispatcher (`1500ms`\
+      \ debounce + startup recovery): expires stale rows (`EXPIRED_UNSENT`), acquires\
+      \ SQLite listener lease (`dispatcher_token = uuidv4()`, `lease_until_ms = now\
+      \ + 30_000`), registers per-`(listener_id, binding_generation)` `AbortController`\
+      \ (aborted immediately on `cito_unlisten` or `fenced`, killing any spawned child\
+      \ process via `SIGTERM` and moving `RECEIVED`/`DISPATCHING` rows to `STORED_PASSIVE`\
+      \ with `unlistened_before_dispatch` / `fenced_before_dispatch`), retries existing\
+      \ frozen `DISPATCHING` `batch_id` before freezing new `RECEIVED` rows (`batch_${listener_id}_${min_seq}_${max_seq}_${binding_generation}`),\
+      \ enforces `assertDispatchStillAuthorized` immediately before Pi `deliver`,\
+      \ before `codex queue`, AND between `codex queue` (`queue_written = 1`) and\
+      \ `open -g \"codex://threads/wake/<id>\"`, and invokes `cito-banner` asynchronously\
+      \ best-effort (updating Pi status badge unread counts on passive signals).\n\
+      \    - Rejection-aware double-checked `flock` JIT OIDC login (`${CITO_STATE_DIR}/oidc-token.json`\
+      \ mode `0600` and `oidc-login.lock`, `45s` deadline): re-reads `oidc-token.json`\
+      \ under lock and reuses only if `issuer`, `client_id`, `expires_at > now + 60`,\
+      \ AND `token_sha256 !== rejected_sha256`; performs silent `refresh_token` exchange\
+      \ or local loopback `http://127.0.0.1:0/callback` PKCE `S256` browser login,\
+      \ writes token atomically, and retries once on HTTP `401` or WSS `4401` `auth_expired`.\n\
+      \  - Deliver the end-to-end integration test suite (`tests/mcp/` and `tests/e2e/`)\
+      \ covering every requirement in `docs/DESIGN.md` §10.1–10.4, update `README.md`\
+      \ with build/run and self-contained Pi extension installation instructions,\
+      \ and execute `[REQUIRES_SKILL: code-hygiene]` across the repository to ensure\
+      \ complete entry-to-effect wiring, zero dead/duplicate code, and authentic behavioral\
+      \ assertions.\n- **Boundary:** Owner `senior-engineer`; integrates all repository\
+      \ modules inside `/Users/tefx/Projects/cito` with `[REQUIRES_SKILL: code-hygiene]`.\
+      \ Must not implement Claude Code (`§9`) or mutate external repositories (`/Users/tefx/dotfiles`,\
+      \ `tela`) or live user `~/.cito` / `~/.codex` directories.\n- **Admit:** Completed\
+      \ `v1.hub`, `v1.host-adapters`, and `v1.banner`, plus `docs/DESIGN.md` (§1–§8,\
+      \ §10) and `README.md`. Verified by `npm test` running the complete unit + E2E\
+      \ test suite and exiting `0`. Consumed by `v1.acceptance-gate`.\n- **Recovery:**\
+      \ Reconcile any failing integration seam, lock/timer leak, or hygiene defect\
+      \ in place and re-run `npm test` until green."
+    verification: npm test
+    evidence_template: Full test suite output (npm test), E2E acceptance coverage
+      matrix for docs/DESIGN.md §10.1-10.4, and code-hygiene consolidation summary.
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v1.host-adapters
+    - v1.banner
+    agent: senior-engineer
+  - id: v1.acceptance-gate
+    name: Final V1 specification conformance and project acceptance gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Final V1 phase and project acceptance decision (`PASS` or `FAIL`) for `/Users/tefx/Projects/cito`\
+      \ over the integrated candidate produced by `v1.hub`, `v1.host-adapters`, `v1.banner`,\
+      \ and `v1.mcp-and-e2e`.\n- **Boundary:** Owner `gate-reviewer`; strictly read-only\
+      \ (`repo_change_policy: no_repo_change`). Does not modify repository files,\
+      \ Plan state, or external host directories.\n- **Admit:**\n  - Included phase\
+      \ and terminal outcomes: Phase `v1` (`v1.hub`, `v1.host-adapters`, `v1.banner`,\
+      \ `v1.mcp-and-e2e`) bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence: completion evidence and test execution outputs from\
+      \ `v1.hub`, `v1.host-adapters`, `v1.banner`, and `v1.mcp-and-e2e`, verified\
+      \ against `docs/DESIGN.md` (§1–§8, §10) and `README.md`.\n  - Exclusions verified:\
+      \ confirm that the Claude Code adapter (`docs/DESIGN.md` §9) is excluded from\
+      \ V1 implementation/tests (`harness: \"claude\"` rejected with `422 UNSUPPORTED_HARNESS`),\
+      \ and that all code, builds, and tests are self-contained inside `/Users/tefx/Projects/cito`\
+      \ without mutating external `dotfiles` or `tela` repositories.\n- **Recovery:**\
+      \ On any unmet material requirement or regression in `docs/DESIGN.md` §1–§8\
+      \ or §10, return `FAIL` with concrete file/line/test counterexamples so Orchestrator\
+      \ can route a cohesive writable repair before re-running this gate in Delta\
+      \ mode."
+    verification: npm test && git status --short
+    evidence_template: Gate verdict (PASS/FAIL), requirement trace against docs/DESIGN.md
+      §1-§8 & §10, verification of Claude Code exclusion (§9) and self-containment
+      inside /Users/tefx/Projects/cito.
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v1.mcp-and-e2e
+    agent: gate-reviewer
