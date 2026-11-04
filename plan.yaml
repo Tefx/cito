@@ -561,3 +561,23 @@ phases:
       rejected with UNSUPPORTED_HARNESS; NATS JetStream + KV used with no custom HTTP/WS
       broker; 18 test files / 160 tests pass in isolated temp directories with zero
       external mutations).'
+- id: v2
+  name: Cito V2 Multi-Hub & Extensible Harness Architecture, Streamlined 3-Table Schema,
+    Documentation, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, all docs/DESIGN.md §§1–8 and README.md requirements are verified,
+    and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE] converges
+    to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Upgrade Cito to the V2 Multi-Hub & Extensible Harness Architecture specification
+    (docs/DESIGN.md §§1–8): open harnessIdSchema and extensible ADAPTER_REGISTRY (SocketBridgeAdapter
+    + CodexDesktopAdapter) with a 100% harness-agnostic src/mcp/, native multi-hub
+    configuration (~/.cito/config.json + env fallback) with isolated per-hub HubSlots
+    and symmetric <hub>:<id> scoped addressing, streamlined 3-table SQLite schema
+    (PRAGMA user_version = 4) with confirmed delivery auto-ack and default drain-on-read
+    cito_inbox, SQLite3-free macOS HUD banner and Ack-footer-free Wake Cards, updated
+    README.md (including per-harness guides and Claude Code marked as ''尚未实现 / Not
+    Yet Implemented'' referencing docs/DESIGN.md §8), full behavioral unit & E2E tests,
+    and iterative code-hygiene acceptance gate.'
+  depends_on:
+  - v1
