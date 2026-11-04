@@ -43,7 +43,7 @@ phases:
 - id: v1
   name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
     MCP Integration
-  status: pending
+  status: in_progress
   gate: 'All V1 deliverables (deploy/nats/, src/auth-callout/, src/shared/, src/pi-extension/cito-bridge.ts,
     src/adapters/, src/macos/cito-banner.swift, src/banner/, and src/mcp/) pass their
     unit and end-to-end acceptance checks covering docs/DESIGN.md §10, with zero actionable
@@ -62,7 +62,7 @@ phases:
   - id: v1.nats-and-auth-callout
     name: Toolchain foundation, shared schemas & keyless listener_id (src/shared/),
       NATS JetStream config (deploy/nats/), and OIDC Auth Callout responder (src/auth-callout/)
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ tsconfig.json\n    - deploy/nats/**\n    - src/shared/**\n    - src/auth-callout/**\n\
@@ -130,6 +130,8 @@ phases:
     - docs/DESIGN.md
     - README.md
     agent: node-typescript-engineer
+    claimed_by: node-typescript-engineer
+    claimed_at: '2026-11-04T01:20:33.662928Z'
   - id: v1.host-adapters
     name: Pi 1.5.0 socket bridge extension (src/pi-extension/cito-bridge.ts) and Codex/Pi
       host caller & wake drivers
