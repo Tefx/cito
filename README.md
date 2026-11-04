@@ -42,29 +42,30 @@ With `CITO_AUTH_MODE=oidc`, run `bin/cito-auth-callout` alongside NATS using the
 
 ## MCP configuration
 
-Run the same stdio server for either harness:
+Run the same stdio server for either harness via `npx` from npmjs:
 
 ```sh
-/absolute/path/to/cito/bin/cito-mcp
+npx -y @tefx/cito@0.1.0
 ```
 
-For a Codex MCP configuration:
+For a Codex MCP configuration (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.cito]
-command = "/absolute/path/to/cito/bin/cito-mcp"
+command = "npx"
+args = ["-y", "@tefx/cito@0.1.0"]
 
 [mcp_servers.cito.env]
 CITO_NATS_URL = "nats://127.0.0.1:4222"
 CITO_AUTH_MODE = "none"
 ```
 
-A Pi stdio MCP gateway can use the equivalent server definition:
+A Pi stdio MCP gateway (`mcp.json` or `tela.yaml`) can use the equivalent server definition:
 
 ```json
 {
-  "command": "/absolute/path/to/cito/bin/cito-mcp",
-  "args": [],
+  "command": "npx",
+  "args": ["-y", "@tefx/cito@0.1.0"],
   "env": {
     "CITO_NATS_URL": "nats://127.0.0.1:4222",
     "CITO_AUTH_MODE": "none"
@@ -123,7 +124,7 @@ OIDC clients verify signatures before caching `oidc-token.json` (`0600`), includ
 
 ## Install the Pi 1.5.0 bridge
 
-The extension imports only Node built-ins. Load it directly:
+Add `"npm:@tefx/cito"` to `"packages"` in `~/.pi/agent/settings.json` (which automatically loads `src/pi-extension/cito-bridge.ts` via the `"pi.extensions"` manifest field), or load the extension directly:
 
 ```sh
 CITO_STATE_DIR="$HOME/.cito" pi -e /absolute/path/to/cito/src/pi-extension/cito-bridge.ts
