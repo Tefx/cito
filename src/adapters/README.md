@@ -43,6 +43,10 @@ trimmed `title`, then the cwd basename; schemas without `name` also work.
 Archived threads are rejected by default. Inbox/unlisten callers can explicitly
 set `allowArchived: true` to read a known closed session without an IPC probe.
 Missing threads still fail. `assertCodexThreadOpen` verifies Desktop liveness.
+`CodexSessionError.definitive` distinguishes absent/archived threads and explicit
+no-owner responses from transient SQLite/socket/protocol failures, allowing the
+MCP liveness sweep to apply its three-strike rule. On a missing/refused IPC socket,
+`codexDesktopRunning(signal)` checks for the ChatGPT.app process within the probe budget.
 `resolveCodexCaller` performs the default read and probe, rejecting
 archived/missing threads and unavailable Desktop owners for registration.
 

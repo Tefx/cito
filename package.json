@@ -7,6 +7,7 @@
     "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
   },
   "bin": {
+    "cito-mcp": "bin/cito-mcp",
     "cito-auth-callout": "bin/cito-auth-callout"
   },
   "scripts": {

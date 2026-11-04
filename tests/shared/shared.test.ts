@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, readFile, writeFile, chmod } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
@@ -143,6 +143,9 @@ describe("configuration and machine identity", () => {
       expect(new Set(ids).size).toBe(1);
       expect((await readFile(join(config.stateDir, "host-id"), "utf8")).trim()).toBe(ids[0]);
       expect((await stat(config.stateDir)).mode & 0o777).toBe(0o700);
+      expect((await stat(join(config.stateDir, "host-id"))).mode & 0o777).toBe(0o600);
+      await chmod(join(config.stateDir, "host-id"), 0o644);
+      expect(await getHostId(config)).toBe(ids[0]);
       expect((await stat(join(config.stateDir, "host-id"))).mode & 0o777).toBe(0o600);
       expect(await getHostId({ ...config, hostId: "explicit-host" })).toBe("explicit-host");
       await writeFile(join(config.stateDir, "host-id"), "corrupt");

@@ -77,7 +77,11 @@ export async function getHostId(config: Pick<CitoConfig, "hostId" | "stateDir">)
   await mkdir(config.stateDir, { recursive: true, mode: 0o700 });
   await chmod(config.stateDir, 0o700);
   const path = join(config.stateDir, "host-id");
-  try { return validateStoredId(await readFile(path, "utf8")); }
+  try {
+    const id = validateStoredId(await readFile(path, "utf8"));
+    await chmod(path, 0o600);
+    return id;
+  }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const temp = join(config.stateDir, ".host-id-" + randomUUID());
   const { link, unlink } = await import("node:fs/promises");

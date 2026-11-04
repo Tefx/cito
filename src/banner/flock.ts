@@ -4,12 +4,12 @@ import { spawn } from "node:child_process";
 // descriptor until stdin closes, interoperating with Darwin.flock on the exact
 // same inode. No lockfile deletion, PID guessing, or advisory JS-only mutex.
 const program = String.raw`
-use strict; use warnings; use Fcntl qw(:DEFAULT :flock); use Time::HiRes qw(time sleep);
+use strict; use warnings; use Fcntl qw(:DEFAULT :flock); use Time::HiRes qw(clock_gettime CLOCK_MONOTONIC sleep);
 sysopen(my $lock, $ARGV[0], O_CREAT | O_RDWR, 0600) or die "open lock: $!";
-my $deadline = time() + $ARGV[1] / 1000;
+my $deadline = clock_gettime(CLOCK_MONOTONIC) + $ARGV[1] / 1000;
 while (!flock($lock, LOCK_EX | LOCK_NB)) {
   if (!$!{EWOULDBLOCK} && !$!{EAGAIN} && !$!{EINTR}) { die "flock: $!"; }
-  if (time() >= $deadline) { exit 75; }
+  if (clock_gettime(CLOCK_MONOTONIC) >= $deadline) { exit 75; }
   sleep(0.01);
 }
 $| = 1; print "locked\n";

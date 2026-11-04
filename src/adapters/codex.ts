@@ -12,6 +12,11 @@ type CodexConfig = Pick<CitoConfig, "codexHome">;
 export interface CodexCaller extends RepoMetadata { harness: "codex"; session_id: string; cwd: string }
 export interface CodexDriverOptions { codexBin?: string; openBin?: string; signal?: AbortSignal }
 export interface ReadCodexThreadOptions { allowArchived?: boolean }
+export class CodexSessionError extends CitoError {
+  constructor(readonly definitive: boolean, message: string, cause?: unknown) {
+    super("SESSION_NOT_OPEN", message, { cause });
+  }
+}
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -35,14 +40,17 @@ export function readCodexThread(threadId: string, config: CodexConfig = loadConf
     // SELECT * also supports older Desktop schemas without the optional name column.
     const row = db.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
     if (!row || (row.archived === 1 && !options.allowArchived) || !nonempty(row.cwd)) {
-      throw new Error("Thread is absent, archived, or has no cwd");
+      throw new CodexSessionError(true, "Codex thread is absent, archived, or has no cwd");
     }
     return { harness: "codex", session_id: threadId, cwd: row.cwd,
       title: (typeof row.name === "string" && row.name.trim())
         || (typeof row.title === "string" && row.title.trim()) || basename(row.cwd),
       repo: normalizeRepo(typeof row.git_origin_url === "string" ? row.git_origin_url : null),
       branch: typeof row.git_branch === "string" ? row.git_branch : null };
-  } catch (error) { throw new CitoError("SESSION_NOT_OPEN", "Codex thread is not open", { cause: error }); }
+  } catch (error) {
+    if (error instanceof CodexSessionError) throw error;
+    throw new CodexSessionError(false, "Cannot read Codex thread", error);
+  }
   finally { db?.close(); }
 }
 
@@ -63,7 +71,8 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
       socket.destroy();
       if (error) reject(error); else resolve();
     };
-    const closed = (cause: unknown) => finish(new CitoError("SESSION_NOT_OPEN", "Codex Desktop has no live thread owner", { cause }));
+    const closed = (cause: unknown) => finish(cause instanceof CodexSessionError ? cause
+      : new CodexSessionError(false, "Codex Desktop liveness probe failed", cause));
     const abort = () => finish(signal!.reason ?? new DOMException("Aborted", "AbortError"));
     const timer = setTimeout(() => closed(new Error("Codex IPC timed out")), 1500);
     signal?.addEventListener("abort", abort, { once: true });
@@ -91,7 +100,10 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
           buffer = buffer.subarray(size + 4);
           if (!record(response)) throw new Error("Invalid Codex response");
           if (response.type !== "response" || response.requestId !== requestId) continue;
-          if (response.resultType !== "success") throw new Error("Codex IPC request rejected");
+          if (response.resultType !== "success") {
+            if (response.error === "no-client-found") throw new CodexSessionError(true, "Codex Desktop has no live thread owner");
+            throw new Error("Codex IPC request rejected");
+          }
           const result = record(response.result) ? response.result : undefined;
           if (phase === "initialize") {
             if (!nonempty(result?.clientId)) throw new Error("Missing clientId");
@@ -102,7 +114,7 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
           } else {
             // Success is authoritative unless the result explicitly reports no owner.
             if (result?.status === "no-client-found" || result?.ownerClientId === null || result?.ownerClientId === "") {
-              throw new Error("No live owner");
+              throw new CodexSessionError(true, "Codex Desktop has no live thread owner");
             }
             finish();
           }
@@ -110,6 +122,10 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
       } catch (error) { closed(error); }
     });
   });
+}
+export async function codexDesktopRunning(signal: AbortSignal): Promise<boolean> {
+  const { stdout } = await exec("/bin/ps", ["-axo", "comm="], { timeout: 1500, signal });
+  return stdout.split("\n").some(command => command.includes("/ChatGPT.app/"));
 }
 export async function resolveCodexCaller(meta: Record<string, unknown> = {}, config: CodexConfig = loadConfig()): Promise<CodexCaller> {
   const thread = readCodexThread(codexThreadId(meta), config);
