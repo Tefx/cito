@@ -41,16 +41,23 @@ project_guidance: '1. Authoritative specification: docs/DESIGN.md (NATS JetStrea
   banner-instance.lock) invariants.'
 phases:
 - id: v1
-  name: Cito V1 Core Relay, Host Adapters, HUD Banner, and MCP Integration
+  name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
+    MCP Integration
   status: pending
-  gate: All V1 deliverables (cito-hub, cito-mcp, Codex Desktop adapter, src/pi-extension/cito-bridge.ts,
-    src/macos/cito-banner.swift, and optional OIDC auth) pass their unit and end-to-end
-    acceptance checks covering docs/DESIGN.md §10, with zero Claude Code implementation/test
-    leakage and zero external repository mutations.
-  context: 'Implement and verify the complete V1 Cito signaling system inside /Users/tefx/Projects/cito:
-    cito-hub relay and OIDC JWT verifier, Pi 1.5.0 bridge extension and Codex/Pi host
-    adapters, macOS native single-instance cito-banner HUD, unified cito-mcp server
-    with crash-safe two-stage dispatch and JIT OIDC login, and final project acceptance.'
+  gate: 'All V1 deliverables (deploy/nats/, src/auth-callout/, src/shared/, src/pi-extension/cito-bridge.ts,
+    src/adapters/, src/macos/cito-banner.swift, src/banner/, and src/mcp/) pass their
+    unit and end-to-end acceptance checks covering docs/DESIGN.md §10, with zero actionable
+    findings under [REQUIRES_SKILL: code-hygiene] (ITERATIVE_CONVERGENCE), zero Claude
+    Code implementation/test leakage, and zero external repository mutations.'
+  context: 'Implement and verify the complete V1 Cito signaling system (NATS JetStream
+    Edition) inside /Users/tefx/Projects/cito: TypeScript toolchain, shared schemas
+    & keyless listener_id derivation (src/shared/), NATS JetStream/KV deployment config
+    (deploy/nats/) and stateless OIDC Auth Callout service (src/auth-callout/), Pi
+    1.5.0 bridge extension (src/pi-extension/cito-bridge.ts) and Codex/Pi host adapters
+    (src/adapters/), macOS native single-instance cito-banner HUD (src/macos/cito-banner.swift
+    & src/banner/), unified cito-mcp server over NATS with recipient-side anti-loop
+    protection, crash-safe two-stage dispatch, and JIT OIDC login (src/mcp/), and
+    final project acceptance.'
   steps:
   - id: v1.hub
     name: Toolchain foundation and cito-hub HTTP/WSS relay with SQLite state machine,
