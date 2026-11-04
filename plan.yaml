@@ -914,3 +914,57 @@ phases:
     - docs/DESIGN.md
     - README.md
     agent: senior-engineer
+  - id: v3.acceptance-and-hygiene-gate
+    name: 'V3 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v3` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run build && npm test` passes 100%,\
+      \ auditing both code and documentation (`docs/DESIGN.md` §6 Claude Code design\
+      \ suggestion and `README.md` per-harness guides), and running iterative `code-hygiene`\
+      \ audit-and-fix convergence until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Boundary:** Owner `code-reviewer` (mapped to `gate-reviewer` / `pathway-auditor`\
+      \ + `structural-auditor` in the Larva roster, routing any admitted repair batch\
+      \ to `senior-engineer` before Delta re-verification); gate step itself is read-only\
+      \ (`repo_change_policy: no_repo_change`) and does not directly mutate repository\
+      \ files, Plan state, or external host directories.\n- **Admit:**\n  - Included\
+      \ phase and terminal outcomes: Phase `v3` (`v3.daemon-http-oidc-and-menubar-ui`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run build\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Code conformance with `docs/DESIGN.md`\
+      \ §§1–6: deletion of `src/banner/flock.ts`, `src/banner/index.ts`, and `src/macos/cito-banner.swift`\
+      \ replaced by in-memory `KeyedMutex`; singleton `cito daemon` + Streamable HTTP\
+      \ MCP (`http://127.0.0.1:4290/mcp`, `GET /health`, `Origin` check, `lsof -Fpn`\
+      \ client-tuple `http_client_pid` attribution, `cito-mcp` stdio auto-forwarding);\
+      \ non-intrusive Codex Desktop adapter (deletion of `assertCodexThreadOpen` /\
+      \ `ipc.sock`, 3-state `readCodexThreadOptional` with `_meta.cwd` / `lsof -d\
+      \ cwd` / `gitMetadata` fallback, `codex queue --resume`); vendor-neutral standard\
+      \ OIDC (`SUPPORTED_OIDC_ALGS`, `scopes_supported` negotiation, `oidcRedirectPort`,\
+      \ port-keyed `oidcMutex`, principal-change fencing); and `src/ui/index.ts` (`UiBridge`)\
+      \ + `src/macos/cito-ui.swift` (progressive-disclosure `NSStatusItem` Menu Bar\
+      \ Extra with Option-click instant unlisten, in-process `NSPanel` HUD Banner\
+      \ hiding without exit, and `unlisten` / `unlisten_all` / `set_scope` / `hub_action`\
+      \ / `quit` commands).\n    3. Documentation conformance (`docs/DESIGN.md` §6\
+      \ and `README.md`): per-harness installation & usage guides (Pi, Codex Desktop\
+      \ HTTP & stdio, Menu Bar usage, Standard OIDC & Multi-Hub config, Extensible\
+      \ Harnesses, and Claude Code explicitly marked as `'尚未实现 / Not Yet Implemented'`\
+      \ with its Streamable HTTP + SSE channel push + inbox drain design suggestion\
+      \ in `docs/DESIGN.md` §6) are clear, accurate, and free of implementation code\
+      \ details in the Claude Code suggestion section.\n    4. Iterative `[REQUIRES_SKILL:\
+      \ code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`) audit-and-fix convergence\
+      \ across all 5 lenses reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable `code-hygiene` finding\
+      \ is admitted, record the concrete file/line counterexamples and route a cohesive\
+      \ writable repair to `senior-engineer` before re-running this gate in Delta\
+      \ mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved.\n"
+    verification: npm run typecheck && npm run build && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v3.daemon-http-oidc-and-menubar-ui
+    agent: code-reviewer
