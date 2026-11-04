@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type JsMsg, type NatsConnection,
   type QueuedIterator, type KvEntry } from "nats";
-import { acquireFlock, showBanner, type BannerOptions } from "../banner/index.js";
+import type { BannerPayload } from "../ui/index.js";
+import { listenMutex, sessionMutex } from "../shared/index.js";
 import { getAdapter, formatWakeCard, type DeliverContext } from "../adapters/index.js";
 import { brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
   type CitoConfig, type provisionNats } from "../shared/index.js";
@@ -11,14 +11,13 @@ import { LocalState, registration, registrationSchema, signalSchema, type Listen
 
 export type Broker = Awaited<ReturnType<typeof provisionNats>> & { nc: NatsConnection };
 export interface ReceiverOptions {
-  banner?: BannerOptions;
+  onBanner?: (payload: BannerPayload) => void;
+  onStateChanged?: () => void;
   diagnostic?: (message: string) => void;
   onSessionSwitched?: (harness: string, sessionId: string) => Promise<void>;
 }
 class DispatchStopped extends Error {}
 export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
-export const listenLock = (config: CitoConfig, id: string, hub = config.defaultHub) => join(config.stateDir, "sockets", `listen-${hub}-${id}.lock`);
-export const receiverLock = (config: CitoConfig, hub: string, id: string) => join(config.stateDir, "sockets", `receiver-${hub}-${id}.lock`);
 const ackPayload = (row: SignalRow) => ({ signal_id: row.signal_id,
   status: row.held_reason ? "stored_passive" : "wake_accepted", held_reason: row.held_reason });
 
@@ -26,19 +25,15 @@ const ackPayload = (row: SignalRow) => ({ signal_id: row.signal_id,
 export async function refreshSessionBadge(state: LocalState, config: CitoConfig, harness: string, sessionId: string,
   options: { closingKeys?: Set<string>; signal?: AbortSignal } = {}): Promise<void> {
   const hash = sha256(sessionId).slice(0, 16);
-  const lock = await acquireFlock(join(config.stateDir, "sockets", `session-${harness}-${hash}.lock`), 5000);
-  if (!lock) throw new Error("Session badge lock timeout");
-  try {
+  await sessionMutex.run(`${config.stateDir}:${harness}:${hash}`, async () => {
     const rows = state.db.prepare("SELECT * FROM local_listeners WHERE harness = ? AND session_id = ? ORDER BY (status = 'ACTIVE') DESC, binding_generation DESC, hub ASC, listener_id ASC")
       .all(harness, sessionId) as unknown as ListenerRow[];
     const target = rows[0]; if (!target) return;
     const active: ListenerRow[] = [];
     for (const row of rows) {
       if (row.status !== "ACTIVE") continue;
-      if (options.closingKeys?.has(`${row.hub}:${row.listener_id}`)) {
-        const probe = await acquireFlock(receiverLock(config, row.hub, row.listener_id), 0);
-        if (probe) { await probe.release(); continue; }
-      }
+      const key = `${row.hub}:${row.listener_id}`, receiver = state.liveReceivers.get(key);
+      if (options.closingKeys?.has(key) || !receiver || receiver.abort.signal.aborted || receiver.owner !== row.owner_token) continue;
       active.push(row);
     }
     const adapter = getAdapter(harness);
@@ -50,10 +45,10 @@ export async function refreshSessionBadge(state: LocalState, config: CitoConfig,
     const badgeSlug = slug.slice(0, 12).replace(/-+$/g, "") || harness;
     const count = `${unread || ""}${active.some(row => row.replay_gap_detected === 1) ? "!" : ""}`;
     await adapter?.updateBadge?.(target, `🔔 ${badgeSlug}${count ? ` (${count})` : ""}`, config, options.signal);
-  } finally { await lock.release(); }
+  });
 }
 
-/** Persisted owner/generation and kernel locks fence every write and external effect. */
+/** Persisted owner/generation and daemon-local critical sections fence effects. */
 export class Receiver {
   readonly abort = new AbortController();
   private consumer?: Consumer;
@@ -65,7 +60,6 @@ export class Receiver {
   private dispatching?: Promise<void>;
   private probing?: Promise<void>;
   private stopped?: Promise<void>;
-  private ownerLock?: NonNullable<Awaited<ReturnType<typeof acquireFlock>>>;
   readonly id: string; readonly hub: string; readonly owner: string; readonly generation: number;
   constructor(private readonly state: LocalState, private readonly config: CitoConfig, private readonly broker: Broker,
     row: ListenerRow, private readonly options: ReceiverOptions = {}) {
@@ -77,12 +71,8 @@ export class Receiver {
     this.tasks.add(task);
     void task.catch(error => { if (!this.abort.signal.aborted) this.log(error); }).finally(() => this.tasks.delete(task));
   }
-  async start(ownerWaitMs = 5000): Promise<boolean> {
+  async start(_ownerWaitMs = 5000): Promise<boolean> {
     if (this.abort.signal.aborted) return false;
-    const lock = await acquireFlock(receiverLock(this.config, this.hub, this.id), ownerWaitMs);
-    if (!lock) return false;
-    if (this.abort.signal.aborted) { await lock.release(); return false; }
-    this.ownerLock = lock;
     try {
       this.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE hub = ? AND listener_id = ? AND owner_token = ?", this.hub, this.id, this.owner);
       this.watch = await this.broker.kv.watch({ key: this.id });
@@ -122,8 +112,7 @@ export class Receiver {
   }
   cancel(): void {
     this.abort.abort(); clearTimeout(this.debounce); clearInterval(this.sweepTimer); this.watch?.stop(); void this.messages?.close();
-    const lock = this.ownerLock; this.ownerLock = undefined;
-    if (lock) this.track(lock.release());
+    this.options.onStateChanged?.();
   }
   stop(): Promise<void> {
     return this.stopped ??= (async () => {
@@ -154,9 +143,9 @@ export class Receiver {
     msg.ack();
     if (!admitted.row || admitted.duplicate || admitted.row.state !== "RECEIVED") return;
     const target = this.row();
-    this.track(showBanner({ target_harness: target.harness, target_session_id: target.session_id, target_title: target.title,
+    this.options.onBanner?.({ target_harness: target.harness, target_session_id: target.session_id, target_title: target.title,
       from_user: admitted.row.from_user, from_host: admitted.row.from_host_name, from_title: admitted.row.from_title,
-      message: admitted.row.message, effective_wake: true }, { ...this.options.banner, config: this.config }));
+      message: admitted.row.message, effective_wake: true });
     this.track(this.badge()); this.schedule();
   }
   badge(): Promise<void> { const row = this.row(); return refreshSessionBadge(this.state, this.config, row.harness, row.session_id); }
@@ -203,9 +192,7 @@ export class Receiver {
     this.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE hub = ? AND listener_id = ? AND owner_token = ? AND dispatcher_token = ?", this.hub, this.id, this.owner, token);
   }
   private async effect(batch: SignalRow, submit: () => Promise<void>): Promise<void> {
-    const lock = await acquireFlock(listenLock(this.config, this.id, this.hub), 5000);
-    if (!lock) throw new Error("Listener dispatch lock timeout");
-    try {
+    await listenMutex.run(`${this.hub}:${this.id}`, async () => {
       const entry = await this.broker.kv.get(this.id), remote = entry && registrationSchema.parse(entry.json());
       if (!remote || remote.owner_token !== this.owner || remote.binding_generation !== this.generation || remote.state !== "ACTIVE") this.fence();
       const row = this.row();
@@ -215,7 +202,7 @@ export class Receiver {
         || Date.now() >= batch.batch_expires_at_ms! || !unread.length) throw new DispatchStopped();
       this.state.run("UPDATE local_listeners SET lease_until_ms = ? WHERE hub = ? AND listener_id = ? AND owner_token = ?", Date.now() + 30_000, this.hub, this.id, this.owner);
       await submit();
-    } finally { await lock.release(); }
+    });
   }
   private async runEffect(batch: SignalRow, submit: () => Promise<void>, opts: Parameters<DeliverContext["runEffect"]>[1]): Promise<boolean> {
     for (let attempt = 0; attempt < opts.attempts; attempt++) {
@@ -258,9 +245,7 @@ export class Receiver {
   }
   async revoke(reason: string): Promise<void> {
     this.cancel();
-    const lock = await acquireFlock(listenLock(this.config, this.id, this.hub), 5000);
-    if (!lock) throw new Error("Listener revocation lock timeout");
-    try {
+    await listenMutex.run(`${this.hub}:${this.id}`, async () => {
       if (this.row()?.owner_token !== this.owner) return;
       this.state.transaction(() => {
         this.state.run("UPDATE local_listeners SET status = 'UNLISTENED' WHERE hub = ? AND listener_id = ? AND owner_token = ?", this.hub, this.id, this.owner);
@@ -274,7 +259,7 @@ export class Receiver {
         if (value.owner_token === this.owner && value.binding_generation === this.generation) await this.broker.kv.update(this.id,
           encode({ ...value, state: "UNLISTENED", binding_generation: this.generation + 1 }), entry.revision);
       }
-    } finally { await lock.release(); }
+    });
   }
   sweep(): Promise<void> { return this.probing ??= this.probe().finally(() => { this.probing = undefined; }); }
   private async probe(): Promise<void> {
@@ -293,13 +278,13 @@ export class Receiver {
       if (outcome.status === "closed_definitive" || this.row().consecutive_probe_failures >= 3) await this.revoke("session_closed");
       return;
     }
-    const lock = await acquireFlock(listenLock(this.config, this.id, this.hub), 5000); if (!lock) return;
-    try {
+    await listenMutex.run(`${this.hub}:${this.id}`, async () => {
       const row = this.row(); if (this.abort.signal.aborted || row.owner_token !== this.owner || row.status !== "ACTIVE") return;
       this.state.run("UPDATE local_listeners SET consecutive_probe_failures = 0 WHERE hub = ? AND listener_id = ? AND owner_token = ?", this.hub, this.id, this.owner);
       const entry = await this.broker.kv.get(this.id), value = entry && registrationSchema.parse(entry.json());
       if (!value || value.owner_token !== this.owner || value.binding_generation !== this.generation || value.state !== "ACTIVE") { this.fence(); return; }
+      if (row.scope !== value.scope) { this.state.run("UPDATE local_listeners SET scope = ? WHERE hub = ? AND listener_id = ?", value.scope, this.hub, this.id); this.options.onStateChanged?.(); }
       await this.broker.kv.update(this.id, encode(registration(this.row())), entry!.revision);
-    } finally { await lock.release(); }
+    });
   }
 }

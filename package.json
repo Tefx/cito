@@ -21,7 +21,7 @@
   "files": [
     "bin",
     "dist/src",
-    "src/macos/cito-banner.swift",
+    "src/macos/cito-ui.swift",
     "src/pi-extension/cito-bridge.ts",
     "README.md"
   ],

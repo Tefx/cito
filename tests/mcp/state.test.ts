@@ -54,7 +54,7 @@ test("schema reset atomically discards pre-V4 state, removes pairwise table and 
     const state = await LocalState.open(dir);
     expect(state.db.prepare("PRAGMA user_version").get()!.user_version).toBe(4);
     expect(state.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => row.name))
-      .toEqual(["local_listeners", "local_sent_idempotency", "local_signals"]);
+      .toEqual(["daemon_owner", "local_listeners", "local_sent_idempotency", "local_signals"]);
     expect(state.db.prepare("PRAGMA table_info(local_listeners)").all().map(row => row.name)).toContain("endpoint_pid");
     state.run("INSERT INTO local_sent_idempotency (hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES ('rda','d','h','s','t','queued','now',1)"); state.close();
     const reopened = await LocalState.open(dir);

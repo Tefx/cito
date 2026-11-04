@@ -1,9 +1,8 @@
 import { afterEach, expect, test } from "vitest";
 import { readFile, stat, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { fixture, call, payload, waitFor, codexDesktop, bannerPids } from "../mcp/support.js";
+import { fixture, call, payload, waitFor, codexDesktop } from "../mcp/support.js";
 import { toCanonicalListenerId } from "../../src/shared/index.js";
-import { showBanner } from "../../src/banner/index.js";
 import { CitoService } from "../../src/mcp/service.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
@@ -41,7 +40,7 @@ test.skipIf(process.platform !== "darwin")("Pi lifecycle uses real broker, bridg
   expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "not_listening", listener_id: null });
   expect((await call(f.service, "cito_find")).listeners).toEqual([]);
   expect(payload(await f.service.call("cito_send", { to: id, message: "closed" }))).toMatchObject({ error: { code: "LISTENER_NOT_FOUND" } });
-  expect(f.diagnostics).toEqual([]);
+  expect(f.diagnostics.filter(line => !line.startsWith("cito-ui: state ") && line !== "cito-ui: banner hidden")).toEqual([]);
 }, 15_000);
 
 test("Pi confirmed delivery automatically drains its inbox and refreshes the badge", async () => {
@@ -63,8 +62,8 @@ test("Codex lifecycle and offline post-close inbox/unlisten use explicit metadat
     const sent = await call(f.service, "cito_send", { to: id, message: "review available" });
     await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1);
     const commands = (await readFile(desktop.log, "utf8")).trim().split("\n").map(line => JSON.parse(line));
-    expect(commands[0].slice(0, 4)).toEqual(["queue", "queue", "--thread", desktop.thread]);
-    expect(commands[0][5]).toContain("review available");
+    expect(commands[0].slice(0, 5)).toEqual(["queue", "queue", "--resume", "--thread", desktop.thread]);
+    expect(commands[0][6]).toContain("review available");
     expect(commands[1]).toEqual(["open", "-g", "codex://threads/wake/" + desktop.thread]);
     desktop.setLive(false); desktop.db.prepare("UPDATE threads SET archived = 1").run();
     expect(payload(await f.service.call("cito_listen", { about: "closed" }, desktop.meta))).toMatchObject({ error: { code: "SESSION_NOT_OPEN" } });
@@ -141,15 +140,12 @@ test("private targets are invisible and forbidden cross-user; workspace peer wak
 test.skipIf(process.platform !== "darwin")("real Codex HUD click opens its thread without accessing local state", async () => {
   const f = await setup(false), desktop = await codexDesktop(f);
   try {
-    f.serviceOptions.banner!.env = { CITO_BANNER_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "5000", CITO_BANNER_URL_OPENER: f.config.openBin };
+    f.serviceOptions.ui!.env = { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "5000", CITO_BANNER_URL_OPENER: f.config.openBin };
+    await f.service.startUi();
     const { listener_id: id } = await call(f.service, "cito_listen", { about: "click" }, desktop.meta);
     await call(f.service, "cito_send", { to: id, message: "click to read" });
-    const binary = join(f.stateDir, "bin/cito-banner");
-    // Wait for a real HUD acknowledgement before clicking; process creation precedes its first payload.
-    expect(await showBanner({ target_harness: "codex", target_session_id: desktop.thread, target_title: "Codex receiver",
-      from_user: "alice", from_host: f.config.hostName, from_title: "", message: "click to read", effective_wake: true },
-      { ...f.serviceOptions.banner, config: f.config })).toEqual({ displayed: true });
-    process.kill((await bannerPids(binary))[0]!, "SIGUSR1");
+    await waitFor(() => f.bannerDisplays.length > 0);
+    process.kill(f.bannerDisplays[0]!.pid, "SIGUSR1");
     await waitFor(async () => { try { return (await readFile(desktop.log, "utf8")).includes("codex://threads/" + desktop.thread); } catch { return false; } });
     expect((await readFile(desktop.log, "utf8")).trim()).toBe(JSON.stringify(["open", "codex://threads/" + desktop.thread]));
   } finally { await desktop.close(); }

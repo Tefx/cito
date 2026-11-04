@@ -11,6 +11,18 @@ async function configFile(value: unknown) {
   return { root, path, env: { CITO_STATE_DIR: root, CITO_CODEX_HOME: join(root, "codex"), CITO_USER: "test" } };
 }
 const personal = { natsUrl: "nats://127.0.0.1:4222" }, rda = { natsUrl: "wss://rda.example/ws", authMode: "oidc", oidcIssuer: "https://id.example/", oidcClientId: "cito", oidcScopes: ["openid", "profile"] };
+test("daemon and OIDC redirect ports validate environment and JSON aliases", async () => {
+  for (const key of ["CITO_DAEMON_PORT", "CITO_OIDC_REDIRECT_PORT"]) {
+    for (const value of ["0", "-1", "65536", "1.5", "NaN", ""]) expect(() => loadConfig({ [key]: value })).toThrow();
+  }
+  expect(loadConfig({ CITO_DAEMON_PORT: "1234", CITO_OIDC_REDIRECT_PORT: "4321" })).toMatchObject({ daemonPort: 1234, oidcRedirectPort: 4321 });
+  const { path, root } = await configFile({ daemonPort: 3333, hubs: {
+    a: { natsUrl: "nats://127.0.0.1:4222", redirect_port: 4444 }, b: { natsUrl: "nats://127.0.0.1:4223", oidcRedirectPort: 5555 },
+  }, default_hub: "a" });
+  const config = loadConfig({ CITO_CONFIG_PATH: path, CITO_STATE_DIR: root });
+  expect(config.daemonPort).toBe(3333); expect(config.hubs.a!.oidcRedirectPort).toBe(4444); expect(config.hubs.b!.oidcRedirectPort).toBe(5555);
+});
+
 test("config file loads simultaneous hubs, defaults, scopes and mirrors the selected default", async () => {
   const f = await configFile({ default_hub: "personal", hubs: { personal, rda } });
   const config = loadConfig(f.env);

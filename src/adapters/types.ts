@@ -18,6 +18,7 @@ export interface DeliverContext {
 }
 export interface HarnessAdapter {
   readonly id: string;
+  readonly canJump?: boolean;
   probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome>;
   deliver(row: ListenerRow, ctx: DeliverContext): Promise<DeliverOutcome>;
   updateBadge?(row: ListenerRow, badge: string | undefined, config: CitoConfig, signal?: AbortSignal): Promise<void>;

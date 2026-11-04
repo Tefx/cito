@@ -8,7 +8,7 @@ export const browser = async (url: string, signal: AbortSignal) => {
   if (!response.ok) throw new Error("Browser callback rejected");
 };
 
-export async function signingKey(alg: "RS256" | "ES256", kid: string) {
+export async function signingKey(alg: "RS256" | "RS384" | "RS512" | "PS256" | "ES256" | "ES384" | "EdDSA", kid: string) {
   const pair = await generateKeyPair(alg, { extractable: true });
   const jwk = { ...await exportJWK(pair.publicKey), kid, alg, use: "sig" };
   return {
@@ -19,7 +19,7 @@ export async function signingKey(alg: "RS256" | "ES256", kid: string) {
   };
 }
 export async function startOidc(keys: JWK[] = []) {
-  const state = { keys, fail: false, stall: false, discoveryRequests: 0, jwksRequests: 0,
+  const state = { scopesSupported: undefined as string[] | undefined, keys, fail: false, stall: false, discoveryRequests: 0, jwksRequests: 0,
     refreshStatus: 200, refreshRequests: 0, codeRequests: 0, authorizationRequests: 0,
     tokenResponse: {} as { id_token?: string; refresh_token?: string }, challenge: "", redirect: "" };
   let issuer = "";
@@ -29,7 +29,7 @@ export async function startOidc(keys: JWK[] = []) {
       if (state.stall) return;
       if (state.fail) { res.writeHead(503).end(); return; }
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ issuer, jwks_uri: issuer + "/jwks", token_endpoint: issuer + "/token", authorization_endpoint: issuer + "/authorize" }));
+      res.end(JSON.stringify({ issuer, scopes_supported: state.scopesSupported, jwks_uri: issuer + "/jwks", token_endpoint: issuer + "/token", authorization_endpoint: issuer + "/authorize" }));
     } else if (req.url === "/jwks") {
       state.jwksRequests++;
       if (state.fail) { res.writeHead(503).end(); return; }

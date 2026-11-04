@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { readFile, writeFile, rename, rm, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { acquireFlock } from "../banner/flock.js";
+import { oidcMutex } from "../shared/index.js";
 import { OidcVerifier } from "../auth-callout/oidc.js";
 import { CitoError, oidcPrincipal, sha256, type CitoConfig, type Principal } from "../shared/index.js";
 import { validateHttpUrl } from "../shared/config.js";
@@ -28,12 +28,7 @@ export class OidcLogin {
   }
   async cached(): Promise<TokenCache | undefined> {
     try {
-      let content: string;
-      try { content = await readFile(this.path, "utf8"); }
-      catch (error) {
-        if (this.hub !== "default" || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        content = await readFile(join(this.config.stateDir, "oidc-token.json"), "utf8");
-      }
+      const content = await readFile(this.path, "utf8");
       const value = cacheSchema.parse(JSON.parse(content));
       if (value.issuer !== this.config.oidcIssuer || value.client_id !== this.config.oidcClientId
         || value.token_sha256 !== sha256(value.id_token)) return;
@@ -48,20 +43,23 @@ export class OidcLogin {
     if (!cache) throw new CitoError("UNAUTHORIZED", "Offline inbox requires a previously verified OIDC identity");
     return { principal_id: cache.verified_principal_id, owner_user: cache.verified_user };
   }
-  async current(): Promise<TokenCache> {
+  async current(interactive = true, signal?: AbortSignal): Promise<TokenCache> {
+    signal?.throwIfAborted();
     const cache = await this.cached();
     if (cache && cache.expires_at > Date.now() / 1000 + 60) {
-      await this.verifier.verify(cache.id_token);
+      await this.verifier.verify(cache.id_token, signal);
+      signal?.throwIfAborted();
       return cache;
     }
-    return this.recover(cache?.token_sha256 ?? null);
+    return this.recover(cache?.token_sha256 ?? null, interactive, signal);
   }
-  async recover(rejected: string | null): Promise<TokenCache> {
+  async recover(rejected: string | null, interactive = true, external?: AbortSignal): Promise<TokenCache> {
     const deadline = performance.now() + 45_000;
-    const signal = AbortSignal.timeout(45_000);
-    const lock = await acquireFlock(join(this.config.stateDir, `oidc-login-${this.hub}.lock`), 45_000);
-    if (!lock) throw new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC login lock deadline exceeded");
+    const signal = AbortSignal.any([AbortSignal.timeout(45_000), ...(external ? [external] : [])]);
+    const operation = oidcMutex.run("port:" + (this.config.oidcRedirectPort || this.hub), async () => {
+    signal.throwIfAborted();
     const remaining = () => {
+      signal.throwIfAborted();
       const ms = Math.ceil(deadline - performance.now());
       if (ms <= 0) throw new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC login deadline exceeded");
       return ms;
@@ -80,8 +78,10 @@ export class OidcLogin {
       }
       const discoveryResponse = await request(this.config.oidcIssuer + "/.well-known/openid-configuration");
       if (!discoveryResponse.ok) throw new CitoError("AUTH_UNAVAILABLE", "OIDC discovery unavailable");
-      const discovery = z.object({ issuer: z.literal(this.config.oidcIssuer!), token_endpoint: z.string(), authorization_endpoint: z.string() })
+      const discovery = z.object({ issuer: z.literal(this.config.oidcIssuer!), token_endpoint: z.string(), authorization_endpoint: z.string(), scopes_supported: z.array(z.string()).optional() })
         .parse(await discoveryResponse.json());
+      if (discovery.scopes_supported && !discovery.scopes_supported.includes("openid")) throw new CitoError("AUTH_UNAVAILABLE", "OIDC provider does not support openid");
+      const scopes = this.config.oidcScopes ?? ["openid", "profile", "email", "offline_access"].filter(scope => !discovery.scopes_supported || discovery.scopes_supported.includes(scope));
       const tokenUrl = validateHttpUrl(discovery.token_endpoint, "token_endpoint");
       const authUrl = validateHttpUrl(discovery.authorization_endpoint, "authorization_endpoint");
       const exchange = async (params: Record<string, string>) => request(tokenUrl, { method: "POST",
@@ -111,6 +111,8 @@ export class OidcLogin {
         if (refreshed.ok) return await save(refreshed, "refresh_token");
         if (![400, 401].includes(refreshed.status)) throw new CitoError("AUTH_UNAVAILABLE", "OIDC refresh unavailable");
       }
+      if (!interactive) throw new CitoError("UNAUTHORIZED", "OIDC login required");
+      remaining();
       const pkceVerifier = randomBytes(32).toString("base64url"), state = randomBytes(32).toString("base64url");
       const challenge = createHash("sha256").update(pkceVerifier).digest("base64url");
       let acceptCode!: (code: string) => void;
@@ -130,15 +132,15 @@ export class OidcLogin {
       const abort = () => rejectCode(new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC browser login deadline exceeded"));
       signal.addEventListener("abort", abort, { once: true });
       try {
-        await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+        await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.config.oidcRedirectPort ?? 0, "127.0.0.1", resolve); });
         const address = server.address();
         if (!address || typeof address === "string") throw new Error("Invalid loopback address");
         const redirect = `http://127.0.0.1:${address.port}/callback`;
         const url = new URL(authUrl);
         url.search = new URLSearchParams({ response_type: "code", client_id: this.config.oidcClientId!, redirect_uri: redirect,
-          scope: (this.config.oidcScopes ?? ["openid", "profile", "email", "offline_access"]).join(" "), state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
+          scope: scopes.join(" "), state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
         remaining();
-        await this.opener(url.toString(), signal);
+        await Promise.race([this.opener(url.toString(), signal), code.then(() => {})]);
         return await save(await exchange({ grant_type: "authorization_code", code: await code, redirect_uri: redirect, code_verifier: pkceVerifier }), "authorization_code");
       } finally {
         signal.removeEventListener("abort", abort);
@@ -149,6 +151,15 @@ export class OidcLogin {
       if (signal.aborted || performance.now() >= deadline) throw new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC login deadline exceeded", { cause });
       if (cause instanceof CitoError) throw cause;
       throw new CitoError("AUTH_UNAVAILABLE", "OIDC login failed", { cause });
-    } finally { await lock.release(); }
+    }
+    });
+    // Cancellation also interrupts time spent queued behind another hub on a fixed port.
+    let abort!: () => void;
+    const cancelled = new Promise<never>((_, reject) => {
+      abort = () => reject(external?.aborted ? external.reason : new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC login deadline exceeded", { cause: signal.reason }));
+      signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort();
+    });
+    try { return await Promise.race([operation, cancelled]); }
+    finally { signal.removeEventListener("abort", abort); }
   }
 }

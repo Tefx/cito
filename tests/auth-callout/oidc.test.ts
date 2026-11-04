@@ -39,6 +39,13 @@ describe("OIDC signature verification and in-memory JWKS", () => {
     await expect(verifier.verify(header + "." + forgedBody + "." + signature)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     await expect(verifier.verify(await rsa.sign(oidc.claims(), { kid: "" }))).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
+  it.each(["RS384", "RS512", "PS256", "ES384", "EdDSA"] as const)("verifies standard asymmetric %s tokens", async alg => {
+    const key = await signingKey(alg, alg), fixture = await startOidc([key.jwk]);
+    try {
+      const verifier = new OidcVerifier({ issuer: fixture.issuer, clientId: "cito" });
+      expect(await verifier.verify(await key.sign(fixture.claims()))).toMatchObject({ sub: "user-1" });
+    } finally { await fixture.stop(); }
+  });
   it("honors strict exp > now - 30 clock tolerance", async () => {
     const now = Math.floor(Date.now() / 1000) * 1000;
     const verifier = new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => now });

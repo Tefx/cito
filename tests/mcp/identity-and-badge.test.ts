@@ -128,29 +128,26 @@ test("badge refresh covers waking/passive admission, gaps, acknowledgements and 
   expect(f.pi.badges.at(-1)).toBeUndefined();
 });
 
-test("an offline inbox-only MCP process refreshes the badge without adopting ownership", async () => {
+test("persisted ACTIVE rows with no live receiver never contribute a badge", async () => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "offline", tag: "offline" }, f.pi.meta);
   await call(f.service, "cito_send", { to: enrolled.listener_id, message: "unread" });
   await waitFor(() => f.pi.badges.at(-1) === "🔔 offline (1)");
-  await f.broker.stop();
-  const inboxOnly = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => inboxOnly.close());
-  await call(inboxOnly, "cito_inbox", { ack_all: true }, f.pi.meta);
-  expect(inboxOnly.receivers.size).toBe(0);
-  expect(Reflect.get(inboxOnly.slots.get("default")!, "broker")).toBeUndefined();
-  expect(f.pi.badges.at(-1)).toBe("🔔 offline");
-  await inboxOnly.close();
-  expect(f.pi.badges.at(-1)).toBe("🔔 offline");
+  await f.service.receivers.get(`default:${toCanonicalListenerId(enrolled.listener_id)}`)!.stop();
+  await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta);
+  expect(f.pi.badges.at(-1)).toBeUndefined();
+  expect(f.service.state.listener(toCanonicalListenerId(enrolled.listener_id))!.status).toBe("ACTIVE");
 });
 
-test("fenced losers cannot clear a live replacement badge during shutdown", async () => {
+test("a fenced old receiver cannot mutate a live replacement's persisted owner", async () => {
   const f = await setup();
   const first = await call(f.service, "cito_listen", { about: "old", tag: "old" }, f.pi.meta);
   const id = toCanonicalListenerId(first.listener_id), old = f.service.receivers.get(`default:${id}`)!;
-  const other = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => other.close());
-  await call(other, "cito_listen", { about: "winner", tag: "winner" }, f.pi.meta);
-  old.fence(); await old.revoke("session_closed"); await f.service.close();
+  await call(f.service, "cito_listen", { about: "winner", tag: "winner" }, f.pi.meta);
+  old.fence(); await old.revoke("session_closed");
+  await call(f.service, "cito_inbox", {}, f.pi.meta);
   expect(f.pi.badges.at(-1)).toBe("🔔 winner");
+  expect(f.service.receivers.get(`default:${id}`)!.abort.signal.aborted).toBe(false);
 });
 
 test("receiver admits a public wire recipient only on its canonical subject", async () => {

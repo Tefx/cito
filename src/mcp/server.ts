@@ -1,3 +1,10 @@
+import { createServer, type IncomingMessage } from "node:http";
+import type { Socket } from "node:net";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { codexThreadId } from "../adapters/index.js";
+import { CitoError, errorResult, type CitoConfig } from "../shared/index.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -15,12 +22,103 @@ const descriptors = [
 export const tools: Tool[] = descriptors.map(([name, description, schema]) => ({
   name, description, inputSchema: z.toJSONSchema(schema, { io: "input", unrepresentable: "any" }) as Tool["inputSchema"],
 }));
-export function createMcpServer(service: CitoService): Server {
+export function createMcpServer(service: CitoService, metadata: (meta: Record<string, unknown>) => Record<string, unknown> = meta => meta): Server {
   const server = new Server({ name: "cito-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async request => {
-    const result = await service.call(request.params.name, request.params.arguments ?? {}, request.params._meta ?? {});
-    return { ...result };
+    try {
+      return { ...await service.call(request.params.name, request.params.arguments ?? {}, metadata(request.params._meta ?? {})) };
+    } catch (error) {
+      if (error instanceof CitoError) return { ...errorResult(error.code, error.message) };
+      throw error;
+    }
   });
   return server;
+}
+const exec = promisify(execFile);
+const clientPids = new WeakMap<Socket, Promise<number | undefined>>();
+export function parseClientPid(output: string, remotePort: number, daemonPort: number): number | undefined {
+  let pid: number | undefined; const matches = new Set<number>();
+  for (const line of output.split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1));
+    if (line === `n127.0.0.1:${remotePort}->127.0.0.1:${daemonPort}` && pid && Number.isSafeInteger(pid) && pid > 0) matches.add(pid);
+  }
+  if (matches.size > 1) matches.delete(process.pid);
+  return matches.size === 1 ? [...matches][0] : undefined;
+}
+export function resolveHttpClientPid(req: IncomingMessage, daemonPort: number): Promise<number | undefined> {
+  let result = clientPids.get(req.socket);
+  if (!result) {
+    result = (async () => {
+      const remote = req.socket.remotePort; if (!remote) return;
+      try {
+        const { stdout } = await exec("/usr/sbin/lsof", ["-nP", `-iTCP:${remote}`, "-sTCP:ESTABLISHED", "-Fpn"], { timeout: 1000 });
+        return parseClientPid(stdout, remote, daemonPort);
+      } catch { return undefined; }
+    })();
+    clientPids.set(req.socket, result);
+  }
+  return result;
+}
+export function httpMetadata(meta: Record<string, unknown>, clientPid: number | undefined, header?: string): Record<string, unknown> {
+  const result = { ...meta, http_transport: true, http_client_pid: clientPid };
+  if (header !== undefined) {
+    const claim = (value: Record<string, unknown>) => {
+      try { return codexThreadId(value); } catch (e) { if (e instanceof CitoError && e.code === "BINDING_REQUIRED") return; throw e; }
+    };
+    const before = claim(meta), after = claim({ "x-codex-turn-metadata": header });
+    if (before && after && before !== after) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata in HTTP header");
+    const turnObject = (value: unknown): Record<string, unknown> | undefined => {
+      if (typeof value === "string") { try { value = JSON.parse(value); } catch { return; } }
+      return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    };
+    const bodyTurn = turnObject(meta["x-codex-turn-metadata"]), headerTurn = turnObject(header);
+    Object.assign(result, { "x-codex-turn-metadata": bodyTurn || headerTurn ? { ...bodyTurn, ...headerTurn } : header });
+    claim(result);
+  }
+  return result;
+}
+export async function startHttpServer(config: CitoConfig, service: CitoService) {
+  const sessions = new Set<Server>();
+  const http = createServer((req, res) => {
+    void (async () => {
+      if (req.headers.origin !== undefined) {
+        let allowed = false;
+        try { allowed = ["127.0.0.1", "localhost"].includes(new URL(req.headers.origin).hostname); } catch {}
+        if (!allowed) { res.writeHead(403).end("Forbidden"); return; }
+      }
+      const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+      if (path === "/health" && req.method === "GET") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, pid: process.pid, stateDir: config.stateDir })); return;
+      }
+      if (path !== "/mcp") { res.writeHead(404).end("Not found"); return; }
+      const pid = await resolveHttpClientPid(req, (http.address() as { port: number }).port);
+      const rawHeader = req.headers["x-codex-turn-metadata"];
+      const server = createMcpServer(service, meta => httpMetadata(meta, pid, Array.isArray(rawHeader) ? rawHeader[0] : rawHeader));
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      sessions.add(server);
+      // IncomingMessage.close also fires when a POST body is consumed. Dispose on
+      // response/socket close so the asynchronous tool response can finish first.
+      res.once("close", () => { sessions.delete(server); void server.close().catch(console.error); });
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    })().catch(error => { console.error(error); if (!res.headersSent) res.writeHead(500); res.end(); });
+  });
+  await new Promise<void>((resolve, reject) => { http.once("error", reject); http.listen(config.daemonPort, "127.0.0.1", resolve); });
+  return {
+    http,
+    port: (http.address() as { port: number }).port,
+    async close() {
+      await Promise.allSettled([...sessions].map(server => server.close()));
+      http.closeAllConnections();
+      await new Promise<void>(resolve => http.close(() => resolve()));
+    },
+  };
+}
+export async function daemonHealth(config: Pick<CitoConfig, "stateDir" | "daemonPort">): Promise<{ pid: number; stateDir: string } | undefined> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${config.daemonPort}/health`, { signal: AbortSignal.timeout(500) });
+    const body = await res.json() as { ok?: boolean; pid: number; stateDir: string };
+    return res.ok && body.ok === true && body.stateDir === config.stateDir && Number.isSafeInteger(body.pid) ? body : undefined;
+  } catch { return undefined; }
 }

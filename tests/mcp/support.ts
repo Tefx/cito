@@ -1,25 +1,21 @@
 import { afterAll } from "vitest";
-import { mkdtemp, mkdir, rm, copyFile, chmod, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import bridge, { type BridgeAPI, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
-import { ensureBannerCompiled } from "../../src/banner/index.js";
+import { ensureUiCompiled } from "../../src/ui/index.js";
 import { CitoService, type ServiceOptions } from "../../src/mcp/service.js";
 import { loadConfig } from "../../src/shared/index.js";
 import { startNats, type TestNats } from "../shared/nats-server.js";
-import { unixServer } from "../adapters/support.js";
 
-const exec = promisify(execFile);
 let cacheRoot: string | undefined;
 let binary: Promise<string> | undefined;
 afterAll(async () => { if (cacheRoot) await rm(cacheRoot, { recursive: true, force: true }); });
 async function bannerBinary() {
   if (!binary) binary = (async () => {
     cacheRoot = await mkdtemp("/tmp/cito-mcp-banner-");
-    return ensureBannerCompiled(cacheRoot);
+    return ensureUiCompiled(cacheRoot);
   })();
   return binary;
 }
@@ -54,11 +50,6 @@ export async function piBridge(stateDir: string) {
     switchSession(id: string) { session = id; handlers.get("session_tree")!({}, ctx); },
     stop: async () => { await handlers.get("session_shutdown")!({}, ctx); } };
 }
-export async function bannerPids(binaryPath: string): Promise<number[]> {
-  return (await exec("/bin/ps", ["-axo", "pid=,command="])).stdout.split("\n").flatMap(line => {
-    const match = line.trim().match(/^(\d+)\s+(.+)$/); return match?.[2] === binaryPath ? [Number(match[1])] : [];
-  });
-}
 export async function fixture(options: { broker?: TestNats; user?: string; service?: ServiceOptions; env?: NodeJS.ProcessEnv; pi?: boolean; observeBanner?: boolean } = {}) {
   const root = await mkdtemp("/tmp/cito-mcp-");
   const stateDir = join(root, "state"), codexHome = join(root, "codex");
@@ -66,45 +57,29 @@ export async function fixture(options: { broker?: TestNats; user?: string; servi
   const broker = options.broker ?? await startNats();
   const env = { CITO_STATE_DIR: stateDir, CITO_CODEX_HOME: codexHome, CITO_NATS_URL: broker.url,
     CITO_USER: options.user ?? "alice", ...options.env };
-  if (process.platform === "darwin") { await copyFile(await bannerBinary(), join(stateDir, "bin/cito-banner")); await chmod(join(stateDir, "bin/cito-banner"), 0o755); }
+  const uiBinary = await bannerBinary();
   const diagnostics: string[] = [];
   const config = loadConfig(env);
+  config.codexDesktopRunning = async () => true;
   const serviceOptions: ServiceOptions = { diagnostic: text => diagnostics.push(text),
-    banner: { env: { CITO_BANNER_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120" }, diagnostic: text => diagnostics.push(text) }, ...options.service };
+    ui: { binary: uiBinary, env: { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120" }, diagnostic: text => {
+      if (text.startsWith("cito-ui: display ")) bannerDisplays.push(JSON.parse(text.slice("cito-ui: display ".length)));
+      else diagnostics.push(text);
+    } }, ...options.service };
+  const bannerDisplays: { pid: number; title: string; subtitle: string; message: string }[] = [];
   const service = await CitoService.create(config, serviceOptions);
   const pi = options.pi === false ? undefined : await piBridge(stateDir);
   let closed = false;
-  let bannerExited: Promise<unknown> | undefined;
-  const bannerDisplays: { pid: number; title: string; subtitle: string; message: string }[] = [];
+
   const result = { root, config, env, stateDir, codexHome, broker, service, serviceOptions, pi: pi!, diagnostics, bannerDisplays,
     async close() {
       if (closed) return; closed = true;
       await service.close(); await pi?.stop();
-      const binaryPath = join(stateDir, "bin/cito-banner");
-      for (const pid of await bannerPids(binaryPath)) { try { process.kill(pid, "SIGKILL"); } catch {} }
-      await waitFor(async () => !(await bannerPids(binaryPath)).length);
-      await bannerExited;
       if (!options.broker) await broker.stop();
       await rm(root, { recursive: true, force: true });
     } };
   try {
-    if (options.observeBanner) {
-      if (process.platform !== "darwin") throw new Error("Native HUD observation requires macOS");
-      const child = spawn(join(stateDir, "bin/cito-banner"), [], { env: { ...process.env, ...env,
-        CITO_BANNER_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "10000" }, stdio: ["ignore", "ignore", "pipe"] });
-      bannerExited = new Promise(resolve => child.once("close", resolve));
-      let pending = "";
-      child.stderr!.setEncoding("utf8").on("data", (chunk: string) => {
-        pending += chunk;
-        let end: number;
-        while ((end = pending.indexOf("\n")) >= 0) {
-          const line = pending.slice(0, end); pending = pending.slice(end + 1);
-          if (line.startsWith("cito-banner: display ")) bannerDisplays.push(JSON.parse(line.slice("cito-banner: display ".length)));
-          else diagnostics.push(line);
-        }
-      });
-      await waitFor(async () => { try { return (await stat(join(stateDir, "sockets/banner.sock"))).isSocket(); } catch { return false; } });
-    }
+    if (options.observeBanner) await service.startUi();
     return result;
   } catch (error) { await result.close(); throw error; }
 }
@@ -116,20 +91,7 @@ export async function codexDesktop(f: Awaited<ReturnType<typeof fixture>>) {
   db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, archived INTEGER, git_branch TEXT, git_origin_url TEXT)");
   db.prepare("INSERT INTO threads VALUES (?, ?, 'Codex receiver', 0, 'main', 'git@github.com:Owner/Repo.git')").run(thread, f.root);
   let live = true;
-  const socket = await unixServer(join(f.codexHome, "ipc/ipc.sock"), connection => {
-    let buffer = Buffer.alloc(0);
-    connection.on("data", chunk => {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (buffer.length >= 4 && buffer.length >= 4 + buffer.readUInt32LE(0)) {
-        const length = buffer.readUInt32LE(0), request = JSON.parse(buffer.subarray(4, 4 + length).toString());
-        buffer = buffer.subarray(4 + length);
-        const response = Buffer.from(JSON.stringify({ type: "response", requestId: request.requestId,
-          resultType: request.method === "initialize" || live ? "success" : "error",
-          error: live ? undefined : "no-client-found", result: { clientId: "desktop" } }));
-        const header = Buffer.alloc(4); header.writeUInt32LE(response.length); connection.write(Buffer.concat([header, response]));
-      }
-    });
-  });
+  f.config.codexDesktopRunning = async () => live;
   const log = join(f.root, "commands");
   const queue = join(f.root, "codex"), opener = join(f.root, "open");
   // Avoid the codexHome directory itself as executable path.
@@ -139,5 +101,5 @@ export async function codexDesktop(f: Awaited<ReturnType<typeof fixture>>) {
   f.config.codexBin = queueBin; f.config.openBin = opener;
   return { thread, meta: { "x-codex-turn-metadata": JSON.stringify({ thread_id: thread }) }, log, db,
     setLive(value: boolean) { live = value; },
-    async close() { await socket.stop(); db.close(); } };
+    async close() { db.close(); } };
 }

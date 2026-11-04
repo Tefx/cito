@@ -1,188 +1,99 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { assertCodexThreadOpen, codexThreadId, queueCodexWake, readCodexThread, resolveCaller,
-  triggerCodexWake } from "../../src/adapters/index.js";
+import { codexThreadId, readCodexThreadOptional, resolveCaller, extractCallerPidRoots, CodexDesktopAdapter,
+  queueCodexWake, triggerCodexWake } from "../../src/adapters/index.js";
 import { loadConfig } from "../../src/shared/index.js";
+import type { ListenerRow } from "../../src/shared/state-types.js";
 import { isolatedState, unixServer } from "./support.js";
 
 const threadId = "01234567-89ab-4cde-8123-0123456789ab";
-function frame(value: object): Buffer {
-  const body = Buffer.from(JSON.stringify(value)); const header = Buffer.alloc(4); header.writeUInt32LE(body.length);
-  return Buffer.concat([header, body]);
-}
-describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => {
+describe("non-intrusive Codex metadata and wake effects", () => {
   let state: Awaited<ReturnType<typeof isolatedState>>;
-  const servers: Awaited<ReturnType<typeof unixServer>>[] = [];
-  beforeEach(async () => {
-    state = await isolatedState(); vi.stubEnv("CITO_STATE_DIR", state.stateDir); vi.stubEnv("CITO_CODEX_HOME", state.codexHome);
-  });
-  afterEach(async () => { await Promise.all(servers.splice(0).map(s => s.stop())); vi.unstubAllEnvs(); await state.cleanup(); });
-  function database(archived = 0, title: string | null = "Thread title", name?: string | null) {
+  beforeEach(async () => { state = await isolatedState(); });
+  afterEach(async () => { await state.cleanup(); });
+  function database(archived = 0, name = "Session name") {
     const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
-    try {
-      db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, title TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, archived INTEGER)");
-      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)").run(threadId, title, state.root, "https://github.com/Owner/Repo.git", "topic", archived);
-      if (name !== undefined) {
-        db.exec("ALTER TABLE threads ADD COLUMN name TEXT");
-        db.prepare("UPDATE threads SET name = ? WHERE id = ?").run(name, threadId);
-      }
-    } finally { db.close(); }
-  }
-  async function ipc(result: object = { ownerClientId: "owner" }, resultType = "success", extra: object = {}) {
-    const requests: Record<string, unknown>[] = [];
-    servers.push(await unixServer(join(state.codexHome, "ipc", "ipc.sock"), socket => {
-      let buffer = Buffer.alloc(0);
-      socket.on("data", chunk => {
-        buffer = Buffer.concat([buffer, chunk]);
-        while (buffer.length >= 4 && buffer.length >= 4 + buffer.readUInt32LE()) {
-          const size = buffer.readUInt32LE();
-          const request = JSON.parse(buffer.subarray(4, 4 + size).toString()) as Record<string, unknown>;
-          buffer = buffer.subarray(4 + size); requests.push(request);
-          const response = frame({ type: "response", requestId: request.requestId,
-            resultType: request.method === "initialize" ? "success" : resultType,
-            result: request.method === "initialize" ? { clientId: "cito-client" } : result, ...extra });
-          // Fragment both the 4-byte header and body, with an unrelated event coalesced in front.
-          socket.write(frame({ type: "event", method: "thread-updated" }));
-          socket.write(response.subarray(0, 2));
-          socket.write(response.subarray(2, 7));
-          socket.write(response.subarray(7));
-        }
-      });
-    }));
-    return requests;
+    db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, title TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, archived INTEGER, name TEXT)");
+    db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)").run(threadId, "Thread title", state.root, "https://github.com/Owner/Repo.git", "topic", archived, name);
+    return db;
   }
   it.each([
-    [{ "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId }) }],
-    [{ "x-codex-turn-metadata": { thread_id: threadId } }],
-    [{ "x-codex-turn-metadata": { session_id: threadId } }],
-    [{ "openai/threadId": threadId }], [{ codexThreadId: threadId }],
-    [{ "x-codex-turn-metadata": "invalid JSON", "openai/threadId": threadId }],
-  ])("extracts explicit thread metadata %j", meta => { expect(codexThreadId(meta)).toBe(threadId); });
-  it("rejects conflicting metadata and fails without a thread binding", () => {
-    expect(() => codexThreadId({ "x-codex-turn-metadata": { thread_id: "first", session_id: "second" },
-      "openai/threadId": "third", codexThreadId: "fourth" })).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
-    for (const meta of [{}, { "x-codex-turn-metadata": "null" }, { codexThreadId: 123 }, { "openai/threadId": "" }]) {
-      expect(() => codexThreadId(meta)).toThrow(expect.objectContaining({ code: "BINDING_REQUIRED" }));
+    { "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId }) },
+    { "x-codex-turn-metadata": { session_id: threadId } }, { "openai/threadId": threadId }, { codexThreadId: threadId },
+  ])("extracts explicit thread claim %j", meta => { expect(codexThreadId(meta)).toBe(threadId); });
+  it("validates all explicit claims before state access", async () => {
+    const config = loadConfig(state.env);
+    for (const meta of [ { codexThreadId: "a", "openai/threadId": "b" }, { codexThreadId: "a", pi_pid: 123 }, { endpoint_pid: 1, caller_pid: 2 } ]) {
+      await expect(resolveCaller(meta, config)).rejects.toMatchObject({ code: "INVALID_INPUT" });
     }
+    for (const pid of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, "12"]) {
+      await expect(resolveCaller({ pi_pid: pid }, config)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
+    }
+    expect(extractCallerPidRoots({ pi_pid: 12, nested: { parent_pid: 13 }, http_client_pid: 14 })).toEqual([12]);
+    expect(extractCallerPidRoots({ nested: { parent_pid: 13 }, http_client_pid: 14 })).toEqual([13]);
+    expect(extractCallerPidRoots({ http_transport: true, http_client_pid: 14 })).toEqual([14]);
+    expect(extractCallerPidRoots({ http_transport: true })).toEqual([]);
+    expect(extractCallerPidRoots()).toEqual([process.ppid]);
   });
-  it("reads only the exact SQLite thread, normalizes repo, and resolves through a real IPC owner handshake", async () => {
-    database(); const requests = await ipc();
-    expect(await resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).toEqual({ harness: "codex", session_id: threadId,
-      cwd: state.root, title: "Thread title", repo: "Owner/Repo", branch: "topic" });
-    expect(requests).toHaveLength(2);
-    expect(requests[0]).toEqual({ type: "request", version: 1, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-      method: "initialize", params: { clientType: "cli" } });
-    expect(requests[1]).toEqual({ type: "request", version: 1, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-      sourceClientId: "cito-client", method: "thread-owner-discovery",
-      params: { hostId: "local", conversationId: threadId, threadId } });
-    expect(requests[1]!.requestId).not.toBe(requests[0]!.requestId);
-    expect(() => readCodexThread("unknown", state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
-    // SQL parameters cannot accidentally select all rows.
-    expect(() => readCodexThread("' OR 1=1 --", state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
+  it("reads exact SQLite row, keeps background threads open, and never contacts Desktop IPC", async () => {
+    const db = database(); let connections = 0;
+    const server = await unixServer(join(state.codexHome, "ipc/ipc.sock"), socket => { connections++; socket.destroy(); });
+    try {
+      expect(readCodexThreadOptional(threadId, state)).toMatchObject({ status: "found", title: "Session name", repo: "Owner/Repo", branch: "topic" });
+      expect(await resolveCaller({ codexThreadId: threadId, http_transport: true, http_client_pid: process.pid }, loadConfig(state.env)))
+        .toMatchObject({ harness: "codex", session_id: threadId, cwd: state.root });
+      expect(connections).toBe(0);
+      expect(readCodexThreadOptional("' OR 1=1 --", state)).toEqual({ status: "unavailable" });
+      db.exec("UPDATE threads SET archived = 1");
+      expect(readCodexThreadOptional(threadId, state)).toEqual({ status: "archived" });
+      await expect(resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
+      expect(await resolveCaller({ codexThreadId: threadId, cwd: state.root }, loadConfig(state.env), { requireOpen: false })).toMatchObject({ cwd: state.root });
+    } finally { db.close(); await server.stop(); }
   });
-  it("rejects archived threads before any IPC and falls back to cwd basename when title is empty", async () => {
-    database(1);
-    await expect(resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-    const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
-    try { db.exec("UPDATE threads SET archived = 0, title = '', git_origin_url = NULL, git_branch = NULL"); } finally { db.close(); }
-    expect(readCodexThread(threadId, state)).toMatchObject({ title: state.root.split("/").at(-1), repo: null, branch: null });
-  });
-  it.each([
-    { name: "  Session name  ", title: "Thread title", expected: "Session name" },
-    { name: "", title: "  Thread title  ", expected: "Thread title" },
-    { name: " \t ", title: "  Thread title  ", expected: "Thread title" },
-    { name: null, title: "Thread title", expected: "Thread title" },
-    { name: "  ", title: " \t ", expected: null },
-    { name: null, title: null, expected: null },
-  ])("prefers trimmed name, then title, then cwd basename: %j", ({ name, title, expected }) => {
-    database(0, title, name);
-    expect(readCodexThread(threadId, state).title).toBe(expected ?? state.root.split("/").at(-1));
-  });
-  it("allows explicit archived-thread reads for inbox/unlisten without a live IPC owner", async () => {
-    database(1, "Archived title", "Archived name");
-    expect(() => readCodexThread(threadId, state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
-    expect(() => readCodexThread(threadId, state, { allowArchived: false })).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
-    expect(readCodexThread(threadId, state, { allowArchived: true })).toMatchObject({ session_id: threadId, title: "Archived name" });
-    expect(() => readCodexThread("missing", state, { allowArchived: true })).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
-    // Registration still rejects archived threads; the option belongs only to explicit reads.
-    await expect(resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-  });
-  it("never creates a missing state database", async () => {
-    expect(() => readCodexThread(threadId, state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
+  it("missing or incompatible databases stay optional and are never created", async () => {
+    expect(readCodexThreadOptional(threadId, state)).toEqual({ status: "unavailable" });
     await expect(readFile(join(state.codexHome, "state_5.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
+    try { expect(readCodexThreadOptional(threadId, state)).toEqual({ status: "unavailable" }); } finally { db.close(); }
   });
-  it.each([{ ownerClientId: "owner" }, { status: "alive" }, {}])("accepts successful discovery without requiring ownerClientId: %j", async result => {
-    await ipc(result);
-    await expect(assertCodexThreadOpen(threadId, state)).resolves.toBeUndefined();
+  it("busy SQLite metadata is unavailable and falls through to the explicit cwd", async () => {
+    const db = database();
+    try {
+      db.exec("PRAGMA journal_mode = DELETE; BEGIN EXCLUSIVE");
+      expect(readCodexThreadOptional(threadId, state)).toEqual({ status: "unavailable" });
+      expect((await resolveCaller({ codexThreadId: threadId, cwd: state.root }, loadConfig(state.env))).cwd).toBe(state.root);
+    } finally { db.exec("ROLLBACK"); db.close(); }
   });
-  it.each([
-    [{ status: "no-client-found", ownerClientId: "stale" }, "success"],
-    [{ ownerClientId: null }, "success"], [{ ownerClientId: "" }, "success"],
-    [{ ownerClientId: "owner" }, "error"], [{ status: "alive" }, "pending"],
-  ])("rejects owner discovery response %j %s", async (result, resultType) => {
-    await ipc(result, resultType);
-    await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
+  it("fallback order is explicit cwd, OS cwd, cached cwd, process cwd", async () => {
+    const config = loadConfig(state.env), meta = { codexThreadId: threadId, http_transport: true };
+    const cached = { harness: "codex", session_id: threadId, cwd: state.root, title: "cached", repo: null, branch: null };
+    expect((await resolveCaller({ ...meta, cwd: state.codexHome, http_client_pid: process.pid }, config, { lookupCachedSession: () => cached })).cwd).toBe(state.codexHome);
+    expect((await resolveCaller({ ...meta, http_client_pid: process.pid }, config, { lookupCachedSession: () => cached })).cwd).toBe(process.cwd());
+    expect((await resolveCaller(meta, config, { lookupCachedSession: () => cached })).cwd).toBe(state.root);
+    expect((await resolveCaller(meta, config)).cwd).toBe(process.cwd());
   });
-  it("rejects error no-client-found, unreachable sockets, invalid client IDs, and malformed frames", async () => {
-    await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-    let server = await unixServer(join(state.codexHome, "ipc", "ipc.sock"), socket => {
-      socket.on("data", chunk => {
-        const request = JSON.parse(chunk.subarray(4).toString()) as Record<string, unknown>;
-        socket.end(frame({ type: "response", requestId: request.requestId, resultType: "error", error: "no-client-found" }));
-      });
-    });
-    try { await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" }); }
-    finally { await server.stop(); }
-    await ipc({}, "success", { result: { clientId: "" } });
-    await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-    await servers.pop()!.stop();
-    server = await unixServer(join(state.codexHome, "ipc", "ipc.sock"), socket => socket.end(Buffer.from([255, 255, 255, 127])));
-    try { await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" }); }
-    finally { await server.stop(); }
+  it("probe archives definitively; unavailable metadata uses desktop process liveness", async () => {
+    const config = loadConfig(state.env), adapter = new CodexDesktopAdapter(), signal = new AbortController().signal;
+    const row = { session_id: threadId } as ListenerRow;
+    config.codexDesktopRunning = async () => true;
+    expect(await adapter.probe(row, config, signal)).toEqual({ status: "alive" });
+    config.codexDesktopRunning = async () => false;
+    expect(await adapter.probe(row, config, signal)).toEqual({ status: "closed_definitive" });
+    const db = database(1); config.codexDesktopRunning = async () => { throw new Error("must not probe process"); };
+    try { expect(await adapter.probe(row, config, signal)).toEqual({ status: "closed_definitive" }); } finally { db.close(); }
   });
-  it("bounds total IPC time even when unrelated frames keep arriving", async () => {
-    servers.push(await unixServer(join(state.codexHome, "ipc", "ipc.sock"), socket => {
-      const timer = setInterval(() => socket.write(frame({ type: "event" })), 100);
-      socket.on("close", () => clearInterval(timer));
-    }));
-    await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-  });
-  async function executable(name: string, source: string): Promise<string> {
-    const path = join(state.root, name);
-    await writeFile(path, `#!${process.execPath}\n${source}\n`, { mode: 0o700 });
-    return path;
-  }
-  it("executes queue and silent deeplink as separate steps with literal argv and no shell interpolation", async () => {
-    const output = join(state.root, "args.json");
-    const bin = await executable("mock-cli.cjs", `require('node:fs').writeFileSync(${JSON.stringify(output)}, JSON.stringify(process.argv.slice(2)))`);
-    const card = 'Card with "quotes"; $(never-execute)\nsecond line';
-    await queueCodexWake(threadId, card, { codexBin: bin });
-    expect(JSON.parse(await readFile(output, "utf8"))).toEqual(["queue", "--thread", threadId, "--message", card]);
+  it("executes queue --resume and silent deeplink with literal argv and CODEX_HOME", async () => {
+    const log = join(state.root, "argv"), bin = join(state.root, "cli.cjs");
+    await writeFile(bin, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify([process.argv.slice(2), process.env.CODEX_HOME]));`, { mode: 0o700 });
+    const card = 'quoted "card"; $(never)\nline two';
+    await queueCodexWake(threadId, card, { codexBin: bin, env: { ...process.env, CODEX_HOME: state.codexHome } });
+    expect(JSON.parse(await readFile(log, "utf8"))).toEqual([["queue", "--resume", "--thread", threadId, "--message", card], state.codexHome]);
     await triggerCodexWake(threadId, { openBin: bin });
-    expect(JSON.parse(await readFile(output, "utf8"))).toEqual(["-g", "codex://threads/wake/" + threadId]);
-    vi.stubEnv("CITO_CODEX_BIN", bin);
-    await queueCodexWake(threadId, "configured executable");
-    expect(JSON.parse(await readFile(output, "utf8"))).toEqual(["queue", "--thread", threadId, "--message", "configured executable"]);
-  });
-  it("propagates spawn and nonzero errors rather than silently running the wake step", async () => {
-    await expect(queueCodexWake(threadId, "card", { codexBin: join(state.root, "missing") })).rejects.toMatchObject({ code: "ENOENT" });
-    const fail = await executable("fail.cjs", "process.exit(7)");
-    await expect(queueCodexWake(threadId, "card", { codexBin: fail })).rejects.toMatchObject({ code: 7 });
-    await expect(triggerCodexWake(threadId, { openBin: fail })).rejects.toMatchObject({ code: 7 });
-  });
-  it.each(["queue", "open"] as const)("aborts an in-flight %s executable and rejects pre-aborted effects", async step => {
-    const output = join(state.root, "started");
-    const bin = await executable("wait.cjs", `require('node:fs').writeFileSync(${JSON.stringify(output)}, String(process.pid)); setInterval(() => {}, 1000)`);
-    const controller = new AbortController();
-    const options = { codexBin: bin, openBin: bin, signal: controller.signal };
-    const run = () => step === "queue" ? queueCodexWake(threadId, "card", options) : triggerCodexWake(threadId, options);
-    const pending = run();
-    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    try { await expect.poll(async () => readFile(output, "utf8")).toMatch(/^\d+$/); }
-    finally { controller.abort(); }
-    await rejected;
-    await expect(run()).rejects.toMatchObject({ name: "AbortError" });
+    expect(JSON.parse(await readFile(log, "utf8"))[0]).toEqual(["-g", "codex://threads/wake/" + threadId]);
+    await expect(queueCodexWake(threadId, card, { codexBin: "/missing" })).rejects.toMatchObject({ code: "ENOENT" });
+    const controller = new AbortController(); controller.abort();
+    await expect(queueCodexWake(threadId, card, { codexBin: bin, signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
   });
 });

@@ -6,10 +6,21 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { resolve, join } from "node:path";
-import { createMcpServer } from "../../src/mcp/server.js";
-import { fixture } from "./support.js";
+import { createServer } from "node:net";
+import { createMcpServer, daemonHealth } from "../../src/mcp/server.js";
+import { loadConfig } from "../../src/shared/index.js";
+import { fixture, waitFor } from "./support.js";
 
 const exec = promisify(execFile);
+async function freePort(): Promise<number> {
+  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
+}
+async function stopDaemon(env: NodeJS.ProcessEnv) {
+  const health = await daemonHealth(loadConfig(env)); if (!health) return;
+  process.kill(health.pid, "SIGTERM");
+  await waitFor(() => { try { process.kill(health.pid, 0); return false; } catch { return true; } }, 10000);
+}
 test("SDK lists exactly five strict tools and routes _meta through real MCP requests", async () => {
   const f = await fixture(), server = createMcpServer(f.service), client = new Client({ name: "test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -42,8 +53,10 @@ test("SDK lists exactly five strict tools and routes _meta through real MCP requ
 
 test("installed stdio entrypoint initializes private local state without requiring NATS for inbox", async () => {
   const root = await mkdtemp("/tmp/cito-stdio-");
+  const port = await freePort();
+  const env = { PATH: process.env.PATH!, CITO_STATE_DIR: join(root, "state"), CITO_CODEX_HOME: join(root, "codex"), CITO_DAEMON_PORT: String(port), CITO_UI_HEADLESS: "1" };
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve("bin/cito-mcp")], env: {
-    PATH: process.env.PATH!, CITO_STATE_DIR: join(root, "state"), CITO_CODEX_HOME: join(root, "codex"), CITO_USER: "test",
+    ...env, CITO_USER: "test",
     CITO_NATS_URL: "nats://127.0.0.1:1" }, stderr: "pipe" });
   const client = new Client({ name: "stdio-test", version: "1" });
   try {
@@ -53,7 +66,7 @@ test("installed stdio entrypoint initializes private local state without requiri
     expect(result.isError).toBe(true);
     expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "BINDING_REQUIRED" } });
     expect((await stat(join(root, "state/state.sqlite"))).mode & 0o777).toBe(0o600);
-  } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await client.close(); await stopDaemon(env); await rm(root, { recursive: true, force: true }); }
 });
 
 test.each([
@@ -71,9 +84,9 @@ test.each([
 
 test("stdio EOF shuts down without leaking a process", async () => {
   const root = await mkdtemp("/tmp/cito-eof-");
-  const child = spawn(process.execPath, [resolve("bin/cito-mcp")], { env: { PATH: process.env.PATH,
-    CITO_STATE_DIR: join(root, "state"), CITO_CODEX_HOME: join(root, "codex") }, stdio: ["pipe", "pipe", "pipe"] });
+  const env = { PATH: process.env.PATH, CITO_STATE_DIR: join(root, "state"), CITO_CODEX_HOME: join(root, "codex"), CITO_DAEMON_PORT: String(await freePort()), CITO_UI_HEADLESS: "1" };
+  const child = spawn(process.execPath, [resolve("bin/cito-mcp")], { env, stdio: ["pipe", "pipe", "pipe"] });
   const stopped = new Promise<number | null>(resolve => child.once("exit", resolve));
   try { child.stdin.end(); expect(await stopped).toBe(0); }
-  finally { if (child.exitCode === null) child.kill("SIGKILL"); await stopped; await rm(root, { recursive: true, force: true }); }
+  finally { if (child.exitCode === null) child.kill("SIGKILL"); await stopped; await stopDaemon(env); await rm(root, { recursive: true, force: true }); }
 });

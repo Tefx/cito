@@ -3,10 +3,6 @@ import Foundation
 import Darwin
 import QuartzCore
 
-// Build: /usr/bin/swiftc src/macos/cito-banner.swift -o <state>/bin/cito-banner
-// Headless uses the same server, timers, retirement locks and click action. SIGUSR1
-// routes through the panel's click handler; CITO_BANNER_URL_OPENER replaces only
-// NSWorkspace.open (executable receives the URL as its single argument).
 struct Payload: Decodable {
     let target_harness: String
     let target_session_id: String
@@ -34,20 +30,10 @@ struct Payload: Decodable {
     }
 }
 
+
 func diagnostic(_ message: String) {
-    FileHandle.standardError.write(Data(("cito-banner: " + message + "\n").utf8))
+    FileHandle.standardError.write(Data(("cito-ui: " + message + "\n").utf8))
 }
-
-func acquire(_ fd: Int32, milliseconds: Int) -> Bool {
-    let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(milliseconds) * 1_000_000
-    repeat {
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 { return true }
-        if errno != EWOULDBLOCK && errno != EINTR { return false }
-        if DispatchTime.now().uptimeNanoseconds >= deadline { return false }
-        usleep(10_000)
-    } while true
-}
-
 final class ClickView: NSView {
     var clicked: (() -> Void)?
     private var tracking: NSTrackingArea?
@@ -74,110 +60,151 @@ final class ClickView: NSView {
     }
 }
 
-final class Banner {
-    let headless = ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
-    let instanceFd: Int32
-    let lockFd: Int32
-    var server: Int32 = -1
-    var source: DispatchSourceRead?
-    var clickSource: DispatchSourceSignal?
-    var timer: DispatchWorkItem?
-    var payload: Payload?
+
+struct Hub: Decodable {
+    let name: String, status: String, auth_mode: String
+    let user: String?, error: String?
+}
+struct Listener: Decodable {
+    let hub: String, listener_id: String, public_id: String, scoped_id: String
+    let harness: String, session_id: String, title: String, cwd: String, scope: String
+    let repo: String?
+    let can_jump: Bool
+}
+struct Frame: Decodable {
+    let op: String
+    let hubs: [Hub]?
+    let listeners: [Listener]?
+    let payload: Payload?
+}
+final class Companion: NSObject {
+    let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
+    let dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
+    var status: NSStatusItem?
     var panel: NSPanel?
     var labels: [NSTextField] = []
     var accentBar: NSView?
     var iconBadge: NSView?
     var icon: NSImageView?
+    var payload: Payload?
     var displayedCount = 0
     var visible = false
-    var retiring = false
-    var clickedPending = false
-    let queue = DispatchQueue(label: "cito.banner.socket")
-    let dismissMs: Int
-
-    init(instanceFd: Int32) {
-        self.instanceFd = instanceFd
-        self.lockFd = Darwin.open("banner.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        self.dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
-    }
-
+    var timer: DispatchWorkItem?
+    var clickSource: DispatchSourceSignal?
+    var menuActions: [() -> Void] = []
+    var hubs: [Hub] = []
+    var listeners: [Listener] = []
     func start() {
-        guard lockFd >= 0 else { exit(1) }
         signal(SIGPIPE, SIG_IGN)
-        server = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard server >= 0 else { exit(1) }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        // chdir was performed before any threads started. Relative bind avoids
-        // Darwin's 104-byte sun_path limit even for a deeply nested state dir.
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            buffer.copyBytes(from: Array("banner.sock\0".utf8))
-        }
-        let bound = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(server, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bound == 0, chmod("banner.sock", 0o600) == 0, listen(server, 16) == 0 else {
-            diagnostic("bind/listen failed: \(errno)"); exit(1)
-        }
-        _ = fcntl(server, F_SETFL, O_NONBLOCK)
-        let readSource = DispatchSource.makeReadSource(fileDescriptor: server, queue: queue)
-        readSource.setEventHandler { [weak self] in self?.acceptClients() }
-        source = readSource
-        readSource.resume()
         signal(SIGUSR1, SIG_IGN)
         clickSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-        clickSource?.setEventHandler { [weak self] in self?.retire(clicked: true) }
+        clickSource?.setEventHandler { [weak self] in self?.hide(clicked: true) }
         clickSource?.resume()
-        resetTimer() // Also retire if a sender disappears between spawn and delivery.
-    }
-
-    func acceptClients() {
-        while true {
-            let client = accept(server, nil, nil)
-            if client < 0 { return }
-            // Darwin accept() inherits O_NONBLOCK from the listener. Read the
-            // complete line with the bounded receive timeout, not an EAGAIN race
-            // against the sender's first write.
-            _ = fcntl(client, F_SETFL, 0)
-            var timeout = timeval(tv_sec: 1, tv_usec: 0)
-            _ = setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-            var data = Data()
-            var bytes = [UInt8](repeating: 0, count: 4096)
-            var complete = false
-            while data.count <= 65_536 {
-                let n = Darwin.read(client, &bytes, bytes.count)
-                if n <= 0 { break }
-                data.append(contentsOf: bytes.prefix(n))
-                if data.contains(10) { complete = true; break }
-            }
-            guard complete, let end = data.firstIndex(of: 10),
-                  let next = try? JSONDecoder().decode(Payload.self, from: data[..<end]),
-                  !next.target_harness.isEmpty else {
-                close(client); continue
-            }
-            DispatchQueue.main.async { [weak self] in
-                defer { close(client) }
-                guard let self = self, !self.retiring else { return }
-                if (self.panel?.isVisible ?? self.visible), let previous = self.payload,
-                   previous.target_harness == next.target_harness,
-                   previous.target_session_id == next.target_session_id,
-                   previous.effective_wake == next.effective_wake {
-                    self.displayedCount += next.count ?? 1
-                } else {
-                    self.displayedCount = next.count ?? 1
+        if !headless { status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
+        DispatchQueue.global().async { [weak self] in
+            var buffer = Data()
+            var dropping = false
+            var bytes = [UInt8](repeating: 0, count: 8192)
+            while true {
+                let n = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
+                if n < 0 && errno == EINTR { continue }
+                if n <= 0 { exit(0) }
+                for byte in bytes.prefix(n) {
+                    if byte == 10 {
+                        let line = buffer; buffer.removeAll(keepingCapacity: true)
+                        if dropping { dropping = false; continue }
+                        DispatchQueue.main.async { self?.receive(line) }
+                    } else if !dropping {
+                        buffer.append(byte)
+                        if buffer.count > 1_048_576 { diagnostic("oversized frame"); buffer.removeAll(); dropping = true }
+                    }
                 }
-                self.payload = next
-                self.show(next)
-                self.resetTimer()
-                let ack = Array("{\"ok\":true}\n".utf8)
-                _ = ack.withUnsafeBytes { Darwin.write(client, $0.baseAddress, $0.count) }
             }
         }
     }
-
+    func receive(_ data: Data) {
+        // Headless hooks use the exact same menu handlers and banner click path.
+        if headless, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let op = object["op"] as? String {
+            if op == "test_click" { hide(clicked: true); return }
+            if op == "test_action", let index = object["index"] as? Int, menuActions.indices.contains(index) {
+                menuActions[index](); return
+            }
+        }
+        guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
+        if frame.op == "state", let h = frame.hubs, let l = frame.listeners,
+           h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "oidc"].contains($0.auth_mode) }),
+           l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
+            hubs = h; listeners = l; rebuild()
+            if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)") }
+        } else if frame.op == "banner", let value = frame.payload, !value.target_harness.isEmpty {
+            if visible, let previous = payload, previous.target_session_id == value.target_session_id && previous.target_harness == value.target_harness && previous.effective_wake == value.effective_wake {
+                displayedCount += value.count ?? 1
+            } else { displayedCount = value.count ?? 1 }
+            payload = value; show(value)
+            timer?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.hide(clicked: false) }
+            timer = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(dismissMs), execute: work)
+        } else { diagnostic("invalid frame") }
+    }
+    func emit(_ action: [String: String]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: action, options: [.sortedKeys]) else { return }
+        FileHandle.standardOutput.write(data + Data([10]))
+    }
+    @objc func act(_ sender: NSMenuItem) {
+        if menuActions.indices.contains(sender.tag) { menuActions[sender.tag]() }
+    }
+    @discardableResult func item(_ title: String, _ menu: NSMenu, _ action: @escaping () -> Void) -> NSMenuItem {
+        let value = NSMenuItem(title: title, action: #selector(act(_:)), keyEquivalent: "")
+        value.target = self; value.tag = menuActions.count; menuActions.append(action); menu.addItem(value); return value
+    }
+    func rebuild() {
+        menuActions.removeAll()
+        status?.button?.title = listeners.isEmpty ? "Cito" : "🔔 \(listeners.count)"
+        let menu = NSMenu()
+        menu.addItem(withTitle: "活跃监听", action: nil, keyEquivalent: "")
+        for listener in listeners {
+            let title = "\(listener.title) · \(listener.scoped_id) · \(listener.harness)"
+            let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            menu.addItem(parent)
+            let sub = NSMenu(); parent.submenu = sub
+            if listener.can_jump { item("跳转至对话 ↗", sub) { self.openCodex(listener.session_id) } }
+            item("复制 \(listener.scoped_id)", sub) {
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(listener.scoped_id, forType: .string)
+            }
+            item("可见范围: \(listener.scope) — 切换", sub) {
+                self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id,
+                           "scope": listener.scope == "self" ? "workspace" : "self"])
+            }
+            let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
+            item("取消监听", sub, unlisten)
+            let alternate = item(title + " — 取消监听", menu, unlisten)
+            alternate.isAlternate = true; alternate.keyEquivalentModifierMask = [.option]
+        }
+        if !listeners.isEmpty { item("取消全部监听", menu) { self.emit(["op": "unlisten_all"]) } }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Hubs", action: nil, keyEquivalent: "")
+        for hub in hubs {
+            let parent = NSMenuItem(title: "\(hub.name) · \(hub.status) · \(hub.user ?? "—")", action: nil, keyEquivalent: "")
+            menu.addItem(parent)
+            let sub = NSMenu(); parent.submenu = sub
+            if let error = hub.error { sub.addItem(withTitle: error, action: nil, keyEquivalent: "") }
+            for (title, action) in [("登录 OIDC", "login"), ("重连", "reconnect"), ("断开", "disconnect")] {
+                if action == "login" && hub.auth_mode != "oidc" { continue }
+                item(title, sub) { self.emit(["op": "hub_action", "hub": hub.name, "action": action]) }
+            }
+        }
+        menu.addItem(.separator())
+        item("退出 Cito", menu) { self.emit(["op": "quit"]) }
+        status?.menu = menu
+    }
+    func hide(clicked: Bool) {
+        timer?.cancel()
+        if clicked, visible, let value = payload, value.target_harness == "codex" { openCodex(value.target_session_id) }
+        visible = false; panel?.orderOut(nil)
+        if headless { diagnostic(clicked ? "banner clicked" : "banner hidden") }
+    }
     func show(_ value: Payload) {
         let title = "Cito · \(value.target_title)" + (displayedCount > 1 ? " (\(displayedCount))" : "")
         let semanticLabel = (value.effective_wake ? "唤醒" : "仅知会") + (displayedCount > 1 ? " · ×\(displayedCount)" : "")
@@ -204,7 +231,7 @@ final class Banner {
             window.hasShadow = true
             window.appearance = NSAppearance(named: .vibrantDark)
             let root = ClickView(frame: window.contentView!.bounds)
-            root.clicked = { [weak self] in self?.retire(clicked: true) }
+            root.clicked = { [weak self] in self?.hide(clicked: true) }
             root.setAccessibilityElement(true)
             root.setAccessibilityRole(.button)
             root.wantsLayer = true
@@ -294,40 +321,6 @@ final class Banner {
         panel?.orderFrontRegardless() // Never makeKey, activate, or change first responder.
     }
 
-    func resetTimer(after milliseconds: Int? = nil) {
-        timer?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.retire(clicked: false) }
-        timer = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(milliseconds ?? dismissMs), execute: item)
-    }
-
-    func retire(clicked: Bool) {
-        guard !retiring else { return }
-        if clicked { clickedPending = true }
-        let isClick = clicked || clickedPending
-        guard acquire(lockFd, milliseconds: isClick ? 500 : 0) else {
-            // A failed sender may not reset the timer. Retry without dropping
-            // the active instance; successful deliveries replace this timer.
-            resetTimer(after: 50)
-            return
-        }
-        retiring = true
-        timer?.cancel()
-        unlink("banner.sock")
-        source?.cancel()
-        close(server)
-        if isClick, let value = payload, value.target_harness == "codex" { openCodex(value.target_session_id) }
-        if isClick { panel?.orderOut(nil); exit(0) }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = headless ? 0 : 0.25
-            panel?.animator().alphaValue = 0
-        }
-        // Preserve the lifetime locks through fade-out, including headless tests.
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(headless ? 10 : 250)) { [self] in
-            panel?.orderOut(nil)
-            exit(0)
-        }
-    }
 
     func openCodex(_ session: String) {
         var allowed = CharacterSet.urlPathAllowed
@@ -340,20 +333,14 @@ final class Banner {
             process.arguments = [url.absoluteString]
             do { try process.run(); process.waitUntilExit() }
             catch { diagnostic("URL opener failed: \(error)") }
-        } else { NSWorkspace.shared.open(url) }
+        } else if headless { diagnostic("open " + url.absoluteString) }
+        else { NSWorkspace.shared.open(url) }
     }
 }
 
-let state = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CITO_STATE_DIR"] ?? (NSHomeDirectory() + "/.cito")).standardizedFileURL.path
-let sockets = state + "/sockets"
-do { try FileManager.default.createDirectory(atPath: sockets, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
-catch { diagnostic("cannot create sockets: \(error)"); exit(1) }
-guard chdir(sockets) == 0 else { exit(1) }
-let instance = Darwin.open("banner-instance.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-guard instance >= 0 else { exit(1) }
-guard acquire(instance, milliseconds: 2000) else { exit(0) }
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let banner = Banner(instanceFd: instance)
-banner.start()
+let companion = Companion()
+companion.start()
 app.run()

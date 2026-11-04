@@ -77,7 +77,7 @@ test("find queries hubs concurrently, deterministically merges revisions and ski
   bad.mockRestore();
 }, 15_000);
 
-test("parallel unlisten rolls back a failed hub and reports partial failure, then retries it", async () => {
+test("parallel unlisten revokes every local hub despite a failed remote update", async () => {
   const f = await multi();
   const ids = new Map<string, string>();
   for (const hub of ["personal", "rda"]) ids.set(hub, canonical((await call(f.service, "cito_listen", { about: "revoke", hub }, f.pi.meta)).listener_id));
@@ -85,11 +85,11 @@ test("parallel unlisten rolls back a failed hub and reports partial failure, the
   const update = vi.spyOn(broker.kv, "update").mockRejectedValueOnce(new Error("remote unavailable"));
   const result = await call(f.service, "cito_unlisten", {}, f.pi.meta);
   update.mockRestore();
-  expect(result).toMatchObject({ status: "unlistened", warnings: [{ hub: "rda" }] });
+  expect(result).toMatchObject({ status: "unlistened" });
   expect(f.service.state.listener(ids.get("personal")!, "personal")!.status).toBe("UNLISTENED");
-  expect(f.service.state.listener(ids.get("rda")!, "rda")!.status).toBe("ACTIVE");
-  expect(f.service.receivers.get(`rda:${ids.get("rda")}`)!.abort.signal.aborted).toBe(false);
-  expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "unlistened" });
+  expect(f.service.state.listener(ids.get("rda")!, "rda")!.status).toBe("UNLISTENED");
+  expect(f.service.receivers.has(`rda:${ids.get("rda")}`)).toBe(false);
+  expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "not_listening" });
   expect(f.pi.badges.at(-1)).toBeUndefined();
 }, 15_000);
 
@@ -227,12 +227,12 @@ test("newly enrolled endpoints replace every retained hub PID and active rows se
   expect(f.pi.badges.at(-1)).toBeUndefined();
 });
 
-test("shutdown aggregates badge ownership with a nonblocking receiver-lock probe", async () => {
+test("shutdown excludes closing receiver keys from badge aggregation", async () => {
   const f = await multi();
   const enrolled = await call(f.service, "cito_listen", { about: "badge", tag: "shared" }, f.pi.meta), id = canonical(enrolled.listener_id);
   const key = `personal:${id}`;
   await refreshSessionBadge(f.service.state, f.config, "pi", "pi-session-1", { closingKeys: new Set([key]) });
-  expect(f.pi.badges.at(-1)).toBe("🔔 shared");
+  expect(f.pi.badges.at(-1)).toBeUndefined();
   await f.service.receivers.get(key)!.stop();
   await refreshSessionBadge(f.service.state, f.config, "pi", "pi-session-1", { closingKeys: new Set([key]) });
   expect(f.pi.badges.at(-1)).toBeUndefined();

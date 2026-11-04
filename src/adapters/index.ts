@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
-import { CodexDesktopAdapter, codexThreadId, readCodexThread, assertCodexThreadOpen } from "./codex.js";
+import { CodexDesktopAdapter, codexThreadId, readCodexThreadOptional } from "./codex.js";
 import { SocketBridgeAdapter, identifyBridge } from "./pi.js";
 import { gitMetadata, type RepoMetadata } from "./git.js";
 import type { HarnessAdapter } from "./types.js";
@@ -52,7 +52,9 @@ export function extractCallerPidRoots(meta: Record<string, unknown> = {}): numbe
     }
   };
   for (const value of Object.values(meta)) walk(value);
-  return roots.size ? [...roots] : [process.ppid];
+  if (roots.size) return [...roots];
+  if (typeof meta.http_client_pid === "number" && Number.isSafeInteger(meta.http_client_pid) && meta.http_client_pid > 0) return [meta.http_client_pid];
+  return meta.http_transport === true ? [] : [process.ppid];
 }
 const exec = promisify(execFile);
 /** Validate mutually exclusive explicit claims before reading either driver's state. */
@@ -63,17 +65,19 @@ export async function resolveCaller(meta: Record<string, unknown> = {}, config: 
   catch (error) { if (!(error instanceof CitoError) || error.code !== "BINDING_REQUIRED") throw error; }
   if (thread && pid !== undefined) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
   if (thread) {
-    try {
-      const caller = readCodexThread(thread, config, { allowArchived: options.requireOpen === false });
-      if (options.requireOpen !== false) await assertCodexThreadOpen(thread, config);
-      return caller;
-    } catch (error) {
-      if (options.requireOpen === false && error instanceof CitoError && error.code === "SESSION_NOT_OPEN") {
-        const cached = await options.lookupCachedSession?.({ harness: "codex", sessionId: thread });
-        if (cached) return cached;
-      }
-      throw error;
+    const row = readCodexThreadOptional(thread, config);
+    if (row.status === "found") return row;
+    if (row.status === "archived" && options.requireOpen !== false) throw new CitoError("SESSION_NOT_OPEN", "Codex thread is archived");
+    let cwd = typeof meta.cwd === "string" && meta.cwd.trim() ? meta.cwd : undefined;
+    if (!cwd && typeof meta.http_client_pid === "number" && Number.isSafeInteger(meta.http_client_pid) && meta.http_client_pid > 0) {
+      try {
+        const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(meta.http_client_pid), "-Fn"], { timeout: 1000 });
+        cwd = stdout.split("\n").find(line => line.startsWith("n"))?.slice(1) || undefined;
+      } catch { /* Optional OS metadata. */ }
     }
+    if (!cwd) cwd = (await options.lookupCachedSession?.({ harness: "codex", sessionId: thread }))?.cwd;
+    cwd ||= process.cwd();
+    return { harness: "codex", session_id: thread, cwd, ...await gitMetadata(cwd, typeof meta.title === "string" ? meta.title : undefined) };
   }
   const roots = extractCallerPidRoots(meta);
   let failure: unknown;

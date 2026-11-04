@@ -28,6 +28,7 @@ export type Signal = z.infer<typeof signalSchema>;
 
 /** All transactions are synchronous: no awaited effects can interleave their writes. */
 export class LocalState {
+  readonly liveReceivers = new Map<string, { owner: string; abort: AbortController }>();
   private constructor(readonly db: DatabaseSync) {}
   static async open(stateDir: string): Promise<LocalState> {
     await mkdir(join(stateDir, "sockets"), { recursive: true, mode: 0o700 });
@@ -69,9 +70,19 @@ export class LocalState {
             held_reason TEXT, expires_at_iso TEXT NOT NULL, expires_at_ms INTEGER NOT NULL, PRIMARY KEY (hub, dedup_id));
           PRAGMA user_version = 4;`);
       });
+      db.exec("CREATE TABLE IF NOT EXISTS daemon_owner (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), pid INTEGER NOT NULL, port INTEGER NOT NULL)");
       return state;
     } catch (error) { db.close(); throw error; }
   }
+  daemonOwner(): { pid: number; port: number } | undefined { return this.db.prepare("SELECT pid, port FROM daemon_owner WHERE singleton = 1").get() as { pid: number; port: number } | undefined; }
+  claimDaemon(pid: number, port: number, expected?: { pid: number; port: number }): boolean {
+    return this.transaction(() => {
+      const current = this.daemonOwner();
+      if (current?.pid !== expected?.pid || current?.port !== expected?.port) return false;
+      this.run("INSERT OR REPLACE INTO daemon_owner VALUES (1, ?, ?)", pid, port); return true;
+    });
+  }
+  releaseDaemon(pid: number): void { this.run("DELETE FROM daemon_owner WHERE singleton = 1 AND pid = ?", pid); }
   run(sql: string, ...values: SQLInputValue[]) { return this.db.prepare(sql).run(...values); }
   listener(id: string, hub = "default"): ListenerRow | undefined {
     return this.db.prepare("SELECT * FROM local_listeners WHERE hub = ? AND listener_id = ?").get(hub, id) as unknown as ListenerRow | undefined;

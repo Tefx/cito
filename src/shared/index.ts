@@ -1,4 +1,5 @@
 export * from "./config.js";
+export * from "./mutex.js";
 export * from "./errors.js";
 export * from "./identity.js";
 export * from "./lease.js";

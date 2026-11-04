@@ -3,6 +3,8 @@ import { CitoError } from "../shared/errors.js";
 import { normalizeIssuer, oidcPrincipal } from "../shared/identity.js";
 import { validateHttpUrl } from "../shared/config.js";
 
+export const SUPPORTED_OIDC_ALGS = ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384", "EdDSA"] as const;
+
 export interface OidcVerifierOptions {
   issuer: string;
   clientId: string;
@@ -71,7 +73,7 @@ export class OidcVerifier {
     void cancelled?.catch(() => {}); // Cached-key verification may not await a refresh race.
     try {
       const header = decodeProtectedHeader(token);
-      if (typeof header.alg !== "string" || !["RS256", "ES256"].includes(header.alg) || typeof header.kid !== "string" || !header.kid) {
+      if (typeof header.alg !== "string" || !(SUPPORTED_OIDC_ALGS as readonly string[]).includes(header.alg) || typeof header.kid !== "string" || !header.kid) {
         throw new Error("OIDC requires RS256/ES256 and kid");
       }
       if (!this.keySet || !this.keys.some(key => key.kid === header.kid)) {
@@ -83,7 +85,7 @@ export class OidcVerifier {
         throw new Error("Unknown OIDC signing kid");
       }
       const { payload } = await jwtVerify(token, this.keySet, {
-        algorithms: ["RS256", "ES256"], issuer: this.issuer, audience: this.options.clientId,
+        algorithms: [...SUPPORTED_OIDC_ALGS], issuer: this.issuer, audience: this.options.clientId,
         requiredClaims: ["iss", "sub", "exp", "aud"], clockTolerance: 30,
         currentDate: new Date(this.now()),
       });

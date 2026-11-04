@@ -15,12 +15,12 @@
   1. **Single Per-User macOS Daemon (`cito daemon`) & Streamable HTTP MCP (`http://127.0.0.1:4290/mcp`)**:
      - Runs as a single per-user background daemon on macOS (`CITO_DAEMON_PORT`, default `4290`), managed via LaunchAgent (`~/Library/LaunchAgents/one.tefx.cito.plist`) or auto-started by the `cito-mcp` stdio forwarder.
      - Exposes `POST /mcp`, `GET /mcp`, `DELETE /mcp` (via stateless-per-request `StreamableHTTPServerTransport` sharing one `CitoService` instance) and `GET /health` (`{ ok: true, pid, stateDir }`) on `127.0.0.1`.
-     - Eliminates per-tab MCP subprocess memory bloat in Codex Desktop and Pi (**0 child processes per conversation tab**).
+     - Direct Streamable HTTP clients use **0 Cito child processes per conversation tab**; stdio-only clients retain one lightweight auto-forwarder per MCP connection.
      - Eliminates all cross-process `flock` lockfiles (`src/banner/flock.ts`, `listen-*.lock`, `receiver-*.lock`, `session-*.lock`, `banner.lock`, `banner-instance.lock`, `oidc-login-*.lock`), replacing them with in-memory `KeyedMutex` instances inside the single daemon process.
   2. **Combined macOS Menu Bar Extra (`NSStatusItem`) & In-Process HUD Banner (`NSPanel`) (`src/macos/cito-ui.swift` & `src/ui/index.ts`)**:
      - Replaces `src/banner/index.ts` and `src/macos/cito-banner.swift` with a single persistent AppKit companion child process (`cito-ui`) connected to `cito-daemon` via newline-delimited JSON over `stdin`/`stdout`.
      - Provides a progressive-disclosure macOS Menu Bar Extra (`NSStatusItem` + `NSMenu`) for viewing active local listeners, 1-click manual unlistening (via submenu or holding `Option ⌥`), toggling `self`/`workspace` visibility in place, jumping to Codex threads, copying scoped listener IDs, and managing Hub connections and OIDC login.
-     - Renders the 388×136 `.vibrantDark` frosted-glass top-right HUD notification banner (`NSPanel`) directly in-process (<1ms latency, hiding via `panel?.orderOut(nil)` after 6s without exiting).
+     - Renders the 388×136 `.vibrantDark` frosted-glass top-right HUD notification banner (`NSPanel`) directly in-process (avoiding per-banner process startup, hiding via `panel?.orderOut(nil)` after 6s without exiting).
   3. **Non-Intrusive Codex Desktop Integration (`src/adapters/codex.ts`)**:
      - Removes `assertCodexThreadOpen` (`~/.codex/ipc/ipc.sock`) completely so background/unfocused Codex conversations in the sidebar never time out after 60s.
      - Treats `~/.codex/state_5.sqlite` as an optional read-only metadata source (`readCodexThreadOptional`: returning `'archived'`, `'found'`, or `'unavailable'`), falling back to `_meta.cwd` $\to$ `lsof -a -d cwd -p <http_client_pid>` $\to$ `lookupCachedSession` $\to$ `process.cwd()` + `gitMetadata(cwd)`.
@@ -29,7 +29,7 @@
      - Compatible with any standard OpenID Connect provider (Okta, Auth0, Keycloak, Microsoft Entra ID, Google, Casdoor, etc.).
      - Supports full standard JWS asymmetric algorithms (`RS256`, `RS384`, `RS512`, `PS256`, `ES256`, `ES384`, `EdDSA`), negotiates default scopes against `.well-known/openid-configuration` `scopes_supported`, supports optional fixed loopback redirect port (`oidcRedirectPort` / `CITO_OIDC_REDIRECT_PORT`), and fences listeners belonging to a previous `principal_id` on account switch.
 - **Proposed Design Suggestion Only (Not Yet Implemented)**:
-  - **Claude Code (`claude`)**: Documented in **Section 8** strictly as a **设计建议（仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented）**, describing how Claude Code can integrate with `cito-daemon` over Streamable HTTP MCP + SSE notifications or local socket bridges without concrete code details. `README.md` provides installation and usage guides per harness (Pi, Codex Desktop, Claude Code marked as not yet implemented, and custom harnesses).
+  - **Claude Code (`claude`)**: Documented in **Section 6** strictly as a **设计建议（仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented）**, describing how Claude Code can integrate with `cito-daemon` over Streamable HTTP MCP + SSE notifications or local socket bridges without concrete code details. `README.md` provides installation and usage guides per harness (Pi, Codex Desktop, Claude Code marked as not yet implemented, and custom harnesses).
 
 ---
 
@@ -74,11 +74,11 @@
 ### 3.2 Caller Resolution (`resolveCaller` & `extractCallerPidRoots`)
 1. **Step 1 — Explicit Claim Validation**:
    - Codex thread claims: `x-codex-turn-metadata.thread_id` / `session_id`, `openai/threadId`, `codexThreadId` (>1 distinct values $\to$ `INVALID_INPUT`).
-   - Explicit bridge PID claims: top-level `meta.endpoint_pid`, `meta.caller_pid` (non-positive integer $\to$ `PI_BRIDGE_UNAVAILABLE`; 2 distinct integers $\to$ `INVALID_INPUT`).
+   - Explicit bridge PID claims: top-level `meta.endpoint_pid`, `meta.pi_pid`, `meta.caller_pid` (non-positive integer $\to$ `PI_BRIDGE_UNAVAILABLE`; 2 distinct integers $\to$ `INVALID_INPUT`).
    - Simultaneous Codex claim + top-level explicit bridge PID claim $\to$ `INVALID_INPUT` (`meta.http_client_pid` is excluded from `explicitPid` so Codex HTTP requests carrying `x-codex-turn-metadata` + `http_client_pid` never conflict).
 2. **Step 2 — `extractCallerPidRoots(meta)` Precedence**:
-   1. Top-level explicit `meta.endpoint_pid` or `meta.caller_pid` $\to$ `[explicitPid]`.
-   2. Nested objects in `meta` containing positive safe integers in `endpoint_pid`, `caller_pid`, or `parent_pid` $\to$ those roots.
+   1. Top-level explicit `meta.endpoint_pid`, `meta.pi_pid`, or `meta.caller_pid` $\to$ `[explicitPid]`.
+   2. Nested objects in `meta` containing positive safe integers in `endpoint_pid`, `pi_pid`, `caller_pid`, or `parent_pid` $\to$ those roots.
    3. `meta.http_client_pid` $\to$ `[meta.http_client_pid]`.
    4. If `meta.http_transport === true` $\to$ `[]` (never walking `cito-daemon`'s own `process.ppid`).
    5. Otherwise (direct in-process stdio) $\to$ `[process.ppid]`.
@@ -160,11 +160,12 @@ export type UiToDaemonAction =
 
 ## 6. Proposed Design for Claude Code Integration (设计建议 — 仅建议，尚未实现)
 
-> **状态声明（仅建议设计 / Proposed Design Suggestion Only — Not Yet Implemented）**：以下为在 `cito-daemon` 常驻架构下未来接入 Claude Code 的架构设计建议，不包含具体代码实现细节，当前版本尚未实现 Claude Code 适配。
+> **设计建议 — 仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented**：以下为在 `cito-daemon` 常驻架构下未来接入 Claude Code 的架构设计建议，不包含具体代码实现细节，当前版本尚未实现 Claude Code 适配。
 
 1. **零子进程 Streamable HTTP 接入与会话标识建议**：
    - 建议在 Claude Code 的 MCP 配置中直接指向本地常驻守护进程端点 `http://127.0.0.1:4290/mcp`。
-   - 守护进程可通过 HTTP 连接的本地客户端套接字（`lsof` 归属的 Claude 进程 PID 与工作目录 `cwd`，或 MCP 标准 `roots/list` 协议返回的工作区 URI）结合连接级会话标识，自动完成会话绑定与进程存活检测（当 Claude Code 终端退出或连接关闭时自动注销监听），无需在 Claude Code 内安装额外的外部桥接进程。
+   - 未来适配需验证 Claude Code 实际提供的会话标识与通知能力，单独设计连接/会话映射；当前 V3 的 HTTP transport 是每请求独立的无状态实例，TCP 连接关闭不能代表会话退出，PID/cwd 本身也不能区分同一进程中的多个会话。以下均为未来扩展建议。
+   - 守护进程可通过 HTTP 连接的本地客户端套接字（`lsof` 归属的 Claude 进程 PID 与工作目录 `cwd`，或 MCP 标准 `roots/list` 协议返回的工作区 URI）结合连接级会话标识，自动完成会话绑定与进程存活检测（未来需以经验证的会话生命周期信号注销监听，不能直接以单次 HTTP 请求/连接关闭为依据），无需在 Claude Code 内安装额外的外部桥接进程。
 2. **双模通知投递建议（MCP SSE 通道推送 + 回合拉取兜底）**：
-   - **主动推送（SSE Channel Push）**：在 Streamable HTTP 模式下，Claude Code 保持一条 `GET /mcp` 的 SSE 事件流连接；守护进程在握手时声明实验性通知通道能力（如 `claude/channel`），收到信号时直接通过该会话的 SSE 连接推送唤醒卡片以唤醒空闲的 Claude 会话。
+   - **主动推送（SSE Channel Push）**：未来需增加会话路由与持久通知通道，并确认 Claude Code 支持相应能力。当前 V3 未实现 Claude 专用 Channel Push。在扩展后的 Streamable HTTP 模式下，Claude Code 保持一条 `GET /mcp` 的 SSE 事件流连接；守护进程在握手时声明实验性通知通道能力（如 `claude/channel`），收到信号时直接通过该会话的 SSE 连接推送唤醒卡片以唤醒空闲的 Claude 会话。
    - **回合开始拉取兜底（Turn-Start Inbox Drain）**：当客户端未启用实验性通道或正忙时，投递结果记为“已派发未确认（`delivered_unconfirmed`）”，使信号保留在未读收件箱中；配合 Claude Code 的 `UserPromptSubmit` Hook 或在回合开始时调用无参 `cito_inbox()`（默认读取即清空），确保消息在下一轮对话开始时可靠进入上下文。

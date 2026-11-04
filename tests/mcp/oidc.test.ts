@@ -3,7 +3,8 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OidcLogin } from "../../src/mcp/oidc.js";
 import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
-import { fixture } from "./support.js";
+import { fixture, waitFor } from "./support.js";
+import { createServer } from "node:net";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -30,7 +31,7 @@ test("interactive S256 PKCE verifies signature and stores canonical identity wit
   expect(await login.offlinePrincipal()).toEqual({ principal_id: cache.verified_principal_id, owner_user: "alice" });
 });
 
-test("rejected unexpired token refreshes once; concurrent flock waiters reuse a different hash", async () => {
+test("rejected unexpired token refreshes once; concurrent mutex waiters reuse a different hash", async () => {
   const { f, key, oidc, login, opener, opened } = await setup();
   const old = await login.recover(null);
   oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-1", exp: Math.floor(Date.now() / 1000) + 3600 })), refresh_token: "refresh-2" };
@@ -101,7 +102,7 @@ test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TI
   await expect(stat(join(f.stateDir, "oidc-token-default.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-test("hub caches and PKCE scopes are isolated, with a legacy default-cache fallback", async () => {
+test("hub caches and PKCE scopes are isolated, with no legacy default-cache fallback", async () => {
   const { f, oidc, opener, login } = await setup();
   const initial = await login.recover(null);
   const personal = new OidcLogin({ ...f.config, oidcScopes: ["openid", "custom"] }, async (url, signal) => {
@@ -115,7 +116,47 @@ test("hub caches and PKCE scopes are isolated, with a legacy default-cache fallb
   expect((await stat(join(f.stateDir, "oidc-token-personal.json"))).mode & 0o777).toBe(0o600);
   const { rename } = await import("node:fs/promises");
   await rename(join(f.stateDir, "oidc-token-default.json"), join(f.stateDir, "oidc-token.json"));
-  expect(await login.cached()).toEqual(initial);
+  expect(await login.cached()).toBeUndefined();
+});
+
+test("discovery negotiates advertised default scopes, honors explicit scopes and rejects providers without openid", async () => {
+  const { f, oidc, opener } = await setup();
+  oidc.state.scopesSupported = ["openid", "email"];
+  const negotiated = new OidcLogin(f.config, async (url, signal) => {
+    expect(new URL(url).searchParams.get("scope")).toBe("openid email"); await opener(url, signal);
+  }, "negotiated");
+  await negotiated.recover(null);
+  const explicit = new OidcLogin({ ...f.config, oidcScopes: ["openid", "custom"] }, async (url, signal) => {
+    expect(new URL(url).searchParams.get("scope")).toBe("openid custom"); await opener(url, signal);
+  }, "explicit");
+  await explicit.recover(null);
+  oidc.state.scopesSupported = ["email"];
+  await expect(new OidcLogin(f.config, opener, "missing-openid").recover(null)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE" });
+});
+
+test("fixed callback ports serialize independent hub logins and abort queued or active logins without opening another browser", async () => {
+  const { f, opener } = await setup();
+  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve()));
+  let firstUrl = "", opened = 0, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const config = { ...f.config, oidcRedirectPort: port };
+  const first = new OidcLogin(config, async (url, signal) => {
+    opened++; firstUrl = url; await gate; await opener(url, signal);
+  }, "a").recover(null);
+  try {
+    await waitFor(() => !!firstUrl); expect(new URL(new URL(firstUrl).searchParams.get("redirect_uri")!).port).toBe(String(port));
+    const controller = new AbortController();
+    const second = new OidcLogin(config, async (url, signal) => { opened++; await opener(url, signal); }, "b").recover(null, true, controller.signal);
+    const rejected = expect(second).rejects.toMatchObject({ name: "AbortError" }); controller.abort(); await rejected;
+    expect(opened).toBe(1); release(); await first;
+    const activeAbort = new AbortController(); let active = false;
+    const third = new OidcLogin(config, async () => { active = true; await new Promise(() => {}); }, "c").recover(null, true, activeAbort.signal);
+    const cancelled = expect(third).rejects.toMatchObject({ name: "AbortError" });
+    await waitFor(() => active); activeAbort.abort(); await cancelled;
+    // Rebinding the exact port proves that the cancelled callback server closed.
+    const fourth = new OidcLogin(config, opener, "d"); await fourth.recover(null);
+  } finally { release(); await first; }
 });
 
 test("locally invalid signatures never acquire a verified identity cache", async () => {

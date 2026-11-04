@@ -20,12 +20,6 @@ test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pu
   const owner = f.service.state.listener(id)!.owner_token;
   f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'frozen-before-restart', batch_expires_at_ms = expires_at_ms, batch_card = 'Original frozen card' WHERE signal_id = ?", sent.signal_id);
   f.service.state.run("UPDATE local_listeners SET dispatcher_token = 'crashed-dispatcher', lease_until_ms = ? WHERE listener_id = ?", Date.now() + 60_000, id);
-  const observer = await CitoService.create(f.config, f.serviceOptions);
-  try {
-    await call(observer, "cito_find");
-    expect(observer.receivers.has(`default:${id}`)).toBe(false);
-    expect(observer.state.listener(id)!.dispatcher_token).toBe("crashed-dispatcher");
-  } finally { await observer.close(); }
   await f.service.close();
   const nc = await connectNats({ servers: f.broker.url }); cleanups.push(() => nc.close());
   const { js } = await provisionNats(nc);
@@ -62,19 +56,20 @@ test("unlisten cleanup cannot delete the concurrently installed replacement rece
   } finally { release(); await revocation; }
 });
 
-test("a transient revocation failure restores the ACTIVE receiver and permits a successful retry", async () => {
+test("remote revocation failure preserves local unlisten and suppresses pending wakes", async () => {
   const f = await setup();
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "retry revoke" }, f.pi.meta);
-  const id = toCanonicalListenerId(publicId);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "revoke offline" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId), receiver = f.service.receivers.get(`default:${id}`)!;
+  await call(f.service, "cito_send", { to: id, message: "must stay passive" });
   const broker = Reflect.get(f.service.slots.get("default")!, "broker") as Broker;
   vi.spyOn(broker.kv, "update").mockRejectedValueOnce(new Error("temporary broker failure"));
-  expect(payload(await f.service.call("cito_unlisten", {}, f.pi.meta))).toMatchObject({ error: { code: "NATS_UNAVAILABLE", retryable: true } });
-  expect(f.service.state.listener(id)!.status).toBe("ACTIVE");
-  expect(registrationSchema.parse((await broker.kv.get(id))!.json()).state).toBe("ACTIVE");
-  expect(f.service.receivers.get(`default:${id}`)!.abort.signal.aborted).toBe(false);
-  expect(await call(f.service, "cito_send", { to: id, message: "recovered receiver" })).toMatchObject({ status: "wake_accepted" });
   expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "unlistened" });
+  expect(f.service.state.listener(id)!.status).toBe("UNLISTENED");
+  expect(registrationSchema.parse((await broker.kv.get(id))!.json()).state).toBe("ACTIVE");
+  expect(receiver.abort.signal.aborted).toBe(true);
   expect(f.service.receivers.has(`default:${id}`)).toBe(false);
+  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "STORED_PASSIVE", held_reason: "unlistened_before_dispatch" });
+  expect(f.pi.messages).toEqual([]);
 });
 
 test("Pi A to B to A retains metadata without wake quotas", async () => {
