@@ -1,0 +1,48 @@
+services:
+  nats:
+    image: nats:2.10-alpine
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        case "$$CITO_AUTH_MODE" in
+          none) config=/etc/nats/cito/nats-server.conf ;;
+          oidc)
+            if [ -n "$$CITO_AUTH_CALLOUT_XKEY" ]; then
+              config=/etc/nats/cito/nats-server.oidc-xkey.conf
+            else
+              config=/etc/nats/cito/nats-server.oidc.conf
+            fi ;;
+          *) echo "CITO_AUTH_MODE must be none or oidc" >&2; exit 1 ;;
+        esac
+        exec nats-server -c "$$config"
+    environment:
+      CITO_AUTH_MODE: ${CITO_AUTH_MODE:-none}
+      CITO_NATS_STORE_DIR: /data/jetstream
+      CITO_AUTH_CALLOUT_PASSWORD: ${CITO_AUTH_CALLOUT_PASSWORD:-}
+      CITO_AUTH_CALLOUT_ISSUER: ${CITO_AUTH_CALLOUT_ISSUER:-}
+      CITO_AUTH_CALLOUT_XKEY: ${CITO_AUTH_CALLOUT_XKEY:-}
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    volumes:
+      - ./:/etc/nats/cito:ro
+      - nats-data:/data
+
+  auth-callout:
+    profiles: ["oidc"]
+    build:
+      context: ../..
+      dockerfile: deploy/nats/Dockerfile
+    depends_on:
+      - nats
+    restart: on-failure
+    environment:
+      CITO_NATS_URL: nats://nats:4222
+      CITO_AUTH_MODE: oidc
+      CITO_OIDC_ISSUER: ${CITO_OIDC_ISSUER:-}
+      CITO_OIDC_CLIENT_ID: ${CITO_OIDC_CLIENT_ID:-}
+      CITO_AUTH_CALLOUT_PASSWORD: ${CITO_AUTH_CALLOUT_PASSWORD:-}
+      CITO_AUTH_CALLOUT_ISSUER_SEED: ${CITO_AUTH_CALLOUT_ISSUER_SEED:-}
+      CITO_AUTH_CALLOUT_XKEY_SEED: ${CITO_AUTH_CALLOUT_XKEY_SEED:-}
+volumes:
+  nats-data:

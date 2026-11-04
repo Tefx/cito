@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// Resolve tsx relative to this installation, independent of the caller's cwd.
+import { tsImport } from "tsx/esm/api";
+try {
+  const { main } = await tsImport("../src/auth-callout/cli.ts", import.meta.url);
+  await main();
+} catch (error) {
+  process.stderr.write("cito-auth-callout: " + (error instanceof Error ? error.message : String(error)) + "\n");
+  process.exitCode = 1;
+}
