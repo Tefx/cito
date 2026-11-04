@@ -790,7 +790,7 @@ phases:
   - id: v3.daemon-http-oidc-and-menubar-ui
     name: Implement V3 macOS Menu Bar Daemon, Streamable HTTP MCP, Standard OIDC,
       Progressive-Disclosure UI, Documentation, and Unit/E2E Tests
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/shared/**\n    - src/adapters/**\n    -\
       \ src/ui/**\n    - src/macos/**\n    - src/banner/**\n    - src/mcp/**\n   \
@@ -916,6 +916,21 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-04T19:20:21.488461Z'
+    done_at: '2026-11-04T20:26:53.509401+00:00'
+    evidence: "Artifact:\n- Commits: 439f3a1b13619ab66aa3a99adf1eefe4198a30cd, fa297c11c316e9e49af6a67e36a259f333ba10b8\
+      \ (fast-forwarded onto main)\n\nVerification:\n- Run: npm run typecheck && npm\
+      \ run build && npm test -> exit 0 (27 test files, 198 tests passed, 0 failed,\
+      \ 0 skipped)\n- Run: npx tsc --noEmit --noUnusedLocals --noUnusedParameters\
+      \ -> exit 0\n- Run: grep -rn '\"pi\"\\|\"codex\"' src/mcp/ -> 0 matches (100%\
+      \ harness-agnostic src/mcp/)\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n\
+      \  - Round 1 fresh-context pathway-auditor (01a1a820-00c7-71f4-8708-a6426fe64694)\
+      \ and structural-auditor (01a1a820-011a-708c-9a07-e5b16ce60cb2) identified 12\
+      \ ledger items (P1-P6, S1-S6), all resolved in commit fa297c11c316e9e49af6a67e36a259f333ba10b8.\n\
+      \  - Round 2 fresh-context structural-auditor (01a1a838-667d-77f6-b906-924bb2b244fb)\
+      \ and pathway-auditor (01a1a838-6712-721e-b4f3-03ed5022e562) verified all 12\
+      \ items CLOSED / SAFE and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md (V3 — macOS Menu Bar Daemon & Streamable HTTP\
+      \ Edition, §§1–6) and README.md"
   - id: v3.acceptance-and-hygiene-gate
     name: 'V3 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
