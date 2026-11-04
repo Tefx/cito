@@ -12,7 +12,7 @@ import { acquireFlock, type PosixLock } from "./flock.js";
 export { acquireFlock, type PosixLock } from "./flock.js";
 
 export interface BannerPayload {
-  target_harness: "codex" | "pi";
+  target_harness: string;
   target_session_id: string;
   target_title: string;
   from_user: string;

@@ -137,7 +137,7 @@ export async function codexDesktop(f: Awaited<ReturnType<typeof fixture>>) {
   const queueBin = queue + "-cli";
   const script = (label: string) => `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, JSON.stringify([${JSON.stringify(label)}, ...process.argv.slice(2)])+'\\n');\n`;
   await writeFile(queueBin, script("queue"), { mode: 0o700 }); await writeFile(opener, script("open"), { mode: 0o700 });
-  f.config.codexBin = queueBin; f.serviceOptions.codex = { openBin: opener };
+  f.config.codexBin = queueBin; f.config.openBin = opener;
   return { thread, meta: { "x-codex-turn-metadata": JSON.stringify({ thread_id: thread }) }, log, db,
     setLive(value: boolean) { live = value; },
     async close() { await socket.stop(); db.close(); } };

@@ -30,7 +30,7 @@ test("OIDC auth-callout + MCP enforces private/workspace scopes and works offlin
     expect(payload(await bob.service.call("cito_send", { to: id, message: "blocked" }))).toMatchObject({ error: { code: "FORBIDDEN_TARGET_SCOPE" } });
     await call(alice.service, "cito_listen", { about: "OIDC shared", scope: "workspace" }, alice.pi.meta);
     expect((await call(bob.service, "cito_find")).listeners).toMatchObject([{ listener_id: id, user: "alice" }]);
-    expect(await call(bob.service, "cito_send", { to: id, message: "peer notification" })).toMatchObject({ effective_wake: false, held_reason: "peer_wake_disabled" });
+    expect(await call(bob.service, "cito_send", { to: id, message: "peer notification" })).toMatchObject({ status: "wake_accepted", held_reason: null });
     await callout.stop(); await broker.stop(); await oidc.stop();
     const inbox = await call(alice.service, "cito_inbox", { ack_all: true }, alice.pi.meta);
     expect(inbox).toMatchObject({ acknowledged_count: 1, signals: [{ message: "peer notification", from: { user: "bob" } }] });

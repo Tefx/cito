@@ -80,10 +80,12 @@ describe("input and MCP envelopes", () => {
   });
   it("validates public tool input, defaults and V1 harnesses", () => {
     expect(parseInput(listenInputSchema, { about: " x " })).toEqual({ about: "x" });
-    expect(parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "😀".repeat(500) }).wake).toBe(true);
+    expect(parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "😀".repeat(500) }).message).toBe("😀".repeat(500));
+    expect(() => parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "x", wake: true })).toThrow(CitoError);
     expect(parseInput(findInputSchema, {})).toEqual({ limit: 20 });
-    expect(() => validateHarness("claude")).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_HARNESS" }));
-    expect(() => parseInput(findInputSchema, { harness: "claude" })).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_HARNESS" }));
+    expect(validateHarness("cursor")).toBe("cursor");
+    expect(() => validateHarness("Bad Harness")).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_HARNESS" }));
+    expect(parseInput(findInputSchema, { harness: "aider" })).toMatchObject({ harness: "aider" });
     expect(() => parseInput(findInputSchema, { limit: 51 })).toThrow(CitoError);
     expect(() => parseInput(listenInputSchema, { about: "yes", extra: true })).toThrow(CitoError);
     expect(() => parseInput(sendInputSchema, { to: "bad", message: "yes" })).toThrow(CitoError);

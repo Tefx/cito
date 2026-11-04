@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
-import { deliverPiWake, identifyPi, piSocketPath, resolvePiCaller, setPiStatus } from "../../src/adapters/index.js";
+import { deliverPiWake, identifyPi, piSocketPath, resolveCaller, setPiStatus } from "../../src/adapters/index.js";
+import { loadConfig } from "../../src/shared/index.js";
 import { isolatedState, unixServer } from "./support.js";
 
 const exec = promisify(execFile);
@@ -32,38 +33,38 @@ describe("Pi receiver resolution and drivers", () => {
   it("uses explicit pi_pid, caller_pid, or nested gateway parent_pid, and returns normalized receiver metadata", async () => {
     const requests: Record<string, unknown>[] = [];
     await bridge(43210, identity(43210, state.root), requests);
-    expect(await resolvePiCaller({ pi_pid: 43210 }, state)).toMatchObject({ harness: "pi", pi_pid: 43210,
-      title: "Title", repo: null, branch: null, human_event_count: 7 });
-    await resolvePiCaller({ caller_pid: 43210 }, state);
-    expect(await resolvePiCaller({ "x-gateway-caller": { parent_pid: 43210 } }, state)).toMatchObject({ harness: "pi", pi_pid: 43210 });
+    expect(await resolveCaller({ pi_pid: 43210 }, loadConfig(state.env))).toMatchObject({ harness: "pi", endpoint_pid: 43210,
+      title: "Title", repo: null, branch: null });
+    await resolveCaller({ caller_pid: 43210 }, loadConfig(state.env));
+    expect(await resolveCaller({ "x-gateway-caller": { parent_pid: 43210 } }, loadConfig(state.env))).toMatchObject({ harness: "pi", endpoint_pid: 43210 });
     expect(requests).toEqual([{ op: "identify" }, { op: "identify" }, { op: "identify" }]);
-    await expect(resolvePiCaller({ pi_pid: 43211, caller_pid: 43210 }, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
+    await expect(resolveCaller({ pi_pid: 43211, caller_pid: 43210 }, loadConfig(state.env))).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
   it("walks the real ps parent chain beyond the immediate parent", async () => {
     const { stdout } = await exec("/bin/ps", ["-o", "ppid=", "-p", String(process.ppid)]);
     const ancestor = Number(stdout.trim());
     expect(ancestor).toBeGreaterThan(0);
     await bridge(ancestor, identity(ancestor, state.root));
-    expect((await resolvePiCaller({}, state)).pi_pid).toBe(ancestor);
+    expect((await resolveCaller({}, loadConfig(state.env))).endpoint_pid).toBe(ancestor);
   });
   it("returns BINDING_REQUIRED only when no ancestor socket or hint exists", async () => {
-    await expect(resolvePiCaller({}, state)).rejects.toMatchObject({ code: "BINDING_REQUIRED" });
-    await expect(resolvePiCaller({ pi_pid: "123" }, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
+    await expect(resolveCaller({}, loadConfig(state.env))).rejects.toMatchObject({ code: "BINDING_REQUIRED" });
+    await expect(resolveCaller({ pi_pid: "123" }, loadConfig(state.env))).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
     await mkdir(state.stateDir + "/sockets");
     await writeFile(piSocketPath(state.stateDir, process.ppid), "stale");
-    await expect(resolvePiCaller({ pi_pid: process.ppid }, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
+    await expect(resolveCaller({ pi_pid: process.ppid }, loadConfig(state.env))).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
   });
   it("distinguishes no active session from unavailable/malformed bridge replies", async () => {
     await bridge(43210, { ok: false, error: "SESSION_NOT_OPEN" });
-    await expect(resolvePiCaller({ pi_pid: 43210 }, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-    await bridge(43211, { ...identity(43211, state.root), human_event_count: -1 });
+    await expect(resolveCaller({ pi_pid: 43210 }, loadConfig(state.env))).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
+    await bridge(43211, { ...identity(43211, state.root), session_id: "" });
     await expect(identifyPi(43211, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
     await bridge(43212, { ...identity(43212, state.root), pi_pid: 999 });
     await expect(identifyPi(43212, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
   });
   it("uses a bounded identify deadline and rejects sockets closing without newline", async () => {
     servers.push(await unixServer(piSocketPath(state.stateDir, 43210), () => {}));
-    await expect(identifyPi(43210, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE", message: "Pi bridge timed out" });
+    await expect(identifyPi(43210, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE", message: "Socket bridge timed out" });
     servers.push(await unixServer(piSocketPath(state.stateDir, 43211), socket => socket.end('{"ok":true}')));
     await expect(identifyPi(43211, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
   });

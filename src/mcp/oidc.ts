@@ -23,13 +23,19 @@ const openBrowser: BrowserOpener = async (url, signal) => { await exec("/usr/bin
 export class OidcLogin {
   private readonly path: string;
   private readonly verifier: OidcVerifier;
-  constructor(private readonly config: CitoConfig, private readonly opener: BrowserOpener = openBrowser) {
-    this.path = join(config.stateDir, "oidc-token.json");
+  constructor(private readonly config: CitoConfig, private readonly opener: BrowserOpener = openBrowser, private readonly hub = config.defaultHub) {
+    this.path = join(config.stateDir, `oidc-token-${hub}.json`);
     this.verifier = new OidcVerifier({ issuer: config.oidcIssuer!, clientId: config.oidcClientId! });
   }
   async cached(): Promise<TokenCache | undefined> {
     try {
-      const value = cacheSchema.parse(JSON.parse(await readFile(this.path, "utf8")));
+      let content: string;
+      try { content = await readFile(this.path, "utf8"); }
+      catch (error) {
+        if (this.hub !== "default" || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        content = await readFile(join(this.config.stateDir, "oidc-token.json"), "utf8");
+      }
+      const value = cacheSchema.parse(JSON.parse(content));
       if (value.issuer !== this.config.oidcIssuer || value.client_id !== this.config.oidcClientId
         || value.token_sha256 !== sha256(value.id_token)) return;
       return value;
@@ -54,7 +60,7 @@ export class OidcLogin {
   async recover(rejected: string | null): Promise<TokenCache> {
     const deadline = performance.now() + 45_000;
     const signal = AbortSignal.timeout(45_000);
-    const lock = await acquireFlock(join(this.config.stateDir, "oidc-login.lock"), 45_000);
+    const lock = await acquireFlock(join(this.config.stateDir, `oidc-login-${this.hub}.lock`), 45_000);
     if (!lock) throw new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC login lock deadline exceeded");
     const remaining = () => {
       const ms = Math.ceil(deadline - performance.now());
@@ -130,7 +136,7 @@ export class OidcLogin {
         const redirect = `http://127.0.0.1:${address.port}/callback`;
         const url = new URL(authUrl);
         url.search = new URLSearchParams({ response_type: "code", client_id: this.config.oidcClientId!, redirect_uri: redirect,
-          scope: "openid profile email offline_access", state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
+          scope: (this.config.oidcScopes ?? ["openid", "profile", "email", "offline_access"]).join(" "), state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
         remaining();
         await this.opener(url.toString(), signal);
         return await save(await exchange({ grant_type: "authorization_code", code: await code, redirect_uri: redirect, code_verifier: pkceVerifier }));

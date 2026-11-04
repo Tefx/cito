@@ -27,15 +27,15 @@ test("SDK lists exactly five strict tools and routes _meta through real MCP requ
     expect(listened.isError).toBe(false);
     const enrolled = JSON.parse((listened.content as { text: string }[])[0]!.text);
     expect(enrolled).toMatchObject({ harness: "pi", status: "listening", listener_id: expect.stringMatching(/^mcp-receiver-[a-z2-7]{12}$/) });
-    const sent = await client.callTool({ name: "cito_send", arguments: { to: enrolled.listener_id, message: "over MCP", wake: false } });
+    const sent = await client.callTool({ name: "cito_send", arguments: { to: enrolled.listener_id, message: "over MCP" } });
     expect(sent.isError).toBe(false);
-    expect(JSON.parse((sent.content as { text: string }[])[0]!.text)).toMatchObject({ to: enrolled.listener_id, status: "stored_passive" });
+    expect(JSON.parse((sent.content as { text: string }[])[0]!.text)).toMatchObject({ to: enrolled.listener_id, status: "wake_accepted" });
     for (const name of ["cito_listen", "cito_unlisten", "cito_find", "cito_send", "cito_inbox"]) {
       const invalid = await client.callTool({ name, arguments: { extra: true } });
       expect(invalid.isError).toBe(true);
       expect(JSON.parse((invalid.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "INVALID_INPUT", retryable: false } });
     }
-    const unsupported = await client.callTool({ name: "cito_find", arguments: { harness: "claude" } });
+    const unsupported = await client.callTool({ name: "cito_find", arguments: { harness: "Bad Harness" } });
     expect(JSON.parse((unsupported.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "UNSUPPORTED_HARNESS" } });
   } finally { await client.close(); await server.close(); await f.close(); }
 });
@@ -51,7 +51,7 @@ test("installed stdio entrypoint initializes private local state without requiri
     expect((await client.listTools()).tools).toHaveLength(5);
     const result = await client.callTool({ name: "cito_inbox", arguments: {} });
     expect(result.isError).toBe(true);
-    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "BINDING_REQUIRED" } });
+    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "PI_BRIDGE_UNAVAILABLE" } });
     expect((await stat(join(root, "state/state.sqlite"))).mode & 0o777).toBe(0o600);
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 });

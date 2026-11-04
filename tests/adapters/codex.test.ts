@@ -59,9 +59,9 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
     [{ "openai/threadId": threadId }], [{ codexThreadId: threadId }],
     [{ "x-codex-turn-metadata": "invalid JSON", "openai/threadId": threadId }],
   ])("extracts explicit thread metadata %j", meta => { expect(codexThreadId(meta)).toBe(threadId); });
-  it("uses metadata precedence and fails without a thread binding", () => {
-    expect(codexThreadId({ "x-codex-turn-metadata": { thread_id: "first", session_id: "second" },
-      "openai/threadId": "third", codexThreadId: "fourth" })).toBe("first");
+  it("rejects conflicting metadata and fails without a thread binding", () => {
+    expect(() => codexThreadId({ "x-codex-turn-metadata": { thread_id: "first", session_id: "second" },
+      "openai/threadId": "third", codexThreadId: "fourth" })).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     for (const meta of [{}, { "x-codex-turn-metadata": "null" }, { codexThreadId: 123 }, { "openai/threadId": "" }]) {
       expect(() => codexThreadId(meta)).toThrow(expect.objectContaining({ code: "BINDING_REQUIRED" }));
     }

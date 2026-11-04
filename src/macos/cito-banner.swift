@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import Darwin
-import SQLite3
 import QuartzCore
 
 // Build: /usr/bin/swiftc src/macos/cito-banner.swift -o <state>/bin/cito-banner
@@ -26,6 +25,9 @@ struct Payload: Decodable {
         let cleanHost = from_host.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
         let title = from_title.trimmingCharacters(in: .whitespacesAndNewlines)
         return "\(from_user)@\(cleanHost.isEmpty ? from_host : cleanHost)" + (title.isEmpty ? "" : " · \(title)")
+    }
+    var actionLabel: String {
+        target_harness == "codex" ? "点击跳转至 Codex 对话 ↗" : "\(target_harness) 终端会话 · 点击关闭横幅"
     }
     var displayMessage: String {
         message.replacingOccurrences(of: "\\s*\\n+\\s*", with: "  ", options: .regularExpression)
@@ -73,7 +75,6 @@ final class ClickView: NSView {
 }
 
 final class Banner {
-    let state: String
     let headless = ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
     let instanceFd: Int32
     let lockFd: Int32
@@ -94,8 +95,7 @@ final class Banner {
     let queue = DispatchQueue(label: "cito.banner.socket")
     let dismissMs: Int
 
-    init(state: String, instanceFd: Int32) {
-        self.state = state
+    init(instanceFd: Int32) {
         self.instanceFd = instanceFd
         self.lockFd = Darwin.open("banner.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         self.dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
@@ -155,7 +155,7 @@ final class Banner {
             }
             guard complete, let end = data.firstIndex(of: 10),
                   let next = try? JSONDecoder().decode(Payload.self, from: data[..<end]),
-                  ["codex", "pi"].contains(next.target_harness) else {
+                  !next.target_harness.isEmpty else {
                 close(client); continue
             }
             DispatchQueue.main.async { [weak self] in
@@ -188,7 +188,7 @@ final class Banner {
             diagnostic("display " + String(data: try! JSONSerialization.data(withJSONObject: [
                 "pid": getpid(), "title": title, "subtitle": value.subtitle, "message": value.message,
                 "displayed_count": displayedCount, "display_subtitle": value.displaySubtitle,
-                "display_message": value.displayMessage, "semantic_label": semanticLabel
+                "display_message": value.displayMessage, "semantic_label": semanticLabel, "action_label": value.actionLabel
             ], options: [.sortedKeys]), encoding: .utf8)!)
             return
         }
@@ -270,7 +270,7 @@ final class Banner {
         labels[0].stringValue = "Cito" + (value.target_title.isEmpty ? "" : " · \(value.target_title)")
         labels[1].stringValue = value.displaySubtitle
         labels[2].stringValue = value.displayMessage
-        labels[3].stringValue = value.target_harness == "codex" ? "点击跳转至 Codex 对话 ↗" : "Pi 终端会话 · 点击关闭横幅"
+        labels[3].stringValue = value.actionLabel
         labels[3].textColor = value.target_harness == "codex" ? .systemBlue : .tertiaryLabelColor
         labels[4].stringValue = semanticLabel
         labels[4].textColor = color
@@ -330,22 +330,6 @@ final class Banner {
     }
 
     func openCodex(_ session: String) {
-        var db: OpaquePointer?
-        let status = sqlite3_open_v2(state + "/state.sqlite", &db, SQLITE_OPEN_READWRITE, nil)
-        if status == SQLITE_OK, let db = db {
-            sqlite3_busy_timeout(db, 1000)
-            var statement: OpaquePointer?
-            let sql = "UPDATE local_listeners SET human_event_seq = human_event_seq + 1 WHERE harness = 'codex' AND session_id = ?"
-            let prepared = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
-            if prepared == SQLITE_OK {
-                let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-                sqlite3_bind_text(statement, 1, session, -1, transient)
-                let result = sqlite3_step(statement)
-                if result != SQLITE_DONE { diagnostic("SQLite click update: \(String(cString: sqlite3_errmsg(db)))") }
-            } else { diagnostic("SQLite click prepare: \(String(cString: sqlite3_errmsg(db)))") }
-            sqlite3_finalize(statement)
-        } else { diagnostic("SQLite unavailable (\(status)); opening thread without watermark update") }
-        if db != nil { sqlite3_close(db) }
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#%")
         guard let encoded = session.addingPercentEncoding(withAllowedCharacters: allowed),
@@ -370,6 +354,6 @@ guard instance >= 0 else { exit(1) }
 guard acquire(instance, milliseconds: 2000) else { exit(0) }
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let banner = Banner(state: state, instanceFd: instance)
+let banner = Banner(instanceFd: instance)
 banner.start()
 app.run()

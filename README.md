@@ -1,10 +1,10 @@
 # Cito
 
-Cito delivers short notifications between opted-in Codex Desktop and Pi conversations across users and machines. Official **NATS JetStream + KV** provides discovery, ordered replay, and 30-minute signal retention. Cito stores notifications, never external business payloads.
+Cito is a notification bus for opted-in coding-agent conversations across users, machines, harnesses, and NATS hubs. One `cito-mcp` stdio server connects directly to all configured hubs; no gateway service is required for multi-hub routing. Pi Coding Agent and Codex Desktop ship with working drivers. Other CLI/IDE harnesses can use the socket bridge protocol or register an adapter.
 
 ## Build and test
 
-Requirements: Node **22.13+** on the supported even-numbered releases (see `package.json`), npm, and macOS Command Line Tools (`/usr/bin/swiftc`) for the native HUD. The Pi bridge targets **Pi 1.5.0**. No SQLite npm addon, Docker, live OIDC provider, or running Desktop application is needed for tests.
+Requirements: Node **22.13+** on supported even-numbered releases (see `package.json`), npm, and macOS Command Line Tools (`/usr/bin/swiftc`) for the native HUD. The Pi bridge targets **Pi 1.5.0**.
 
 ```sh
 npm ci
@@ -15,147 +15,223 @@ npm test
 npm test -- tests/mcp/ tests/e2e/
 ```
 
-`bin/cito-mcp` and `bin/cito-auth-callout` load their TypeScript sources through the installed `tsx` dependency, independently of the caller's working directory. `npm run build` also emits JavaScript/declarations under `dist/`.
+`bin/cito-mcp` and `bin/cito-auth-callout` load TypeScript through `tsx`, independently of the caller's working directory. The build also emits JavaScript/declarations under `dist/`.
 
-Tests use the installed official `nats-server` **2.14.0** binary, temporary SQLite databases, real Unix sockets, a mock OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS HUD tests compile and run the real Swift executable in headless mode, including click/retirement synchronization. The optional installed-Pi test uses the actual Pi 1.5.0 loader when available. Non-macOS hosts skip native HUD tests. Tests isolate `CITO_STATE_DIR` and `CITO_CODEX_HOME` and stop their processes before deleting state.
-
-The 30-minute boundary tests supply broker-clock samples to the production lease/gap calculations; they do not wait 30 minutes. Desktop compatibility with an installed `ChatGPT.app`, visible HUD presentation, live Casdoor, and production Docker/TLS deployment require operator verification.
+Tests use the installed official `nats-server` **2.14.0**, temporary SQLite databases, real Unix sockets, a local OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS tests compile and run the real Swift HUD headlessly, including click/retirement synchronization. The installed-Pi loader test uses Pi 1.5.0 when available. Non-macOS hosts skip native HUD tests. All test state and child processes are isolated and cleaned up. Tests require no Docker, live OIDC account, or running Desktop app. Visible HUD presentation, installed `ChatGPT.app` compatibility, live Casdoor, and production TLS/deployment require operator verification.
 
 ## NATS deployment
 
-For a local, unauthenticated broker:
+For a local unauthenticated broker:
 
 ```sh
 docker compose -f deploy/nats/docker-compose.yml up -d nats
-```
-
-Or run the official server directly:
-
-```sh
+# Or use the official server directly:
 CITO_NATS_STORE_DIR=/absolute/path/to/nats-data \
   nats-server -c deploy/nats/nats-server.conf
 ```
 
-The default configuration publishes ports on loopback. A remote deployment needs an operator-selected interface and TLS/network controls. See [`deploy/nats/README.md`](deploy/nats/README.md) for Compose, OIDC account bootstrap, optional encrypted Auth Callout, and required service credentials. Clients verify existing stream/KV configuration and reject incompatible retention settings without destroying data.
+The default deployment binds loopback. Remote deployments need an operator-selected interface and TLS/network controls. See [deployment instructions](deploy/nats/README.md) for Compose, OIDC account bootstrap, optional encrypted Auth Callout, and service credentials. Clients reject incompatible stream/KV retention settings without destroying broker data.
 
-With `CITO_AUTH_MODE=oidc`, run `bin/cito-auth-callout` alongside NATS using the OIDC deployment configuration. The responder verifies RS256/ES256 `id_token` signatures and grants the CITO account's JetStream/KV/Cito permissions, including `$JS.ACK.>`. Only the callout process receives the **SA Account seed** and exempted service password; MCP clients receive neither. Official NATS rejects an SO Operator issuer in this non-operator callout configuration.
+In OIDC mode, run `bin/cito-auth-callout` alongside NATS. It verifies RS256/ES256 `id_token` signatures and grants CITO account JetStream/KV permissions, including `$JS.ACK.>`. Only the responder receives the **SA Account seed** and exempt service password; MCP clients receive neither. Official NATS rejects an SO Operator issuer in the non-operator callout configuration.
 
-## MCP configuration
+## Pi Coding Agent (`pi`)
 
-Run the same stdio server for either harness via `npx` from npmjs:
-
-```sh
-npx -y @tefx/cito@0.1.0
-```
-
-For a Codex MCP configuration (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.cito]
-command = "npx"
-args = ["-y", "@tefx/cito@0.1.0"]
-
-[mcp_servers.cito.env]
-CITO_NATS_URL = "nats://127.0.0.1:4222"
-CITO_AUTH_MODE = "none"
-```
-
-A Pi stdio MCP gateway (`mcp.json` or `tela.yaml`) can use the equivalent server definition:
-
-```json
-{
-  "command": "npx",
-  "args": ["-y", "@tefx/cito@0.1.0"],
-  "env": {
-    "CITO_NATS_URL": "nats://127.0.0.1:4222",
-    "CITO_AUTH_MODE": "none"
-  }
-}
-```
-
-Configure this definition in your existing MCP gateway; the bridge itself does not install an MCP client into Pi. Stdio stdout contains only MCP frames. Invalid environment configuration exits with status 1 and a diagnostic on stderr. Local state initializes at startup; NATS and OIDC login connect lazily when an online tool needs them, so an offline inbox remains accessible.
-
-### Tools
-
-| Tool | Purpose |
-| --- | --- |
-| `cito_listen({about, tag?, scope?, allow_peer_wake?})` | Enroll the calling session. Initial scope is `self`; peer waking defaults to false. Omitted preferences survive updates. |
-| `cito_unlisten({})` | Revoke enrollment, abort pending host effects, retain unread inbox signals until expiry. |
-| `cito_find({query?, user?, host?, harness?, repo?, limit?})` | Discover visible active leases. Harness accepts only `codex` or `pi`; default limit 20, maximum 50. |
-| `cito_send({to, message, wake?, in_reply_to?, idempotency_key?})` | Notify an exact discovered listener ID. Wake defaults to true. Idempotency keys are sender-endpoint + target scoped for 30 minutes. |
-| `cito_inbox({ack_ids?, ack_all?})` | Read up to 50 unacknowledged, unexpired local signals in sequence order and optionally acknowledge them. Works offline. |
-
-All tool inputs reject unknown properties. Results use the common MCP text JSON envelope (`isError`, `ok`, and structured retryable error codes). Messages/about accept 1–500 Unicode codepoints after control stripping and trimming; wake cards escape angle brackets.
-
-Receiver tools require the caller's session identity. Codex uses `_meta["x-codex-turn-metadata"].thread_id` (object or JSON string), `_meta["openai/threadId"]`, or `_meta.codexThreadId`. Enrollment additionally checks the exact thread's SQLite row and live Desktop owner socket. Inbox/unlisten can resolve an archived/closed, previously registered thread locally. Pi uses `_meta.pi_pid` / `_meta.caller_pid` or a six-level parent-process socket walk. Outbound find/send remain available when this resolution fails and use a distinct unbound sender endpoint.
-
-For in-process consumers, use `CitoService.create(config?, options?)` from `src/mcp/service.ts`, `service.call(name, args, meta)`, and `await service.close()`. `createMcpServer(service)` from `src/mcp/server.ts` attaches the same handlers to an SDK `Server`. The owner of an in-process service must close both server and service. Options allow a browser opener, Desktop URL opener executable, and banner environment for controlled integrations.
-
-### Listener IDs and notification UI
-
-Public listener IDs combine a meaningful slug and a deterministic 60-bit fingerprint, for example `rcatwin-teams-pbtjxcxkgw3y`. Set `cito_listen({about: "Teams verification", tag: "RCATwin Teams"})` to choose the slug. Tags accept up to 64 characters, normalize to lowercase ASCII letters/digits separated by hyphens (at most 20 characters), and must contain at least one ASCII letter or digit. Omitting `tag` preserves an existing explicit tag. Otherwise the slug comes from the repository name, directory basename, conversation title, then harness, skipping empty normalized values.
-
-`cito_listen`, `cito_unlisten`, `cito_find`, `cito_inbox`, and bound senders' `signals[].from.listener_id` return public IDs. `cito_send.to` accepts either a public ID or the legacy canonical `c_<fp12>` ID. A slug rename keeps the fingerprint and destination unchanged: old public IDs still route to the same session, and retries across aliases share one sender idempotency record. Internal SQLite keys, locks, NATS KV keys and JetStream subjects always use the canonical ID. Existing databases migrate automatically; enrollment rejects a fingerprint collision against a different principal/host/harness/session tuple before changing the local receiver.
-
-Pi shows `🔔 <slug>` (slug truncated to 12 characters) while listening, `🔔 <slug> (N)` for unread signals, `🔔 <slug> (!)` for a replay gap, or `🔔 <slug> (N!)` for both. Admission updates the badge for waking and passive messages. Inbox calls refresh it; only `ack_all: true` clears the replay-gap warning. Restore refreshes it; unlisten, revocation and shutdown clear it under the listener lock only for the persisted owner. Switching Pi sessions clears the old status immediately.
-
-Waking messages appear in chat as:
-
-```text
-🔔 Cito · alice@mac · Review [↩ rcatwin-teams-pbtjxcxkgw3y]
-
-Review is ready.
-
-↳ Ack: cito_inbox(ack_ids: ["sig_..."])
-```
-
-Cards strip `.local` from sender hosts and omit an empty title or one duplicating the sender's ID slug. Batches use a `🔔 Cito · N 条唤醒消息 · <target title>` header and numbered senders. Pi's self-contained custom renderer adds a themed background, accent header and left body bar; acknowledgement details appear only when expanded. It also renders pre-upgrade frozen `<cito_signal>` cards.
-
-The macOS HUD uses a dark 388×136pt panel with a continuous 16pt corner, hover border and slide-in animation. Amber bell / `唤醒` styling identifies waking signals; cyan inbox / `仅知会` styling identifies passive signals. Counts accumulate only while the same harness, session and wake mode remain displayed. Codex's footer opens the conversation; Pi's footer dismisses the banner. Display text removes `.local`, empty title separators and message line breaks; headless diagnostics retain the original `subtitle` and `message` fields.
-
-### State and delivery guarantees
-
-- `stateDir/host-id` holds one atomically published lowercase UUIDv4 (`0600`). MCP always uses that persisted identity. The state directory is `0700`; `state.sqlite` is `0600`, uses WAL and a 5-second SQLite busy timeout.
-- Canonical listener IDs are deterministic `c_[a-z2-7]{12}` values for principal + host + harness + session; public IDs use `<slug>-<fp12>`. Re-enrollment increments generation; KV CAS and per-listener `flock` serialize ownership changes. Losing owners cannot overwrite the winner's local row or clear its badge.
-- The first online tool after an MCP process restart restores matching persisted `ACTIVE` enrollments, frozen batches and pull cursors without another `cito_listen`. A receiver-lifetime `flock` prevents a second MCP process from adopting a still-live owner. Failed revocation keeps or restores the active receiver; successful revocation removes only that exact receiver instance.
-- Sender flush/publish/ack waits share a 10-second operation deadline and are interrupted by service shutdown.
-- Healthy listeners renew every 20 seconds. Discovery hides leases older than 60 seconds; sends can buffer through 30 minutes of disconnection. Older active entries return `LISTENER_EXPIRED`. Reattachment detects listener-specific replay gaps and reports them until `ack_all`.
-- Recipient-local admission persists quota and pairwise counters in the same transaction as the signal and replay cursor. Three unattended wakes are allowed; a sender endpoint can admit two waking signals per recipient in 120 seconds. Re-enrollment or elapsed time never resets the unattended quota. Only verified human-event sequence advancement resets it.
-- Requested passive signals, disabled peer wakes, stale generations and anti-loop suppression stay readable in the inbox and show a passive HUD; they never insert a Pi transcript card or run Desktop queue/wake commands.
-- Waking signals debounce for 1500ms into immutable, persisted batches. Every host-effect submission holds the same listener lock across its authorization check. Revocation/fencing cancels retries and prevents a later `open -g`. Inbox acknowledgements survive driver completion independently of dispatch state.
-- Pi retries a frozen batch with bridge-side deduplication. Codex queue timeouts have an unknown insertion outcome: the dispatcher records `queue_written` and only retries the separate wake URL. A crash between an external effect and its SQLite commit can duplicate a Desktop card; the batch ID identifies it.
-
-## Environment
-
-| Variable | Default / requirement |
-| --- | --- |
-| `CITO_NATS_URL` | `nats://127.0.0.1:4222`; supports `nats://`, `ws://`, `wss://`. |
-| `CITO_AUTH_MODE` | `none` or `oidc`; default `none`. |
-| `CITO_OIDC_ISSUER` | Required in OIDC mode; HTTPS issuer (loopback HTTP allowed for tests). |
-| `CITO_OIDC_CLIENT_ID` | Required with an issuer; registered OIDC client/audience. |
-| `CITO_STATE_DIR` | `~/.cito`; use the same value for Pi host and MCP processes. |
-| `CITO_USER` | OS username; 1–64 letters, digits, dots, underscores or hyphens, canonicalized to lowercase for local identity. |
-| `CITO_HOST_NAME` | OS hostname, truncated to 128 printable ASCII characters. |
-| `CITO_CODEX_BIN` | `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`. |
-| `CITO_CODEX_HOME` | `~/.codex`; explicit-thread reads only, never advertising un-enrolled sessions. |
-| `CITO_AUTH_CALLOUT_ISSUER_SEED` | Auth responder only: required `SA...` Account signing seed. |
-| `CITO_AUTH_CALLOUT_PASSWORD` | Auth responder and OIDC broker bootstrap only: exempt service password. |
-| `CITO_AUTH_CALLOUT_XKEY_SEED` | Optional responder `SX...`; pair with the broker's matching public XKey. |
-
-OIDC clients verify signatures before caching `oidc-token.json` (`0600`), including the canonical principal/user used by an offline inbox. Online connections verify cached tokens again. Rejected-token recovery holds `oidc-login.lock`, rechecks for another process's different fresh token, silently refreshes, and falls back to S256 loopback browser PKCE only on missing refresh credentials or HTTP 400/401. Refresh network/5xx failures return `AUTH_UNAVAILABLE` without opening a browser. Lock wait + login share a 45-second deadline; the rejected operation retries authentication at most once. Broker reconnect authorization failures defer login until the next online tool call.
-
-## Install the Pi 1.5.0 bridge
-
-Add `"npm:@tefx/cito"` to `"packages"` in `~/.pi/agent/settings.json` (which automatically loads `src/pi-extension/cito-bridge.ts` via the `"pi.extensions"` manifest field), or load the extension directly:
+Install the self-contained extension by adding `"npm:@tefx/cito"` to `packages` in `~/.pi/agent/settings.json`, or load the source file directly:
 
 ```sh
 CITO_STATE_DIR="$HOME/.cito" pi -e /absolute/path/to/cito/src/pi-extension/cito-bridge.ts
 ```
 
-For persistent installation, copy that single file into your Pi extension directory (for example `~/.pi/agent/extensions/cito-bridge.ts`) and restart Pi. No Cito package dependency is needed in that directory. Configure the stdio MCP server separately through your MCP gateway, with the same `CITO_STATE_DIR`. Parent-PID discovery works through intermediate local gateways; explicit `pi_pid` metadata is available when the MCP subprocess is outside that ancestor chain.
+For a standalone installation, copy only `src/pi-extension/cito-bridge.ts` into `~/.pi/agent/extensions/cito-bridge.ts` and restart Pi. The file needs no Cito or Pi package imports.
 
-The bridge creates `sockets/pi-pid-<pid>.sock` (`0600`) on `session_start`, exposes identify/status/deliver operations, counts only interactive human input, and removes its socket on normal shutdown. Human counters and the 200-ID delivery-dedup ring are kept separately for each session, including when switching A → B → A. It delivers waking cards with `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` and displays unread status badges. Pi banner clicks dismiss without switching windows; Codex banner clicks increment the local human-event sequence before opening the target conversation.
+Configure `cito-mcp` separately in your Pi MCP client/gateway, using this stdio server definition and the **same `CITO_STATE_DIR`** as the extension:
 
-## Scope
+```json
+{
+  "command": "/absolute/path/to/cito/bin/cito-mcp",
+  "args": [],
+  "env": {
+    "CITO_STATE_DIR": "/Users/you/.cito",
+    "CITO_NATS_URL": "nats://127.0.0.1:4222"
+  }
+}
+```
 
-V1 supports **Codex Desktop (`ChatGPT.app`) and Pi 1.5.0**. Claude Code is a deferred proposal in [`docs/DESIGN.md`](docs/DESIGN.md) §9 and returns `UNSUPPORTED_HARNESS` when requested through find. Cito installs no `launchd` daemon, implements no custom HTTP/WebSocket broker, and never uses Telegram as a notification side channel.
+Alternatively use `"command": "npx", "args": ["-y", "@tefx/cito@0.1.0"]` for the published package. The extension provides host delivery; your MCP client exposes the tools to the agent.
+
+In a conversation, call `cito_listen({about: "Build verification", tag: "build"})`, then use `cito_find()` to discover other opted-in conversations and `cito_send({to: "<discovered-id>", message: "Build is ready"})` to notify one. Notifications enter the target conversation via `pi.sendMessage(..., {triggerTurn: true, deliverAs: "followUp"})`, waking idle sessions or entering a busy session's follow-up queue. Confirmed insertion automatically acknowledges the local signal. Use `cito_inbox()` to drain any unconfirmed/unavailable deliveries, and `cito_unlisten()` to opt out.
+
+The extension listens on `sockets/pi-pid-<pid>.sock` (`0600`) from `session_start` until shutdown. Discovery walks the MCP process's parent chain, or uses `_meta.endpoint_pid`, `_meta.pi_pid`, or `_meta.caller_pid`. A local gateway can forward nested PID roots; explicit roots prevent fallback to an unrelated parent. The bridge returns both `endpoint_pid` and `pi_pid`. Session switches clear stale badges immediately, and a per-session 200-batch deduplication ring prevents repeated insertions on socket retries.
+
+## ChatGPT / Codex Desktop (`codex`)
+
+Configure the stdio server in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.cito]
+command = "/absolute/path/to/cito/bin/cito-mcp"
+args = []
+
+[mcp_servers.cito.env]
+CITO_STATE_DIR = "/Users/you/.cito"
+CITO_NATS_URL = "nats://127.0.0.1:4222"
+CITO_AUTH_MODE = "none"
+```
+
+For the published package use `command = "npx"` and `args = ["-y", "@tefx/cito@0.1.0"]` instead.
+
+The host must supply the exact conversation ID in MCP request `_meta` using one of:
+
+```json
+{ "x-codex-turn-metadata": { "thread_id": "<thread-id>" } }
+```
+
+`x-codex-turn-metadata` may also be a JSON string or contain `session_id`; `openai/threadId` and `codexThreadId` are accepted top-level aliases. Multiple distinct thread claims or a thread claim combined with a top-level bridge PID return `INVALID_INPUT`. Cito never guesses a thread from recent activity or window focus.
+
+Call `cito_listen({about: "Review service changes"})` from the conversation. Enrollment reads only that thread from `CITO_CODEX_HOME/state_5.sqlite`, checks that it is unarchived, and verifies its live owner through `ipc/ipc.sock`. On notification, the driver runs:
+
+1. `codex queue --thread <id> --message <card>` with `CODEX_HOME` set to the configured home.
+2. `/usr/bin/open -g codex://threads/wake/<id>` to trigger processing.
+
+A clean queue exit plus successful wake confirms delivery and auto-acknowledges the batch. A SIGTERM queue timeout has an unknown insertion result: Cito records the queue milestone and proceeds to the wake URL without repeating queue insertion. Failed wake attempts or uncertain insertion produce `delivered_unconfirmed`; these signals stay unread in `cito_inbox()`. Exhausted queue failures stay readable with `held_reason: "driver_unavailable"`.
+
+`cito_inbox()` drains up to 50 unread signals by default. Use `cito_inbox({ack_all: false})` to peek. Inbox and unlisten support archived or missing threads via retained local session metadata. The native HUD opens `codex://threads/<id>` when clicked; it never reads or writes SQLite.
+
+## Multi-hub configuration and scoped addressing
+
+Create `~/.cito/config.json` (or set `CITO_CONFIG_PATH`) to connect to multiple hubs simultaneously:
+
+```json
+{
+  "default_hub": "personal",
+  "hubs": {
+    "personal": {
+      "natsUrl": "nats://personal-tailnet-host:4222",
+      "authMode": "none",
+      "user": "alice"
+    },
+    "rda": {
+      "natsUrl": "wss://nats.company.example/ws",
+      "authMode": "oidc",
+      "oidcIssuer": "https://login.company.example",
+      "oidcClientId": "cito",
+      "oidcScopes": ["openid", "profile", "email", "offline_access"]
+    }
+  }
+}
+```
+
+Hub names match `^[a-z0-9][a-z0-9_-]{0,31}$`. Each entry defaults to `authMode: "none"` and the environment/OS username. OIDC entries require issuer and client ID. The selected default is `CITO_HUB` (trimmed), then `default_hub`, then the sole configured hub. Multiple hubs require an explicit default. A specified missing or invalid config file fails startup. Without a file, `CITO_*` environment variables synthesize the single hub `default`.
+
+Each hub has its own connection, identity, OIDC cache (`oidc-token-<hub>.json`), login lock (`oidc-login-<hub>.lock`), and receivers. All hubs share the host ID and one local SQLite database. The `default` hub also accepts the old `oidc-token.json` cache. No secondary OIDC login is triggered by offline inbox reads: unauthenticated secondary hubs are skipped, while targeting one explicitly returns `UNAUTHORIZED`.
+
+IDs returned to the agent use `<hub>:<id>` whenever multiple hubs or a named single hub are configured. Only a single hub literally named `default` returns unprefixed IDs for compatibility. Both input styles work; bare input IDs select the default hub unless `hub` is supplied. Prefixes and explicit `hub` must agree. Unknown/conflicting hubs are rejected before network or database activity. NATS payloads and SQLite ID columns always remain unprefixed.
+
+```js
+cito_listen({about: "Personal build", hub: "personal"})
+cito_listen({about: "Corporate review", hub: "rda"})
+cito_find()                          // parallel query of every configured hub
+cito_find({hub: "rda", harness: "pi"})
+cito_send({to: "rda:review-pbtjxcxkgw3y", message: "Review ready"})
+// Equivalent addressing:
+cito_send({hub: "rda", to: "review-pbtjxcxkgw3y", message: "Review ready"})
+cito_inbox()                         // drain all authorized local hub inboxes
+cito_inbox({hub: "rda", ack_all: false}) // peek at one hub
+cito_inbox({ack_ids: ["rda:sig_..."]}) // acknowledge only these, without default draining
+cito_unlisten({hub: "personal"})
+cito_unlisten()                      // revoke all active hubs for this session
+```
+
+`in_reply_to` accepts the same optional prefix as signal IDs, and must refer to the send's hub. Scoped `ack_ids` must lie in the selected authorized inbox; bare signal IDs matching more than one hub return `INVALID_INPUT` without acknowledging anything. Inbox output sorts by creation time, hub, sequence, and signal ID. `cito_find` merges by descending revision, then hub and canonical ID, with a default limit of 20 and maximum 50. Find and unlisten include `warnings: [{hub, code, message}]` on partial hub failure. Find throws when all hubs fail; unlisten retains/restores active receivers on failed hubs and throws when all targets fail.
+
+## Tools, identities and delivery guarantees
+
+| Tool | Contract |
+| --- | --- |
+| `cito_listen({about, tag?, hub?, scope?})` | Opt in on one hub; default scope `self`. Omitted tag/scope preserve existing choices. |
+| `cito_unlisten({hub?})` | Revoke one hub or every active hub, aborting pending host effects. |
+| `cito_find({query?, hub?, user?, host?, harness?, repo?, limit?})` | Discover visible active leases across hubs; malformed KV records are skipped. |
+| `cito_send({to, hub?, message, in_reply_to?, idempotency_key?})` | Always request delivery; no wake flag or unattended/pairwise quota. |
+| `cito_inbox({hub?, ack_ids?, ack_all?})` | Read up to 50 unread, unexpired signals. Without `ack_ids`, omitted `ack_all` means true; with `ack_ids`, it means false. |
+
+Inputs reject unknown properties. Messages/about contain 1–500 sanitized Unicode codepoints. `scope: "self"` restricts visibility and delivery to the same principal; `workspace` allows other users. Self-send protection compares principal, host, harness, and session. Find/send can use a distinct unbound sender when caller discovery is unavailable; conflicting explicit claims always fail.
+
+Public listener IDs use `<slug>-<fingerprint>`. `tag` accepts up to 64 characters and normalizes to at most 20 lowercase ASCII letters/digits/hyphens; an empty normalized tag is invalid. Without a tag, the slug uses repository, directory basename, conversation title, then harness. Slug renames preserve the deterministic canonical `c_<fingerprint>` identity and route through old public aliases. Both canonical and public IDs work with hub prefixes.
+
+- `host-id` holds one atomically published UUIDv4 (`0600`). State directories use `0700`; `state.sqlite` uses `0600`, WAL, and a 5-second busy timeout.
+- **Local schema reset:** `PRAGMA user_version = 4` uses only `local_listeners`, `local_signals`, and `local_sent_idempotency`, with hub-qualified primary keys. Opening an older local schema atomically drops its local registrations, inbox, idempotency data, and legacy pairwise table. Re-enroll after upgrading. Broker data is not reset by this operation.
+- KV CAS, generations, owner tokens, and hub-qualified listener/receiver locks fence concurrent owners. The first online tool after restart restores matching persisted active registrations and replay cursors. Receiver-lifetime locks prevent duplicate adoption.
+- Healthy listeners renew every 20 seconds. Find hides leases older than 60 seconds; sends buffer through 30 minutes of disconnection. Reattachment records detected replay gaps until an `ack_all` drain.
+- Admission persists the signal and replay cursor atomically. Duplicate `(hub, signal_id)` does not redeliver. Stale generations remain passive. Unauthorized private messages advance the cursor and drop silently.
+- Admitted signals debounce for 1500ms into immutable, persisted batches with hub-qualified batch IDs. Every external effect rechecks ownership under its listener lock. Acknowledging before dispatch suppresses that effect; cancellation stops retries and subsequent wake effects.
+- Confirmed delivery sets `DISPATCHED` and auto-acknowledges; unconfirmed delivery sets `DISPATCHED` and remains unread. Unavailable drivers retain passive inbox signals. Session switches revoke the old conversation's bindings on all hubs.
+- Pi deduplicates frozen batches. Codex queue milestones survive restart. A crash between a Desktop effect and its local commit can duplicate a card; the persisted batch ID identifies it.
+- Flush/publish/ack waits share a 10-second deadline and are interrupted by shutdown. Network acceptance does not imply confirmed insertion into a conversation.
+
+### Wake cards and native HUD
+
+```text
+🔔 Cito · alice@mac [↩ rda:review-pbtjxcxkgw3y]
+
+Review is ready.
+```
+
+Cards escape angle brackets, strip `.local` from hosts, omit duplicate sender titles, and include scoped reply IDs. Batches use numbered senders. There is no acknowledgement footer. Pi's self-contained renderer adds the host theme's background, header accent, and left body bar.
+
+Pi's badge aggregates all active hubs for its session: `🔔 <slug>`, unread count `(N)`, replay gap `(!)`, or both `(N!)`. Auto-acks, inbox commits, and enrollment/revocation refresh it under a session-wide lock. Closing one hub cannot clear another active hub's badge; closing an observer cannot clear another process's live ownership.
+
+The macOS HUD uses a dark 388×136pt nonactivating panel. It compiles on demand and has **no SQLite dependency**. The Codex action reads “点击跳转至 Codex 对话 ↗”; other harnesses read “<harness> 终端会话 · 点击关闭横幅” and dismiss on click. Counts aggregate for the exact target/session/wake tuple. Headless diagnostics report the same presentation fields used by the UI.
+
+## Extending Cito with custom harnesses
+
+Harness identifiers are open strings matching `^[a-z][a-z0-9_-]{0,31}$`. New socket-backed harnesses need no edits in `src/mcp/` and no registry entry. Provide a Unix socket at `${CITO_STATE_DIR}/sockets/<harness>-pid-<pid>.sock`. For example, an IDE companion can expose `cursor-pid-12345.sock`, and forward `_meta.endpoint_pid: 12345` to MCP calls.
+
+The protocol is one newline-delimited JSON request/reply per connection:
+
+```js
+// identify (1500ms deadline)
+{op: "identify"}
+// reply
+{ok: true, endpoint_pid: 12345, session_id: "stable-session", session_name: "Review", cwd: "/repo"}
+// insert into the conversation / follow-up queue (3000ms deadline)
+{op: "deliver", session_id: "stable-session", batch_id: "batch_...", wake: true, content: "🔔 Cito ..."}
+// reply only after insertion; deduplicate batch_id per session
+{ok: true, delivered: true, deduplicated: false}
+// optional status badge
+{op: "status", session_id: "stable-session", badge: "🔔 review (2)"}
+{ok: true}
+```
+
+Return `{ok: false, error: "SESSION_NOT_OPEN"}` when no session exists, and `SESSION_MISMATCH` before status/delivery if the session changed. Omitted `badge` clears it. Keep socket state private (`0700` directory, `0600` socket); remove the endpoint on shutdown. Parent-process discovery considers registered socket adapters first, then any matching harness socket, walking only supplied PID roots or the default parent chain through depth 5. Git metadata ignores inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, and `GIT_COMMON_DIR`.
+
+For hosts that only confirm queue/channel submission, register `new SocketBridgeAdapter("cursor", {confirmDelivery: false})` before creating the service. It returns `delivered_unconfirmed`, retaining inbox fallback.
+
+For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`, then call `registerAdapter(customAdapter)` from `src/adapters/index.ts` in your in-process entrypoint. Implement `probe`, `deliver`, and optional `updateBadge`; delivery returns `delivered`, `delivered_unconfirmed`, `driver_unavailable`, or `session_switched`. Use `ctx.runEffect` for each external effect so retries preserve cancellation and ownership fencing. Only return `delivered` after confirmed host insertion. Use `CitoService.create(config?, options?)`, `service.call(name, args, meta)`, and `await service.close()`; `createMcpServer(service)` supplies SDK stdio handlers. Non-socket caller identity currently uses explicit Codex thread metadata; custom harnesses still need an identity socket for discovery even if delivery uses another registered driver.
+
+### Claude Code (`claude`) — 尚未实现 / Not Yet Implemented
+
+Cito does **not** ship a runtime Claude Code adapter. [DESIGN.md §8](docs/DESIGN.md#8-proposed-design-for-claude-code-adapter-设计建议--仅建议尚未实现) proposes a companion `<harness>-pid-<pid>.sock` bridge using `SocketBridgeAdapter`, MCP Channel Push for idle wakeup, and a turn-start `cito_inbox()` drain when push delivery is unconfirmed. The open harness schema permits `claude` as an identifier; it does not install that proposed host integration.
+
+## Environment
+
+| Variable | Default / requirement |
+| --- | --- |
+| `CITO_CONFIG_PATH` | Optional explicit hub config JSON; missing/invalid paths fail startup. |
+| `CITO_HUB` | Override the default hub from the file. |
+| `CITO_NATS_URL` | `nats://127.0.0.1:4222`; `nats://`, `ws://`, `wss://` supported. Also overrides the selected file hub unless `CITO_CONFIG_PATH` is set. |
+| `CITO_AUTH_MODE` | Single-default-hub fallback: `none` (default) or `oidc`. |
+| `CITO_USER` | OS username; 1–64 letters/digits/dots/underscores/hyphens. |
+| `CITO_OIDC_ISSUER` / `CITO_OIDC_CLIENT_ID` | Single-hub OIDC issuer and client/audience. HTTPS required except loopback tests. |
+| `CITO_OIDC_SCOPES` | Space-separated fallback scopes; default `openid profile email offline_access`. |
+| `CITO_STATE_DIR` | `~/.cito`; share between bridge and MCP. |
+| `CITO_HOST_NAME` | OS hostname, at most 128 printable ASCII characters. |
+| `CITO_CODEX_HOME` | `~/.codex`; reads only explicitly identified threads. |
+| `CITO_CODEX_BIN` | `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`. |
+| `CITO_OPEN_BIN` | `/usr/bin/open`; configurable Codex wake executable. |
+| `CITO_AUTH_CALLOUT_ISSUER_SEED` | Responder only: required `SA...` Account signing seed. |
+| `CITO_AUTH_CALLOUT_PASSWORD` | Responder/bootstrap only: exempt service password. |
+| `CITO_AUTH_CALLOUT_XKEY_SEED` | Optional responder `SX...`, paired with the broker's public XKey. |
+
+OIDC verifies signatures before caching tokens and the offline principal (`0600`). Online connections verify cached tokens again. Per-hub rejected-token recovery rechecks under its login lock, refreshes silently, and falls back to S256 loopback PKCE only for missing refresh credentials or HTTP 400/401. Refresh network/5xx failures return `AUTH_UNAVAILABLE` without opening a browser. Lock wait and login share a 45-second deadline. Broker reconnect authorization failures defer login until the next online tool call.
+
+Cito installs no `launchd` daemon, implements no custom HTTP/WebSocket broker, and uses no external messaging side channel for delivery.

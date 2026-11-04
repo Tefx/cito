@@ -1,11 +1,8 @@
 import { afterEach, expect, test } from "vitest";
-import { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
 import { fixture, call, payload, waitFor, codexDesktop } from "./support.js";
 import { CitoService } from "../../src/mcp/service.js";
 import { LocalState, registrationSchema } from "../../src/mcp/state.js";
-import { encode, listenLock, type Broker } from "../../src/mcp/receiver.js";
-import { acquireFlock } from "../../src/banner/index.js";
+import { encode, type Broker } from "../../src/mcp/receiver.js";
 import { listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   listenerIdSchema, listenInputSchema } from "../../src/shared/index.js";
 
@@ -49,21 +46,21 @@ test("tag renaming preserves canonical KV, subjects, SQLite keys and sender idem
   expect(preserved.listener_id).toBe(first.listener_id);
   const renamed = await call(f.service, "cito_listen", { about: "renamed", tag: "New Name" }, f.pi.meta);
   expect(toCanonicalListenerId(renamed.listener_id)).toBe(id);
-  expect(f.service.state.listener(id)).toMatchObject({ listener_id: id, tag: "new-name", public_id: renamed.listener_id, unattended_wake_count: 1 });
+  expect(f.service.state.listener(id)).toMatchObject({ listener_id: id, tag: "new-name", public_id: renamed.listener_id });
   const replay = await call(f.service, "cito_send", { to: renamed.listener_id, message: "one", idempotency_key: "same" }, desktop.meta);
   expect(replay).toMatchObject({ signal_id: sent.signal_id, seq: sent.seq, to: renamed.listener_id });
   expect(payload(await f.service.call("cito_send", { to: first.listener_id, message: "self" }, f.pi.meta))).toMatchObject({ error: { code: "SELF_SEND_FORBIDDEN" } });
   const found = await call(f.service, "cito_find", {}, f.pi.meta);
   expect(found.caller.listener_id).toBe(renamed.listener_id);
   expect(found.listeners.map((row: { listener_id: string }) => row.listener_id)).toContain(renamed.listener_id);
-  expect(await call(f.service, "cito_inbox", {}, f.pi.meta)).toMatchObject({ listener_id: renamed.listener_id,
+  expect(await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta)).toMatchObject({ listener_id: renamed.listener_id,
     signals: [{ from: { listener_id: sender.listener_id } }] });
-  const broker = Reflect.get(f.service, "broker") as Broker;
+  const broker = Reflect.get(f.service.slots.get("default")!, "broker") as Broker;
   expect(registrationSchema.parse((await broker.kv.get(id))!.json())).toMatchObject({ listener_id: id, public_id: renamed.listener_id, tag: "new-name" });
   expect(await broker.kv.get(first.listener_id)).toBeNull();
   expect((await broker.jsm.streams.info("CITO_SIGNALS")).state.messages).toBe(1);
   expect((await broker.jsm.streams.getMessage("CITO_SIGNALS", { seq: sent.seq })).subject).toBe("cito.signal." + id);
-  for (const [table, column] of [["local_signals", "listener_id"], ["local_pairwise_wakes", "listener_id"], ["local_sent_idempotency", "to_listener_id"]]) {
+  for (const [table, column] of [["local_signals", "listener_id"], ["local_sent_idempotency", "to_listener_id"]]) {
     expect(f.service.state.db.prepare(`SELECT ${column} AS id FROM ${table}`).all()).toEqual([{ id }]);
   }
   expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ listener_id: renamed.listener_id });
@@ -72,7 +69,7 @@ test("tag renaming preserves canonical KV, subjects, SQLite keys and sender idem
 test("invalid explicit tags leave the existing receiver and persisted registration untouched", async () => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "receiver", tag: "stable" }, f.pi.meta);
-  const id = toCanonicalListenerId(enrolled.listener_id), receiver = f.service.receivers.get(id)!;
+  const id = toCanonicalListenerId(enrolled.listener_id), receiver = f.service.receivers.get(`default:${id}`)!;
   const before = f.service.state.listener(id);
   for (const tag of ["", "  --- ", "中文 🔔", "a".repeat(65)]) {
     expect(payload(await f.service.call("cito_listen", { about: "invalid", tag }, f.pi.meta))).toMatchObject({ error: { code: "INVALID_INPUT" } });
@@ -84,8 +81,8 @@ test("invalid explicit tags leave the existing receiver and persisted registrati
 test.each(["principal_id", "host_id", "harness", "session_id"])("collision guard checks %s before stopping an owner or writing SQLite", async field => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "untouched", tag: "stable" }, f.pi.meta);
-  const id = toCanonicalListenerId(enrolled.listener_id), receiver = f.service.receivers.get(id)!;
-  const before = f.service.state.listener(id), broker = Reflect.get(f.service, "broker") as Broker;
+  const id = toCanonicalListenerId(enrolled.listener_id), receiver = f.service.receivers.get(`default:${id}`)!;
+  const before = f.service.state.listener(id), broker = Reflect.get(f.service.slots.get("default")!, "broker") as Broker;
   const entry = (await broker.kv.get(id))!, value = registrationSchema.parse(entry.json());
   const collided = { ...value, [field]: field === "harness" ? "codex" : "another-identity" };
   const revision = await broker.kv.update(id, encode(collided), entry.revision);
@@ -96,24 +93,13 @@ test.each(["principal_id", "host_id", "harness", "session_id"])("collision guard
   expect((await broker.kv.get(id))!.revision).toBe(revision);
 });
 
-test("legacy SQLite migration backfills public IDs without changing keys, ownership or quota", async () => {
+test("V4 state persists public IDs and ownership on reopening", async () => {
   const f = await setup();
-  const enrolled = await call(f.service, "cito_listen", { about: "legacy" }, f.pi.meta);
-  const id = toCanonicalListenerId(enrolled.listener_id);
-  await call(f.service, "cito_send", { to: id, message: "persisted", idempotency_key: "legacy" });
-  const before = f.service.state.listener(id)!;
+  const enrolled = await call(f.service, "cito_listen", { about: "persisted", tag: "retained" }, f.pi.meta);
+  const id = toCanonicalListenerId(enrolled.listener_id), before = f.service.state.listener(id);
   await f.service.close();
-  const db = new DatabaseSync(join(f.stateDir, "state.sqlite"));
-  db.exec("ALTER TABLE local_listeners DROP COLUMN tag; ALTER TABLE local_listeners DROP COLUMN public_id");
-  db.close();
-  for (let n = 0; n < 2; n++) {
-    const migrated = await LocalState.open(f.stateDir);
-    try {
-      expect(migrated.listener(id)).toEqual({ ...before, tag: null, public_id: publicListenerId(listenerSlug(before), id) });
-      expect(migrated.db.prepare("SELECT listener_id FROM local_signals").get()?.listener_id).toBe(id);
-      expect(migrated.db.prepare("SELECT to_listener_id FROM local_sent_idempotency").get()?.to_listener_id).toBe(id);
-    } finally { migrated.close(); }
-  }
+  const reopened = await LocalState.open(f.stateDir);
+  try { expect(reopened.listener(id)).toEqual(before); } finally { reopened.close(); }
 });
 
 test("badge refresh covers waking/passive admission, gaps, acknowledgements and restore", async () => {
@@ -122,7 +108,7 @@ test("badge refresh covers waking/passive admission, gaps, acknowledgements and 
   const id = toCanonicalListenerId(enrolled.listener_id);
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl");
   f.service.state.run("UPDATE local_listeners SET replay_gap_detected = 1, replay_gap_range = 'offline_exceeded_30m' WHERE listener_id = ?", id);
-  await call(f.service, "cito_inbox", {}, f.pi.meta);
+  await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta);
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl (!)");
   const waking = await call(f.service, "cito_send", { to: enrolled.listener_id, message: "awake" });
   await waitFor(() => f.pi.badges.at(-1) === "🔔 abcdefghijkl (1!)");
@@ -131,64 +117,51 @@ test("badge refresh covers waking/passive admission, gaps, acknowledgements and 
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl (!)");
   await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta);
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl");
-  await call(f.service, "cito_send", { to: id, message: "passive", wake: false });
+  await call(f.service, "cito_send", { to: id, message: "passive" });
   await waitFor(() => f.pi.badges.at(-1) === "🔔 abcdefghijkl (1)");
   await f.service.close();
   expect(f.pi.badges.at(-1)).toBeUndefined();
   const restarted = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => restarted.close());
   await call(restarted, "cito_find");
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl (1)");
-  await restarted.receivers.get(id)!.revoke("session_closed");
+  await restarted.receivers.get(`default:${id}`)!.revoke("session_closed");
   expect(f.pi.badges.at(-1)).toBeUndefined();
 });
 
 test("an offline inbox-only MCP process refreshes the badge without adopting ownership", async () => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "offline", tag: "offline" }, f.pi.meta);
-  await call(f.service, "cito_send", { to: enrolled.listener_id, message: "unread", wake: false });
+  await call(f.service, "cito_send", { to: enrolled.listener_id, message: "unread" });
   await waitFor(() => f.pi.badges.at(-1) === "🔔 offline (1)");
   await f.broker.stop();
   const inboxOnly = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => inboxOnly.close());
   await call(inboxOnly, "cito_inbox", { ack_all: true }, f.pi.meta);
   expect(inboxOnly.receivers.size).toBe(0);
-  expect(Reflect.get(inboxOnly, "broker")).toBeUndefined();
+  expect(Reflect.get(inboxOnly.slots.get("default")!, "broker")).toBeUndefined();
   expect(f.pi.badges.at(-1)).toBe("🔔 offline");
   await inboxOnly.close();
   expect(f.pi.badges.at(-1)).toBe("🔔 offline");
 });
 
-test("fenced losers cannot clear a replacement badge during revoke or shutdown", async () => {
+test("fenced losers cannot clear a live replacement badge during shutdown", async () => {
   const f = await setup();
   const first = await call(f.service, "cito_listen", { about: "old", tag: "old" }, f.pi.meta);
-  const id = toCanonicalListenerId(first.listener_id), old = f.service.receivers.get(id)!;
+  const id = toCanonicalListenerId(first.listener_id), old = f.service.receivers.get(`default:${id}`)!;
   const other = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => other.close());
   await call(other, "cito_listen", { about: "winner", tag: "winner" }, f.pi.meta);
+  old.fence(); await old.revoke("session_closed"); await f.service.close();
   expect(f.pi.badges.at(-1)).toBe("🔔 winner");
-  old.fence();
-  await old.clearBadge();
-  await old.revoke("session_closed");
-  await f.service.close();
-  expect(f.pi.badges.at(-1)).toBe("🔔 winner");
-  const lock = (await acquireFlock(listenLock(f.config, id), 1000))!;
-  const receiver = other.receivers.get(id)!;
-  let cleared = false;
-  const pending = receiver.clearBadge().then(() => { cleared = true; });
-  await new Promise(resolve => setTimeout(resolve, 40));
-  expect(cleared).toBe(false);
-  expect(f.pi.badges.at(-1)).toBe("🔔 winner");
-  await lock.release(); await pending;
-  expect(f.pi.badges.at(-1)).toBeUndefined();
 });
 
 test("receiver admits a public wire recipient only on its canonical subject", async () => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "wire", tag: "wire" }, f.pi.meta);
   const id = listenerId({ principal_id: "none#alice", host_id: f.service.hostId, harness: "pi", session_id: "pi-session-1" });
-  const broker = Reflect.get(f.service, "broker") as Broker;
+  const broker = Reflect.get(f.service.slots.get("default")!, "broker") as Broker;
   await broker.js.publish("cito.signal." + id, encode({ signal_id: "public-wire", to: enrolled.listener_id,
     target_generation: enrolled.binding_generation, sender_endpoint_key: "sender", from: {
       principal_id: "none#alice", user: "alice", host_id: "other", host_name: "other", harness: null },
     message: "public wire", requested_wake: false, in_reply_to: null }));
   await waitFor(() => f.service.state.listener(id)!.persisted_seq === 1);
-  expect((await call(f.service, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ signal_id: "public-wire" }]);
+  expect((await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta)).signals).toMatchObject([{ signal_id: "public-wire" }]);
 });

@@ -1,133 +1,64 @@
-import { afterEach, describe, expect, test } from "vitest";
-import { randomUUID } from "node:crypto";
-import { uptime } from "node:os";
-import { fixture, call } from "./support.js";
-import { toCanonicalListenerId } from "../../src/shared/index.js";
-import { type Signal } from "../../src/mcp/state.js";
+import { afterEach, expect, test } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { LocalState, type Signal } from "../../src/mcp/state.js";
 
-const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
-afterEach(async () => { for (const f of fixtures.splice(0)) await f.close(); });
-async function enrolled() {
-  const f = await fixture(); fixtures.push(f);
-  const listening = await call(f.service, "cito_listen", { about: "receiver", scope: "workspace" }, f.pi.meta);
-  const id = toCanonicalListenerId(listening.listener_id), state = f.service.state;
-  const row = state.listener(id)!;
-  let seq = 0;
-  const admit = (overrides: Partial<Signal> = {}, sender = "none#alice|host|unbound|default") => {
-    const signal: Signal = { signal_id: "sig_" + randomUUID(), to: id, target_generation: row.binding_generation,
-      sender_endpoint_key: sender, from: { principal_id: "none#alice", user: "alice", host_id: "host", host_name: "sender-host",
-        harness: null, listener_id: null, title: "sender", about: null },
-      message: "notification", requested_wake: true, in_reply_to: null, ...overrides };
-    return { signal, result: state.admit(id, row.owner_token, signal, ++seq, new Date().toISOString(), Date.now() + 1_800_000, Math.floor(uptime() * 1000)) };
-  };
-  return { f, id, state, row, admit };
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+async function setup() {
+  const dir = await mkdtemp("/tmp/cito-state-"); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const state = await LocalState.open(dir); cleanup.push(async () => state.close());
+  for (const hub of ["personal", "rda"]) state.run(`INSERT INTO local_listeners (hub,listener_id,principal_id,owner_user,host_id,host_name,
+    harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token)
+    VALUES (?, 'c_abcdefgh2345','alice','alice','host','host','cursor','s',123,'/tmp','Title','About','self','ACTIVE',2,'owner')`, hub);
+  return state;
 }
-
-describe("atomic Stage-1 admission", () => {
-  test("inbox selects the first 50 sequences and ignores unknown acknowledgement IDs", async () => {
-    const { f, admit } = await enrolled();
-    for (let n = 1; n <= 60; n++) admit({ requested_wake: false, message: "message-" + n });
-    const first = await call(f.service, "cito_inbox", { ack_all: true, ack_ids: ["unknown"] }, f.pi.meta);
-    expect(first.acknowledged_count).toBe(50);
-    expect(first.signals.map((signal: { seq: number }) => signal.seq)).toEqual(Array.from({ length: 50 }, (_, index) => index + 1));
-    const remaining = await call(f.service, "cito_inbox", {}, f.pi.meta);
-    expect(remaining.signals.map((signal: { seq: number }) => signal.seq)).toEqual([51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
-  });
-  test("listener-specific retention gaps preserve quota at >30m and clear only with ack_all", async () => {
-    const { f, id, state, admit } = await enrolled();
-    admit(); admit(); admit({}, "other");
-    const now = new Date().toISOString();
-    state.recordOfflineGap(id, now, new Date(Date.parse(now) - 1_800_000));
-    expect(state.listener(id)!.replay_gap_detected).toBe(0);
-    state.recordOfflineGap(id, now, new Date(Date.parse(now) - 1_800_001));
-    expect(state.listener(id)).toMatchObject({ replay_gap_detected: 1, replay_gap_range: "offline_exceeded_30m", unattended_wake_count: 3 });
-    const relisten = await call(f.service, "cito_listen", { about: "retained" }, f.pi.meta);
-    expect(relisten.unattended_wakes_remaining).toBe(0);
-    expect(await call(f.service, "cito_inbox", {}, f.pi.meta)).toMatchObject({ replay_gap_detected: true, replay_gap_range: "offline_exceeded_30m" });
-    expect(await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta)).toMatchObject({ replay_gap_detected: true, acknowledged_count: 3 });
-    expect(await call(f.service, "cito_inbox", {}, f.pi.meta)).toMatchObject({ replay_gap_detected: false, replay_gap_range: null });
-  });
-  test("rolling pairwise window expires independently of persistent unattended quota", async () => {
-    const { id, state, admit } = await enrolled();
-    admit(); admit();
-    state.run("UPDATE local_pairwise_wakes SET admitted_at_ms = admitted_at_ms - 120001");
-    expect(admit().result.row).toMatchObject({ effective_wake: 1, held_reason: null });
-    expect(state.listener(id)!.unattended_wake_count).toBe(3);
-    expect(state.db.prepare("SELECT COUNT(*) AS n FROM local_pairwise_wakes").get()!.n).toBe(1);
-  });
-  test("redelivery reuses result, advances cursor, and never double-charges", async () => {
-    const { f, id, state, row, admit } = await enrolled();
-    const { signal, result } = admit();
-    expect(result.row).toMatchObject({ state: "RECEIVED", effective_wake: 1, held_reason: null });
-    const redelivered = state.admit(id, row.owner_token, signal, 99, new Date().toISOString(), 0, 0);
-    expect(redelivered).toMatchObject({ duplicate: true, row: { signal_id: signal.signal_id, effective_wake: 1, held_reason: null } });
-    expect(state.listener(id)).toMatchObject({ unattended_wake_count: 1, persisted_seq: 99 });
-    expect(state.db.prepare("SELECT COUNT(*) AS n FROM local_pairwise_wakes").get()!.n).toBe(1);
-    expect(f.pi.messages).toEqual([]);
-  });
-  test("pairwise threshold is recipient-local; quota wins after three admissions", async () => {
-    const { id, state, admit } = await enrolled();
-    expect(admit().result.row!.effective_wake).toBe(1);
-    expect(admit().result.row!.effective_wake).toBe(1);
-    expect(admit().result.row).toMatchObject({ effective_wake: 0, held_reason: "pairwise_rate_limited", state: "STORED_PASSIVE" });
-    expect(admit({}, "other-sender").result.row!.effective_wake).toBe(1);
-    expect(admit().result.row).toMatchObject({ effective_wake: 0, held_reason: "wake_quota_exhausted" });
-    expect(state.listener(id)!.unattended_wake_count).toBe(3);
-    expect(state.db.prepare("SELECT COUNT(*) AS n FROM local_pairwise_wakes").get()!.n).toBe(3);
-  });
-  test("all five suppression levels have deterministic precedence", async () => {
-    const { id, row, state, admit } = await enrolled();
-    admit(); admit();
-    state.run("UPDATE local_listeners SET binding_generation = binding_generation + 1, unattended_wake_count = 3 WHERE listener_id = ?", id);
-    const peer = { principal_id: "none#bob", user: "bob", host_id: "h", host_name: "h", harness: null, listener_id: null, title: "", about: null };
-    expect(admit({ requested_wake: false, from: peer }).result.row!.held_reason).toBe("stale_generation");
-    expect(admit({ target_generation: row.binding_generation + 1, requested_wake: false, from: peer }).result.row!.held_reason).toBe("passive_requested");
-    expect(admit({ target_generation: row.binding_generation + 1, from: peer }).result.row!.held_reason).toBe("peer_wake_disabled");
-    expect(admit({ target_generation: row.binding_generation + 1 }).result.row!.held_reason).toBe("wake_quota_exhausted");
-    state.run("UPDATE local_listeners SET unattended_wake_count = 2 WHERE listener_id = ?", id);
-    expect(admit({ target_generation: row.binding_generation + 1 }).result.row!.held_reason).toBe("pairwise_rate_limited");
-  });
-  test("stale generations remain readable; unauthorized private signals only advance cursor", async () => {
-    const { f, id, state, admit } = await enrolled();
-    state.run("UPDATE local_listeners SET binding_generation = binding_generation + 1 WHERE listener_id = ?", id);
-    const stale = admit().result.row!;
-    expect(stale).toMatchObject({ state: "STORED_PASSIVE", held_reason: "stale_generation" });
-    expect((await call(f.service, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ signal_id: stale.signal_id, held_reason: "stale_generation" }]);
-    state.run("UPDATE local_listeners SET scope = 'self' WHERE listener_id = ?", id);
-    const denied = admit({ from: { principal_id: "none#bob", user: "bob", host_id: "", host_name: "", harness: null, listener_id: null, title: "", about: null } });
-    expect(denied.result.row).toBeUndefined();
-    expect(state.listener(id)).toMatchObject({ persisted_seq: 2, unattended_wake_count: 0 });
-    expect(state.signals("SELECT * FROM local_signals")).toHaveLength(1);
-  });
-  test("Pi epoch deltas reject retired observations and bound history; human events alone reset counters", async () => {
-    const { f, id, state, admit } = await enrolled();
-    admit(); admit();
-    const epoch = state.listener(id)!.last_bridge_epoch!;
-    state.transaction(() => { state.observePi(id, "restart-1", 0); state.consumeHuman(id); });
-    expect(state.listener(id)).toMatchObject({ human_event_seq: 0, unattended_wake_count: 2 });
-    state.transaction(() => { state.observePi(id, "restart-1", 1); state.consumeHuman(id); });
-    expect(state.listener(id)).toMatchObject({ human_event_seq: 1, last_consumed_human_seq: 1, unattended_wake_count: 0 });
-    state.observePi(id, epoch, 100);
-    state.observePi(id, "restart-1", 0);
-    expect(state.listener(id)).toMatchObject({ human_event_seq: 1, last_bridge_count: 1 });
-    expect(state.db.prepare("SELECT COUNT(*) AS n FROM local_pairwise_wakes").get()!.n).toBe(0);
-    for (let n = 2; n < 40; n++) state.observePi(id, "restart-" + n, 0);
-    expect(JSON.parse(state.listener(id)!.retired_bridge_epochs_json)).toHaveLength(32);
-    f.pi.input("extension");
-    await f.service.receivers.get(id)!.sweep();
-    expect(state.listener(id)!.human_event_seq).toBe(1);
-    f.pi.input();
-    await f.service.receivers.get(id)!.sweep();
-    expect(state.listener(id)!.human_event_seq).toBe(2);
-  });
-  test("quota and preferences survive unlisten/relisten; verified human sequence consumption resets quota", async () => {
-    const { f, id, state, admit } = await enrolled();
-    admit(); admit(); admit({}, "other");
-    await call(f.service, "cito_unlisten", {}, f.pi.meta);
-    const again = await call(f.service, "cito_listen", { about: "updated" }, f.pi.meta);
-    expect(again).toMatchObject({ listener_id: state.listener(id)!.public_id, binding_generation: 3, scope: "workspace", allow_peer_wake: false, unattended_wakes_remaining: 0 });
-    state.run("UPDATE local_listeners SET human_event_seq = human_event_seq + 1 WHERE listener_id = ?", id);
-    const human = await call(f.service, "cito_listen", { about: "human seen", allow_peer_wake: true }, f.pi.meta);
-    expect(human).toMatchObject({ listener_id: state.listener(id)!.public_id, scope: "workspace", allow_peer_wake: true, unattended_wakes_remaining: 3 });
-  });
+function wire(id = "s1", patch: Partial<Signal> = {}): Signal {
+  return { signal_id: id, to: "c_abcdefgh2345", target_generation: 2, sender_endpoint_key: "sender",
+    from: { principal_id: "alice", user: "alice", host_id: "other", host_name: "other", harness: null, listener_id: null, title: "Sender", about: null },
+    message: "Hello", in_reply_to: null, ...patch };
+}
+function admit(state: LocalState, signal: Signal, seq: number, hub = "personal") {
+  return state.admit("c_abcdefgh2345", "owner", signal, seq, new Date().toISOString(), Date.now() + 60_000, hub);
+}
+test("admission is hub scoped, deduplicates and advances the cursor without any quota", async () => {
+  const state = await setup();
+  const first = admit(state, wire(), 1).row!;
+  expect(first).toMatchObject({ hub: "personal", state: "RECEIVED", held_reason: null });
+  expect(admit(state, wire(), 3)).toEqual({ row: first, duplicate: true });
+  expect(admit(state, wire(), 1, "rda").duplicate).toBe(false);
+  for (let i = 4; i <= 12; i++) expect(admit(state, wire("s" + i), i).row!.state).toBe("RECEIVED");
+  expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(12);
+  expect(state.listener("c_abcdefgh2345", "rda")!.persisted_seq).toBe(1);
+});
+test("private cross-principal messages drop silently, workspace messages wake, stale generations stay passive", async () => {
+  const state = await setup(), peer = wire().from; peer.principal_id = "bob";
+  expect(admit(state, wire("denied", { from: peer }), 1).row).toBeUndefined();
+  expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(1);
+  state.run("UPDATE local_listeners SET scope = 'workspace' WHERE hub = 'personal'");
+  expect(admit(state, wire("peer", { from: peer }), 2).row).toMatchObject({ state: "RECEIVED", held_reason: null });
+  expect(admit(state, wire("stale", { target_generation: 1 }), 3).row).toMatchObject({ state: "STORED_PASSIVE", held_reason: "stale_generation" });
+});
+test("stale owners cannot admit or advance cursor and transaction errors roll back", async () => {
+  const state = await setup();
+  expect(() => state.admit("c_abcdefgh2345", "wrong", wire(), 1, new Date().toISOString(), Date.now(), "personal")).toThrow("Listener owner changed");
+  expect(() => state.transaction(() => { state.run("UPDATE local_listeners SET persisted_seq = 10"); throw new Error("rollback"); })).toThrow("rollback");
+  expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(0);
+});
+test("schema reset atomically discards pre-V4 state, removes pairwise table and preserves V4 rows on reopening", async () => {
+  const dir = await mkdtemp("/tmp/cito-upgrade-");
+  try {
+    const db = new DatabaseSync(join(dir, "state.sqlite"));
+    db.exec("CREATE TABLE local_listeners (legacy TEXT); CREATE TABLE local_pairwise_wakes (legacy TEXT); PRAGMA user_version = 3;"); db.close();
+    const state = await LocalState.open(dir);
+    expect(state.db.prepare("PRAGMA user_version").get()!.user_version).toBe(4);
+    expect(state.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => row.name))
+      .toEqual(["local_listeners", "local_sent_idempotency", "local_signals"]);
+    expect(state.db.prepare("PRAGMA table_info(local_listeners)").all().map(row => row.name)).toContain("endpoint_pid");
+    state.run("INSERT INTO local_sent_idempotency (hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES ('rda','d','h','s','t','queued','now',1)"); state.close();
+    const reopened = await LocalState.open(dir);
+    try { expect(reopened.db.prepare("SELECT hub, dedup_id FROM local_sent_idempotency").all()).toEqual([{ hub: "rda", dedup_id: "d" }]); }
+    finally { reopened.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

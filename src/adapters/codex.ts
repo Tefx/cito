@@ -6,11 +6,13 @@ import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
 import { normalizeRepo, type RepoMetadata } from "./git.js";
+import type { ListenerRow } from "../shared/state-types.js";
+import type { HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
 
 const exec = promisify(execFile);
 type CodexConfig = Pick<CitoConfig, "codexHome">;
 export interface CodexCaller extends RepoMetadata { harness: "codex"; session_id: string; cwd: string }
-export interface CodexDriverOptions { codexBin?: string; openBin?: string; signal?: AbortSignal }
+export interface CodexDriverOptions { codexBin?: string; openBin?: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
 export interface ReadCodexThreadOptions { allowArchived?: boolean }
 export class CodexSessionError extends CitoError {
   constructor(readonly definitive: boolean, message: string, cause?: unknown) {
@@ -25,7 +27,9 @@ export function codexThreadId(meta: Record<string, unknown> = {}): string {
   let turn = meta["x-codex-turn-metadata"];
   if (typeof turn === "string") { try { turn = JSON.parse(turn); } catch { turn = undefined; } }
   const candidates = [...(record(turn) ? [turn.thread_id, turn.session_id] : []), meta["openai/threadId"], meta.codexThreadId];
-  const id = candidates.find(nonempty);
+  const ids = [...new Set(candidates.filter(nonempty))];
+  if (ids.length > 1) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
+  const id = ids[0];
   if (!id) throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
   return id;
 }
@@ -39,7 +43,7 @@ export function readCodexThread(threadId: string, config: CodexConfig = loadConf
     db.exec("PRAGMA busy_timeout = 1000");
     // SELECT * also supports older Desktop schemas without the optional name column.
     const row = db.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
-    if (!row || (row.archived === 1 && !options.allowArchived) || !nonempty(row.cwd)) {
+    if (!row || (row.archived !== 0 && !options.allowArchived) || !nonempty(row.cwd)) {
       throw new CodexSessionError(true, "Codex thread is absent, archived, or has no cwd");
     }
     return { harness: "codex", session_id: threadId, cwd: row.cwd,
@@ -123,10 +127,6 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
     });
   });
 }
-export async function codexDesktopRunning(signal: AbortSignal): Promise<boolean> {
-  const { stdout } = await exec("/bin/ps", ["-axo", "comm="], { timeout: 1500, signal });
-  return stdout.split("\n").some(command => command.includes("/ChatGPT.app/"));
-}
 export async function resolveCodexCaller(meta: Record<string, unknown> = {}, config: CodexConfig = loadConfig()): Promise<CodexCaller> {
   const thread = readCodexThread(codexThreadId(meta), config);
   await assertCodexThreadOpen(thread.session_id, config);
@@ -137,7 +137,36 @@ export async function resolveCodexCaller(meta: Record<string, unknown> = {}, con
 export async function queueCodexWake(threadId: string, card: string, options: CodexDriverOptions = {}): Promise<void> {
   options.signal?.throwIfAborted();
   await exec(options.codexBin ?? loadConfig().codexBin, ["queue", "--thread", threadId, "--message", card],
-    { timeout: 10_000, signal: options.signal });
+    { timeout: 10_000, signal: options.signal, env: options.env ?? process.env });
+}
+export class CodexDesktopAdapter implements HarnessAdapter {
+  readonly id = "codex";
+  async probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome> {
+    try {
+      readCodexThread(row.session_id, config);
+      await assertCodexThreadOpen(row.session_id, config, signal);
+      return { status: "alive" };
+    } catch (error) {
+      return error instanceof CodexSessionError && error.definitive
+        ? { status: "closed_definitive" } : { status: "transient_error", error };
+    }
+  }
+  async deliver(row: ListenerRow, ctx: DeliverContext): Promise<DeliverOutcome> {
+    // A recovered queue-written batch has no durable proof of a clean queue exit.
+    let cleanQueueExit = false;
+    if (!ctx.queueWritten) {
+      const queued = await ctx.runEffect(async () => {
+        await queueCodexWake(row.session_id, ctx.card, { codexBin: ctx.config.codexBin,
+          signal: ctx.signal, env: { ...process.env, CODEX_HOME: ctx.config.codexHome } });
+        cleanQueueExit = true;
+      }, { attempts: 3, pause: [1000, 2000], onSigtermTimeout: () => { cleanQueueExit = false; } });
+      if (!queued) return "driver_unavailable";
+      ctx.markQueueWritten();
+    }
+    const triggered = await ctx.runEffect(() => triggerCodexWake(row.session_id,
+      { openBin: ctx.config.openBin, signal: ctx.signal }), { attempts: 2, pause: [500] });
+    return cleanQueueExit && triggered ? "delivered" : "delivered_unconfirmed";
+  }
 }
 export async function triggerCodexWake(threadId: string, options: CodexDriverOptions = {}): Promise<void> {
   options.signal?.throwIfAborted();

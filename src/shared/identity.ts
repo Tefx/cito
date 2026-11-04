@@ -2,7 +2,30 @@ import { createHash } from "node:crypto";
 import { userInfo } from "node:os";
 import { basename } from "node:path";
 import { CitoError } from "./errors.js";
-import { validateHarness, type Harness } from "./validation.js";
+import { validateHarness, hubNameSchema, type Harness } from "./validation.js";
+import type { CitoConfig } from "./config.js";
+
+export function isSingleDefaultHub(config: CitoConfig): boolean {
+  return Object.keys(config.hubs).length === 1 && config.defaultHub === "default";
+}
+export function formatScopedId(hub: string, id: string, config: CitoConfig): string {
+  return isSingleDefaultHub(config) ? id : `${hub}:${id}`;
+}
+export function parseScopedId(raw: string, config: CitoConfig, explicitHub?: string): { hub: string; id: string } {
+  const colon = raw.indexOf(":");
+  const prefixHub = colon < 0 ? undefined : raw.slice(0, colon);
+  const id = colon < 0 ? raw : raw.slice(colon + 1);
+  for (const hub of [prefixHub, explicitHub]) {
+    if (hub !== undefined && (!hubNameSchema.safeParse(hub).success || !Object.hasOwn(config.hubs, hub))) {
+      throw new CitoError("INVALID_INPUT", `Unknown hub: ${hub}`);
+    }
+  }
+  if (prefixHub !== undefined && explicitHub !== undefined && prefixHub !== explicitHub) {
+    throw new CitoError("INVALID_INPUT", "Conflicting hub prefixes");
+  }
+  if (!id || id.includes(":")) throw new CitoError("INVALID_INPUT", "Invalid scoped ID");
+  return { hub: prefixHub ?? explicitHub ?? config.defaultHub, id };
+}
 
 export interface Principal { principal_id: string; owner_user: string }
 export interface SessionKey {

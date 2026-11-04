@@ -237,13 +237,24 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
     expect((await stat(f.socket)).isSocket()).toBe(true);
   });
 
-  test("Codex click increments only the target Codex row and opens its deeplink", async () => {
+  test("custom harnesses render their own action label and never create a SQLite file", async () => {
+    const f = await fixture(5000), server = await native(f);
+    expect(await send(f, { ...payload, target_harness: "cursor" })).toEqual({ displayed: true });
+    await waitFor(() => server.output().includes("cursor 终端会话 · 点击关闭横幅"));
+    const display = JSON.parse(server.output().split("\n").find(line => line.startsWith("cito-banner: display "))!.slice("cito-banner: display ".length));
+    expect(display.action_label).toBe("cursor 终端会话 · 点击关闭横幅");
+    await click(f);
+    await expect(stat(join(f.state, "state.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("Codex click opens its deeplink without mutating SQLite", async () => {
     const f = await fixture(5000);
     const db = database(f);
     try {
       expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
       await click(f);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([8, 11, 19]);
+      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([7, 11, 19]);
       expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
     } finally { db.close(); }
   });
@@ -262,7 +273,7 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
       await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
       await lock!.release(); lock = null;
       await waitFor(async () => (await processes(f)).length === 0);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([8, 11, 19]);
+      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([7, 11, 19]);
       expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
     } finally { await lock?.release(); db.close(); }
   });
@@ -275,7 +286,7 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
     try {
       expect(await send(f, { ...payload, target_harness: "codex", target_session_id: session })).toEqual({ displayed: true });
       await click(f);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE session_id = ?").get(session)?.human_event_seq).toBe(24);
+      expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE session_id = ?").get(session)?.human_event_seq).toBe(23);
       expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE harness = 'codex' AND session_id = 'session-1'").get()?.human_event_seq).toBe(7);
       expect(await readFile(f.log, "utf8")).toBe("codex://threads/thread'quoted%2Fpart%3F\n");
     } finally { db.close(); }
@@ -299,11 +310,11 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
     const server = await native(f);
     expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
     await click(f);
-    expect(server.output()).toContain("no such table: local_listeners");
+    expect(server.output()).not.toContain("SQLite");
     expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
   });
 
-  test("SQLite busy timeout logs a diagnostic, then opens and dismisses", async () => {
+  test("SQLite lock has no effect on clicking, opening and dismissal", async () => {
     const f = await fixture(5000);
     const db = database(f);
     const server = await native(f);
@@ -311,7 +322,7 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
       db.exec("BEGIN EXCLUSIVE");
       expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
       await click(f);
-      expect(server.output()).toContain("database is locked");
+      expect(server.output()).not.toContain("database is locked");
       expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
     } finally { db.exec("ROLLBACK"); db.close(); }
   });

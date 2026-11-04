@@ -17,9 +17,11 @@ export function normalizeRepo(origin: string | null | undefined): string | null 
 }
 export interface RepoMetadata { repo: string | null; branch: string | null; title: string }
 export async function gitMetadata(cwd: string, sessionName?: string | null): Promise<RepoMetadata> {
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"]) delete env[key];
   async function git(args: string[]): Promise<string | null> {
     try {
-      const { stdout } = await exec("git", ["-C", cwd, ...args], { timeout: 1000 });
+      const { stdout } = await exec("git", ["-C", cwd, ...args], { timeout: 1000, env });
       return stdout.trim() || null;
     } catch { return null; }
   }

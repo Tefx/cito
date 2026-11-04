@@ -25,7 +25,7 @@ test("interactive S256 PKCE verifies signature and stores canonical identity wit
   expect(cache).toMatchObject({ issuer: oidc.issuer, client_id: "cito", verified_principal_id: oidc.issuer + "#user-1", verified_user: "alice", refresh_token: "refresh-1" });
   expect(opened()).toBe(1);
   expect(oidc.state.codeRequests).toBe(1);
-  expect((await stat(join(f.stateDir, "oidc-token.json"))).mode & 0o777).toBe(0o600);
+  expect((await stat(join(f.stateDir, "oidc-token-default.json"))).mode & 0o777).toBe(0o600);
   expect(await login.current()).toEqual(cache);
   expect(await login.offlinePrincipal()).toEqual({ principal_id: cache.verified_principal_id, owner_user: "alice" });
 });
@@ -53,11 +53,11 @@ test.each([400, 401])("refresh %i falls through to PKCE within the same lock", a
 
 test("refresh 503 fails without launching a browser or overwriting verified cache", async () => {
   const { f, oidc, login, opened } = await setup();
-  const old = await login.recover(null), original = await readFile(join(f.stateDir, "oidc-token.json"), "utf8");
+  const old = await login.recover(null), original = await readFile(join(f.stateDir, "oidc-token-default.json"), "utf8");
   oidc.state.refreshStatus = 503;
   await expect(login.recover(old.token_sha256)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE", retryable: true });
   expect(opened()).toBe(1);
-  expect(await readFile(join(f.stateDir, "oidc-token.json"), "utf8")).toBe(original);
+  expect(await readFile(join(f.stateDir, "oidc-token-default.json"), "utf8")).toBe(original);
 });
 
 test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TIMEOUT", async () => {
@@ -75,7 +75,24 @@ test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TI
   await expect(login.recover(null)).rejects.toMatchObject({ code: "OIDC_LOGIN_TIMEOUT", retryable: true });
   expect(verifying).toBe(true);
   expect(await login.cached()).toBeUndefined();
-  await expect(stat(join(f.stateDir, "oidc-token.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(stat(join(f.stateDir, "oidc-token-default.json"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("hub caches and PKCE scopes are isolated, with a legacy default-cache fallback", async () => {
+  const { f, oidc, opener, login } = await setup();
+  const initial = await login.recover(null);
+  const personal = new OidcLogin({ ...f.config, oidcScopes: ["openid", "custom"] }, async (url, signal) => {
+    expect(new URL(url).searchParams.get("scope")).toBe("openid custom");
+    await opener(url, signal);
+  }, "personal");
+  expect(await personal.cached()).toBeUndefined();
+  await personal.recover(null);
+  expect(await new OidcLogin(f.config, opener, "rda").cached()).toBeUndefined();
+  expect((await personal.offlinePrincipal()).principal_id).toBe(oidc.issuer + "#user-1");
+  expect((await stat(join(f.stateDir, "oidc-token-personal.json"))).mode & 0o777).toBe(0o600);
+  const { rename } = await import("node:fs/promises");
+  await rename(join(f.stateDir, "oidc-token-default.json"), join(f.stateDir, "oidc-token.json"));
+  expect(await login.cached()).toEqual(initial);
 });
 
 test("locally invalid signatures never acquire a verified identity cache", async () => {
@@ -84,6 +101,6 @@ test("locally invalid signatures never acquire a verified identity cache", async
   oidc.state.tokenResponse.id_token = await wrong.sign(oidc.claims());
   await expect(login.recover(null)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   expect(await login.cached()).toBeUndefined();
-  await writeFile(join(f.stateDir, "oidc-token.json"), "{}");
+  await writeFile(join(f.stateDir, "oidc-token-default.json"), "{}");
   await expect(login.offlinePrincipal()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 });

@@ -116,7 +116,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (ctx) update(ctx);
     if (req.op === "identify") {
       if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
-      return { ok: true, pi_pid: process.pid, session_id: sessionId,
+      return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: sessionId,
         session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd,
         is_streaming: !ctx.isIdle(), bridge_epoch, human_event_count: sessions.get(sessionId)!.human_event_count };
     }

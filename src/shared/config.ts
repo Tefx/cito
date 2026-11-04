@@ -2,18 +2,29 @@ import { hostname, homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { mkdir, open, readFile, chmod } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { readFileSync, existsSync } from "node:fs";
+import { z } from "zod";
 import { normalizeIssuer } from "./identity.js";
+import { CitoError } from "./errors.js";
+import { hubNameSchema } from "./validation.js";
 
-export interface CitoConfig {
+export interface HubConfig {
+  name: string;
   natsUrl: string;
   authMode: "none" | "oidc";
   user: string;
   oidcIssuer?: string;
   oidcClientId?: string;
+  oidcScopes?: string[];
+}
+export interface CitoConfig extends Omit<HubConfig, "name"> {
   stateDir: string;
   codexHome: string;
   codexBin: string;
+  openBin: string;
   hostName: string;
+  defaultHub: string;
+  hubs: Record<string, HubConfig>;
 }
 function directory(value: string): string {
   const expanded = value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
@@ -28,8 +39,8 @@ export function validateHttpUrl(value: string, name: string): string {
   }
   return value;
 }
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
-  const natsUrl = env.CITO_NATS_URL ?? "nats://127.0.0.1:4222";
+function validateHub(value: HubConfig): HubConfig {
+  const { natsUrl, authMode, user, oidcClientId } = value;
   let url: URL;
   try { url = new URL(natsUrl); } catch { throw new Error("CITO_NATS_URL must be a valid NATS or WebSocket URL"); }
   if (!["nats:", "ws:", "wss:"].includes(url.protocol) || !url.hostname
@@ -37,11 +48,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     || (url.protocol === "nats:" && url.pathname && url.pathname !== "/")) {
     throw new Error("CITO_NATS_URL must use nats://, ws:// or wss:// without credentials");
   }
-  const authMode = env.CITO_AUTH_MODE ?? "none";
   if (authMode !== "none" && authMode !== "oidc") throw new Error("CITO_AUTH_MODE must be none or oidc");
-  const oidcIssuer = env.CITO_OIDC_ISSUER === undefined ? undefined
-    : normalizeIssuer(validateHttpUrl(env.CITO_OIDC_ISSUER, "CITO_OIDC_ISSUER"));
-  const oidcClientId = env.CITO_OIDC_CLIENT_ID;
+  const oidcIssuer = value.oidcIssuer === undefined ? undefined
+    : normalizeIssuer(validateHttpUrl(value.oidcIssuer, "CITO_OIDC_ISSUER"));
   if (authMode === "oidc" && !oidcIssuer) throw new Error("CITO_OIDC_ISSUER is required in oidc mode");
   if ((authMode === "oidc" || oidcIssuer !== undefined) && !oidcClientId?.trim()) {
     throw new Error("CITO_OIDC_CLIENT_ID is required with an OIDC issuer");
@@ -49,18 +58,47 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
   if (oidcClientId !== undefined && (oidcClientId !== oidcClientId.trim() || !oidcClientId)) {
     throw new Error("CITO_OIDC_CLIENT_ID must be a non-empty trimmed string");
   }
-  const user = env.CITO_USER ?? userInfo().username;
   if (user.length < 1 || user.length > 64 || /[^a-zA-Z0-9._-]/.test(user)) {
     throw new Error("CITO_USER must contain 1–64 letters, numbers, dots, underscores or hyphens");
   }
-  for (const key of ["CITO_STATE_DIR", "CITO_CODEX_HOME", "CITO_CODEX_BIN"] as const) {
+  return { ...value, oidcIssuer };
+}
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
+  for (const key of ["CITO_STATE_DIR", "CITO_CODEX_HOME", "CITO_CODEX_BIN", "CITO_OPEN_BIN", "CITO_CONFIG_PATH"] as const) {
     if (env[key] !== undefined && !env[key]?.trim()) throw new Error(key + " must not be empty");
   }
+  const stateDir = directory(env.CITO_STATE_DIR ?? "~/.cito");
+  const path = env.CITO_CONFIG_PATH ?? join(stateDir, "config.json");
+  const entrySchema = z.object({ natsUrl: z.string(), authMode: z.enum(["none", "oidc"]).default("none"),
+    user: z.string().default(env.CITO_USER ?? userInfo().username), oidcIssuer: z.string().optional(),
+    oidcClientId: z.string().optional(), oidcScopes: z.array(z.string().min(1)).optional() });
+  let json: { hubs: Record<string, z.infer<typeof entrySchema>>; default_hub?: string } | undefined;
+  if ((env === process.env || env.CITO_STATE_DIR !== undefined || env.CITO_CONFIG_PATH !== undefined)
+    && (env.CITO_CONFIG_PATH !== undefined || existsSync(path))) {
+    try {
+      json = z.object({ hubs: z.record(hubNameSchema, entrySchema).refine(v => Object.keys(v).length > 0),
+        default_hub: hubNameSchema.optional() }).parse(JSON.parse(readFileSync(path, "utf8")));
+    } catch (cause) { throw new CitoError("INVALID_INPUT", "Cannot load hub configuration: " + path, { cause }); }
+  }
+  const hubs: Record<string, HubConfig> = Object.create(null);
+  if (json) for (const [name, value] of Object.entries(json.hubs)) hubs[name] = validateHub({ name, ...value });
+  else hubs.default = validateHub({ name: "default", natsUrl: env.CITO_NATS_URL ?? "nats://127.0.0.1:4222",
+    authMode: (env.CITO_AUTH_MODE ?? "none") as HubConfig["authMode"], user: env.CITO_USER ?? userInfo().username,
+    oidcIssuer: env.CITO_OIDC_ISSUER, oidcClientId: env.CITO_OIDC_CLIENT_ID,
+    oidcScopes: env.CITO_OIDC_SCOPES?.split(/\s+/).filter(Boolean) });
+  const defaultHub = env.CITO_HUB?.trim() || json?.default_hub || (Object.keys(hubs).length === 1 ? Object.keys(hubs)[0] : undefined);
+  if (!defaultHub || !Object.hasOwn(hubs, defaultHub)) {
+    throw new CitoError("INVALID_INPUT", "default_hub must be specified and exist in configured hubs");
+  }
+  if (env.CITO_NATS_URL !== undefined && env.CITO_CONFIG_PATH === undefined) {
+    hubs[defaultHub] = validateHub({ ...hubs[defaultHub]!, natsUrl: env.CITO_NATS_URL });
+  }
+  const { name: _name, ...mirror } = hubs[defaultHub]!;
   return {
-    natsUrl, authMode, user, oidcIssuer, oidcClientId,
-    stateDir: directory(env.CITO_STATE_DIR ?? "~/.cito"),
+    ...mirror, hubs, defaultHub, stateDir,
     codexHome: directory(env.CITO_CODEX_HOME ?? "~/.codex"),
     codexBin: env.CITO_CODEX_BIN ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    openBin: env.CITO_OPEN_BIN ?? "/usr/bin/open",
     hostName: (env.CITO_HOST_NAME ?? hostname()).replace(/[^\x20-\x7e]/g, "").slice(0, 128),
   };
 }
