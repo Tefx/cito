@@ -19,8 +19,9 @@
   },
   "files": [
     "bin",
-    "dist",
-    "src",
+    "dist/src",
+    "src/macos/cito-banner.swift",
+    "src/pi-extension/cito-bridge.ts",
     "README.md"
   ],
   "publishConfig": {
