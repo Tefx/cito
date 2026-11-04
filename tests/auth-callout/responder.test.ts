@@ -3,10 +3,9 @@ import { createAccount, createCurve, createServer, createUser } from "nkeys.js";
 import { decode, encodeGeneric, type User, type AuthorizationResponse } from "@nats-io/jwt";
 import { AckPolicy, connect, StringCodec } from "nats";
 import { resolve } from "node:path";
-import {
-  loadAuthCalloutConfig, authorizationResponse, decodeRequest, startAuthCallout,
-  OidcVerifier, USER_PERMISSIONS,
-} from "../../src/auth-callout/index.js";
+import { loadAuthCalloutConfig } from "../../src/auth-callout/config.js";
+import { authorizationResponse, decodeRequest, startAuthCallout, USER_PERMISSIONS } from "../../src/auth-callout/responder.js";
+import { OidcVerifier } from "../../src/auth-callout/oidc.js";
 import { provisionNats } from "../../src/shared/nats.js";
 import { startNats } from "../shared/nats-server.js";
 import { signingKey, startOidc } from "./oidc-fixture.js";

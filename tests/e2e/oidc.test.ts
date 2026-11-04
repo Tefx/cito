@@ -2,15 +2,13 @@ import { expect, test } from "vitest";
 import { createAccount } from "nkeys.js";
 import { resolve } from "node:path";
 import { startNats } from "../shared/nats-server.js";
-import { startOidc, signingKey } from "../auth-callout/oidc-fixture.js";
+import { startOidc, signingKey, browser } from "../auth-callout/oidc-fixture.js";
 import { fixture, call, payload } from "../mcp/support.js";
 import { loadAuthCalloutConfig } from "../../src/auth-callout/config.js";
 import { startAuthCallout } from "../../src/auth-callout/responder.js";
 import { OidcVerifier } from "../../src/auth-callout/oidc.js";
 import { OidcLogin } from "../../src/mcp/oidc.js";
 import { CitoService } from "../../src/mcp/service.js";
-
-const browser = async (url: string, signal: AbortSignal) => { const response = await fetch(url, { signal }); if (!response.ok) throw new Error("PKCE failed"); };
 
 test("OIDC auth-callout + MCP enforces private/workspace scopes and works offline with verified cached identity", async () => {
   const key = await signingKey("ES256", "e2e"), oidc = await startOidc([key.jwk]), account = createAccount();

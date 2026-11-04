@@ -21,25 +21,20 @@ const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
 export default function citoBridge(pi: BridgeAPI): void {
   const bridge_epoch = randomUUID();
-  let human_event_count = 0;
+  const sessions = new Map<string, { human_event_count: number; processedBatchIds: Set<string> }>();
   let sessionId: string | undefined;
   let context: BridgeContext | undefined;
   let server: Server | undefined;
   let ownsSocket = false;
   const connections = new Set<Socket>();
-  const processedBatchIds = new Set<string>();
   const stateDir = process.env.CITO_STATE_DIR ?? join(homedir(), ".cito");
   const directory = join(stateDir === "~" ? homedir() : stateDir.startsWith("~/")
     ? join(homedir(), stateDir.slice(2)) : resolve(stateDir), "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
 
   function update(ctx: BridgeContext): void {
-    const id = ctx.sessionManager.getSessionId();
-    if (id !== sessionId) {
-      human_event_count = 0;
-      processedBatchIds.clear();
-      sessionId = id;
-    }
+    sessionId = ctx.sessionManager.getSessionId();
+    if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, { human_event_count: 0, processedBatchIds: new Set() });
     context = ctx;
   }
   function unlinkSocket(): void {
@@ -55,7 +50,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
       return { ok: true, pi_pid: process.pid, session_id: sessionId,
         session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd,
-        is_streaming: !ctx.isIdle(), bridge_epoch, human_event_count };
+        is_streaming: !ctx.isIdle(), bridge_epoch, human_event_count: sessions.get(sessionId)!.human_event_count };
     }
     if (req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
     if (!ctx || !sessionId || req.session_id !== sessionId) return { ok: false, error: "SESSION_MISMATCH" };
@@ -64,6 +59,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       ctx.ui.setStatus("cito", req.badge ?? undefined);
       return { ok: true };
     }
+    const { processedBatchIds } = sessions.get(sessionId)!;
     if (typeof req.batch_id !== "string" || !req.batch_id) return { ok: false, error: "INVALID_REQUEST" };
     if (processedBatchIds.has(req.batch_id)) return { ok: true, delivered: true, deduplicated: true };
     if (typeof req.content !== "string" || typeof req.wake !== "boolean") return { ok: false, error: "INVALID_REQUEST" };
@@ -129,7 +125,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   });
   pi.on("input", (event, ctx) => {
     update(ctx);
-    if (event.source === "interactive") human_event_count += 1;
+    if (event.source === "interactive" && sessionId) sessions.get(sessionId)!.human_event_count += 1;
   });
   pi.on("session_info_changed", (_event, ctx) => update(ctx));
   pi.on("session_tree", (_event, ctx) => update(ctx));

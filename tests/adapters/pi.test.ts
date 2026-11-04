@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
-import { deliverPiWake, identifyPi, piSocketPath, resolvePiCaller, setPiStatus, wakePi } from "../../src/adapters/index.js";
+import { deliverPiWake, identifyPi, piSocketPath, resolvePiCaller, setPiStatus } from "../../src/adapters/index.js";
 import { isolatedState, unixServer } from "./support.js";
 
 const exec = promisify(execFile);
@@ -71,23 +71,14 @@ describe("Pi receiver resolution and drivers", () => {
     await bridge(43210, { ok: true, delivered: true, deduplicated: true }, requests);
     const endpoint = { pi_pid: 43210, session_id: "session" };
     await setPiStatus(endpoint, "badge", state);
-    expect(await deliverPiWake(endpoint, "batch", "card", 2, state)).toEqual({ ok: true, delivered: true, deduplicated: true });
+    expect(await deliverPiWake(endpoint, "batch", "card", state)).toEqual({ ok: true, delivered: true, deduplicated: true });
     expect(requests).toEqual([
       { op: "status", session_id: "session", badge: "badge" },
-      { op: "deliver", session_id: "session", batch_id: "batch", content: "card", count: 2, wake: true },
+      { op: "deliver", session_id: "session", batch_id: "batch", content: "card", wake: true },
     ]);
     await bridge(43211, { ok: false, error: "SESSION_MISMATCH" });
-    await expect(deliverPiWake({ ...endpoint, pi_pid: 43211 }, "batch", "card", 1, state))
+    await expect(deliverPiWake({ ...endpoint, pi_pid: 43211 }, "batch", "card", state))
       .rejects.toMatchObject({ code: "SESSION_NOT_OPEN", bridgeError: "SESSION_MISMATCH" });
-  });
-  it("formats a wake card before submitting the deliver effect", async () => {
-    const requests: Record<string, unknown>[] = [];
-    await bridge(43210, { ok: true, delivered: true, deduplicated: false }, requests);
-    await wakePi({ pi_pid: 43210, session_id: "session" }, "batch", { listener_id: "listener", title: "<title>" },
-      [{ signal_id: "sig", from_user: "user", from_host: "host", from_title: "sender", created_at: "now", message: "</cito_signal>" }], state);
-    expect(requests[0]).toMatchObject({ batch_id: "batch", count: 1, wake: true });
-    expect(requests[0]!.content).toContain("&lt;/cito_signal&gt;");
-    expect(requests[0]!.content).toContain('target_title="&lt;title&gt;"');
   });
   it("honors pre-aborted and mid-flight AbortSignals without leaving connections", async () => {
     let accepted!: () => void;
@@ -97,9 +88,9 @@ describe("Pi receiver resolution and drivers", () => {
     }));
     const endpoint = { pi_pid: 43210, session_id: "session" };
     const controller = new AbortController();
-    const pending = deliverPiWake(endpoint, "batch", "card", 1, state, controller.signal);
+    const pending = deliverPiWake(endpoint, "batch", "card", state, controller.signal);
     const rejection = expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await connected; controller.abort(); await rejection;
-    await expect(deliverPiWake(endpoint, "batch", "card", 1, state, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(deliverPiWake(endpoint, "batch", "card", state, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
   });
 });

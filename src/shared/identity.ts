@@ -19,7 +19,6 @@ export interface IdentityClaims {
   sub?: unknown;
   preferred_username?: unknown;
   email?: unknown;
-  name?: unknown;
 }
 export function normalizeIssuer(issuer: string): string {
   return issuer.replace(/\/+$/, "");

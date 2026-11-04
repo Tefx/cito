@@ -13,7 +13,6 @@ export interface CitoConfig {
   stateDir: string;
   codexHome: string;
   codexBin: string;
-  hostId?: string;
   hostName: string;
 }
 function directory(value: string): string {
@@ -54,10 +53,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
   if (user.length < 1 || user.length > 64 || /[^a-zA-Z0-9._-]/.test(user)) {
     throw new Error("CITO_USER must contain 1–64 letters, numbers, dots, underscores or hyphens");
   }
-  const hostId = env.CITO_HOST_ID;
-  if (hostId !== undefined && !/^[a-zA-Z0-9._-]{1,128}$/.test(hostId)) {
-    throw new Error("CITO_HOST_ID must contain 1–128 letters, numbers, dots, underscores or hyphens");
-  }
   for (const key of ["CITO_STATE_DIR", "CITO_CODEX_HOME", "CITO_CODEX_BIN"] as const) {
     if (env[key] !== undefined && !env[key]?.trim()) throw new Error(key + " must not be empty");
   }
@@ -66,14 +61,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     stateDir: directory(env.CITO_STATE_DIR ?? "~/.cito"),
     codexHome: directory(env.CITO_CODEX_HOME ?? "~/.codex"),
     codexBin: env.CITO_CODEX_BIN ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-    hostId,
     hostName: (env.CITO_HOST_NAME ?? hostname()).replace(/[^\x20-\x7e]/g, "").slice(0, 128),
   };
 }
 
 /** Publish a complete host-id atomically with an exclusive hard-link creation. */
-export async function getHostId(config: Pick<CitoConfig, "hostId" | "stateDir">): Promise<string> {
-  if (config.hostId) return config.hostId;
+export async function getHostId(config: Pick<CitoConfig, "stateDir">): Promise<string> {
   await mkdir(config.stateDir, { recursive: true, mode: 0o700 });
   await chmod(config.stateDir, 0o700);
   const path = join(config.stateDir, "host-id");

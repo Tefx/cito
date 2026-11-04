@@ -27,10 +27,10 @@ export const SIGNALS_STREAM_CONFIG: Partial<StreamConfig> & { name: string } = {
   discard: DiscardPolicy.Old,
 };
 
-function isNotFound(error: unknown): boolean {
+export function isJsApiError(error: unknown, code: number): boolean {
   return typeof error === "object" && error !== null
     && "api_error" in error && typeof error.api_error === "object" && error.api_error !== null
-    && "err_code" in error.api_error && error.api_error.err_code === 10059;
+    && "err_code" in error.api_error && error.api_error.err_code === code;
 }
 function assertConfig(actual: StreamConfig, expected: Partial<StreamConfig>): void {
   for (const [key, value] of Object.entries(expected)) {
@@ -44,7 +44,7 @@ function assertConfig(actual: StreamConfig, expected: Partial<StreamConfig>): vo
 async function ensureSignals(jsm: JetStreamManager): Promise<void> {
   try { await jsm.streams.info(SIGNALS_STREAM); }
   catch (error) {
-    if (!isNotFound(error)) throw error;
+    if (!isJsApiError(error, 10059)) throw error;
     // The server accepts concurrent identical stream creations. If another client
     // wins with a different config, the final verification rejects the mismatch.
     await jsm.streams.add(SIGNALS_STREAM_CONFIG);

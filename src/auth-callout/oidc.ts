@@ -27,23 +27,23 @@ export class OidcVerifier {
     this.now = options.now ?? Date.now;
     if (!options.clientId.trim()) throw new Error("OIDC clientId is required");
   }
-  private async json(url: string): Promise<unknown> {
-    const response = await this.fetch(url, { signal: AbortSignal.timeout(5000), redirect: "error" });
+  private async json(url: string, signal?: AbortSignal): Promise<unknown> {
+    const response = await this.fetch(url, { signal: AbortSignal.any([AbortSignal.timeout(5000), ...(signal ? [signal] : [])]), redirect: "error" });
     if (!response.ok) throw new Error("OIDC HTTP status " + response.status);
     return response.json();
   }
-  private async refresh(): Promise<void> {
+  private async refresh(signal?: AbortSignal): Promise<void> {
     if (this.refreshing) return this.refreshing;
     if (this.now() - this.refreshAt < 60_000) return;
     this.refreshAt = this.now();
     this.refreshing = (async () => {
       try {
-        const discovery = await this.json(this.issuer + "/.well-known/openid-configuration");
+        const discovery = await this.json(this.issuer + "/.well-known/openid-configuration", signal);
         if (typeof discovery !== "object" || !discovery || !("jwks_uri" in discovery)
           || typeof discovery.jwks_uri !== "string") throw new Error("OIDC discovery has no jwks_uri");
         if ("issuer" in discovery && discovery.issuer !== this.issuer) throw new Error("OIDC discovery issuer mismatch");
         const uri = validateHttpUrl(discovery.jwks_uri, "jwks_uri");
-        const jwks = await this.json(uri);
+        const jwks = await this.json(uri, signal);
         if (typeof jwks !== "object" || !jwks || !("keys" in jwks) || !Array.isArray(jwks.keys)
           || !jwks.keys.every((key: unknown) => typeof key === "object" && key !== null && "kty" in key && typeof key.kty === "string")) {
           throw new Error("Invalid OIDC JWKS");
@@ -54,19 +54,30 @@ export class OidcVerifier {
         this.keys = set.keys;
         this.unavailable = false;
       } catch (cause) {
+        if (signal?.aborted) { this.refreshAt = -Infinity; throw signal.reason; }
         this.unavailable = true;
         throw new CitoError("AUTH_UNAVAILABLE", "OIDC discovery/JWKS unavailable during cache miss", { cause });
       } finally { this.refreshing = undefined; }
     })();
     return this.refreshing;
   }
-  async verify(token: string): Promise<VerifiedOidcClaims> {
+  async verify(token: string, signal?: AbortSignal): Promise<VerifiedOidcClaims> {
+    signal?.throwIfAborted();
+    let abort!: () => void;
+    const cancelled = signal && new Promise<never>((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    void cancelled?.catch(() => {}); // Cached-key verification may not await a refresh race.
     try {
       const header = decodeProtectedHeader(token);
       if (typeof header.alg !== "string" || !["RS256", "ES256"].includes(header.alg) || typeof header.kid !== "string" || !header.kid) {
         throw new Error("OIDC requires RS256/ES256 and kid");
       }
-      if (!this.keySet || !this.keys.some(key => key.kid === header.kid)) await this.refresh();
+      if (!this.keySet || !this.keys.some(key => key.kid === header.kid)) {
+        const refresh = this.refresh(signal);
+        await (cancelled ? Promise.race([refresh, cancelled]) : refresh);
+      }
       if (!this.keySet || !this.keys.some(key => key.kid === header.kid)) {
         if (this.unavailable) throw new CitoError("AUTH_UNAVAILABLE", "OIDC keys unavailable; refresh cooldown active");
         throw new Error("Unknown OIDC signing kid");
@@ -79,11 +90,13 @@ export class OidcVerifier {
       // jwtVerify checks exp's type and strict > now - tolerance.
       if (typeof payload.iss !== "string" || typeof payload.sub !== "string" || !payload.sub.trim()
         || typeof payload.exp !== "number") throw new Error("Invalid OIDC identity claims");
+      signal?.throwIfAborted();
       oidcPrincipal(payload);
       return payload as VerifiedOidcClaims;
     } catch (cause) {
+      signal?.throwIfAborted();
       if (cause instanceof CitoError && cause.code === "AUTH_UNAVAILABLE") throw cause;
       throw new CitoError("UNAUTHORIZED", "OIDC token rejected", { cause });
-    }
+    } finally { if (signal) signal.removeEventListener("abort", abort); }
   }
 }

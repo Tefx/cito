@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
 import { gitMetadata, type RepoMetadata } from "./git.js";
-import { formatWakeCard, type WakeSignal, type WakeTarget } from "./wake-card.js";
 
 const exec = promisify(execFile);
 type PiConfig = Pick<CitoConfig, "stateDir">;
@@ -120,14 +119,10 @@ export async function setPiStatus(endpoint: PiEndpoint, badge: string | null | u
   await requestPi(piSocketPath(config.stateDir, endpoint.pi_pid),
     { op: "status", session_id: endpoint.session_id, badge }, 1500, signal);
 }
-export async function deliverPiWake(endpoint: PiEndpoint, batchId: string, content: string, count: number,
+export async function deliverPiWake(endpoint: PiEndpoint, batchId: string, content: string,
   config: PiConfig = loadConfig(), signal?: AbortSignal): Promise<PiDelivery> {
   const reply = await requestPi(piSocketPath(config.stateDir, endpoint.pi_pid),
-    { op: "deliver", session_id: endpoint.session_id, batch_id: batchId, wake: true, content, count }, 3000, signal);
+    { op: "deliver", session_id: endpoint.session_id, batch_id: batchId, wake: true, content }, 3000, signal);
   if (reply.delivered !== true || typeof reply.deduplicated !== "boolean") throw new PiBridgeError("INVALID_RESPONSE");
   return { ok: true, delivered: true, deduplicated: reply.deduplicated };
-}
-export async function wakePi(endpoint: PiEndpoint, batchId: string, target: WakeTarget, signals: readonly WakeSignal[],
-  config: PiConfig = loadConfig(), signal?: AbortSignal): Promise<PiDelivery> {
-  return deliverPiWake(endpoint, batchId, formatWakeCard(target, signals), signals.length, config, signal);
 }

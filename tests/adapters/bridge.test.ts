@@ -64,6 +64,24 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     currentId = undefined;
     await expect(identifyPi(process.pid, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN", bridgeError: "SESSION_NOT_OPEN" });
   });
+  it("preserves per-session human counts and batch dedup through A to B to A", async () => {
+    await emit("session_start");
+    const a = { pi_pid: process.pid, session_id: "session-a" };
+    await emit("input", { source: "interactive" }); await emit("input", { source: "interactive" });
+    const original = await identifyPi(process.pid, state);
+    expect(await deliverPiWake(a, "same-batch", "A card", state)).toMatchObject({ deduplicated: false });
+    currentId = "session-b"; await emit("session_tree");
+    await emit("input", { source: "interactive" });
+    expect(await deliverPiWake({ ...a, session_id: "session-b" }, "same-batch", "B card", state)).toMatchObject({ deduplicated: false });
+    currentId = "session-a"; await emit("session_tree");
+    expect(await identifyPi(process.pid, state)).toMatchObject({ bridge_epoch: original.bridge_epoch, human_event_count: 2 });
+    expect(await deliverPiWake(a, "same-batch", "A card", state)).toMatchObject({ deduplicated: true });
+    await emit("input", { source: "interactive" });
+    expect((await identifyPi(process.pid, state)).human_event_count).toBe(3);
+    currentId = "session-b"; await emit("session_tree");
+    expect((await identifyPi(process.pid, state)).human_event_count).toBe(1);
+    expect(send.mock.calls.map(call => call[0].content)).toEqual(["A card", "B card"]);
+  });
   it("checks session identity before either status update or duplicate delivery", async () => {
     await emit("session_start");
     const endpoint = { pi_pid: process.pid, session_id: "session-a" };
@@ -71,17 +89,17 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     expect(status).toHaveBeenLastCalledWith("cito", "📡 cito: listener");
     await setPiStatus(endpoint, null, state);
     expect(status).toHaveBeenLastCalledWith("cito", undefined);
-    await deliverPiWake(endpoint, "batch", "hello", 1, state);
+    await deliverPiWake(endpoint, "batch", "hello", state);
     const wrong = { ...endpoint, session_id: "old" };
     await expect(setPiStatus(wrong, "no", state)).rejects.toMatchObject({ bridgeError: "SESSION_MISMATCH" });
-    await expect(deliverPiWake(wrong, "batch", "no", 1, state)).rejects.toMatchObject({ bridgeError: "SESSION_MISMATCH" });
+    await expect(deliverPiWake(wrong, "batch", "no", state)).rejects.toMatchObject({ bridgeError: "SESSION_MISMATCH" });
     expect(send).toHaveBeenCalledTimes(1);
     expect(status).toHaveBeenCalledTimes(2);
   });
   it("deduplicates concurrent retries and evicts only the oldest of 200 IDs", async () => {
     await emit("session_start");
     const endpoint = { pi_pid: process.pid, session_id: "session-a" };
-    const deliver = (id: string) => deliverPiWake(endpoint, id, "card", 2, state);
+    const deliver = (id: string) => deliverPiWake(endpoint, id, "card", state);
     const replies = await Promise.all([deliver("batch-0"), deliver("batch-0")]);
     expect(replies.map(r => r.deduplicated).sort()).toEqual([false, true]);
     expect(send).toHaveBeenCalledWith({ customType: "cito-notification", content: "card", display: true },
@@ -97,9 +115,9 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     await emit("session_start");
     const endpoint = { pi_pid: process.pid, session_id: "session-a" };
     send.mockImplementationOnce(() => { throw new Error("Pi unavailable"); });
-    await expect(deliverPiWake(endpoint, "retry", "card", 1, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
-    expect(await deliverPiWake(endpoint, "retry", "card", 1, state)).toMatchObject({ deduplicated: false });
-    expect(await deliverPiWake(endpoint, "retry", "card", 1, state)).toMatchObject({ deduplicated: true });
+    await expect(deliverPiWake(endpoint, "retry", "card", state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
+    expect(await deliverPiWake(endpoint, "retry", "card", state)).toMatchObject({ deduplicated: false });
+    expect(await deliverPiWake(endpoint, "retry", "card", state)).toMatchObject({ deduplicated: true });
     expect(send).toHaveBeenCalledTimes(2);
   });
   it("honors wake:false, echoes request IDs, and handles fragmented newline framing once", async () => {

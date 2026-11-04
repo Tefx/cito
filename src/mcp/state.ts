@@ -2,7 +2,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { chmod, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { CitoError, brokerAgeMs, harnessSchema, listenerIdSchema, sanitizeMessage } from "../shared/index.js";
+import { CitoError, brokerAgeMs, RETENTION_MS, harnessSchema, listenerIdSchema, sanitizeMessage } from "../shared/index.js";
 
 export const registrationSchema = z.object({
   listener_id: listenerIdSchema, principal_id: z.string().min(1), owner_user: z.string().min(1),
@@ -17,7 +17,7 @@ export const signalSchema = z.object({
   signal_id: z.string().min(1).max(128), to: listenerIdSchema, target_generation: z.number().int().positive(),
   sender_endpoint_key: z.string().min(1),
   from: z.object({ principal_id: z.string().min(1), user: z.string(), host_id: z.string(), host_name: z.string(),
-    harness: harnessSchema.nullable(), session_id: z.string().nullable().default(null), listener_id: listenerIdSchema.nullable().default(null),
+    harness: harnessSchema.nullable(), listener_id: listenerIdSchema.nullable().default(null),
     title: z.string().default(""), about: z.string().nullable().default(null) }),
   message: z.string().transform(sanitizeMessage), requested_wake: z.boolean(), in_reply_to: z.string().nullable(),
 });
@@ -27,18 +27,17 @@ export interface ListenerRow {
   harness: "codex" | "pi"; session_id: string; pi_pid: number | null; cwd: string; repo: string | null;
   branch: string | null; title: string; about: string; scope: "self" | "workspace"; allow_peer_wake: number;
   status: "ACTIVE" | "REBINDING" | "UNLISTENED" | "FENCED_INACTIVE";
-  binding_generation: number; owner_token: string; kv_revision: number; persisted_seq: number;
+  binding_generation: number; owner_token: string; persisted_seq: number;
   unattended_wake_count: number; last_bridge_epoch: string | null; retired_bridge_epochs_json: string;
   last_bridge_count: number; human_event_seq: number; last_consumed_human_seq: number;
   consecutive_probe_failures: number; replay_gap_detected: number; replay_gap_range: string | null;
-  dispatcher_token: string | null; lease_until_ms: number; updated_at_ms: number;
+  dispatcher_token: string | null; lease_until_ms: number;
 }
 export interface SignalRow {
-  signal_id: string; listener_id: string; seq: number; binding_generation: number; target_generation: number;
-  from_principal_id: string; from_user: string; from_host_id: string; from_host_name: string;
-  from_harness: "pi" | "codex" | null; from_session_id: string | null; from_listener_id: string | null;
-  from_title: string; from_about: string | null; sender_endpoint_key: string; message: string;
-  requested_wake: number; effective_wake: number; held_reason: string | null; in_reply_to: string | null;
+  signal_id: string; listener_id: string; seq: number; binding_generation: number;
+  from_user: string; from_host_name: string; from_harness: "pi" | "codex" | null; from_listener_id: string | null;
+  from_title: string; from_about: string | null; message: string;
+  effective_wake: number; held_reason: string | null; in_reply_to: string | null;
   created_at: string; expires_at_ms: number;
   state: "RECEIVED" | "DISPATCHING" | "DISPATCHED" | "STORED_PASSIVE" | "EXPIRED_UNSENT";
   batch_id: string | null; batch_expires_at_ms: number | null; dispatcher_token: string | null;
@@ -69,20 +68,18 @@ export class LocalState {
           allow_peer_wake INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL CHECK(status IN ('ACTIVE','REBINDING','UNLISTENED','FENCED_INACTIVE')),
           binding_generation INTEGER NOT NULL DEFAULT 0, owner_token TEXT NOT NULL DEFAULT '',
-          kv_revision INTEGER NOT NULL DEFAULT 0, persisted_seq INTEGER NOT NULL DEFAULT 0,
+          persisted_seq INTEGER NOT NULL DEFAULT 0,
           unattended_wake_count INTEGER NOT NULL DEFAULT 0, last_bridge_epoch TEXT,
           retired_bridge_epochs_json TEXT NOT NULL DEFAULT '[]', last_bridge_count INTEGER NOT NULL DEFAULT 0,
           human_event_seq INTEGER NOT NULL DEFAULT 0, last_consumed_human_seq INTEGER NOT NULL DEFAULT 0,
           consecutive_probe_failures INTEGER NOT NULL DEFAULT 0, replay_gap_detected INTEGER NOT NULL DEFAULT 0,
-          replay_gap_range TEXT, dispatcher_token TEXT, lease_until_ms INTEGER NOT NULL DEFAULT 0,
-          updated_at_ms INTEGER NOT NULL);
+          replay_gap_range TEXT, dispatcher_token TEXT, lease_until_ms INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS local_signals (
           signal_id TEXT PRIMARY KEY, listener_id TEXT NOT NULL, seq INTEGER NOT NULL,
-          binding_generation INTEGER NOT NULL, target_generation INTEGER NOT NULL,
-          from_principal_id TEXT NOT NULL, from_user TEXT NOT NULL, from_host_id TEXT NOT NULL,
-          from_host_name TEXT NOT NULL, from_harness TEXT, from_session_id TEXT, from_listener_id TEXT,
-          from_title TEXT NOT NULL, from_about TEXT, sender_endpoint_key TEXT NOT NULL, message TEXT NOT NULL,
-          requested_wake INTEGER NOT NULL, effective_wake INTEGER NOT NULL, held_reason TEXT, in_reply_to TEXT,
+          binding_generation INTEGER NOT NULL, from_user TEXT NOT NULL,
+          from_host_name TEXT NOT NULL, from_harness TEXT, from_listener_id TEXT,
+          from_title TEXT NOT NULL, from_about TEXT, message TEXT NOT NULL,
+          effective_wake INTEGER NOT NULL, held_reason TEXT, in_reply_to TEXT,
           created_at TEXT NOT NULL, expires_at_ms INTEGER NOT NULL,
           state TEXT NOT NULL CHECK(state IN ('RECEIVED','DISPATCHING','DISPATCHED','STORED_PASSIVE','EXPIRED_UNSENT')),
           batch_id TEXT, batch_expires_at_ms INTEGER, dispatcher_token TEXT,
@@ -96,13 +93,6 @@ export class LocalState {
           to_listener_id TEXT NOT NULL, requested_wake INTEGER NOT NULL, effective_wake INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL, held_reason TEXT, expires_at_iso TEXT NOT NULL, expires_at_ms INTEGER NOT NULL);
       `);
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        if (!db.prepare("PRAGMA table_info(local_signals)").all().some(column => column.name === "batch_card")) {
-          db.exec("ALTER TABLE local_signals ADD COLUMN batch_card TEXT");
-        }
-        db.exec("COMMIT");
-      } catch (error) { db.exec("ROLLBACK"); throw error; }
       return new LocalState(db);
     } catch (error) { db.close(); throw error; }
   }
@@ -119,7 +109,7 @@ export class LocalState {
     catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   recordOfflineGap(id: string, brokerNow: string, created: Date): void {
-    if (brokerAgeMs(brokerNow, created) > 1_800_000) this.run(`UPDATE local_listeners SET replay_gap_detected = 1,
+    if (brokerAgeMs(brokerNow, created) > RETENTION_MS) this.run(`UPDATE local_listeners SET replay_gap_detected = 1,
       replay_gap_range = 'offline_exceeded_30m' WHERE listener_id = ?`, id);
   }
   consumeHuman(id: string): void {
@@ -167,14 +157,11 @@ export class LocalState {
         this.run("UPDATE local_listeners SET unattended_wake_count = unattended_wake_count + 1 WHERE listener_id = ?", id);
         this.run("INSERT INTO local_pairwise_wakes VALUES (?, ?, ?)", id, signal.sender_endpoint_key, pairwiseNow);
       }
-      this.run(`INSERT INTO local_signals (signal_id, listener_id, seq, binding_generation, target_generation,
-        from_principal_id, from_user, from_host_id, from_host_name, from_harness, from_session_id, from_listener_id,
-        from_title, from_about, sender_endpoint_key, message, requested_wake, effective_wake, held_reason, in_reply_to,
-        created_at, expires_at_ms, state) VALUES (${Array(23).fill("?").join(",")})`,
-        signal.signal_id, id, seq, row.binding_generation, signal.target_generation,
-        signal.from.principal_id, signal.from.user, signal.from.host_id, signal.from.host_name, signal.from.harness,
-        signal.from.session_id, signal.from.listener_id, signal.from.title, signal.from.about,
-        signal.sender_endpoint_key, signal.message, +signal.requested_wake, +effective, reason, signal.in_reply_to,
+      this.run(`INSERT INTO local_signals (signal_id, listener_id, seq, binding_generation,
+        from_user, from_host_name, from_harness, from_listener_id, from_title, from_about, message,
+        effective_wake, held_reason, in_reply_to, created_at, expires_at_ms, state) VALUES (${Array(17).fill("?").join(",")})`,
+        signal.signal_id, id, seq, row.binding_generation, signal.from.user, signal.from.host_name, signal.from.harness,
+        signal.from.listener_id, signal.from.title, signal.from.about, signal.message, +effective, reason, signal.in_reply_to,
         created, expires, effective ? "RECEIVED" : "STORED_PASSIVE");
       advance();
       return { row: this.signals("SELECT * FROM local_signals WHERE signal_id = ?", signal.signal_id)[0]!, duplicate: false };

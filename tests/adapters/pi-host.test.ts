@@ -42,8 +42,8 @@ it.skipIf(!hostAvailable)("loads a standalone file with Pi 1.5.0's real loader, 
         await expect.poll(() => messages.filter(m => m.type === "input-done").length).toBe(2);
         expect((await identifyPi(pid, state)).human_event_count).toBe(1);
         const endpoint = { pi_pid: pid, session_id: info.session_id };
-        expect(await deliverPiWake(endpoint, "batch", "Host-loaded card", 1, state)).toMatchObject({ deduplicated: false });
-        expect(await deliverPiWake(endpoint, "batch", "Host-loaded card", 1, state)).toMatchObject({ deduplicated: true });
+        expect(await deliverPiWake(endpoint, "batch", "Host-loaded card", state)).toMatchObject({ deduplicated: false });
+        expect(await deliverPiWake(endpoint, "batch", "Host-loaded card", state)).toMatchObject({ deduplicated: true });
         await expect.poll(() => messages.filter(m => m.type === "delivered").length).toBe(1);
         expect(messages.find(m => m.type === "delivered")).toMatchObject({
           message: { customType: "cito-notification", content: "Host-loaded card", display: true },

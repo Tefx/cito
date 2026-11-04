@@ -65,13 +65,11 @@ export class OidcLogin {
       try { return await fetch(url, { ...options, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(Math.min(10_000, remaining())), ...(options.signal ? [options.signal] : [])]) }); }
       catch (cause) { throw new CitoError(signal.aborted ? "OIDC_LOGIN_TIMEOUT" : "AUTH_UNAVAILABLE", "OIDC endpoint unavailable", { cause }); }
     };
-    const verifier = new OidcVerifier({ issuer: this.config.oidcIssuer!, clientId: this.config.oidcClientId!,
-      fetch: (url, options) => request(String(url), options) });
     try {
       remaining();
       const cache = await this.cached();
       if (cache && cache.token_sha256 !== rejected && cache.expires_at > Date.now() / 1000 + 60) {
-        await verifier.verify(cache.id_token);
+        await this.verifier.verify(cache.id_token, signal);
         remaining();
         return cache;
       }
@@ -88,7 +86,7 @@ export class OidcLogin {
         if (!response.ok) throw new CitoError(response.status >= 500 ? "AUTH_UNAVAILABLE" : "UNAUTHORIZED", "OIDC token exchange rejected");
         const body = z.object({ id_token: z.string().min(1), refresh_token: z.string().optional() }).parse(await response.json());
         // Bind verification requests to the same login deadline, including JWKS fetch.
-        const claims = await verifier.verify(body.id_token);
+        const claims = await this.verifier.verify(body.id_token, signal);
         remaining();
         const principal = oidcPrincipal(claims);
         const value: TokenCache = { issuer: this.config.oidcIssuer!, client_id: this.config.oidcClientId!,
@@ -142,8 +140,9 @@ export class OidcLogin {
         await new Promise<void>(resolve => server.close(() => resolve()));
       }
     } catch (cause) {
+      if (signal.aborted || performance.now() >= deadline) throw new CitoError("OIDC_LOGIN_TIMEOUT", "OIDC login deadline exceeded", { cause });
       if (cause instanceof CitoError) throw cause;
-      throw new CitoError(signal.aborted ? "OIDC_LOGIN_TIMEOUT" : "AUTH_UNAVAILABLE", "OIDC login failed", { cause });
+      throw new CitoError("AUTH_UNAVAILABLE", "OIDC login failed", { cause });
     } finally { await lock.release(); }
   }
 }

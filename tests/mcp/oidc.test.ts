@@ -1,13 +1,12 @@
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OidcLogin } from "../../src/mcp/oidc.js";
-import { signingKey, startOidc } from "../auth-callout/oidc-fixture.js";
+import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
 import { fixture } from "./support.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-export const browser = async (url: string, signal: AbortSignal) => { const result = await fetch(url, { signal }); if (!result.ok) throw new Error("Browser callback rejected"); };
+afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function setup() {
   const key = await signingKey("ES256", "key");
   const oidc = await startOidc([key.jwk]); cleanups.push(() => oidc.stop());
@@ -59,6 +58,24 @@ test("refresh 503 fails without launching a browser or overwriting verified cach
   await expect(login.recover(old.token_sha256)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE", retryable: true });
   expect(opened()).toBe(1);
   expect(await readFile(join(f.stateDir, "oidc-token.json"), "utf8")).toBe(original);
+});
+
+test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TIMEOUT", async () => {
+  const deadline = new AbortController(), timeout = AbortSignal.timeout.bind(AbortSignal), request = globalThis.fetch;
+  vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => ms === 45_000 ? deadline.signal : timeout(ms));
+  let verifying = false;
+  vi.spyOn(globalThis, "fetch").mockImplementation((url, options) => {
+    if (String(url).endsWith("/jwks")) {
+      verifying = true;
+      deadline.abort(new DOMException("Login deadline expired", "TimeoutError"));
+    }
+    return request(url, options);
+  });
+  const { f, login } = await setup();
+  await expect(login.recover(null)).rejects.toMatchObject({ code: "OIDC_LOGIN_TIMEOUT", retryable: true });
+  expect(verifying).toBe(true);
+  expect(await login.cached()).toBeUndefined();
+  await expect(stat(join(f.stateDir, "oidc-token.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("locally invalid signatures never acquire a verified identity cache", async () => {

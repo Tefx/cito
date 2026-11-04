@@ -2,6 +2,12 @@ import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { generateKeyPair, exportJWK, SignJWT, type JWK, type JWTPayload } from "jose";
 
+/** Follow the mock provider through the real loopback PKCE callback. */
+export const browser = async (url: string, signal: AbortSignal) => {
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error("Browser callback rejected");
+};
+
 export async function signingKey(alg: "RS256" | "ES256", kid: string) {
   const pair = await generateKeyPair(alg, { extractable: true });
   const jwk = { ...await exportJWK(pair.publicKey), kid, alg, use: "sig" };

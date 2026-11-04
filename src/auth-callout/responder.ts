@@ -78,7 +78,7 @@ export async function startAuthCallout(config: AuthCalloutConfig, options: {
 } = {}): Promise<AuthCalloutService> {
   const nc = await connectNats({
     servers: config.natsUrl,
-    ...(config.authMode === "oidc" ? { user: config.serviceUser, pass: config.servicePassword } : {}),
+    ...(config.authMode === "oidc" ? { user: "callout-service", pass: config.servicePassword } : {}),
     name: "cito-auth-callout",
     timeout: 5000,
     maxReconnectAttempts: -1,

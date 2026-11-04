@@ -15,7 +15,7 @@ export interface ReceiverOptions { banner?: BannerOptions; codex?: Pick<CodexDri
 class DispatchStopped extends Error {}
 export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 export const listenLock = (config: CitoConfig, id: string) => join(config.stateDir, "sockets", `listen-${id}.lock`);
-export const ackPayload = (row: SignalRow) => ({ signal_id: row.signal_id, effective_wake: !!row.effective_wake,
+const ackPayload = (row: SignalRow) => ({ signal_id: row.signal_id, effective_wake: !!row.effective_wake,
   status: row.effective_wake ? "wake_accepted" : "stored_passive", held_reason: row.held_reason });
 
 /** One process-owned receiver; SQLite owner_token guards every write and every host effect. */
@@ -30,6 +30,7 @@ export class Receiver {
   private dispatching?: Promise<void>;
   private probing?: Promise<void>;
   private stopped?: Promise<void>;
+  private ownerLock?: NonNullable<Awaited<ReturnType<typeof acquireFlock>>>;
   readonly id: string;
   readonly owner: string;
   readonly generation: number;
@@ -42,8 +43,16 @@ export class Receiver {
     this.tasks.add(task);
     void task.catch(error => { if (!this.abort.signal.aborted) this.log(error); }).finally(() => this.tasks.delete(task));
   }
-  async start(): Promise<void> {
+  async start(ownerWaitMs = 5000): Promise<boolean> {
+    if (this.abort.signal.aborted) return false;
+    // A persisted owner may be discovered by several MCP processes. Only the
+    // live holder may consume/dispatch; kernel flock releases on process exit.
+    const ownerLock = await acquireFlock(join(this.config.stateDir, "sockets", `receiver-${this.id}.lock`), ownerWaitMs);
+    if (!ownerLock) return false;
+    if (this.abort.signal.aborted) { await ownerLock.release(); return false; }
+    this.ownerLock = ownerLock;
     try {
+      this.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ? AND owner_token = ?", this.id, this.owner);
       this.watch = await this.broker.kv.watch({ key: this.id });
       this.track((async () => {
         for await (const entry of this.watch!) {
@@ -54,7 +63,7 @@ export class Receiver {
           }
         }
       })());
-      if (this.abort.signal.aborted) return;
+      if (this.abort.signal.aborted) return false;
       const row = this.state.listener(this.id)!;
       const info = await this.broker.jsm.consumers.add(SIGNALS_STREAM, {
         filter_subject: "cito.signal." + this.id, ack_policy: AckPolicy.Explicit,
@@ -64,7 +73,7 @@ export class Receiver {
       });
       this.consumer = await this.broker.js.consumers.get(SIGNALS_STREAM, info.name);
       this.messages = await this.consumer.consume({ max_messages: 50 });
-      if (this.abort.signal.aborted) { await this.messages.close(); return; }
+      if (this.abort.signal.aborted) { await this.messages.close(); return false; }
       this.track((async () => {
         for await (const msg of this.messages!) {
           if (this.abort.signal.aborted) break;
@@ -83,6 +92,7 @@ export class Receiver {
       this.sweepTimer = setInterval(() => { this.track(this.sweep()); }, 20_000);
       this.sweepTimer.unref();
       this.schedule();
+      return true;
     } catch (error) { await this.stop(); throw error; }
   }
   cancel(): void {
@@ -90,6 +100,8 @@ export class Receiver {
     clearTimeout(this.debounce); clearInterval(this.sweepTimer);
     this.watch?.stop();
     void this.messages?.close();
+    const lock = this.ownerLock; this.ownerLock = undefined;
+    if (lock) this.track(lock.release());
   }
   stop(): Promise<void> {
     return this.stopped ??= (async () => {
@@ -226,7 +238,7 @@ export class Receiver {
     try {
       if (listener.harness === "pi") {
         if (!await this.retry(first, 3, [1000, 2000], async () => {
-          await deliverPiWake({ pi_pid: listener.pi_pid!, session_id: listener.session_id }, batch, card, rows.length, this.config, this.abort.signal);
+          await deliverPiWake({ pi_pid: listener.pi_pid!, session_id: listener.session_id }, batch, card, this.config, this.abort.signal);
         })) { passive(); return; }
       } else {
         if (!rows.every(row => row.queue_written)) {
@@ -312,8 +324,7 @@ export class Receiver {
       if (!entry) { this.fence(); return; }
       const value = registrationSchema.parse(entry.json());
       if (value.owner_token !== this.owner || value.binding_generation !== this.generation || value.state !== "ACTIVE") { this.fence(); return; }
-      const revision = await this.broker.kv.update(this.id, encode(registration(this.state.listener(this.id)!)), entry.revision);
-      this.state.run("UPDATE local_listeners SET kv_revision = ?, updated_at_ms = ? WHERE listener_id = ? AND owner_token = ?", revision, Date.now(), this.id, this.owner);
+      await this.broker.kv.update(this.id, encode(registration(this.state.listener(this.id)!)), entry.revision);
     } finally { await lock.release(); }
   }
 }

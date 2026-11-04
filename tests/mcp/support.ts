@@ -1,7 +1,7 @@
 import { afterAll } from "vitest";
-import { mkdtemp, mkdir, rm, copyFile, chmod, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, copyFile, chmod, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -55,7 +55,12 @@ export async function piBridge(stateDir: string) {
     switchSession(id: string) { session = id; handlers.get("session_tree")!({}, ctx); },
     stop: async () => { await handlers.get("session_shutdown")!({}, ctx); } };
 }
-export async function fixture(options: { broker?: TestNats; user?: string; service?: ServiceOptions; env?: NodeJS.ProcessEnv; pi?: boolean } = {}) {
+export async function bannerPids(binaryPath: string): Promise<number[]> {
+  return (await exec("/bin/ps", ["-axo", "pid=,command="])).stdout.split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/); return match?.[2] === binaryPath ? [Number(match[1])] : [];
+  });
+}
+export async function fixture(options: { broker?: TestNats; user?: string; service?: ServiceOptions; env?: NodeJS.ProcessEnv; pi?: boolean; observeBanner?: boolean } = {}) {
   const root = await mkdtemp("/tmp/cito-mcp-");
   const stateDir = join(root, "state"), codexHome = join(root, "codex");
   await mkdir(join(stateDir, "bin"), { recursive: true }); await mkdir(codexHome);
@@ -70,19 +75,39 @@ export async function fixture(options: { broker?: TestNats; user?: string; servi
   const service = await CitoService.create(config, serviceOptions);
   const pi = options.pi === false ? undefined : await piBridge(stateDir);
   let closed = false;
-  return { root, config, env, stateDir, codexHome, broker, service, serviceOptions, pi: pi!, diagnostics,
+  let bannerExited: Promise<unknown> | undefined;
+  const bannerDisplays: { pid: number; title: string; subtitle: string; message: string }[] = [];
+  const result = { root, config, env, stateDir, codexHome, broker, service, serviceOptions, pi: pi!, diagnostics, bannerDisplays,
     async close() {
       if (closed) return; closed = true;
       await service.close(); await pi?.stop();
       const binaryPath = join(stateDir, "bin/cito-banner");
-      const pids = async () => (await exec("/bin/ps", ["-axo", "pid=,command="])).stdout.split("\n").flatMap(line => {
-        const match = line.trim().match(/^(\d+)\s+(.+)$/); return match?.[2] === binaryPath ? [Number(match[1])] : [];
-      });
-      for (const pid of await pids()) { try { process.kill(pid, "SIGKILL"); } catch {} }
-      await waitFor(async () => !(await pids()).length);
+      for (const pid of await bannerPids(binaryPath)) { try { process.kill(pid, "SIGKILL"); } catch {} }
+      await waitFor(async () => !(await bannerPids(binaryPath)).length);
+      await bannerExited;
       if (!options.broker) await broker.stop();
       await rm(root, { recursive: true, force: true });
     } };
+  try {
+    if (options.observeBanner) {
+      if (process.platform !== "darwin") throw new Error("Native HUD observation requires macOS");
+      const child = spawn(join(stateDir, "bin/cito-banner"), [], { env: { ...process.env, ...env,
+        CITO_BANNER_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "10000" }, stdio: ["ignore", "ignore", "pipe"] });
+      bannerExited = new Promise(resolve => child.once("close", resolve));
+      let pending = "";
+      child.stderr!.setEncoding("utf8").on("data", (chunk: string) => {
+        pending += chunk;
+        let end: number;
+        while ((end = pending.indexOf("\n")) >= 0) {
+          const line = pending.slice(0, end); pending = pending.slice(end + 1);
+          if (line.startsWith("cito-banner: display ")) bannerDisplays.push(JSON.parse(line.slice("cito-banner: display ".length)));
+          else diagnostics.push(line);
+        }
+      });
+      await waitFor(async () => { try { return (await stat(join(stateDir, "sockets/banner.sock"))).isSocket(); } catch { return false; } });
+    }
+    return result;
+  } catch (error) { await result.close(); throw error; }
 }
 
 /** Desktop protocol/CLI fixture; adapters still use real framing, sockets, SQLite and execFile. */

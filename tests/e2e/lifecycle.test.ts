@@ -1,17 +1,15 @@
 import { afterEach, expect, test } from "vitest";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { fixture, call, payload, waitFor, codexDesktop } from "../mcp/support.js";
+import { fixture, call, payload, waitFor, codexDesktop, bannerPids } from "../mcp/support.js";
 import { CitoService } from "../../src/mcp/service.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
 afterEach(async () => { for (const f of fixtures.splice(0)) await f.close(); });
-async function setup(pi = true) { const f = await fixture({ pi }); fixtures.push(f); return f; }
+async function setup(pi = true, observeBanner = false) { const f = await fixture({ pi, observeBanner }); fixtures.push(f); return f; }
 
-test("Pi lifecycle uses real broker, bridge socket, frozen wake card, inbox acknowledgement and native HUD", async () => {
-  const f = await setup();
+test.skipIf(process.platform !== "darwin")("Pi lifecycle uses real broker, bridge socket, frozen wake card, inbox acknowledgement and native HUD", async () => {
+  const f = await setup(true, true);
   const enrolled = await call(f.service, "cito_listen", { about: "Pi notifications" }, f.pi.meta);
   const id = String(enrolled.listener_id);
   expect(id).toMatch(/^c_[a-z2-7]{12}$/);
@@ -28,6 +26,8 @@ test("Pi lifecycle uses real broker, bridge socket, frozen wake card, inbox ackn
   await waitFor(() => f.pi.messages.length === 1);
   expect(f.pi.messages[0]).toMatchObject({ options: { triggerTurn: true, deliverAs: "followUp" } });
   expect(f.pi.messages[0]!.content).toContain("&lt;ping&gt;");
+  await waitFor(() => f.bannerDisplays.length === 1);
+  expect(f.bannerDisplays[0]).toMatchObject({ title: "Cito · Pi receiver", subtitle: `alice@${f.config.hostName} · `, message: "<ping>" });
   const inbox = await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta);
   expect(inbox).toMatchObject({ listener_id: id, acknowledged_count: 1, signals: [{ signal_id: sent.signal_id, message: "<ping>", effective_wake: true }] });
   expect((await call(f.service, "cito_inbox", {}, f.pi.meta)).signals).toEqual([]);
@@ -42,13 +42,15 @@ test("Pi lifecycle uses real broker, bridge socket, frozen wake card, inbox ackn
   expect(f.diagnostics).toEqual([]);
 }, 15_000);
 
-test("passive Pi admission changes badge/inbox and never inserts a transcript card", async () => {
-  const f = await setup();
+test.skipIf(process.platform !== "darwin")("passive Pi admission changes badge/inbox, shows native HUD, and never inserts a transcript card", async () => {
+  const f = await setup(true, true);
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "passive" }, f.pi.meta);
   const sent = await call(f.service, "cito_send", { to: id, message: "FYI", wake: false });
   expect(sent).toMatchObject({ status: "stored_passive", effective_wake: false, held_reason: "passive_requested" });
   await waitFor(() => f.pi.badges.at(-1)?.includes("1 unread") === true);
   expect(f.pi.messages).toEqual([]);
+  await waitFor(() => f.bannerDisplays.length === 1);
+  expect(f.bannerDisplays[0]).toMatchObject({ title: "Cito · Pi receiver", subtitle: `[仅知会] alice@${f.config.hostName} · `, message: "FYI" });
   expect((await call(f.service, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ message: "FYI", held_reason: "passive_requested" }]);
 });
 
@@ -146,9 +148,7 @@ test.skipIf(process.platform !== "darwin")("real Codex HUD click advances human 
     const binary = join(f.stateDir, "bin/cito-banner");
     let pid = 0;
     await waitFor(async () => {
-      const { stdout } = await promisify(execFile)("/bin/ps", ["-axo", "pid=,command="]);
-      const line = stdout.split("\n").find(line => line.trim().replace(/^\d+\s+/, "") === binary);
-      if (line) pid = Number(line.trim().split(/\s+/)[0]);
+      pid = (await bannerPids(binary))[0] ?? 0;
       try { return pid > 0 && (await stat(join(f.stateDir, "sockets/banner.sock"))).isSocket(); } catch { return false; }
     });
     process.kill(pid, "SIGUSR1");

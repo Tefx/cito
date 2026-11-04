@@ -15,7 +15,7 @@ async function enrolled() {
   const admit = (overrides: Partial<Signal> = {}, sender = "none#alice|host|unbound|default") => {
     const signal: Signal = { signal_id: "sig_" + randomUUID(), to: id, target_generation: row.binding_generation,
       sender_endpoint_key: sender, from: { principal_id: "none#alice", user: "alice", host_id: "host", host_name: "sender-host",
-        harness: null, session_id: null, listener_id: null, title: "sender", about: null },
+        harness: null, listener_id: null, title: "sender", about: null },
       message: "notification", requested_wake: true, in_reply_to: null, ...overrides };
     return { signal, result: state.admit(id, row.owner_token, signal, ++seq, new Date().toISOString(), Date.now() + 1_800_000, Math.floor(uptime() * 1000)) };
   };
@@ -78,7 +78,7 @@ describe("atomic Stage-1 admission", () => {
     const { id, row, state, admit } = await enrolled();
     admit(); admit();
     state.run("UPDATE local_listeners SET binding_generation = binding_generation + 1, unattended_wake_count = 3 WHERE listener_id = ?", id);
-    const peer = { principal_id: "none#bob", user: "bob", host_id: "h", host_name: "h", harness: null, session_id: null, listener_id: null, title: "", about: null };
+    const peer = { principal_id: "none#bob", user: "bob", host_id: "h", host_name: "h", harness: null, listener_id: null, title: "", about: null };
     expect(admit({ requested_wake: false, from: peer }).result.row!.held_reason).toBe("stale_generation");
     expect(admit({ target_generation: row.binding_generation + 1, requested_wake: false, from: peer }).result.row!.held_reason).toBe("passive_requested");
     expect(admit({ target_generation: row.binding_generation + 1, from: peer }).result.row!.held_reason).toBe("peer_wake_disabled");
@@ -93,7 +93,7 @@ describe("atomic Stage-1 admission", () => {
     expect(stale).toMatchObject({ state: "STORED_PASSIVE", held_reason: "stale_generation" });
     expect((await call(f.service, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ signal_id: stale.signal_id, held_reason: "stale_generation" }]);
     state.run("UPDATE local_listeners SET scope = 'self' WHERE listener_id = ?", id);
-    const denied = admit({ from: { principal_id: "none#bob", user: "bob", host_id: "", host_name: "", harness: null, session_id: null, listener_id: null, title: "", about: null } });
+    const denied = admit({ from: { principal_id: "none#bob", user: "bob", host_id: "", host_name: "", harness: null, listener_id: null, title: "", about: null } });
     expect(denied.result.row).toBeUndefined();
     expect(state.listener(id)).toMatchObject({ persisted_seq: 2, unattended_wake_count: 0 });
     expect(state.signals("SELECT * FROM local_signals")).toHaveLength(1);

@@ -4,7 +4,7 @@ import { Events, ErrorCode } from "nats";
 import { acquireFlock } from "../banner/flock.js";
 import { codexThreadId, resolveCodexCaller, resolvePiCaller, readCodexThread, setPiStatus,
   type CodexCaller, type PiCaller } from "../adapters/index.js";
-import { CitoError, brokerNow, brokerAgeMs, connectNats, provisionNats, loadConfig, getHostId,
+import { CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, senderEndpointKey, parseInput, successResult, errorResult,
   listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema,
   type CitoConfig, type Principal } from "../shared/index.js";
@@ -14,14 +14,8 @@ import { Receiver, encode, listenLock, type Broker, type ReceiverOptions } from 
 
 type Caller = CodexCaller | PiCaller;
 export interface ServiceOptions extends ReceiverOptions { browserOpener?: BrowserOpener }
-export type ToolName = "cito_listen" | "cito_unlisten" | "cito_find" | "cito_send" | "cito_inbox";
 const ackSchema = z.object({ signal_id: z.string(), effective_wake: z.boolean(),
   status: z.enum(["wake_accepted", "stored_passive"]), held_reason: z.string().nullable() });
-function casConflict(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "api_error" in error
-    && !!error.api_error && typeof error.api_error === "object" && "err_code" in error.api_error
-    && error.api_error.err_code === 10071;
-}
 function sentResult(row: SentRow) {
   return { ok: true, signal_id: row.signal_id, seq: row.seq, to: row.to_listener_id, requested_wake: !!row.requested_wake,
     effective_wake: !!row.effective_wake, status: row.status, held_reason: row.held_reason, expires_at: row.expires_at_iso };
@@ -37,6 +31,7 @@ export class CitoService {
   private readonly login?: OidcLogin;
   private principal?: Principal;
   private closing = false;
+  private readonly shuttingDown = new AbortController();
   private closePromise?: Promise<void>;
   private readonly calls = new Set<Promise<unknown>>();
   private constructor(readonly config: CitoConfig, readonly state: LocalState, readonly hostId: string,
@@ -50,7 +45,10 @@ export class CitoService {
   }
   private async network(): Promise<Broker> {
     if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
-    if (this.broker && !this.broker.nc.isClosed() && !this.rejectedHash) return this.broker;
+    if (this.broker && !this.broker.nc.isClosed() && !this.rejectedHash) {
+      await this.restoreReceivers(this.broker);
+      return this.broker;
+    }
     if (this.brokerPromise) return this.brokerPromise;
     this.brokerPromise = (async () => {
       if (this.rejectedHash) await this.broker?.nc.close();
@@ -107,23 +105,33 @@ export class CitoService {
     }
   }
   private async restoreReceivers(broker: Broker): Promise<void> {
-    for (const [id, previous] of this.receivers) {
-      if (this.closing || !previous.abort.signal.aborted) continue;
-      await previous.stop();
+    const ids = new Set([
+      ...this.state.db.prepare("SELECT listener_id FROM local_listeners WHERE status = 'ACTIVE'").all().map(row => String(row.listener_id)),
+      ...this.receivers.keys(),
+    ]);
+    for (const id of ids) {
+      const previous = this.receivers.get(id);
+      if (this.closing || (previous && !previous.abort.signal.aborted)) continue;
+      await previous?.stop();
       const lock = await acquireFlock(listenLock(this.config, id), 5000);
       if (!lock) continue;
       let restored: Receiver | undefined;
       try {
+        const current = this.receivers.get(id);
+        if (this.closing || (current !== previous && current && !current.abort.signal.aborted)) continue;
         const local = this.state.listener(id);
+        if (!local || local.status !== "ACTIVE") continue;
         const entry = await broker.kv.get(id);
         const remote = entry && registrationSchema.parse(entry.json());
-        if (!local || local.status !== "ACTIVE" || local.owner_token !== previous.owner
-          || remote?.owner_token !== previous.owner || remote.binding_generation !== previous.generation || remote.state !== "ACTIVE") continue;
+        if (remote?.owner_token !== local.owner_token || remote.binding_generation !== local.binding_generation || remote.state !== "ACTIVE") continue;
         this.state.recordOfflineGap(id, await brokerNow(broker.jsm), entry!.created);
-        this.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ? AND owner_token = ?", id, previous.owner);
         restored = new Receiver(this.state, this.config, broker, local, this.options);
         this.receivers.set(id, restored);
-        await restored.start();
+        if (!await restored.start(0)) {
+          await restored.stop();
+          if (this.receivers.get(id) === restored) this.receivers.delete(id);
+          restored = undefined;
+        }
       } finally { await lock.release(); }
       if (restored) await restored.sweep();
     }
@@ -189,12 +197,12 @@ export class CitoService {
       previous = this.receivers.get(id); previous?.cancel();
       this.state.transaction(() => {
         this.state.run(`INSERT INTO local_listeners (listener_id, principal_id, owner_user, host_id, host_name, harness,
-          session_id, pi_pid, cwd, repo, branch, title, about, scope, allow_peer_wake, status, updated_at_ms)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REBINDING', ?)
+          session_id, pi_pid, cwd, repo, branch, title, about, scope, allow_peer_wake, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REBINDING')
           ON CONFLICT(listener_id) DO UPDATE SET status = 'REBINDING'`, id, principal.principal_id,
           principal.owner_user, this.hostId, this.config.hostName, caller.harness, caller.session_id,
           caller.harness === "pi" ? caller.pi_pid : null, caller.cwd, caller.repo, caller.branch, caller.title,
-          input.about, input.scope ?? "self", +(input.allow_peer_wake ?? false), Date.now());
+          input.about, input.scope ?? "self", +(input.allow_peer_wake ?? false));
         if (caller.harness === "pi") this.state.observePi(id, caller.bridge_epoch, caller.human_event_count);
         this.state.consumeHuman(id);
       });
@@ -208,21 +216,24 @@ export class CitoService {
           cwd: caller.cwd, repo: caller.repo, branch: caller.branch, title: caller.title, about: input.about,
           scope: input.scope ?? local.scope, allow_peer_wake: input.allow_peer_wake ?? !!local.allow_peer_wake,
           state: "ACTIVE" as const, binding_generation: generation, owner_token: owner };
-        let revision;
-        try { revision = entry ? await broker.kv.update(id, encode(next), entry.revision) : await broker.kv.create(id, encode(next)); }
-        catch (error) { if (casConflict(error)) continue; throw error; }
+        try { if (entry) await broker.kv.update(id, encode(next), entry.revision); else await broker.kv.create(id, encode(next)); }
+        catch (error) { if (isJsApiError(error, 10071)) continue; throw error; }
         this.state.transaction(() => {
-          this.state.run(`UPDATE local_listeners SET status = 'ACTIVE', binding_generation = ?, owner_token = ?, kv_revision = ?,
+          this.state.run(`UPDATE local_listeners SET status = 'ACTIVE', binding_generation = ?, owner_token = ?,
             pi_pid = ?, cwd = ?, repo = ?, branch = ?, title = ?, about = ?, scope = ?, allow_peer_wake = ?,
-            host_name = ?, consecutive_probe_failures = 0, dispatcher_token = NULL, lease_until_ms = 0, updated_at_ms = ?
-            WHERE listener_id = ?`, generation, owner, revision, caller.harness === "pi" ? caller.pi_pid : null,
+            host_name = ?, consecutive_probe_failures = 0, dispatcher_token = NULL, lease_until_ms = 0
+            WHERE listener_id = ?`, generation, owner, caller.harness === "pi" ? caller.pi_pid : null,
             caller.cwd, caller.repo, caller.branch, caller.title, input.about, next.scope, +next.allow_peer_wake,
-            this.config.hostName, Date.now(), id);
+            this.config.hostName, id);
           // Recovery transfers admitted work to the new owner without changing frozen membership or batch_id.
           this.state.run(`UPDATE local_signals SET binding_generation = ?, dispatcher_token = NULL
             WHERE listener_id = ? AND state IN ('RECEIVED','DISPATCHING')`, generation, id);
         });
         ownedToken = owner;
+        const receiver = new Receiver(this.state, this.config, broker, this.state.listener(id)!, this.options);
+        this.receivers.set(id, receiver);
+        if (!await receiver.start()) { receiver.cancel(); throw new CitoError("NATS_UNAVAILABLE", "Receiver ownership lock unavailable"); }
+        await receiver.badge().catch(error => (this.options.diagnostic ?? console.error)(String(error)));
         return { ok: true, status: "listening", listener_id: id, binding_generation: generation,
           user: principal.owner_user, host_id: this.hostId, host_name: this.config.hostName, harness: caller.harness,
           session_id: caller.session_id, about: input.about, repo: caller.repo, branch: caller.branch, title: caller.title,
@@ -231,33 +242,31 @@ export class CitoService {
       }
       throw new CitoError("STALE_GENERATION", "Listener CAS retries exhausted");
     } catch (error) {
-      this.state.run("UPDATE local_listeners SET status = 'FENCED_INACTIVE' WHERE listener_id = ?", id);
+      if (!ownedToken) this.state.run("UPDATE local_listeners SET status = 'FENCED_INACTIVE' WHERE listener_id = ?", id);
       throw error;
     } finally {
       await lock.release();
       await previous?.stop();
-      const local = this.state.listener(id);
-      if (local?.status === "ACTIVE" && local.owner_token === ownedToken) {
-        const receiver = new Receiver(this.state, this.config, broker, local, this.options);
-        this.receivers.set(id, receiver);
-        await receiver.start();
-        await receiver.badge().catch(error => (this.options.diagnostic ?? console.error)(String(error)));
-      }
     }
   }
   private async unlisten(meta: Record<string, unknown>) {
     const principal = await this.identity(true), caller = await this.caller(meta, false, principal);
     const id = listenerId({ ...principal, host_id: this.hostId, harness: caller.harness, session_id: caller.session_id });
-    // Stop the in-flight queue command before waiting for its effect lock.
-    this.receivers.get(id)?.cancel();
-    const lock = await acquireFlock(listenLock(this.config, id), 5000);
-    if (!lock) throw new CitoError("STALE_GENERATION", "Listener revocation lock timeout");
-    let receiver: Receiver | undefined;
+    if (this.state.listener(id)?.status !== "ACTIVE") return { ok: true, status: "not_listening", listener_id: null };
+    // Establish connectivity before pausing effects. Failure here leaves the
+    // active receiver untouched; later failures restore its persisted owner.
+    const broker = await this.network();
+    const previous = this.receivers.get(id);
+    previous?.cancel(); // Abort an in-flight queue before waiting for its effect lock.
+    let receiver = previous;
+    let revoked = false;
+    let lock: Awaited<ReturnType<typeof acquireFlock>> = null;
     try {
+      lock = await acquireFlock(listenLock(this.config, id), 5000);
+      if (!lock) throw new CitoError("STALE_GENERATION", "Listener revocation lock timeout");
       const row = this.state.listener(id);
       if (!row || row.status !== "ACTIVE") return { ok: true, status: "not_listening", listener_id: null };
-      const broker = await this.network();
-      receiver = this.receivers.get(id); receiver?.cancel();
+      receiver = this.receivers.get(id);
       const pending = this.state.signals("SELECT * FROM local_signals WHERE listener_id = ? AND state IN ('RECEIVED','DISPATCHING')", id);
       const entry = await broker.kv.get(id);
       if (entry) {
@@ -270,9 +279,20 @@ export class CitoService {
         for (const signal of pending) this.state.run(`UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'unlistened_before_dispatch'
           WHERE listener_id = ? AND signal_id = ?`, id, signal.signal_id);
       });
+      revoked = true;
+      receiver?.cancel();
       if (row.harness === "pi" && row.pi_pid) await setPiStatus({ pi_pid: row.pi_pid, session_id: row.session_id }, undefined, this.config).catch(error => (this.options.diagnostic ?? console.error)(String(error)));
       return { ok: true, status: "unlistened", listener_id: id };
-    } finally { await lock.release(); await receiver?.stop(); this.receivers.delete(id); }
+    } finally {
+      await lock?.release();
+      await previous?.stop();
+      if (revoked || this.state.listener(id)?.status !== "ACTIVE") {
+        await receiver?.stop();
+        if (this.receivers.get(id) === receiver) this.receivers.delete(id);
+      } else {
+        await this.restoreReceivers(broker).catch(error => (this.options.diagnostic ?? console.error)(String(error)));
+      }
+    }
   }
   private async find(input: z.infer<typeof findInputSchema>, meta: Record<string, unknown>) {
     const broker = await this.network(), principal = await this.identity();
@@ -287,7 +307,7 @@ export class CitoService {
     for (const key of names) {
       const entry = await broker.kv.get(key); if (!entry || entry.operation !== "PUT") continue;
       const value = registrationSchema.parse(entry.json());
-      if (value.state !== "ACTIVE" || brokerAgeMs(now, entry.created) >= 60_000) continue;
+      if (evaluateLease(value.state, now, entry.created) !== "ACTIVE") continue;
       if (value.scope !== "workspace" && value.principal_id !== principal.principal_id) continue;
       if (input.user && lower(value.owner_user) !== lower(input.user)) continue;
       if (input.host && value.host_id !== input.host && !lower(value.host_name).includes(lower(input.host))) continue;
@@ -312,8 +332,9 @@ export class CitoService {
     const entry = await broker.kv.get(input.to), now = await brokerNow(broker.jsm);
     if (!entry) throw new CitoError("LISTENER_NOT_FOUND", "Target listener does not exist");
     const target = registrationSchema.parse(entry.json());
-    if (target.state === "UNLISTENED") throw new CitoError("LISTENER_NOT_FOUND", "Target listener was revoked");
-    if (brokerAgeMs(now, entry.created) > 1_800_000) throw new CitoError("LISTENER_EXPIRED", "Target listener expired");
+    const lease = evaluateLease(target.state, now, entry.created);
+    if (lease === "UNLISTENED") throw new CitoError("LISTENER_NOT_FOUND", "Target listener was revoked");
+    if (lease === "EXPIRED") throw new CitoError("LISTENER_EXPIRED", "Target listener expired");
     if (sender.key === senderEndpointKey(target)) throw new CitoError("SELF_SEND_FORBIDDEN", "Cannot send to your own session");
     if (principal.principal_id !== target.principal_id && target.scope !== "workspace") throw new CitoError("FORBIDDEN_TARGET_SCOPE", "Target is private to its principal");
     const dedup = sha256(JSON.stringify([sender.key, input.to, input.idempotency_key ?? randomUUID()]));
@@ -325,7 +346,7 @@ export class CitoService {
         if (previous.request_hash !== hash) throw new CitoError("IDEMPOTENCY_KEY_CONFLICT", "Idempotency key was used with another payload");
         return previous;
       }
-      const expiry = Date.now() + 1_800_000;
+      const expiry = Date.now() + RETENTION_MS;
       this.state.run(`INSERT INTO local_sent_idempotency (dedup_id, request_hash, signal_id, to_listener_id,
         requested_wake, status, expires_at_iso, expires_at_ms) VALUES (?, ?, ?, ?, ?, 'PENDING_PUBLISH', ?, ?)`,
         dedup, hash, "sig_" + randomUUID().replaceAll("-", ""), input.to, +input.wake, new Date(expiry).toISOString(), expiry);
@@ -342,22 +363,29 @@ export class CitoService {
       } catch { /* Ignore malformed replies; timeout preserves the publish milestone. */ }
     } });
     const timer = setTimeout(() => accept(null), 2000);
+    const operation = AbortSignal.any([this.shuttingDown.signal, AbortSignal.timeout(10_000)]);
+    let interrupt!: () => void;
+    const interrupted = new Promise<never>((_, reject) => {
+      interrupt = () => reject(new CitoError("NATS_UNAVAILABLE", "Send interrupted or NATS operation deadline exceeded"));
+      operation.addEventListener("abort", interrupt, { once: true });
+      if (operation.aborted) interrupt();
+    });
     try {
-      await broker.nc.flush();
-      const published = await broker.js.publish("cito.signal." + input.to, encode({ signal_id: reservation.signal_id,
+      await Promise.race([broker.nc.flush(), interrupted]);
+      const published = await Promise.race([broker.js.publish("cito.signal." + input.to, encode({ signal_id: reservation.signal_id,
         to: input.to, target_generation: target.binding_generation, sender_endpoint_key: sender.key,
         from: { principal_id: principal.principal_id, user: principal.owner_user, host_id: this.hostId,
-          host_name: this.config.hostName, harness: sender.endpoint.harness, session_id: sender.endpoint.session_id,
+          host_name: this.config.hostName, harness: sender.endpoint.harness,
           listener_id: sender.local?.status === "ACTIVE" ? sender.local.listener_id : null,
           title: sender.caller?.title ?? "", about: sender.local?.about ?? null },
-        message: input.message, requested_wake: input.wake, in_reply_to: input.in_reply_to ?? null }), { msgID: dedup });
-      const reply = await ack;
+        message: input.message, requested_wake: input.wake, in_reply_to: input.in_reply_to ?? null }), { msgID: dedup }), interrupted]);
+      const reply = await Promise.race([ack, interrupted]);
       const held = !input.wake ? "passive_requested" : principal.principal_id !== target.principal_id && !target.allow_peer_wake ? "peer_wake_disabled" : null;
       const effective = reply?.effective_wake ?? held === null;
       const status = reply?.status ?? (effective ? "queued_for_reconnect" : "stored_passive");
       this.state.run("UPDATE local_sent_idempotency SET seq = ?, effective_wake = ?, status = ?, held_reason = ? WHERE dedup_id = ? AND status = 'PENDING_PUBLISH'", published.seq, +effective, status, reply?.held_reason ?? held, dedup);
       return sentResult(this.state.db.prepare("SELECT * FROM local_sent_idempotency WHERE dedup_id = ?").get(dedup) as unknown as SentRow);
-    } finally { clearTimeout(timer); sub.unsubscribe(); }
+    } finally { clearTimeout(timer); sub.unsubscribe(); operation.removeEventListener("abort", interrupt); }
   }
   private async inbox(input: z.infer<typeof inboxInputSchema>, meta: Record<string, unknown>) {
     const principal = await this.identity(true), caller = await this.caller(meta, false, principal);
@@ -383,10 +411,11 @@ export class CitoService {
   close(): Promise<void> { return this.closePromise ??= this.shutdown(); }
   private async shutdown(): Promise<void> {
     this.closing = true;
+    this.shuttingDown.abort();
     for (const receiver of this.receivers.values()) receiver.cancel();
-    await Promise.allSettled([...this.calls]);
-    // Closing the connection also releases pending pull requests when the broker is offline.
+    // Release broker requests before waiting for their tool calls to settle.
     await this.broker?.nc.close();
+    await Promise.allSettled([...this.calls]);
     await Promise.allSettled([...this.receivers.values()].map(receiver => receiver.stop()));
     this.receivers.clear();
     if (this.brokerPromise) await this.brokerPromise.catch(() => {});

@@ -121,7 +121,7 @@ describe("configuration and machine identity", () => {
       { CITO_AUTH_MODE: "oidc" }, { CITO_OIDC_ISSUER: "https://issuer" },
       { CITO_OIDC_ISSUER: "http://remote", CITO_OIDC_CLIENT_ID: "cito" },
       { CITO_OIDC_ISSUER: "https://issuer?bad", CITO_OIDC_CLIENT_ID: "cito" },
-      { CITO_HOST_ID: "a|b" }, { CITO_STATE_DIR: "" },
+      { CITO_STATE_DIR: "" },
     ]) expect(() => loadConfig(env)).toThrow();
   });
   it("exposes a validated CITO_USER and passes it to canonical local identity", () => {
@@ -147,7 +147,6 @@ describe("configuration and machine identity", () => {
       await chmod(join(config.stateDir, "host-id"), 0o644);
       expect(await getHostId(config)).toBe(ids[0]);
       expect((await stat(join(config.stateDir, "host-id"))).mode & 0o777).toBe(0o600);
-      expect(await getHostId({ ...config, hostId: "explicit-host" })).toBe("explicit-host");
       await writeFile(join(config.stateDir, "host-id"), "corrupt");
       await expect(getHostId(config)).rejects.toThrow("Invalid persisted host-id");
     } finally { await rm(root, { recursive: true, force: true }); }

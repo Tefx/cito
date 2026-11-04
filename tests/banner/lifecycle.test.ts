@@ -232,6 +232,25 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
     } finally { db.close(); }
   });
 
+  test("Codex click survives banner.lock contention beyond its initial 500ms wait", async () => {
+    const f = await fixture(5000), db = database(f);
+    let lock: Awaited<ReturnType<typeof acquireFlock>> = null;
+    try {
+      expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
+      lock = await acquireFlock(join(f.state, "sockets/banner.lock"), 2500);
+      expect(lock).not.toBeNull();
+      const [pid] = await processes(f);
+      process.kill(pid!, "SIGUSR1");
+      await delay(700);
+      expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE harness = 'codex' AND session_id = 'session-1'").get()?.human_event_seq).toBe(7);
+      await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
+      await lock!.release(); lock = null;
+      await waitFor(async () => (await processes(f)).length === 0);
+      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([8, 11, 19]);
+      expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
+    } finally { await lock?.release(); db.close(); }
+  });
+
   test("Codex binds session identifiers literally and URL-encodes path delimiters", async () => {
     const f = await fixture(5000);
     const db = database(f);

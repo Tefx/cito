@@ -12,6 +12,113 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function setup(pi = true) { const f = await fixture({ pi }); cleanups.push(() => f.close()); return f; }
 
+test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pull without re-enrolling", async () => {
+  const f = await setup();
+  const enrolled = await call(f.service, "cito_listen", { about: "restart" }, f.pi.meta);
+  const id = enrolled.listener_id;
+  const sent = await call(f.service, "cito_send", { to: id, message: "frozen" });
+  const owner = f.service.state.listener(id)!.owner_token;
+  f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'frozen-before-restart', batch_expires_at_ms = expires_at_ms, batch_card = 'Original frozen card' WHERE signal_id = ?", sent.signal_id);
+  f.service.state.run("UPDATE local_listeners SET dispatcher_token = 'crashed-dispatcher', lease_until_ms = ? WHERE listener_id = ?", Date.now() + 60_000, id);
+  const observer = await CitoService.create(f.config, f.serviceOptions);
+  try {
+    await call(observer, "cito_find");
+    expect(observer.receivers.has(id)).toBe(false);
+    expect(observer.state.listener(id)!.dispatcher_token).toBe("crashed-dispatcher");
+  } finally { await observer.close(); }
+  await f.service.close();
+  const nc = await connectNats({ servers: f.broker.url }); cleanups.push(() => nc.close());
+  const { js } = await provisionNats(nc);
+  await js.publish("cito.signal." + id, encode({ signal_id: "queued-during-restart", to: id, target_generation: 1,
+    sender_endpoint_key: "none#alice|other|unbound|default", from: { principal_id: "none#alice", user: "alice", host_id: "other", host_name: "other", harness: null },
+    message: "queued offline", requested_wake: false, in_reply_to: null }));
+  const restarted = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => restarted.close());
+  expect((await call(restarted, "cito_find")).listeners).toMatchObject([{ listener_id: id }]);
+  await waitFor(() => restarted.state.listener(id)!.persisted_seq === 2 && restarted.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1);
+  expect(restarted.state.listener(id)).toMatchObject({ status: "ACTIVE", owner_token: owner, binding_generation: 1, unattended_wake_count: 1 });
+  expect(f.pi.messages.map(message => message.content)).toEqual(["Original frozen card"]);
+  expect((await call(restarted, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ signal_id: sent.signal_id }, { signal_id: "queued-during-restart", message: "queued offline" }]);
+});
+
+test("unlisten cleanup cannot delete the concurrently installed replacement receiver", async () => {
+  const f = await setup();
+  const { listener_id: id } = await call(f.service, "cito_listen", { about: "old" }, f.pi.meta);
+  const old = f.service.receivers.get(id)!, stop = old.stop.bind(old);
+  let entered!: () => void, release!: () => void;
+  const stopping = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(old, "stop").mockImplementationOnce(async () => { await stop(); entered(); await gate; });
+  const revocation = call(f.service, "cito_unlisten", {}, f.pi.meta);
+  try {
+    await stopping;
+    await call(f.service, "cito_listen", { about: "replacement" }, f.pi.meta);
+    const replacement = f.service.receivers.get(id)!;
+    expect(replacement).not.toBe(old);
+    release(); await revocation;
+    expect(f.service.receivers.get(id)).toBe(replacement);
+    expect(replacement.abort.signal.aborted).toBe(false);
+    expect(await call(f.service, "cito_send", { to: id, message: "still receiving" })).toMatchObject({ status: "wake_accepted" });
+  } finally { release(); await revocation; }
+});
+
+test("a transient revocation failure restores the ACTIVE receiver and permits a successful retry", async () => {
+  const f = await setup();
+  const { listener_id: id } = await call(f.service, "cito_listen", { about: "retry revoke" }, f.pi.meta);
+  const broker = Reflect.get(f.service, "broker") as Broker;
+  vi.spyOn(broker.kv, "update").mockRejectedValueOnce(new Error("temporary broker failure"));
+  expect(payload(await f.service.call("cito_unlisten", {}, f.pi.meta))).toMatchObject({ error: { code: "NATS_UNAVAILABLE", retryable: true } });
+  expect(f.service.state.listener(id)!.status).toBe("ACTIVE");
+  expect(registrationSchema.parse((await broker.kv.get(id))!.json()).state).toBe("ACTIVE");
+  expect(f.service.receivers.get(id)!.abort.signal.aborted).toBe(false);
+  expect(await call(f.service, "cito_send", { to: id, message: "recovered receiver" })).toMatchObject({ status: "wake_accepted" });
+  expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "unlistened" });
+  expect(f.service.receivers.has(id)).toBe(false);
+});
+
+test("Pi A to B to A preserves A's human watermark through re-enrollment and sweep", async () => {
+  const f = await setup();
+  const { listener_id: a } = await call(f.service, "cito_listen", { about: "A" }, f.pi.meta);
+  f.pi.input(); f.pi.input(); f.pi.input();
+  await f.service.receivers.get(a)!.sweep();
+  await call(f.service, "cito_send", { to: a, message: "charge A" });
+  f.pi.switchSession("B"); f.pi.input(); f.pi.input();
+  const { listener_id: b } = await call(f.service, "cito_listen", { about: "B" }, f.pi.meta);
+  f.pi.switchSession("pi-session-1"); f.pi.input();
+  await call(f.service, "cito_listen", { about: "A resumed" }, f.pi.meta);
+  expect(f.service.state.listener(a)).toMatchObject({ human_event_seq: 4, last_bridge_count: 4, last_consumed_human_seq: 4, unattended_wake_count: 0 });
+  await call(f.service, "cito_send", { to: a, message: "charge resumed A" });
+  f.pi.input(); await f.service.receivers.get(a)!.sweep();
+  expect(f.service.state.listener(a)).toMatchObject({ human_event_seq: 5, last_bridge_count: 5, unattended_wake_count: 0 });
+  expect(f.service.state.listener(b)).toMatchObject({ human_event_seq: 2, last_bridge_count: 2 });
+});
+
+test.each(["flush", "ack"])("shutdown interrupts a stalled send %s boundary without waiting for its deadline", async boundary => {
+  const target = await setup();
+  const { listener_id: id } = await call(target.service, "cito_listen", { about: "offline recipient" }, target.pi.meta);
+  await target.service.receivers.get(id)!.stop();
+  const sender = await fixture({ broker: target.broker, pi: false }); cleanups.push(() => sender.close());
+  await call(sender.service, "cito_find");
+  const broker = Reflect.get(sender.service, "broker") as Broker;
+  const flush = boundary === "flush" ? vi.spyOn(broker.nc, "flush").mockImplementation(() => new Promise(() => {})) : undefined;
+  const pending = sender.service.call("cito_send", { to: id, message: "blocked send" });
+  if (flush) await waitFor(() => flush.mock.calls.length === 1);
+  else await waitFor(async () => (await broker.jsm.streams.info("CITO_SIGNALS")).state.messages === 1);
+  const began = performance.now();
+  await sender.service.close();
+  expect(performance.now() - began).toBeLessThan(1000);
+  expect(payload(await pending)).toMatchObject({ error: { code: "NATS_UNAVAILABLE", retryable: true } });
+}, 5000);
+
+test("a stalled flush is bounded by the ten-second NATS operation deadline", async () => {
+  const f = await setup();
+  const { listener_id: id } = await call(f.service, "cito_listen", { about: "flush deadline" }, f.pi.meta);
+  const broker = Reflect.get(f.service, "broker") as Broker;
+  vi.spyOn(broker.nc, "flush").mockImplementation(() => new Promise(() => {}));
+  expect(payload(await f.service.call("cito_send", { to: id, message: "never flushed" }))).toMatchObject({ error: { code: "NATS_UNAVAILABLE", retryable: true } });
+  expect((await broker.jsm.streams.info("CITO_SIGNALS")).state.messages).toBe(0);
+  expect(f.service.state.db.prepare("SELECT status FROM local_sent_idempotency").get()?.status).toBe("PENDING_PUBLISH");
+}, 13_000);
+
 test("20-second scheduled sweep consumes human input without explicit test invocation", async () => {
   const f = await setup();
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "scheduled sweep" }, f.pi.meta);
@@ -142,7 +249,8 @@ test("disconnected recipient returns the exact sender timeout milestone and pass
   const f = await setup();
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "disconnected", scope: "workspace" }, f.pi.meta);
   await f.service.receivers.get(id)!.stop();
-  expect(await call(f.service, "cito_send", { to: id, message: "buffered" })).toMatchObject({ status: "queued_for_reconnect", effective_wake: true, held_reason: null });
-  expect(await call(f.service, "cito_send", { to: id, message: "buffered passive", wake: false })).toMatchObject({ status: "stored_passive", effective_wake: false, held_reason: "passive_requested" });
+  const sender = await fixture({ broker: f.broker, pi: false }); cleanups.push(() => sender.close());
+  expect(await call(sender.service, "cito_send", { to: id, message: "buffered" })).toMatchObject({ status: "queued_for_reconnect", effective_wake: true, held_reason: null });
+  expect(await call(sender.service, "cito_send", { to: id, message: "buffered passive", wake: false })).toMatchObject({ status: "stored_passive", effective_wake: false, held_reason: "passive_requested" });
   expect(f.service.state.listener(id)!.persisted_seq).toBe(0);
 }, 10_000);

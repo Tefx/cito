@@ -56,6 +56,7 @@ final class Banner {
     var panel: NSPanel?
     var labels: [NSTextField] = []
     var retiring = false
+    var clickedPending = false
     let queue = DispatchQueue(label: "cito.banner.socket")
     let dismissMs: Int
 
@@ -136,11 +137,12 @@ final class Banner {
     }
 
     func show(_ value: Payload) {
+        let title = "Cito · \(value.target_title)" + ((value.count ?? 1) > 1 ? " (\(value.count!))" : "")
         if headless {
             // Diagnostics expose the actual presentation model, without adding
             // test-only socket commands or bypassing delivery/retirement.
             diagnostic("display " + String(data: try! JSONSerialization.data(withJSONObject: [
-                "pid": getpid(), "subtitle": value.subtitle, "message": value.message
+                "pid": getpid(), "title": title, "subtitle": value.subtitle, "message": value.message
             ], options: [.sortedKeys]), encoding: .utf8)!)
             return
         }
@@ -177,7 +179,7 @@ final class Banner {
             window.contentView = root
             panel = window
         }
-        labels[0].stringValue = "Cito · \(value.target_title)" + ((value.count ?? 1) > 1 ? " (\(value.count!))" : "")
+        labels[0].stringValue = title
         labels[1].stringValue = value.subtitle
         labels[2].stringValue = value.message
         panel?.contentView?.setAccessibilityLabel("\(labels[0].stringValue). \(value.subtitle). \(value.message)")
@@ -197,7 +199,9 @@ final class Banner {
 
     func retire(clicked: Bool) {
         guard !retiring else { return }
-        guard acquire(lockFd, milliseconds: clicked ? 500 : 0) else {
+        if clicked { clickedPending = true }
+        let isClick = clicked || clickedPending
+        guard acquire(lockFd, milliseconds: isClick ? 500 : 0) else {
             // A failed sender may not reset the timer. Retry without dropping
             // the active instance; successful deliveries replace this timer.
             resetTimer(after: 50)
@@ -208,8 +212,8 @@ final class Banner {
         unlink("banner.sock")
         source?.cancel()
         close(server)
-        if clicked, let value = payload, value.target_harness == "codex" { openCodex(value.target_session_id) }
-        if clicked { panel?.orderOut(nil); exit(0) }
+        if isClick, let value = payload, value.target_harness == "codex" { openCodex(value.target_session_id) }
+        if isClick { panel?.orderOut(nil); exit(0) }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = headless ? 0 : 0.25
             panel?.animator().alphaValue = 0
