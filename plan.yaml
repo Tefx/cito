@@ -585,7 +585,7 @@ phases:
   - id: v2.multi-hub-and-extensible-adapters
     name: Implement V2 Multi-Hub & Extensible Harness Architecture, 3-table SQLite
       schema (user_version=4), README guides, and unit/E2E tests
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/shared/**\n    - src/adapters/**\n    -\
       \ src/mcp/**\n    - src/banner/**\n    - src/macos/cito-banner.swift\n    -\
@@ -674,6 +674,21 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-04T15:38:43.711400Z'
+    done_at: '2026-11-04T17:01:43.674225+00:00'
+    evidence: "Artifact:\n- Commits: 81d967e539f8fef53249dad3ad1ee98846c89c76, 8111aee1153c4f6ba541fee26877b0edae5b8a9b\
+      \ (fast-forwarded onto main)\n\nVerification:\n- Run: npm run typecheck && npm\
+      \ run build && npm test -> exit 0 (23 test files, 202 tests passed, 0 failed,\
+      \ 0 skipped)\n- Run: npx tsc --noEmit --noUnusedLocals --noUnusedParameters\
+      \ -> exit 0\n- Run: grep -rn '\"pi\"\\|\"codex\"' src/mcp/ -> 0 matches (100%\
+      \ harness-agnostic src/mcp/)\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n\
+      \  - Round 1 fresh-context pathway-auditor (01a1a755-db3e-7774-a587-f3d44abb4722)\
+      \ and structural-auditor (01a1a755-db82-73d0-9bbb-ae0a88e7da12) identified 11\
+      \ ledger items (P1-P5, S1-S6), all resolved in commit 8111aee1153c4f6ba541fee26877b0edae5b8a9b.\n\
+      \  - Round 2 fresh-context structural-auditor (01a1a777-5a61-720a-81f9-35d132f547e6)\
+      \ and pathway-auditor (01a1a777-5aa4-760a-96b8-257bd133965d) verified all 11\
+      \ items CLOSED / SAFE and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md (V2 — Multi-Hub & Extensible Harness Edition,\
+      \ §§1–8) and README.md"
   - id: v2.acceptance-and-hygiene-gate
     name: 'V2 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
