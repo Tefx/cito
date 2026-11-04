@@ -73,8 +73,8 @@ and clear keys. No host state, OIDC token files or business payloads are read.
 official `nats-server 2.14.0 -t` rejects an Operator public key as
 `auth_callout.issuer`: “Expected callout user to be a valid public account
 nkey”. The responder therefore rejects SO seeds at startup with a descriptive
-error and uses SA seeds. This is a remaining specification discrepancy for
-the parent to resolve, not an implemented Operator-auth path.
+error and uses SA seeds. SA-only enforcement is the approved resolution for
+this non-operator topology; an Operator-auth path is outside this deployment.
 
 Tests run against an installed official NATS 2.14.0 binary and a local mock
 OIDC HTTP server. Compose configuration is syntax-checked; a live Casdoor

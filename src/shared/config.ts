@@ -1,4 +1,4 @@
-import { hostname, homedir } from "node:os";
+import { hostname, homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { mkdir, open, readFile, chmod } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -7,6 +7,7 @@ import { normalizeIssuer } from "./identity.js";
 export interface CitoConfig {
   natsUrl: string;
   authMode: "none" | "oidc";
+  user: string;
   oidcIssuer?: string;
   oidcClientId?: string;
   stateDir: string;
@@ -49,6 +50,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
   if (oidcClientId !== undefined && (oidcClientId !== oidcClientId.trim() || !oidcClientId)) {
     throw new Error("CITO_OIDC_CLIENT_ID must be a non-empty trimmed string");
   }
+  const user = env.CITO_USER ?? userInfo().username;
+  if (user.length < 1 || user.length > 64 || /[^a-zA-Z0-9._-]/.test(user)) {
+    throw new Error("CITO_USER must contain 1–64 letters, numbers, dots, underscores or hyphens");
+  }
   const hostId = env.CITO_HOST_ID;
   if (hostId !== undefined && !/^[a-zA-Z0-9._-]{1,128}$/.test(hostId)) {
     throw new Error("CITO_HOST_ID must contain 1–128 letters, numbers, dots, underscores or hyphens");
@@ -57,10 +62,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     if (env[key] !== undefined && !env[key]?.trim()) throw new Error(key + " must not be empty");
   }
   return {
-    natsUrl, authMode, oidcIssuer, oidcClientId,
+    natsUrl, authMode, user, oidcIssuer, oidcClientId,
     stateDir: directory(env.CITO_STATE_DIR ?? "~/.cito"),
     codexHome: directory(env.CITO_CODEX_HOME ?? "~/.codex"),
-    codexBin: env.CITO_CODEX_BIN ?? "codex",
+    codexBin: env.CITO_CODEX_BIN ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
     hostId,
     hostName: (env.CITO_HOST_NAME ?? hostname()).replace(/[^\x20-\x7e]/g, "").slice(0, 128),
   };

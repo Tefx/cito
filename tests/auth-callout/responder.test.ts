@@ -33,8 +33,9 @@ describe("NATS auth callout wire protocol", () => {
   }
   it("signs verifiable JWT v2 user and auth responses with exact broker scope and expiry", async () => {
     const c = config();
+    const claims = oidc.claims();
     const req = { user_nkey: createUser().getPublicKey(), server_id: { id: createServer().getPublicKey() },
-      connect_opts: { auth_token: await key.sign(oidc.claims()) } };
+      connect_opts: { auth_token: await key.sign(claims) } };
     try {
       const bytes = await authorizationResponse(req, c, new OidcVerifier({ issuer: oidc.issuer, clientId: "cito" }));
       const response = decode<AuthorizationResponse>(decoder.decode(bytes));
@@ -46,7 +47,7 @@ describe("NATS auth callout wire protocol", () => {
       expect(user.iss).toBe(c.issuer.getPublicKey());
       expect(user.sub).toBe(req.user_nkey);
       expect(user.aud).toBe("CITO");
-      expect(user.exp).toBe(oidc.claims().exp);
+      expect(user.exp).toBe(claims.exp);
       expect(user.nats.pub?.allow).toEqual(USER_PERMISSIONS);
       expect(user.nats.sub?.allow).toEqual(USER_PERMISSIONS);
       expect(user.nats.pub?.allow).toContain("$JS.ACK.>");

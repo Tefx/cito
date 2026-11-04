@@ -10,29 +10,33 @@ v2 and NKey/XKey libraries for downstream steps.
 
 - `loadConfig(env?)` validates startup configuration without touching disk.
   It returns camelCase properties (`natsUrl`, `authMode`, `oidcIssuer`,
-  `oidcClientId`, `stateDir`, `codexHome`, `codexBin`, `hostId`, `hostName`).
+  `oidcClientId`, `user`, `stateDir`, `codexHome`, `codexBin`, `hostId`, `hostName`).
 - Defaults: `nats://127.0.0.1:4222`, `none`, `~/.cito`, `~/.codex`,
-  and `codex`. OIDC requires an HTTPS issuer (loopback HTTP is permitted
-  for tests) and a non-empty client ID.
+  and `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`.
+  `CITO_CODEX_BIN` overrides the executable. OIDC requires an HTTPS issuer
+  (loopback HTTP is permitted for tests) and a non-empty client ID.
+  `user` preserves `CITO_USER` or the OS username and must match
+  `^[a-zA-Z0-9._-]{1,64}$`; invalid values fail at startup.
 - `getHostId(config)` returns an explicit `CITO_HOST_ID` or atomically creates
   a persisted lowercase UUIDv4 in `stateDir/host-id`. It uses exclusive
   hard-link publication so concurrent initializers see one complete identity.
   State directory mode is 0700; the file mode is 0600. Invalid persisted IDs
   fail rather than silently changing listener identity.
-- `localPrincipal()` yields `principal_id="local"` and the OS username.
-- `oidcPrincipal(verifiedClaims)` yields normalized `iss#sub`; display name
-  selects non-blank `preferred_username`, full `email`, `name`, then `sub`,
-  trims it and lowercases it. Callers must verify JWTs first.
+- `localPrincipal(config.user)` lowercases the configured username, validates
+  `^[a-z0-9._-]{1,64}$`, and yields `principal_id="none#" + owner_user`.
+  Without an argument it selects `CITO_USER` or the OS username.
+- `oidcPrincipal(verifiedClaims)` yields normalized `iss#sub`; display handle
+  selects trimmed non-blank `preferred_username`, then the trimmed non-empty
+  email local-part before `@`, then `sub`. It lowercases the handle, replaces
+  non-`[a-z0-9._-]` characters with `_`, and truncates to 64 characters.
+  `name` is not a fallback. Callers must verify JWTs first.
 - `listenerId(SessionKey)` derives a keyless deterministic
   `c_[a-z2-7]{12}` ID. `senderEndpointKey` distinguishes bound sessions
   from the `unbound|default` namespace.
 
-**Specification differences:** the explicit step assignment overrides
-DESIGN.md §2.1/§3.1.1 for the `codex` default and identity derivation above.
-In particular, this implementation does not use `none#<user>`, email
-local-part extraction, or `CITO_USER` to change the anonymous principal.
-Consumers must use these shared functions consistently. The protected design
-document was not modified.
+Configuration and identity follow DESIGN.md §2.1/§3.1.1. Consumers must use
+these shared functions consistently so listener IDs, self-send checks and
+principal scope comparisons share the same canonical identity.
 
 ## Validation and results
 

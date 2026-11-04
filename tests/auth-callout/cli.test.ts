@@ -30,6 +30,7 @@ describe("public cito-auth-callout executable", () => {
       };
       const cases: [NodeJS.ProcessEnv, RegExp][] = [
         [{ CITO_AUTH_MODE: "other" }, /CITO_AUTH_MODE/],
+        [{ CITO_USER: "invalid user" }, /CITO_USER/],
         [{ CITO_NATS_URL: "garbage" }, /CITO_NATS_URL/],
         [{ CITO_NATS_URL: "http://example" }, /CITO_NATS_URL/],
         [{ CITO_OIDC_ISSUER: "" }, /CITO_OIDC_ISSUER/],

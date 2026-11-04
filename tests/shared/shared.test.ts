@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -26,16 +26,39 @@ describe("keyless identity", () => {
     expect(() => senderEndpointKey({ ...key, session_id: null })).toThrow(CitoError);
     expect(() => senderEndpointKey({ ...key, harness: null })).toThrow(CitoError);
   });
-  it("derives local and canonical OIDC identity without a server key", () => {
-    expect(localPrincipal()).toEqual({ principal_id: "local", owner_user: userInfo().username || "local" });
-    expect(localPrincipal("")).toEqual({ principal_id: "local", owner_user: "local" });
-    const base = { iss: "https://issuer///", sub: "stable", email: " Mail@Example.COM ", name: "Display" };
+  it("derives a validated local principal from CITO_USER or the OS username", () => {
+    try {
+      vi.stubEnv("CITO_USER", undefined);
+      const osUser = userInfo().username.toLowerCase();
+      expect(localPrincipal()).toEqual({ principal_id: "none#" + osUser, owner_user: osUser });
+      vi.stubEnv("CITO_USER", "Alice.Example_1-2");
+      expect(localPrincipal()).toEqual({ principal_id: "none#alice.example_1-2", owner_user: "alice.example_1-2" });
+      expect(localPrincipal("Bob")).toEqual({ principal_id: "none#bob", owner_user: "bob" });
+      expect(listenerId({ ...key, ...localPrincipal("Alice") })).not.toBe(listenerId({ ...key, ...localPrincipal("Bob") }));
+      expect(localPrincipal("A".repeat(64)).owner_user).toBe("a".repeat(64));
+      for (const username of ["", " ", " Alice", "Alice ", "Alice\n", "a/b", "a@b", "é", "a".repeat(65)]) {
+        expect(() => localPrincipal(username)).toThrow(CitoError);
+      }
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("normalizes OIDC display handles while preserving immutable issuer and subject", () => {
+    const base = { iss: "https://issuer///", sub: "Stable+ID", email: " Mail@Example.COM ", name: "Display" };
     expect(oidcPrincipal({ ...base, preferred_username: " Alice " })).toEqual({
-      principal_id: "https://issuer#stable", owner_user: "alice",
+      principal_id: "https://issuer#Stable+ID", owner_user: "alice",
     });
-    expect(oidcPrincipal(base).owner_user).toBe("mail@example.com");
-    expect(oidcPrincipal({ ...base, email: "", preferred_username: " " }).owner_user).toBe("display");
+    expect(oidcPrincipal(base).owner_user).toBe("mail");
+    expect(oidcPrincipal({ ...base, preferred_username: " A+Ü@X! " }).owner_user).toBe("a___x_");
+    expect(oidcPrincipal({ ...base, preferred_username: " A".repeat(70) }).owner_user).toHaveLength(64);
+    expect(oidcPrincipal({ ...base, preferred_username: "X".repeat(70) }).owner_user).toBe("x".repeat(64));
+    for (const email of ["", " ", "missing-at", "@example.com", " @example.com "]) {
+      expect(oidcPrincipal({ ...base, email, preferred_username: " " }).owner_user).toBe("stable_id");
+    }
+    expect(oidcPrincipal({ ...base, email: " Team+Alerts@Example.COM ", preferred_username: 42 }).owner_user).toBe("team_alerts");
+    expect(oidcPrincipal({ ...base, email: 42, preferred_username: null }).owner_user).toBe("stable_id");
     expect(oidcPrincipal({ iss: "https://issuer", sub: "OpaqueID" }).owner_user).toBe("opaqueid");
+    expect(oidcPrincipal({ iss: "https://issuer", sub: " Opaque ID " })).toEqual({
+      principal_id: "https://issuer# Opaque ID ", owner_user: "_opaque_id_",
+    });
     for (const claims of [{}, { iss: "", sub: "x" }, { iss: "x" }, { iss: "x", sub: " " }]) {
       expect(() => oidcPrincipal(claims)).toThrow(CitoError);
     }
@@ -86,7 +109,9 @@ describe("configuration and machine identity", () => {
     const config = loadConfig({});
     expect(config.natsUrl).toBe("nats://127.0.0.1:4222");
     expect(config.authMode).toBe("none");
-    expect(config.codexBin).toBe("codex");
+    expect(config.codexBin).toBe("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+    expect(config.user).toBe(userInfo().username);
+    expect(loadConfig({ CITO_CODEX_BIN: "/tmp/custom-codex" }).codexBin).toBe("/tmp/custom-codex");
     expect(config.stateDir).toBe(join(process.env.HOME!, ".cito"));
     expect(config.codexHome).toBe(join(process.env.HOME!, ".codex"));
     expect(loadConfig({ CITO_NATS_URL: "wss://nats.example/ws" }).natsUrl).toBe("wss://nats.example/ws");
@@ -98,6 +123,17 @@ describe("configuration and machine identity", () => {
       { CITO_OIDC_ISSUER: "https://issuer?bad", CITO_OIDC_CLIENT_ID: "cito" },
       { CITO_HOST_ID: "a|b" }, { CITO_STATE_DIR: "" },
     ]) expect(() => loadConfig(env)).toThrow();
+  });
+  it("exposes a validated CITO_USER and passes it to canonical local identity", () => {
+    const config = loadConfig({ CITO_USER: "Alice.Example_1-2" });
+    expect(config.user).toBe("Alice.Example_1-2");
+    expect(localPrincipal(config.user)).toEqual({
+      principal_id: "none#alice.example_1-2", owner_user: "alice.example_1-2",
+    });
+    expect(loadConfig({ CITO_USER: "A".repeat(64) }).user).toHaveLength(64);
+    for (const user of ["", " ", " Alice", "Alice ", "Alice\n", "a/b", "a@b", "é", "a".repeat(65)]) {
+      expect(() => loadConfig({ CITO_USER: user })).toThrow("CITO_USER");
+    }
   });
   it("publishes one persisted UUID atomically across concurrent callers without touching host state", async () => {
     const root = await mkdtemp(join(tmpdir(), "cito-host-"));

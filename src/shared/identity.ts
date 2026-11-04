@@ -30,18 +30,21 @@ export function oidcPrincipal(claims: IdentityClaims): Principal {
     || typeof claims.sub !== "string" || !claims.sub.trim()) {
     throw new CitoError("UNAUTHORIZED", "OIDC identity requires iss and sub");
   }
-  const display = [claims.preferred_username, claims.email, claims.name, claims.sub]
-    .find((value): value is string => typeof value === "string" && value.trim().length > 0)!;
+  const preferred = typeof claims.preferred_username === "string" ? claims.preferred_username.trim() : "";
+  const email = typeof claims.email === "string" ? claims.email.trim() : "";
+  const emailLocal = email.includes("@") ? email.slice(0, email.indexOf("@")).trim() : "";
+  const display = preferred || emailLocal || claims.sub;
   return {
     principal_id: normalizeIssuer(claims.iss) + "#" + claims.sub,
-    owner_user: display.trim().toLowerCase(),
+    owner_user: display.toLowerCase().replace(/[^a-z0-9._-]/g, "_").slice(0, 64),
   };
 }
-export function localPrincipal(username?: string): Principal {
-  if (username === undefined) {
-    try { username = userInfo().username; } catch { username = "local"; }
+export function localPrincipal(username: string = process.env.CITO_USER ?? userInfo().username): Principal {
+  const owner_user = username.toLowerCase();
+  if (owner_user.length < 1 || owner_user.length > 64 || /[^a-z0-9._-]/.test(owner_user)) {
+    throw new CitoError("INVALID_INPUT", "Local owner_user must match ^[a-z0-9._-]{1,64}$");
   }
-  return { principal_id: "local", owner_user: username || "local" };
+  return { principal_id: "none#" + owner_user, owner_user };
 }
 export function senderEndpointKey(endpoint: SenderEndpoint): string {
   if (endpoint.harness === null && endpoint.session_id === null) {
