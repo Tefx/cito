@@ -934,7 +934,7 @@ phases:
   - id: v3.acceptance-and-hygiene-gate
     name: 'V3 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v3` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -985,3 +985,5 @@ phases:
     depends_on:
     - v3.daemon-http-oidc-and-menubar-ui
     agent: code-reviewer
+    claimed_by: code-reviewer
+    claimed_at: '2026-11-04T20:26:53.718214Z'
