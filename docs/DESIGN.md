@@ -1,324 +1,170 @@
-# Cito Architecture & Protocol Specification (V2 — Multi-Hub & Extensible Harness Edition)
+# Cito Architecture & Protocol Specification (V3 — macOS Menu Bar Daemon & Streamable HTTP Edition)
 
 ## 1. Purpose, Scope, and Non-Goals
 
 ### 1.1 Purpose
-**Cito** (Latin *citō*: "to summon / to rouse into action / swiftly") is a notification and signaling bus that wakes or delivers messages to opted-in coding agent conversations across:
-1. **Multiple NATS Hubs** (e.g., a personal Tailscale no-auth hub `personal` and a corporate GCP Casdoor OIDC hub `rda` simultaneously),
+**Cito** (Latin *citō*: "to summon / to rouse into action / swiftly") is a macOS-native notification and signaling daemon for coding agents that wakes or delivers messages to opted-in agent conversations across:
+1. **Multiple NATS Hubs** (e.g., a personal Tailscale no-auth hub `personal` and a corporate OIDC hub `rda` simultaneously),
 2. **Users** (e.g., `tefx`, colleague `mingchen`),
 3. **Hosts / Machines** (e.g., `mbp-work`, `mbp-personal`),
-4. **Extensible Agent Harnesses** (shipped: **Pi Coding Agent** and **ChatGPT / Codex Desktop App**; open plug-in architecture for **Claude Code** and future CLI/IDE harnesses), and
+4. **Extensible Agent Harnesses** (shipped: **Pi Coding Agent** and **ChatGPT / Codex Desktop App**; open extensible architecture for **Claude Code** and future CLI/IDE harnesses), and
 5. **Concurrent Conversations** within the same repository or working directory.
 
-Cito follows a **"Direct Notification & Follow-Up"** model: every message sent via `cito_send` to an opted-in listener (`cito_listen`) is reliably delivered to the target conversation (waking an idle session immediately or queuing into a running session's follow-up queue, with `cito_inbox` as the pull fallback when a target driver is unconfirmed or unavailable).
-
-### 1.2 Implementation Scope vs. Proposed/Deferred Scope
-- **In Scope for Implementation & Verification (inside `/Users/tefx/Projects/cito`)**:
-  1. **Native Multi-Hub Support (`src/shared/config.ts` & `src/mcp/service.ts`)**:
-     - Zero dependency on external gateways (such as Tela). A single `cito-mcp` stdio server manages one or more configured `HubSlot`s from optional `~/.cito/config.json` (or `CITO_*` environment variables for a single `"default"` hub), isolating per-hub NATS connections, OIDC PKCE tokens (`oidc-token-<hub>.json`), and receivers while sharing a single local SQLite database (`~/.cito/state.sqlite`, `PRAGMA user_version = 4`).
-     - Symmetric `<hub>:<id>` scoped addressing across all 5 MCP tools (`cito_listen`, `cito_unlisten`, `cito_find`, `cito_send`, `cito_inbox`) and Wake Cards when multiple or named hubs are configured, while keeping NATS wire payloads unprefixed.
-  2. **Extensible Harness Adapter Architecture (`src/adapters/` & `src/mcp/`)**:
-     - `src/mcp/` (`service.ts`, `receiver.ts`, `state.ts`, `oidc.ts`, `server.ts`, `cli.ts`) is 100% harness-agnostic and contains zero hardcoded checks for `"pi"` or `"codex"`.
-     - `harness` is an open identifier (`^[a-z][a-z0-9_-]{0,31}$`) across schemas, SQLite, and `cito-banner.swift`, never a closed hardcoded enum.
-     - Ships two built-in adapter classes behind the 3-method `HarnessAdapter` interface (`probe`, `deliver`, `updateBadge?`):
-       - `SocketBridgeAdapter(harnessId)`: generic local Unix domain socket driver (`${stateDir}/sockets/<harness>-pid-<pid>.sock`) used by **Pi** (`pi`) and automatically discoverable for any future socket-bridged harness without modifying `src/mcp/`.
-       - `CodexDesktopAdapter`: external SQLite/IPC/URL-scheme driver for **ChatGPT / Codex Desktop (`ChatGPT.app`)** (`codex`).
-  3. **Zero-Wake-Parameter & Zero-Quota Streamlined Delivery**:
-     - Removes `wake?: boolean` from `cito_send` and `allow_peer_wake?: boolean` from `cito_listen` (access control is governed solely by `scope: "self" | "workspace"`).
-     - Removes the 6-column `unattended_wake_count` / `bridge_epoch` / `human_event_seq` state machine and `local_pairwise_wakes` table so multi-turn agent collaboration is never artificially throttled, and removes `import SQLite3` from `src/macos/cito-banner.swift`.
-     - Auto-acknowledges confirmed deliveries (`Adapter.deliver` returning `"delivered"`) and removes the `↳ Ack: cito_inbox(...)` footer from Wake Cards, while preserving `cito_inbox` (defaulting to drain-on-read when `ack_ids` is omitted) for unconfirmed or driver-unavailable signals.
-- **Proposed Design Only (Not Yet Implemented)**:
-  - **Claude Code (`claude`)**: Documented in **Section 9** strictly as a **设计建议（仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented）**. `README.md` includes per-harness setup and usage guides for Pi, Codex Desktop, and future harnesses, explicitly noting that Claude Code support is not yet implemented.
-
-### 1.3 Non-Goals
-- **No External Gateway Dependency**: Cito never requires Tela or multiple MCP server entries to connect to multiple hubs.
-- **No Implicit Session Scanning**: Conversations remain invisible until they explicitly call `cito_listen`.
-- **No Legacy Schema Migration Shims**: `LocalState.open()` enforces `PRAGMA user_version = 4` and atomically drops and recreates tables if an older local database version is encountered.
+### 1.2 V3 Implementation Scope vs. Proposed Design Scope
+- **In Scope for V3 Implementation & Verification (inside `/Users/tefx/Projects/cito`)**:
+  1. **Single Per-User macOS Daemon (`cito daemon`) & Streamable HTTP MCP (`http://127.0.0.1:4290/mcp`)**:
+     - Runs as a single per-user background daemon on macOS (`CITO_DAEMON_PORT`, default `4290`), managed via LaunchAgent (`~/Library/LaunchAgents/one.tefx.cito.plist`) or auto-started by the `cito-mcp` stdio forwarder.
+     - Exposes `POST /mcp`, `GET /mcp`, `DELETE /mcp` (via stateless-per-request `StreamableHTTPServerTransport` sharing one `CitoService` instance) and `GET /health` (`{ ok: true, pid, stateDir }`) on `127.0.0.1`.
+     - Eliminates per-tab MCP subprocess memory bloat in Codex Desktop and Pi (**0 child processes per conversation tab**).
+     - Eliminates all cross-process `flock` lockfiles (`src/banner/flock.ts`, `listen-*.lock`, `receiver-*.lock`, `session-*.lock`, `banner.lock`, `banner-instance.lock`, `oidc-login-*.lock`), replacing them with in-memory `KeyedMutex` instances inside the single daemon process.
+  2. **Combined macOS Menu Bar Extra (`NSStatusItem`) & In-Process HUD Banner (`NSPanel`) (`src/macos/cito-ui.swift` & `src/ui/index.ts`)**:
+     - Replaces `src/banner/index.ts` and `src/macos/cito-banner.swift` with a single persistent AppKit companion child process (`cito-ui`) connected to `cito-daemon` via newline-delimited JSON over `stdin`/`stdout`.
+     - Provides a progressive-disclosure macOS Menu Bar Extra (`NSStatusItem` + `NSMenu`) for viewing active local listeners, 1-click manual unlistening (via submenu or holding `Option ⌥`), toggling `self`/`workspace` visibility in place, jumping to Codex threads, copying scoped listener IDs, and managing Hub connections and OIDC login.
+     - Renders the 388×136 `.vibrantDark` frosted-glass top-right HUD notification banner (`NSPanel`) directly in-process (<1ms latency, hiding via `panel?.orderOut(nil)` after 6s without exiting).
+  3. **Non-Intrusive Codex Desktop Integration (`src/adapters/codex.ts`)**:
+     - Removes `assertCodexThreadOpen` (`~/.codex/ipc/ipc.sock`) completely so background/unfocused Codex conversations in the sidebar never time out after 60s.
+     - Treats `~/.codex/state_5.sqlite` as an optional read-only metadata source (`readCodexThreadOptional`: returning `'archived'`, `'found'`, or `'unavailable'`), falling back to `_meta.cwd` $\to$ `lsof -a -d cwd -p <http_client_pid>` $\to$ `lookupCachedSession` $\to$ `process.cwd()` + `gitMetadata(cwd)`.
+     - Uses `codex queue --resume --thread <id> --message <card>` + `open -g "codex://threads/wake/<id>"`.
+  4. **Standard, Vendor-Neutral OIDC (`src/auth-callout/oidc.ts`, `src/mcp/oidc.ts`)**:
+     - Compatible with any standard OpenID Connect provider (Okta, Auth0, Keycloak, Microsoft Entra ID, Google, Casdoor, etc.).
+     - Supports full standard JWS asymmetric algorithms (`RS256`, `RS384`, `RS512`, `PS256`, `ES256`, `ES384`, `EdDSA`), negotiates default scopes against `.well-known/openid-configuration` `scopes_supported`, supports optional fixed loopback redirect port (`oidcRedirectPort` / `CITO_OIDC_REDIRECT_PORT`), and fences listeners belonging to a previous `principal_id` on account switch.
+- **Proposed Design Suggestion Only (Not Yet Implemented)**:
+  - **Claude Code (`claude`)**: Documented in **Section 8** strictly as a **设计建议（仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented）**, describing how Claude Code can integrate with `cito-daemon` over Streamable HTTP MCP + SSE notifications or local socket bridges without concrete code details. `README.md` provides installation and usage guides per harness (Pi, Codex Desktop, Claude Code marked as not yet implemented, and custom harnesses).
 
 ---
 
-## 2. System Topology, Multi-Hub Configuration, and Module Boundaries
+## 2. Module Boundaries & Process Lifecycle
 
-### 2.1 Acyclic Module Dependency Graph
-`src/shared/` $\to$ `src/adapters/` $\to$ `src/mcp/`
+### 2.1 Acyclic Module Graph
+`src/shared/` $\to$ `src/adapters/` & `src/ui/` $\to$ `src/mcp/`
 
-- **`src/shared/`**: Configuration (`config.ts`), open `harnessIdSchema` (`^[a-z][a-z0-9_-]{0,31}$`) and tool input schemas (`validation.ts`), deterministic identity & `<hub>:` scoped ID helpers (`identity.ts`), NATS provisioning (`nats.ts`), and error vocabulary (`errors.ts`).
-- **`src/adapters/`**: `HarnessAdapter` interface (`types.ts`), `SocketBridgeAdapter` (`pi.ts`), `CodexDesktopAdapter` (`codex.ts`), priority-free `resolveCaller` and extensible `ADAPTER_REGISTRY` (`index.ts`), Git metadata helper (`git.ts`), and clean `formatWakeCard` (`wake-card.ts`).
-- **`src/mcp/`**: Harness-agnostic `LocalState` (`state.ts`), `Receiver` (`receiver.ts`), multi-hub `CitoService` (`service.ts`), per-hub `OidcLogin` (`oidc.ts`), MCP stdio server (`server.ts`), and CLI entrypoint (`cli.ts`).
+- **`src/shared/`**: `config.ts` (`daemonPort`, `oidcRedirectPort`, multi-hub `hubs`), `validation.ts` (open `harnessIdSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/)`), `identity.ts` (`formatScopedId`, `parseScopedId`), `mutex.ts` (in-memory `KeyedMutex`), `nats.ts`, `errors.ts`.
+- **`src/adapters/`**: `types.ts`, `pi.ts` (`SocketBridgeAdapter`), `codex.ts` (`CodexDesktopAdapter`), `index.ts` (`ADAPTER_REGISTRY`, `extractCallerPidRoots`, `resolveCaller`), `git.ts`, `wake-card.ts`.
+- **`src/ui/`**: `index.ts` (`UiBridge` managing the persistent `cito-ui` child process over `stdin`/`stdout` JSON lines; imports only `src/shared/` and emits UI actions via an `onAction` callback).
+- **`src/macos/cito-ui.swift`**: Combined `NSStatusItem` Menu Bar Extra + `NSPanel` HUD Banner (compiled to `${stateDir}/bin/cito-ui`, zero `SQLite3` dependency).
+- **`src/mcp/`**: `state.ts` (3-table `LocalState`, `PRAGMA user_version = 4`), `oidc.ts` (`OidcLogin`), `receiver.ts` (`Receiver` + `refreshSessionBadge`), `service.ts` (`CitoService` + `HubSlot`), `server.ts` (Streamable HTTP `/mcp` + `/health` + stdio server), `cli.ts` (`cito daemon` & `cito-mcp` auto-forwarding entrypoint).
 
-### 2.2 Multi-Hub Configuration (`~/.cito/config.json` & Environment Variables)
+### 2.2 Singleton Daemon Ownership & Startup
+1. **Singleton Enforcement**:
+   - `CitoConfig` includes `daemonPort: number` (`env.CITO_DAEMON_PORT ? Number(env.CITO_DAEMON_PORT) : 4290`, validated `1..65535`).
+   - On `cito daemon` startup, `LocalState.open(stateDir)` runs a `BEGIN IMMEDIATE` transaction checking a singleton metadata table/row (or `GET http://127.0.0.1:${port}/health`): if a live `cito-daemon` process (`process.kill(pid, 0)`) already owns `stateDir` and responds on `/health` with `body.stateDir === config.stateDir`, `cito daemon` exits `0` cleanly (if `existing.port !== config.daemonPort`, exits `1` with an error).
+   - If `cito-mcp` is invoked in stdio mode without `daemon` subcommand, it checks `GET http://127.0.0.1:${config.daemonPort}/health` (spawning `cito daemon` detached if unreachable and polling `/health` up to `5000ms`), then forwards stdio JSON-RPC messages to `http://127.0.0.1:${config.daemonPort}/mcp`.
+2. **Daemon Lifecycle Table**:
+
+| Event | Deterministic Behavior |
+| :--- | :--- |
+| **Daemon startup** | Opens `LocalState`, starts `UiBridge` (`cito-ui`), binds `127.0.0.1:${daemonPort}`, and runs non-interactive background connection across all hubs (`interactive = false`: connects `none` hubs and `oidc` hubs with valid/refreshable tokens and restores their `ACTIVE` listeners; if an `oidc` hub has no valid token, sets `slot.status = "auth_required"` without launching a browser). |
+| **Menu `断开` (`disconnect`)** | Sets `slot.manuallyDisconnected = true`, aborts any in-flight login, cancels in-memory receivers on that slot (retaining `local_listeners.status = 'ACTIVE'` in SQLite), closes its NATS connection, sets `slot.status = "disconnected"`, and updates Pi badges & UI state. While `manuallyDisconnected === true`, **all** calls to `slot.network()` (including foreground MCP tools and background restoration) immediately throw `CitoError("NATS_UNAVAILABLE", "Hub '<name>' is manually disconnected")`; any in-flight connection resolving after `manuallyDisconnected` becomes `true` immediately closes without installing `slot.broker`. |
+| **Menu `重连` / `登录 OIDC`** | Clears `slot.manuallyDisconnected = false`, calls `slot.network({ interactive: action === "login" })`, restores `ACTIVE` listeners for that hub, and broadcasts updated UI state. |
+| **Menu `退出 Cito` (`quit`)** | Calls `service.close()` (stopping all in-memory receivers, clearing Pi badges, closing NATS connections, and closing `UiBridge` `stdin` so `cito-ui` exits on `EOF`) and exits `0`. (`LaunchAgent` uses `KeepAlive: { SuccessfulExit: false }` so exit `0` stays stopped while crash non-zero exits auto-restart). |
+
+---
+
+## 3. Streamable HTTP MCP & Non-Intrusive Caller Resolution
+
+### 3.1 HTTP `/mcp` & Client PID Attribution (`src/mcp/server.ts`)
+- Binds `http.createServer` strictly to `127.0.0.1:${config.daemonPort}`.
+- Validates `Origin` header when present: allows only `undefined` or parsed origins with hostname `127.0.0.1` or `localhost` (rejecting any other `Origin` with `403 Forbidden`).
+- `GET /health` returns `200 OK` with `{ ok: true, pid: process.pid, stateDir: config.stateDir }`.
+- On `/mcp` requests:
+  - Creates a fresh per-request `StreamableHTTPServerTransport({ sessionIdGenerator: undefined })` and per-request MCP `Server` wired to the shared `CitoService`; request close disposes only that transport and never closes `CitoService`.
+  - Resolves the TCP client's OS PID (`clientPid`) from `req.socket.remotePort` via `/usr/sbin/lsof -nP -iTCP:${remotePort} -sTCP:ESTABLISHED -Fpn` (`1000ms` timeout, cached on the `net.Socket` instance), matching `p<pid>` whose `n` line equals `127.0.0.1:${remotePort}->127.0.0.1:${daemonPort}` (excluding `process.pid` when another PID matches).
+  - Sets server-owned `meta.http_transport = true` and `meta.http_client_pid = clientPid` (ignoring any client-supplied `http_transport` or `http_client_pid`). If the HTTP request headers include `x-codex-turn-metadata`, merges it into `meta["x-codex-turn-metadata"]` (throwing `INVALID_INPUT` if both header and JSON-RPC `_meta` supply disagreeing thread IDs).
+
+### 3.2 Caller Resolution (`resolveCaller` & `extractCallerPidRoots`)
+1. **Step 1 — Explicit Claim Validation**:
+   - Codex thread claims: `x-codex-turn-metadata.thread_id` / `session_id`, `openai/threadId`, `codexThreadId` (>1 distinct values $\to$ `INVALID_INPUT`).
+   - Explicit bridge PID claims: top-level `meta.endpoint_pid`, `meta.caller_pid` (non-positive integer $\to$ `PI_BRIDGE_UNAVAILABLE`; 2 distinct integers $\to$ `INVALID_INPUT`).
+   - Simultaneous Codex claim + top-level explicit bridge PID claim $\to$ `INVALID_INPUT` (`meta.http_client_pid` is excluded from `explicitPid` so Codex HTTP requests carrying `x-codex-turn-metadata` + `http_client_pid` never conflict).
+2. **Step 2 — `extractCallerPidRoots(meta)` Precedence**:
+   1. Top-level explicit `meta.endpoint_pid` or `meta.caller_pid` $\to$ `[explicitPid]`.
+   2. Nested objects in `meta` containing positive safe integers in `endpoint_pid`, `caller_pid`, or `parent_pid` $\to$ those roots.
+   3. `meta.http_client_pid` $\to$ `[meta.http_client_pid]`.
+   4. If `meta.http_transport === true` $\to$ `[]` (never walking `cito-daemon`'s own `process.ppid`).
+   5. Otherwise (direct in-process stdio) $\to$ `[process.ppid]`.
+3. **Step 3 — Non-Intrusive Codex Resolution (`readCodexThreadOptional`)**:
+   - Attempts to read `${codexHome}/state_5.sqlite` (`SELECT * FROM threads WHERE id = ?`):
+     - Row exists with `archived !== 0` $\to$ `{ status: "archived" }` (throws `SESSION_NOT_OPEN` when `requireOpen !== false`, returns `closed_definitive` in `probe()`).
+     - Row exists with `archived === 0` $\to$ `{ status: "found", cwd, title, repo, branch }`.
+     - File missing, unreadable, busy, or row/schema absent $\to$ `{ status: "unavailable" }`. `resolveCaller` then resolves `cwd` from `_meta.cwd` $\to$ `lsof -a -d cwd -p <http_client_pid> -Fn` $\to$ `lookupCachedSession` $\to$ `process.cwd()` and enriches via `gitMetadata(cwd)`.
+   - `CodexDesktopAdapter.probe(row, config, signal)`: returns `closed_definitive` if `readCodexThreadOptional` returns `'archived'`, else checks `await codexDesktopRunning(signal)` (`alive` if `ChatGPT.app` is running, `closed_definitive` if not).
+   - `queueCodexWake`: executes `execFile(codexBin, ["queue", "--resume", "--thread", threadId, "--message", card], { timeout: 10_000, signal, env: { ...process.env, CODEX_HOME: config.codexHome } })`.
+
+---
+
+## 4. Standard Vendor-Neutral OIDC & Multi-Hub Isolation
+
+1. **Isolated `HubSlot` Configuration**:
+   - Each `HubSlot` constructs its config strictly from machine properties (`{ stateDir, codexHome, codexBin, openBin, daemonPort, hostName, defaultHub, hubs }`) + its own `HubConfig` (`natsUrl`, `authMode`, `user`, `oidcIssuer`, `oidcClientId`, `oidcScopes`, `oidcRedirectPort`), never inheriting another hub's optional `oidcScopes` or `oidcRedirectPort`.
+2. **Standard JWS Algorithms & Scope Negotiation**:
+   - `SUPPORTED_OIDC_ALGS = ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384", "EdDSA"] as const`.
+   - `OidcLogin` reads/writes only `join(stateDir, "oidc-token-" + hub.name + ".json")`.
+   - Discovery checks `discovery.scopes_supported`: if present as an array and missing `"openid"`, throws `AUTH_UNAVAILABLE`. When `hubConfig.oidcScopes` is unset, filters `["openid", "profile", "email", "offline_access"]` against `discovery.scopes_supported` (when present).
+   - Callback server binds `127.0.0.1:${hubConfig.oidcRedirectPort ?? 0}` under `oidcMutex.run("port:" + ((hubConfig.oidcRedirectPort ?? 0) || hub.name))` and aborts immediately if the slot is disconnected or closed.
+3. **Principal-Change Fencing**:
+   - When `slot.network()` authenticates as `slot.principal`, before calling `restoreReceivers`, any rows in `local_listeners` for `slot.name` with `status IN ('ACTIVE', 'REBINDING')` and `principal_id !== slot.principal.principal_id` are transitioned to `'FENCED_INACTIVE'` and their in-memory receivers stopped.
+
+---
+
+## 5. UI Bridge Protocol & Menu Bar Extra (`src/ui/index.ts`, `src/macos/cito-ui.swift`)
+
+### 5.1 Framed Pipe Protocol (`stdin` / `stdout` JSON Lines)
+- Both `UiBridge` and `cito-ui.swift` incrementally buffer and decode `\n`-delimited UTF-8 lines (max line length 1 MiB), runtime-validating JSON payloads and logging invalid frames to `stderr` without crashing.
+- `UiBridge` coalesces pending `{ op: "state" }` snapshots, swallows `EPIPE` errors when the child pipe is closed, and respawns `cito-ui` (500ms backoff) with an immediate state snapshot replay if `cito-ui` exits unexpectedly while `cito-daemon` is running.
+- On `stdin` `EOF`, `cito-ui.swift` immediately terminates (`exit(0)`).
 
 ```ts
-export interface HubConfig {
-  name: string;        // Matches ^[a-z0-9][a-z0-9_-]{0,31}$
-  natsUrl: string;
-  authMode: "none" | "oidc";
-  user: string;
-  oidcIssuer?: string;
-  oidcClientId?: string;
-  oidcScopes?: string[];
+export interface UiHubSummary {
+  name: string;
+  status: "connected" | "connecting" | "auth_required" | "disconnected";
+  user: string | null;
+  auth_mode: "none" | "oidc";
+  error: string | null;
 }
 
-export interface CitoConfig {
-  stateDir: string;
-  codexHome: string;
-  codexBin: string;
-  openBin: string;
-  hostName: string;
-  defaultHub: string;
-  hubs: Record<string, HubConfig>;
-  // Mirrors hubs[defaultHub] for AuthCalloutConfig compatibility:
-  natsUrl: string;
-  authMode: "none" | "oidc";
-  user: string;
-  oidcIssuer?: string;
-  oidcClientId?: string;
-  oidcScopes?: string[];
+export interface UiListenerSummary {
+  hub: string;
+  listener_id: string; // canonical c_<fp12>
+  public_id: string;
+  scoped_id: string;
+  harness: string;
+  session_id: string;
+  title: string;
+  cwd: string;
+  repo: string | null;
+  scope: "self" | "workspace";
+  can_jump: boolean;
 }
+
+export type DaemonToUiMessage =
+  | { op: "state"; hubs: UiHubSummary[]; listeners: UiListenerSummary[] }
+  | { op: "banner"; payload: BannerPayload };
+
+export type UiToDaemonAction =
+  | { op: "unlisten"; hub: string; listener_id: string }
+  | { op: "unlisten_all" }
+  | { op: "set_scope"; hub: string; listener_id: string; scope: "self" | "workspace" }
+  | { op: "hub_action"; hub: string; action: "login" | "reconnect" | "disconnect" }
+  | { op: "quit" };
 ```
 
-- **Resolution & Validation (`loadConfig(env)`)**:
-  1. `stateDir = directory(env.CITO_STATE_DIR ?? "~/.cito")`.
-  2. When `env === process.env || env.CITO_STATE_DIR !== undefined || env.CITO_CONFIG_PATH !== undefined`, checks for `env.CITO_CONFIG_PATH ?? join(stateDir, "config.json")`:
-     - If present: parses `hubs` (must be a non-empty object whose keys match `^[a-z0-9][a-z0-9_-]{0,31}$`). Each entry defaults `authMode` to `"none"` and `user` to `env.CITO_USER ?? osUser` (requiring `oidcIssuer` and `oidcClientId` when `authMode === "oidc"`).
-     - If absent: synthesizes a single hub `"default"` from `CITO_NATS_URL`, `CITO_AUTH_MODE`, `CITO_USER`, `CITO_OIDC_ISSUER`, `CITO_OIDC_CLIENT_ID`, and `CITO_OIDC_SCOPES`.
-  3. `defaultHub` precedence: `env.CITO_HUB?.trim() || configJson?.default_hub || (Object.keys(hubs).length === 1 ? Object.keys(hubs)[0] : undefined)`. If `!defaultHub || !(defaultHub in hubs)`, throws `CitoError("INVALID_INPUT", "default_hub must be specified and exist in configured hubs")`.
-  4. If `env.CITO_NATS_URL` is explicitly set when `CITO_CONFIG_PATH` is unset, it overrides `hubs[defaultHub].natsUrl`.
+### 5.2 UI-Driven Service Operations & Live-Receiver Rule
+- **Live-Receiver Rule for Badges & UI State**:
+  Both `refreshSessionBadge` and the UI `{ op: "state" }` `listeners` list include only `ACTIVE` rows that have a live, non-aborted in-memory `Receiver` in `slot.receivers` (`receiver && !receiver.abort.signal.aborted && receiver.owner === row.owner_token`).
+- **`unlistenById(hub, listenerId)` & `unlistenAll()`**:
+  Serialized under `listenMutex.run("${hub}:${listenerId}")`. Immediately cancels the in-memory `Receiver`, updates SQLite `status = 'UNLISTENED'` (and moves pending `'RECEIVED'/'DISPATCHING'` signals to `'STORED_PASSIVE'` with `held_reason = 'unlistened_before_dispatch'`), refreshes the Pi badge, and pushes the updated UI state; then attempts the NATS KV `state: "UNLISTENED"` update best-effort.
+- **`setScope(hub, listenerId, scope)` & Scope Reconciliation**:
+  Serialized under `listenMutex.run("${hub}:${listenerId}")`. Preserves `listener_id`, `owner_token`, and `binding_generation`. Updates NATS KV **first**; once KV succeeds, the KV entry's `scope` is authoritative for that `(owner_token, binding_generation)` and SQLite is updated (`UPDATE local_listeners SET scope = ? WHERE hub = ? AND listener_id = ?`). In `restoreReceivers` and `Receiver.probe()`, if `remote.owner_token === local.owner_token && remote.binding_generation === local.binding_generation && remote.state === "ACTIVE"` and `local.scope !== remote.scope`, SQLite is reconciled to `remote.scope` before starting the receiver or renewing KV.
 
 ---
 
-## 3. Identity, Symmetric `<hub>:` Addressing, and Extensible Caller Resolution
+## 6. Proposed Design for Claude Code Integration (设计建议 — 仅建议，尚未实现)
 
-### 3.1 Canonical Storage Identity and Public Display IDs
-- Each listener registration on a hub is keyed by `SessionKey = (principal_id, host_id, harness, session_id)` where `harness` matches `harnessIdSchema` (`^[a-z][a-z0-9_-]{0,31}$`).
-- Internal canonical ID: `canonical_id = "c_" + fp12` (`^c_[a-z2-7]{12}$`).
-- Unscoped public ID: `public_id = "${slug}-${fp12}"` (`^[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12}$`).
+> **状态声明（仅建议设计 / Proposed Design Suggestion Only — Not Yet Implemented）**：以下为在 `cito-daemon` 常驻架构下未来接入 Claude Code 的架构设计建议，不包含具体代码实现细节，当前版本尚未实现 Claude Code 适配。
 
-### 3.2 Symmetric `<hub>:` Scoped Addressing (`formatScopedId` & `parseScopedId`)
-- **NATS Wire Invariant**: All IDs stored in NATS KV (`cito_listeners`), published in JetStream (`CITO_SIGNALS`), or stored in SQLite columns (`listener_id`, `public_id`, `signal_id`, `from_listener_id`, `in_reply_to`) are **unprefixed**.
-- **`isSingleDefaultHub(config)`**: `Object.keys(config.hubs).length === 1 && config.defaultHub === "default"`.
-- **`formatScopedId(hub, id, config)`**: Returns `id` when `isSingleDefaultHub(config)` is `true`, and `${hub}:${id}` otherwise. Applied to all public MCP outputs (`cito_listen.listener_id`, `cito_unlisten.listener_id`, `cito_find.caller.listener_id`, `cito_find.listeners[].listener_id`, `cito_send.to`, `cito_send.signal_id`, `cito_inbox.listener_id`, `cito_inbox.signals[].signal_id`, `cito_inbox.signals[].from.listener_id`) and to `from_listener_id` when rendering `[↩ ...]` in `formatWakeCard` (which strips optional `^(?:[a-z0-9][a-z0-9_-]{0,31}:)?` before comparing sender `slug` to `from_title`).
-- **`parseScopedId(raw, config, explicitHub?)`**: Parses optional `<prefixHub>:<rest>`. Validates that any `<prefixHub>` and any `explicitHub` exist in `config.hubs` and do not conflict with each other (throwing `INVALID_INPUT` prior to any network/DB activity on unknown or conflicting hubs). Returns `{ hub: prefixHub ?? explicitHub ?? config.defaultHub, id: rest }`.
-
-### 3.3 Priority-Free, Extensible Caller Resolution (`resolveCaller`)
-- **Step 1 — Explicit Claim Validation**:
-  - Extracts explicit Codex thread claims (`x-codex-turn-metadata.thread_id` / `session_id`, `openai/threadId`, `codexThreadId`; multiple distinct values $\to$ `INVALID_INPUT`) and top-level explicit bridge PID claims (`meta.endpoint_pid`, `meta.caller_pid`; non-positive/non-safe-integer $\to$ `PI_BRIDGE_UNAVAILABLE`, two distinct values $\to$ `INVALID_INPUT`).
-  - If both an explicit Codex claim and a top-level explicit bridge PID claim are present, throws `CitoError("INVALID_INPUT", "Conflicting caller metadata")` (`outbound()` catches only `BINDING_REQUIRED` and `SESSION_NOT_OPEN`, always rethrowing `INVALID_INPUT`).
-- **Step 2 — Resolution Execution**:
-  1. **Codex claim present**: When `requireOpen !== false`, calls `readCodexThread` + `assertCodexThreadOpen`; when `requireOpen === false`, tries `readCodexThread(id, config, { allowArchived: true })` and on `SESSION_NOT_OPEN` falls back to `lookupCachedSession?.({ harness: "codex", sessionId: id })`.
-  2. **Socket Bridge Discovery (Extensible to Any `<harness>-pid-<pid>.sock`)**:
-     - Shared helper `extractCallerPidRoots(meta)` returns `[explicitPid]` if a top-level `endpoint_pid` / `caller_pid` is present; else collects all positive safe integers from nested `endpoint_pid`, `caller_pid`, and `parent_pid` fields in `meta` (walking ONLY those roots `depth = 0..5`, never `process.ppid`); else walks `[process.ppid]` (`depth = 0..5`).
-     - At each hop `pid`, scans `${stateDir}/sockets/` for any socket matching `^([a-z][a-z0-9_-]{0,31})-pid-${pid}\.sock$` (checking registered `SocketBridgeAdapter` instances first, and dynamically supporting any `<harness>-pid-${pid>.sock`), then queries `{ op: "identify" }` (`1500ms` timeout) returning `{ ok: true, endpoint_pid: pid, session_id, session_name, cwd }` and enriches via `gitMetadata(cwd, session_name)` (with `git -C` stripping inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`).
-     - **Unambiguous Offline PID Fallback (`requireOpen === false`)**: When a socket probe fails and `requireOpen === false`, `lookupCachedSession?.({ endpointPid: pid })` checks `SELECT DISTINCT harness, session_id FROM local_listeners WHERE endpoint_pid = ?` across **all retained rows** (regardless of `status`). If and only if `distinctRows.length === 1`, it returns the cached session metadata; if `0` or `>1` distinct `(harness, session_id)` pairs exist for that PID, it throws `PI_BRIDGE_UNAVAILABLE` (never guessing by `binding_generation` or status).
-
----
-
-## 4. Extensible `HarnessAdapter` Contract & Built-In Drivers (`src/adapters/`)
-
-```ts
-export type ProbeOutcome =
-  | { status: "alive" | "switched" | "closed_definitive" }
-  | { status: "transient_error"; error: unknown };
-
-export type DeliverOutcome =
-  | "delivered"              // Confirmed insertion into host conversation -> auto-sets acknowledged_at_ms
-  | "delivered_unconfirmed"  // Queued with indeterminate timeout or unconfirmed channel -> DISPATCHED, keeps acknowledged_at_ms NULL
-  | "driver_unavailable"     // Host driver unreachable -> STORED_PASSIVE (held_reason = 'driver_unavailable')
-  | "session_switched";      // Host switched session -> revokes all active hub bindings for (harness, session_id)
-
-export interface DeliverContext {
-  batchId: string;
-  card: string;
-  queueWritten: boolean;
-  markQueueWritten: () => void;
-  runEffect: (
-    submit: () => Promise<void>,
-    opts: { attempts: number; pause: number[]; onSigtermTimeout?: () => void }
-  ) => Promise<boolean>;
-  config: CitoConfig;
-  signal: AbortSignal;
-}
-
-export interface HarnessAdapter {
-  readonly id: string;
-  probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome>;
-  deliver(row: ListenerRow, ctx: DeliverContext): Promise<DeliverOutcome>;
-  updateBadge?(row: ListenerRow, badge: string | undefined, config: CitoConfig, signal?: AbortSignal): Promise<void>;
-}
-```
-
-- **Extensible Registry (`ADAPTER_REGISTRY`)**:
-  - Registers built-in `CodexDesktopAdapter` (`id: "codex"`) and `new SocketBridgeAdapter("pi")` (`id: "pi"`), exports `registerAdapter(adapter: HarnessAdapter)` for plug-in extension, and provides `getAdapter(harness: string): HarnessAdapter | undefined` (which returns the registered adapter or dynamically creates a `SocketBridgeAdapter(harness)` when a corresponding socket bridge is used).
-- **`SocketBridgeAdapter(harnessId, { confirmDelivery = true })`**:
-  - Communicates over `${stateDir}/sockets/${harnessId}-pid-${row.endpoint_pid}.sock`.
-  - `probe`: calls `identify`; returns `switched` if `session_id !== row.session_id`, `closed_definitive` on `SESSION_NOT_OPEN` or `ENOENT`/`ECONNREFUSED` when `process.kill(endpoint_pid, 0)` throws `ESRCH`.
-  - `deliver`: calls `{ op: "deliver", session_id: row.session_id, batch_id: ctx.batchId, wake: true, content: ctx.card }` inside `ctx.runEffect(..., { attempts: 3, pause: [1000, 2000] })`. Returns `"delivered"` when `confirmDelivery` is `true`, `"delivered_unconfirmed"` when `confirmDelivery` is `false`, `"session_switched"` on `SESSION_MISMATCH`, or `"driver_unavailable"` on exhausted retries.
-- **`CodexDesktopAdapter` (`id: "codex"`)**:
-  - `probe`: checks `readCodexThread` (`archived === 0`) and `assertCodexThreadOpen` (`ipc.sock`).
-  - `deliver`:
-    - Step 1 (`!ctx.queueWritten`): runs `queueCodexWake` (passing `CODEX_HOME: ctx.config.codexHome` in child `env`) via `ctx.runEffect` (`attempts: 3, pause: [1000, 2000]`, tracking whether completion was a clean exit `0` vs. `SIGTERM` timeout via `onSigtermTimeout`). If Step 1 returns `false`, returns `"driver_unavailable"`. Otherwise calls `ctx.markQueueWritten()`.
-    - Step 2: runs `triggerCodexWake` (`openBin: ctx.config.openBin`, `attempts: 2, pause: [500]`).
-    - Returns `"delivered"` **if and only if** `cleanQueueExit && triggered`; otherwise returns `"delivered_unconfirmed"` so `acknowledged_at_ms` remains `NULL` and the message stays readable in `cito_inbox`.
-
----
-
-## 5. Single-DB 3-Table Schema & Multi-Hub Lifecycle (`src/mcp/state.ts`, `src/mcp/receiver.ts`)
-
-### 5.1 Three-Table SQLite Schema (`~/.cito/state.sqlite`, `PRAGMA user_version = 4`)
-`LocalState.open()` sets `PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;` and runs a single `BEGIN IMMEDIATE ... COMMIT` transaction: if `PRAGMA user_version !== 4`, it executes `DROP TABLE IF EXISTS` on `local_listeners`, `local_signals`, `local_pairwise_wakes`, and `local_sent_idempotency`, creates the 3 tables below, and sets `PRAGMA user_version = 4`:
-
-```sql
-CREATE TABLE local_listeners (
-  hub TEXT NOT NULL DEFAULT 'default',
-  listener_id TEXT NOT NULL,
-  public_id TEXT NOT NULL DEFAULT '',
-  tag TEXT,
-  principal_id TEXT NOT NULL,
-  owner_user TEXT NOT NULL,
-  host_id TEXT NOT NULL,
-  host_name TEXT NOT NULL,
-  harness TEXT NOT NULL CHECK(length(harness) > 0),
-  session_id TEXT NOT NULL,
-  endpoint_pid INTEGER,
-  cwd TEXT NOT NULL,
-  repo TEXT,
-  branch TEXT,
-  title TEXT NOT NULL,
-  about TEXT NOT NULL,
-  scope TEXT NOT NULL CHECK(scope IN ('self','workspace')),
-  status TEXT NOT NULL CHECK(status IN ('ACTIVE','REBINDING','UNLISTENED','FENCED_INACTIVE')),
-  binding_generation INTEGER NOT NULL DEFAULT 0,
-  owner_token TEXT NOT NULL DEFAULT '',
-  persisted_seq INTEGER NOT NULL DEFAULT 0,
-  consecutive_probe_failures INTEGER NOT NULL DEFAULT 0,
-  replay_gap_detected INTEGER NOT NULL DEFAULT 0,
-  replay_gap_range TEXT,
-  dispatcher_token TEXT,
-  lease_until_ms INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (hub, listener_id)
-);
-CREATE INDEX listeners_by_session ON local_listeners(harness, session_id);
-
-CREATE TABLE local_signals (
-  hub TEXT NOT NULL DEFAULT 'default',
-  signal_id TEXT NOT NULL,
-  listener_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  binding_generation INTEGER NOT NULL,
-  from_user TEXT NOT NULL,
-  from_host_name TEXT NOT NULL,
-  from_harness TEXT,
-  from_listener_id TEXT,
-  from_title TEXT NOT NULL,
-  from_about TEXT,
-  message TEXT NOT NULL,
-  held_reason TEXT,
-  in_reply_to TEXT,
-  created_at TEXT NOT NULL,
-  expires_at_ms INTEGER NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('RECEIVED','DISPATCHING','DISPATCHED','STORED_PASSIVE','EXPIRED_UNSENT')),
-  batch_id TEXT,
-  batch_expires_at_ms INTEGER,
-  dispatcher_token TEXT,
-  queue_written INTEGER NOT NULL DEFAULT 0,
-  acknowledged_at_ms INTEGER,
-  batch_card TEXT,
-  PRIMARY KEY (hub, signal_id)
-);
-CREATE INDEX signals_listener ON local_signals(hub, listener_id, state, seq);
-CREATE INDEX signals_batch ON local_signals(hub, batch_id);
-
-CREATE TABLE local_sent_idempotency (
-  hub TEXT NOT NULL DEFAULT 'default',
-  dedup_id TEXT NOT NULL,
-  request_hash TEXT NOT NULL,
-  signal_id TEXT NOT NULL,
-  seq INTEGER NOT NULL DEFAULT 0,
-  to_listener_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  held_reason TEXT,
-  expires_at_iso TEXT NOT NULL,
-  expires_at_ms INTEGER NOT NULL,
-  PRIMARY KEY (hub, dedup_id)
-);
-```
-
-### 5.2 Lock Names, Batch Identity & Stage-1 / Stage-2 Rules
-- **Uniform Locks & Batch IDs**:
-  - Listener lock: `listen-${hub}-${id}.lock`
-  - Receiver lock: `receiver-${hub}-${id}.lock`
-  - Session badge lock: `session-${harness}-${sha256(sessionId).slice(0, 16)}.lock`
-  - Frozen batch ID: `batch_${hub}_${id}_${firstSeq}_${lastSeq}_${generation}` (scoped by `WHERE hub = ? AND batch_id = ?`).
-- **Stage-1 Admission (`LocalState.admit`)**:
-  - Duplicate `signal_id` on `hub` reuses stored row and advances `persisted_seq`.
-  - If `signal.from.principal_id !== target.principal_id && target.scope !== 'workspace'`: advances `persisted_seq` and drops silently.
-  - If `signal.target_generation < row.binding_generation`: inserts with `state = 'STORED_PASSIVE', held_reason = 'stale_generation'`, publishes `{ signal_id, status: 'stored_passive', held_reason: 'stale_generation' }` to `cito.ack.<signal_id>`.
-  - Otherwise: inserts with `state = 'RECEIVED', held_reason = null`, publishes `{ signal_id, status: 'wake_accepted', held_reason: null }` to `cito.ack.<signal_id>`, shows HUD banner, refreshes badge, and schedules 1500ms Stage-2 dispatch.
-- **Unified `refreshSessionBadge`**:
-  - Under `session-${harness}-${sha256(sessionId).slice(0, 16)}.lock`, loads all rows for `(harness, session_id)` from `local_listeners`.
-  - Resolves `target` (`endpoint_pid`, `public_id`) from the highest-generation row (any status).
-  - Active rows are all rows with `status === 'ACTIVE'`, excluding any key in `options?.closingKeys` (`${hub}:${id}`) passed by `CitoService.close()` unless a non-blocking probe `acquireFlock("receiver-${hub}-${id}.lock", 0)` returns `null` (releasing any acquired probe lock immediately).
-  - If `activeRows.length === 0`: calls `getAdapter(harness)?.updateBadge(target, undefined, config)` to clear the badge.
-  - Otherwise: counts unread signals (`acknowledged_at_ms IS NULL AND expires_at_ms > ? AND state != 'EXPIRED_UNSENT'`) and `gap = activeRows.some(r => r.replay_gap_detected === 1)`, and calls `updateBadge` with `🔔 ${badgeSlug}${countStr}`.
-
----
-
-## 6. Public MCP Tool Contracts (`src/mcp/service.ts`, `src/mcp/server.ts`)
-
-1. **`cito_listen({ about, tag?, hub?, scope? })`**:
-   - Enrolls on `targetHub = input.hub ?? config.defaultHub` (default `scope: "self"`). Quiesces any prior in-process receiver for `(targetHub, id)` before starting the new receiver.
-   - Returns `{ ok: true, status: "listening", hub: targetHub, listener_id: formatScopedId(targetHub, publicId, config), binding_generation, user, host_id, host_name, harness, session_id, about, repo, branch, title, scope, lease_ttl_seconds: 60 }`.
-2. **`cito_unlisten({ hub? })`**:
-   - Targets `[input.hub]` if specified, else all configured hubs where caller's `(hub, listener_id)` is currently `ACTIVE` in SQLite (or `[config.defaultHub]` if none active).
-   - If all targeted hubs fail remote KV update, rolls back local `ACTIVE` state and returns the error; if partial failure occurs across multiple hubs, rolls back failed hubs and returns `{ ok: true, status: "unlistened", listener_id, warnings: [{ hub, code, message }] }`.
-3. **`cito_find({ query?, hub?, user?, host?, harness?, repo?, limit? })`**:
-   - `harness` accepts any string matching `harnessIdSchema` (`^[a-z][a-z0-9_-]{0,31}$`).
-   - Targets `[input.hub]` or all configured hubs in parallel (`Promise.allSettled`), wrapping each KV entry decode + `registrationSchema.parse` in `try/catch` to skip malformed records.
-   - Sorts merged results by `b.revision - a.revision || a.hub.localeCompare(b.hub) || a.value.listener_id.localeCompare(b.value.listener_id)`, slices to `limit`, formats each `listener_id` via `formatScopedId`, and includes `hub` on each item plus `warnings` for unreachable hubs (throwing the first error if all targeted hubs fail).
-4. **`cito_send({ to, hub?, message, in_reply_to?, idempotency_key? })`**:
-   - Resolves `{ hub, id: targetId } = parseScopedId(input.to, config, input.hub)`. Validates `in_reply_to` via `parseScopedId(input.in_reply_to, config, hub)` when provided (rejecting cross-hub reply prefixes with `INVALID_INPUT`).
-   - Compares sender 4-tuple `(principal_id, host_id, harness, session_id)` directly against `target` for `SELF_SEND_FORBIDDEN`.
-   - Publishes unprefixed wire payload `{ signal_id, to: canonicalTo, target_generation, sender_endpoint_key, from, message, in_reply_to }` and awaits `cito.ack.<signal_id>` (`2000ms` timeout, defaulting to `status: "queued_for_reconnect", held_reason: null`).
-   - Returns `{ ok: true, signal_id: formatScopedId(hub, row.signal_id, config), seq, to: formatScopedId(hub, displayId(target), config), status, held_reason, expires_at }`.
-5. **`cito_inbox({ hub?, ack_ids?, ack_all? })`**:
-   - `ack_all` is optional in `inboxInputSchema` with `const ackAll = input.ack_all ?? (input.ack_ids === undefined)` (draining by default when `ack_ids` is omitted).
-   - For each slot in `targetedSlots` (`input.hub ? [slot] : allSlots`), resolves offline `principal = await slot.identity(true)` (if a slot throws `UNAUTHORIZED`, rethrows when `targetedSlots.length === 1` or when all slots fail, and skips unauthenticated secondary slots when `targetedSlots.length > 1`), computing `authorizedListeners` from `(slot.name, listenerId({ principal_id: principal.principal_id, host_id: this.hostId, harness: caller.harness, session_id: caller.session_id }))`.
-   - In one `BEGIN IMMEDIATE` transaction: validates `ack_ids` for out-of-scope `<hub>:` prefixes and cross-hub bare ID ambiguity across `authorizedListeners`; selects up to 50 unread non-expired rows (`ORDER BY created_at ASC, hub ASC, seq ASC, signal_id ASC LIMIT 50`); updates `acknowledged_at_ms = COALESCE(acknowledged_at_ms, now), state = CASE WHEN state = 'RECEIVED' THEN 'STORED_PASSIVE' ELSE state END` for the union of the `ackAll` page and matched `ack_ids`; and clears `replay_gap_detected = 0, replay_gap_range = NULL` on `authorizedListeners` when `ackAll` is true. Refreshes badge after commit.
-
----
-
-## 7. Wake Cards & macOS HUD Banner (`src/adapters/wake-card.ts`, `src/macos/cito-banner.swift`)
-
-- **In-Chat Wake Card (`formatWakeCard`)**:
-  - Single signal:
-    ```text
-    🔔 Cito · tefx@Zhaomengs-MacBook-Air · codex [↩ personal:rcatwin-pbtjxcxkgw3y]
-
-    压测数据已更新，请读取最新日志。
-    ```
-  - Multi-signal batch:
-    ```text
-    🔔 Cito · 2 条唤醒消息 → 检查在线的 Cito agent
-
-    [1] alice@mac · pi [↩ personal:build-ab2def3gh4jk]
-    Ready
-
-    [2] bob@pc · codex
-    Done
-    ```
-  - No `↳ Ack: cito_inbox(...)` footer is emitted.
-- **macOS Native HUD Banner (`cito-banner.swift`)**:
-  - Zero `SQLite3` dependency (`import SQLite3` and `Banner.state` removed).
-  - Accepts any non-empty `target_harness`; renders `"点击跳转至 Codex 对话 ↗"` (system blue, opening `codex://threads/<id>` on click) when `target_harness == "codex"`, and `"\(target_harness) 终端会话 · 点击关闭横幅"` (tertiary label color) for other harnesses.
-
----
-
-## 8. Proposed Design for Claude Code Adapter (设计建议 — 仅建议，尚未实现)
-
-> **状态声明（仅建议设计 / Proposed Design Suggestion Only — Not Yet Implemented）**：以下为未来接入 Claude Code 时的架构设计建议，不包含具体代码实现细节，当前版本尚未实现 Claude Code 宿主适配。
-
-1. **会话身份与本地桥接建连建议**：
-   - 由于 Claude Code 不支持加载进程内 TypeScript 扩展，建议利用 `SocketBridgeAdapter` 的通用本地 Unix Socket 协议（`<harness>-pid-<pid>.sock`）：由运行在 Claude Code 下的 MCP 服务端实例（或 `SessionStart` Hook 伴随进程）在收到首个工具请求时，按调用方进程根 PID 惰性绑定 `~/.cito/sockets/claude-pid-<pid>.sock`，将身份识别、20 秒存活探针与跨进程恢复统一收敛至标准桥接协议。
-2. **双模消息投递建议（MCP Channel Push + Turn-Start Inbox Drain）**：
-   - **主动唤醒推送（Channel Push）**：MCP 服务端在握手阶段声明实验性通道能力（如 `claude/channel`），当本地桥接 Socket 收到 `deliver` 请求时，通过该 Claude 会话所属的 MCP stdio 通道推送通知以唤醒空闲会话。
-   - **回合开始拉取兜底（Inbox Drain）**：考虑到客户端可能未启用实验性推送通道或正处于忙碌回合，桥接投递返回“已投递未确认（`delivered_unconfirmed`）”状态，使消息保留在未读收件箱中；配合 Claude Code 的 `UserPromptSubmit` Hook 或在回合开始时调用无参 `cito_inbox()`（默认读取即清空），确保消息在下一轮对话开始时可靠进入上下文。
+1. **零子进程 Streamable HTTP 接入与会话标识建议**：
+   - 建议在 Claude Code 的 MCP 配置中直接指向本地常驻守护进程端点 `http://127.0.0.1:4290/mcp`。
+   - 守护进程可通过 HTTP 连接的本地客户端套接字（`lsof` 归属的 Claude 进程 PID 与工作目录 `cwd`，或 MCP 标准 `roots/list` 协议返回的工作区 URI）结合连接级会话标识，自动完成会话绑定与进程存活检测（当 Claude Code 终端退出或连接关闭时自动注销监听），无需在 Claude Code 内安装额外的外部桥接进程。
+2. **双模通知投递建议（MCP SSE 通道推送 + 回合拉取兜底）**：
+   - **主动推送（SSE Channel Push）**：在 Streamable HTTP 模式下，Claude Code 保持一条 `GET /mcp` 的 SSE 事件流连接；守护进程在握手时声明实验性通知通道能力（如 `claude/channel`），收到信号时直接通过该会话的 SSE 连接推送唤醒卡片以唤醒空闲的 Claude 会话。
+   - **回合开始拉取兜底（Turn-Start Inbox Drain）**：当客户端未启用实验性通道或正忙时，投递结果记为“已派发未确认（`delivered_unconfirmed`）”，使信号保留在未读收件箱中；配合 Claude Code 的 `UserPromptSubmit` Hook 或在回合开始时调用无参 `cito_inbox()`（默认读取即清空），确保消息在下一轮对话开始时可靠进入上下文。
