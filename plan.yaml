@@ -764,7 +764,7 @@ phases:
 - id: v3
   name: Cito V3 macOS Menu Bar Daemon, Streamable HTTP MCP, Standard OIDC, Progressive-Disclosure
     UI, Documentation, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, all docs/DESIGN.md §§1–6 and README.md requirements (including
     the Claude Code design suggestion review) are verified, and [REQUIRES_SKILL: code-hygiene]
@@ -934,7 +934,7 @@ phases:
   - id: v3.acceptance-and-hygiene-gate
     name: 'V3 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v3` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -987,3 +987,34 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-04T20:26:53.718214Z'
+    done_at: '2026-11-04T20:32:52.997000+00:00'
+    evidence: "Artifact:\n- Gate report: gate.report.v2 PASS (validated via review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v3-gate/binding.json: valid=true, binding_checked=true,\
+      \ evidence_disposition=POSITIVE_GATE_EVIDENCE, target_ref=git:f2e3204857a7d255da96cec86dabbc52ee657ca2)\n\
+      \nVerification:\n- Run: npm run typecheck && npm run build && npm test -> exit\
+      \ 0 (27 test files, 198 tests passed, 0 failed, 0 skipped)\n- Requirement results:\n\
+      \  - V3-1-KEYED-MUTEX-AND-LEGACY-BANNER-REMOVAL: PROVEN (src/banner/flock.ts,\
+      \ src/banner/index.ts, and src/macos/cito-banner.swift deleted; KeyedMutex in\
+      \ src/shared/mutex.ts replaces cross-process file locks; package.json ships\
+      \ src/macos/cito-ui.swift).\n  - V3-2-SINGLETON-DAEMON-HTTP-MCP-AND-STDIO-FORWARDER:\
+      \ PROVEN (singleton cito daemon with daemon_owner + /health check, Streamable\
+      \ HTTP MCP at http://127.0.0.1:4290/mcp, Origin validation, lsof -Fpn http_client_pid\
+      \ attribution, x-codex-turn-metadata header merge/conflict check, and cito-mcp\
+      \ stdio auto-spawning/forwarding).\n  - V3-3-NON-INTRUSIVE-CODEX-ADAPTER-AND-QUEUE-RESUME:\
+      \ PROVEN (assertCodexThreadOpen/ipc.sock removed, 5-step extractCallerPidRoots\
+      \ precedence, 3-state readCodexThreadOptional with _meta.cwd/lsof/cached/process.cwd()\
+      \ fallback, and codex queue --resume).\n  - V3-4-STANDARD-OIDC-ALGS-SCOPES-PORT-AND-FENCING:\
+      \ PROVEN (strict per-HubSlot config isolation, SUPPORTED_OIDC_ALGS 7 algorithms,\
+      \ scopes_supported negotiation, oidcRedirectPort + port-keyed oidcMutex, and\
+      \ principal-change listener fencing).\n  - V3-5-MENUBAR-UI-BRIDGE-AND-LIVE-RECEIVER-RULE:\
+      \ PROVEN (src/ui/index.ts UiBridge + src/macos/cito-ui.swift NSStatusItem Menu\
+      \ Bar Extra with Option-click instant unlisten, in-process 388x136 .vibrantDark\
+      \ NSPanel HUD Banner hiding without exit, Live-Receiver Rule, unlistenById,\
+      \ unlistenAll, setScope, hub_action, and quit).\n  - V3-6-DOCUMENTATION-AND-CLAUDE-DESIGN-SUGGESTION:\
+      \ PROVEN (docs/DESIGN.md §6 Claude Code design suggestion free of implementation\
+      \ code and marked '仅建议设计，尚未实现'; README.md per-harness guides complete).\n  -\
+      \ V3-7-CODE-HYGIENE-ITERATIVE-CONVERGENCE: PROVEN (Round 1 P1-P6 & S1-S6 resolved\
+      \ in fa297c11c316e9e49af6a67e36a259f333ba10b8; Round 2 structural-auditor 01a1a838-667d-77f6-b906-924bb2b244fb\
+      \ and pathway-auditor 01a1a838-6712-721e-b4f3-03ed5022e562 certified Completeness:\
+      \ CLEAN | Simplicity: ZERO_NEW_ISSUES).\n\nSpec link:\n- docs/DESIGN.md (V3\
+      \ — macOS Menu Bar Daemon & Streamable HTTP Edition, §§1–6) and README.md"
