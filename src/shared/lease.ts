@@ -1,4 +1,4 @@
-export const ACTIVE_LEASE_MS = 60_000;
+const ACTIVE_LEASE_MS = 60_000;
 export const RETENTION_MS = 1_800_000;
 function timestamp(value: string | Date | number): number {
   const result = typeof value === "number" ? value : value instanceof Date ? value.getTime() : Date.parse(value);

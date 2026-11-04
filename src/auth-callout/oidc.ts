@@ -74,7 +74,7 @@ export class OidcVerifier {
     try {
       const header = decodeProtectedHeader(token);
       if (typeof header.alg !== "string" || !(SUPPORTED_OIDC_ALGS as readonly string[]).includes(header.alg) || typeof header.kid !== "string" || !header.kid) {
-        throw new Error("OIDC requires RS256/ES256 and kid");
+        throw new Error("OIDC requires a supported asymmetric alg and kid");
       }
       if (!this.keySet || !this.keys.some(key => key.kid === header.kid)) {
         const refresh = this.refresh(signal);

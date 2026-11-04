@@ -15,9 +15,9 @@ export async function connectNats(options: ConnectionOptions): Promise<NatsConne
   return connect(options);
 }
 
-export const LISTENERS_BUCKET = "cito_listeners";
+const LISTENERS_BUCKET = "cito_listeners";
 export const SIGNALS_STREAM = "CITO_SIGNALS";
-export const SIGNALS_STREAM_CONFIG: Partial<StreamConfig> & { name: string } = {
+const SIGNALS_STREAM_CONFIG: Partial<StreamConfig> & { name: string } = {
   name: SIGNALS_STREAM,
   subjects: ["cito.signal.*"],
   retention: RetentionPolicy.Limits,

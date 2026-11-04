@@ -9,10 +9,11 @@ import { LocalState } from "./state.js";
 import { startHttpServer, daemonHealth } from "./server.js";
 
 function alive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
-export async function runDaemon(config: CitoConfig): Promise<void> {
+async function runDaemon(config: CitoConfig): Promise<void> {
   process.title = "cito-daemon";
   const state = await LocalState.open(config.stateDir);
-  let claimed = false;
+  let claimed = false, ownershipClosed = false;
+  let service: CitoService | undefined;
   try {
     for (;;) {
       const existing = state.daemonOwner();
@@ -32,39 +33,37 @@ export async function runDaemon(config: CitoConfig): Promise<void> {
       }
       if (state.claimDaemon(process.pid, config.daemonPort, existing)) { claimed = true; break; }
     }
-    let http: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let binding: ReturnType<typeof startHttpServer> | undefined;
     let stopping: Promise<void> | undefined;
-    let starting: Promise<void> | undefined;
-    const service = await CitoService.create(config, { onQuit: () => stop() }, state);
+    // Ownership has its own handle and outlives every service operation and badge update.
+    service = await CitoService.create(config, { onQuit: () => stop() });
+    const daemonService = service;
     const stop = () => stopping ??= (async () => {
       process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
-      await starting?.catch(() => {});
+      const http = await binding?.catch(() => undefined);
       await http?.close();
-      // Release before service.close closes SQLite (quit may already have closed it).
-      const ownership = await LocalState.open(config.stateDir);
-      try { ownership.releaseDaemon(process.pid); } finally { ownership.close(); }
-      await service.close();
+      try { await daemonService.close(); state.releaseDaemon(process.pid); }
+      finally { state.close(); ownershipClosed = true; }
     })();
     const onSignal = () => { void stop().catch(error => { console.error(error); process.exitCode = 1; }); };
     process.once("SIGINT", onSignal); process.once("SIGTERM", onSignal);
     try {
-      starting = (async () => {
-        await service.startUi();
-        if (stopping) return;
-        http = await startHttpServer(config, service);
-        if (!stopping) void service.connectBackground();
-      })();
-      await starting;
+      binding = startHttpServer(config, daemonService);
+      await binding;
+      if (stopping) { await stopping; return; }
+      // HTTP readiness must not depend on a cold Swift compile.
+      await daemonService.startUi();
+      if (!stopping) void daemonService.connectBackground();
     } catch (error) { await stop(); throw error; }
   } catch (error) {
-    if (!claimed) state.close();
-    else {
-      try { state.releaseDaemon(process.pid); state.close(); } catch { /* shutdown already closed it */ }
+    if (!ownershipClosed) {
+      try { await service?.close(); if (claimed) state.releaseDaemon(process.pid); }
+      finally { state.close(); }
     }
     throw error;
   }
 }
-export async function ensureDaemon(config: CitoConfig): Promise<void> {
+async function ensureDaemon(config: CitoConfig): Promise<void> {
   if (await daemonHealth(config)) return;
   const entry = fileURLToPath(new URL("../../../bin/cito-mcp", import.meta.url));
   const sourceEntry = fileURLToPath(new URL("../../bin/cito-mcp", import.meta.url));

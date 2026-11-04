@@ -32,7 +32,7 @@ npm test
 npm test -- tests/mcp/ tests/e2e/
 ```
 
-`bin/cito-mcp` and `bin/cito-auth-callout` load TypeScript through `tsx`, independently of the caller's working directory. The build also emits JavaScript/declarations under `dist/`.
+`bin/cito-mcp` and `bin/cito-auth-callout` prefer compiled JavaScript under `dist/` when present and fall back to loading TypeScript through `tsx`, independently of the caller's working directory. The build emits JavaScript/declarations under `dist/`.
 
 Tests use the installed official `nats-server` **2.14.0**, temporary SQLite databases, real Unix sockets, a local OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS tests compile and run the real Swift companion headlessly, including JSON-line framing, menu actions, HUD auto-hide, click behavior, EOF and crash/respawn replay. The installed-Pi loader test uses Pi 1.5.0 when available. The complete V3 acceptance suite requires macOS and Swift. All test state and child processes are isolated and cleaned up. Tests require no Docker, live OIDC account, or running Desktop app. Visible HUD presentation, installed `ChatGPT.app` compatibility, live Casdoor, and production TLS/deployment require operator verification.
 
@@ -252,7 +252,7 @@ For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`,
 
 ### Claude Code (`claude`) — 尚未实现 / Not Yet Implemented
 
-Cito does **not** ship a runtime Claude Code adapter. [DESIGN.md §6](docs/DESIGN.md#6-proposed-design-for-claude-code-integration-设计建议--仅建议尚未实现) contains a **设计建议 — 仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented**. It proposes a companion `<harness>-pid-<pid>.sock` bridge using `SocketBridgeAdapter`, MCP Channel Push for idle wakeup, and a turn-start `cito_inbox()` drain when push delivery is unconfirmed. The open harness schema permits `claude` as an identifier; it does not install that proposed host integration.
+Cito does **not** ship a runtime Claude Code adapter. [DESIGN.md §6](docs/DESIGN.md#6-proposed-design-for-claude-code-integration-设计建议--仅建议尚未实现) contains a **设计建议 — 仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented**. It proposes a direct, zero-subprocess Streamable HTTP connection to `cito-daemon` at `http://127.0.0.1:4290/mcp`, future MCP SSE Channel Push for idle wakeup, and a turn-start `cito_inbox()` drain fallback when push delivery is unavailable or unconfirmed. The proposal still requires validated host session identity and persistent notification routing; current V3 does not implement those Claude-specific capabilities. The open harness schema permits `claude` as an identifier; it does not install that proposed host integration.
 
 ## Environment
 

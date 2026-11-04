@@ -3,9 +3,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type JsMsg, type NatsConnection,
   type QueuedIterator, type KvEntry } from "nats";
 import type { BannerPayload } from "../ui/index.js";
-import { listenMutex, sessionMutex } from "../shared/index.js";
 import { getAdapter, formatWakeCard, type DeliverContext } from "../adapters/index.js";
-import { brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
+import { listenMutex, sessionMutex, brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
   type CitoConfig, type provisionNats } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type SignalRow } from "./state.js";
 
@@ -71,7 +70,7 @@ export class Receiver {
     this.tasks.add(task);
     void task.catch(error => { if (!this.abort.signal.aborted) this.log(error); }).finally(() => this.tasks.delete(task));
   }
-  async start(_ownerWaitMs = 5000): Promise<boolean> {
+  async start(): Promise<boolean> {
     if (this.abort.signal.aborted) return false;
     try {
       this.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE hub = ? AND listener_id = ? AND owner_token = ?", this.hub, this.id, this.owner);

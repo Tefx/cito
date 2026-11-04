@@ -4,11 +4,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { codexThreadId } from "../adapters/index.js";
-import { CitoError, errorResult, type CitoConfig } from "../shared/index.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema } from "../shared/index.js";
+import { CitoError, errorResult, type CitoConfig, listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema } from "../shared/index.js";
 import { CitoService } from "./service.js";
 
 // Derive the advertised schema from the same validation contract used by service calls.
@@ -46,7 +45,7 @@ export function parseClientPid(output: string, remotePort: number, daemonPort: n
   if (matches.size > 1) matches.delete(process.pid);
   return matches.size === 1 ? [...matches][0] : undefined;
 }
-export function resolveHttpClientPid(req: IncomingMessage, daemonPort: number): Promise<number | undefined> {
+function resolveHttpClientPid(req: IncomingMessage, daemonPort: number): Promise<number | undefined> {
   let result = clientPids.get(req.socket);
   if (!result) {
     result = (async () => {

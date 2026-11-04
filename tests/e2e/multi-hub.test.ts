@@ -85,13 +85,24 @@ test("parallel unlisten revokes every local hub despite a failed remote update",
   const update = vi.spyOn(broker.kv, "update").mockRejectedValueOnce(new Error("remote unavailable"));
   const result = await call(f.service, "cito_unlisten", {}, f.pi.meta);
   update.mockRestore();
-  expect(result).toMatchObject({ status: "unlistened" });
+  expect(result).toMatchObject({ status: "unlistened", warnings: [{ hub: "rda", code: "NATS_UNAVAILABLE", message: "remote unavailable" }] });
   expect(f.service.state.listener(ids.get("personal")!, "personal")!.status).toBe("UNLISTENED");
   expect(f.service.state.listener(ids.get("rda")!, "rda")!.status).toBe("UNLISTENED");
   expect(f.service.receivers.has(`rda:${ids.get("rda")}`)).toBe(false);
   expect(await call(f.service, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "not_listening" });
   expect(f.pi.badges.at(-1)).toBeUndefined();
 }, 15_000);
+
+test("send and inbox round-trip non-null reply IDs with named hub qualification", async () => {
+  const f = await multi();
+  for (const hub of ["personal", "rda"]) {
+    const enrolled = await call(f.service, "cito_listen", { about: "reply routing", hub }, f.pi.meta);
+    const sent = await call(f.service, "cito_send", { to: enrolled.listener_id, message: "reply", in_reply_to: hub + ":sig_original" });
+    const inbox = await call(f.service, "cito_inbox", { hub, ack_all: false }, f.pi.meta);
+    expect(inbox.signals).toMatchObject([{ signal_id: sent.signal_id, in_reply_to: hub + ":sig_original" }]);
+    expect(f.service.state.signals("SELECT * FROM local_signals WHERE hub = ?", hub)[0]!.in_reply_to).toBe("sig_original");
+  }
+});
 
 test("inbox orders and drains across hubs, enforces scoped ack scope and rejects bare-ID ambiguity atomically", async () => {
   const f = await multi();

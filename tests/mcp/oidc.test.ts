@@ -3,8 +3,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OidcLogin } from "../../src/mcp/oidc.js";
 import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
-import { fixture, waitFor } from "./support.js";
-import { createServer } from "node:net";
+import { fixture, waitFor, freePort } from "./support.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -104,7 +103,7 @@ test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TI
 
 test("hub caches and PKCE scopes are isolated, with no legacy default-cache fallback", async () => {
   const { f, oidc, opener, login } = await setup();
-  const initial = await login.recover(null);
+  await login.recover(null);
   const personal = new OidcLogin({ ...f.config, oidcScopes: ["openid", "custom"] }, async (url, signal) => {
     expect(new URL(url).searchParams.get("scope")).toBe("openid custom");
     await opener(url, signal);
@@ -136,8 +135,7 @@ test("discovery negotiates advertised default scopes, honors explicit scopes and
 
 test("fixed callback ports serialize independent hub logins and abort queued or active logins without opening another browser", async () => {
   const { f, opener } = await setup();
-  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve()));
+  const port = await freePort();
   let firstUrl = "", opened = 0, release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const config = { ...f.config, oidcRedirectPort: port };

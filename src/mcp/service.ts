@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Events, ErrorCode } from "nats";
 import { UiBridge, type UiOptions, type UiToDaemonAction } from "../ui/index.js";
-import { KeyedMutex, listenMutex } from "../shared/index.js";
+import { setTimeout as delay } from "node:timers/promises";
 import { getAdapter, resolveCaller, type Caller, type CachedSessionQuery } from "../adapters/index.js";
-import { CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
+import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
   listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema,
@@ -28,6 +28,7 @@ export class HubSlot {
   status: "connected" | "connecting" | "auth_required" | "disconnected" = "disconnected";
   error: string | null = null;
   private connectionAbort = new AbortController();
+  private restoreRetry?: AbortController;
   private readonly actions = new KeyedMutex();
   readonly receivers = new Map<string, Receiver>();
   private readonly login?: OidcLogin;
@@ -70,9 +71,7 @@ export class HubSlot {
         signal.throwIfAborted();
         this.broker = broker; this.status = "connected";
         if (token) this.principal = { principal_id: token.verified_principal_id, owner_user: token.verified_user };
-        const monitor = this.monitor(this.broker, token?.token_sha256);
-        this.background.add(monitor);
-        void monitor.catch(error => { if (!this.closing) (this.options.diagnostic ?? console.error)(String(error)); }).finally(() => this.background.delete(monitor));
+        this.track(this.monitor(this.broker, token?.token_sha256));
         await this.restore(this.broker);
         return this.broker;
       } catch (cause) { await nc.close(); throw new CitoError("NATS_UNAVAILABLE", "NATS topology unavailable", { cause }); }
@@ -82,23 +81,73 @@ export class HubSlot {
       throw error;
     }).finally(() => { this.brokerPromise = undefined; this.changed(); });
   }
+  private track(task: Promise<void>): void {
+    this.background.add(task);
+    void task.catch(error => {
+      if (!this.closing && !(error instanceof Error && error.name === "AbortError")) (this.options.diagnostic ?? console.error)(String(error));
+    }).finally(() => this.background.delete(task));
+  }
+  private retryRestoration(broker: Broker): void {
+    this.restoreRetry?.abort();
+    const retry = this.restoreRetry = new AbortController();
+    const signal = AbortSignal.any([retry.signal, this.connectionAbort.signal]);
+    const active = () => !signal.aborted && !this.closing && !this.manuallyDisconnected
+      && this.broker === broker && !broker.nc.isClosed() && this.status === "connected";
+    this.track((async () => {
+      for (const pause of [250, 1000, 3000]) {
+        if (!active()) return;
+        await delay(pause, undefined, { signal });
+        if (!active()) return;
+        try {
+          await this.restore(broker);
+          if (active()) { this.error = null; this.changed(); }
+          return;
+        } catch (error) {
+          if (!active()) return;
+          this.error = String(error); this.changed();
+        }
+      }
+    })());
+  }
   private async monitor(broker: Broker, tokenHash?: string): Promise<void> {
     const statuses = broker.nc.status();
     if (!("stop" in statuses) || typeof statuses.stop !== "function") throw new Error("Unsupported NATS status iterator");
     const stop = statuses.stop.bind(statuses);
+    const current = () => !this.closing && !this.manuallyDisconnected && this.broker === broker;
+    const authError = (code: unknown) => [ErrorCode.AuthorizationViolation, ErrorCode.AuthenticationExpired, ErrorCode.PermissionsViolation].includes(code as ErrorCode);
+    let terminalAuth: Error | undefined;
     void broker.nc.closed().then(error => {
-      if (!this.closing && tokenHash && error && "code" in error && [ErrorCode.AuthorizationViolation, ErrorCode.AuthenticationExpired].includes(error.code as ErrorCode)) {
-        this.rejectedHash = tokenHash; this.cancel();
+      if (current()) {
+        const auth = terminalAuth || (error && "code" in error && authError(error.code));
+        if (auth && tokenHash) this.rejectedHash = tokenHash;
+        this.restoreRetry?.abort(); this.cancel();
+        this.status = auth ? "auth_required" : "disconnected";
+        this.error = String(terminalAuth ?? error ?? "NATS connection closed unexpectedly");
+        this.changed();
       }
       stop();
     });
     for await (const status of statuses) {
-      if (this.closing) break;
-      if (status.type === Events.Disconnect) { this.status = "connecting"; this.cancel(); this.changed(); }
-      if (status.type === Events.Error && tokenHash && [ErrorCode.AuthorizationViolation, ErrorCode.AuthenticationExpired].includes(status.data as ErrorCode)) {
-        this.rejectedHash = tokenHash; this.cancel(); await broker.nc.close(); break;
+      if (!current()) break;
+      if (status.type === Events.Disconnect) {
+        this.restoreRetry?.abort(); this.status = "connecting"; this.cancel(); this.changed();
       }
-      if (status.type === Events.Reconnect && !this.manuallyDisconnected) { this.status = "connected"; await this.restore(broker); this.changed(); }
+      if (status.type === Events.Error && authError(status.data)) {
+        terminalAuth = new Error(String(status.data));
+        if (tokenHash) this.rejectedHash = tokenHash;
+        this.restoreRetry?.abort(); this.cancel();
+        this.status = "auth_required"; this.error = terminalAuth.message; this.changed();
+        await broker.nc.close(); break;
+      }
+      if (status.type === Events.Reconnect) {
+        this.status = "connected"; this.error = null; this.changed();
+        try { await this.restore(broker); }
+        catch (error) {
+          if (current() && !broker.nc.isClosed() && this.status === "connected") {
+            this.error = String(error); this.changed(); this.retryRestoration(broker);
+          }
+        }
+      }
     }
   }
   connectedBroker(): Broker | undefined { return this.broker && !this.broker.nc.isClosed() && !this.manuallyDisconnected ? this.broker : undefined; }
@@ -127,6 +176,7 @@ export class HubSlot {
 export class CitoService {
   readonly receivers = new Map<string, Receiver>();
   ui?: UiBridge;
+  private uiStarting?: Promise<void>;
   readonly slots = new Map<string, HubSlot>();
   private closing = false;
   private readonly shuttingDown = new AbortController();
@@ -152,9 +202,12 @@ export class CitoService {
     this.receivers.set(key, receiver); this.state.liveReceivers.set(key, receiver);
     this.slots.get(receiver.hub)!.receivers.set(receiver.id, receiver);
   }
-  async startUi(): Promise<void> {
-    this.ui ??= new UiBridge(this.config.stateDir, { ...this.options.ui, onAction: action => this.handleUiAction(action) });
-    await this.ui.start(); this.pushUiState();
+  startUi(): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    return this.uiStarting ??= (async () => {
+      this.ui ??= new UiBridge(this.config.stateDir, { ...this.options.ui, onAction: action => this.handleUiAction(action) });
+      await this.ui.start(); this.pushUiState();
+    })();
   }
   async connectBackground(): Promise<void> {
     await Promise.allSettled([...this.slots.values()].map(slot => slot.network({ interactive: false })));
@@ -195,11 +248,11 @@ export class CitoService {
     this.calls.add(task);
     try { await task; } finally { this.calls.delete(task); this.pushUiState(); }
   }
-  async unlistenById(hub: string, listenerId: string): Promise<void> {
+  async unlistenById(hub: string, listenerId: string): Promise<ReturnType<typeof warning> | undefined> {
     const slot = this.slot(hub), id = toCanonicalListenerId(listenerId), key = `${hub}:${id}`;
     // Abort effects before waiting for their critical section; they hold the same mutex.
     const previous = this.receivers.get(key); previous?.cancel();
-    await listenMutex.run(key, async () => {
+    const remoteWarning = await listenMutex.run(key, async () => {
       const row = this.state.listener(id, hub); if (!row) return;
       const receiver = this.receivers.get(key); receiver?.cancel();
       this.state.transaction(() => {
@@ -216,10 +269,11 @@ export class CitoService {
           if (value.owner_token === row.owner_token && value.binding_generation === row.binding_generation) await broker.kv.update(id,
             encode({ ...value, state: "UNLISTENED", binding_generation: row.binding_generation + 1 }), entry.revision);
         }
-      } catch (error) { this.log(error); }
+      } catch (error) { this.log(error); return warning(hub, error); }
     });
     await previous?.stop();
     if (this.receivers.get(key) === previous) { this.receivers.delete(key); this.state.liveReceivers.delete(key); slot.receivers.delete(id); }
+    return remoteWarning;
   }
   async unlistenAll(): Promise<void> {
     const rows = this.state.db.prepare("SELECT hub, listener_id FROM local_listeners WHERE status IN ('ACTIVE','REBINDING')").all();
@@ -275,7 +329,7 @@ export class CitoService {
         this.state.recordOfflineGap(id, await brokerNow(broker.jsm), entry!.created, hub);
         restored = new Receiver(this.state, this.config, broker, local, this.receiverOptions());
         this.installReceiver(key, restored);
-        if (!await restored.start(0)) { await restored.stop(); if (this.receivers.get(key) === restored) this.receivers.delete(key); restored = undefined; }
+        if (!await restored.start()) { await restored.stop(); if (this.receivers.get(key) === restored) this.receivers.delete(key); restored = undefined; }
         else await restored.badge().catch(error => this.log(error));
       });
       this.pushUiState();
@@ -400,9 +454,9 @@ export class CitoService {
   private async unlistenOne(slot: HubSlot, caller: Caller, principal: Principal) {
     const id = listenerId({ ...principal, host_id: this.hostId, harness: caller.harness, session_id: caller.session_id });
     const row = this.state.listener(id, slot.name);
-    if (!row || row.status !== "ACTIVE") return { ok: true, status: "not_listening", listener_id: null };
-    await this.unlistenById(slot.name, id);
-    return { ok: true, status: "unlistened", listener_id: this.scoped(slot.name, displayId(row)) };
+    if (!row || row.status !== "ACTIVE") return { ok: true, status: "not_listening", listener_id: null, warnings: [] };
+    const remoteWarning = await this.unlistenById(slot.name, id);
+    return { ok: true, status: "unlistened", listener_id: this.scoped(slot.name, displayId(row)), warnings: remoteWarning ? [remoteWarning] : [] };
   }
   private async unlisten(input: z.infer<typeof unlistenInputSchema>, meta: Record<string, unknown>) {
     if (input.hub) this.slot(input.hub);
@@ -421,7 +475,7 @@ export class CitoService {
     const results = await Promise.allSettled(slots.map(async slot => this.unlistenOne(slot, caller, await slot.identity(true))));
     const successes = results.flatMap(r => r.status === "fulfilled" ? [r.value] : []);
     if (!successes.length) throw (results[0] as PromiseRejectedResult).reason;
-    const warnings = results.flatMap((r, i) => r.status === "rejected" ? [warning(slots[i]!.name, r.reason)] : []);
+    const warnings = results.flatMap((r, i) => r.status === "rejected" ? [warning(slots[i]!.name, r.reason)] : r.value.warnings);
     return { ok: true, status: successes.some(r => r.status === "unlistened") ? "unlistened" : "not_listening",
       listener_id: successes.find(r => r.listener_id)?.listener_id ?? null, ...(warnings.length ? { warnings } : {}) };
   }
@@ -560,7 +614,7 @@ export class CitoService {
         signals: rows.map(row => ({ signal_id: this.scoped(row.hub, row.signal_id), hub: row.hub, seq: row.seq,
           from: { user: row.from_user, host_name: row.from_host_name, harness: row.from_harness,
             listener_id: row.from_listener_id ? this.scoped(row.hub, row.from_listener_id.startsWith("c_") ? publicListenerId(normalizeSlug(row.from_title) || row.from_harness || "listener", row.from_listener_id) : row.from_listener_id) : null,
-            about: row.from_about }, message: row.message, held_reason: row.held_reason, in_reply_to: row.in_reply_to, created_at: row.created_at })), acknowledged_count: count };
+            about: row.from_about }, message: row.message, held_reason: row.held_reason, in_reply_to: row.in_reply_to ? this.scoped(row.hub, row.in_reply_to) : null, created_at: row.created_at })), acknowledged_count: count };
     });
     await refreshSessionBadge(this.state, this.config, caller.harness, caller.session_id).catch(error => this.log(error));
     return result;
@@ -587,6 +641,8 @@ export class CitoService {
   close(): Promise<void> { return this.closePromise ??= this.shutdown(); }
   private async shutdown(): Promise<void> {
     this.closing = true; this.shuttingDown.abort();
+    // Mark the bridge stopped before waiting for a cold compilation to finish.
+    const uiClosing = this.ui?.close();
     const closingKeys = new Set(this.receivers.keys()), receivers = [...this.receivers.values()];
     for (const receiver of receivers) receiver.cancel();
     const slotsClosing = Promise.allSettled([...this.slots.values()].map(slot => slot.close()));
@@ -599,6 +655,7 @@ export class CitoService {
       const row = this.state.listener(receiver.id, receiver.hub); if (row) sessions.set(`${row.harness}:${row.session_id}`, row);
     }
     for (const row of sessions.values()) await refreshSessionBadge(this.state, this.config, row.harness, row.session_id, { closingKeys }).catch(error => this.log(error));
-    this.receivers.clear(); this.state.liveReceivers.clear(); await slotsClosing; await this.ui?.close(); this.state.close();
+    this.receivers.clear(); this.state.liveReceivers.clear(); await slotsClosing;
+    await uiClosing; await this.uiStarting?.catch(error => this.log(error)); this.state.close();
   }
 }

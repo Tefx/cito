@@ -2,6 +2,7 @@ import { afterAll } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { createServer } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import bridge, { type BridgeAPI, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
 import { ensureUiCompiled } from "../../src/ui/index.js";
@@ -18,6 +19,11 @@ async function bannerBinary() {
     return ensureUiCompiled(cacheRoot);
   })();
   return binary;
+}
+export async function freePort(): Promise<number> {
+  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
 export async function waitFor(check: () => boolean | Promise<boolean>, timeout = 5000) {
   const deadline = performance.now() + timeout;

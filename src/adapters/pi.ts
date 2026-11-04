@@ -6,7 +6,7 @@ import type { DeliverContext, DeliverOutcome, HarnessAdapter, ProbeOutcome } fro
 
 type BridgeConfig = Pick<CitoConfig, "stateDir">;
 export interface BridgeIdentity { endpoint_pid: number; session_id: string; session_name: string; cwd: string }
-export class PiBridgeError extends CitoError {
+class PiBridgeError extends CitoError {
   constructor(readonly bridgeError: string) {
     super(bridgeError === "SESSION_MISMATCH" || bridgeError === "SESSION_NOT_OPEN"
       ? "SESSION_NOT_OPEN" : "PI_BRIDGE_UNAVAILABLE", `Socket bridge: ${bridgeError}`);

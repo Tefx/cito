@@ -6,16 +6,11 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { resolve, join } from "node:path";
-import { createServer } from "node:net";
 import { createMcpServer, daemonHealth } from "../../src/mcp/server.js";
 import { loadConfig } from "../../src/shared/index.js";
-import { fixture, waitFor } from "./support.js";
+import { fixture, waitFor, freePort } from "./support.js";
 
 const exec = promisify(execFile);
-async function freePort(): Promise<number> {
-  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
-}
 async function stopDaemon(env: NodeJS.ProcessEnv) {
   const health = await daemonHealth(loadConfig(env)); if (!health) return;
   process.kill(health.pid, "SIGTERM");

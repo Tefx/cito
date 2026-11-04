@@ -2,20 +2,15 @@ import { expect, test, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createServer } from "node:net";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { startHttpServer, parseClientPid, httpMetadata, daemonHealth } from "../../src/mcp/server.js";
 import { loadConfig } from "../../src/shared/index.js";
-import { fixture, waitFor } from "./support.js";
+import { fixture, waitFor, freePort } from "./support.js";
 
 const exec = promisify(execFile);
-async function freePort(): Promise<number> {
-  const server = createServer(); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as { port: number }).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
-}
 test("HTTP binds loopback, enforces Origin, attributes real client PID, rejects spoofing and merges Codex headers", async () => {
   const f = await fixture();
   const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);

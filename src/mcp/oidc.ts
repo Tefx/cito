@@ -5,9 +5,8 @@ import { promisify } from "node:util";
 import { readFile, writeFile, rename, rm, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { oidcMutex } from "../shared/index.js";
 import { OidcVerifier } from "../auth-callout/oidc.js";
-import { CitoError, oidcPrincipal, sha256, type CitoConfig, type Principal } from "../shared/index.js";
+import { oidcMutex, CitoError, oidcPrincipal, sha256, type CitoConfig, type Principal } from "../shared/index.js";
 import { validateHttpUrl } from "../shared/config.js";
 
 const cacheSchema = z.object({ issuer: z.string(), client_id: z.string(), id_token: z.string(),
