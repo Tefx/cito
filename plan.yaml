@@ -9,27 +9,36 @@
 version: 1
 project: cito
 strategy_ref: docs/DESIGN.md
-context: 'Deliver and verify Cito V1 inside /Users/tefx/Projects/cito per docs/DESIGN.md
-  and README.md: cito-hub HTTP+WSS relay with SQLite persistence, anti-loop quotas,
-  pairwise circuit breaker, and optional pure-OIDC JWT verification; cito-mcp unified
-  stdio MCP server with two-stage crash-safe batch dispatch, 20s bounded liveness
-  sweep, and rejection-aware double-checked flock OIDC JIT login; ChatGPT/Codex Desktop
-  App adapter; Pi (1.5.0) local Unix socket bridge extension (src/pi-extension/cito-bridge.ts);
-  and macOS single-instance NSPanel HUD banner (src/macos/cito-banner.swift). Exclude
-  Claude Code adapter implementation and tests (docs/DESIGN.md §9 is proposed/TODO
+context: 'Deliver and verify Cito V1 (NATS JetStream Edition) inside /Users/tefx/Projects/cito
+  per docs/DESIGN.md and README.md: NATS Server JetStream + KV configuration (deploy/nats/nats-server.conf,
+  docker-compose.yml, KV bucket cito_listeners, stream CITO_SIGNALS, Core NATS ack
+  cito.ack.<signal_id>), shared schemas & keyless deterministic listener_id (src/shared/),
+  and optional stateless OIDC Auth Callout service (src/auth-callout/); cito-mcp unified
+  stdio MCP server (src/mcp/) over NATS with recipient-local wake quota & inbound
+  pairwise circuit breaker, lock-serialized KV revision fencing (listen-<id>.lock
+  + binding_generation + owner_token), clock-independent epoch-delta human_event_seq,
+  two-stage crash-safe batch dispatch holding listen-<id>.lock across assertDispatchStillAuthorized
+  + host-effect submission, and rejection-aware double-checked flock OIDC JIT login;
+  ChatGPT/Codex Desktop App adapter (src/adapters/codex.ts); Pi (1.5.0) local Unix
+  socket bridge extension (src/pi-extension/cito-bridge.ts & src/adapters/pi.ts);
+  and macOS single-instance NSPanel HUD banner (src/macos/cito-banner.swift & src/banner/).
+  Exclude Claude Code adapter implementation and tests (docs/DESIGN.md §9 is proposed/TODO
   only) and forbid mutations to external dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (§1-§8, §10) and
-  README.md.
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (NATS JetStream
+  Edition, commit 65dfd20, §1-§8, §10) and README.md.
 
   2. Hard exclusions: Do NOT implement or test the Claude Code adapter (docs/DESIGN.md
-  §9 is TODO/proposed only; cito-hub rejects harness=''claude'' with 422 UNSUPPORTED_HARNESS
-  and cito_find accepts only ''codex'' | ''pi''). Do NOT mutate external repositories
-  (/Users/tefx/dotfiles, tela) or live user ~/.cito / ~/.codex state during tests;
-  always isolate test state in temporary directories via CITO_STATE_DIR, CITO_HUB_DB_PATH,
-  and CITO_CODEX_HOME.
+  §9 is TODO/proposed only; V1 rejects harness=''claude'' with UNSUPPORTED_HARNESS
+  and cito_find accepts only ''codex'' | ''pi''). Do NOT implement a custom HTTP/WebSocket
+  message broker (cito-hub is replaced by nats-server JetStream + KV and src/auth-callout/).
+  Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
+  / ~/.codex state during tests; always isolate test state in temporary directories
+  via CITO_STATE_DIR and CITO_CODEX_HOME and ephemeral test nats-server instances.
 
-  3. Preserve strict wire/error envelopes, SQLite 0600/0700 permissions, lease fencing,
-  and lock-order invariants.'
+  3. Preserve strict MCP result/error envelopes, keyless deterministic listener_id
+  (^c_[a-z2-7]{12}$), SQLite 0600/0700 permissions, lock-serialized KV revision fencing
+  (listen-<id>.lock, binding_generation, owner_token), and cito-banner two-lock (banner.lock,
+  banner-instance.lock) invariants.'
 phases:
 - id: v1
   name: Cito V1 Core Relay, Host Adapters, HUD Banner, and MCP Integration
