@@ -11,32 +11,34 @@ project: cito
 strategy_ref: docs/DESIGN.md
 context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md
   and README.md across V1 (initial NATS JetStream relay, OIDC Auth Callout, Pi/Codex
-  host adapters, HUD banner, and MCP server) and V2 (Multi-Hub & Extensible Harness
-  Architecture Edition: open harnessIdSchema ^[a-z][a-z0-9_-]{0,31}$, ADAPTER_REGISTRY
-  + generic SocketBridgeAdapter(harnessId) + CodexDesktopAdapter, native multi-hub
-  ~/.cito/config.json + HubSlot isolation + symmetric <hub>:<id> addressing, streamlined
-  3-table SQLite schema at PRAGMA user_version = 4 without wake/quota/epoch throttling
-  or SQLite3 in cito-banner.swift, confirmed vs. unconfirmed auto-acknowledgment,
-  default drain-on-read in cito_inbox, and comprehensive README.md & unit/E2E test
-  coverage). Exclude Claude Code runtime implementation (documented in docs/DESIGN.md
-  §8 and README.md strictly as ''尚未实现 / Not Yet Implemented'' design suggestion) and
+  host adapters, HUD banner, and MCP server), V2 (Multi-Hub & Extensible Harness Architecture,
+  3-table SQLite schema at PRAGMA user_version = 4, confirmed vs. unconfirmed auto-acknowledgment,
+  and default drain-on-read in cito_inbox), and V3 (macOS Menu Bar Daemon & Streamable
+  HTTP Edition: singleton cito daemon + Streamable HTTP MCP at http://127.0.0.1:4290/mcp
+  + GET /health + Origin check + lsof client-tuple PID attribution + cito-mcp stdio
+  auto-forwarding, replacement of cross-process file locks with in-memory KeyedMutex,
+  non-intrusive Codex Desktop adapter without ipc.sock, vendor-neutral standard OIDC,
+  progressive-disclosure NSStatusItem Menu Bar Extra + in-process NSPanel HUD in cito-ui.swift
+  & UiBridge, and updated README.md & docs/DESIGN.md §6). Exclude Claude Code runtime
+  implementation (documented in docs/DESIGN.md §6 and README.md strictly as ''尚未实现
+  / Not Yet Implemented'' design suggestion without implementation code details) and
   forbid mutations to external dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V2 — Multi-Hub
-  & Extensible Harness Edition, §§1–8) and README.md.
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V3 — macOS Menu
+  Bar Daemon & Streamable HTTP Edition, §§1–6) and README.md.
 
   2. Hard boundaries: Keep src/mcp/ 100% harness-agnostic (zero hardcoded ''pi'' or
   ''codex'' checks) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$). Do NOT
-  implement a runtime Claude Code adapter (docs/DESIGN.md §8 is a proposed design
-  suggestion only and must be marked ''尚未实现 / Not Yet Implemented'' in README.md).
-  Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
-  / ~/.codex state during tests; always isolate test state in temporary directories
-  and ephemeral test nats-server instances.
+  implement a runtime Claude Code adapter (docs/DESIGN.md §6 is a proposed design
+  suggestion only, free of implementation code details, and must be marked ''尚未实现
+  / Not Yet Implemented'' in README.md). Do NOT mutate external repositories (/Users/tefx/dotfiles,
+  tela) or live user ~/.cito / ~/.codex state during tests; always isolate test state
+  in temporary directories and ephemeral test nats-server / HTTP instances.
 
-  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ -> src/mcp/),
-  unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing (formatScopedId
-  / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4), lock-serialized
-  KV revision fencing (listen-<hub>-<id>.lock, receiver-<hub>-<id>.lock, session-<harness>-<hash>.lock),
-  and zero-SQLite3 cito-banner two-lock (banner.lock, banner-instance.lock) invariants.'
+  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ & src/ui/ ->
+  src/mcp/), unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing
+  (formatScopedId / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4),
+  in-memory KeyedMutex serialization (zero cross-process flock lockfiles), and zero-SQLite3
+  cito-ui.swift invariants.'
 phases:
 - id: v1
   name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
