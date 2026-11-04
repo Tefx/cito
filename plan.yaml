@@ -786,3 +786,131 @@ phases:
     and iterative code-hygiene gate.'
   depends_on:
   - v2
+  steps:
+  - id: v3.daemon-http-oidc-and-menubar-ui
+    name: Implement V3 macOS Menu Bar Daemon, Streamable HTTP MCP, Standard OIDC,
+      Progressive-Disclosure UI, Documentation, and Unit/E2E Tests
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/shared/**\n    - src/adapters/**\n    -\
+      \ src/ui/**\n    - src/macos/**\n    - src/banner/**\n    - src/mcp/**\n   \
+      \ - src/auth-callout/**\n    - bin/**\n    - package.json\n    - README.md\n\
+      \    - docs/DESIGN.md\n    - tests/**\n  blocked_paths:\n    - plan.yaml\n```\n\
+      \n- **Deliver:**\n  - Implement the complete V3 specification in `docs/DESIGN.md`\
+      \ §§1–6 across `src/shared/`, `src/adapters/`, `src/ui/`, `src/macos/cito-ui.swift`,\
+      \ `src/mcp/`, `src/auth-callout/`, `package.json`, `README.md`, and `tests/`:\n\
+      \    1. **Delete legacy file locks & standalone banner; replace with in-memory\
+      \ `KeyedMutex` (`src/shared/mutex.ts`, `src/banner/`, `src/macos/cito-banner.swift`,\
+      \ `package.json`)**:\n       - Delete `src/banner/flock.ts`, `src/banner/index.ts`,\
+      \ and `src/macos/cito-banner.swift`; replace cross-process file locks (`listen-*.lock`,\
+      \ `receiver-*.lock`, `session-*.lock`, `banner.lock`, `banner-instance.lock`,\
+      \ `oidc-login-*.lock`) with in-memory `KeyedMutex` in `src/shared/mutex.ts`\
+      \ while preserving acyclic module boundaries (`src/shared/` -> `src/adapters/`\
+      \ & `src/ui/` -> `src/mcp/`), and update `package.json` `files` entry to ship\
+      \ `src/macos/cito-ui.swift`.\n    2. **Singleton `cito daemon` & Streamable\
+      \ HTTP MCP (`src/shared/config.ts`, `src/mcp/state.ts`, `src/mcp/server.ts`,\
+      \ `src/mcp/service.ts`, `src/mcp/cli.ts`)**:\n       - Implement singleton `cito\
+      \ daemon` (`CITO_DAEMON_PORT`, default `4290`, validated `1..65535`): check\
+      \ single per-user daemon ownership per `stateDir` (`BEGIN IMMEDIATE` singleton\
+      \ check / `GET http://127.0.0.1:${port}/health`), exiting `0` cleanly if a live\
+      \ `cito-daemon` already owns `stateDir` on `config.daemonPort` or exiting `1`\
+      \ on port mismatch (`existing.port !== config.daemonPort`).\n       - Implement\
+      \ Streamable HTTP MCP server bound strictly to `127.0.0.1:${config.daemonPort}`\
+      \ exposing `http://127.0.0.1:4290/mcp` (`POST /mcp`, `GET /mcp`, `DELETE /mcp`\
+      \ with stateless per-request `StreamableHTTPServerTransport({ sessionIdGenerator:\
+      \ undefined })` and per-request MCP `Server` wired to the shared `CitoService`,\
+      \ disposing only the transport on request close) and `GET /health` (`{ ok: true,\
+      \ pid: process.pid, stateDir: config.stateDir }`).\n       - Enforce `Origin`\
+      \ header check (allowing only `undefined` or parsed origins with hostname `127.0.0.1`\
+      \ or `localhost`, rejecting others with `403 Forbidden`).\n       - Resolve\
+      \ TCP client OS PID (`http_client_pid`) from `req.socket.remotePort` via `/usr/sbin/lsof\
+      \ -nP -iTCP:${remotePort} -sTCP:ESTABLISHED -Fpn` (`1000ms` timeout, cached\
+      \ on `net.Socket`), matching `p<pid>` whose `n` line equals `127.0.0.1:${remotePort}->127.0.0.1:${daemonPort}`\
+      \ (excluding `process.pid` when another PID matches), setting server-owned `meta.http_transport\
+      \ = true` and `meta.http_client_pid = clientPid` (ignoring client-supplied values),\
+      \ and merging HTTP header `x-codex-turn-metadata` into `meta[\"x-codex-turn-metadata\"\
+      ]` (throwing `INVALID_INPUT` if header and JSON-RPC `_meta` supply disagreeing\
+      \ thread IDs).\n       - Implement `cito-mcp` stdio auto-forwarding: when invoked\
+      \ in stdio mode without the `daemon` subcommand, check `GET http://127.0.0.1:${config.daemonPort}/health`,\
+      \ spawn `cito daemon` detached if unreachable and poll `/health` up to `5000ms`,\
+      \ then forward stdio JSON-RPC messages to `http://127.0.0.1:${config.daemonPort}/mcp`.\n\
+      \       - Implement deterministic daemon startup (`interactive = false` background\
+      \ connection across all hubs, setting `slot.status = \"auth_required\"` without\
+      \ launching a browser when an `oidc` hub has no valid/refreshable token) and\
+      \ `manuallyDisconnected` hub lifecycle (`slot.network()` immediately throwing\
+      \ `CitoError(\"NATS_UNAVAILABLE\", \"Hub '<name>' is manually disconnected\"\
+      )` and closing any late-resolving in-flight connection).\n    3. **Non-Intrusive\
+      \ Codex Desktop Adapter & Caller Resolution (`src/adapters/codex.ts`, `src/adapters/index.ts`)**:\n\
+      \       - Delete `assertCodexThreadOpen` and all `~/.codex/ipc/ipc.sock` probing.\n\
+      \       - Implement 5-step `extractCallerPidRoots(meta)` precedence and explicit\
+      \ claim validation (excluding `meta.http_client_pid` from `explicitPid` so Codex\
+      \ HTTP requests carrying `x-codex-turn-metadata` + `http_client_pid` never conflict,\
+      \ and returning `[]` when `meta.http_transport === true` without `http_client_pid`).\n\
+      \       - Implement 3-state `readCodexThreadOptional` (`'archived'` throwing\
+      \ `SESSION_NOT_OPEN` when `requireOpen !== false` and returning `closed_definitive`\
+      \ in `probe()`; `'found'` returning `{ status: \"found\", cwd, title, repo,\
+      \ branch }`; `'unavailable'` falling back to `_meta.cwd` -> `lsof -a -d cwd\
+      \ -p <http_client_pid> -Fn` -> `lookupCachedSession` -> `process.cwd()` + `gitMetadata(cwd)`).\n\
+      \       - Pass `--resume` to `codex queue` (`execFile(codexBin, [\"queue\",\
+      \ \"--resume\", \"--thread\", threadId, \"--message\", card], { timeout: 10_000,\
+      \ signal, env: { ...process.env, CODEX_HOME: config.codexHome } })`) and update\
+      \ `CodexDesktopAdapter.probe` to check `'archived'` then `await codexDesktopRunning(signal)`.\n\
+      \    4. **Standard Vendor-Neutral OIDC (`src/shared/config.ts`, `src/auth-callout/oidc.ts`,\
+      \ `src/mcp/oidc.ts`, `src/mcp/service.ts`)**:\n       - Enforce strict per-`HubSlot`\
+      \ configuration isolation (never inheriting another hub's optional `oidcScopes`\
+      \ or `oidcRedirectPort`).\n       - Support `SUPPORTED_OIDC_ALGS = [\"RS256\"\
+      , \"RS384\", \"RS512\", \"PS256\", \"ES256\", \"ES384\", \"EdDSA\"] as const`.\n\
+      \       - Negotiate default scopes against `.well-known/openid-configuration`\
+      \ `scopes_supported` (throwing `AUTH_UNAVAILABLE` if `scopes_supported` is an\
+      \ array missing `\"openid\"`, and filtering default `[\"openid\", \"profile\"\
+      , \"email\", \"offline_access\"]` against `scopes_supported` when `hubConfig.oidcScopes`\
+      \ is unset).\n       - Support `oidcRedirectPort` (`CITO_OIDC_REDIRECT_PORT`),\
+      \ binding the loopback callback server to `127.0.0.1:${hubConfig.oidcRedirectPort\
+      \ ?? 0}` under port-keyed `oidcMutex.run(\"port:\" + ((hubConfig.oidcRedirectPort\
+      \ ?? 0) || hub.name))` and aborting immediately if the slot is disconnected\
+      \ or closed.\n       - Enforce principal-change fencing in `slot.network()`\
+      \ before `restoreReceivers` (transitioning any `local_listeners` rows for `slot.name`\
+      \ with `status IN ('ACTIVE', 'REBINDING')` and `principal_id !== slot.principal.principal_id`\
+      \ to `'FENCED_INACTIVE'` and stopping their in-memory receivers).\n    5. **Progressive-Disclosure\
+      \ Menu Bar Extra & In-Process HUD Banner (`src/ui/index.ts`, `src/macos/cito-ui.swift`,\
+      \ `src/mcp/service.ts`, `src/mcp/receiver.ts`)**:\n       - Implement `src/ui/index.ts`\
+      \ (`UiBridge`, importing only `src/shared/`) managing the persistent `${stateDir}/bin/cito-ui`\
+      \ child process over `\\n`-delimited UTF-8 JSON lines (max 1 MiB per line),\
+      \ coalescing pending `{ op: \"state\" }` snapshots, swallowing `EPIPE`, and\
+      \ respawning `cito-ui` with 500ms backoff + immediate state snapshot replay\
+      \ on unexpected exit while `cito-daemon` is running.\n       - Implement `src/macos/cito-ui.swift`\
+      \ (compiled via `/usr/bin/swiftc` to `${stateDir}/bin/cito-ui`, zero `SQLite3`\
+      \ dependency): progressive-disclosure `NSStatusItem` + `NSMenu` Menu Bar Extra\
+      \ with Option-click (`⌥`) instant unlisten, in-process 388×136 `.vibrantDark`\
+      \ `NSPanel` HUD Banner hiding via `panel?.orderOut(nil)` after 6s without exiting,\
+      \ exiting `0` on `stdin` `EOF`, and emitting `unlisten`, `unlisten_all`, `set_scope`,\
+      \ `hub_action`, and `quit` commands.\n       - Enforce the Live-Receiver Rule\
+      \ for both `refreshSessionBadge` and UI `{ op: \"state\" }` `listeners` list\
+      \ (`ACTIVE` rows with a live, non-aborted in-memory `Receiver` matching `row.owner_token`),\
+      \ and implement `unlistenById(hub, listenerId)`, `unlistenAll()`, and `setScope(hub,\
+      \ listenerId, scope)` (updating NATS KV first, then SQLite, plus KV-to-SQLite\
+      \ scope reconciliation in `restoreReceivers` and `Receiver.probe()`) under `listenMutex.run(\"\
+      ${hub}:${listenerId}\")`.\n    6. **Documentation (`README.md`, `docs/DESIGN.md`\
+      \ §6) & Behavioral Unit/E2E Tests (`tests/`)**:\n       - Synchronously update\
+      \ `README.md` and review `docs/DESIGN.md` §6 so that per-harness installation\
+      \ & usage guides (Pi, Codex Desktop HTTP & stdio, Menu Bar usage, Standard OIDC\
+      \ & Multi-Hub config, Extensible Harnesses, and Claude Code explicitly marked\
+      \ as `'尚未实现 / Not Yet Implemented'` with its Streamable HTTP + SSE channel push\
+      \ + inbox drain design suggestion in `docs/DESIGN.md` §6) are clear, accurate,\
+      \ and free of implementation code details in the Claude Code suggestion section.\n\
+      \       - Update and add behavioral unit & E2E tests in `tests/`.\n- **Boundary:**\
+      \ Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito` (`src/**`, `bin/**`,\
+      \ `package.json`, `README.md`, `docs/DESIGN.md`, `tests/**`). Must not implement\
+      \ a runtime Claude Code adapter (`docs/DESIGN.md` §6 is design suggestion only)\
+      \ or mutate external repositories (`/Users/tefx/dotfiles`, `tela`) or live user\
+      \ `~/.cito` / `~/.codex` directories.\n- **Admit:** Completed Phase `v2`, `docs/DESIGN.md`\
+      \ (V3 §§1–6), and `README.md`. Verified by `npm run typecheck && npm run build\
+      \ && npm test` exiting `0`. Consumed by `v3.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, build, or unit/E2E test in place\
+      \ within the isolated worktree and clean up any temporary test sockets, HTTP\
+      \ servers, or child processes.\n"
+    verification: npm run typecheck && npm run build && npm test
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    agent: senior-engineer
