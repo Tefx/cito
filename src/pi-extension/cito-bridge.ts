@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
@@ -8,12 +7,11 @@ import { stripVTControlCharacters } from "node:util";
 /** Structural subset of Pi 1.5.0's public API: no host package is needed to load this file. */
 export interface BridgeContext {
   cwd: string;
-  isIdle(): boolean;
   sessionManager: { getSessionId(): string | undefined; getSessionName(): string | undefined };
   ui: { setStatus(key: string, value: string | undefined): void };
 }
 interface NotificationTheme {
-  fg(color: "accent" | "borderAccent" | "dim", text: string): string;
+  fg(color: "accent" | "borderAccent", text: string): string;
   bg(color: "customMessageBg", text: string): string;
   bold(text: string): string;
 }
@@ -21,8 +19,8 @@ export type NotificationRenderer = (message: { content: unknown }, options: { ex
   theme: NotificationTheme) => { render(width: number): string[]; invalidate(): void };
 export interface BridgeAPI {
   registerMessageRenderer?(customType: string, renderer: NotificationRenderer): void;
-  on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree" | "input",
-    handler: (event: { source?: string }, ctx: BridgeContext) => void | Promise<void>): unknown;
+  on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree",
+    handler: (event: unknown, ctx: BridgeContext) => void | Promise<void>): unknown;
   sendMessage(message: { customType: string; content: string; display: boolean },
     options: { triggerTurn: boolean; deliverAs: "followUp" }): void;
 }
@@ -51,30 +49,19 @@ function cardLines(content: unknown): string[] {
   const text = typeof content === "string" ? content : Array.isArray(content)
     ? content.filter(part => part?.type === "text").map(part => part.text).join("\n") : "";
   const clean = stripVTControlCharacters(text).replace(/\t/g, "  ").replace(/\r/g, "");
-  if (!clean.startsWith("<cito_signal")) return clean.startsWith("🔔 Cito") ? clean.split("\n") : ["🔔 Cito", "", ...clean.split("\n")];
-  // Frozen pre-upgrade batches retain their XML-style envelope across recovery.
-  const attr = (attrs: string, name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(attrs)?.[1] ?? "";
-  const signals = [...clean.matchAll(/<signal\s+([^>]*)>\n?([\s\S]*?)\n?<\/signal>/g)];
-  const body = signals.map((match, i) => {
-    const attrs = match[1]!, from = attr(attrs, "from"), title = attr(attrs, "from_title");
-    return `[${i + 1}] ${attr(attrs, "from_user")}@${attr(attrs, "from_host").replace(/\.local$/i, "")}`
-      + (title ? ` · ${title}` : "") + (from && from !== "unbound" ? ` [↩ ${from}]` : "") + "\n" + match[2];
-  });
-  const ack = /Please call (cito_inbox\(ack_ids: [\s\S]*?\)) to acknowledge\./.exec(clean)?.[1];
-  return ["🔔 Cito", "", ...(body.length ? body.join("\n\n").split("\n") : [clean]), ...(ack ? ["", "↳ Ack: " + ack] : [])];
+  return clean.startsWith("🔔 Cito") ? clean.split("\n") : ["🔔 Cito", "", ...clean.split("\n")];
 }
 const notificationRenderer: NotificationRenderer = (message, options, theme) => ({
   render(width) {
     if (width < 1) return [];
     const pad = Math.min(Math.max(0, Math.floor(options.outputPad ?? 0)), Math.floor((width - 1) / 2));
     const inner = width - 2 * pad;
-    const lines = cardLines(message.content).filter(line => options.expanded || !line.startsWith("↳ Ack:"));
+    const lines = cardLines(message.content);
     while (lines.at(-1) === "") lines.pop();
     return lines.flatMap((line, index) => {
       const bar = index > 0 && inner >= 3;
       return wrapLine(line, inner - (bar ? 2 : 0)).map(part => {
-        const styled = index === 0 ? theme.fg("accent", theme.bold(part.text))
-          : line.startsWith("↳ Ack:") ? theme.fg("dim", part.text) : part.text;
+        const styled = index === 0 ? theme.fg("accent", theme.bold(part.text)) : part.text;
         const prefix = bar ? theme.fg("borderAccent", "│ ") : "";
         return theme.bg("customMessageBg", " ".repeat(pad) + prefix + styled
           + " ".repeat(inner - (bar ? 2 : 0) - part.width + pad));
@@ -86,8 +73,7 @@ const notificationRenderer: NotificationRenderer = (message, options, theme) => 
 
 export default function citoBridge(pi: BridgeAPI): void {
   pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
-  const bridge_epoch = randomUUID();
-  const sessions = new Map<string, { human_event_count: number; processedBatchIds: Set<string> }>();
+  const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
   let context: BridgeContext | undefined;
   let server: Server | undefined;
@@ -102,7 +88,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     const nextSessionId = ctx.sessionManager.getSessionId();
     if (nextSessionId !== sessionId) ctx.ui.setStatus("cito", undefined);
     sessionId = nextSessionId;
-    if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, { human_event_count: 0, processedBatchIds: new Set() });
+    if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
     context = ctx;
   }
   function unlinkSocket(): void {
@@ -117,8 +103,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (req.op === "identify") {
       if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
       return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: sessionId,
-        session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd,
-        is_streaming: !ctx.isIdle(), bridge_epoch, human_event_count: sessions.get(sessionId)!.human_event_count };
+        session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd };
     }
     if (req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
     if (!ctx || !sessionId || req.session_id !== sessionId) return { ok: false, error: "SESSION_MISMATCH" };
@@ -127,7 +112,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       ctx.ui.setStatus("cito", req.badge ?? undefined);
       return { ok: true };
     }
-    const { processedBatchIds } = sessions.get(sessionId)!;
+    const processedBatchIds = sessions.get(sessionId)!;
     if (typeof req.batch_id !== "string" || !req.batch_id) return { ok: false, error: "INVALID_REQUEST" };
     if (processedBatchIds.has(req.batch_id)) return { ok: true, delivered: true, deduplicated: true };
     if (typeof req.content !== "string" || typeof req.wake !== "boolean") return { ok: false, error: "INVALID_REQUEST" };
@@ -190,10 +175,6 @@ export default function citoBridge(pi: BridgeAPI): void {
       unlinkSocket();
       throw error;
     }
-  });
-  pi.on("input", (event, ctx) => {
-    update(ctx);
-    if (event.source === "interactive" && sessionId) sessions.get(sessionId)!.human_event_count += 1;
   });
   pi.on("session_info_changed", (_event, ctx) => update(ctx));
   pi.on("session_tree", (_event, ctx) => update(ctx));

@@ -7,10 +7,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { acquireFlock } from "../banner/flock.js";
 import { OidcVerifier } from "../auth-callout/oidc.js";
-import { CitoError, oidcPrincipal, type CitoConfig, type Principal } from "../shared/index.js";
+import { CitoError, oidcPrincipal, sha256, type CitoConfig, type Principal } from "../shared/index.js";
 import { validateHttpUrl } from "../shared/config.js";
 
-export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const cacheSchema = z.object({ issuer: z.string(), client_id: z.string(), id_token: z.string(),
   refresh_token: z.string().optional(), token_sha256: z.string(), expires_at: z.number(),
   verified_principal_id: z.string().min(1), verified_user: z.string().min(1) });
@@ -88,7 +87,7 @@ export class OidcLogin {
       const exchange = async (params: Record<string, string>) => request(tokenUrl, { method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ client_id: this.config.oidcClientId!, ...params }) });
-      const save = async (response: Response): Promise<TokenCache> => {
+      const save = async (response: Response, grant: "refresh_token" | "authorization_code"): Promise<TokenCache> => {
         if (!response.ok) throw new CitoError(response.status >= 500 ? "AUTH_UNAVAILABLE" : "UNAUTHORIZED", "OIDC token exchange rejected");
         const body = z.object({ id_token: z.string().min(1), refresh_token: z.string().optional() }).parse(await response.json());
         // Bind verification requests to the same login deadline, including JWKS fetch.
@@ -96,7 +95,8 @@ export class OidcLogin {
         remaining();
         const principal = oidcPrincipal(claims);
         const value: TokenCache = { issuer: this.config.oidcIssuer!, client_id: this.config.oidcClientId!,
-          id_token: body.id_token, refresh_token: body.refresh_token ?? cache?.refresh_token,
+          id_token: body.id_token, refresh_token: body.refresh_token
+            ?? (grant === "refresh_token" && principal.principal_id === cache?.verified_principal_id ? cache.refresh_token : undefined),
           token_sha256: sha256(body.id_token), expires_at: claims.exp,
           verified_principal_id: principal.principal_id, verified_user: principal.owner_user };
         const temporary = this.path + "." + randomUUID();
@@ -108,7 +108,7 @@ export class OidcLogin {
       };
       if (cache?.refresh_token) {
         const refreshed = await exchange({ grant_type: "refresh_token", refresh_token: cache.refresh_token });
-        if (refreshed.ok) return await save(refreshed);
+        if (refreshed.ok) return await save(refreshed, "refresh_token");
         if (![400, 401].includes(refreshed.status)) throw new CitoError("AUTH_UNAVAILABLE", "OIDC refresh unavailable");
       }
       const pkceVerifier = randomBytes(32).toString("base64url"), state = randomBytes(32).toString("base64url");
@@ -139,7 +139,7 @@ export class OidcLogin {
           scope: (this.config.oidcScopes ?? ["openid", "profile", "email", "offline_access"]).join(" "), state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
         remaining();
         await this.opener(url.toString(), signal);
-        return await save(await exchange({ grant_type: "authorization_code", code: await code, redirect_uri: redirect, code_verifier: pkceVerifier }));
+        return await save(await exchange({ grant_type: "authorization_code", code: await code, redirect_uri: redirect, code_verifier: pkceVerifier }), "authorization_code");
       } finally {
         signal.removeEventListener("abort", abort);
         server.closeAllConnections();

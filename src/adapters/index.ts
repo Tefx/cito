@@ -107,7 +107,7 @@ export async function resolveCaller(meta: Record<string, unknown> = {}, config: 
       } catch { break; }
     }
   }
-  if (options.requireOpen !== false && failure instanceof CitoError && failure.code === "SESSION_NOT_OPEN") throw failure;
-  throw new CitoError(pid !== undefined || failure || options.requireOpen === false ? "PI_BRIDGE_UNAVAILABLE" : "BINDING_REQUIRED",
+  // Missing/unopen implicit ancestors leave outbound callers unbound. An explicit PID is a claim and must fail visibly.
+  throw new CitoError(pid !== undefined ? "PI_BRIDGE_UNAVAILABLE" : "BINDING_REQUIRED",
     "No caller socket bridge found", { cause: failure });
 }

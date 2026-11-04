@@ -13,11 +13,9 @@ export function escapeWakeCard(value: string): string {
   return value.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 export const harnessIdSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
-export const harnessSchema = harnessIdSchema;
-export type HarnessId = z.infer<typeof harnessIdSchema>;
-export type Harness = HarnessId;
+export type Harness = z.infer<typeof harnessIdSchema>;
 export function validateHarness(value: unknown): Harness {
-  const result = harnessSchema.safeParse(value);
+  const result = harnessIdSchema.safeParse(value);
   if (!result.success) throw new CitoError("UNSUPPORTED_HARNESS", "Invalid harness identifier");
   return result.data;
 }
@@ -36,7 +34,7 @@ export const listenInputSchema = z.object({
 export const unlistenInputSchema = z.object({ hub: hubNameSchema.optional() }).strict();
 export const findInputSchema = z.object({
   query: z.string().max(200).optional(), hub: hubNameSchema.optional(), user: z.string().max(64).optional(),
-  host: z.string().max(128).optional(), harness: harnessSchema.optional(), repo: z.string().max(200).optional(),
+  host: z.string().max(128).optional(), harness: harnessIdSchema.optional(), repo: z.string().max(200).optional(),
   limit: z.number().int().min(1).max(50).default(20),
 }).strict();
 export const sendInputSchema = z.object({

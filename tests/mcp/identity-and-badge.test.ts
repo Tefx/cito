@@ -161,7 +161,7 @@ test("receiver admits a public wire recipient only on its canonical subject", as
   await broker.js.publish("cito.signal." + id, encode({ signal_id: "public-wire", to: enrolled.listener_id,
     target_generation: enrolled.binding_generation, sender_endpoint_key: "sender", from: {
       principal_id: "none#alice", user: "alice", host_id: "other", host_name: "other", harness: null },
-    message: "public wire", requested_wake: false, in_reply_to: null }));
+    message: "public wire", in_reply_to: null }));
   await waitFor(() => f.service.state.listener(id)!.persisted_seq === 1);
   expect((await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta)).signals).toMatchObject([{ signal_id: "public-wire" }]);
 });

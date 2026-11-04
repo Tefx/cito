@@ -31,7 +31,7 @@ test("recovery retries immutable existing batch before new received rows", async
   const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "recovery" }, f.pi.meta);
   const id = toCanonicalListenerId(publicId);
   const first = await call(f.service, "cito_send", { to: id, message: "original frozen" });
-  const frozenCard = '<cito_signal target_title="Original title">original frozen</cito_signal>';
+  const frozenCard = '🔔 Cito · Original title\n\noriginal frozen';
   f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'immutable-batch', batch_expires_at_ms = expires_at_ms, batch_card = ? WHERE signal_id = ?", frozenCard, first.signal_id);
   f.service.state.run("UPDATE local_listeners SET title = 'Changed title' WHERE listener_id = ?", id);
   await call(f.service, "cito_send", { to: id, message: "new arrival" });
@@ -109,7 +109,7 @@ test("Pi socket failures retry the exact batch three times; session mismatch rev
     connection.once("data", bytes => {
       const request = JSON.parse(bytes.toString());
       if (request.op === "identify") connection.end(JSON.stringify({ ok: true, pi_pid: process.pid, session_id: "pi-retry", session_name: "retry", cwd: f.root,
-        is_streaming: false, bridge_epoch: "epoch", human_event_count: 0 }) + "\n");
+        }) + "\n");
       else if (request.op === "status") connection.end('{"ok":true}\n');
       else { batches.push(request.batch_id); connection.end(mode === "mismatch" ? '{"ok":false,"error":"SESSION_MISMATCH"}\n' : '{"ok":false,"error":"TEMPORARY_ERROR"}\n'); }
     });
@@ -174,7 +174,7 @@ test("Pi completion sets DISPATCHED without clearing a concurrent inbox acknowle
     socket.once("data", bytes => {
       const request = JSON.parse(bytes.toString());
       if (request.op === "identify") socket.end(JSON.stringify({ ok: true, pi_pid: process.pid, session_id: "ack-inflight",
-        session_name: "Pi acknowledgement", cwd: f.root, is_streaming: false, bridge_epoch: "epoch", human_event_count: 0 }) + "\n");
+        session_name: "Pi acknowledgement", cwd: f.root, }) + "\n");
       else if (request.op === "status") socket.end('{"ok":true}\n');
       else { complete = () => socket.end('{"ok":true,"delivered":true,"deduplicated":false}\n'); entered(); }
     });

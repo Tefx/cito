@@ -51,7 +51,7 @@ test("installed stdio entrypoint initializes private local state without requiri
     expect((await client.listTools()).tools).toHaveLength(5);
     const result = await client.callTool({ name: "cito_inbox", arguments: {} });
     expect(result.isError).toBe(true);
-    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "PI_BRIDGE_UNAVAILABLE" } });
+    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "BINDING_REQUIRED" } });
     expect((await stat(join(root, "state/state.sqlite"))).mode & 0o777).toBe(0o600);
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 });

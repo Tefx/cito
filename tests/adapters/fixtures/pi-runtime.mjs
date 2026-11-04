@@ -16,9 +16,10 @@ manager.appendSessionInfo("Loader session");
 const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, manager, {});
 const errors = [];
 runner.onError(error => errors.push(error));
+// Observe the real ExtensionRunner.bindCore sendMessage boundary. The interactive
+// TUI owns transcript insertion and turn execution; this fixture does neither.
 runner.bindCore({ ...loaded.runtime, sendMessage: (message, options) => {
-  manager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
-  process.send({ type: "delivered", message, options });
+  process.send({ type: "core-send-message", message, options });
 } }, {
   getModel: () => undefined, getScopedModels: () => [], isIdle: () => true,
   isProjectTrusted: () => true, getSignal: () => undefined,
@@ -30,12 +31,9 @@ if (errors.length) throw new Error(JSON.stringify(errors));
 process.send({ type: "ready", session_id: manager.getSessionId() });
 process.on("message", async message => {
   try {
-    if (message.op === "input") {
-      await runner.emitInput("test input", undefined, message.source);
-      process.send({ type: "input-done" });
-    } else if (message.op === "shutdown") {
+    if (message.op === "shutdown") {
       await runner.emit({ type: "session_shutdown", reason: "quit" });
-      process.send({ type: "shutdown", errors, entries: manager.getEntries() }, () => process.exit(0));
+      process.send({ type: "shutdown", errors }, () => process.exit(0));
     } else if (message.op === "exit") {
       // Deliberately skip the host shutdown event: verify the process exit fallback.
       process.exit(0);

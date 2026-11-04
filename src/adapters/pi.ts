@@ -1,16 +1,11 @@
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import { CitoError, loadConfig, validateHarness, type CitoConfig } from "../shared/index.js";
+import { CitoError, validateHarness, type CitoConfig } from "../shared/index.js";
 import type { ListenerRow } from "../shared/state-types.js";
 import type { DeliverContext, DeliverOutcome, HarnessAdapter, ProbeOutcome } from "./types.js";
 
 type BridgeConfig = Pick<CitoConfig, "stateDir">;
 export interface BridgeIdentity { endpoint_pid: number; session_id: string; session_name: string; cwd: string }
-export interface PiIdentity extends BridgeIdentity {
-  pi_pid: number; is_streaming: boolean; bridge_epoch: string; human_event_count: number;
-}
-export interface PiEndpoint { pi_pid: number; session_id: string }
-export interface PiDelivery { ok: true; delivered: true; deduplicated: boolean }
 export class PiBridgeError extends CitoError {
   constructor(readonly bridgeError: string) {
     super(bridgeError === "SESSION_MISMATCH" || bridgeError === "SESSION_NOT_OPEN"
@@ -20,7 +15,6 @@ export class PiBridgeError extends CitoError {
 export function bridgeSocketPath(stateDir: string, harness: string, pid: number): string {
   return join(stateDir, "sockets", `${validateHarness(harness)}-pid-${pid}.sock`);
 }
-export const piSocketPath = (stateDir: string, pid: number) => bridgeSocketPath(stateDir, "pi", pid);
 
 /** One newline request/reply with a total deadline and abortable socket lifetime. */
 export async function requestBridge(path: string, request: object, timeout: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -59,20 +53,6 @@ export async function identifyBridge(harness: string, pid: number, config: Bridg
   if ((record.endpoint_pid ?? record.pi_pid) !== pid || typeof record.session_id !== "string" || !record.session_id
     || typeof record.session_name !== "string" || typeof record.cwd !== "string" || !record.cwd) throw new PiBridgeError("INVALID_RESPONSE");
   return { ...record, endpoint_pid: pid, session_id: record.session_id, session_name: record.session_name, cwd: record.cwd };
-}
-export async function identifyPi(pid: number, config: BridgeConfig = loadConfig(), signal?: AbortSignal): Promise<PiIdentity> {
-  const info = await identifyBridge("pi", pid, config, signal);
-  return { ...info, pi_pid: pid, is_streaming: info.is_streaming === true,
-    bridge_epoch: String(info.bridge_epoch ?? ""), human_event_count: Number(info.human_event_count ?? 0) };
-}
-export async function setPiStatus(endpoint: PiEndpoint, badge: string | null | undefined, config: BridgeConfig = loadConfig(), signal?: AbortSignal): Promise<void> {
-  await requestBridge(piSocketPath(config.stateDir, endpoint.pi_pid), { op: "status", session_id: endpoint.session_id, badge }, 1500, signal);
-}
-export async function deliverPiWake(endpoint: PiEndpoint, batchId: string, content: string, config: BridgeConfig = loadConfig(), signal?: AbortSignal): Promise<PiDelivery> {
-  const reply = await requestBridge(piSocketPath(config.stateDir, endpoint.pi_pid),
-    { op: "deliver", session_id: endpoint.session_id, batch_id: batchId, wake: true, content }, 3000, signal);
-  if (reply.delivered !== true || typeof reply.deduplicated !== "boolean") throw new PiBridgeError("INVALID_RESPONSE");
-  return { ok: true, delivered: true, deduplicated: reply.deduplicated };
 }
 export class SocketBridgeAdapter implements HarnessAdapter {
   readonly id: string;

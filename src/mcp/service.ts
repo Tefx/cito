@@ -5,11 +5,11 @@ import { acquireFlock } from "../banner/flock.js";
 import { resolveCaller, type Caller, type CachedSessionQuery } from "../adapters/index.js";
 import { CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
-  senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId,
+  senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
   listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema,
   type CitoConfig, type Principal } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, type ListenerRow, type Registration, type SentRow, type SignalRow } from "./state.js";
-import { OidcLogin, sha256, type BrowserOpener } from "./oidc.js";
+import { OidcLogin, type BrowserOpener } from "./oidc.js";
 import { Receiver, encode, listenLock, refreshSessionBadge, type Broker, type ReceiverOptions } from "./receiver.js";
 
 export interface ServiceOptions extends ReceiverOptions { browserOpener?: BrowserOpener }
@@ -161,12 +161,14 @@ export class CitoService {
   private caller(meta: Record<string, unknown>, open: boolean): Promise<Caller> {
     return resolveCaller(meta, this.config, { requireOpen: open, lookupCachedSession: query => this.cachedCaller(query) });
   }
-  private async outbound(meta: Record<string, unknown>, principal: Principal, hub: string) {
-    let caller: Caller | undefined;
-    try { caller = await this.caller(meta, false); }
+  private async optionalCaller(meta: Record<string, unknown>): Promise<Caller | undefined> {
+    try { return await this.caller(meta, false); }
     catch (error) {
-      if (!(error instanceof CitoError) || !["BINDING_REQUIRED", "SESSION_NOT_OPEN", "PI_BRIDGE_UNAVAILABLE"].includes(error.code)) throw error;
+      if (!(error instanceof CitoError) || !["BINDING_REQUIRED", "SESSION_NOT_OPEN"].includes(error.code)) throw error;
+      return undefined;
     }
+  }
+  private sender(caller: Caller | undefined, principal: Principal, hub: string) {
     const endpoint = { principal_id: principal.principal_id, host_id: this.hostId, harness: caller?.harness ?? null, session_id: caller?.session_id ?? null };
     const local = caller && this.state.listener(listenerId({ ...endpoint, harness: caller.harness, session_id: caller.session_id }), hub);
     return { endpoint, caller, local, key: senderEndpointKey(endpoint) };
@@ -229,6 +231,9 @@ export class CitoService {
         try { if (entry) await broker.kv.update(id, encode(next), entry.revision); else await broker.kv.create(id, encode(next)); }
         catch (error) { if (isJsApiError(error, 10071)) continue; throw error; }
         this.state.transaction(() => {
+          // Endpoint PIDs describe the host conversation, not one hub generation.
+          this.state.run("UPDATE local_listeners SET endpoint_pid = ? WHERE harness = ? AND session_id = ?",
+            caller.endpoint_pid ?? null, caller.harness, caller.session_id);
           this.state.run(`UPDATE local_listeners SET status = 'ACTIVE', binding_generation = ?, owner_token = ?, endpoint_pid = ?,
             cwd = ?, repo = ?, branch = ?, title = ?, about = ?, scope = ?, host_name = ?, tag = ?, public_id = ?,
             consecutive_probe_failures = 0, dispatcher_token = NULL, lease_until_ms = 0 WHERE hub = ? AND listener_id = ?`,
@@ -305,9 +310,9 @@ export class CitoService {
   private async find(input: z.infer<typeof findInputSchema>, meta: Record<string, unknown>) {
     const slots = this.targetSlots(input.hub);
     // Resolve once before any hub operation so metadata conflicts cannot be hidden by partial success.
-    await this.outbound(meta, localPrincipal("unbound"), slots[0]!.name);
+    const caller = await this.optionalCaller(meta);
     const results = await Promise.allSettled(slots.map(async slot => {
-      const broker = await slot.network(), principal = await slot.identity(), sender = await this.outbound(meta, principal, slot.name), now = await brokerNow(broker.jsm);
+      const broker = await slot.network(), principal = await slot.identity(), sender = this.sender(caller, principal, slot.name), now = await brokerNow(broker.jsm);
       const keys = await broker.kv.keys(), names: string[] = []; for await (const key of keys) names.push(key);
       const found: { hub: string; value: Registration; revision: number; created: string }[] = [];
       const lower = (text: string | null) => (text ?? "").toLowerCase();
@@ -346,13 +351,9 @@ export class CitoService {
     const replyId = input.in_reply_to === undefined ? null : parseScopedId(input.in_reply_to, this.config, hub).id;
     const canonicalTo = toCanonicalListenerId(id), slot = this.slot(hub);
     // Claim validation precedes network/DB effects.
-    const principal = await slot.identity(true).catch(error => {
-      if (error instanceof CitoError && error.code === "UNAUTHORIZED") return undefined;
-      throw error;
-    });
-    const sender = await this.outbound(meta, principal ?? localPrincipal("unbound"), hub);
-    const broker = await slot.network(), identity = principal ?? await slot.identity();
-    const from = principal ? sender : await this.outbound(meta, identity, hub);
+    const caller = await this.optionalCaller(meta);
+    const broker = await slot.network(), identity = await slot.identity();
+    const from = this.sender(caller, identity, hub);
     const entry = await broker.kv.get(canonicalTo), now = await brokerNow(broker.jsm);
     if (!entry) throw new CitoError("LISTENER_NOT_FOUND", "Target listener does not exist");
     const target = registrationSchema.parse(entry.json()), lease = evaluateLease(target.state, now, entry.created);

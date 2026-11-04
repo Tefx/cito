@@ -4,7 +4,6 @@ import { promisify } from "node:util";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { DatabaseSync } from "node:sqlite";
 import { acquireFlock, ensureBannerCompiled, showBanner, type BannerPayload } from "../../src/banner/index.js";
 
 const exec = promisify(execFile);
@@ -74,15 +73,6 @@ async function click(f: Fixture) {
   expect(pids).toHaveLength(1);
   process.kill(pids[0]!, "SIGUSR1");
   await waitFor(async () => (await processes(f)).length === 0);
-}
-function database(f: Fixture) {
-  const db = new DatabaseSync(join(f.state, "state.sqlite"));
-  db.exec("CREATE TABLE local_listeners (harness TEXT, session_id TEXT, human_event_seq INTEGER NOT NULL)");
-  const insert = db.prepare("INSERT INTO local_listeners VALUES (?, ?, ?)");
-  insert.run("codex", "session-1", 7);
-  insert.run("pi", "session-1", 11);
-  insert.run("codex", "other", 19);
-  return db;
 }
 
 beforeAll(async () => {
@@ -248,19 +238,15 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
     await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  test("Codex click opens its deeplink without mutating SQLite", async () => {
+  test("Codex click opens its deeplink", async () => {
     const f = await fixture(5000);
-    const db = database(f);
-    try {
-      expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
-      await click(f);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([7, 11, 19]);
-      expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
-    } finally { db.close(); }
+    expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
+    await click(f);
+    expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
   });
 
   test("Codex click survives banner.lock contention beyond its initial 500ms wait", async () => {
-    const f = await fixture(5000), db = database(f);
+    const f = await fixture(5000);
     let lock: Awaited<ReturnType<typeof acquireFlock>> = null;
     try {
       expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
@@ -269,61 +255,26 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
       const [pid] = await processes(f);
       process.kill(pid!, "SIGUSR1");
       await delay(700);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE harness = 'codex' AND session_id = 'session-1'").get()?.human_event_seq).toBe(7);
       await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
       await lock!.release(); lock = null;
       await waitFor(async () => (await processes(f)).length === 0);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([7, 11, 19]);
       expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
-    } finally { await lock?.release(); db.close(); }
+    } finally { await lock?.release(); }
   });
 
-  test("Codex binds session identifiers literally and URL-encodes path delimiters", async () => {
-    const f = await fixture(5000);
-    const db = database(f);
-    const session = "thread'quoted/part?";
-    db.prepare("INSERT INTO local_listeners VALUES ('codex', ?, 23)").run(session);
-    try {
-      expect(await send(f, { ...payload, target_harness: "codex", target_session_id: session })).toEqual({ displayed: true });
-      await click(f);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE session_id = ?").get(session)?.human_event_seq).toBe(23);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners WHERE harness = 'codex' AND session_id = 'session-1'").get()?.human_event_seq).toBe(7);
-      expect(await readFile(f.log, "utf8")).toBe("codex://threads/thread'quoted%2Fpart%3F\n");
-    } finally { db.close(); }
-  });
-
-  test("Pi click dismisses without opening a URL or mutating SQLite", async () => {
-    const f = await fixture(5000);
-    const db = database(f);
-    try {
-      expect(await send(f)).toEqual({ displayed: true });
-      await click(f);
-      expect(db.prepare("SELECT human_event_seq FROM local_listeners ORDER BY rowid").all().map(row => row.human_event_seq)).toEqual([7, 11, 19]);
-      await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
-    } finally { db.close(); }
-  });
-
-  test("Codex tolerates an uninitialized database and still dismisses/opens", async () => {
-    const f = await fixture(5000);
-    const db = new DatabaseSync(join(f.state, "state.sqlite"));
-    db.close();
-    const server = await native(f);
-    expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
+  test("Codex URL-encodes session path delimiters", async () => {
+    const f = await fixture(5000), session = "thread'quoted/part?";
+    expect(await send(f, { ...payload, target_harness: "codex", target_session_id: session })).toEqual({ displayed: true });
     await click(f);
-    expect(server.output()).not.toContain("SQLite");
-    expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
+    expect(await readFile(f.log, "utf8")).toBe("codex://threads/thread'quoted%2Fpart%3F\n");
   });
 
-  test("SQLite lock has no effect on clicking, opening and dismissal", async () => {
+  test("Pi click dismisses without opening a URL", async () => {
     const f = await fixture(5000);
-    const db = database(f);
-    const server = await native(f);
-    try {
-      db.exec("BEGIN EXCLUSIVE");
-      expect(await send(f, { ...payload, target_harness: "codex" })).toEqual({ displayed: true });
-      await click(f);
-      expect(server.output()).not.toContain("database is locked");
-      expect(await readFile(f.log, "utf8")).toBe("codex://threads/session-1\n");
-    } finally { db.exec("ROLLBACK"); db.close(); }
+    expect(await send(f)).toEqual({ displayed: true });
+    await click(f);
+    await expect(stat(f.log)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+
 });

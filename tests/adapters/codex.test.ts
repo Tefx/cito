@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { assertCodexThreadOpen, codexThreadId, queueCodexWake, readCodexThread, resolveCodexCaller,
+import { assertCodexThreadOpen, codexThreadId, queueCodexWake, readCodexThread, resolveCaller,
   triggerCodexWake } from "../../src/adapters/index.js";
+import { loadConfig } from "../../src/shared/index.js";
 import { isolatedState, unixServer } from "./support.js";
 
 const threadId = "01234567-89ab-4cde-8123-0123456789ab";
@@ -68,7 +69,7 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
   });
   it("reads only the exact SQLite thread, normalizes repo, and resolves through a real IPC owner handshake", async () => {
     database(); const requests = await ipc();
-    expect(await resolveCodexCaller({ codexThreadId: threadId }, state)).toEqual({ harness: "codex", session_id: threadId,
+    expect(await resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).toEqual({ harness: "codex", session_id: threadId,
       cwd: state.root, title: "Thread title", repo: "Owner/Repo", branch: "topic" });
     expect(requests).toHaveLength(2);
     expect(requests[0]).toEqual({ type: "request", version: 1, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -83,7 +84,7 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
   });
   it("rejects archived threads before any IPC and falls back to cwd basename when title is empty", async () => {
     database(1);
-    await expect(resolveCodexCaller({ codexThreadId: threadId }, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
+    await expect(resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
     const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
     try { db.exec("UPDATE threads SET archived = 0, title = '', git_origin_url = NULL, git_branch = NULL"); } finally { db.close(); }
     expect(readCodexThread(threadId, state)).toMatchObject({ title: state.root.split("/").at(-1), repo: null, branch: null });
@@ -106,7 +107,7 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
     expect(readCodexThread(threadId, state, { allowArchived: true })).toMatchObject({ session_id: threadId, title: "Archived name" });
     expect(() => readCodexThread("missing", state, { allowArchived: true })).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
     // Registration still rejects archived threads; the option belongs only to explicit reads.
-    await expect(resolveCodexCaller({ codexThreadId: threadId }, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
+    await expect(resolveCaller({ codexThreadId: threadId }, loadConfig(state.env))).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
   });
   it("never creates a missing state database", async () => {
     expect(() => readCodexThread(threadId, state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));

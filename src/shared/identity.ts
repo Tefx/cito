@@ -5,6 +5,8 @@ import { CitoError } from "./errors.js";
 import { validateHarness, hubNameSchema, type Harness } from "./validation.js";
 import type { CitoConfig } from "./config.js";
 
+export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
 export function isSingleDefaultHub(config: CitoConfig): boolean {
   return Object.keys(config.hubs).length === 1 && config.defaultHub === "default";
 }

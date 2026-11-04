@@ -127,11 +127,6 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
     });
   });
 }
-export async function resolveCodexCaller(meta: Record<string, unknown> = {}, config: CodexConfig = loadConfig()): Promise<CodexCaller> {
-  const thread = readCodexThread(codexThreadId(meta), config);
-  await assertCodexThreadOpen(thread.session_id, config);
-  return thread;
-}
 
 /** The caller owns authorization and the listener lock around EACH separate effect. No retries here. */
 export async function queueCodexWake(threadId: string, card: string, options: CodexDriverOptions = {}): Promise<void> {

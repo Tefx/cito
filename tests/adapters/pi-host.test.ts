@@ -5,14 +5,16 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deliverPiWake, identifyPi, piSocketPath } from "../../src/adapters/index.js";
+import { bridgeSocketPath, identifyBridge, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
+import { loadConfig } from "../../src/shared/index.js";
+import type { ListenerRow } from "../../src/mcp/state.js";
 import { isolatedState } from "./support.js";
 
 // The host is intentionally not an npm dependency. CI can point at an installed 1.5.0 package.
 const host = process.env.CITO_PI_PACKAGE_DIR ?? join(homedir(), ".pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent");
 const hostAvailable = existsSync(join(host, "dist/core/extensions/loader.js"));
 
-it.skipIf(!hostAvailable)("loads a standalone file with Pi 1.5.0's real loader, dispatches events, persists custom entries, and cleans exit sockets", async () => {
+it.skipIf(!hostAvailable)("loads a standalone file through Pi 1.5.0 and verifies bindCore sendMessage arguments and socket cleanup", async () => {
   expect(JSON.parse(await readFile(join(host, "package.json"), "utf8")).version).toBe("1.5.0");
   const state = await isolatedState();
   try {
@@ -34,29 +36,28 @@ it.skipIf(!hostAvailable)("loads a standalone file with Pi 1.5.0's real loader, 
           return messages.find(m => m.type === "ready");
         }, { timeout: 10_000 }).toBeDefined();
         const pid = child.pid!;
-        const info = await identifyPi(pid, state);
-        expect(info).toMatchObject({ session_name: "Loader session", cwd: state.root, human_event_count: 0 });
-        child.send({ op: "input", source: "extension" });
-        await expect.poll(() => messages.filter(m => m.type === "input-done").length).toBe(1);
-        child.send({ op: "input", source: "interactive" });
-        await expect.poll(() => messages.filter(m => m.type === "input-done").length).toBe(2);
-        expect((await identifyPi(pid, state)).human_event_count).toBe(1);
-        const endpoint = { pi_pid: pid, session_id: info.session_id };
-        expect(await deliverPiWake(endpoint, "batch", "Host-loaded card", state)).toMatchObject({ deduplicated: false });
-        expect(await deliverPiWake(endpoint, "batch", "Host-loaded card", state)).toMatchObject({ deduplicated: true });
-        await expect.poll(() => messages.filter(m => m.type === "delivered").length).toBe(1);
-        expect(messages.find(m => m.type === "delivered")).toMatchObject({
-          message: { customType: "cito-notification", content: "Host-loaded card", display: true },
+        const info = await identifyBridge("pi", pid, state);
+        expect(info).toEqual({ ok: true, endpoint_pid: pid, pi_pid: pid, session_id: messages.find(m => m.type === "ready")!.session_id,
+          session_name: "Loader session", cwd: state.root });
+        const row = { endpoint_pid: pid, session_id: info.session_id } as ListenerRow, adapter = new SocketBridgeAdapter("pi");
+        const context: DeliverContext = { batchId: "batch", card: "Host-loaded card", config: loadConfig(state.env),
+          signal: new AbortController().signal, queueWritten: false, markQueueWritten() {},
+          runEffect: async submit => { await submit(); return true; } };
+        expect(await adapter.deliver(row, context)).toBe("delivered");
+        expect(await adapter.deliver(row, context)).toBe("delivered");
+        await expect.poll(() => messages.filter(m => m.type === "core-send-message").length).toBe(1);
+        // This is the real loader -> ExtensionRunner -> bindCore callback boundary;
+        // interactive TUI transcript insertion and turn execution remain operator checks.
+        expect(messages.filter(m => m.type === "core-send-message")).toEqual([{
+          type: "core-send-message", message: { customType: "cito-notification", content: "Host-loaded card", display: true },
           options: { triggerTurn: true, deliverAs: "followUp" },
-        });
+        }]);
         child.send({ op: stop });
         expect(await exited).toBe(0);
-        await expect(stat(piSocketPath(state.stateDir, pid))).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(stat(bridgeSocketPath(state.stateDir, "pi", pid))).rejects.toMatchObject({ code: "ENOENT" });
         if (stop === "shutdown") {
           const receipt = messages.find(m => m.type === "shutdown");
-          expect(receipt).toMatchObject({ errors: [], entries: expect.arrayContaining([
-            expect.objectContaining({ type: "custom_message", customType: "cito-notification", content: "Host-loaded card" }),
-          ]) });
+          expect(receipt).toEqual({ type: "shutdown", errors: [] });
         }
       } finally {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");

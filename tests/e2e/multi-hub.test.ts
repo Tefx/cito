@@ -133,6 +133,31 @@ test("unknown/conflicting addressing and conflicting caller claims fail before n
   expect(f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_sent_idempotency").get()!.n).toBe(0);
 });
 
+test("find and send reject invalid, unreachable, and ambiguous explicit PID claims before connecting", async () => {
+  const f = await multi();
+  const target = await call(f.service, "cito_listen", { about: "first" }, f.pi.meta);
+  f.pi.switchSession("second-session");
+  await call(f.service, "cito_listen", { about: "second" }, f.pi.meta);
+  f.service.state.run("UPDATE local_listeners SET endpoint_pid = 2147483647");
+  const spies = [...f.service.slots.values()].map(slot => vi.spyOn(slot, "network"));
+  for (const meta of [{ endpoint_pid: 0 }, { endpoint_pid: 2147483647 }, { endpoint_pid: 2147483646 }]) {
+    for (const name of ["cito_find", "cito_send"]) {
+      const args = name === "cito_send" ? { to: target.listener_id, message: "invalid claim" } : {};
+      expect(payload(await f.service.call(name, args, meta))).toMatchObject({ error: { code: "PI_BRIDGE_UNAVAILABLE" } });
+    }
+  }
+  expect(spies.every(spy => spy.mock.calls.length === 0)).toBe(true);
+});
+
+test("unopen implicit ancestor sockets leave outbound callers unbound", async () => {
+  const f = await multi();
+  const enrolled = await call(f.service, "cito_listen", { about: "implicit" }, f.pi.meta);
+  const server = await unixServer(join(f.stateDir, `sockets/aider-pid-${process.ppid}.sock`), socket => socket.once("data", () => socket.end('{"ok":false,"error":"SESSION_NOT_OPEN"}\n')));
+  cleanups.push(() => server.stop());
+  expect((await call(f.service, "cito_find")).caller).toMatchObject({ harness: null, session_id: null });
+  expect(await call(f.service, "cito_send", { to: enrolled.listener_id, message: "unbound allowed" })).toMatchObject({ status: "wake_accepted" });
+});
+
 test("a dynamically discovered cursor bridge can deliver unconfirmed, drain offline, and revoke all hubs on a session switch", async () => {
   const f = await multi(false), requests: Record<string, unknown>[] = [];
   let switched = false;
@@ -146,7 +171,17 @@ test("a dynamically discovered cursor bridge can deliver unconfirmed, drain offl
   expect(personal.harness).toBe("cursor"); expect(ADAPTER_REGISTRY.get("cursor")).toBeInstanceOf(SocketBridgeAdapter);
   await call(f.service, "cito_listen", { about: "custom", hub: "rda", tag: "cursor" }, meta);
   registerAdapter(new SocketBridgeAdapter("cursor", { confirmDelivery: false }));
-  const sent = await call(f.service, "cito_send", { to: personal.listener_id, message: "unconfirmed" });
+  requests.length = 0;
+  expect((await call(f.service, "cito_find", {}, meta)).caller.harness).toBe("cursor");
+  expect(requests.filter(req => req.op === "identify")).toHaveLength(1); // Discovery runs once, independent of hub count.
+  const senderPid = 2147483645;
+  const senderSocket = await unixServer(join(f.stateDir, `sockets/aider-pid-${senderPid}.sock`), socket => socket.once("data", bytes => {
+    requests.push(JSON.parse(bytes.toString()));
+    socket.end(JSON.stringify({ ok: true, endpoint_pid: senderPid, session_id: "sender-session", session_name: "Sender", cwd: f.root }) + "\n");
+  })); cleanups.push(() => senderSocket.stop());
+  requests.length = 0;
+  const sent = await call(f.service, "cito_send", { to: personal.listener_id, message: "unconfirmed" }, { endpoint_pid: senderPid });
+  expect(requests.filter(req => req.op === "identify")).toHaveLength(1);
   const receiver = f.service.receivers.get(`personal:${canonical(personal.listener_id)}`)!;
   await receiver.dispatch();
   expect(requests.find(req => req.op === "deliver")).toMatchObject({ wake: true, session_id: "cursor-session", batch_id: expect.stringMatching(/^batch_personal_/) });
@@ -169,6 +204,27 @@ test("offline multi-hub inbox skips an unauthenticated secondary slot, but expli
   const noAuth = await CitoService.create({ ...config, hubs: { rda: config.hubs.rda }, defaultHub: "rda" }, f.serviceOptions);
   cleanups.push(() => noAuth.close());
   expect(payload(await noAuth.call("cito_inbox", {}, f.pi.meta))).toMatchObject({ error: { code: "UNAUTHORIZED" } });
+});
+
+test("newly enrolled endpoints replace every retained hub PID and active rows select the badge target", async () => {
+  const f = await multi();
+  let personal;
+  for (let generation = 1; generation <= 5; generation++) personal = await call(f.service, "cito_listen", { about: "old host", tag: "old-host" }, f.pi.meta);
+  const id = canonical(personal!.listener_id);
+  await call(f.service, "cito_unlisten", { hub: "personal" }, f.pi.meta);
+  f.service.state.run("UPDATE local_listeners SET endpoint_pid = 2147483647 WHERE hub = 'personal'");
+  const rda = await call(f.service, "cito_listen", { hub: "rda", about: "new host", tag: "new-host" }, f.pi.meta);
+  expect(rda.binding_generation).toBe(1);
+  expect(f.service.state.listener(id, "personal")).toMatchObject({ status: "UNLISTENED", binding_generation: 5, endpoint_pid: process.pid });
+  expect(f.service.state.listener(id, "rda")).toMatchObject({ status: "ACTIVE", binding_generation: 1, endpoint_pid: process.pid });
+  expect(f.pi.badges.at(-1)).toBe("🔔 new-host");
+  // A stale inactive row must not outrank the current active endpoint, independently of enrollment propagation.
+  f.service.state.run("UPDATE local_listeners SET endpoint_pid = 2147483647 WHERE hub = 'personal'");
+  await refreshSessionBadge(f.service.state, f.config, "pi", "pi-session-1");
+  expect(f.pi.badges.at(-1)).toBe("🔔 new-host");
+  f.service.state.run("UPDATE local_listeners SET endpoint_pid = ? WHERE hub = 'personal'", process.pid);
+  await call(f.service, "cito_unlisten", { hub: "rda" }, f.pi.meta);
+  expect(f.pi.badges.at(-1)).toBeUndefined();
 });
 
 test("shutdown aggregates badge ownership with a nonblocking receiver-lock probe", async () => {

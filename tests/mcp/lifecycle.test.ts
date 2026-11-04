@@ -31,7 +31,7 @@ test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pu
   const { js } = await provisionNats(nc);
   await js.publish("cito.signal." + id, encode({ signal_id: "queued-during-restart", to: id, target_generation: 1,
     sender_endpoint_key: "none#alice|other|unbound|default", from: { principal_id: "none#alice", user: "alice", host_id: "other", host_name: "other", harness: null },
-    message: "queued offline", requested_wake: false, in_reply_to: null }));
+    message: "queued offline", in_reply_to: null }));
   const restarted = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => restarted.close());
   expect((await call(restarted, "cito_find")).listeners).toMatchObject([{ listener_id: enrolled.listener_id }]);
   await waitFor(() => restarted.state.listener(id)!.persisted_seq === 2 && restarted.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1);
@@ -137,8 +137,7 @@ test("transient Pi probes revoke on third failure, whereas healthy probe resets 
       const request = JSON.parse(bytes.toString());
       socket.end(JSON.stringify(request.op !== "identify" ? { ok: true } : healthy ? {
         ok: true, pi_pid: process.pid, session_id: "transient-pi", session_name: "probe", cwd: f.root,
-        is_streaming: false, bridge_epoch: "epoch", human_event_count: 0,
-      } : { ok: false, error: "TEMPORARY" }) + "\n");
+        } : { ok: false, error: "TEMPORARY" }) + "\n");
     });
   }); cleanups.push(() => server.stop());
   const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "three strikes" }, { pi_pid: process.pid });
@@ -244,7 +243,7 @@ test("admission failure never advances restart cursor past the failed earlier me
   });
   const wire = { to: id, target_generation: generation, sender_endpoint_key: "none#alice|sender|unbound|default",
     from: { principal_id: "none#alice", user: "alice", host_id: "sender", host_name: "sender", harness: null },
-    message: "ordered", requested_wake: false, in_reply_to: null };
+    message: "ordered", in_reply_to: null };
   await broker.js.publish("cito.signal." + id, encode({ ...wire, signal_id: "first" }));
   await broker.js.publish("cito.signal." + id, encode({ ...wire, signal_id: "second" }));
   await waitFor(() => f.service.state.signals("SELECT * FROM local_signals").length === 2);

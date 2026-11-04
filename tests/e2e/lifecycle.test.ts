@@ -114,12 +114,11 @@ test("receiver acknowledgement prevents a debounced wake; unlisten cancels admit
   expect(f.pi.messages).toEqual([]);
 });
 
-test("liveness sweep is single-flight, consumes interactive deltas and revokes a switched Pi session", async () => {
+test("liveness sweep is single-flight and revokes a switched Pi session", async () => {
   const f = await setup();
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "live" }, f.pi.meta);
   const receiver = f.service.receivers.get(`default:${toCanonicalListenerId(id)}`)!;
   await call(f.service, "cito_send", { to: id, message: "charge" });
-  f.pi.input();
   await Promise.all([receiver.sweep(), receiver.sweep(), receiver.sweep()]);
   expect(f.service.state.listener(toCanonicalListenerId(id))).toMatchObject({ consecutive_probe_failures: 0 });
   f.pi.switchSession("pi-session-2"); await receiver.sweep();

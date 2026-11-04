@@ -63,6 +63,8 @@ In a conversation, call `cito_listen({about: "Build verification", tag: "build"}
 
 The extension listens on `sockets/pi-pid-<pid>.sock` (`0600`) from `session_start` until shutdown. Discovery walks the MCP process's parent chain, or uses `_meta.endpoint_pid`, `_meta.pi_pid`, or `_meta.caller_pid`. A local gateway can forward nested PID roots; explicit roots prevent fallback to an unrelated parent. The bridge returns both `endpoint_pid` and `pi_pid`. Session switches clear stale badges immediately, and a per-session 200-batch deduplication ring prevents repeated insertions on socket retries.
 
+**Automated verification boundary:** the installed Pi 1.5.0 test loads the standalone extension through the real `loadExtensions` and `ExtensionRunner`, then observes `ExtensionRunner.bindCore`'s `sendMessage` handler. It verifies `{customType: "cito-notification", content, display: true}` with `{triggerTurn: true, deliverAs: "followUp"}` and suppression of duplicate batches. Interactive TUI transcript insertion and turn execution remain operator checks; the fixture does not perform or prove those later effects.
+
 ## ChatGPT / Codex Desktop (`codex`)
 
 Configure the stdio server in `~/.codex/config.toml`:

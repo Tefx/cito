@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type JsMsg, type NatsConnection,
   type QueuedIterator, type KvEntry } from "nats";
 import { acquireFlock, showBanner, type BannerOptions } from "../banner/index.js";
 import { getAdapter, formatWakeCard, type DeliverContext } from "../adapters/index.js";
-import { brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId,
+import { brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
   type CitoConfig, type provisionNats } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type SignalRow } from "./state.js";
 
@@ -25,11 +25,11 @@ const ackPayload = (row: SignalRow) => ({ signal_id: row.signal_id,
 /** One badge aggregates every active hub for the same host conversation. */
 export async function refreshSessionBadge(state: LocalState, config: CitoConfig, harness: string, sessionId: string,
   options: { closingKeys?: Set<string>; signal?: AbortSignal } = {}): Promise<void> {
-  const hash = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+  const hash = sha256(sessionId).slice(0, 16);
   const lock = await acquireFlock(join(config.stateDir, "sockets", `session-${harness}-${hash}.lock`), 5000);
   if (!lock) throw new Error("Session badge lock timeout");
   try {
-    const rows = state.db.prepare("SELECT * FROM local_listeners WHERE harness = ? AND session_id = ? ORDER BY binding_generation DESC, hub ASC, listener_id ASC")
+    const rows = state.db.prepare("SELECT * FROM local_listeners WHERE harness = ? AND session_id = ? ORDER BY (status = 'ACTIVE') DESC, binding_generation DESC, hub ASC, listener_id ASC")
       .all(harness, sessionId) as unknown as ListenerRow[];
     const target = rows[0]; if (!target) return;
     const active: ListenerRow[] = [];

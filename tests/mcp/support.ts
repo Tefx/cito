@@ -37,11 +37,11 @@ export async function call(service: CitoService, name: string, args: unknown = {
   return payload<Record<string, any>>(result); // JSON tool payloads are asserted by each behavior test.
 }
 export async function piBridge(stateDir: string) {
-  const handlers = new Map<string, (event: { source?: string }, ctx: BridgeContext) => unknown>();
+  const handlers = new Map<string, (event: unknown, ctx: BridgeContext) => unknown>();
   const messages: { content: string; options: { triggerTurn: boolean; deliverAs: string } }[] = [];
   const badges: (string | undefined)[] = [];
   let session = "pi-session-1";
-  const ctx: BridgeContext = { cwd: stateDir, isIdle: () => true,
+  const ctx: BridgeContext = { cwd: stateDir,
     sessionManager: { getSessionId: () => session, getSessionName: () => "Pi receiver" },
     ui: { setStatus: (_key, value) => { badges.push(value); } } };
   const api: BridgeAPI = { on: (event, handler) => { handlers.set(event, handler); },
@@ -51,7 +51,6 @@ export async function piBridge(stateDir: string) {
   finally { if (before === undefined) delete process.env.CITO_STATE_DIR; else process.env.CITO_STATE_DIR = before; }
   await handlers.get("session_start")!({}, ctx);
   return { meta: { pi_pid: process.pid }, messages, badges,
-    input(source = "interactive") { handlers.get("input")!({ source }, ctx); },
     switchSession(id: string) { session = id; handlers.get("session_tree")!({}, ctx); },
     stop: async () => { await handlers.get("session_shutdown")!({}, ctx); } };
 }

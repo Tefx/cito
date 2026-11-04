@@ -60,6 +60,29 @@ test("refresh 503 fails without launching a browser or overwriting verified cach
   expect(await readFile(join(f.stateDir, "oidc-token-default.json"), "utf8")).toBe(original);
 });
 
+test("a different PKCE identity never inherits the previous refresh token after refresh rejection", async () => {
+  const { key, oidc, login } = await setup();
+  const alice = await login.recover(null);
+  expect(alice.refresh_token).toBe("refresh-1");
+  oidc.state.refreshStatus = 401;
+  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-2", preferred_username: "Bob" })) };
+  const bob = await login.recover(alice.token_sha256);
+  expect(bob).toMatchObject({ verified_principal_id: oidc.issuer + "#user-2", verified_user: "bob" });
+  expect(bob.refresh_token).toBeUndefined();
+  expect(await login.cached()).not.toHaveProperty("refresh_token");
+  expect(oidc.state.refreshRequests).toBe(1); expect(oidc.state.codeRequests).toBe(2);
+});
+
+test.each([false, true])("silent refresh retains an omitted token only for the same principal (identity changed: %s)", async changed => {
+  const { key, oidc, login } = await setup();
+  const old = await login.recover(null);
+  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: changed ? "other-user" : "user-1",
+    exp: Math.floor(Date.now() / 1000) + 3600 })) };
+  const fresh = await login.recover(old.token_sha256);
+  expect(fresh.refresh_token).toBe(changed ? undefined : "refresh-1");
+  expect(oidc.state.refreshRequests).toBe(1); expect(oidc.state.codeRequests).toBe(1);
+});
+
 test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TIMEOUT", async () => {
   const deadline = new AbortController(), timeout = AbortSignal.timeout.bind(AbortSignal), request = globalThis.fetch;
   vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => ms === 45_000 ? deadline.signal : timeout(ms));

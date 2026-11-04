@@ -2,7 +2,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { chmod, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { CitoError, brokerAgeMs, RETENTION_MS, harnessSchema, canonicalListenerIdSchema,
+import { CitoError, brokerAgeMs, RETENTION_MS, harnessIdSchema, canonicalListenerIdSchema,
   unscopedListenerIdSchema, sanitizeMessage } from "../shared/index.js";
 import type { ListenerRow, SignalRow } from "../shared/state-types.js";
 export type { ListenerRow, SignalRow, SentRow } from "../shared/state-types.js";
@@ -10,7 +10,7 @@ export type { ListenerRow, SignalRow, SentRow } from "../shared/state-types.js";
 export const registrationSchema = z.object({
   listener_id: canonicalListenerIdSchema, public_id: unscopedListenerIdSchema.optional(), tag: z.string().nullable().optional(),
   principal_id: z.string().min(1), owner_user: z.string().min(1),
-  host_id: z.string().min(1), host_name: z.string(), harness: harnessSchema, session_id: z.string().min(1),
+  host_id: z.string().min(1), host_name: z.string(), harness: harnessIdSchema, session_id: z.string().min(1),
   cwd: z.string(), repo: z.string().nullable(), branch: z.string().nullable(), title: z.string(), about: z.string(),
   scope: z.enum(["self", "workspace"]), state: z.enum(["ACTIVE", "UNLISTENED"]),
   binding_generation: z.number().int().positive(), owner_token: z.string().uuid(),
@@ -20,7 +20,7 @@ export const signalSchema = z.object({
   signal_id: z.string().min(1).max(128).regex(/^[^:]+$/), to: unscopedListenerIdSchema, target_generation: z.number().int().positive(),
   sender_endpoint_key: z.string().min(1),
   from: z.object({ principal_id: z.string().min(1), user: z.string(), host_id: z.string(), host_name: z.string(),
-    harness: harnessSchema.nullable(), listener_id: unscopedListenerIdSchema.nullable().default(null),
+    harness: harnessIdSchema.nullable(), listener_id: unscopedListenerIdSchema.nullable().default(null),
     title: z.string().default(""), about: z.string().nullable().default(null) }),
   message: z.string().transform(sanitizeMessage), in_reply_to: z.string().nullable(),
 });
