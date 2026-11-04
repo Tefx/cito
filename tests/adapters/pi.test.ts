@@ -29,13 +29,14 @@ describe("Pi receiver resolution and drivers", () => {
       });
     }));
   }
-  it("uses explicit pi_pid, then caller_pid, and returns normalized receiver metadata", async () => {
+  it("uses explicit pi_pid, caller_pid, or nested gateway parent_pid, and returns normalized receiver metadata", async () => {
     const requests: Record<string, unknown>[] = [];
     await bridge(43210, identity(43210, state.root), requests);
     expect(await resolvePiCaller({ pi_pid: 43210 }, state)).toMatchObject({ harness: "pi", pi_pid: 43210,
       title: "Title", repo: null, branch: null, human_event_count: 7 });
     await resolvePiCaller({ caller_pid: 43210 }, state);
-    expect(requests).toEqual([{ op: "identify" }, { op: "identify" }]);
+    expect(await resolvePiCaller({ "x-gateway-caller": { parent_pid: 43210 } }, state)).toMatchObject({ harness: "pi", pi_pid: 43210 });
+    expect(requests).toEqual([{ op: "identify" }, { op: "identify" }, { op: "identify" }]);
     await expect(resolvePiCaller({ pi_pid: 43211, caller_pid: 43210 }, state)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
   });
   it("walks the real ps parent chain beyond the immediate parent", async () => {

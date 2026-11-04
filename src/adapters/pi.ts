@@ -99,15 +99,27 @@ export async function resolvePiCaller(meta: Record<string, unknown> = {}, config
     if (typeof hint !== "number" || !Number.isSafeInteger(hint) || hint <= 0) throw new PiBridgeError("INVALID_PID");
     pid = hint;
   } else {
-    let ancestor = process.ppid;
-    for (let depth = 0; depth < 6 && ancestor > 0; depth++) {
-      if (await socketExists(piSocketPath(config.stateDir, ancestor))) { pid = ancestor; break; }
-      try {
-        const { stdout } = await exec("/bin/ps", ["-o", "ppid=", "-p", String(ancestor)], { timeout: 1000 });
-        const parent = Number(stdout.trim());
-        if (!Number.isSafeInteger(parent) || parent <= 0 || parent === ancestor) break;
-        ancestor = parent;
-      } catch { break; }
+    const nestedRoots: number[] = [];
+    for (const value of Object.values(meta)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const obj = value as Record<string, unknown>;
+      for (const candidate of [obj.pi_pid, obj.caller_pid, obj.parent_pid]) {
+        if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0 && !nestedRoots.includes(candidate)) {
+          nestedRoots.push(candidate);
+        }
+      }
+    }
+    const roots = [...nestedRoots, ...(nestedRoots.includes(process.ppid) ? [] : [process.ppid])];
+    outer: for (let ancestor of roots) {
+      for (let depth = 0; depth < 6 && ancestor > 0; depth++) {
+        if (await socketExists(piSocketPath(config.stateDir, ancestor))) { pid = ancestor; break outer; }
+        try {
+          const { stdout } = await exec("/bin/ps", ["-o", "ppid=", "-p", String(ancestor)], { timeout: 1000 });
+          const parent = Number(stdout.trim());
+          if (!Number.isSafeInteger(parent) || parent <= 0 || parent === ancestor) break;
+          ancestor = parent;
+        } catch { break; }
+      }
     }
   }
   if (pid === undefined) throw new CitoError("BINDING_REQUIRED", "No Pi ancestor bridge found");
