@@ -499,7 +499,7 @@ phases:
       \ Findings) across all 5 lenses."
   - id: v1.acceptance-gate
     name: Final V1 specification conformance and project acceptance gate
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Final V1 phase and project acceptance decision (`PASS` or `FAIL`) for `/Users/tefx/Projects/cito`\
@@ -532,3 +532,5 @@ phases:
     depends_on:
     - v1.mcp-and-e2e
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-04T04:02:17.607507Z'
