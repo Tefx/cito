@@ -343,7 +343,7 @@ phases:
     name: 'Unified cito-mcp server over NATS JetStream/KV, recipient anti-loop & crash-safe
       dispatch, OIDC JIT login, E2E suite, and code-hygiene consolidation [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/**\n    - bin/**\n    - deploy/**\n    -\
       \ tests/**\n    - README.md\n    - package.json\n    - tsconfig.json\n  blocked_paths:\n\
@@ -453,6 +453,50 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-04T02:06:08.174186Z'
+    done_at: '2026-11-04T04:02:02.938677+00:00'
+    evidence: "Implemented by senior-engineer in isolated worktree (commits 69963b57e67fecb00583cfbf17980336f8c26dac,\
+      \ cdd49a7fe24a8698bd6c61b60dd40264400e1e7f, fast-forwarded onto main):\n- Unified\
+      \ five-tool stdio MCP server (`bin/cito-mcp`, `src/mcp/{cli,server,service,state,receiver,oidc}.ts`):\n\
+      \  - Persistent `${CITO_STATE_DIR}/host-id` (`0600`) and SQLite state (`${CITO_STATE_DIR}/state.sqlite`,\
+      \ mode `0600`) with `local_listeners`, `local_signals`, `local_pairwise_wakes`,\
+      \ and `local_sent_idempotency`.\n  - Public MCP tools `cito_listen`, `cito_unlisten`,\
+      \ `cito_find`, `cito_send`, `cito_inbox` with canonical `isError` envelopes,\
+      \ keyless deterministic `listener_id` offline inbox, and target-driven outbound\
+      \ routing (`SenderEndpointKey = \"${principal_id}|${host_id}|unbound|default\"\
+      `).\n  - Lock-serialized KV takeover (`listen-${listener_id}.lock` + KV CAS\
+      \ with `REBINDING` -> `ACTIVE` / `FENCED_INACTIVE`), owner-qualified fencing\
+      \ (`WHERE listener_id = ? AND owner_token = ?`), broker-clock lease evaluation\
+      \ (`evaluateLease`), and persisted `ACTIVE` enrollment recovery on process restart\
+      \ (`restoreReceivers()`).\n  - Recipient-local anti-loop protection: persistent\
+      \ `unattended_wake_count` (`max_unattended_wakes = 3`), clock-independent `human_event_seq`\
+      \ (Pi per-session `bridge_epoch` + `human_event_count` delta with 32-epoch retired\
+      \ history and A->B->A session-switch preservation; Codex native HUD banner click\
+      \ SQLite increment), 120s rolling-window pairwise circuit breaker (`local_pairwise_wakes`),\
+      \ and 5-level `held_reason` precedence (`stale_generation` > `passive_requested`\
+      \ > `peer_wake_disabled` > `wake_quota_exhausted` > `pairwise_rate_limited`).\n\
+      \  - Two-stage crash-safe batch dispatch: atomic `BEGIN IMMEDIATE` Stage-1 admission\
+      \ with redelivery deduplication; Stage-2 1500ms debounce + startup recovery,\
+      \ whole-batch expiry, immutable `batch_id`/`batch_card`, `listen-${listener_id}.lock`\
+      \ held across `assertDispatchStillAuthorized` + each host-effect submission\
+      \ (`deliverPiWake`, `queueCodexWake`, `triggerCodexWake`), and independent `acknowledged_at_ms`.\n\
+      \  - Rejection-aware double-checked `flock` JIT OIDC login (`oidc-login.lock`,\
+      \ `oidc-token.json` `0600`, `token_sha256 !== rejected_sha256`, silent refresh\
+      \ 200/400/401/5xx semantics, loopback PKCE `S256`).\n- Full test suite (`npm\
+      \ test` -> `/tmp/cito-round1-tests.json`): 18 test files, 160 tests passed,\
+      \ 0 failed, 0 skipped (`tests/shared/`: 2 files / 15 tests, `tests/auth-callout/`:\
+      \ 3 files / 13 tests, `tests/adapters/`: 5 files / 54 tests, `tests/banner/`:\
+      \ 1 file / 14 tests, `tests/mcp/`: 5 files / 51 tests, `tests/e2e/`: 2 files\
+      \ / 13 tests), covering all `docs/DESIGN.md` §10.1-10.4 criteria; `npm run typecheck`,\
+      \ `npm run build`, and `npx tsc --noEmit --noUnusedLocals --noUnusedParameters`\
+      \ all exited 0.\n- `[REQUIRES_SKILL: code-hygiene]` (`ITERATIVE_CONVERGENCE`\
+      \ mode):\n  - 4 owner-led hygiene passes + Round 1 fresh-context `pathway-auditor`\
+      \ (`01a1a488-6cf5-7643-a196-d82bb2cf3a11`) and `structural-auditor` (`01a1a488-6ca0-72b3-bc84-3a896b776aa4`)\
+      \ synthesized into a 19-item Frozen Finding Ledger (`P1-P8`, `S1-S11`), all\
+      \ resolved in commit `cdd49a7fe24a8698bd6c61b60dd40264400e1e7f`.\n  - Round\
+      \ 2 fresh-context `structural-auditor` (`01a1a4ae-6b6f-7602-9262-ed228c6f001f`)\
+      \ and `pathway-auditor` (`01a1a4ae-6bc2-735b-afc6-09cf4d447ef6`) verified all\
+      \ 19 Round 1 items `CLOSED` / `SAFE` and certified `ZERO_NEW_ISSUES` (Zero Actionable\
+      \ Findings) across all 5 lenses."
   - id: v1.acceptance-gate
     name: Final V1 specification conformance and project acceptance gate
     status: pending
