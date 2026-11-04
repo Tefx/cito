@@ -142,49 +142,53 @@ phases:
       \ at `src/pi-extension/cito-bridge.ts` (`docs/DESIGN.md` §6.2.1, §7.4):\n  \
       \  - Listens on `${CITO_STATE_DIR}/sockets/pi-pid-${process.pid}.sock` (mode\
       \ `0600`) using one short-lived newline-terminated JSON request/response per\
-      \ connection.\n    - Tracks `pi.on(\"input\", ...)` and increments `human_event_seq`\
-      \ only when `event.source === \"interactive\"` (ignoring extension-triggered\
-      \ turns).\n    - Implements `identify` (returning `pi_pid`, `session_id`, `session_name`,\
-      \ `cwd`, `is_streaming`, `human_event_seq`), `status` (verifying `req.session_id\
-      \ === currentSessionId` or returning `SESSION_MISMATCH`, updating `ctx.ui.setStatus(\"\
-      cito\", req.badge)`), and `deliver` (verifying `req.session_id === currentSessionId`,\
-      \ checking a 200-capacity `processedBatchIds` ring buffer for `deduplicated:\
-      \ true`, calling `pi.sendMessage({ customType: \"cito-notification\", content:\
-      \ req.content, display: true }, { triggerTurn: req.wake, deliverAs: \"followUp\"\
-      \ })`, and recording `req.batch_id` only after `pi.sendMessage` returns without\
-      \ throwing).\n  - Implement the Codex Desktop App and Pi host resolution & wake\
-      \ driver modules (`src/adapters/`, `docs/DESIGN.md` §3.2, §3.3, §7.3):\n   \
-      \ - Receiver caller resolution for Codex (`_meta[\"x-codex-turn-metadata\"]`\
-      \ JSON/object, `_meta[\"openai/threadId\"]`, `_meta[\"codexThreadId\"]`, read-only\
-      \ `${CITO_CODEX_HOME}/state_5.sqlite` `threads` lookup with `1000ms` timeout\
-      \ rejecting `archived == 1` with `SESSION_NOT_OPEN`, and `${CITO_CODEX_HOME}/ipc/ipc.sock`\
-      \ 4-byte `UInt32LE` length-prefixed JSON `initialize` + `thread-owner-discovery`\
-      \ probe with `1500ms` timeout rejecting `no-client-found` with `SESSION_NOT_OPEN`).\n\
-      \    - Receiver caller resolution for Pi (`_meta.pi_pid`/`caller_pid` hint followed\
-      \ by up to 6-level `/bin/ps -o ppid= -p <pid>` parent-PID ancestor walk locating\
-      \ `${CITO_STATE_DIR}/sockets/pi-pid-<pid>.sock` and calling `identify` with\
-      \ `1500ms` timeout, returning `PI_BRIDGE_UNAVAILABLE` or `BINDING_REQUIRED`\
-      \ on failure).\n    - Repository and metadata normalization (`git@github.com:Owner/Repo.git`\
-      \ and `https://github.com/Owner/Repo.git` normalized to `\"Owner/Repo\"`, branch\
-      \ via `git -C <cwd> rev-parse --abbrev-ref HEAD`, title fallback `session_name\
-      \ || basename(cwd)`).\n    - Wake execution drivers for Pi (`deliver` over `pi-pid-<pid>.sock`\
-      \ with `3000ms` timeout andwake card `<`/`>` escaping) and Codex Desktop (`execFile(CITO_CODEX_BIN,\
-      \ [\"queue\", \"--thread\", thread_id, \"--message\", card], { timeout: 5000\
-      \ })` and `execFile(\"/usr/bin/open\", [\"-g\", \"codex://threads/wake/\" +\
-      \ thread_id], { timeout: 3000 })` bound to `AbortSignal`).\n  - Deliver automated\
-      \ tests in `tests/adapters/` exercising `cito-bridge.ts` and the Codex/Pi drivers\
-      \ against real Unix domain sockets, temporary `state_5.sqlite` databases, and\
-      \ mock executables without touching external `~/.cito` or `~/.codex` state.\n\
-      - **Boundary:** Owner `node-typescript-engineer`; modifies only `src/pi-extension/cito-bridge.ts`,\
-      \ `src/adapters/**`, and `tests/adapters/**` so it can execute in parallel with\
-      \ `v1.banner` without file conflicts.\n- **Admit:** Completed `v1.hub` toolchain/shared\
-      \ types and `docs/DESIGN.md` (§3.2, §3.3, §6.2.1, §7.3, §7.4, §10.3). Verified\
-      \ by `npm test -- tests/adapters/` exiting `0`. Consumed by `v1.mcp-and-e2e`.\n\
-      - **Recovery:** Clean up temporary test sockets/processes and fix adapter or\
-      \ extension failures in place within the isolated worktree."
+      \ connection.\n    - Generates a unique in-memory `bridge_epoch = uuidv4()`\
+      \ on startup and initializes a per-session integer `human_event_count = 0`;\
+      \ subscribes to `pi.on(\"input\", ...)` and increments `human_event_count +=\
+      \ 1` only when `event.source === \"interactive\"` (ignoring `source === \"extension\"\
+      ` turns).\n    - Implements `identify` (returning `pi_pid`, `session_id`, `session_name`,\
+      \ `cwd`, `is_streaming`, `bridge_epoch`, `human_event_count`), `status` (verifying\
+      \ `req.session_id === currentSessionId` or returning `SESSION_MISMATCH`, updating\
+      \ `ctx.ui.setStatus(\"cito\", req.badge)`), and `deliver` (verifying `req.session_id\
+      \ === currentSessionId`, checking a 200-capacity `processedBatchIds` ring buffer\
+      \ for `deduplicated: true`, calling `pi.sendMessage({ customType: \"cito-notification\"\
+      , content: req.content, display: true }, { triggerTurn: req.wake, deliverAs:\
+      \ \"followUp\" })`, and recording `req.batch_id` only after `pi.sendMessage`\
+      \ returns without throwing).\n  - Implement the Codex Desktop App and Pi host\
+      \ resolution & wake driver modules (`src/adapters/codex.ts`, `src/adapters/pi.ts`,\
+      \ `docs/DESIGN.md` §3.2, §3.3, §5.3.2.5, §7.3):\n    - Receiver caller resolution\
+      \ for Codex (`_meta[\"x-codex-turn-metadata\"]` JSON/object, `_meta[\"openai/threadId\"\
+      ]`, `_meta[\"codexThreadId\"]`, read-only `${CITO_CODEX_HOME}/state_5.sqlite`\
+      \ `threads` lookup with `1000ms` timeout rejecting `archived == 1` with `SESSION_NOT_OPEN`,\
+      \ and `${CITO_CODEX_HOME}/ipc/ipc.sock` 4-byte `UInt32LE` length-prefixed JSON\
+      \ `initialize` + `thread-owner-discovery` probe with `1500ms` timeout rejecting\
+      \ `no-client-found` with `SESSION_NOT_OPEN`).\n    - Receiver caller resolution\
+      \ for Pi (`_meta.pi_pid`/`caller_pid` hint followed by up to 6-level `/bin/ps\
+      \ -o ppid= -p <pid>` parent-PID ancestor walk locating `${CITO_STATE_DIR}/sockets/pi-pid-<pid>.sock`\
+      \ and calling `identify` with `1500ms` timeout, returning `PI_BRIDGE_UNAVAILABLE`\
+      \ or `BINDING_REQUIRED` on failure).\n    - Repository and metadata normalization\
+      \ (`git@github.com:Owner/Repo.git` and `https://github.com/Owner/Repo.git` normalized\
+      \ to `\"Owner/Repo\"`, branch via `git -C <cwd> rev-parse --abbrev-ref HEAD`,\
+      \ title fallback `session_name || basename(cwd)`).\n    - Wake execution drivers\
+      \ for Pi (`deliver` over `pi-pid-<pid>.sock` with `3000ms` timeout and wake\
+      \ card `<`/`>` escaping) and Codex Desktop (`execFile(CITO_CODEX_BIN, [\"queue\"\
+      , \"--thread\", thread_id, \"--message\", card], { timeout: 10000 })` and `execFile(\"\
+      /usr/bin/open\", [\"-g\", \"codex://threads/wake/\" + thread_id], { timeout:\
+      \ 3000 })` bound to `AbortSignal`).\n  - Deliver automated tests in `tests/adapters/`\
+      \ exercising `cito-bridge.ts` and the Codex/Pi drivers against real Unix domain\
+      \ sockets, temporary `state_5.sqlite` databases, and mock executables without\
+      \ touching external `~/.cito` or `~/.codex` state.\n- **Boundary:** Owner `node-typescript-engineer`;\
+      \ modifies only `src/pi-extension/cito-bridge.ts`, `src/adapters/**`, and `tests/adapters/**`\
+      \ so it can execute in parallel with `v1.banner` without file conflicts.\n-\
+      \ **Admit:** Completed `v1.nats-and-auth-callout` toolchain/shared types and\
+      \ `docs/DESIGN.md` (§3.2, §3.3, §6.2.1, §7.3, §7.4, §10.3). Verified by `npm\
+      \ test -- tests/adapters/` exiting `0`. Consumed by `v1.mcp-and-e2e`.\n- **Recovery:**\
+      \ Clean up temporary test sockets/processes and fix adapter or extension failures\
+      \ in place within the isolated worktree."
     verification: npm test -- tests/adapters/
     evidence_template: Commands run, test summary for tests/adapters/, and verified
-      Pi socket bridge + Codex IPC/queue/wake adapter behaviors.
+      Pi socket bridge (bridge_epoch + human_event_count) + Codex IPC/queue/wake adapter
+      behaviors.
     refs:
     - docs/DESIGN.md
     - README.md
