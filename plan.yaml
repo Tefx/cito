@@ -231,7 +231,7 @@ phases:
   - id: v1.banner
     name: macOS single-instance HUD banner (src/macos/cito-banner.swift) and two-lock
       IPC lifecycle
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/macos/cito-banner.swift\n    - src/banner/**\n\
       \    - tests/banner/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n\
@@ -291,6 +291,28 @@ phases:
     agent: ios-developer
     claimed_by: ios-developer
     claimed_at: '2026-11-04T01:47:43.999994Z'
+    done_at: '2026-11-04T01:59:52.398815+00:00'
+    evidence: 'Implemented by ios-developer in isolated worktree (commit 67fb2def2f28f7560ff8c23dea08297660b7c79e,
+      fast-forwarded to main):
+
+      - Native macOS HUD (`src/macos/cito-banner.swift`): zero-dependency AppKit/Darwin/SQLite3
+      implementation with process-lifetime `flock` on `banner-instance.lock` (2000ms
+      timeout), relative Unix domain socket server `banner.sock` (`0600`), non-activating
+      `NSPanel` floating HUD, `[仅知会]` subtitle prefix when `effective_wake == false`,
+      6-second auto-dismiss timer reset on coalesced delivery, and unified two-lock
+      retirement (`banner.lock` + `banner-instance.lock`) unlinking `banner.sock`
+      before fade-out or Codex SQLite `human_event_seq` increment (`UPDATE local_listeners
+      SET human_event_seq = human_event_seq + 1 WHERE harness = ''codex'' AND session_id
+      = ?`) + `codex://threads/<session_id>` deeplink.
+
+      - Node sender & compiler (`src/banner/index.ts`, `src/banner/flock.ts`): kernel
+      `flock(2)` wrapper, atomic on-demand `/usr/bin/swiftc` compilation to `${CITO_STATE_DIR}/bin/cito-banner`,
+      and exact Fast Path / Case A (busy instance retry/release/re-probe) / Case B
+      (free instance unlink/spawn/poll) sender protocol (`docs/DESIGN.md` §7.2.3).
+
+      - Verification: `/usr/bin/swiftc` compilation (exit 0); `npm run typecheck`
+      (exit 0); `npm test -- tests/banner/` (13 lifecycle tests passed, exit 0); `pgrep
+      -f ''[c]ito-banner''` confirmed zero leftover processes.'
   - id: v1.mcp-and-e2e
     name: 'Unified cito-mcp server over NATS JetStream/KV, recipient anti-loop & crash-safe
       dispatch, OIDC JIT login, E2E suite, and code-hygiene consolidation [REQUIRES_SKILL:
