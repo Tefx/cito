@@ -581,3 +581,141 @@ phases:
     and iterative code-hygiene acceptance gate.'
   depends_on:
   - v1
+  steps:
+  - id: v2.multi-hub-and-extensible-adapters
+    name: Implement V2 Multi-Hub & Extensible Harness Architecture, 3-table SQLite
+      schema (user_version=4), README guides, and unit/E2E tests
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/shared/**\n    - src/adapters/**\n    -\
+      \ src/mcp/**\n    - src/banner/**\n    - src/macos/cito-banner.swift\n    -\
+      \ src/pi-extension/cito-bridge.ts\n    - README.md\n    - tests/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - docs/DESIGN.md\n```\n\n- **Deliver:**\n  - Implement\
+      \ the complete V2 specification in `docs/DESIGN.md` (§§1–8) across `src/shared/`,\
+      \ `src/adapters/`, `src/mcp/`, `src/banner/`, `src/macos/cito-banner.swift`,\
+      \ `src/pi-extension/cito-bridge.ts`, `README.md`, and `tests/`:\n    1. **Open\
+      \ Extensible Harness Architecture (`src/shared/`, `src/adapters/`, `src/pi-extension/cito-bridge.ts`,\
+      \ `src/mcp/`)**:\n       - Define open `harnessIdSchema` (`^[a-z][a-z0-9_-]{0,31}$`),\
+      \ never hardcoding a closed harness enum across tool schemas, SQLite, or `cito-banner.swift`;\
+      \ keep `src/mcp/` (`service.ts`, `receiver.ts`, `state.ts`, `oidc.ts`, `server.ts`,\
+      \ `cli.ts`) 100% harness-agnostic with zero hardcoded checks for `\"pi\"` or\
+      \ `\"codex\"`.\n       - Implement the 3-method `HarnessAdapter` contract (`probe`,\
+      \ `deliver`, `updateBadge?`) in `src/adapters/types.ts`, `ADAPTER_REGISTRY`\
+      \ + `registerAdapter` + `getAdapter` in `src/adapters/index.ts`, generic `SocketBridgeAdapter(harnessId,\
+      \ { confirmDelivery = true })` in `src/adapters/pi.ts` (supporting `pi` and\
+      \ dynamically discovering any `${stateDir}/sockets/<harness>-pid-<pid>.sock`),\
+      \ and `CodexDesktopAdapter` in `src/adapters/codex.ts` (returning `\"delivered\"\
+      ` iff `cleanQueueExit && triggered`, else `\"delivered_unconfirmed\"`, or `\"\
+      driver_unavailable\"` when queue step fails).\n       - Implement priority-free\
+      \ extensible `resolveCaller` and `extractCallerPidRoots(meta)` (`docs/DESIGN.md`\
+      \ §3.3), stripping inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`\
+      \ in `gitMetadata`, and enforcing unambiguous offline PID fallback (`requireOpen\
+      \ === false` returning cached session iff `SELECT DISTINCT harness, session_id\
+      \ FROM local_listeners WHERE endpoint_pid = ?` yields exactly 1 distinct pair,\
+      \ otherwise throwing `PI_BRIDGE_UNAVAILABLE`).\n    2. **Native Multi-Hub Configuration,\
+      \ Per-Hub `HubSlot`, and Symmetric `<hub>:<id>` Scoped Addressing (`src/shared/config.ts`,\
+      \ `src/shared/identity.ts`, `src/mcp/service.ts`, `src/mcp/oidc.ts`)**:\n  \
+      \     - Implement `loadConfig(env)` supporting `~/.cito/config.json` (`CITO_CONFIG_PATH`\
+      \ / `CITO_STATE_DIR`) with `CITO_*` single-`\"default\"`-hub fallback, `defaultHub`\
+      \ resolution and validation (`CITO_HUB` > `configJson.default_hub` > single-hub\
+      \ key), and `CITO_NATS_URL` override when `CITO_CONFIG_PATH` is unset (`docs/DESIGN.md`\
+      \ §2.2).\n       - Manage per-hub `HubSlot` instances in `CitoService` (isolated\
+      \ NATS connections, per-hub `oidc-token-<hub>.json` / `oidc-login-<hub>.lock`\
+      \ tokens, and per-hub `Receiver` instances) while keeping NATS wire payloads\
+      \ and SQLite columns unprefixed.\n       - Implement `isSingleDefaultHub`, `formatScopedId(hub,\
+      \ id, config)`, and `parseScopedId(raw, config, explicitHub?)` (`docs/DESIGN.md`\
+      \ §3.2) across all 5 public MCP tools (`cito_listen`, `cito_unlisten`, `cito_find`,\
+      \ `cito_send`, `cito_inbox`) and `formatWakeCard` (`[↩ <scoped_from_id>]`).\n\
+      \    3. **Streamlined 3-Table SQLite Schema (`PRAGMA user_version = 4`), Delivery\
+      \ Auto-Ack, Drain-by-Default `cito_inbox`, and Zero-SQLite3 HUD Banner (`src/mcp/state.ts`,\
+      \ `src/mcp/receiver.ts`, `src/adapters/wake-card.ts`, `src/macos/cito-banner.swift`,\
+      \ `src/banner/`)**:\n       - Upgrade `LocalState.open()` to `PRAGMA user_version\
+      \ = 4` (dropping and recreating `local_listeners`, `local_signals`, `local_sent_idempotency`\
+      \ and dropping legacy `local_pairwise_wakes` when `user_version !== 4`), keyed\
+      \ by `(hub, listener_id)`, `(hub, signal_id)`, and `(hub, dedup_id)` (`docs/DESIGN.md`\
+      \ §5.1).\n       - Remove `wake` from `cito_send`, `allow_peer_wake` from `cito_listen`,\
+      \ and the 6 quota/epoch columns (`unattended_wake_count`, `last_bridge_epoch`,\
+      \ `retired_bridge_epochs_json`, `last_bridge_count`, `human_event_seq`, `last_consumed_human_seq`).\n\
+      \       - Implement hub-qualified locks (`listen-${hub}-${id}.lock`, `receiver-${hub}-${id}.lock`,\
+      \ `session-${harness}-${sha256(sessionId).slice(0, 16)}.lock`) and `batch_${hub}_${id}_${firstSeq}_${lastSeq}_${generation}`\
+      \ batch IDs, unified multi-hub `refreshSessionBadge`, auto-setting `acknowledged_at_ms`\
+      \ on confirmed `'delivered'` while keeping `acknowledged_at_ms IS NULL` on `'delivered_unconfirmed'`,\
+      \ and default drain-on-read in `cito_inbox` (`const ackAll = input.ack_all ??\
+      \ (input.ack_ids === undefined)`).\n       - Remove the `↳ Ack: cito_inbox(...)`\
+      \ footer from `formatWakeCard` (`src/adapters/wake-card.ts`) and remove `import\
+      \ SQLite3` / `Banner.state` from `src/macos/cito-banner.swift` (rendering `\"\
+      点击跳转至 Codex 对话 ↗\"` for `target_harness == \"codex\"` and `\"\\(target_harness)\
+      \ 终端会话 · 点击关闭横幅\"` for all other harnesses).\n    4. **Documentation (`README.md`)\
+      \ & Behavioral Unit/E2E Test Suite (`tests/`)**:\n       - Update `README.md`\
+      \ with per-harness installation and usage instructions: Pi Coding Agent, ChatGPT\
+      \ / Codex Desktop, Claude Code explicitly marked as \"尚未实现 / Not Yet Implemented\"\
+      \ referencing `docs/DESIGN.md` §8's design suggestion, Multi-Hub `~/.cito/config.json`\
+      \ configuration and `<hub>:<id>` addressing, and the custom harness plug-in\
+      \ guide (`SocketBridgeAdapter` / `registerAdapter`).\n       - Update and expand\
+      \ automated unit and E2E tests in `tests/` covering multi-hub isolation and\
+      \ cross-hub routing/warnings, `formatScopedId` / `parseScopedId`, extensible\
+      \ `<harness>-pid-<pid>.sock` discovery and unambiguous offline PID fallback,\
+      \ confirmed (`\"delivered\"`) vs. unconfirmed (`\"delivered_unconfirmed\"`)\
+      \ delivery auto-ack semantics, `cito_inbox` drain-by-default, and `cito-banner.swift`\
+      \ compilation/lifecycle.\n- **Boundary:** Owner `senior-engineer`; modifies\
+      \ `/Users/tefx/Projects/cito` (`src/**`, `README.md`, `tests/**`). Must not\
+      \ implement a runtime Claude Code adapter (`docs/DESIGN.md` §8 is design suggestion\
+      \ only) or mutate external repositories (`/Users/tefx/dotfiles`, `tela`) or\
+      \ live user `~/.cito` / `~/.codex` directories.\n- **Admit:** Completed Phase\
+      \ `v1`, `docs/DESIGN.md` (V2 §§1–8), and `README.md`. Verified by `npm run typecheck\
+      \ && npm run build && npm test` exiting `0`. Consumed by `v2.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, build, or unit/E2E test in place\
+      \ within the isolated worktree and clean up any temporary test sockets, locks,\
+      \ or child processes.\n"
+    verification: npm run typecheck && npm run build && npm test
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    agent: senior-engineer
+  - id: v2.acceptance-and-hygiene-gate
+    name: 'V2 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v2` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run build && npm test` passes 100%,\
+      \ verifying complete conformance with `docs/DESIGN.md` (§§1–8) and `README.md`\
+      \ requirements, and running iterative `code-hygiene` audit-and-fix convergence\
+      \ until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n- **Boundary:**\
+      \ Owner `code-reviewer` (mapped to `gate-reviewer` / `pathway-auditor` + `structural-auditor`\
+      \ in the Larva roster, routing any admitted repair batch to `senior-engineer`\
+      \ before Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not directly mutate repository files, Plan state,\
+      \ or external host directories.\n- **Admit:**\n  - Included phase and terminal\
+      \ outcomes: Phase `v2` (`v2.multi-hub-and-extensible-adapters`) bound to the\
+      \ immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed\
+      \ evidence and checks:\n    1. `npm run typecheck && npm run build && npm test`\
+      \ passes 100% with zero skipped or failing tests and clean working tree (`git\
+      \ status --short`).\n    2. Conformance with `docs/DESIGN.md` §§1–8: open `harnessIdSchema`\
+      \ (`^[a-z][a-z0-9_-]{0,31}$`) with zero hardcoded `\"pi\"` / `\"codex\"` checks\
+      \ in `src/mcp/`, `ADAPTER_REGISTRY` + `SocketBridgeAdapter(harnessId)` + `CodexDesktopAdapter`,\
+      \ multi-hub `~/.cito/config.json` + per-hub `HubSlot` + symmetric `<hub>:<id>`\
+      \ addressing (`formatScopedId` / `parseScopedId`), 3-table SQLite schema (`PRAGMA\
+      \ user_version = 4`) without `local_pairwise_wakes` / quota / epoch / `wake`\
+      \ / `allow_peer_wake`, confirmed `\"delivered\"` auto-ack vs. `\"delivered_unconfirmed\"\
+      ` inbox retention, default drain-on-read in `cito_inbox`, and removal of `↳\
+      \ Ack:` card footer and `SQLite3` in `cito-banner.swift`.\n    3. Conformance\
+      \ with `README.md` requirements: per-harness setup and usage guides (Pi, Codex\
+      \ Desktop, Claude Code explicitly marked as \"尚未实现 / Not Yet Implemented\" referencing\
+      \ `docs/DESIGN.md` §8, Multi-Hub `~/.cito/config.json`, and custom harness plug-in\
+      \ guide).\n    4. Iterative `[REQUIRES_SKILL: code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`)\
+      \ audit-and-fix convergence across all 5 lenses reaching `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`.\n- **Recovery:** If any check fails or\
+      \ any actionable `code-hygiene` finding is admitted, record the concrete file/line\
+      \ counterexamples and route a cohesive writable repair before re-running this\
+      \ gate in Delta mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`\
+      \ are achieved.\n"
+    verification: npm run typecheck && npm run build && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    depends_on:
+    - v2.multi-hub-and-extensible-adapters
+    agent: code-reviewer
