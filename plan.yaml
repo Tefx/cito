@@ -564,7 +564,7 @@ phases:
 - id: v2
   name: Cito V2 Multi-Hub & Extensible Harness Architecture, Streamlined 3-Table Schema,
     Documentation, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, all docs/DESIGN.md §§1–8 and README.md requirements are verified,
     and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE] converges
@@ -692,7 +692,7 @@ phases:
   - id: v2.acceptance-and-hygiene-gate
     name: 'V2 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v2` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -738,3 +738,24 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-04T17:01:43.878005Z'
+    done_at: '2026-11-04T17:09:16.332564+00:00'
+    evidence: "Artifact:\n- Gate report: gate.report.v2 PASS (validated via review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v2-gate/binding.json: valid=true, binding_checked=true,\
+      \ evidence_disposition=POSITIVE_GATE_EVIDENCE, target_ref=git:848866efad01651bf69eac5367c3c6de4fe0265d)\n\
+      \nVerification:\n- Run: npm run typecheck && npm run build && npm test -> exit\
+      \ 0 (23 test files, 202 tests passed, 0 failed, 0 skipped)\n- Requirement results:\n\
+      \  - V2-1-EXTENSIBLE-HARNESS-AND-ADAPTERS: PROVEN (open harnessIdSchema ^[a-z][a-z0-9_-]{0,31}$,\
+      \ 100% harness-agnostic src/mcp/, ADAPTER_REGISTRY + SocketBridgeAdapter + CodexDesktopAdapter,\
+      \ priority-free resolveCaller, unambiguous offline PID fallback).\n  - V2-2-MULTI-HUB-CONFIG-AND-SCOPED-IDS:\
+      \ PROVEN (loadConfig ~/.cito/config.json + env fallback, per-hub HubSlot + OIDC\
+      \ token/lock isolation, symmetric formatScopedId / parseScopedId).\n  - V2-3-SQLITE-V4-AUTO-ACK-INBOX-AND-BANNER:\
+      \ PROVEN (PRAGMA user_version = 4 3-table schema, confirmed delivery auto-ack\
+      \ vs delivered_unconfirmed inbox retention, cito_inbox drain-by-default, Ack-footer-free\
+      \ Wake Cards, SQLite3-free cito-banner.swift).\n  - V2-4-README-GUIDES-AND-CLAUDE-DEFERRED-NOTICE:\
+      \ PROVEN (per-harness guides in README.md with Claude Code marked '尚未实现 / Not\
+      \ Yet Implemented' referencing docs/DESIGN.md §8).\n  - V2-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE:\
+      \ PROVEN (Round 1 P1-P5 & S1-S6 resolved in 8111aee1153c4f6ba541fee26877b0edae5b8a9b;\
+      \ Round 2 structural-auditor 01a1a777-5a61-720a-81f9-35d132f547e6 and pathway-auditor\
+      \ 01a1a777-5aa4-760a-96b8-257bd133965d certified Completeness: CLEAN | Simplicity:\
+      \ ZERO_NEW_ISSUES).\n\nSpec link:\n- docs/DESIGN.md (V2 — Multi-Hub & Extensible\
+      \ Harness Edition, §§1–8) and README.md"
