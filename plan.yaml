@@ -59,66 +59,73 @@ phases:
     protection, crash-safe two-stage dispatch, and JIT OIDC login (src/mcp/), and
     final project acceptance.'
   steps:
-  - id: v1.hub
-    name: Toolchain foundation and cito-hub HTTP/WSS relay with SQLite state machine,
-      anti-loop guards, and OIDC verifier
+  - id: v1.nats-and-auth-callout
+    name: Toolchain foundation, shared schemas & keyless listener_id (src/shared/),
+      NATS JetStream config (deploy/nats/), and OIDC Auth Callout responder (src/auth-callout/)
     status: pending
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
-      \ tsconfig.json\n    - src/shared/**\n    - src/hub/**\n    - bin/**\n    -\
-      \ tests/hub/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n```\n\
-      \n- **Deliver:**\n  - Initialize the repository Node.js/TypeScript toolchain\
-      \ (`package.json`, `tsconfig.json`, and wildcard test runner scripts so downstream\
-      \ parallel steps do not need to edit `package.json`) and shared wire schemas,\
-      \ error codes, control-character sanitization, and crypto helpers (`src/shared/`).\n\
-      \  - Implement `cito-hub` (`src/hub/`) fulfilling `docs/DESIGN.md` §2.1, §3.1,\
-      \ §4.1, §5.1, §5.2, §6.1–6.3, and §8.1:\n    - Fail-fast startup configuration\
-      \ validation (`CITO_HUB_BIND`, `CITO_HUB_DB_PATH`, `CITO_AUTH_MODE`, `CITO_OIDC_ISSUER`,\
-      \ `CITO_OIDC_CLIENT_ID`) exiting with code `1` and a diagnostic on `stderr`\
-      \ on invalid input.\n    - SQLite persistence (`hub.sqlite` created mode `0600`\
-      \ in `0700` dir) storing persistent 32-byte `hub_secret` in `hub_meta`, canonical\
-      \ `SessionKey = (principal_id, host_id, harness, session_id)` and `owner_user`\
-      \ derivation in both `\"none\"` and `\"oidc\"` modes, and deterministic `listener_id`\
-      \ (`^c_[a-z2-7]{12}$` via `HMAC-SHA256`).\n    - Four-state listener lifecycle\
-      \ (`ACTIVE` with 60s lease, `DISCONNECTED_RETAINED` for 30m, `EXPIRED` returning\
-      \ `410 LISTENER_EXPIRED`, `UNLISTENED` returning `404 LISTENER_NOT_FOUND` or\
-      \ `409 STALE_GENERATION`), monotonic `binding_generation`, and monotonic never-resetting\
-      \ per-listener `latest_seq`.\n    - Anti-loop & human-turn reset rules: durable\
-      \ `unattended_wake_count` (`max_unattended_wakes = 3`) surviving `unlisten ->\
-      \ listen` and 30m expiry; monotonic `last_consumed_human_seq` reset rule (`human_event_seq\
-      \ > last_consumed_human_seq` resets `unattended_wake_count = 0` and clears pairwise\
-      \ rate counters); rolling 120s pairwise circuit breaker per unordered `{SenderEndpointKey,\
-      \ TargetSessionKey}` (4 waking signals permitted, 5th forced to `effective_wake:\
-      \ false` with `held_reason: \"pairwise_rate_limited\"`); and deterministic `held_reason`\
-      \ precedence (`passive_requested` > `peer_wake_disabled` > `wake_quota_exhausted`\
-      \ > `pairwise_rate_limited`).\n    - HTTP endpoints (`POST /v1/listen`, `/v1/unlisten`,\
-      \ `/v1/find`, `/v1/send`) with strict unknown-field rejection (`422 INVALID_INPUT`),\
-      \ control-char stripping & 500-codepoint validation, V1 harness check (`\"codex\"\
-      \ | \"pi\"` only; `\"claude\"` rejected with `422 UNSUPPORTED_HARNESS`), self-send\
-      \ rejection (`422 SELF_SEND_FORBIDDEN`), cross-user scope enforcement (`403\
-      \ FORBIDDEN_TARGET_SCOPE`), 30m idempotency key store (`409 IDEMPOTENCY_KEY_CONFLICT`\
-      \ on mismatch; live milestone reflection on match), and 2000ms WSS `receipt`\
-      \ wait (`wake_accepted` vs `queued_for_reconnect` vs `stored_passive`).\n  \
-      \  - WSS `/v1/stream` server supporting `bind` -> `bound` (`replay_gap`, `min_retained_seq`,\
-      \ `latest_seq`, and retained signal replay `seq > persisted_seq`), `heartbeat`\
-      \ -> `heartbeat_ack`, `receipt`, `unlisten`, `fenced` (`STALE_GENERATION`),\
-      \ `error`, and `auth_expired` (WebSocket close `4401`), plus OIDC `.well-known/openid-configuration`\
-      \ + `jwks_uri` discovery/caching (`5000ms` timeout, `503 AUTH_UNAVAILABLE` on\
-      \ cache-miss fetch failure) and `RS256`/`ES256` JWT validation.\n  - Deliver\
-      \ automated unit and HTTP/WSS integration tests in `tests/hub/` covering all\
-      \ Hub lifecycle, anti-loop, replay-gap, and OIDC verification contracts in `docs/DESIGN.md`\
-      \ §10.1–10.2.\n- **Boundary:** Owner `node-typescript-engineer`; modifies `/Users/tefx/Projects/cito`\
-      \ (`package.json`, `tsconfig.json`, `src/shared/**`, `src/hub/**`, `tests/hub/**`).\
-      \ Uses isolated temp directories for SQLite and loopback sockets in tests; no\
-      \ external network or host state mutation.\n- **Admit:** `docs/DESIGN.md` (§1–§6,\
-      \ §8.1, §10.1–10.2) and `README.md`. Verified by `npm test -- tests/hub/` exiting\
-      \ `0`. Consumed by `v1.host-adapters`, `v1.banner`, and `v1.mcp-and-e2e`.\n\
+      \ tsconfig.json\n    - deploy/nats/**\n    - src/shared/**\n    - src/auth-callout/**\n\
+      \    - bin/**\n    - tests/shared/**\n    - tests/auth-callout/**\n  blocked_paths:\n\
+      \    - plan.yaml\n    - docs/DESIGN.md\n```\n\n- **Deliver:**\n  - Initialize\
+      \ the repository Node.js/TypeScript toolchain (`package.json`, `tsconfig.json`,\
+      \ and wildcard test runner scripts so downstream parallel steps do not need\
+      \ to edit `package.json`), including NATS client/JWT/NKeys libraries and SQLite/test\
+      \ dependencies.\n  - Implement `src/shared/` fulfilling `docs/DESIGN.md` §2.1,\
+      \ §3.1, §3.2.1, §4.1, §4.5, and §5.1:\n    - Canonical MCP result/error envelope\
+      \ helpers and error codes (`BINDING_REQUIRED`, `SESSION_NOT_OPEN`, `PI_BRIDGE_UNAVAILABLE`,\
+      \ `INVALID_INPUT`, `UNSUPPORTED_HARNESS`, `UNAUTHORIZED`, `OIDC_LOGIN_TIMEOUT`,\
+      \ `AUTH_UNAVAILABLE`, `FORBIDDEN_TARGET_SCOPE`, `LISTENER_NOT_FOUND`, `LISTENER_EXPIRED`,\
+      \ `SELF_SEND_FORBIDDEN`, `IDEMPOTENCY_KEY_CONFLICT`, `STALE_GENERATION`, `NATS_UNAVAILABLE`).\n\
+      \    - Control-character stripping (`0x00-0x08`, `0x0B`, `0x0C`, `0x0E-0x1F`,\
+      \ `0x7F`, preserving `\\n` and `\\t`), whitespace trimming, 500-codepoint validation,\
+      \ and `<`/`>` card escaping.\n    - Canonical `principal_id` and `owner_user`\
+      \ derivation in both `\"none\"` and `\"oidc\"` modes (`§3.1.1`), `SenderEndpointKey`\
+      \ formatting (`§3.2.1`), and **keyless deterministic `listener_id`** (`^c_[a-z2-7]{12}$`\
+      \ computed as `\"c_\" + base32_lower(SHA256(\"cito-v1|\" + principal_id + \"\
+      |\" + host_id + \"|\" + harness + \"|\" + session_id)[0..7])[0..12]`, `§3.1.3`).\n\
+      \    - Idempotent NATS JetStream & KV provisioning helpers (`§5.1`) for KV bucket\
+      \ `cito_listeners` (`history: 1`, `ttl: 0` no auto-purge) and JetStream stream\
+      \ `CITO_SIGNALS` (`subjects: [\"cito.signal.*\"]`, `retention: \"limits\"`,\
+      \ `max_age: 30m`, `duplicate_window: 30m`, `storage: \"file\"`, `discard: \"\
+      old\"`).\n  - Author NATS Server JetStream deployment files (`deploy/nats/nats-server.conf`\
+      \ and `docker-compose.yml`, `§8.1`) supporting both `CITO_AUTH_MODE=\"none\"\
+      ` and `CITO_AUTH_MODE=\"oidc\"` (`$SYS` account, `CITO` application account\
+      \ with JetStream enabled, and `authorization { auth_callout { ... } }`).\n \
+      \ - Implement the stateless OIDC Auth Callout responder (`src/auth-callout/`,\
+      \ CLI entrypoint `bin/cito-auth-callout`, `§2.1`, `§8.1`):\n    - Fail-fast\
+      \ startup configuration validation (`CITO_NATS_URL`, `CITO_AUTH_MODE`, `CITO_OIDC_ISSUER`,\
+      \ `CITO_OIDC_CLIENT_ID`, `CITO_AUTH_CALLOUT_ISSUER_SEED`, optional `CITO_AUTH_CALLOUT_XKEY_SEED`)\
+      \ exiting with code `1` and a diagnostic on `stderr` on invalid input.\n   \
+      \ - Connects using the exempted `callout-service` user credentials, idempotently\
+      \ provisions `cito_listeners` KV bucket and `CITO_SIGNALS` stream on startup,\
+      \ and subscribes to `$SYS.REQ.USER.AUTH` (supporting Curve25519 XKey encryption\
+      \ when `CITO_AUTH_CALLOUT_XKEY_SEED` is set).\n    - Fetches `${CITO_OIDC_ISSUER}/.well-known/openid-configuration`\
+      \ (`5000ms` timeout) and caches JWKS keys from `jwks_uri` (refreshing on unknown\
+      \ `kid` with a 60s cooldown; returning an Auth Callout transient error on cache-miss\
+      \ fetch failure).\n    - Verifies client OIDC `id_token` JWT signature (`RS256`\
+      \ / `ES256`), `iss === CITO_OIDC_ISSUER`, `exp > now - 30`, and `aud` containing\
+      \ `CITO_OIDC_CLIENT_ID`, signs a NATS User Claims JWT (`jwt` v2, `aud: \"CITO\"\
+      `, `exp: claims.exp`) granting publish/subscribe permissions (`[\"$JS.API.>\"\
+      , \"$JS.ACK.>\", \"$KV.cito_listeners.>\", \"cito.signal.>\", \"cito.ack.>\"\
+      , \"_INBOX.>\"]`), or returns an Auth Callout rejection so NATS denies the connection\
+      \ with `Authorization Violation`.\n  - Deliver automated unit and integration\
+      \ tests in `tests/shared/` and `tests/auth-callout/` covering keyless `listener_id`\
+      \ derivation, `principal_id`/`owner_user` extraction, NATS KV/Stream provisioning,\
+      \ and OIDC Auth Callout JWT verification (`docs/DESIGN.md` §10.1–10.2).\n- **Boundary:**\
+      \ Owner `node-typescript-engineer`; modifies `/Users/tefx/Projects/cito` (`package.json`,\
+      \ `tsconfig.json`, `deploy/nats/**`, `src/shared/**`, `src/auth-callout/**`,\
+      \ `bin/**`, `tests/shared/**`, `tests/auth-callout/**`). Uses isolated temp\
+      \ directories and loopback sockets/servers in tests; no external network or\
+      \ host state mutation.\n- **Admit:** `docs/DESIGN.md` (§1–§5.1, §8.1, §10.1–10.2)\
+      \ and `README.md`. Verified by `npm test -- tests/shared/ tests/auth-callout/`\
+      \ exiting `0`. Consumed by `v1.host-adapters`, `v1.banner`, and `v1.mcp-and-e2e`.\n\
       - **Recovery:** Revert uncommitted or broken worktree edits and fix failing\
-      \ Hub unit/integration checks in place; stop and report if a specification conflict\
+      \ unit/integration checks in place; stop and report if a specification conflict\
       \ is found."
-    verification: npm test -- tests/hub/
-    evidence_template: Commands run, test summary for tests/hub/, and verified docs/DESIGN.md
-      §2.1, §3.1, §5.1-5.2, §6, §8.1 invariants.
+    verification: npm test -- tests/shared/ tests/auth-callout/
+    evidence_template: Commands run, test summary for tests/shared/ and tests/auth-callout/,
+      and verified docs/DESIGN.md §2.1, §3.1, §4.1, §5.1, §8.1 invariants.
     refs:
     - docs/DESIGN.md
     - README.md
@@ -182,7 +189,7 @@ phases:
     - docs/DESIGN.md
     - README.md
     depends_on:
-    - v1.hub
+    - v1.nats-and-auth-callout
     agent: node-typescript-engineer
   - id: v1.banner
     name: macOS single-instance HUD banner (src/macos/cito-banner.swift) and two-lock
@@ -242,7 +249,7 @@ phases:
     - docs/DESIGN.md
     - README.md
     depends_on:
-    - v1.hub
+    - v1.nats-and-auth-callout
     agent: ios-developer
   - id: v1.mcp-and-e2e
     name: 'Unified cito-mcp server, crash-safe two-stage dispatcher, OIDC JIT login,
