@@ -43,7 +43,7 @@ phases:
 - id: v1
   name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
     MCP Integration
-  status: in_progress
+  status: done
   gate: 'All V1 deliverables (deploy/nats/, src/auth-callout/, src/shared/, src/pi-extension/cito-bridge.ts,
     src/adapters/, src/macos/cito-banner.swift, src/banner/, and src/mcp/) pass their
     unit and end-to-end acceptance checks covering docs/DESIGN.md §10, with zero actionable
@@ -499,7 +499,7 @@ phases:
       \ Findings) across all 5 lenses."
   - id: v1.acceptance-gate
     name: Final V1 specification conformance and project acceptance gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Final V1 phase and project acceptance decision (`PASS` or `FAIL`) for `/Users/tefx/Projects/cito`\
@@ -534,3 +534,32 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-04T04:02:17.607507Z'
+    done_at: '2026-11-04T04:11:35.164303+00:00'
+    evidence: 'Gate verdict: PASS (gate.report.v2 validated via review_report_validator.py
+      --kind gate --binding /tmp/cito-gate-evidence/binding.json: valid=true, binding_checked=true,
+      evidence_disposition=POSITIVE_GATE_EVIDENCE, target_ref=git:77f83e63e7ab0e8314778d3c1b73015710668c97).
+
+      Requirement trace against docs/DESIGN.md (NATS JetStream Edition) §1-§8 & §10:
+
+      - V1-10.1-NATS-IDENTITY-LIFECYCLE-ANTILOOP: PROVEN (src/shared/identity.ts,
+      src/shared/nats.ts, src/mcp/{state,service,receiver}.ts, tests/mcp/{state,lifecycle,dispatch}.test.ts,
+      tests/e2e/lifecycle.test.ts).
+
+      - V1-10.2-OIDC-AUTH-CALLOUT-AND-JIT-LOGIN: PROVEN (src/auth-callout/{oidc,responder}.ts,
+      src/mcp/oidc.ts, tests/auth-callout/responder.test.ts, tests/mcp/oidc.test.ts,
+      tests/e2e/oidc.test.ts).
+
+      - V1-10.3-PI-AND-CODEX-ADAPTERS: PROVEN (src/pi-extension/cito-bridge.ts, src/adapters/{pi,codex}.ts,
+      tests/adapters/pi-host.test.ts, tests/e2e/lifecycle.test.ts).
+
+      - V1-10.4-CITO-BANNER-TWO-LOCK-LIFECYCLE: PROVEN (src/macos/cito-banner.swift,
+      src/banner/{index,flock}.ts, tests/banner/lifecycle.test.ts).
+
+      - V1-CODE-HYGIENE-ITERATIVE-CONVERGENCE: PROVEN (Round 1 P1-P8 & S1-S11 closed
+      in cdd49a7fe24a8698bd6c61b60dd40264400e1e7f; Round 2 structural-auditor 01a1a4ae-6b6f-7602-9262-ed228c6f001f
+      and pathway-auditor 01a1a4ae-6bc2-735b-afc6-09cf4d447ef6 certified ZERO_NEW_ISSUES).
+
+      - V1-EXCLUSIONS-AND-SELF-CONTAINMENT: PROVEN (Claude Code §9 excluded and harness=''claude''
+      rejected with UNSUPPORTED_HARNESS; NATS JetStream + KV used with no custom HTTP/WS
+      broker; 18 test files / 160 tests pass in isolated temp directories with zero
+      external mutations).'
