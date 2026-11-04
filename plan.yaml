@@ -9,36 +9,34 @@
 version: 1
 project: cito
 strategy_ref: docs/DESIGN.md
-context: 'Deliver and verify Cito V1 (NATS JetStream Edition) inside /Users/tefx/Projects/cito
-  per docs/DESIGN.md and README.md: NATS Server JetStream + KV configuration (deploy/nats/nats-server.conf,
-  docker-compose.yml, KV bucket cito_listeners, stream CITO_SIGNALS, Core NATS ack
-  cito.ack.<signal_id>), shared schemas & keyless deterministic listener_id (src/shared/),
-  and optional stateless OIDC Auth Callout service (src/auth-callout/); cito-mcp unified
-  stdio MCP server (src/mcp/) over NATS with recipient-local wake quota & inbound
-  pairwise circuit breaker, lock-serialized KV revision fencing (listen-<id>.lock
-  + binding_generation + owner_token), clock-independent epoch-delta human_event_seq,
-  two-stage crash-safe batch dispatch holding listen-<id>.lock across assertDispatchStillAuthorized
-  + host-effect submission, and rejection-aware double-checked flock OIDC JIT login;
-  ChatGPT/Codex Desktop App adapter (src/adapters/codex.ts); Pi (1.5.0) local Unix
-  socket bridge extension (src/pi-extension/cito-bridge.ts & src/adapters/pi.ts);
-  and macOS single-instance NSPanel HUD banner (src/macos/cito-banner.swift & src/banner/).
-  Exclude Claude Code adapter implementation and tests (docs/DESIGN.md §9 is proposed/TODO
-  only) and forbid mutations to external dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (NATS JetStream
-  Edition, commit 65dfd20, §1-§8, §10) and README.md.
+context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md
+  and README.md across V1 (initial NATS JetStream relay, OIDC Auth Callout, Pi/Codex
+  host adapters, HUD banner, and MCP server) and V2 (Multi-Hub & Extensible Harness
+  Architecture Edition: open harnessIdSchema ^[a-z][a-z0-9_-]{0,31}$, ADAPTER_REGISTRY
+  + generic SocketBridgeAdapter(harnessId) + CodexDesktopAdapter, native multi-hub
+  ~/.cito/config.json + HubSlot isolation + symmetric <hub>:<id> addressing, streamlined
+  3-table SQLite schema at PRAGMA user_version = 4 without wake/quota/epoch throttling
+  or SQLite3 in cito-banner.swift, confirmed vs. unconfirmed auto-acknowledgment,
+  default drain-on-read in cito_inbox, and comprehensive README.md & unit/E2E test
+  coverage). Exclude Claude Code runtime implementation (documented in docs/DESIGN.md
+  §8 and README.md strictly as ''尚未实现 / Not Yet Implemented'' design suggestion) and
+  forbid mutations to external dotfiles or tela repositories.'
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V2 — Multi-Hub
+  & Extensible Harness Edition, §§1–8) and README.md.
 
-  2. Hard exclusions: Do NOT implement or test the Claude Code adapter (docs/DESIGN.md
-  §9 is TODO/proposed only; V1 rejects harness=''claude'' with UNSUPPORTED_HARNESS
-  and cito_find accepts only ''codex'' | ''pi''). Do NOT implement a custom HTTP/WebSocket
-  message broker (cito-hub is replaced by nats-server JetStream + KV and src/auth-callout/).
+  2. Hard boundaries: Keep src/mcp/ 100% harness-agnostic (zero hardcoded ''pi'' or
+  ''codex'' checks) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$). Do NOT
+  implement a runtime Claude Code adapter (docs/DESIGN.md §8 is a proposed design
+  suggestion only and must be marked ''尚未实现 / Not Yet Implemented'' in README.md).
   Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
   / ~/.codex state during tests; always isolate test state in temporary directories
-  via CITO_STATE_DIR and CITO_CODEX_HOME and ephemeral test nats-server instances.
+  and ephemeral test nats-server instances.
 
-  3. Preserve strict MCP result/error envelopes, keyless deterministic listener_id
-  (^c_[a-z2-7]{12}$), SQLite 0600/0700 permissions, lock-serialized KV revision fencing
-  (listen-<id>.lock, binding_generation, owner_token), and cito-banner two-lock (banner.lock,
-  banner-instance.lock) invariants.'
+  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ -> src/mcp/),
+  unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing (formatScopedId
+  / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4), lock-serialized
+  KV revision fencing (listen-<hub>-<id>.lock, receiver-<hub>-<id>.lock, session-<harness>-<hash>.lock),
+  and zero-SQLite3 cito-banner two-lock (banner.lock, banner-instance.lock) invariants.'
 phases:
 - id: v1
   name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
