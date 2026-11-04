@@ -164,7 +164,7 @@ phases:
   - id: v1.host-adapters
     name: Pi 1.5.0 socket bridge extension (src/pi-extension/cito-bridge.ts) and Codex/Pi
       host caller & wake drivers
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/pi-extension/cito-bridge.ts\n    - src/adapters/**\n\
       \    - tests/adapters/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n\
@@ -226,10 +226,12 @@ phases:
     depends_on:
     - v1.nats-and-auth-callout
     agent: node-typescript-engineer
+    claimed_by: node-typescript-engineer
+    claimed_at: '2026-11-04T01:47:43.999948Z'
   - id: v1.banner
     name: macOS single-instance HUD banner (src/macos/cito-banner.swift) and two-lock
       IPC lifecycle
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/macos/cito-banner.swift\n    - src/banner/**\n\
       \    - tests/banner/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n\
@@ -287,6 +289,8 @@ phases:
     depends_on:
     - v1.nats-and-auth-callout
     agent: ios-developer
+    claimed_by: ios-developer
+    claimed_at: '2026-11-04T01:47:43.999994Z'
   - id: v1.mcp-and-e2e
     name: 'Unified cito-mcp server over NATS JetStream/KV, recipient anti-loop & crash-safe
       dispatch, OIDC JIT login, E2E suite, and code-hygiene consolidation [REQUIRES_SKILL:
