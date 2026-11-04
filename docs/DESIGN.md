@@ -93,7 +93,7 @@ Invalid configuration values cause the respective process (`cito-mcp` or `cito-a
 
 ## 3. Identity, Addressing, and Caller Resolution
 
-### 3.1 Canonical Listener Identity & Deterministic Keyless `listener_id`
+### 3.1 Canonical Storage Identity and Meaningful Public Listener IDs
 Every listener registration is uniquely keyed by the 4-tuple:
 
 $$\text{SessionKey} = (\text{principal\_id}, \text{host\_id}, \text{harness}, \text{session\_id})$$
@@ -109,11 +109,19 @@ $$\text{SessionKey} = (\text{principal\_id}, \text{host\_id}, \text{harness}, \t
    - **When `CITO_AUTH_MODE="none"`**: `owner_user` is `CITO_USER` or OS username (lowercased, validated against `^[a-z0-9._-]{1,64}$`), and `principal_id = "none#" + owner_user`.
 2. **`host_id`**:
    - On first run, `cito-mcp` generates a lowercase UUIDv4 and writes it atomically to `${CITO_STATE_DIR}/host-id` (`0600`). Subsequent runs read this file so machine hostname changes never alter `host_id`.
-3. **Keyless Deterministic `listener_id` Grammar**:
+3. **Keyless Deterministic Canonical ID** (`listenerId(sessionKey)`):
    - Format: `^c_[a-z2-7]{12}$` (prefix `c_` followed by 12 lowercase RFC 4648 base32 characters `[a-z2-7]`, e.g., `c_ab2def3gh4jk`).
    - Computed deterministically without any server-side secret as:
      $$\text{listener\_id} = \text{"c\_"} + \text{base32\_lower}\big(\text{SHA256}(\text{"cito-v1|"} + \text{principal\_id} + \text{"|"} + \text{host\_id} + \text{"|"} + \text{harness} + \text{"|"} + \text{session\_id})[0..7]\big)[0..12]$$
-   - Because `listener_id` is a pure function of `SessionKey`, `cito-mcp` can always compute its own `listener_id` locally (including in `cito_inbox` when offline or after `cito_unlisten`), and repeating `cito_listen` from the same session always yields the exact same `listener_id`.
+   - This 60-bit value is `canonical_id = "c_" + fp12`; the formula above names the internal `listener_id`. It remains the key for every local listener/signal/pairwise/idempotency row, lock (`listen-c_<fp12>.lock`), NATS KV entry (`cito_listeners.c_<fp12>`) and JetStream subject (`cito.signal.c_<fp12>`). It is computable offline and never changes when display metadata changes.
+4. **Public Display ID**: `public_id = "${slug}-${canonical_id.slice(2)}"`, matching `^[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12}$`, for example `rcatwin-teams-pbtjxcxkgw3y`.
+   - `normalizeSlug(raw)` lowercases, replaces each run of non-ASCII-alphanumeric characters with `-`, trims edge hyphens, truncates to 20 characters, then removes trailing hyphens again.
+   - `cito_listen.tag?: string` accepts at most 64 characters. An explicit tag with no ASCII letter/digit after normalization fails with `INVALID_INPUT: tag must contain at least one ASCII letter or digit`.
+   - With no new tag, choose the first nonempty normalized candidate: existing explicit SQLite tag, repository name after the last `/`, `basename(cwd)`, conversation title, harness (`codex` / `pi`). Directory names deliberately outrank conversation titles.
+   - SQLite `local_listeners` stores `tag: string | null` and `public_id: string`. Opening an existing database inspects `PRAGMA table_info(local_listeners)`, adds missing columns with `ALTER TABLE` under a transaction, and backfills display IDs without rewriting canonical keys, quota, cursors or ownership. KV registrations add optional `public_id` and `tag` fields so old registrations remain readable.
+   - Every public MCP `listener_id`, including `cito_find.caller.listener_id` and `signals[].from.listener_id`, uses the public ID (or `null` for an unbound sender). Discovery derives one for legacy registrations; an unregistered offline inbox derives one from caller metadata. The send result's `to` uses the target's current public ID.
+   - `toCanonicalListenerId` accepts either `^c_[a-z2-7]{12}$` unchanged or a public ID and extracts its final fingerprint; all other forms fail with `INVALID_INPUT`. Slugs are display hints: an old or renamed slug still addresses the same canonical destination. KV lookup, self-send checks, publication, receiver recipient checks and sender idempotency use the canonical form.
+5. **Collision Guard**: Before cancelling a receiver or changing SQLite in `listen`, inspect the canonical KV entry. Its `(principal_id, host_id, harness, session_id)` must match the caller exactly; otherwise fail with `STALE_GENERATION: Listener ID collision`. The local tuple is checked too; CAS retries recheck remote identity.
 
 ### 3.2 Target-Driven Routing vs. Receiver-Only Session Binding
 Cito separates **outbound operations (`cito_find`, `cito_send`)** from **receiver-side operations (`cito_listen`, `cito_unlisten`, `cito_inbox`)**:
@@ -169,8 +177,8 @@ Cito separates **outbound operations (`cito_find`, `cito_send`)** from **receive
 | `LISTENER_NOT_FOUND` | `false` | Unknown `listener_id` in NATS KV `cito_listeners` or target `state == "UNLISTENED"`. |
 | `LISTENER_EXPIRED` | `false` | Target listener entry exists in NATS KV with `state == "ACTIVE"`, but its broker-recorded `kv_entry.created` age exceeds 30 minutes (`broker_age_ms > 1_800_000`). |
 | `SELF_SEND_FORBIDDEN` | `false` | `SenderEndpointKey` equals target `SessionKey`. |
-| `IDEMPOTENCY_KEY_CONFLICT` | `false` | Same `(SenderEndpointKey, to, idempotency_key)` reused within 30m with different `(message, wake, in_reply_to)`. |
-| `STALE_GENERATION` | `true` | Operation carried `binding_generation < current_generation` in NATS KV. |
+| `IDEMPOTENCY_KEY_CONFLICT` | `false` | Same `(SenderEndpointKey, canonical_to, idempotency_key)` reused within 30m with different `(message, wake, in_reply_to)`. |
+| `STALE_GENERATION` | `true` | Stale generation, takeover/CAS conflict, or canonical fingerprint collision with a different session tuple. |
 | `NATS_UNAVAILABLE` | `true` | Network failure or timeout (`10s`) reaching NATS Server. |
 
 ### 4.2 `cito_listen`
@@ -187,6 +195,7 @@ Opts the calling conversation into discovery and wake notifications, or updates 
         "maxLength": 500,
         "description": "Concise description of this session's role, responsibility, or current task."
       },
+      "tag": { "type": "string", "maxLength": 64, "description": "Optional display slug override; omission preserves an existing explicit tag." },
       "scope": {
         "type": "string",
         "enum": ["self", "workspace"],
@@ -206,7 +215,7 @@ Opts the calling conversation into discovery and wake notifications, or updates 
   {
     "ok": true,
     "status": "listening",
-    "listener_id": "c_ab2def3gh4jk",
+    "listener_id": "rcatwin-ab2def3gh4jk",
     "binding_generation": 3,
     "user": "tefx",
     "host_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
@@ -236,7 +245,7 @@ Revokes the calling conversation's listener registration and stops receiving not
   {
     "ok": true,
     "status": "unlistened",
-    "listener_id": "c_ab2def3gh4jk"
+    "listener_id": "rcatwin-ab2def3gh4jk"
   }
   ```
 
@@ -282,7 +291,7 @@ Searches active listeners in the NATS KV bucket `cito_listeners`.
     },
     "listeners": [
       {
-        "listener_id": "c_ab2def3gh4jk",
+        "listener_id": "rcatwin-ab2def3gh4jk",
         "user": "tefx",
         "host_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
         "host_name": "tefx-mbp-personal",
@@ -310,7 +319,7 @@ Sends a notification signal to an opted-in listener via NATS JetStream.
     "properties": {
       "to": {
         "type": "string",
-        "pattern": "^c_[a-z2-7]{12}$",
+        "pattern": "^(?:c_[a-z2-7]{12}|[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12})$",
         "description": "Exact target listener_id returned by cito_find or cito_listen."
       },
       "message": {
@@ -344,21 +353,21 @@ Sends a notification signal to an opted-in listener via NATS JetStream.
   1. Strip ASCII control characters (`0x00–0x08`, `0x0B`, `0x0C`, `0x0E–0x1F`, `0x7F`) from `message` and `about`, preserving `\n` (`0x0A`) and `\t` (`0x09`).
   2. Trim leading/trailing whitespace. If the resulting string is empty or exceeds 500 Unicode code points, reject with `INVALID_INPUT` **before** publishing.
   3. Escape `<` as `&lt;` and `>` as `&gt;` when rendering into wake cards.
-- **Pre-Publish Target Validation (against NATS KV `cito_listeners.<to>`)**:
-  1. Fetch `kv_entry = kv.get(to)` and `stream_info = jsm.streams.info("KV_cito_listeners")`. If `kv_entry` is missing or `target.state === "UNLISTENED"`, fail with `LISTENER_NOT_FOUND`.
+- **Pre-Publish Target Validation**: Compute `canonical_to = toCanonicalListenerId(to)` before looking up NATS KV `cito_listeners.<canonical_to>` or comparing the caller's canonical ID for self-send protection.
+  1. Fetch `kv_entry = kv.get(canonical_to)` and `stream_info = jsm.streams.info("KV_cito_listeners")`. If `kv_entry` is missing or `target.state === "UNLISTENED"`, fail with `LISTENER_NOT_FOUND`.
   2. Compute `broker_age_ms = Math.max(0, Date.parse(stream_info.ts) - Date.parse(kv_entry.created))`. If `broker_age_ms > 1_800_000` (30 minutes since last heartbeat renewal), fail with `LISTENER_EXPIRED`.
   3. If `SenderEndpointKey === "${target.principal_id}|${target.host_id}|${target.harness}|${target.session_id}"`, fail with `SELF_SEND_FORBIDDEN`.
   4. If `sender.principal_id !== target.principal_id && target.scope !== "workspace"`, fail with `FORBIDDEN_TARGET_SCOPE`.
 - **Crash-Safe Sender Idempotency & Milestone Semantics**:
   - If caller omits `idempotency_key`, `cito-mcp` generates a fresh UUIDv4 for that single call.
-  - Keyed by `dedup_id = SHA256(JSON.stringify([SenderEndpointKey, to, effective_idempotency_key]))` for 30 minutes in the sender's `local_sent_idempotency(dedup_id PRIMARY KEY, request_hash, signal_id, seq, status, effective_wake, held_reason, expires_at_ms)` SQLite table.
+  - Keyed by `dedup_id = SHA256(JSON.stringify([SenderEndpointKey, canonical_to, effective_idempotency_key]))` for 30 minutes in the sender's `local_sent_idempotency(dedup_id PRIMARY KEY, request_hash, signal_id, seq, status, effective_wake, held_reason, expires_at_ms)` SQLite table.
   - **Transactional Pre-Publish Reservation**:
     1. Before publishing to NATS, `cito-mcp` begins a local SQLite transaction and looks up `dedup_id` (where `expires_at_ms > Date.now()`):
        - If found with a different `request_hash = SHA256(JSON.stringify([message, wake, in_reply_to ?? null]))`, rolls back and rejects with `IDEMPOTENCY_KEY_CONFLICT`.
        - If found with matching `request_hash` and `status != 'PENDING_PUBLISH'`, returns the stored result immediately without re-publishing.
        - If found with `status == 'PENDING_PUBLISH'` (recovering from a prior crash mid-publish), reuses the exact stored `signal_id` and proceeds to publish with `Nats-Msg-Id: dedup_id`.
        - If not found, allocates a new `signal_id` and commits a reservation row with `status = 'PENDING_PUBLISH'` **before** sending over the network.
-    2. Subscribes to Core NATS reply subject `cito.ack.<signal_id>` (`timeout = 2000ms`), then publishes the signal (including `"target_generation": target.binding_generation`) to JetStream `cito.signal.<to>` with header `Nats-Msg-Id: dedup_id` (receiving `PubAck.seq`).
+    2. Subscribes to Core NATS reply subject `cito.ack.<signal_id>` (`timeout = 2000ms`), then publishes the signal (including `"target_generation": target.binding_generation`) to JetStream `cito.signal.<canonical_to>` with header `Nats-Msg-Id: dedup_id` (receiving `PubAck.seq`).
     3. If the recipient `cito-mcp` is online, it runs its atomic Stage-1 admission transaction (Section 5.3) and publishes `{ signal_id, effective_wake, status: effective_wake ? "wake_accepted" : "stored_passive", held_reason }` to `cito.ack.<signal_id>`. Sender takes the first valid reply, updates `local_sent_idempotency` with the final `status`, and unsubscribes.
     4. If no reply arrives on `cito.ack.<signal_id>` within `2000ms`: if `wake === false` or (`sender.principal_id !== target.principal_id && !target.allow_peer_wake`), sender records and returns `effective_wake: false, status: "stored_passive", held_reason: "passive_requested" | "peer_wake_disabled"`; otherwise sender records and returns `effective_wake: true, status: "queued_for_reconnect", held_reason: null`.
 - **Output Schema**:
@@ -367,7 +376,7 @@ Sends a notification signal to an opted-in listener via NATS JetStream.
     "ok": true,
     "signal_id": "sig_019a4b8c7d2e70008123456789abcdef",
     "seq": 42,
-    "to": "c_ab2def3gh4jk",
+    "to": "rcatwin-ab2def3gh4jk",
     "requested_wake": true,
     "effective_wake": true,
     "status": "wake_accepted",
@@ -399,7 +408,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
   }
   ```
 - **Transactional Execution Order**:
-  1. Resolve caller `(harness, session_id)` (Section 3.2) and compute its deterministic `listener_id` (Section 3.1.3). If the session has never registered locally, return `{ "ok": true, "listener_id": "<listener_id>", "replay_gap_detected": false, "replay_gap_range": null, "signals": [], "acknowledged_count": 0 }`.
+  1. Resolve caller `(harness, session_id)` (Section 3.2), compute its canonical storage key (Section 3.1.3), and resolve the public `listener_id` from SQLite or caller metadata (Section 3.1.4). If the session has never registered locally, return `{ "ok": true, "listener_id": "<listener_id>", "replay_gap_detected": false, "replay_gap_range": null, "signals": [], "acknowledged_count": 0 }`.
   2. Select all rows in `local_signals` where `listener_id = ? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED', 'DISPATCHING', 'DISPATCHED', 'STORED_PASSIVE') AND expires_at_ms > Date.now()` ordered by `seq ASC` (limit 50).
   3. Determine the set of IDs to acknowledge: if `ack_all == true`, all selected `signal_id`s plus any additional IDs in `ack_ids` belonging to this `listener_id`; if `ack_all == false`, only IDs in `ack_ids` belonging to this `listener_id` (unknown IDs or IDs belonging to other sessions are ignored).
   4. Update those rows with `acknowledged_at_ms = Date.now()` (an independent column so a concurrent Stage-2 driver completion setting `state = 'DISPATCHED'` can never clear `acknowledged_at_ms` or resurrect an acknowledged message; if any acknowledged row is still in `state = 'RECEIVED'`, also set `state = 'STORED_PASSIVE'` so it will not be batched for wake).
@@ -408,7 +417,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
   ```json
   {
     "ok": true,
-    "listener_id": "c_ab2def3gh4jk",
+    "listener_id": "rcatwin-ab2def3gh4jk",
     "replay_gap_detected": false,
     "replay_gap_range": null,
     "signals": [
@@ -419,7 +428,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
           "user": "mingchen",
           "host_name": "mc-mbp",
           "harness": "codex",
-          "listener_id": "c_mn5pqr6st7uv",
+          "listener_id": "rcatwin-mn5pqr6st7uv",
           "about": "RCATwin solver"
         },
         "message": "我已在 Teams 群发出最新压测数据，请读取并继续复测",
@@ -438,6 +447,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
 ## 5. NATS JetStream Topology, Lease Lifecycle, and Crash-Safe Dispatch
 
 ### 5.1 NATS KV (`cito_listeners`) & JetStream (`CITO_SIGNALS`) Configuration
+In storage, lock names and routing subjects below, `listener_id` / `<id>` always denotes the canonical `c_<fp12>` key. Public display IDs appear in tool output and sender display metadata only.
 1. **KV Bucket `cito_listeners` (Persistent Metadata, Broker-Timestamp Leases)**:
    - Configured with `history: 1` and **no auto-purge TTL** (`ttl: 0`). Because entries are never auto-purged by TTL, `binding_generation` never resets to `1` after a disconnect, and `LISTENER_EXPIRED` vs. `LISTENER_NOT_FOUND` are always distinguishable.
    - Liveness state is derived from `entry.state` and the NATS broker timestamp age `broker_age_ms = Math.max(0, Date.parse(stream_info.ts) - Date.parse(kv_entry.created))`:
@@ -465,7 +475,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
          "host_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
          "host_name": "tefx-mbp-work",
          "harness": "pi",
-         "listener_id": "c_mn5pqr6st7uv",
+         "listener_id": "dotfiles-mn5pqr6st7uv",
          "about": "dotfiles configuration"
        },
        "message": "配置已更新并推送，请拉取最新分支",
@@ -481,7 +491,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
 - Each `cito_listen` call generates a unique `owner_token = uuidv4()`.
 - **Lock-Serialized Takeover Sequence (Preventing Local/KV Split-Brain)**:
   1. Acquire an exclusive local file lock `flock("${CITO_STATE_DIR}/sockets/listen-${listener_id}.lock")` (timeout `5000ms`), serializing all local processes attempting to register or update `listener_id`.
-  2. While holding `listen-${listener_id}.lock`, first set `local_listeners.status = 'REBINDING'` in `~/.cito/state.sqlite` (which immediately halts any prior local process's Stage-2 `assertDispatchStillAuthorized` gate before the KV write occurs).
+  2. While holding `listen-${listener_id}.lock`, first reject any KV/local tuple collision (Section 3.1.5), before stopping the previous receiver or mutating SQLite; then set `local_listeners.status = 'REBINDING'` in `~/.cito/state.sqlite` (which immediately halts any prior local process's Stage-2 `assertDispatchStillAuthorized` gate before the KV write occurs).
   3. Read `kv_entry = kv.get(listener_id)` and `local_row` from `local_listeners`. Compute `next_gen = Math.max(kv_entry?.binding_generation ?? 0, local_row?.binding_generation ?? 0) + 1`.
   4. Write the updated entry (`binding_generation: next_gen, owner_token: my_owner_token, state: "ACTIVE"`) to NATS KV using CAS (`kv.update(listener_id, val, kv_entry.revision)` or `kv.create`). If CAS fails due to a concurrent update, re-read `kv_entry`, recompute `next_gen`, and retry up to 3 times.
   5. **Only after NATS KV CAS succeeds**: commit `status = 'ACTIVE', binding_generation = next_gen, owner_token = my_owner_token` to `local_listeners` in SQLite and release `listen-${listener_id}.lock`. (If KV CAS fails after all retries, restore/set `local_listeners.status = 'FENCED_INACTIVE'`, release the lock, and return `STALE_GENERATION` — never leaving SQLite owned by a failed contender).
@@ -513,7 +523,7 @@ Reads and acknowledges signals stored in local SQLite (`~/.cito/state.sqlite`) f
           - If the row already exists (e.g., redelivered after a crash before `msg.ack()`): advances `persisted_seq = MAX(persisted_seq, msg.seq)`, commits, and **reuses the stored `(effective_wake, held_reason)`** to publish `cito.ack.<signal_id>` and `msg.ack()` **without** re-charging wake quota, re-charging pairwise counters, or re-triggering a banner.
        2. **Scope Check**: If `msg.from.principal_id !== local_listener.principal_id && local_listener.scope !== 'workspace'`, advances `persisted_seq = MAX(persisted_seq, msg.seq)`, commits without storing, and calls `msg.ack()`.
        3. **Epoch, Quota & Pairwise Evaluation**: Consumes any new `human_event_seq` (Section 6.2). Evaluates recipient wake admission using the deterministic precedence order in Section 6.3 (including checking `msg.target_generation < local_listener.binding_generation` as priority #1 `"stale_generation"`). If `effective_wake == true`, increments `unattended_wake_count` and inserts into `local_pairwise_wakes`. Inserts the new row into `local_signals` (`state = 'RECEIVED'` if `effective_wake == true`, else `state = 'STORED_PASSIVE'` — including for `"stale_generation"` signals so they remain readable in `cito_inbox`!), advances `persisted_seq = MAX(persisted_seq, msg.seq)`, and commits.
-       4. After commit: publishes `{ signal_id, effective_wake, status: effective_wake ? "wake_accepted" : "stored_passive", held_reason }` to `cito.ack.<signal_id>`, calls `msg.ack()`, and (if `effective_wake == false`) triggers a passive `cito-banner`.
+       4. After commit: publishes `{ signal_id, effective_wake, status: effective_wake ? "wake_accepted" : "stored_passive", held_reason }` to `cito.ack.<signal_id>`, calls `msg.ack()`, refreshes the Pi badge for both waking and passive admissions, and triggers the corresponding waking/passive `cito-banner`.
    - **Stage 2 (`DISPATCHING` $\to$ `DISPATCHED` with Immutable Batch Membership & Whole-Batch Expiry)**:
      1. When the `1500ms` debounce timer fires (or on startup recovery), the dispatcher first expires stale rows (`UPDATE local_signals SET state = 'EXPIRED_UNSENT' WHERE state IN ('RECEIVED', 'DISPATCHING') AND expires_at_ms <= Date.now()`), then acquires the SQLite listener row lease (`dispatcher_token = uuidv4()`, `lease_until_ms = Date.now() + 30_000`) and verifies `local_listeners.status == 'ACTIVE' AND owner_token == my_owner_token`.
      2. **Retry Existing Frozen Batch First (All-or-Nothing Batch Expiry)**: If rows already exist in `state = 'DISPATCHING'` for `(listener_id, binding_generation)`, `cito-mcp` checks the frozen batch's deadline `batch_expires_at_ms = MIN(expires_at_ms)` across all members of that `batch_id`. If `Date.now() >= batch_expires_at_ms`, the **entire** frozen batch is atomically transitioned to `'EXPIRED_UNSENT'`; otherwise `cito-mcp` retries that exact `batch_id` with its original immutable membership and card content.
@@ -571,9 +581,14 @@ Each listener tracks `human_event_seq` and `last_consumed_human_seq` (monotonic 
 | Signal Type | Stored in `cito_inbox`? | Pi TUI Transcript (`sendMessage`) | Codex Queue + Wake URL | `cito-banner` HUD Shown? |
 | :--- | :--- | :--- | :--- | :--- |
 | **`effective_wake == true`** | Yes (`RECEIVED` $\to$ `DISPATCHED`) | Yes (`display: true, triggerTurn: true, deliverAs: "followUp"`) | Yes (`codex queue` + `open -g codex://threads/wake/<id>`) | **Yes** |
-| **`effective_wake == false`** | Yes (`STORED_PASSIVE`) | **No** (status bar badge updates unread count: `📡 cito: c_ab2def3gh4jk (1 unread)`) | **No** | **Yes** (subtitle prefixed `[仅知会]`) |
+| **`effective_wake == false`** | Yes (`STORED_PASSIVE`) | **No** (status bar updates to `🔔 <slug> (N)`) | **No** | **Yes** (cyan inbox badge / `仅知会` pill) |
 
 ### 7.2 Lock-Synchronized Single-Instance `cito-banner` Lifecycle
+
+The HUD is a 388×136pt nonactivating vibrant-dark panel with continuous 16pt corners, a 1pt white border (alpha 0.14, 0.28 on hover), and an initial +20pt-right slide-in over 0.20s ease-out. Waking signals use amber `#FF9F0A`, a 3.5pt left accent, 32×32pt `bell.badge.fill` badge and `唤醒` pill; passive signals use cyan `#64D2FF`, `tray.and.arrow.down.fill` and `仅知会`. While visible, `displayedCount` adds `count ?? 1` only for the exact `(target_harness, target_session_id, effective_wake)` tuple; a tuple change resets the count. Counts above one append ` · ×N` to the pill.
+
+Presentation removes trailing `.local` from hosts, omits empty-title separators, and collapses message newline runs with surrounding whitespace to two spaces. The original `value.subtitle` and `value.message` remain unchanged in headless JSON diagnostics; separate display fields expose cleaned text and tuple counts. Codex shows the blue action `点击跳转至 Codex 对话 ↗`; Pi shows the tertiary action `Pi 终端会话 · 点击关闭横幅`. Labels are nonselectable; the root click view accepts the first mouse and owns hit testing, with a tracking area for the pointing-hand cursor and hover border.
+
 To guarantee that two `cito-banner` windows/processes can never coexist and no notification is dropped during startup or retirement, coordination uses two locks (`banner.lock` for sender serialization and `banner-instance.lock` held by the running `cito-banner` process for its entire lifetime):
 
 1. **Process-Lifetime Instance Lock (`banner-instance.lock`)**:
@@ -583,7 +598,7 @@ To guarantee that two `cito-banner` windows/processes can never coexist and no n
    - While holding `banner.lock`, attempts to connect to `${CITO_STATE_DIR}/sockets/banner.sock` (`300ms` timeout), writes `JSON.stringify(payload) + "\n"`, and awaits `{"ok":true}\n` (`500ms` timeout).
    - If connect or read/write fails, while **still holding `banner.lock`**, `cito-mcp` tests `${CITO_STATE_DIR}/sockets/banner-instance.lock` with a **non-blocking** `flock(LOCK_EX | LOCK_NB)`:
      - **Case A (`banner-instance.lock` is busy — `EWOULDBLOCK`)**: An existing `cito-banner` process is alive (either still finishing startup or mid-retirement). `cito-mcp` does **not** block on `banner-instance.lock` while holding `banner.lock`. Instead, it polls `banner.sock` connect every `50ms` for up to `500ms`; if `banner.sock` connects, it delivers `payload` and releases `banner.lock`. If `banner.sock` remains unreachable, `cito-mcp` releases `banner.lock` for `300ms` to let the retiring instance acquire `banner.lock` and exit, then re-acquires `banner.lock`, retries connecting to `banner.sock` once (`300ms` timeout), and if still unreachable, **re-probes `banner-instance.lock` with non-blocking `flock(LOCK_EX | LOCK_NB)`**: it enters Case B **only if** `banner-instance.lock` is now free; if `banner-instance.lock` is still busy, it logs a best-effort banner skip and releases `banner.lock` without unlinking `banner.sock` or spawning a duplicate process.
-     - **Case B (`banner-instance.lock` is free — acquired and immediately released by `cito-mcp`)**: Confirms zero `cito-banner` processes are running. `cito-mcp` unlinks any stale `banner.sock`, spawns `${CITO_STATE_DIR}/bin/cito-banner` detached, polls `banner.sock` readiness (every `25ms` up to `1000ms`), writes `payload + "\n"`, awaits `{"ok":true}\n`, and always releases `banner.lock` before returning.
+     - **Case B (`banner-instance.lock` is free — acquired and immediately released by `cito-mcp`)**: Confirms zero `cito-banner` processes are running. `cito-mcp` unlinks any stale `banner.sock`, spawns `${CITO_STATE_DIR}/bin/cito-banner` detached, polls `banner.sock` readiness (every `25ms` up to `2500ms`, allowing first-launch AppKit initialization during concurrent builds), writes `payload + "\n"`, awaits `{"ok":true}\n`, and always releases `banner.lock` before returning.
 3. **Unified Retirement Protocol (Timer Expiry AND Click Dismissal)**:
    - Both the 6-second auto-dismiss timer and user click dismissal execute the same synchronized retirement sequence:
      1. Attempt a non-blocking `flock(LOCK_EX | LOCK_NB)` on `banner.lock`. (For timer expiry, if `EWOULDBLOCK`, abort retirement and process the incoming sender's update; for click dismissal, wait up to `500ms` to acquire `banner.lock`).
@@ -602,10 +617,12 @@ To guarantee that two `cito-banner` windows/processes can never coexist and no n
 
 ### 7.4 Pi Socket Bridge Protocol (`src/pi-extension/cito-bridge.ts`)
 - **Transport**: Unix domain socket `${CITO_STATE_DIR}/sockets/pi-pid-${process.pid}.sock` (mode `0600`).
+- **Status badge**: `badgeSlug = slug.slice(0, 12).replace(/-+$/g, "") || harness`. Idle: `🔔 <badgeSlug>`; unread: `🔔 <badgeSlug> (N)`; replay gap: `🔔 <badgeSlug> (!)`; both: `🔔 <badgeSlug> (N!)`. Refresh on listen, restore, both waking/passive Stage-1 admissions and inbox. `ack_ids` leaves a gap warning in place; `ack_all: true` clears it. Unlisten, receiver revocation and service shutdown clear the badge only under `listen-c_<fp12>.lock` after checking SQLite `owner_token`; fenced losers never clear the replacement owner's badge. `update(ctx)` clears status immediately when the Pi session ID changes.
+- **Custom renderer**: The bridge optionally registers `cito-notification` with Pi using only Node built-ins, preserving standalone installation. It applies `customMessageBg`, a bold accent `🔔 Cito` header and `borderAccent` vertical body bars, wraps wide/combining characters to terminal width, hides acknowledgement details while collapsed and shows them in `dim` when expanded. It renders both the new cards and legacy frozen `<cito_signal>` envelopes.
 - **Framing**: One short-lived connection per request; one `\n`-terminated JSON request line $\to$ one `\n`-terminated JSON response line.
 - **Operations**:
   1. `{"id":"1","op":"identify"}` $\to$ `{"id":"1","ok":true,"pi_pid":51204,"session_id":"01a1a1ef...","session_name":"...","cwd":"...","is_streaming":false,"bridge_epoch":"e1...","human_event_count":2}`
-  2. `{"id":"2","op":"status","session_id":"01a1a1ef...","badge":"📡 cito: c_ab2def3gh4jk"}`:
+  2. `{"id":"2","op":"status","session_id":"01a1a1ef...","badge":"🔔 rcatwin"}`:
      - If `req.session_id !== currentSessionId`, returns `{"id":"2","ok":false,"error":"SESSION_MISMATCH"}`. Otherwise updates `ctx.ui.setStatus("cito", req.badge)` and returns `{"id":"2","ok":true}`.
   3. `{"id":"3","op":"deliver","session_id":"01a1a1ef...","batch_id":"batch_c_ab2def3gh4jk_41_42_3","content":"...","wake":true}`:
      - If `req.session_id !== currentSessionId`, returns `{"id":"3","ok":false,"error":"SESSION_MISMATCH"}`.
@@ -614,6 +631,22 @@ To guarantee that two `cito-banner` windows/processes can never coexist and no n
      - **Only after `pi.sendMessage` returns without throwing**, adds `req.batch_id` to `processedBatchIds` and returns `{"id":"3","ok":true,"deduplicated":false}`.
 
 ---
+
+### 7.5 In-Chat Wake Cards
+
+A single signal renders as:
+
+```text
+🔔 Cito · alice@mac · Review [↩ rcatwin-teams-pbtjxcxkgw3y]
+
+Review is ready.
+
+↳ Ack: cito_inbox(ack_ids: ["sig_..."])
+```
+
+Sender hosts lose a trailing `.local` (case-insensitive, retaining the original if stripping leaves nothing). A trimmed nonempty sender title follows ` · ` unless its normalized slug equals the public sender ID's slug prefix. Bound senders add `[↩ <public_id>]`; unbound senders omit the reply hint. All interpolated text and acknowledgement JSON escape angle brackets at rendering time; stored text remains plain.
+
+Multiple signals use `🔔 Cito · N 条唤醒消息` plus ` · <target title>` when nonempty, followed by blank-line-separated `[1] <sender>\n<message>` entries in sequence order and one shared acknowledgement footer. Persisted frozen legacy cards retain their original bytes during recovery.
 
 ## 8. Optional Pure-OIDC Authentication via NATS Auth Callout (GCP Casdoor)
 
@@ -660,7 +693,7 @@ To guarantee that two `cito-banner` windows/processes can never coexist and no n
 ## 10. Verification & Acceptance Criteria (V1)
 
 1. **NATS JetStream, Identity, Lifecycle, and Anti-Loop Contract Tests**:
-   - Keyless deterministic `listener_id` (`^c_[a-z2-7]{12}$`): repeating `cito_listen` preserves `listener_id`, increments `binding_generation` in NATS KV `cito_listeners`, preserves omitted `scope`/`allow_peer_wake`, and does **not** reset `unattended_wake_count`.
+   - Deterministic canonical IDs (`^c_[a-z2-7]{12}$`) remain storage/routing keys while public IDs use `<slug>-<fp12>`. Verify normalization and derivation order, explicit-tag persistence, SQLite migration, tuple collision rejection before local mutations, canonical/public/renamed-alias idempotency equivalence and public response IDs. Repeating `cito_listen` increments generation, preserves omitted preferences and does **not** reset unattended quota.
    - Persistent wake quota & clock-independent `human_event_seq`: `unattended_wake_count` persists across `unlisten -> listen` and across 30-minute expiry; Pi `bridge_epoch` + `human_event_count` delta increments `human_event_seq` strictly on interactive events across restarts without relying on `Date.now()`.
    - Recipient-local pairwise inbound circuit breaker: 2 admitted inbound waking signals from the same `SenderEndpointKey` to `listener_id` within 120s succeed (`effective_wake: true`); the **3rd** inbound waking signal from that sender within 120s is downgraded to `effective_wake: false` with `held_reason: "pairwise_rate_limited"`.
    - Atomic Stage-1 redelivery idempotency: redelivering an already-persisted `signal_id` reuses the stored `(effective_wake, held_reason)` without double-charging wake quota or pairwise counters.

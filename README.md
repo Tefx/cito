@@ -79,7 +79,7 @@ Configure this definition in your existing MCP gateway; the bridge itself does n
 
 | Tool | Purpose |
 | --- | --- |
-| `cito_listen({about, scope?, allow_peer_wake?})` | Enroll the calling session. Initial scope is `self`; peer waking defaults to false. Omitted preferences survive updates. |
+| `cito_listen({about, tag?, scope?, allow_peer_wake?})` | Enroll the calling session. Initial scope is `self`; peer waking defaults to false. Omitted preferences survive updates. |
 | `cito_unlisten({})` | Revoke enrollment, abort pending host effects, retain unread inbox signals until expiry. |
 | `cito_find({query?, user?, host?, harness?, repo?, limit?})` | Discover visible active leases. Harness accepts only `codex` or `pi`; default limit 20, maximum 50. |
 | `cito_send({to, message, wake?, in_reply_to?, idempotency_key?})` | Notify an exact discovered listener ID. Wake defaults to true. Idempotency keys are sender-endpoint + target scoped for 30 minutes. |
@@ -91,10 +91,32 @@ Receiver tools require the caller's session identity. Codex uses `_meta["x-codex
 
 For in-process consumers, use `CitoService.create(config?, options?)` from `src/mcp/service.ts`, `service.call(name, args, meta)`, and `await service.close()`. `createMcpServer(service)` from `src/mcp/server.ts` attaches the same handlers to an SDK `Server`. The owner of an in-process service must close both server and service. Options allow a browser opener, Desktop URL opener executable, and banner environment for controlled integrations.
 
+### Listener IDs and notification UI
+
+Public listener IDs combine a meaningful slug and a deterministic 60-bit fingerprint, for example `rcatwin-teams-pbtjxcxkgw3y`. Set `cito_listen({about: "Teams verification", tag: "RCATwin Teams"})` to choose the slug. Tags accept up to 64 characters, normalize to lowercase ASCII letters/digits separated by hyphens (at most 20 characters), and must contain at least one ASCII letter or digit. Omitting `tag` preserves an existing explicit tag. Otherwise the slug comes from the repository name, directory basename, conversation title, then harness, skipping empty normalized values.
+
+`cito_listen`, `cito_unlisten`, `cito_find`, `cito_inbox`, and bound senders' `signals[].from.listener_id` return public IDs. `cito_send.to` accepts either a public ID or the legacy canonical `c_<fp12>` ID. A slug rename keeps the fingerprint and destination unchanged: old public IDs still route to the same session, and retries across aliases share one sender idempotency record. Internal SQLite keys, locks, NATS KV keys and JetStream subjects always use the canonical ID. Existing databases migrate automatically; enrollment rejects a fingerprint collision against a different principal/host/harness/session tuple before changing the local receiver.
+
+Pi shows `🔔 <slug>` (slug truncated to 12 characters) while listening, `🔔 <slug> (N)` for unread signals, `🔔 <slug> (!)` for a replay gap, or `🔔 <slug> (N!)` for both. Admission updates the badge for waking and passive messages. Inbox calls refresh it; only `ack_all: true` clears the replay-gap warning. Restore refreshes it; unlisten, revocation and shutdown clear it under the listener lock only for the persisted owner. Switching Pi sessions clears the old status immediately.
+
+Waking messages appear in chat as:
+
+```text
+🔔 Cito · alice@mac · Review [↩ rcatwin-teams-pbtjxcxkgw3y]
+
+Review is ready.
+
+↳ Ack: cito_inbox(ack_ids: ["sig_..."])
+```
+
+Cards strip `.local` from sender hosts and omit an empty title or one duplicating the sender's ID slug. Batches use a `🔔 Cito · N 条唤醒消息 · <target title>` header and numbered senders. Pi's self-contained custom renderer adds a themed background, accent header and left body bar; acknowledgement details appear only when expanded. It also renders pre-upgrade frozen `<cito_signal>` cards.
+
+The macOS HUD uses a dark 388×136pt panel with a continuous 16pt corner, hover border and slide-in animation. Amber bell / `唤醒` styling identifies waking signals; cyan inbox / `仅知会` styling identifies passive signals. Counts accumulate only while the same harness, session and wake mode remain displayed. Codex's footer opens the conversation; Pi's footer dismisses the banner. Display text removes `.local`, empty title separators and message line breaks; headless diagnostics retain the original `subtitle` and `message` fields.
+
 ### State and delivery guarantees
 
 - `stateDir/host-id` holds one atomically published lowercase UUIDv4 (`0600`). MCP always uses that persisted identity. The state directory is `0700`; `state.sqlite` is `0600`, uses WAL and a 5-second SQLite busy timeout.
-- Listener IDs are deterministic `c_[a-z2-7]{12}` values for principal + host + harness + session. Re-enrollment increments generation; KV CAS and per-listener `flock` serialize ownership changes. Losing owners cannot overwrite the winner's local row.
+- Canonical listener IDs are deterministic `c_[a-z2-7]{12}` values for principal + host + harness + session; public IDs use `<slug>-<fp12>`. Re-enrollment increments generation; KV CAS and per-listener `flock` serialize ownership changes. Losing owners cannot overwrite the winner's local row or clear its badge.
 - The first online tool after an MCP process restart restores matching persisted `ACTIVE` enrollments, frozen batches and pull cursors without another `cito_listen`. A receiver-lifetime `flock` prevents a second MCP process from adopting a still-live owner. Failed revocation keeps or restores the active receiver; successful revocation removes only that exact receiver instance.
 - Sender flush/publish/ack waits share a 10-second operation deadline and are interrupted by service shutdown.
 - Healthy listeners renew every 20 seconds. Discovery hides leases older than 60 seconds; sends can buffer through 30 minutes of disconnection. Older active entries return `LISTENER_EXPIRED`. Reattachment detects listener-specific replay gaps and reports them until `ack_all`.

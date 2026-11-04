@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fixture, call, payload, waitFor, codexDesktop } from "./support.js";
 import { unixServer } from "../adapters/support.js";
-import { connectNats, provisionNats, listenerId } from "../../src/shared/index.js";
+import { connectNats, provisionNats, listenerId, toCanonicalListenerId, publicListenerId, listenerSlug } from "../../src/shared/index.js";
 import { encode, type Broker } from "../../src/mcp/receiver.js";
 import { registrationSchema } from "../../src/mcp/state.js";
 import { CitoService } from "../../src/mcp/service.js";
@@ -15,7 +15,7 @@ async function setup(pi = true) { const f = await fixture({ pi }); cleanups.push
 test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pull without re-enrolling", async () => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "restart" }, f.pi.meta);
-  const id = enrolled.listener_id;
+  const id = toCanonicalListenerId(enrolled.listener_id);
   const sent = await call(f.service, "cito_send", { to: id, message: "frozen" });
   const owner = f.service.state.listener(id)!.owner_token;
   f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'frozen-before-restart', batch_expires_at_ms = expires_at_ms, batch_card = 'Original frozen card' WHERE signal_id = ?", sent.signal_id);
@@ -33,16 +33,17 @@ test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pu
     sender_endpoint_key: "none#alice|other|unbound|default", from: { principal_id: "none#alice", user: "alice", host_id: "other", host_name: "other", harness: null },
     message: "queued offline", requested_wake: false, in_reply_to: null }));
   const restarted = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => restarted.close());
-  expect((await call(restarted, "cito_find")).listeners).toMatchObject([{ listener_id: id }]);
+  expect((await call(restarted, "cito_find")).listeners).toMatchObject([{ listener_id: enrolled.listener_id }]);
   await waitFor(() => restarted.state.listener(id)!.persisted_seq === 2 && restarted.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1);
   expect(restarted.state.listener(id)).toMatchObject({ status: "ACTIVE", owner_token: owner, binding_generation: 1, unattended_wake_count: 1 });
   expect(f.pi.messages.map(message => message.content)).toEqual(["Original frozen card"]);
   expect((await call(restarted, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ signal_id: sent.signal_id }, { signal_id: "queued-during-restart", message: "queued offline" }]);
-});
+}, 10_000); // Includes first-use Swift compilation and native startup under parallel test load.
 
 test("unlisten cleanup cannot delete the concurrently installed replacement receiver", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "old" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "old" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const old = f.service.receivers.get(id)!, stop = old.stop.bind(old);
   let entered!: () => void, release!: () => void;
   const stopping = new Promise<void>(resolve => { entered = resolve; });
@@ -63,7 +64,8 @@ test("unlisten cleanup cannot delete the concurrently installed replacement rece
 
 test("a transient revocation failure restores the ACTIVE receiver and permits a successful retry", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "retry revoke" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "retry revoke" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const broker = Reflect.get(f.service, "broker") as Broker;
   vi.spyOn(broker.kv, "update").mockRejectedValueOnce(new Error("temporary broker failure"));
   expect(payload(await f.service.call("cito_unlisten", {}, f.pi.meta))).toMatchObject({ error: { code: "NATS_UNAVAILABLE", retryable: true } });
@@ -77,12 +79,14 @@ test("a transient revocation failure restores the ACTIVE receiver and permits a 
 
 test("Pi A to B to A preserves A's human watermark through re-enrollment and sweep", async () => {
   const f = await setup();
-  const { listener_id: a } = await call(f.service, "cito_listen", { about: "A" }, f.pi.meta);
+  const { listener_id: aPublic } = await call(f.service, "cito_listen", { about: "A" }, f.pi.meta);
+  const a = toCanonicalListenerId(aPublic);
   f.pi.input(); f.pi.input(); f.pi.input();
   await f.service.receivers.get(a)!.sweep();
   await call(f.service, "cito_send", { to: a, message: "charge A" });
   f.pi.switchSession("B"); f.pi.input(); f.pi.input();
-  const { listener_id: b } = await call(f.service, "cito_listen", { about: "B" }, f.pi.meta);
+  const { listener_id: bPublic } = await call(f.service, "cito_listen", { about: "B" }, f.pi.meta);
+  const b = toCanonicalListenerId(bPublic);
   f.pi.switchSession("pi-session-1"); f.pi.input();
   await call(f.service, "cito_listen", { about: "A resumed" }, f.pi.meta);
   expect(f.service.state.listener(a)).toMatchObject({ human_event_seq: 4, last_bridge_count: 4, last_consumed_human_seq: 4, unattended_wake_count: 0 });
@@ -94,7 +98,8 @@ test("Pi A to B to A preserves A's human watermark through re-enrollment and swe
 
 test.each(["flush", "ack"])("shutdown interrupts a stalled send %s boundary without waiting for its deadline", async boundary => {
   const target = await setup();
-  const { listener_id: id } = await call(target.service, "cito_listen", { about: "offline recipient" }, target.pi.meta);
+  const { listener_id: publicId } = await call(target.service, "cito_listen", { about: "offline recipient" }, target.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   await target.service.receivers.get(id)!.stop();
   const sender = await fixture({ broker: target.broker, pi: false }); cleanups.push(() => sender.close());
   await call(sender.service, "cito_find");
@@ -111,7 +116,8 @@ test.each(["flush", "ack"])("shutdown interrupts a stalled send %s boundary with
 
 test("a stalled flush is bounded by the ten-second NATS operation deadline", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "flush deadline" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "flush deadline" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const broker = Reflect.get(f.service, "broker") as Broker;
   vi.spyOn(broker.nc, "flush").mockImplementation(() => new Promise(() => {}));
   expect(payload(await f.service.call("cito_send", { to: id, message: "never flushed" }))).toMatchObject({ error: { code: "NATS_UNAVAILABLE", retryable: true } });
@@ -121,7 +127,8 @@ test("a stalled flush is bounded by the ten-second NATS operation deadline", asy
 
 test("20-second scheduled sweep consumes human input without explicit test invocation", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "scheduled sweep" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "scheduled sweep" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "charge" });
   f.pi.input();
   await waitFor(() => f.service.state.listener(id)!.human_event_seq === 1, 23_000);
@@ -140,7 +147,8 @@ test("transient Pi probes revoke on third failure, whereas healthy probe resets 
       } : { ok: false, error: "TEMPORARY" }) + "\n");
     });
   }); cleanups.push(() => server.stop());
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "three strikes" }, { pi_pid: process.pid });
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "three strikes" }, { pi_pid: process.pid });
+  const id = toCanonicalListenerId(publicId);
   const receiver = f.service.receivers.get(id)!;
   healthy = false; await receiver.sweep(); await receiver.sweep();
   expect(f.service.state.listener(id)).toMatchObject({ status: "ACTIVE", consecutive_probe_failures: 2 });
@@ -153,7 +161,8 @@ test("transient Pi probes revoke on third failure, whereas healthy probe resets 
 
 test("Codex definitive no-client-found revokes immediately and preserves unread passive signals", async () => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "Codex closure" }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "Codex closure" }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "retained", wake: false });
   desktop.setLive(false); await f.service.receivers.get(id)!.sweep();
   expect(f.service.state.listener(id)!.status).toBe("UNLISTENED");
@@ -162,7 +171,8 @@ test("Codex definitive no-client-found revokes immediately and preserves unread 
 
 test("CAS retry exhaustion from real competing KV writes fences failed contender without advancing local generation", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "CAS" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "CAS" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const broker = Reflect.get(f.service, "broker") as Broker;
   const peer = await connectNats({ servers: f.broker.url }); cleanups.push(() => peer.close());
   const { kv } = await provisionNats(peer);
@@ -185,22 +195,24 @@ test("CAS retry exhaustion from real competing KV writes fences failed contender
 
 test("find drains a multi-key KV snapshot before per-entry reads and applies the 50-result limit after sorting", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "many leases" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "many leases" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const broker = Reflect.get(f.service, "broker") as Broker;
   const base = registrationSchema.parse((await broker.kv.get(id))!.json());
   const ids: string[] = [];
   for (let n = 0; n < 60; n++) {
     const session = "other-session-" + n;
     const key = listenerId({ ...base, session_id: session }); ids.push(key);
-    await broker.kv.create(key, encode({ ...base, listener_id: key, session_id: session, owner_token: randomUUID() }));
+    await broker.kv.create(key, encode({ ...base, public_id: undefined, listener_id: key, session_id: session, owner_token: randomUUID() }));
   }
   const result = await call(f.service, "cito_find", { limit: 50 });
-  expect(result.listeners.map((entry: { listener_id: string }) => entry.listener_id)).toEqual(ids.reverse().slice(0, 50));
+  expect(result.listeners.map((entry: { listener_id: string }) => entry.listener_id)).toEqual(ids.reverse().slice(0, 50).map(key => publicListenerId(listenerSlug(base), key)));
 });
 
 test("a second MCP process can revoke the active owner without losing unlisten suppression reason", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "remote revoke" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "remote revoke" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const sent = await call(f.service, "cito_send", { to: id, message: "pending" });
   const other = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => other.close());
   expect(await call(other, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "unlistened" });
@@ -211,7 +223,8 @@ test("a second MCP process can revoke the active owner without losing unlisten s
 
 test("reconnect creates a fresh ephemeral consumer from persisted cursor without double charging", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "reconnect" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "reconnect" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "first", wake: false });
   const original = f.service.receivers.get(id)!;
   const broker = Reflect.get(f.service, "broker") as Broker;
@@ -225,7 +238,8 @@ test("reconnect creates a fresh ephemeral consumer from persisted cursor without
 
 test("admission failure never advances restart cursor past the failed earlier message", async () => {
   const f = await setup();
-  const { listener_id: id, binding_generation: generation } = await call(f.service, "cito_listen", { about: "ordered admission" }, f.pi.meta);
+  const { listener_id: publicId, binding_generation: generation } = await call(f.service, "cito_listen", { about: "ordered admission" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const broker = Reflect.get(f.service, "broker") as Broker;
   const original = f.service.state.admit.bind(f.service.state), order: string[] = [];
   let attempts = 0;
@@ -247,7 +261,8 @@ test("admission failure never advances restart cursor past the failed earlier me
 
 test("disconnected recipient returns the exact sender timeout milestone and passive reason", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "disconnected", scope: "workspace" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "disconnected", scope: "workspace" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   await f.service.receivers.get(id)!.stop();
   const sender = await fixture({ broker: f.broker, pi: false }); cleanups.push(() => sender.close());
   expect(await call(sender.service, "cito_send", { to: id, message: "buffered" })).toMatchObject({ status: "queued_for_reconnect", effective_wake: true, held_reason: null });

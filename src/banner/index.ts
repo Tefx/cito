@@ -149,7 +149,8 @@ export async function showBanner(payload: BannerPayload, options: BannerOptions 
       child.once("spawn", resolveSpawn);
     });
     child.unref();
-    const startupDeadline = performance.now() + 1000;
+    // First-launch AppKit initialization can exceed one second during concurrent builds.
+    const startupDeadline = performance.now() + 2500;
     while (performance.now() < startupDeadline) {
       if (await exists(socket) && await deliver(socket, payload, 300)) return { displayed: true };
       await delay(25);

@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "vitest";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { fixture, call, payload, waitFor, codexDesktop, bannerPids } from "../mcp/support.js";
+import { toCanonicalListenerId } from "../../src/shared/index.js";
 import { CitoService } from "../../src/mcp/service.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
@@ -12,7 +13,7 @@ test.skipIf(process.platform !== "darwin")("Pi lifecycle uses real broker, bridg
   const f = await setup(true, true);
   const enrolled = await call(f.service, "cito_listen", { about: "Pi notifications" }, f.pi.meta);
   const id = String(enrolled.listener_id);
-  expect(id).toMatch(/^c_[a-z2-7]{12}$/);
+  expect(id).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12}$/);
   expect(enrolled).toMatchObject({ binding_generation: 1, scope: "self", allow_peer_wake: false, unattended_wakes_remaining: 3 });
   for (const [file, mode] of [[f.stateDir, 0o700], [join(f.stateDir, "host-id"), 0o600], [join(f.stateDir, "state.sqlite"), 0o600]] as const) expect((await stat(file)).mode & 0o777).toBe(mode);
   expect((await readFile(join(f.stateDir, "host-id"), "utf8")).trim()).toMatch(/^[a-f0-9-]{36}$/);
@@ -47,7 +48,7 @@ test.skipIf(process.platform !== "darwin")("passive Pi admission changes badge/i
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "passive" }, f.pi.meta);
   const sent = await call(f.service, "cito_send", { to: id, message: "FYI", wake: false });
   expect(sent).toMatchObject({ status: "stored_passive", effective_wake: false, held_reason: "passive_requested" });
-  await waitFor(() => f.pi.badges.at(-1)?.includes("1 unread") === true);
+  await waitFor(() => f.pi.badges.at(-1)?.endsWith(" (1)") === true);
   expect(f.pi.messages).toEqual([]);
   await waitFor(() => f.bannerDisplays.length === 1);
   expect(f.bannerDisplays[0]).toMatchObject({ title: "Cito · Pi receiver", subtitle: `[仅知会] alice@${f.config.hostName} · `, message: "FYI" });
@@ -86,7 +87,7 @@ test("offline Pi inbox reads and acknowledges SQLite without attempting NATS", a
 test("concurrent takeover fences old owner without changing winner or its new-generation signals", async () => {
   const f = await setup();
   const initial = await call(f.service, "cito_listen", { about: "initial", scope: "workspace", allow_peer_wake: true }, f.pi.meta);
-  const id = String(initial.listener_id), old = f.service.receivers.get(id)!;
+  const id = String(initial.listener_id), old = f.service.receivers.get(toCanonicalListenerId(id))!;
   const other = await CitoService.create(f.config, f.serviceOptions);
   try {
     const winner = await call(other, "cito_listen", { about: "winner" }, f.pi.meta);
@@ -94,7 +95,7 @@ test("concurrent takeover fences old owner without changing winner or its new-ge
     await waitFor(() => old.abort.signal.aborted);
     const sent = await call(other, "cito_send", { to: id, message: "winner work" });
     old.fence();
-    expect(f.service.state.listener(id)).toMatchObject({ status: "ACTIVE", binding_generation: 2 });
+    expect(f.service.state.listener(toCanonicalListenerId(id))).toMatchObject({ status: "ACTIVE", binding_generation: 2 });
     expect(f.service.state.signals("SELECT * FROM local_signals WHERE signal_id = ?", sent.signal_id)[0]).toMatchObject({ state: "RECEIVED", binding_generation: 2 });
     expect(await call(other, "cito_unlisten", {}, f.pi.meta)).toMatchObject({ status: "unlistened" });
   } finally { await other.close(); }
@@ -105,7 +106,7 @@ test("receiver acknowledgement prevents a debounced wake; unlisten cancels admit
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "cancel" }, f.pi.meta);
   await call(f.service, "cito_send", { to: id, message: "read before wake" });
   await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta);
-  await f.service.receivers.get(id)!.dispatch();
+  await f.service.receivers.get(toCanonicalListenerId(id))!.dispatch();
   expect(f.pi.messages).toEqual([]);
   const next = await call(f.service, "cito_send", { to: id, message: "cancel me" });
   await call(f.service, "cito_unlisten", {}, f.pi.meta);
@@ -116,13 +117,13 @@ test("receiver acknowledgement prevents a debounced wake; unlisten cancels admit
 test("liveness sweep is single-flight, consumes interactive deltas and revokes a switched Pi session", async () => {
   const f = await setup();
   const { listener_id: id } = await call(f.service, "cito_listen", { about: "live" }, f.pi.meta);
-  const receiver = f.service.receivers.get(id)!;
+  const receiver = f.service.receivers.get(toCanonicalListenerId(id))!;
   await call(f.service, "cito_send", { to: id, message: "charge" });
   f.pi.input();
   await Promise.all([receiver.sweep(), receiver.sweep(), receiver.sweep()]);
-  expect(f.service.state.listener(id)).toMatchObject({ human_event_seq: 1, unattended_wake_count: 0, consecutive_probe_failures: 0 });
+  expect(f.service.state.listener(toCanonicalListenerId(id))).toMatchObject({ human_event_seq: 1, unattended_wake_count: 0, consecutive_probe_failures: 0 });
   f.pi.switchSession("pi-session-2"); await receiver.sweep();
-  expect(f.service.state.listener(id)!.status).toBe("UNLISTENED");
+  expect(f.service.state.listener(toCanonicalListenerId(id))!.status).toBe("UNLISTENED");
   expect((await call(f.service, "cito_find")).listeners).toEqual([]);
 });
 
@@ -143,7 +144,7 @@ test.skipIf(process.platform !== "darwin")("real Codex HUD click advances human 
   try {
     f.serviceOptions.banner!.env = { CITO_BANNER_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "5000", CITO_BANNER_URL_OPENER: f.serviceOptions.codex!.openBin };
     const { listener_id: id } = await call(f.service, "cito_listen", { about: "human click" }, desktop.meta);
-    f.service.state.run("UPDATE local_listeners SET unattended_wake_count = 3 WHERE listener_id = ?", id);
+    f.service.state.run("UPDATE local_listeners SET unattended_wake_count = 3 WHERE listener_id = ?", toCanonicalListenerId(id));
     await call(f.service, "cito_send", { to: id, message: "click to read", wake: false });
     const binary = join(f.stateDir, "bin/cito-banner");
     let pid = 0;
@@ -152,9 +153,9 @@ test.skipIf(process.platform !== "darwin")("real Codex HUD click advances human 
       try { return pid > 0 && (await stat(join(f.stateDir, "sockets/banner.sock"))).isSocket(); } catch { return false; }
     });
     process.kill(pid, "SIGUSR1");
-    await waitFor(() => f.service.state.listener(id)!.human_event_seq === 1);
-    await f.service.receivers.get(id)!.sweep();
-    expect(f.service.state.listener(id)).toMatchObject({ human_event_seq: 1, last_consumed_human_seq: 1, unattended_wake_count: 0 });
+    await waitFor(() => f.service.state.listener(toCanonicalListenerId(id))!.human_event_seq === 1);
+    await f.service.receivers.get(toCanonicalListenerId(id))!.sweep();
+    expect(f.service.state.listener(toCanonicalListenerId(id))).toMatchObject({ human_event_seq: 1, last_consumed_human_seq: 1, unattended_wake_count: 0 });
     await waitFor(async () => { try { return (await readFile(desktop.log, "utf8")).trim() === JSON.stringify(["open", "codex://threads/" + desktop.thread]); } catch { return false; } });
     expect((await readFile(desktop.log, "utf8")).trim()).toBe(JSON.stringify(["open", "codex://threads/" + desktop.thread]));
   } finally { await desktop.close(); }
@@ -187,6 +188,6 @@ test("PENDING_PUBLISH recovery reuses exact signal ID and JetStream dedup sequen
   f.service.state.run("UPDATE local_sent_idempotency SET status = 'PENDING_PUBLISH'");
   const recovered = await call(f.service, "cito_send", { to: id, message: "reserved", idempotency_key: "recover" });
   expect(recovered).toMatchObject({ signal_id: original.signal_id, seq: original.seq });
-  expect(f.service.state.listener(id)!.unattended_wake_count).toBe(1);
+  expect(f.service.state.listener(toCanonicalListenerId(id))!.unattended_wake_count).toBe(1);
   expect(f.service.state.signals("SELECT * FROM local_signals")).toHaveLength(1);
 }, 10_000);

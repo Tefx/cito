@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { randomUUID } from "node:crypto";
 import { uptime } from "node:os";
 import { fixture, call } from "./support.js";
+import { toCanonicalListenerId } from "../../src/shared/index.js";
 import { type Signal } from "../../src/mcp/state.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
@@ -9,7 +10,7 @@ afterEach(async () => { for (const f of fixtures.splice(0)) await f.close(); });
 async function enrolled() {
   const f = await fixture(); fixtures.push(f);
   const listening = await call(f.service, "cito_listen", { about: "receiver", scope: "workspace" }, f.pi.meta);
-  const id = String(listening.listener_id), state = f.service.state;
+  const id = toCanonicalListenerId(listening.listener_id), state = f.service.state;
   const row = state.listener(id)!;
   let seq = 0;
   const admit = (overrides: Partial<Signal> = {}, sender = "none#alice|host|unbound|default") => {
@@ -124,9 +125,9 @@ describe("atomic Stage-1 admission", () => {
     admit(); admit(); admit({}, "other");
     await call(f.service, "cito_unlisten", {}, f.pi.meta);
     const again = await call(f.service, "cito_listen", { about: "updated" }, f.pi.meta);
-    expect(again).toMatchObject({ listener_id: id, binding_generation: 3, scope: "workspace", allow_peer_wake: false, unattended_wakes_remaining: 0 });
+    expect(again).toMatchObject({ listener_id: state.listener(id)!.public_id, binding_generation: 3, scope: "workspace", allow_peer_wake: false, unattended_wakes_remaining: 0 });
     state.run("UPDATE local_listeners SET human_event_seq = human_event_seq + 1 WHERE listener_id = ?", id);
     const human = await call(f.service, "cito_listen", { about: "human seen", allow_peer_wake: true }, f.pi.meta);
-    expect(human).toMatchObject({ listener_id: id, scope: "workspace", allow_peer_wake: true, unattended_wakes_remaining: 3 });
+    expect(human).toMatchObject({ listener_id: state.listener(id)!.public_id, scope: "workspace", allow_peer_wake: true, unattended_wakes_remaining: 3 });
   });
 });

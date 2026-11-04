@@ -2,10 +2,12 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { chmod, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { CitoError, brokerAgeMs, RETENTION_MS, harnessSchema, listenerIdSchema, sanitizeMessage } from "../shared/index.js";
+import { CitoError, brokerAgeMs, RETENTION_MS, harnessSchema, canonicalListenerIdSchema, listenerIdSchema,
+  listenerSlug, publicListenerId, sanitizeMessage } from "../shared/index.js";
 
 export const registrationSchema = z.object({
-  listener_id: listenerIdSchema, principal_id: z.string().min(1), owner_user: z.string().min(1),
+  listener_id: canonicalListenerIdSchema, public_id: listenerIdSchema.optional(), tag: z.string().nullable().optional(),
+  principal_id: z.string().min(1), owner_user: z.string().min(1),
   host_id: z.string().min(1), host_name: z.string(), harness: harnessSchema, session_id: z.string().min(1),
   cwd: z.string(), repo: z.string().nullable(), branch: z.string().nullable(), title: z.string(), about: z.string(),
   scope: z.enum(["self", "workspace"]), allow_peer_wake: z.boolean(),
@@ -23,7 +25,8 @@ export const signalSchema = z.object({
 });
 export type Signal = z.infer<typeof signalSchema>;
 export interface ListenerRow {
-  listener_id: string; principal_id: string; owner_user: string; host_id: string; host_name: string;
+  listener_id: string; public_id: string; tag: string | null;
+  principal_id: string; owner_user: string; host_id: string; host_name: string;
   harness: "codex" | "pi"; session_id: string; pi_pid: number | null; cwd: string; repo: string | null;
   branch: string | null; title: string; about: string; scope: "self" | "workspace"; allow_peer_wake: number;
   status: "ACTIVE" | "REBINDING" | "UNLISTENED" | "FENCED_INACTIVE";
@@ -51,7 +54,18 @@ export interface SentRow {
 
 /** One synchronous transaction owner: no await is permitted inside a transaction. */
 export class LocalState {
-  private constructor(readonly db: DatabaseSync) {}
+  private constructor(readonly db: DatabaseSync) {
+    // Serialize schema inspection and ALTERs across concurrent MCP starts.
+    this.transaction(() => {
+      const columns = new Set(db.prepare("PRAGMA table_info(local_listeners)").all().map(row => row.name));
+      if (!columns.has("tag")) db.exec("ALTER TABLE local_listeners ADD COLUMN tag TEXT");
+      if (!columns.has("public_id")) db.exec("ALTER TABLE local_listeners ADD COLUMN public_id TEXT NOT NULL DEFAULT ''");
+      for (const row of db.prepare("SELECT * FROM local_listeners WHERE public_id = ''").all() as unknown as ListenerRow[]) {
+        this.run("UPDATE local_listeners SET public_id = ? WHERE listener_id = ?",
+          publicListenerId(listenerSlug(row), row.listener_id), row.listener_id);
+      }
+    });
+  }
   static async open(stateDir: string): Promise<LocalState> {
     await mkdir(join(stateDir, "sockets"), { recursive: true, mode: 0o700 });
     await chmod(stateDir, 0o700);
@@ -61,7 +75,8 @@ export class LocalState {
     try {
       db.exec(`PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;
         CREATE TABLE IF NOT EXISTS local_listeners (
-          listener_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, owner_user TEXT NOT NULL,
+          listener_id TEXT PRIMARY KEY, public_id TEXT NOT NULL DEFAULT '', tag TEXT,
+          principal_id TEXT NOT NULL, owner_user TEXT NOT NULL,
           host_id TEXT NOT NULL, host_name TEXT NOT NULL, harness TEXT NOT NULL CHECK(harness IN ('pi','codex')),
           session_id TEXT NOT NULL, pi_pid INTEGER, cwd TEXT NOT NULL, repo TEXT, branch TEXT,
           title TEXT NOT NULL, about TEXT NOT NULL, scope TEXT NOT NULL CHECK(scope IN ('self','workspace')),
@@ -170,7 +185,8 @@ export class LocalState {
   close(): void { this.db.close(); }
 }
 export function registration(row: ListenerRow): Registration {
-  return { listener_id: row.listener_id, principal_id: row.principal_id, owner_user: row.owner_user,
+  return { listener_id: row.listener_id, public_id: row.public_id, tag: row.tag,
+    principal_id: row.principal_id, owner_user: row.owner_user,
     host_id: row.host_id, host_name: row.host_name, harness: row.harness, session_id: row.session_id,
     cwd: row.cwd, repo: row.repo, branch: row.branch, title: row.title, about: row.about,
     scope: row.scope, allow_peer_wake: !!row.allow_peer_wake, state: row.status === "ACTIVE" ? "ACTIVE" : "UNLISTENED",

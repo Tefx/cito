@@ -150,6 +150,22 @@ describe.skipIf(process.platform !== "darwin")("native HUD and lock-synchronized
     expect(new Set(presentations.map(p => p.pid)).size).toBe(1);
   });
 
+  test("HUD aggregates counts only for the exact target/wake tuple and preserves raw diagnostics", async () => {
+    const f = await fixture(5000), server = await native(f);
+    const next = { ...payload, from_host: "laptop.LOCAL", from_title: "  ", message: "one \n  two\n\nthree" };
+    const updates = [next, { ...next, count: 2 }, { ...next, effective_wake: false, count: 4 },
+      { ...next, effective_wake: false }, { ...next, target_session_id: "other", count: 2 },
+      { ...next, target_session_id: "other", target_harness: "codex" as const }];
+    for (const update of updates) expect(await send(f, update)).toEqual({ displayed: true });
+    await waitFor(() => server.output().split("cito-banner: display ").length === 7);
+    const displays = server.output().split("\n").filter(line => line.startsWith("cito-banner: display "))
+      .map(line => JSON.parse(line.slice("cito-banner: display ".length)));
+    expect(displays.map(display => display.displayed_count)).toEqual([1, 3, 4, 5, 2, 1]);
+    expect(displays.map(display => display.semantic_label)).toEqual(["唤醒", "唤醒 · ×3", "仅知会 · ×4", "仅知会 · ×5", "唤醒 · ×2", "唤醒"]);
+    expect(displays[0]).toMatchObject({ subtitle: "alice@laptop.LOCAL ·   ", message: next.message,
+      display_subtitle: "alice@laptop", display_message: "one  two  three" });
+  });
+
   test("process-lifetime instance lock excludes a second native process", async () => {
     const f = await fixture(5000);
     const original = await native(f);

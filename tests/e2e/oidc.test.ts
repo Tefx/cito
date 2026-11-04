@@ -8,6 +8,7 @@ import { loadAuthCalloutConfig } from "../../src/auth-callout/config.js";
 import { startAuthCallout } from "../../src/auth-callout/responder.js";
 import { OidcVerifier } from "../../src/auth-callout/oidc.js";
 import { OidcLogin } from "../../src/mcp/oidc.js";
+import { toCanonicalListenerId } from "../../src/shared/index.js";
 import { CitoService } from "../../src/mcp/service.js";
 
 test("OIDC auth-callout + MCP enforces private/workspace scopes and works offline with verified cached identity", async () => {
@@ -23,7 +24,7 @@ test("OIDC auth-callout + MCP enforces private/workspace scopes and works offlin
   try {
     oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims()), refresh_token: "alice-refresh" };
     const { listener_id: id } = await call(alice.service, "cito_listen", { about: "OIDC private" }, alice.pi.meta);
-    expect(alice.service.state.listener(id)!.principal_id).toBe(oidc.issuer + "#user-1");
+    expect(alice.service.state.listener(toCanonicalListenerId(id))!.principal_id).toBe(oidc.issuer + "#user-1");
     oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-2", preferred_username: "Bob" })), refresh_token: "bob-refresh" };
     expect((await call(bob.service, "cito_find")).listeners).toEqual([]);
     expect(payload(await bob.service.call("cito_send", { to: id, message: "blocked" }))).toMatchObject({ error: { code: "FORBIDDEN_TARGET_SCOPE" } });

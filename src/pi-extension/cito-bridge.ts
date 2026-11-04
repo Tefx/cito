@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 
 /** Structural subset of Pi 1.5.0's public API: no host package is needed to load this file. */
 export interface BridgeContext {
@@ -11,7 +12,15 @@ export interface BridgeContext {
   sessionManager: { getSessionId(): string | undefined; getSessionName(): string | undefined };
   ui: { setStatus(key: string, value: string | undefined): void };
 }
+interface NotificationTheme {
+  fg(color: "accent" | "borderAccent" | "dim", text: string): string;
+  bg(color: "customMessageBg", text: string): string;
+  bold(text: string): string;
+}
+export type NotificationRenderer = (message: { content: unknown }, options: { expanded: boolean; outputPad?: number },
+  theme: NotificationTheme) => { render(width: number): string[]; invalidate(): void };
 export interface BridgeAPI {
+  registerMessageRenderer?(customType: string, renderer: NotificationRenderer): void;
   on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree" | "input",
     handler: (event: { source?: string }, ctx: BridgeContext) => void | Promise<void>): unknown;
   sendMessage(message: { customType: string; content: string; display: boolean },
@@ -19,7 +28,64 @@ export interface BridgeAPI {
 }
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
+// This extension is copied on its own into Pi: keep rendering free of host-package imports.
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+function columns(value: string): number {
+  if (/^[\p{Mark}\u200d\ufe0f]*$/u.test(value)) return 0;
+  return /[\p{Emoji_Presentation}\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}]/u.test(value)
+    || value.includes("\ufe0f") ? 2 : 1;
+}
+function wrapLine(value: string, width: number): { text: string; width: number }[] {
+  const lines: { text: string; width: number }[] = [];
+  let line = "", used = 0;
+  for (const { segment } of graphemes.segment(value)) {
+    const size = columns(segment);
+    if (used + size > width && line) { lines.push({ text: line, width: used }); line = ""; used = 0; }
+    if (size > width) continue;
+    line += segment; used += size;
+  }
+  lines.push({ text: line, width: used });
+  return lines;
+}
+function cardLines(content: unknown): string[] {
+  const text = typeof content === "string" ? content : Array.isArray(content)
+    ? content.filter(part => part?.type === "text").map(part => part.text).join("\n") : "";
+  const clean = stripVTControlCharacters(text).replace(/\t/g, "  ").replace(/\r/g, "");
+  if (!clean.startsWith("<cito_signal")) return clean.startsWith("🔔 Cito") ? clean.split("\n") : ["🔔 Cito", "", ...clean.split("\n")];
+  // Frozen pre-upgrade batches retain their XML-style envelope across recovery.
+  const attr = (attrs: string, name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(attrs)?.[1] ?? "";
+  const signals = [...clean.matchAll(/<signal\s+([^>]*)>\n?([\s\S]*?)\n?<\/signal>/g)];
+  const body = signals.map((match, i) => {
+    const attrs = match[1]!, from = attr(attrs, "from"), title = attr(attrs, "from_title");
+    return `[${i + 1}] ${attr(attrs, "from_user")}@${attr(attrs, "from_host").replace(/\.local$/i, "")}`
+      + (title ? ` · ${title}` : "") + (from && from !== "unbound" ? ` [↩ ${from}]` : "") + "\n" + match[2];
+  });
+  const ack = /Please call (cito_inbox\(ack_ids: [\s\S]*?\)) to acknowledge\./.exec(clean)?.[1];
+  return ["🔔 Cito", "", ...(body.length ? body.join("\n\n").split("\n") : [clean]), ...(ack ? ["", "↳ Ack: " + ack] : [])];
+}
+const notificationRenderer: NotificationRenderer = (message, options, theme) => ({
+  render(width) {
+    if (width < 1) return [];
+    const pad = Math.min(Math.max(0, Math.floor(options.outputPad ?? 0)), Math.floor((width - 1) / 2));
+    const inner = width - 2 * pad;
+    const lines = cardLines(message.content).filter(line => options.expanded || !line.startsWith("↳ Ack:"));
+    while (lines.at(-1) === "") lines.pop();
+    return lines.flatMap((line, index) => {
+      const bar = index > 0 && inner >= 3;
+      return wrapLine(line, inner - (bar ? 2 : 0)).map(part => {
+        const styled = index === 0 ? theme.fg("accent", theme.bold(part.text))
+          : line.startsWith("↳ Ack:") ? theme.fg("dim", part.text) : part.text;
+        const prefix = bar ? theme.fg("borderAccent", "│ ") : "";
+        return theme.bg("customMessageBg", " ".repeat(pad) + prefix + styled
+          + " ".repeat(inner - (bar ? 2 : 0) - part.width + pad));
+      });
+    });
+  },
+  invalidate() {}, // Rendering is stateless; colors are reapplied on every render.
+});
+
 export default function citoBridge(pi: BridgeAPI): void {
+  pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
   const bridge_epoch = randomUUID();
   const sessions = new Map<string, { human_event_count: number; processedBatchIds: Set<string> }>();
   let sessionId: string | undefined;
@@ -33,7 +99,9 @@ export default function citoBridge(pi: BridgeAPI): void {
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
 
   function update(ctx: BridgeContext): void {
-    sessionId = ctx.sessionManager.getSessionId();
+    const nextSessionId = ctx.sessionManager.getSessionId();
+    if (nextSessionId !== sessionId) ctx.ui.setStatus("cito", undefined);
+    sessionId = nextSessionId;
     if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, { human_event_count: 0, processedBatchIds: new Set() });
     context = ctx;
   }

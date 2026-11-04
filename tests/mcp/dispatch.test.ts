@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fixture, call, codexDesktop, waitFor } from "./support.js";
 import { unixServer } from "../adapters/support.js";
 import { CitoService } from "../../src/mcp/service.js";
-import { connectNats, provisionNats } from "../../src/shared/index.js";
+import { connectNats, provisionNats, toCanonicalListenerId } from "../../src/shared/index.js";
 import { encode } from "../../src/mcp/receiver.js";
 import { registrationSchema } from "../../src/mcp/state.js";
 
@@ -16,7 +16,8 @@ async function fileExists(path: string) { try { await stat(path); return true; }
 
 test("whole frozen batch expires at earliest member; no partial wake escapes", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "expire" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "expire" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "early" });
   await call(f.service, "cito_send", { to: id, message: "later" });
   f.service.state.run(`UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'frozen', batch_expires_at_ms = ?, dispatcher_token = 'crashed'`, Date.now() - 1);
@@ -27,7 +28,8 @@ test("whole frozen batch expires at earliest member; no partial wake escapes", a
 
 test("recovery retries immutable existing batch before new received rows", async () => {
   const f = await setup();
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "recovery" }, f.pi.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "recovery" }, f.pi.meta);
+  const id = toCanonicalListenerId(publicId);
   const first = await call(f.service, "cito_send", { to: id, message: "original frozen" });
   const frozenCard = '<cito_signal target_title="Original title">original frozen</cito_signal>';
   f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'immutable-batch', batch_expires_at_ms = expires_at_ms, batch_card = ? WHERE signal_id = ?", frozenCard, first.signal_id);
@@ -47,7 +49,8 @@ test("acknowledgement during queue submission survives completion and suppresses
 writeFileSync(${JSON.stringify(marker)}, 'queued');
 const timer = setInterval(() => { if (existsSync(${JSON.stringify(release)})) { clearInterval(timer); } }, 10);
 `);
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "ack-inflight" }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "ack-inflight" }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   const sent = await call(f.service, "cito_send", { to: id, message: "read while queued" });
   const dispatch = f.service.receivers.get(id)!.dispatch();
   await waitFor(() => fileExists(marker));
@@ -65,7 +68,8 @@ test.each(["unlisten", "fence"])("%s aborts an in-flight Codex queue and prevent
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   const marker = join(f.root, "queue-entered");
   await queueScript(f.config.codexBin, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'entered'); setInterval(() => {}, 1000);`);
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: action }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: action }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   const sent = await call(f.service, "cito_send", { to: id, message: "abort" });
   const receiver = f.service.receivers.get(id)!;
   const dispatch = receiver.dispatch();
@@ -88,7 +92,8 @@ test("three definite Codex pre-insertion failures store passive and never invoke
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   const attempts = join(f.root, "attempts");
   await queueScript(f.config.codexBin, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(attempts)}, 'attempt\\n'); process.exit(2);`);
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "failure" }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "failure" }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "driver fails" });
   await f.service.receivers.get(id)!.dispatch();
   expect((await readFile(attempts, "utf8")).trim().split("\n")).toHaveLength(3);
@@ -110,7 +115,8 @@ test("Pi socket failures retry the exact batch three times; session mismatch rev
     });
   }); cleanups.push(() => socket.stop());
   const meta = { pi_pid: process.pid };
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "Pi retry" }, meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "Pi retry" }, meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "retry" });
   await f.service.receivers.get(id)!.dispatch();
   expect(batches).toHaveLength(3); expect(new Set(batches).size).toBe(1);
@@ -125,7 +131,8 @@ test("Pi socket failures retry the exact batch three times; session mismatch rev
 test("Codex 10-second queue timeout records unknown insertion and still submits exactly one open", async () => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   await queueScript(f.config.codexBin, "setInterval(() => {}, 1000);");
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "timeout" }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "timeout" }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "unknown insertion" });
   await f.service.receivers.get(id)!.dispatch();
   expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ queue_written: 1, state: "DISPATCHED" });
@@ -137,7 +144,8 @@ test("Desktop open retry does not repeat queue insertion", async () => {
   const attempts = join(f.root, "open-attempts");
   await queueScript(f.serviceOptions.codex!.openBin!, `import { appendFileSync, readFileSync } from 'node:fs';
 appendFileSync(${JSON.stringify(attempts)}, 'open\\n'); if (readFileSync(${JSON.stringify(attempts)}, 'utf8').trim().split('\\n').length === 1) process.exit(1);`);
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "open retry" }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "open retry" }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "queue once" });
   await f.service.receivers.get(id)!.dispatch();
   expect((await readFile(attempts, "utf8")).trim().split("\n")).toHaveLength(2);
@@ -159,7 +167,8 @@ test("Pi completion sets DISPATCHED without clearing a concurrent inbox acknowle
     });
   }); cleanups.push(() => server.stop());
   const meta = { pi_pid: process.pid };
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "ack during Pi effect" }, meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "ack during Pi effect" }, meta);
+  const id = toCanonicalListenerId(publicId);
   const sent = await call(f.service, "cito_send", { to: id, message: "ack while delivering" });
   const dispatch = f.service.receivers.get(id)!.dispatch();
   await deliveryEntered;
@@ -172,7 +181,8 @@ test("Pi completion sets DISPATCHED without clearing a concurrent inbox acknowle
 
 test("frozen DISPATCHING recovery after restart preserves batch identity and queue_written", async () => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const { listener_id: id } = await call(f.service, "cito_listen", { about: "restart" }, desktop.meta);
+  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "restart" }, desktop.meta);
+  const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "already queued" });
   f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'crashed-batch', batch_expires_at_ms = expires_at_ms, queue_written = 1");
   await f.service.close();

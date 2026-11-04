@@ -7,7 +7,8 @@ const object = (properties: Record<string, object>, required: string[] = []): To
 const text = { type: "string", minLength: 1, maxLength: 500 };
 export const tools: Tool[] = [
   { name: "cito_listen", description: "Enroll this Codex or Pi session to receive notifications.", inputSchema: object({
-    about: { ...text, description: "Concise session responsibility." }, scope: { type: "string", enum: ["self", "workspace"] },
+    about: { ...text, description: "Concise session responsibility." },
+    tag: { type: "string", maxLength: 64, description: "Optional short display name; preserved on later enrollments." }, scope: { type: "string", enum: ["self", "workspace"] },
     allow_peer_wake: { type: "boolean" } }, ["about"]) },
   { name: "cito_unlisten", description: "Revoke this session's registration and cancel pending wakes.", inputSchema: object({}) },
   { name: "cito_find", description: "Find active opted-in sessions. Caller binding is optional.", inputSchema: object({
@@ -15,7 +16,7 @@ export const tools: Tool[] = [
     host: { type: "string", maxLength: 128 }, harness: { type: "string", enum: ["codex", "pi"] },
     repo: { type: "string", maxLength: 200 }, limit: { type: "integer", minimum: 1, maximum: 50, default: 20 } }) },
   { name: "cito_send", description: "Notify an exact listener ID. Caller binding is optional.", inputSchema: object({
-    to: { type: "string", pattern: "^c_[a-z2-7]{12}$" }, message: text, wake: { type: "boolean", default: true },
+    to: { type: "string", pattern: "^(?:c_[a-z2-7]{12}|[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12})$" }, message: text, wake: { type: "boolean", default: true },
     in_reply_to: { type: "string", maxLength: 64 }, idempotency_key: { type: "string", minLength: 1, maxLength: 128 } }, ["to", "message"]) },
   { name: "cito_inbox", description: "Read and acknowledge this session's local inbox, including offline.", inputSchema: object({
     ack_ids: { type: "array", items: { type: "string" } }, ack_all: { type: "boolean", default: false } }) },

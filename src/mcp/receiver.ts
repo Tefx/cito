@@ -7,7 +7,7 @@ import { AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type Js
 import { acquireFlock, showBanner, type BannerOptions } from "../banner/index.js";
 import { assertCodexThreadOpen, readCodexThread, identifyPi, setPiStatus, deliverPiWake, PiBridgeError,
   queueCodexWake, triggerCodexWake, formatWakeCard, CodexSessionError, codexDesktopRunning, type CodexDriverOptions, type PiIdentity } from "../adapters/index.js";
-import { brokerNow, localExpirationMs, SIGNALS_STREAM, type CitoConfig, type provisionNats } from "../shared/index.js";
+import { brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, type CitoConfig, type provisionNats } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type SignalRow } from "./state.js";
 
 export type Broker = Awaited<ReturnType<typeof provisionNats>> & { nc: NatsConnection };
@@ -17,6 +17,19 @@ export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringif
 export const listenLock = (config: CitoConfig, id: string) => join(config.stateDir, "sockets", `listen-${id}.lock`);
 const ackPayload = (row: SignalRow) => ({ signal_id: row.signal_id, effective_wake: !!row.effective_wake,
   status: row.effective_wake ? "wake_accepted" : "stored_passive", held_reason: row.held_reason });
+
+/** Inbox-only processes can refresh the persisted owner's badge without starting a receiver. */
+export async function refreshPiBadge(state: LocalState, config: CitoConfig, id: string, owner: string, signal?: AbortSignal): Promise<void> {
+  const row = state.listener(id);
+  if (!row || row.owner_token !== owner || row.harness !== "pi" || !row.pi_pid || row.status !== "ACTIVE") return;
+  const unread = Number(state.db.prepare(`SELECT COUNT(*) AS n FROM local_signals
+    WHERE listener_id = ? AND acknowledged_at_ms IS NULL AND expires_at_ms > ?`).get(id, Date.now())!.n);
+  const slug = row.public_id ? row.public_id.slice(0, -13) : listenerSlug(row);
+  const badgeSlug = slug.slice(0, 12).replace(/-+$/g, "") || row.harness;
+  const count = `${unread || ""}${row.replay_gap_detected ? "!" : ""}`;
+  await setPiStatus({ pi_pid: row.pi_pid, session_id: row.session_id },
+    `🔔 ${badgeSlug}${count ? ` (${count})` : ""}`, config, signal);
+}
 
 /** One process-owned receiver; SQLite owner_token guards every write and every host effect. */
 export class Receiver {
@@ -123,7 +136,7 @@ export class Receiver {
     let signal;
     try { signal = signalSchema.parse(msg.json()); }
     catch (error) { this.log(error); msg.term("invalid signal"); return; }
-    if (signal.to !== this.id) { msg.term("wrong recipient"); return; }
+    if (toCanonicalListenerId(signal.to) !== this.id) { msg.term("wrong recipient"); return; }
     const wall = Date.now(), mono = performance.now();
     const now = await brokerNow(this.broker.jsm, SIGNALS_STREAM);
     const created = new Date(msg.info.timestampNanos / 1_000_000).toISOString();
@@ -134,8 +147,8 @@ export class Receiver {
     msg.ack();
     if (!admitted.row || admitted.duplicate) return;
     this.track(this.banner(admitted.row));
+    this.track(this.badge()); // Stage 1 is visible even while a waking batch is debounced.
     if (admitted.row.effective_wake) this.schedule();
-    else this.track(this.badge());
   }
   private async banner(row: SignalRow): Promise<void> {
     const target = this.state.listener(this.id)!;
@@ -143,12 +156,19 @@ export class Receiver {
       from_user: row.from_user, from_host: row.from_host_name, from_title: row.from_title,
       message: row.message, effective_wake: !!row.effective_wake }, { ...this.options.banner, config: this.config });
   }
-  async badge(): Promise<void> {
-    const row = this.state.listener(this.id);
-    if (!row || row.owner_token !== this.owner || row.harness !== "pi" || !row.pi_pid || row.status !== "ACTIVE") return;
-    const unread = Number(this.state.db.prepare(`SELECT COUNT(*) AS n FROM local_signals
-      WHERE listener_id = ? AND acknowledged_at_ms IS NULL AND expires_at_ms > ?`).get(this.id, Date.now())!.n);
-    await setPiStatus({ pi_pid: row.pi_pid, session_id: row.session_id }, `📡 cito: ${this.id}${unread ? ` (${unread} unread)` : ""}`, this.config, this.abort.signal);
+  badge(): Promise<void> {
+    return refreshPiBadge(this.state, this.config, this.id, this.owner, this.abort.signal);
+  }
+  /** Clearing never uses the cancelled effect signal and is serialized with takeovers. */
+  async clearBadge(lockHeld = false): Promise<void> {
+    const lock = lockHeld ? null : await acquireFlock(listenLock(this.config, this.id), 5000);
+    if (!lockHeld && !lock) throw new Error("Listener badge lock timeout");
+    try {
+      const row = this.state.listener(this.id);
+      if (row?.owner_token === this.owner && row.harness === "pi" && row.pi_pid) {
+        await setPiStatus({ pi_pid: row.pi_pid, session_id: row.session_id }, undefined, this.config);
+      }
+    } finally { await lock?.release(); }
   }
   private schedule(): void {
     if (this.abort.signal.aborted) return;
@@ -261,18 +281,24 @@ export class Receiver {
   }
   async revoke(reason: string): Promise<void> {
     this.cancel();
-    this.state.transaction(() => {
-      this.state.run("UPDATE local_listeners SET status = 'UNLISTENED' WHERE listener_id = ? AND owner_token = ?", this.id, this.owner);
-      this.state.run(`UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = ? WHERE listener_id = ?
-        AND binding_generation <= ? AND state IN ('RECEIVED','DISPATCHING')`, reason, this.id, this.generation);
-    });
-    const entry = await this.broker.kv.get(this.id);
-    if (entry) {
-      const value = registrationSchema.parse(entry.json());
-      if (value.owner_token === this.owner && value.binding_generation === this.generation) {
-        await this.broker.kv.update(this.id, encode({ ...value, state: "UNLISTENED", binding_generation: this.generation + 1 }), entry.revision);
+    const lock = await acquireFlock(listenLock(this.config, this.id), 5000);
+    if (!lock) throw new Error("Listener revocation lock timeout");
+    try {
+      if (this.state.listener(this.id)?.owner_token !== this.owner) return;
+      this.state.transaction(() => {
+        this.state.run("UPDATE local_listeners SET status = 'UNLISTENED' WHERE listener_id = ? AND owner_token = ?", this.id, this.owner);
+        this.state.run(`UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = ? WHERE listener_id = ?
+          AND binding_generation <= ? AND state IN ('RECEIVED','DISPATCHING')`, reason, this.id, this.generation);
+      });
+      await this.clearBadge(true).catch(error => this.log(error));
+      const entry = await this.broker.kv.get(this.id);
+      if (entry) {
+        const value = registrationSchema.parse(entry.json());
+        if (value.owner_token === this.owner && value.binding_generation === this.generation) {
+          await this.broker.kv.update(this.id, encode({ ...value, state: "UNLISTENED", binding_generation: this.generation + 1 }), entry.revision);
+        }
       }
-    }
+    } finally { await lock.release(); }
   }
   sweep(): Promise<void> {
     if (this.probing) return this.probing;

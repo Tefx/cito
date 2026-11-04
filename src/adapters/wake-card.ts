@@ -1,4 +1,4 @@
-import { escapeWakeCard } from "../shared/index.js";
+import { escapeWakeCard, normalizeSlug } from "../shared/index.js";
 
 /** Signal display fields are already sanitized at admission; escape only at rendering. */
 export interface WakeSignal {
@@ -11,13 +11,25 @@ export interface WakeSignal {
   message: string;
 }
 export interface WakeTarget { listener_id: string; title: string }
-const attribute = (value: string): string => escapeWakeCard(value).replace(/"/g, "&quot;");
 
+function formatSender(signal: WakeSignal): string {
+  const host = signal.from_host.replace(/\.local$/i, "") || signal.from_host;
+  const title = signal.from_title.trim();
+  const slug = signal.from_listener_id?.match(/^([a-z0-9]+(?:-[a-z0-9]+)*)-[a-z2-7]{12}$/)?.[1];
+  const titlePart = title && !(signal.from_listener_id && normalizeSlug(title) === slug)
+    ? " · " + escapeWakeCard(title) : "";
+  const replyPart = signal.from_listener_id ? " [↩ " + escapeWakeCard(signal.from_listener_id) + "]" : "";
+  return `${escapeWakeCard(signal.from_user)}@${escapeWakeCard(host)}${titlePart}${replyPart}`;
+}
 export function formatWakeCard(target: WakeTarget, signals: readonly WakeSignal[]): string {
-  const body = signals.map(signal =>
-    `<signal id="${attribute(signal.signal_id)}" from="${attribute(signal.from_listener_id || "unbound")}" from_user="${attribute(signal.from_user)}" from_host="${attribute(signal.from_host)}" from_title="${attribute(signal.from_title)}" ts="${attribute(signal.created_at)}">\n${escapeWakeCard(signal.message)}\n</signal>`
-  ).join("\n");
-  // Escape the rendered JSON as well: IDs are interpolated data, not markup.
   const ackIds = escapeWakeCard(JSON.stringify(signals.map(signal => signal.signal_id)));
-  return `<cito_signal to="${attribute(target.listener_id)}" target_title="${attribute(target.title)}" count="${signals.length}" wake="true">\n${body}\nPlease call cito_inbox(ack_ids: ${ackIds}) to acknowledge.</cito_signal>`;
+  const footer = `↳ Ack: cito_inbox(ack_ids: ${ackIds})`;
+  if (signals.length === 1) {
+    const signal = signals[0]!;
+    return `🔔 Cito · ${formatSender(signal)}\n\n${escapeWakeCard(signal.message)}\n\n${footer}`;
+  }
+  const targetTitle = target.title.trim() ? " · " + escapeWakeCard(target.title.trim()) : "";
+  const body = signals.map((signal, index) =>
+    `[${index + 1}] ${formatSender(signal)}\n${escapeWakeCard(signal.message)}`).join("\n\n");
+  return `🔔 Cito · ${signals.length} 条唤醒消息${targetTitle}\n\n${body}\n\n${footer}`;
 }

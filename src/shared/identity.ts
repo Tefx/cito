@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { userInfo } from "node:os";
+import { basename } from "node:path";
 import { CitoError } from "./errors.js";
 import { validateHarness, type Harness } from "./validation.js";
 
@@ -52,6 +53,27 @@ export function senderEndpointKey(endpoint: SenderEndpoint): string {
   validateHarness(endpoint.harness);
   if (!endpoint.session_id) throw new CitoError("INVALID_INPUT", "Bound sender requires session_id");
   return [endpoint.principal_id, endpoint.host_id, endpoint.harness, endpoint.session_id].join("|");
+}
+export function normalizeSlug(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    .slice(0, 20).replace(/-+$/g, "");
+}
+export interface ListenerMetadata {
+  tag?: string | null; repo: string | null; cwd: string; title: string; harness: Harness;
+}
+/** A stored explicit tag outranks metadata; empty normalized candidates are skipped. */
+export function listenerSlug(value: ListenerMetadata): string {
+  return [value.tag, value.repo?.split("/").at(-1), basename(value.cwd), value.title, value.harness]
+    .map(raw => normalizeSlug(raw ?? "")).find(Boolean)!;
+}
+export function publicListenerId(slug: string, canonicalId: string): string {
+  return `${slug}-${canonicalId.slice(2)}`;
+}
+export function toCanonicalListenerId(input: string): string {
+  if (/^c_[a-z2-7]{12}$/.test(input)) return input;
+  const match = /^[a-z0-9]+(?:-[a-z0-9]+)*-([a-z2-7]{12})$/.exec(input);
+  if (match) return "c_" + match[1];
+  throw new CitoError("INVALID_INPUT", "Invalid listener ID");
 }
 export function listenerId(key: SessionKey): string {
   validateHarness(key.harness);

@@ -18,9 +18,18 @@ test("SDK lists exactly five strict tools and routes _meta through real MCP requ
     const listed = await client.listTools();
     expect(listed.tools.map(tool => tool.name)).toEqual(["cito_listen", "cito_unlisten", "cito_find", "cito_send", "cito_inbox"]);
     expect(listed.tools.every(tool => tool.inputSchema.additionalProperties === false)).toBe(true);
-    const listened = await client.callTool({ name: "cito_listen", arguments: { about: "MCP receiver" }, _meta: f.pi.meta });
+    expect(listed.tools.find(tool => tool.name === "cito_listen")!.inputSchema.properties?.tag)
+      .toMatchObject({ type: "string", maxLength: 64 });
+    const toSchema = listed.tools.find(tool => tool.name === "cito_send")!.inputSchema.properties?.to as { pattern: string };
+    expect(new RegExp(toSchema.pattern).test("mcp-receiver-pbtjxcxkgw3y")).toBe(true);
+    expect(new RegExp(toSchema.pattern).test("c_pbtjxcxkgw3y")).toBe(true);
+    const listened = await client.callTool({ name: "cito_listen", arguments: { about: "MCP receiver", tag: "MCP receiver" }, _meta: f.pi.meta });
     expect(listened.isError).toBe(false);
-    expect(JSON.parse((listened.content as { text: string }[])[0]!.text)).toMatchObject({ harness: "pi", status: "listening" });
+    const enrolled = JSON.parse((listened.content as { text: string }[])[0]!.text);
+    expect(enrolled).toMatchObject({ harness: "pi", status: "listening", listener_id: expect.stringMatching(/^mcp-receiver-[a-z2-7]{12}$/) });
+    const sent = await client.callTool({ name: "cito_send", arguments: { to: enrolled.listener_id, message: "over MCP", wake: false } });
+    expect(sent.isError).toBe(false);
+    expect(JSON.parse((sent.content as { text: string }[])[0]!.text)).toMatchObject({ to: enrolled.listener_id, status: "stored_passive" });
     for (const name of ["cito_listen", "cito_unlisten", "cito_find", "cito_send", "cito_inbox"]) {
       const invalid = await client.callTool({ name, arguments: { extra: true } });
       expect(invalid.isError).toBe(true);

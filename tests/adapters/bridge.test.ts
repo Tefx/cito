@@ -15,6 +15,7 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
   let handlers: Map<string, (event: { source?: string }, ctx: BridgeContext) => void | Promise<void>>;
   const send = vi.fn<BridgeAPI["sendMessage"]>();
   const status = vi.fn<BridgeContext["ui"]["setStatus"]>();
+  const register = vi.fn<NonNullable<BridgeAPI["registerMessageRenderer"]>>();
   const emit = async (event: string, value = {}) => { await handlers.get(event)!(value, ctx); };
   beforeEach(async () => {
     state = await isolatedState();
@@ -23,8 +24,8 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     currentId = "session-a"; name = "Human title"; idle = true;
     ctx = { cwd: state.root, isIdle: () => idle,
       sessionManager: { getSessionId: () => currentId, getSessionName: () => name }, ui: { setStatus: status } };
-    handlers = new Map(); send.mockReset(); status.mockReset();
-    api = { on: (event, handler) => handlers.set(event, handler), sendMessage: send };
+    handlers = new Map(); send.mockReset(); status.mockReset(); register.mockReset();
+    api = { on: (event, handler) => handlers.set(event, handler), sendMessage: send, registerMessageRenderer: register };
     citoBridge(api);
   });
   afterEach(async () => {
@@ -85,8 +86,8 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
   it("checks session identity before either status update or duplicate delivery", async () => {
     await emit("session_start");
     const endpoint = { pi_pid: process.pid, session_id: "session-a" };
-    await setPiStatus(endpoint, "📡 cito: listener", state);
-    expect(status).toHaveBeenLastCalledWith("cito", "📡 cito: listener");
+    await setPiStatus(endpoint, "🔔 listener", state);
+    expect(status).toHaveBeenLastCalledWith("cito", "🔔 listener");
     await setPiStatus(endpoint, null, state);
     expect(status).toHaveBeenLastCalledWith("cito", undefined);
     await deliverPiWake(endpoint, "batch", "hello", state);
@@ -94,7 +95,7 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     await expect(setPiStatus(wrong, "no", state)).rejects.toMatchObject({ bridgeError: "SESSION_MISMATCH" });
     await expect(deliverPiWake(wrong, "batch", "no", state)).rejects.toMatchObject({ bridgeError: "SESSION_MISMATCH" });
     expect(send).toHaveBeenCalledTimes(1);
-    expect(status).toHaveBeenCalledTimes(2);
+    expect(status.mock.calls).toEqual([["cito", undefined], ["cito", "🔔 listener"], ["cito", undefined]]);
   });
   it("deduplicates concurrent retries and evicts only the oldest of 200 IDs", async () => {
     await emit("session_start");
@@ -135,6 +136,56 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     expect(reply.split("\n").filter(Boolean)).toHaveLength(1);
     expect(JSON.parse(reply)).toEqual({ id: "x", ok: true, delivered: true, deduplicated: false });
     expect(send).toHaveBeenCalledWith(expect.anything(), { triggerTurn: false, deliverAs: "followUp" });
+  });
+  it("clears stale badges immediately on session changes, including switches discovered by identify", async () => {
+    await emit("session_start");
+    await setPiStatus({ pi_pid: process.pid, session_id: "session-a" }, "🔔 old", state);
+    currentId = "session-b"; await emit("session_tree");
+    expect(status).toHaveBeenLastCalledWith("cito", undefined);
+    const calls = status.mock.calls.length;
+    await emit("session_info_changed");
+    expect(status).toHaveBeenCalledTimes(calls);
+    await setPiStatus({ pi_pid: process.pid, session_id: "session-b" }, "🔔 new", state);
+    currentId = "session-a";
+    await identifyPi(process.pid, state);
+    expect(status).toHaveBeenLastCalledWith("cito", undefined);
+  });
+  it("renders new and legacy notifications with themed bars and expandable acknowledgement details", () => {
+    expect(register).toHaveBeenCalledWith("cito-notification", expect.any(Function));
+    const renderer = register.mock.calls[0]![1];
+    const theme = { fg: vi.fn((_color: string, text: string) => text), bg: vi.fn((_color: string, text: string) => text),
+      bold: vi.fn((text: string) => text) };
+    const content = '🔔 Cito · alice@mac [↩ repo-pbtjxcxkgw3y]\n\nHello\n\n↳ Ack: cito_inbox(ack_ids: ["sig_1"])';
+    const collapsed = renderer({ content }, { expanded: false, outputPad: 1 }, theme);
+    expect(collapsed.render(80).map(line => line.trimEnd())).toEqual([
+      ' 🔔 Cito · alice@mac [↩ repo-pbtjxcxkgw3y]', ' │', ' │ Hello',
+    ]);
+    expect(theme.bg).toHaveBeenCalledWith("customMessageBg", expect.any(String));
+    expect(theme.fg).toHaveBeenCalledWith("accent", expect.stringContaining("🔔 Cito"));
+    expect(theme.fg).toHaveBeenCalledWith("borderAccent", "│ ");
+    expect(theme.bold).toHaveBeenCalled();
+    const expanded = renderer({ content: [{ type: "text", text: content }] }, { expanded: true }, theme);
+    expect(expanded.render(80).join("\n")).toContain('↳ Ack: cito_inbox(ack_ids: ["sig_1"])');
+    expect(theme.fg).toHaveBeenCalledWith("dim", expect.stringContaining("↳ Ack:"));
+    const legacy = '<cito_signal count="1"><signal id="sig_1" from="repo-pbtjxcxkgw3y" from_user="alice" from_host="mac.local" from_title="Build">\nLegacy message\n</signal>\nPlease call cito_inbox(ack_ids: ["sig_1"]) to acknowledge.</cito_signal>';
+    const old = renderer({ content: legacy }, { expanded: false }, theme).render(80).join("\n");
+    expect(old).toContain("alice@mac · Build [↩ repo-pbtjxcxkgw3y]");
+    expect(old).toContain("Legacy message");
+    expect(old).not.toContain("<cito_signal");
+    expect(old).not.toContain("cito_inbox");
+    expect(renderer({ content: legacy }, { expanded: true }, theme).render(80).join("\n")).toContain("↳ Ack:");
+  });
+  it("wraps CJK, emoji and combining characters within narrow terminal widths and reapplies themes", () => {
+    const renderer = register.mock.calls[0]![1];
+    let style = "";
+    const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => style + text,
+      bold: (text: string) => text };
+    const component = renderer({ content: "🔔 Cito\n你好🙂é" }, { expanded: false }, theme);
+    expect(component.render(7)).toEqual(["🔔 Cito", "│ 你好 ", "│ 🙂é  "]);
+    expect(component.render(1)).toEqual([" ", "C", "i", "t", "o", "é"]);
+    style = "new-theme:"; component.invalidate();
+    expect(component.render(7).every(line => line.startsWith("new-theme:"))).toBe(true);
+    expect(component.render(0)).toEqual([]);
   });
   it("generates a different epoch for a new extension instance", async () => {
     await emit("session_start");

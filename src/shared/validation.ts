@@ -22,7 +22,8 @@ export function validateHarness(value: unknown): Harness {
   if (!result.success) throw new CitoError("UNSUPPORTED_HARNESS", "V1 supports only codex and pi");
   return result.data;
 }
-export const listenerIdSchema = z.string().regex(/^c_[a-z2-7]{12}$/);
+export const canonicalListenerIdSchema = z.string().regex(/^c_[a-z2-7]{12}$/);
+export const listenerIdSchema = z.string().regex(/^(?:c_[a-z2-7]{12}|[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12})$/);
 // Refine by codepoints after cleaning: z.string().max(500) would reject valid emoji.
 const textSchema = z.unknown().transform((value, ctx) => {
   try { return sanitizeMessage(value); }
@@ -33,6 +34,7 @@ const textSchema = z.unknown().transform((value, ctx) => {
 });
 export const listenInputSchema = z.object({
   about: textSchema,
+  tag: z.string().max(64).optional(),
   scope: z.enum(["self", "workspace"]).optional(),
   allow_peer_wake: z.boolean().optional(),
 }).strict();
