@@ -62,7 +62,7 @@ phases:
   - id: v1.nats-and-auth-callout
     name: Toolchain foundation, shared schemas & keyless listener_id (src/shared/),
       NATS JetStream config (deploy/nats/), and OIDC Auth Callout responder (src/auth-callout/)
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ tsconfig.json\n    - deploy/nats/**\n    - src/shared/**\n    - src/auth-callout/**\n\
@@ -132,6 +132,35 @@ phases:
     agent: node-typescript-engineer
     claimed_by: node-typescript-engineer
     claimed_at: '2026-11-04T01:20:33.662928Z'
+    done_at: '2026-11-04T01:47:01.119582+00:00'
+    evidence: 'Implemented by node-typescript-engineer in isolated worktree (commits
+      9f10242bec1de55e79ea37c24c005aa88ce1887c, 3012bad8fea5bd0263515e35576be2bce08275f0,
+      fast-forwarded to main):
+
+      - Toolchain foundation: package.json, package-lock.json, tsconfig.json with
+      Vitest directory-filtered runner (`npm test -- tests/shared/ tests/auth-callout/`),
+      TypeScript strict ESM, and offline official NATS 2.14.0 test harness (`tests/shared/nats-server.ts`).
+
+      - Shared contracts (`src/shared/`): config validation (`docs/DESIGN.md` §2.1),
+      canonical `principal_id`/`owner_user` (`none#<user>` and `${iss}#${sub}`, §3.1.1),
+      keyless deterministic `listener_id` (`^c_[a-z2-7]{12}$`, §3.1.3), `SenderEndpointKey`
+      (§3.2.1), MCP result/error envelopes and all 15 error codes (§4.1), message
+      sanitization & `<`/`>` escaping (§4.5), broker-clock lease evaluation (`ACTIVE_LEASE_MS
+      = 60_000`, `RETENTION_MS = 1_800_000`, §4.4/§5.1), and idempotent NATS `CITO_SIGNALS`
+      stream + `cito_listeners` KV provisioning (§5.1).
+
+      - NATS deployment configs (`deploy/nats/`): `nats-server.conf`, `nats-server.oidc.conf`,
+      `nats-server.oidc-xkey.conf`, `nats-server.oidc-accounts.conf`, `docker-compose.yml`,
+      `Dockerfile` (§8.1).
+
+      - Stateless OIDC Auth Callout responder (`src/auth-callout/`, `bin/cito-auth-callout`):
+      fail-fast startup validation (exit code 1 on invalid config), JWKS discovery/caching
+      with 60s refresh cooldown, RS256/ES256 `id_token` verification, NATS User Claims
+      JWT v2 signing (`$JS.API.>`, `$JS.ACK.>`, `$KV.cito_listeners.>`, `cito.signal.>`,
+      `cito.ack.>`, `_INBOX.>`), and Curve25519 XKey encryption support (§8.1).
+
+      - Verification: `npm run typecheck` (exit 0); `npm test -- tests/shared/ tests/auth-callout/`
+      (5 test files, 29 tests passed, exit 0); `git diff --check` (exit 0).'
   - id: v1.host-adapters
     name: Pi 1.5.0 socket bridge extension (src/pi-extension/cito-bridge.ts) and Codex/Pi
       host caller & wake drivers
