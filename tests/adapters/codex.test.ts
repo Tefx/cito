@@ -18,11 +18,15 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
     state = await isolatedState(); vi.stubEnv("CITO_STATE_DIR", state.stateDir); vi.stubEnv("CITO_CODEX_HOME", state.codexHome);
   });
   afterEach(async () => { await Promise.all(servers.splice(0).map(s => s.stop())); vi.unstubAllEnvs(); await state.cleanup(); });
-  function database(archived = 0, title: string | null = "Thread title") {
+  function database(archived = 0, title: string | null = "Thread title", name?: string | null) {
     const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
     try {
       db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, title TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, archived INTEGER)");
       db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)").run(threadId, title, state.root, "https://github.com/Owner/Repo.git", "topic", archived);
+      if (name !== undefined) {
+        db.exec("ALTER TABLE threads ADD COLUMN name TEXT");
+        db.prepare("UPDATE threads SET name = ? WHERE id = ?").run(name, threadId);
+      }
     } finally { db.close(); }
   }
   async function ipc(result: object = { ownerClientId: "owner" }, resultType = "success", extra: object = {}) {
@@ -67,10 +71,11 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
     expect(await resolveCodexCaller({ codexThreadId: threadId }, state)).toEqual({ harness: "codex", session_id: threadId,
       cwd: state.root, title: "Thread title", repo: "Owner/Repo", branch: "topic" });
     expect(requests).toHaveLength(2);
-    expect(requests[0]).toEqual({ type: "request", requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-      method: "initialize", params: { clientType: "cito-mcp" } });
-    expect(requests[1]).toEqual({ type: "request", requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
-      sourceClientId: "cito-client", method: "thread-owner-discovery", params: { threadId } });
+    expect(requests[0]).toEqual({ type: "request", version: 1, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      method: "initialize", params: { clientType: "cli" } });
+    expect(requests[1]).toEqual({ type: "request", version: 1, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      sourceClientId: "cito-client", method: "thread-owner-discovery",
+      params: { hostId: "local", conversationId: threadId, threadId } });
     expect(requests[1]!.requestId).not.toBe(requests[0]!.requestId);
     expect(() => readCodexThread("unknown", state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
     // SQL parameters cannot accidentally select all rows.
@@ -83,13 +88,38 @@ describe("Codex metadata, SQLite, framed IPC, and separate wake effects", () => 
     try { db.exec("UPDATE threads SET archived = 0, title = '', git_origin_url = NULL, git_branch = NULL"); } finally { db.close(); }
     expect(readCodexThread(threadId, state)).toMatchObject({ title: state.root.split("/").at(-1), repo: null, branch: null });
   });
+  it.each([
+    { name: "  Session name  ", title: "Thread title", expected: "Session name" },
+    { name: "", title: "  Thread title  ", expected: "Thread title" },
+    { name: " \t ", title: "  Thread title  ", expected: "Thread title" },
+    { name: null, title: "Thread title", expected: "Thread title" },
+    { name: "  ", title: " \t ", expected: null },
+    { name: null, title: null, expected: null },
+  ])("prefers trimmed name, then title, then cwd basename: %j", ({ name, title, expected }) => {
+    database(0, title, name);
+    expect(readCodexThread(threadId, state).title).toBe(expected ?? state.root.split("/").at(-1));
+  });
+  it("allows explicit archived-thread reads for inbox/unlisten without a live IPC owner", async () => {
+    database(1, "Archived title", "Archived name");
+    expect(() => readCodexThread(threadId, state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
+    expect(() => readCodexThread(threadId, state, { allowArchived: false })).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
+    expect(readCodexThread(threadId, state, { allowArchived: true })).toMatchObject({ session_id: threadId, title: "Archived name" });
+    expect(() => readCodexThread("missing", state, { allowArchived: true })).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
+    // Registration still rejects archived threads; the option belongs only to explicit reads.
+    await expect(resolveCodexCaller({ codexThreadId: threadId }, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
+  });
   it("never creates a missing state database", async () => {
     expect(() => readCodexThread(threadId, state)).toThrow(expect.objectContaining({ code: "SESSION_NOT_OPEN" }));
     await expect(readFile(join(state.codexHome, "state_5.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+  it.each([{ ownerClientId: "owner" }, { status: "alive" }, {}])("accepts successful discovery without requiring ownerClientId: %j", async result => {
+    await ipc(result);
+    await expect(assertCodexThreadOpen(threadId, state)).resolves.toBeUndefined();
+  });
   it.each([
     [{ status: "no-client-found", ownerClientId: "stale" }, "success"],
-    [{}, "success"], [{ ownerClientId: "" }, "success"], [{ ownerClientId: "owner" }, "error"],
+    [{ ownerClientId: null }, "success"], [{ ownerClientId: "" }, "success"],
+    [{ ownerClientId: "owner" }, "error"], [{ status: "alive" }, "pending"],
   ])("rejects owner discovery response %j %s", async (result, resultType) => {
     await ipc(result, resultType);
     await expect(assertCodexThreadOpen(threadId, state)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });

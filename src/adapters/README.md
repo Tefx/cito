@@ -37,16 +37,26 @@ any Pi ancestor or hint uses `BINDING_REQUIRED`.
 
 ## Codex Desktop
 
-`readCodexThread` reads `state_5.sqlite` without creating or modifying it.
-`assertCodexThreadOpen` verifies a current IPC owner. `resolveCodexCaller` does
-both, rejecting archived/missing threads and unavailable Desktop owners.
+`readCodexThread(threadId, config, { allowArchived? })` reads `state_5.sqlite`
+without creating or modifying it. Display titles prefer trimmed `name`, then
+trimmed `title`, then the cwd basename; schemas without `name` also work.
+Archived threads are rejected by default. Inbox/unlisten callers can explicitly
+set `allowArchived: true` to read a known closed session without an IPC probe.
+Missing threads still fail. `assertCodexThreadOpen` verifies Desktop liveness.
+`resolveCodexCaller` performs the default read and probe, rejecting
+archived/missing threads and unavailable Desktop owners for registration.
 
-The assigned IPC contract uses `type: "request"`, UUID `requestId`, initialize
-`clientType: "cito-mcp"`, then `sourceClientId` and discovery `params.threadId`.
-Discovery requires a non-empty `result.ownerClientId`. This is the explicit task
-contract; DESIGN.md §7.3 currently describes different initialize/discovery
-fields. The local tests establish this assigned wire contract against real
-Unix sockets, without claiming a live Desktop compatibility probe.
+IPC requests use `type: "request"`, `version: 1`, and a UUID `requestId`.
+Initialize sends `params: { clientType: "cli" }` and requires `result.clientId`.
+Discovery sends that `sourceClientId` and
+`params: { hostId: "local", conversationId: threadId, threadId }`.
+A discovery `resultType: "success"` establishes liveness, including results
+`{ status: "alive" }` and `{}` with no owner ID. Explicit `status: "no-client-found"`,
+`ownerClientId: null`, or `ownerClientId: ""` reports closure even on success;
+any non-success result also fails with `SESSION_NOT_OPEN`. These requests follow
+DESIGN.md §7.3, retaining `threadId` alongside `conversationId` for compatibility.
+Local Unix socket tests verify the wire contract; live Desktop compatibility
+remains unverified.
 
 `queueCodexWake(threadId, card, { codexBin?, signal? })` and
 `triggerCodexWake(threadId, { openBin?, signal? })` expose separate effects.

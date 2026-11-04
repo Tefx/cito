@@ -11,6 +11,7 @@ const exec = promisify(execFile);
 type CodexConfig = Pick<CitoConfig, "codexHome">;
 export interface CodexCaller extends RepoMetadata { harness: "codex"; session_id: string; cwd: string }
 export interface CodexDriverOptions { codexBin?: string; openBin?: string; signal?: AbortSignal }
+export interface ReadCodexThreadOptions { allowArchived?: boolean }
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -25,15 +26,20 @@ export function codexThreadId(meta: Record<string, unknown> = {}): string {
 }
 
 /** Read only the caller's explicit thread, never guess from recency or focus. */
-export function readCodexThread(threadId: string, config: CodexConfig = loadConfig()): CodexCaller {
+export function readCodexThread(threadId: string, config: CodexConfig = loadConfig(),
+  options: ReadCodexThreadOptions = {}): CodexCaller {
   let db: DatabaseSync | undefined;
   try {
     db = new DatabaseSync(join(config.codexHome, "state_5.sqlite"), { readOnly: true });
     db.exec("PRAGMA busy_timeout = 1000");
-    const row = db.prepare("SELECT id, title, cwd, git_origin_url, git_branch, archived FROM threads WHERE id = ?").get(threadId);
-    if (!row || row.archived === 1 || !nonempty(row.cwd)) throw new Error("Thread is absent, archived, or has no cwd");
+    // SELECT * also supports older Desktop schemas without the optional name column.
+    const row = db.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
+    if (!row || (row.archived === 1 && !options.allowArchived) || !nonempty(row.cwd)) {
+      throw new Error("Thread is absent, archived, or has no cwd");
+    }
     return { harness: "codex", session_id: threadId, cwd: row.cwd,
-      title: nonempty(row.title) ? row.title : basename(row.cwd),
+      title: (typeof row.name === "string" && row.name.trim())
+        || (typeof row.title === "string" && row.title.trim()) || basename(row.cwd),
       repo: normalizeRepo(typeof row.git_origin_url === "string" ? row.git_origin_url : null),
       branch: typeof row.git_branch === "string" ? row.git_branch : null };
   } catch (error) { throw new CitoError("SESSION_NOT_OPEN", "Codex thread is not open", { cause: error }); }
@@ -69,7 +75,7 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
     }
     socket.on("connect", () => {
       if (signal?.aborted) { abort(); return; }
-      send({ type: "request", requestId, method: "initialize", params: { clientType: "cito-mcp" } });
+      send({ type: "request", version: 1, requestId, method: "initialize", params: { clientType: "cli" } });
     });
     socket.on("error", closed);
     socket.on("close", () => { if (!settled) closed(new Error("Codex IPC closed before response")); });
@@ -85,15 +91,19 @@ export async function assertCodexThreadOpen(threadId: string, config: CodexConfi
           buffer = buffer.subarray(size + 4);
           if (!record(response)) throw new Error("Invalid Codex response");
           if (response.type !== "response" || response.requestId !== requestId) continue;
-          if (response.resultType !== "success" || !record(response.result)) throw new Error("Codex IPC request rejected");
+          if (response.resultType !== "success") throw new Error("Codex IPC request rejected");
+          const result = record(response.result) ? response.result : undefined;
           if (phase === "initialize") {
-            if (!nonempty(response.result.clientId)) throw new Error("Missing clientId");
+            if (!nonempty(result?.clientId)) throw new Error("Missing clientId");
             phase = "discover";
             requestId = randomUUID();
-            send({ type: "request", requestId, sourceClientId: response.result.clientId,
-              method: "thread-owner-discovery", params: { threadId } });
+            send({ type: "request", version: 1, requestId, sourceClientId: result.clientId,
+              method: "thread-owner-discovery", params: { hostId: "local", conversationId: threadId, threadId } });
           } else {
-            if (response.result.status === "no-client-found" || !nonempty(response.result.ownerClientId)) throw new Error("No live owner");
+            // Success is authoritative unless the result explicitly reports no owner.
+            if (result?.status === "no-client-found" || result?.ownerClientId === null || result?.ownerClientId === "") {
+              throw new Error("No live owner");
+            }
             finish();
           }
         }
