@@ -1,8 +1,10 @@
 {
-  "name": "cito",
+  "name": "@tefx/cito",
   "version": "0.1.0",
-  "private": true,
+  "description": "Notification-only cross-harness, cross-machine, multi-user wake and signaling service for coding agents",
   "type": "module",
+  "main": "dist/src/mcp/service.js",
+  "types": "dist/src/mcp/service.d.ts",
   "engines": {
     "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
   },
@@ -10,10 +12,30 @@
     "cito-mcp": "bin/cito-mcp",
     "cito-auth-callout": "bin/cito-auth-callout"
   },
+  "pi": {
+    "extensions": [
+      "./src/pi-extension/cito-bridge.ts"
+    ]
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tefx/cito.git"
+  },
   "scripts": {
     "test": "vitest run --dir tests",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

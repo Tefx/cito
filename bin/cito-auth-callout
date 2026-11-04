@@ -1,9 +1,18 @@
 #!/usr/bin/env node
-// Resolve tsx relative to this installation, independent of the caller's cwd.
-import { tsImport } from "tsx/esm/api";
+// Resolve prebuilt dist/ first, falling back to tsx relative to this installation.
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const distEntry = new URL("../dist/src/auth-callout/cli.js", import.meta.url);
 try {
-  const { main } = await tsImport("../src/auth-callout/cli.ts", import.meta.url);
-  await main();
+  if (existsSync(fileURLToPath(distEntry))) {
+    const { main } = await import(distEntry.href);
+    await main();
+  } else {
+    const { tsImport } = await import("tsx/esm/api");
+    const { main } = await tsImport("../src/auth-callout/cli.ts", import.meta.url);
+    await main();
+  }
 } catch (error) {
   process.stderr.write("cito-auth-callout: " + (error instanceof Error ? error.message : String(error)) + "\n");
   process.exitCode = 1;

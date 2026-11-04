@@ -1,8 +1,17 @@
 #!/usr/bin/env node
-import { tsImport } from "tsx/esm/api";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const distEntry = new URL("../dist/src/mcp/cli.js", import.meta.url);
 try {
-  const { main } = await tsImport("../src/mcp/cli.ts", import.meta.url);
-  await main();
+  if (existsSync(fileURLToPath(distEntry))) {
+    const { main } = await import(distEntry.href);
+    await main();
+  } else {
+    const { tsImport } = await import("tsx/esm/api");
+    const { main } = await tsImport("../src/mcp/cli.ts", import.meta.url);
+    await main();
+  }
 } catch (error) {
   process.stderr.write("cito-mcp: " + (error instanceof Error ? error.message : String(error)) + "\n");
   process.exitCode = 1;
