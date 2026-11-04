@@ -374,27 +374,29 @@ phases:
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Final V1 phase and project acceptance decision (`PASS` or `FAIL`) for `/Users/tefx/Projects/cito`\
-      \ over the integrated candidate produced by `v1.hub`, `v1.host-adapters`, `v1.banner`,\
-      \ and `v1.mcp-and-e2e`.\n- **Boundary:** Owner `gate-reviewer`; strictly read-only\
-      \ (`repo_change_policy: no_repo_change`). Does not modify repository files,\
-      \ Plan state, or external host directories.\n- **Admit:**\n  - Included phase\
-      \ and terminal outcomes: Phase `v1` (`v1.hub`, `v1.host-adapters`, `v1.banner`,\
-      \ `v1.mcp-and-e2e`) bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
-      \  - Consumed evidence: completion evidence and test execution outputs from\
-      \ `v1.hub`, `v1.host-adapters`, `v1.banner`, and `v1.mcp-and-e2e`, verified\
-      \ against `docs/DESIGN.md` (§1–§8, §10) and `README.md`.\n  - Exclusions verified:\
-      \ confirm that the Claude Code adapter (`docs/DESIGN.md` §9) is excluded from\
-      \ V1 implementation/tests (`harness: \"claude\"` rejected with `422 UNSUPPORTED_HARNESS`),\
-      \ and that all code, builds, and tests are self-contained inside `/Users/tefx/Projects/cito`\
-      \ without mutating external `dotfiles` or `tela` repositories.\n- **Recovery:**\
-      \ On any unmet material requirement or regression in `docs/DESIGN.md` §1–§8\
-      \ or §10, return `FAIL` with concrete file/line/test counterexamples so Orchestrator\
-      \ can route a cohesive writable repair before re-running this gate in Delta\
-      \ mode."
+      \ over the integrated NATS JetStream Edition candidate produced by `v1.nats-and-auth-callout`,\
+      \ `v1.host-adapters`, `v1.banner`, and `v1.mcp-and-e2e`.\n- **Boundary:** Owner\
+      \ `gate-reviewer`; strictly read-only (`repo_change_policy: no_repo_change`).\
+      \ Does not modify repository files, Plan state, or external host directories.\n\
+      - **Admit:**\n  - Included phase and terminal outcomes: Phase `v1` (`v1.nats-and-auth-callout`,\
+      \ `v1.host-adapters`, `v1.banner`, `v1.mcp-and-e2e`) bound to the immutable\
+      \ integrated Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence:\
+      \ completion evidence, test execution outputs, and `code-hygiene` (`ITERATIVE_CONVERGENCE`)\
+      \ convergence receipts from `v1.nats-and-auth-callout`, `v1.host-adapters`,\
+      \ `v1.banner`, and `v1.mcp-and-e2e`, verified against `docs/DESIGN.md` (§1–§8,\
+      \ §10) and `README.md`.\n  - Exclusions verified: confirm that the Claude Code\
+      \ adapter (`docs/DESIGN.md` §9) is excluded from V1 implementation/tests (`harness:\
+      \ \"claude\"` rejected with `UNSUPPORTED_HARNESS`), that no custom HTTP/WebSocket\
+      \ message broker replaces NATS JetStream + KV, and that all code, builds, and\
+      \ tests are self-contained inside `/Users/tefx/Projects/cito` without mutating\
+      \ external `dotfiles` or `tela` repositories.\n- **Recovery:** On any unmet\
+      \ material requirement or regression in `docs/DESIGN.md` §1–§8 or §10, return\
+      \ `FAIL` with concrete file/line/test counterexamples so Orchestrator can route\
+      \ a cohesive writable repair before re-running this gate in Delta mode."
     verification: npm test && git status --short
     evidence_template: Gate verdict (PASS/FAIL), requirement trace against docs/DESIGN.md
-      §1-§8 & §10, verification of Claude Code exclusion (§9) and self-containment
-      inside /Users/tefx/Projects/cito.
+      (NATS JetStream Edition) §1-§8 & §10, verification of Claude Code exclusion
+      (§9) and self-containment inside /Users/tefx/Projects/cito.
     refs:
     - docs/DESIGN.md
     - README.md
