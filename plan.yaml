@@ -257,70 +257,110 @@ phases:
     - v1.nats-and-auth-callout
     agent: ios-developer
   - id: v1.mcp-and-e2e
-    name: 'Unified cito-mcp server, crash-safe two-stage dispatcher, OIDC JIT login,
-      E2E suite, and code-hygiene consolidation [REQUIRES_SKILL: code-hygiene]'
+    name: 'Unified cito-mcp server over NATS JetStream/KV, recipient anti-loop & crash-safe
+      dispatch, OIDC JIT login, E2E suite, and code-hygiene consolidation [REQUIRES_SKILL:
+      code-hygiene]'
     status: pending
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
-      scope:\n  allowed_paths:\n    - src/**\n    - bin/**\n    - tests/**\n    -\
-      \ README.md\n    - package.json\n    - tsconfig.json\n  blocked_paths:\n   \
-      \ - plan.yaml\n    - docs/DESIGN.md\n```\n\n- **Deliver:**\n  - Implement the\
-      \ unified `cito-mcp` stdio MCP server (`src/mcp/`, CLI entrypoint `bin/cito-mcp`)\
-      \ and integrate `cito-hub`, `src/adapters/`, `src/pi-extension/cito-bridge.ts`,\
-      \ and `src/banner/` fulfilling `docs/DESIGN.md` §2.1, §3.1–3.2, §4.1–4.6, §5.3,\
-      \ §7.1, §8.2, and §10:\n    - Persistent `${CITO_STATE_DIR}/host-id` (`0600`\
-      \ lowercase UUIDv4) and local SQLite state store (`${CITO_STATE_DIR}/state.sqlite`,\
-      \ mode `0600`) with `local_listeners` and `local_signals` tables, retaining\
-      \ `(harness, session_id) -> listener_id` across `cito_unlisten` so `cito_inbox`\
-      \ works without an active Hub connection.\n    - Public MCP tools (`cito_listen`,\
-      \ `cito_unlisten`, `cito_find`, `cito_send`, `cito_inbox`) with exact input/output\
-      \ JSON schemas, common `isError` envelope (`§4.1`), and target-driven outbound\
-      \ routing (`cito_find` and `cito_send` never fail with `BINDING_REQUIRED` when\
-      \ caller is unbound, using `SenderEndpointKey = \"${principal_id}|${host_id}|unbound|default\"\
-      `).\n    - Lazy outbound WS/WSS stream client (`/v1/stream`) with automatic\
-      \ reconnect, `bind` handshake, gap-rebasing cursor (`replay_gap: true` sets\
-      \ `replay_gap_detected = 1`, `replay_gap_range`, and rebases `persisted_seq\
-      \ = min_retained_seq - 1`), Stage-1 durable signal insertion (`RECEIVED` vs\
-      \ `STORED_PASSIVE`), and immediate `receipt` transmission.\n    - Bounded 20-second\
-      \ continuous liveness sweep (`Promise.allSettled` with strict `1500ms` per-listener\
-      \ timeout) before each `heartbeat`, revoking immediately on Codex `archived\
-      \ == 1` / `no-client-found` (`reason: \"tab_closed\"`), Pi `session_id` change\
-      \ (`reason: \"session_switched\"`), or dead Pi process (`reason: \"process_exited\"\
-      `), and revoking on the 3rd consecutive transient probe timeout (`reason: \"\
-      probe_timeout\"`).\n    - Stage-2 crash-safe immutable-batch dispatcher (`1500ms`\
-      \ debounce + startup recovery): expires stale rows (`EXPIRED_UNSENT`), acquires\
-      \ SQLite listener lease (`dispatcher_token = uuidv4()`, `lease_until_ms = now\
-      \ + 30_000`), registers per-`(listener_id, binding_generation)` `AbortController`\
-      \ (aborted immediately on `cito_unlisten` or `fenced`, killing any spawned child\
-      \ process via `SIGTERM` and moving `RECEIVED`/`DISPATCHING` rows to `STORED_PASSIVE`\
-      \ with `unlistened_before_dispatch` / `fenced_before_dispatch`), retries existing\
-      \ frozen `DISPATCHING` `batch_id` before freezing new `RECEIVED` rows (`batch_${listener_id}_${min_seq}_${max_seq}_${binding_generation}`),\
-      \ enforces `assertDispatchStillAuthorized` immediately before Pi `deliver`,\
-      \ before `codex queue`, AND between `codex queue` (`queue_written = 1`) and\
-      \ `open -g \"codex://threads/wake/<id>\"`, and invokes `cito-banner` asynchronously\
-      \ best-effort (updating Pi status badge unread counts on passive signals).\n\
-      \    - Rejection-aware double-checked `flock` JIT OIDC login (`${CITO_STATE_DIR}/oidc-token.json`\
-      \ mode `0600` and `oidc-login.lock`, `45s` deadline): re-reads `oidc-token.json`\
-      \ under lock and reuses only if `issuer`, `client_id`, `expires_at > now + 60`,\
-      \ AND `token_sha256 !== rejected_sha256`; performs silent `refresh_token` exchange\
-      \ or local loopback `http://127.0.0.1:0/callback` PKCE `S256` browser login,\
-      \ writes token atomically, and retries once on HTTP `401` or WSS `4401` `auth_expired`.\n\
-      \  - Deliver the end-to-end integration test suite (`tests/mcp/` and `tests/e2e/`)\
-      \ covering every requirement in `docs/DESIGN.md` §10.1–10.4, update `README.md`\
-      \ with build/run and self-contained Pi extension installation instructions,\
-      \ and execute `[REQUIRES_SKILL: code-hygiene]` across the repository to ensure\
-      \ complete entry-to-effect wiring, zero dead/duplicate code, and authentic behavioral\
-      \ assertions.\n- **Boundary:** Owner `senior-engineer`; integrates all repository\
-      \ modules inside `/Users/tefx/Projects/cito` with `[REQUIRES_SKILL: code-hygiene]`.\
+      scope:\n  allowed_paths:\n    - src/**\n    - bin/**\n    - deploy/**\n    -\
+      \ tests/**\n    - README.md\n    - package.json\n    - tsconfig.json\n  blocked_paths:\n\
+      \    - plan.yaml\n    - docs/DESIGN.md\n```\n\n- **Deliver:**\n  - Implement\
+      \ the unified `cito-mcp` stdio MCP server (`src/mcp/`, CLI entrypoint `bin/cito-mcp`)\
+      \ over NATS JetStream + KV and integrate `src/shared/`, `src/auth-callout/`,\
+      \ `src/adapters/`, `src/pi-extension/cito-bridge.ts`, and `src/banner/` fulfilling\
+      \ `docs/DESIGN.md` §2.1, §3.1–3.2, §4.1–4.6, §5.1–5.3, §6.1–6.3, §7.1, §8.2,\
+      \ and §10:\n    - Persistent `${CITO_STATE_DIR}/host-id` (`0600` lowercase UUIDv4)\
+      \ and local SQLite state store (`${CITO_STATE_DIR}/state.sqlite`, mode `0600`)\
+      \ with `local_listeners`, `local_signals`, `local_pairwise_wakes`, and `local_sent_idempotency`\
+      \ tables.\n    - Public MCP tools (`cito_listen`, `cito_unlisten`, `cito_find`,\
+      \ `cito_send`, `cito_inbox`) with exact input/output JSON schemas, common `isError`\
+      \ envelope (`§4.1`), keyless deterministic `listener_id` lookup (so `cito_inbox`\
+      \ works offline or after `cito_unlisten`), and target-driven outbound routing\
+      \ (`cito_find` and `cito_send` never fail with `BINDING_REQUIRED` when caller\
+      \ is unbound, using `SenderEndpointKey = \"${principal_id}|${host_id}|unbound|default\"\
+      `).\n    - NATS KV (`cito_listeners`) & JetStream (`CITO_SIGNALS`) protocol\
+      \ (`§4.4`, `§4.5`, `§5.1`, `§5.2`):\n      - Broker-clock authoritative lease\
+      \ evaluation (`broker_now_ms = Date.parse(jsm.streams.info(\"KV_cito_listeners\"\
+      ).ts)`, `broker_age_ms = Math.max(0, broker_now_ms - Date.parse(kv_entry.created))`)\
+      \ distinguishing `ACTIVE` (`< 60_000ms`), `DISCONNECTED_RETAINED` (`60_000..1_800_000ms`),\
+      \ `EXPIRED` (`> 1_800_000ms` -> `LISTENER_EXPIRED`), and `UNLISTENED` (`LISTENER_NOT_FOUND`).\n\
+      \      - Lock-serialized KV takeover (`§5.2`): acquires `flock(\"${CITO_STATE_DIR}/sockets/listen-${listener_id}.lock\"\
+      )` (`5000ms`), sets `local_listeners.status = 'REBINDING'` in SQLite before\
+      \ KV CAS (`next_gen = Math.max(kv_entry?.binding_generation ?? 0, local_row?.binding_generation\
+      \ ?? 0) + 1`, `owner_token = uuidv4()`), commits `status = 'ACTIVE', binding_generation\
+      \ = next_gen, owner_token = my_owner_token` only after KV CAS succeeds (or `FENCED_INACTIVE`\
+      \ + `STALE_GENERATION` on exhausted retries), and enforces owner-qualified fencing\
+      \ cleanup (`WHERE listener_id = ? AND owner_token = A.owner_token` and `binding_generation\
+      \ <= A.generation`) so a losing process never clobbers the winner.\n      -\
+      \ Crash-safe sender idempotency & live ack (`§4.5`): transactional pre-publish\
+      \ reservation in `local_sent_idempotency` (`status = 'PENDING_PUBLISH'`, rejecting\
+      \ payload mismatches with `IDEMPOTENCY_KEY_CONFLICT`), subscribing to Core NATS\
+      \ `cito.ack.<signal_id>` (`2000ms` timeout), and publishing to JetStream `cito.signal.<to>`\
+      \ with `Nats-Msg-Id: dedup_id`.\n    - Recipient-local anti-loop protection\
+      \ & clock-independent `human_event_seq` (`§6.1–6.3`):\n      - Persistent `unattended_wake_count`\
+      \ (`max_unattended_wakes = 3`) in `state.sqlite` (mirrored to KV `unattended_wakes_remaining`),\
+      \ never reset by `unlisten -> listen` or 30m expiry.\n      - Clock-independent\
+      \ `human_event_seq`: single-flight Pi `identify` epoch-delta tracking (`last_bridge_epoch`,\
+      \ `retired_bridge_epochs_json` bounded to 32 epochs, `last_bridge_count`, `human_event_seq`,\
+      \ `last_consumed_human_seq`) ignoring stale retired epochs and advancing strictly\
+      \ on interactive events across restarts without relying on `Date.now()`; Codex\
+      \ banner-click SQLite atomic increment; and monotonic consumption (`human_event_seq\
+      \ > last_consumed_human_seq` resets `unattended_wake_count = 0` and clears `local_pairwise_wakes`).\n\
+      \      - Recipient-local inbound pairwise circuit breaker (`local_pairwise_wakes`):\
+      \ permits 2 admitted inbound waking signals per `(listener_id, sender_endpoint_key)`\
+      \ in a rolling 120s window and downgrades the 3rd to `effective_wake: false`\
+      \ (`held_reason = \"pairwise_rate_limited\"`), following the exact 5-level `held_reason`\
+      \ precedence (`stale_generation` > `passive_requested` > `peer_wake_disabled`\
+      \ > `wake_quota_exhausted` > `pairwise_rate_limited`).\n    - Bounded 20-second\
+      \ liveness sweep & Two-stage crash-safe batch dispatch (`§5.3`):\n      - 20s\
+      \ `Promise.allSettled` sweep (`1500ms` per-listener timeout) for `owner_token\
+      \ == my_owner_token`, shared 3-strike transient failure rule (`60s`), and shared\
+      \ healthy renewal updating NATS KV via `kv.update(listener_id, entry, last_revision)`.\n\
+      \      - Ephemeral JetStream Pull Consumer on `CITO_SIGNALS` (`opt_start_seq\
+      \ = persisted_seq + 1`), listener-specific offline gap detection (`broker_age_ms\
+      \ > 1_800_000` -> `replay_gap_detected = 1`, `replay_gap_range = \"offline_exceeded_30m\"\
+      `), latency-conservative local expiration mapping (`expires_at_ms = wall_at_req_start\
+      \ + Math.max(0, 1_800_000 - already_elapsed_ms - rtt_ms)`), and single atomic\
+      \ `BEGIN IMMEDIATE` Stage-1 admission transaction (deduplicating redelivered\
+      \ `signal_id` without double-charging wake quota/pairwise counters, storing\
+      \ `\"stale_generation\"` signals as `STORED_PASSIVE` so they remain readable\
+      \ in `cito_inbox`, advancing `persisted_seq`, then publishing `cito.ack.<signal_id>`\
+      \ and `msg.ack()`).\n      - Stage-2 crash-safe batch dispatch (`1500ms` debounce\
+      \ + startup recovery): whole-batch expiry (`batch_expires_at_ms = MIN(expires_at_ms)`),\
+      \ retrying existing frozen `DISPATCHING` `batch_id` before freezing new `RECEIVED`\
+      \ rows (`acknowledged_at_ms IS NULL`), and **holding `flock(\"${CITO_STATE_DIR}/sockets/listen-${listener_id}.lock\"\
+      )` across `assertDispatchStillAuthorized` + each host-effect submission** (Pi\
+      \ `deliver`, `codex queue` with `10_000ms` timeout and `queue_written = 1`,\
+      \ and `open -g \"codex://threads/wake/<id>\"`) so no takeover or `cito_unlisten`\
+      \ can interleave between authorization check and host-effect submission; plus\
+      \ independent `acknowledged_at_ms` column in `cito_inbox` (`§4.6`).\n    - Rejection-aware\
+      \ double-checked `flock` JIT OIDC login (`§8.2`): canonical `id_token` selection,\
+      \ local cryptographic JWKS signature verification before caching `{ issuer,\
+      \ client_id, id_token, refresh_token, token_sha256, expires_at, verified_principal_id,\
+      \ verified_user }` in `oidc-token.json` (`0600`), `oidc-login.lock` (`45s` deadline),\
+      \ `token_sha256 !== rejected_sha256` double-check, deadline-bounded silent `refresh_token`\
+      \ refresh (falling through to browser PKCE on `400`/`401`, or failing with `AUTH_UNAVAILABLE`\
+      \ on network/5xx without opening browser), and loopback `http://127.0.0.1:0/callback`\
+      \ PKCE `S256` flow.\n  - Deliver the end-to-end integration test suite (`tests/mcp/`\
+      \ and `tests/e2e/`) covering every requirement in `docs/DESIGN.md` §10.1–10.4,\
+      \ update `README.md` with build/run and self-contained Pi extension installation\
+      \ instructions, and execute `[REQUIRES_SKILL: code-hygiene]` with **`ITERATIVE_CONVERGENCE`\
+      \ cadence** across the repository until zero actionable findings remain.\n-\
+      \ **Boundary:** Owner `senior-engineer`; integrates all repository modules inside\
+      \ `/Users/tefx/Projects/cito` with `[REQUIRES_SKILL: code-hygiene]` (`ITERATIVE_CONVERGENCE`).\
       \ Must not implement Claude Code (`§9`) or mutate external repositories (`/Users/tefx/dotfiles`,\
       \ `tela`) or live user `~/.cito` / `~/.codex` directories.\n- **Admit:** Completed\
-      \ `v1.hub`, `v1.host-adapters`, and `v1.banner`, plus `docs/DESIGN.md` (§1–§8,\
-      \ §10) and `README.md`. Verified by `npm test` running the complete unit + E2E\
-      \ test suite and exiting `0`. Consumed by `v1.acceptance-gate`.\n- **Recovery:**\
-      \ Reconcile any failing integration seam, lock/timer leak, or hygiene defect\
-      \ in place and re-run `npm test` until green."
+      \ `v1.nats-and-auth-callout`, `v1.host-adapters`, and `v1.banner`, plus `docs/DESIGN.md`\
+      \ (§1–§8, §10) and `README.md`. Verified by `npm test` running the complete\
+      \ unit + E2E test suite and exiting `0`, plus `[REQUIRES_SKILL: code-hygiene]`\
+      \ (`ITERATIVE_CONVERGENCE`) reaching zero actionable findings. Consumed by `v1.acceptance-gate`.\n\
+      - **Recovery:** Reconcile any failing integration seam, lock/timer leak, or\
+      \ hygiene defect in place and re-run `npm test` and `code-hygiene` passes until\
+      \ green with zero actionable findings."
     verification: npm test
-    evidence_template: Full test suite output (npm test), E2E acceptance coverage
-      matrix for docs/DESIGN.md §10.1-10.4, and code-hygiene consolidation summary.
+    evidence_template: 'Full test suite output (npm test), E2E acceptance coverage
+      matrix for docs/DESIGN.md §10.1-10.4, and [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE
+      convergence summary with zero actionable findings remaining.'
     refs:
     - docs/DESIGN.md
     - README.md
