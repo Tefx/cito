@@ -343,7 +343,7 @@ phases:
     name: 'Unified cito-mcp server over NATS JetStream/KV, recipient anti-loop & crash-safe
       dispatch, OIDC JIT login, E2E suite, and code-hygiene consolidation [REQUIRES_SKILL:
       code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/**\n    - bin/**\n    - deploy/**\n    -\
       \ tests/**\n    - README.md\n    - package.json\n    - tsconfig.json\n  blocked_paths:\n\
@@ -451,6 +451,8 @@ phases:
     - v1.host-adapters
     - v1.banner
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-04T02:06:08.174186Z'
   - id: v1.acceptance-gate
     name: Final V1 specification conformance and project acceptance gate
     status: pending
