@@ -219,13 +219,14 @@ phases:
       \ if `EWOULDBLOCK` to process the incoming sender update) or wait up to `500ms`\
       \ to acquire `banner.lock` on click dismissal.\n      2. While holding both\
       \ `banner.lock` and `banner-instance.lock`: unlink `banner.sock`, close the\
-      \ listening socket, perform the click action (for Codex: atomically increment\
-      \ `human_event_seq` for `<thread_id>` in `${CITO_STATE_DIR}/state.sqlite` via\
-      \ `libsqlite3` and open `codex://threads/<thread_id>`; for Pi: dismiss without\
-      \ window switching) or `250ms` fade-out, order out the window, and call `exit(0)`.\n\
-      \    - Sender protocol in `src/banner/` (`cito-mcp` caller side): acquires exclusive\
-      \ blocking `flock` on `banner.lock` (`2500ms` timeout), attempts `banner.sock`\
-      \ delivery (`300ms` connect, `500ms` ack), and on failure probes `banner-instance.lock`\
+      \ listening socket, perform the click action (for Codex: atomically execute\
+      \ `UPDATE local_listeners SET human_event_seq = human_event_seq + 1 WHERE harness\
+      \ = 'codex' AND session_id = ?` in `${CITO_STATE_DIR}/state.sqlite` via `libsqlite3`\
+      \ and open `codex://threads/<thread_id>`; for Pi: dismiss without window switching)\
+      \ or `250ms` fade-out, order out the window, and call `exit(0)`.\n    - Sender\
+      \ protocol in `src/banner/` (`cito-mcp` caller side): acquires exclusive blocking\
+      \ `flock` on `banner.lock` (`2500ms` timeout), attempts `banner.sock` delivery\
+      \ (`300ms` connect, `500ms` ack), and on failure probes `banner-instance.lock`\
       \ with non-blocking `flock(LOCK_EX | LOCK_NB)` to execute Case A (busy instance:\
       \ poll `banner.sock` every `50ms` for `500ms`, release `banner.lock` for `300ms`,\
       \ re-acquire `banner.lock`, retry `banner.sock` once, and re-probe `banner-instance.lock`\
@@ -241,14 +242,14 @@ phases:
       \ and `tests/banner/**` so it can execute in parallel with `v1.host-adapters`.\
       \ Uses isolated temp `CITO_STATE_DIR` and headless/non-activating test hooks\
       \ where needed so tests are deterministic and leave zero stray processes.\n\
-      - **Admit:** Completed `v1.hub` toolchain and `docs/DESIGN.md` (§6.2.2, §7.1,\
-      \ §7.2, §10.4). Verified by `/usr/bin/swiftc` compilation and `npm test -- tests/banner/`\
-      \ exiting `0`. Consumed by `v1.mcp-and-e2e`.\n- **Recovery:** Terminate any\
-      \ test `cito-banner` child processes, remove temp socket/lock files, and fix\
-      \ lock/IPC defects in place."
+      - **Admit:** Completed `v1.nats-and-auth-callout` toolchain and `docs/DESIGN.md`\
+      \ (§6.2.2, §7.1, §7.2, §10.4). Verified by `/usr/bin/swiftc` compilation and\
+      \ `npm test -- tests/banner/` exiting `0`. Consumed by `v1.mcp-and-e2e`.\n-\
+      \ **Recovery:** Terminate any test `cito-banner` child processes, remove temp\
+      \ socket/lock files, and fix lock/IPC defects in place."
     verification: npm test -- tests/banner/
     evidence_template: Commands run (/usr/bin/swiftc build + tests/banner/), concurrency
-      test results, and verified §7.1-7.2 & §10.4 invariants.
+      test results, and verified §6.2.2, §7.1-7.2 & §10.4 invariants.
     refs:
     - docs/DESIGN.md
     - README.md
