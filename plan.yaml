@@ -1316,3 +1316,29 @@ phases:
       Spec link:
 
       - docs/DESIGN.md §4 and tests/e2e/claude-channel.test.ts'
+- id: v5
+  name: Cito V5 Theory-Grounded macOS Menu Bar UI, State-Driven Hub Lifecycle & Drawer,
+    380pt Session Cards, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/ and zero company/environment-specific names (rda, casdoor, rcatwin,
+    keppel, mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/,
+    zero harness references exist in src/mcp/, all docs/DESIGN.md §§2.2–3.3 requirements
+    are verified, and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE]
+    converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Upgrade Cito to the V5 Theory-Grounded UI/UX & Hub State-Machine specification
+    (docs/DESIGN.md §§2.2–3.3 and AGENTS.md): extend UiListenerSummary, CitoService.pushUiState(),
+    and Swift Listener with optional about and branch; clear HubSlot.error on manual
+    disconnect() and support forceLogin interactive OIDC re-authentication on Switch
+    Account (action === ''login''); implement cell-accurate measureTextWidth via NSTextField.fittingSize.width
+    and monochrome SF Symbol leadingSymbol in MenuControl; eliminate literal ''default''
+    in single-default-hub mode with a compact 44x22pt icon pill; implement the state-driven
+    380x32pt Hub action drawer while preserving deterministic menuActions; widen the
+    Control-Center menu panel to 380pt (360pt 2-row 58pt / 3-row 72pt session cards,
+    Row 1 anchored action cluster without redundant harness text pill, Row 2 full-296pt
+    about, Row 3 untruncated <slug>#<fp4> copy pill + cwd · branch, and 36pt footer);
+    expand tests/ui/lifecycle.test.ts and tests/mcp/; and pass the iterative code-hygiene
+    acceptance gate.'
+  depends_on:
+  - v4
