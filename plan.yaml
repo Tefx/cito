@@ -1448,3 +1448,66 @@ phases:
     - src/macos/cito-ui.swift
     - tests/ui/lifecycle.test.ts
     agent: senior-engineer
+  - id: v5.acceptance-and-hygiene-gate
+    name: 'V5 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v5` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run build && npm test` passes 100%,\
+      \ mechanically verifying zero Chinese characters in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, `deploy/`, zero matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ (case-insensitive) in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`,\
+      \ `tests/`, and zero harness references (`codex|pi|x-codex-turn-metadata`) in\
+      \ `src/mcp/`, and running iterative `code-hygiene` convergence until `Completeness:\
+      \ CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n- **Boundary:** Owner `code-reviewer`\
+      \ (mapped to `gate-reviewer` / `pathway-auditor` + `structural-auditor` in the\
+      \ Larva roster, routing any admitted repair batch to `senior-engineer` before\
+      \ Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not directly mutate repository files, Plan state,\
+      \ or external host directories.\n- **Admit:**\n  - Included phase and terminal\
+      \ outcomes: Phase `v5` (`v5.theory-grounded-ui-and-hub-state-machine`) bound\
+      \ to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n  -\
+      \ Consumed evidence and checks:\n    1. `npm run typecheck && npm run build\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Mechanical language, neutral-naming,\
+      \ and adapter-purity verification:\n       - Zero Chinese characters (`[\\p{Script=Han}]`)\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, and `deploy/`.\n       - Zero\
+      \ case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen` in `src/`,\
+      \ `docs/`, `README.md`, `AGENTS.md`, `deploy/`, and `tests/`.\n       - Zero\
+      \ references to `codex`, `pi`, or `x-codex-turn-metadata` in `src/mcp/`.\n \
+      \   3. Conformance with `docs/DESIGN.md` §§2.2–3.3 and `AGENTS.md`: extended\
+      \ `UiListenerSummary` (`about`, `branch`) populated in `CitoService.pushUiState()`;\
+      \ `HubSlot.disconnect()` clearing `this.error = null` and `HubSlot.reconnect(interactive,\
+      \ { forceLogin })` closing active broker and forcing interactive OIDC re-authentication\
+      \ on `action === \"login\"`; `measureTextWidth` via `NSTextField.fittingSize.width`\
+      \ and monochrome SF Symbol `leadingSymbol` in `MenuControl`; single-default-hub\
+      \ `\"default\"` elimination (`44x22pt` compact icon pill); state-driven `380x32pt`\
+      \ Hub action drawer with toggle and deterministic `menuActions`; and `380pt`\
+      \ menu panel with `360pt` 2-row (`58pt`) / 3-row (`72pt`) session cards, Row\
+      \ 1 top-right action cluster without redundant harness text pill, Row 2 `296pt`\
+      \ `about`, and Row 3 untruncated `<slug>#<fp4>` copy pill + `cwd · branch`.\n\
+      \    4. Iterative `[REQUIRES_SKILL: code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`)\
+      \ audit-and-fix convergence across all 5 lenses reaching `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`.\n- **Recovery:** If any check fails or\
+      \ any actionable `code-hygiene` finding is admitted, record the concrete file/line\
+      \ counterexamples and route a cohesive writable repair to `senior-engineer`\
+      \ before re-running this gate in Delta mode until `Completeness: CLEAN` and\
+      \ `Simplicity: ZERO_NEW_ISSUES` are achieved."
+    verification: npm run typecheck && npm run build && npm test && git status --short
+    evidence_template: 'Gate verdict (PASS/FAIL), test output (npm run typecheck &&
+      npm run build && npm test), mechanical regex verification (0 Chinese chars,
+      0 forbidden names, 0 harness refs in src/mcp/), and [REQUIRES_SKILL: code-hygiene]
+      ITERATIVE_CONVERGENCE convergence summary.'
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - src/ui/index.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - tests/ui/lifecycle.test.ts
+    depends_on:
+    - v5.theory-grounded-ui-and-hub-state-machine
+    agent: code-reviewer
