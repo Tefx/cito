@@ -2164,3 +2164,51 @@ phases:
       - V7-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
       structural-auditor 01a1ab8c-0874-7636-83b1-6c69be1e53be and uiux-auditor 01a1ab8c-0828-7171-9e71-69f3d946c6e3
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v8
+  name: Cito V8 Ego-Centric Menu Bar Control Plane, Spotlight Network Directory, Scalable
+    NATS KV Discovery, Claude Removal, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    case-insensitive ''claude'' matches exist in src/ or tests/, zero non-Node built-in
+    imports exist in src/pi-extension/cito-bridge.ts, zero harness references exist
+    in src/mcp/ except src/mcp/cli.ts delegating --codex resolution to src/adapters/codex.ts,
+    all docs/DESIGN.md §§1.2–6 requirements are verified, and [REQUIRES_SKILL: code-hygiene]
+    with [GATE_MODE: ITERATIVE_CONVERGENCE] converges to Completeness: CLEAN and Simplicity:
+    ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V8 Ego-Centric Menu Bar Control Plane, Spotlight
+    Network Directory & Scalable NATS KV Discovery per docs/DESIGN.md §§1.2–6 and
+    AGENTS.md: complete Claude Code removal from src/ and tests/ (deleting src/adapters/claude-channel.ts,
+    tests/adapters/claude-channel.test.ts, and tests/e2e/claude-channel.test.ts after
+    migrating its transport-independent regression tests into tests/mcp/dispatch.test.ts
+    / tests/e2e/lifecycle.test.ts under ''pi'', removing claude default registration
+    from src/adapters/index.ts, enableClaudeChannel / CITO_CLAUDE_CHANNEL from src/shared/config.ts
+    and src/mcp/cli.ts, case ''claude'': from src/macos/cito-ui.swift, the channel
+    config test from tests/shared/multi-hub.test.ts, and replacing ''claude'' with
+    ''custom'' in tests/adapters/pi.test.ts and tests/ui/lifecycle.test.ts); implement
+    HubDirectoryIndex in src/mcp/service.ts (single streams.info(KV_STREAM) call for
+    brokerTs + messages + targetSeq, watch({ ignoreDeletes: false, initializedFn })
+    terminating on initDone || entry.delta === 0 || entry.revision >= targetSeq with
+    2500ms deadline, 16-worker concurrent kv.keys()+kv.get() fallback, directoryGen
+    fencing, immediate local mutation coalescing, and read-time lease/visibility evaluation)
+    and refactor find() to use it; remove the ''(!)'' replay_gap_detected badge suffix
+    in src/mcp/receiver.ts and update lines 112, 114, 117 of tests/mcp/identity-and-badge.test.ts;
+    implement Pi interaction recency tracking (lastActiveMs in src/pi-extension/cito-bridge.ts,
+    read-only during identify/status polling, returned as updated_at_ms in identify)
+    and per-harness candidate quota (up to 8 per harness, max 16 total) in src/adapters/pi.ts
+    and src/adapters/index.ts; implement the Two-Surface macOS UI Architecture across
+    src/ui/index.ts, src/mcp/service.ts, and src/macos/cito-ui.swift (Surface 1 380pt
+    Ego-Centric cardMenu with dynamic header subtitle width, Zone 1 Active on This
+    Mac, Zone 2 collapsible MY OTHER HOSTS, Zone 3 AVAILABLE SESSIONS with collapsible
+    Harness group headers, icon-free 274pt candidate rows, and per-group scroll container,
+    Zone 4 Network Directory Launcher row, and stable menuActions indices 0..9; Surface
+    2 560x440pt Spotlight-style DirectoryPanel KeyPanel: NSPanel with NSSearchField,
+    close_directory, facet pills, daemon-backed full-index query_directory returning
+    top 100 matched rows + matched_count + online_count, view-based NSTableView at
+    rowHeight = 52, keyboard navigation respecting IME hasMarkedText, and headless
+    inspection/control hooks); update README.md, deploy/nats/README.md, and docs/DESIGN.md;
+    and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v7
