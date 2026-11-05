@@ -110,7 +110,7 @@ test("hub caches and PKCE scopes are isolated, with no legacy default-cache fall
   }, "personal");
   expect(await personal.cached()).toBeUndefined();
   await personal.recover(null);
-  expect(await new OidcLogin(f.config, opener, "rda").cached()).toBeUndefined();
+  expect(await new OidcLogin(f.config, opener, "work").cached()).toBeUndefined();
   expect((await personal.offlinePrincipal()).principal_id).toBe(oidc.issuer + "#user-1");
   expect((await stat(join(f.stateDir, "oidc-token-personal.json"))).mode & 0o777).toBe(0o600);
   const { rename } = await import("node:fs/promises");

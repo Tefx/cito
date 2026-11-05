@@ -17,7 +17,7 @@ The stdio entrypoint checks matching `/health`, starts a detached daemon when ne
 
 For automatic login startup, configure a user LaunchAgent with absolute `ProgramArguments` (`/absolute/path/to/cito/bin/cito-mcp`, `daemon`), `RunAtLoad: true`, and `KeepAlive: { SuccessfulExit: false }`. Put `CITO_STATE_DIR` and other daemon environment overrides in that agent. Cito does not install or modify LaunchAgents. Menu Quit exits 0 and stays stopped with this policy; crashes restart. A subsequent stdio client can auto-start it again.
 
-The dependency graph is `shared → adapters / ui → mcp`. `src/ui/` depends only on shared types and Node built-ins; Swift owns Menu Bar Extra and HUD rendering, with no SQLite access. Daemon-local `KeyedMutex` critical sections replace every legacy file lock.
+The dependency graph is `shared → adapters / ui → mcp`. MCP supports `2026-07-28` alongside existing `2025-*` clients. The MCP layer passes generic caller context (metadata, headers and OS-attributed PID) into registered adapters; only `CodexDesktopAdapter.detectExplicitCaller` extracts and merges host-specific thread headers. Conflicting explicit bridge PID and thread claims fail before enrollment. `src/ui/` depends only on shared types and Node built-ins; Swift owns Menu Bar Extra and HUD rendering, with no SQLite access. Daemon-local `KeyedMutex` critical sections replace every legacy file lock.
 
 ## Build and test
 
@@ -34,7 +34,7 @@ npm test -- tests/mcp/ tests/e2e/
 
 `bin/cito-mcp` and `bin/cito-auth-callout` prefer compiled JavaScript under `dist/` when present and fall back to loading TypeScript through `tsx`, independently of the caller's working directory. The build emits JavaScript/declarations under `dist/`.
 
-Tests use the installed official `nats-server` **2.14.0**, temporary SQLite databases, real Unix sockets, a local OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS tests compile and run the real Swift companion headlessly, including JSON-line framing, menu actions, HUD auto-hide, click behavior, EOF and crash/respawn replay. The installed-Pi loader test uses Pi 1.5.0 when available. The complete V3 acceptance suite requires macOS and Swift. All test state and child processes are isolated and cleaned up. Tests require no Docker, live OIDC account, or running Desktop app. Visible HUD presentation, installed `ChatGPT.app` compatibility, live Casdoor, and production TLS/deployment require operator verification.
+Tests use the installed official `nats-server` **2.14.0**, temporary SQLite databases, real Unix sockets, a local OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS tests compile and run the real Swift companion headlessly, including JSON-line framing, menu actions, HUD auto-hide, click behavior, EOF and crash/respawn replay. The installed-Pi loader test uses Pi 1.5.0 when available. The complete V4 acceptance suite requires macOS and Swift. All test state and child processes are isolated and cleaned up. Tests require no Docker, live OIDC account, or running Desktop app. Visible HUD presentation, installed `ChatGPT.app` compatibility, live OIDC providers, and production TLS/deployment require operator verification.
 
 ## NATS deployment
 
@@ -127,9 +127,9 @@ A clean queue exit plus successful wake confirms delivery and auto-acknowledges 
 
 ## macOS Menu Bar Extra (`cito-ui`)
 
-The daemon compiles `src/macos/cito-ui.swift` on demand into `${CITO_STATE_DIR}/bin/cito-ui`, then keeps one companion connected over UTF-8 newline-delimited JSON pipes. The menu shows only ACTIVE listeners with a matching live receiver. It displays title, scoped ID and harness; each listener submenu offers jump-to-Codex (when supported), copy ID, `self`/`workspace` scope toggle, and unlisten. Hold **Option ⌥** to replace a listener submenu with an instant unlisten action. “取消全部监听” revokes all local listeners.
+The daemon compiles `src/macos/cito-ui.swift` on demand into `${CITO_STATE_DIR}/bin/cito-ui`, then keeps one companion connected over UTF-8 newline-delimited JSON pipes. The menu shows only ACTIVE listeners with a matching live receiver. The V4 Control-Center menu uses a 340pt custom AppKit card panel hosted in `NSMenuItem.view`. Each 320×58pt listener card shows a harness badge, title, harness capsule, abbreviated cwd, and short `slug#fp4 ⧉` ID pill. Copy stores the full scoped ID and displays green `✓ Copied` feedback for 1.2 seconds without closing the menu. Inline `🔒 Self` / `👥 Team`, open-in-Codex and stop buttons replace submenus. `⏹ Stop All` revokes all local listeners; `Quit Cito ⌘Q` stops the daemon. `makeCitoStatusIcon` draws an 18×18pt monochrome template vector with a C-resonator, core node, outbound wave, and warning cutout dot, followed by a monospaced unique-session count when nonzero.
 
-Hub submenus show status and user, and offer OIDC login, reconnect and disconnect. Disconnect aborts pending login, closes NATS and receivers, clears their badges, and retains ACTIVE SQLite registrations for reconnect. Foreground tools cannot silently reconnect a manually disconnected hub. Reconnect uses cached/refreshable credentials; Login permits interactive PKCE. Account changes fence the previous principal's ACTIVE/REBINDING listeners before restoration.
+Interactive semantic-color hub pills show status and user. Click a pill to expand its action drawer; authentication errors and disconnected hubs expand automatically. Drawers offer Sign In (OIDC), Reconnect and Disconnect. Disconnect aborts pending login, closes NATS and receivers, clears their badges, and retains ACTIVE SQLite registrations for reconnect. Foreground tools cannot silently reconnect a manually disconnected hub. Reconnect uses cached/refreshable credentials; Login permits interactive PKCE. Account changes fence the previous principal's ACTIVE/REBINDING listeners before restoration.
 
 Unlisten cancels locally and makes pending signals passive immediately, then updates NATS best-effort. Scope changes update NATS KV first without changing listener ID, owner or generation; receiver renewal and restoration reconcile SQLite to the matching remote scope. Quit closes receivers, hub connections and companion stdin; the companion exits on EOF. If the companion crashes, the daemon respawns it after 500ms and replays the latest state.
 
@@ -149,10 +149,10 @@ Create `~/.cito/config.json` (or set `CITO_CONFIG_PATH`) to connect to multiple 
       "authMode": "none",
       "user": "alice"
     },
-    "rda": {
-      "natsUrl": "wss://nats.company.example/ws",
+    "work": {
+      "natsUrl": "wss://nats.example.com/ws",
       "authMode": "oidc",
-      "oidcIssuer": "https://login.company.example",
+      "oidcIssuer": "https://id.example.com",
       "oidcClientId": "cito",
       "oidcRedirectPort": 4291,
       "oidcScopes": ["openid", "profile", "email", "offline_access"]
@@ -165,21 +165,21 @@ Hub names match `^[a-z0-9][a-z0-9_-]{0,31}$`. Each entry defaults to `authMode: 
 
 Each hub has its own connection, identity, OIDC cache (`oidc-token-<hub>.json` only), optional scopes/redirect port, and receivers. All hubs share the host ID and one local SQLite database. Login uses an in-memory mutex, serializing hubs sharing a fixed redirect port. `oidcRedirectPort` (alias `redirect_port`) binds the callback to `127.0.0.1:<port>`; omit it for an ephemeral port. Ports must be integers in 1..65535. Providers may require registering the exact `http://127.0.0.1:<port>/callback` URI.
 
-OIDC uses standard discovery, S256 PKCE, signature verification and silent refresh with any conforming provider (e.g. Okta, Auth0, Keycloak, Entra ID, Google or Casdoor). When `oidcScopes` is omitted, default `openid profile email offline_access` scopes are filtered against advertised `scopes_supported`; an advertised list without `openid` fails with `AUTH_UNAVAILABLE`. Explicit scopes are sent unchanged. No provider-specific API or account ID is required. No secondary OIDC login is triggered by offline inbox reads: unauthenticated secondary hubs are skipped, while targeting one explicitly returns `UNAUTHORIZED`.
+OIDC uses standard discovery, S256 PKCE, signature verification and silent refresh with any conforming provider (e.g. Okta, Auth0, Keycloak, Entra ID, Google or another conforming provider). When `oidcScopes` is omitted, default `openid profile email offline_access` scopes are filtered against advertised `scopes_supported`; an advertised list without `openid` fails with `AUTH_UNAVAILABLE`. Explicit scopes are sent unchanged. No provider-specific API or account ID is required. No secondary OIDC login is triggered by offline inbox reads: unauthenticated secondary hubs are skipped, while targeting one explicitly returns `UNAUTHORIZED`.
 
 IDs returned to the agent use `<hub>:<id>` whenever multiple hubs or a named single hub are configured. Only a single hub literally named `default` returns unprefixed IDs for compatibility. Both input styles work; bare input IDs select the default hub unless `hub` is supplied. Prefixes and explicit `hub` must agree. Unknown/conflicting hubs are rejected before network or database activity. NATS payloads and SQLite ID columns always remain unprefixed.
 
 ```js
 cito_listen({about: "Personal build", hub: "personal"})
-cito_listen({about: "Corporate review", hub: "rda"})
+cito_listen({about: "Corporate review", hub: "work"})
 cito_find()                          // parallel query of every configured hub
-cito_find({hub: "rda", harness: "pi"})
-cito_send({to: "rda:review-pbtjxcxkgw3y", message: "Review ready"})
+cito_find({hub: "work", harness: "pi"})
+cito_send({to: "work:review-pbtjxcxkgw3y", message: "Review ready"})
 // Equivalent addressing:
-cito_send({hub: "rda", to: "review-pbtjxcxkgw3y", message: "Review ready"})
+cito_send({hub: "work", to: "review-pbtjxcxkgw3y", message: "Review ready"})
 cito_inbox()                         // drain all authorized local hub inboxes
-cito_inbox({hub: "rda", ack_all: false}) // peek at one hub
-cito_inbox({ack_ids: ["rda:sig_..."]}) // acknowledge only these, without default draining
+cito_inbox({hub: "work", ack_all: false}) // peek at one hub
+cito_inbox({ack_ids: ["work:sig_..."]}) // acknowledge only these, without default draining
 cito_unlisten({hub: "personal"})
 cito_unlisten()                      // revoke all active hubs for this session
 ```
@@ -213,16 +213,16 @@ Public listener IDs use `<slug>-<fingerprint>`. `tag` accepts up to 64 character
 ### Wake cards and native HUD
 
 ```text
-🔔 Cito · alice@mac [↩ rda:review-pbtjxcxkgw3y]
+🔔 Cito · alice@mac [↩ work:review-pbtjxcxkgw3y]
 
 Review is ready.
 ```
 
-Cards escape angle brackets, strip `.local` from hosts, omit duplicate sender titles, and include scoped reply IDs. Batches use numbered senders. There is no acknowledgement footer. Pi's self-contained renderer adds the host theme's background, header accent, and left body bar.
+Cards escape angle brackets, strip `.local` from hosts, omit duplicate sender titles, and include scoped reply IDs. Batches use the English header `🔔 Cito · N notifications → Target` and numbered senders. There is no acknowledgement footer. Pi's self-contained renderer adds the host theme's background, header accent, and left body bar.
 
 Pi's badge aggregates all active hubs for its session: `🔔 <slug>`, unread count `(N)`, replay gap `(!)`, or both `(N!)`. Auto-acks, inbox commits, and enrollment/revocation refresh it under a session-wide lock. Only ACTIVE rows with a live, non-aborted receiver matching `owner_token` contribute to badges and menu state. Disconnecting one hub preserves other live hubs' badges.
 
-The macOS HUD uses a dark 388×136pt nonactivating panel. It compiles on demand and has **no SQLite dependency**. The Codex action reads “点击跳转至 Codex 对话 ↗”; other harnesses read “<harness> 终端会话 · 点击关闭横幅” and dismiss on click. Counts aggregate for the exact target/session/wake tuple. Headless diagnostics report the same presentation fields used by the UI.
+The macOS HUD uses a dark 388×136pt nonactivating panel. It compiles on demand and has **no SQLite dependency**. The state pill reads `Notification` or `Passive`, with ` · ×N` for batches; passive subtitles start with `[Passive] `. The Codex action reads `Open in Codex ↗`; other harnesses read `<harness> session · Click to dismiss` and dismiss on click. Counts aggregate for the exact target/session/wake tuple. Headless diagnostics report the same presentation fields used by the UI.
 
 ## Extending Cito with custom harnesses
 
@@ -248,11 +248,17 @@ Return `{ok: false, error: "SESSION_NOT_OPEN"}` when no session exists, and `SES
 
 For hosts that only confirm queue/channel submission, register `new SocketBridgeAdapter("cursor", {confirmDelivery: false})` before creating the service. It returns `delivered_unconfirmed`, retaining inbox fallback.
 
-For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`, then call `registerAdapter(customAdapter)` from `src/adapters/index.ts` in your in-process entrypoint. Implement `probe`, `deliver`, and optional `updateBadge`; delivery returns `delivered`, `delivered_unconfirmed`, `driver_unavailable`, or `session_switched`. Use `ctx.runEffect` for each external effect so retries preserve cancellation and ownership fencing. Only return `delivered` after confirmed host insertion. Use `CitoService.create(config?, options?)`, `service.call(name, args, meta)`, and `await service.close()`; `createMcpServer(service)` supplies SDK handlers and `startHttpServer(config, service)` exposes them over loopback HTTP. Non-socket caller identity currently uses explicit Codex thread metadata; custom harnesses still need an identity socket for discovery even if delivery uses another registered driver.
+For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`, then call `registerAdapter(customAdapter)` from `src/adapters/index.ts` in your in-process entrypoint. Implement `probe`, `deliver`, and optional `updateBadge`; delivery returns `delivered`, `delivered_unconfirmed`, `driver_unavailable`, or `session_switched`. Use `ctx.runEffect` for each external effect so retries preserve cancellation and ownership fencing. Only return `delivered` after confirmed host insertion. Use `CitoService.create(config?, options?)`, `service.call(name, args, meta)`, and `await service.close()`; `createMcpServer(service)` supplies SDK handlers and `startHttpServer(config, service)` exposes them over loopback HTTP. An optional `detectExplicitCaller(ctx, config)` hook can resolve non-socket identity using generic context; multiple explicit adapter claims or a concurrent bridge PID claim return `INVALID_INPUT`. Socket-backed harnesses use the existing identity discovery protocol.
 
-### Claude Code (`claude`) — 尚未实现 / Not Yet Implemented
+### Optional Claude stdio channel bridge
 
-Cito does **not** ship a runtime Claude Code adapter. [DESIGN.md §6](docs/DESIGN.md#6-proposed-design-for-claude-code-integration-设计建议--仅建议尚未实现) contains a **设计建议 — 仅建议，尚未实现 / Proposed Design Suggestion Only — Not Yet Implemented**. It proposes a direct, zero-subprocess Streamable HTTP connection to `cito-daemon` at `http://127.0.0.1:4290/mcp`, future MCP SSE Channel Push for idle wakeup, and a turn-start `cito_inbox()` drain fallback when push delivery is unavailable or unconfirmed. The proposal still requires validated host session identity and persistent notification routing; current V3 does not implement those Claude-specific capabilities. The open harness schema permits `claude` as an identifier; it does not install that proposed host integration.
+Set `CITO_CLAUDE_CHANNEL=1` on the `cito-mcp` stdio forwarder, or set `enable_claude_channel: true` (alias `enableClaudeChannel`) in config.json. The default is false; an explicit environment value overrides the file and only `1` enables it. Direct HTTP clients do not gain a channel endpoint.
+
+The forwarder advertises `experimental: { "claude/channel": {} }` at initialization and binds `${CITO_STATE_DIR}/sockets/claude-pid-<parent-pid>.sock` with mode `0600`. Its identity uses `CLAUDE_SESSION_ID` or `claude-<parent-pid>`, the forwarder's cwd and directory name. One active forwarder owns a parent-PID endpoint; a second fails rather than replacing it. Close/EOF/signals remove the socket. Deliveries verify session identity, deduplicate the last 200 batch IDs and emit `notifications/claude/channel` with `{content, meta: {origin: "cito"}}`.
+
+The client must enable experimental channel support (such as `--channels`) for push to wake a conversation. Channel submission returns `delivered_unconfirmed`: SQLite records `DISPATCHED` with a null acknowledgement, so `cito_inbox()` still drains the message if push is ignored or delayed.
+
+**Native Claude Code lifecycle integration: Proposed Design Suggestion Only — Not Yet Implemented.** [DESIGN.md §5](docs/DESIGN.md#5-proposed-design-for-claude-code-integration-design-suggestion-only-not-yet-implemented) describes future native hooks and turn-start inbox draining. Cito installs no native lifecycle hooks or session-discovery integration.
 
 ## Environment
 
@@ -267,6 +273,7 @@ Cito does **not** ship a runtime Claude Code adapter. [DESIGN.md §6](docs/DESIG
 | `CITO_OIDC_SCOPES` | Single-hub fallback explicit space-separated scopes; omitted defaults negotiate against discovery. |
 | `CITO_OIDC_REDIRECT_PORT` | Optional single-hub fixed callback port, 1..65535; omitted selects ephemeral. |
 | `CITO_DAEMON_PORT` | `4290`, or config `daemonPort`; 1..65535, loopback only. |
+| `CITO_CLAUDE_CHANNEL` | Opt-in stdio channel bridge: `1` enables, default false; config aliases `enable_claude_channel` / `enableClaudeChannel`. |
 | `CITO_STATE_DIR` | `~/.cito`; share between bridge and MCP. |
 | `CITO_HOST_NAME` | OS hostname, at most 128 printable ASCII characters. |
 | `CITO_CODEX_HOME` | `~/.codex`; reads only explicitly identified threads. |
@@ -278,4 +285,4 @@ Cito does **not** ship a runtime Claude Code adapter. [DESIGN.md §6](docs/DESIG
 
 OIDC verifies signatures before caching tokens and the offline principal (`0600`). Online connections verify cached tokens again. Per-hub rejected-token recovery rechecks under its in-memory mutex, refreshes silently, and falls back to S256 loopback PKCE only for missing refresh credentials or HTTP 400/401. Refresh network/5xx failures return `AUTH_UNAVAILABLE` without opening a browser. Lock wait and login share a 45-second deadline. Broker reconnect authorization failures defer login until the next online tool call.
 
-Cito installs no LaunchAgent automatically and uses NATS for cross-host delivery. The local HTTP endpoint exposes MCP only; keep it on loopback. See [DESIGN.md](docs/DESIGN.md) for the V3 protocol and the unimplemented Claude Code proposal.
+Cito installs no LaunchAgent automatically and uses NATS for cross-host delivery. The local HTTP endpoint exposes MCP only; keep it on loopback. See [DESIGN.md](docs/DESIGN.md) for the V4 protocol and the unimplemented Claude Code proposal.

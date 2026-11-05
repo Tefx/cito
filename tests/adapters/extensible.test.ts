@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { isolatedState, unixServer } from "./support.js";
 import { fixture, call, payload } from "../mcp/support.js";
 import { loadConfig, toCanonicalListenerId } from "../../src/shared/index.js";
-import { extractCallerPidRoots, resolveCaller, SocketBridgeAdapter, getAdapter } from "../../src/adapters/index.js";
+import { extractCallerPidRoots, resolveCaller, SocketBridgeAdapter, getAdapter, ADAPTER_REGISTRY, registerAdapter } from "../../src/adapters/index.js";
 import type { ListenerRow } from "../../src/mcp/state.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -23,6 +23,22 @@ test("a nested explicit root cannot accidentally bind to a bridge on process.ppi
   const config = loadConfig(f.env);
   expect((await resolveCaller({}, config)).harness).toBe("aider");
   await expect(resolveCaller({ gateway: { parent_pid: 2147483647 } }, config)).rejects.toMatchObject({ code: "BINDING_REQUIRED" });
+});
+test("registered explicit identity hooks receive generic context and conflicting driver/PID claims fail", async () => {
+  const f = await isolatedState(); cleanups.push(() => f.cleanup());
+  const config = loadConfig(f.env), caller = { harness: "editor", session_id: "s", cwd: f.root, title: "Editor", repo: null, branch: null };
+  let received: unknown;
+  registerAdapter({ ...new SocketBridgeAdapter("editor"), id: "editor",
+    probe: async () => ({ status: "alive" }), deliver: async () => "delivered_unconfirmed",
+    detectExplicitCaller: async context => { received = context; return context.meta.editor_session ? caller : null; } });
+  try {
+    const input = { meta: { editor_session: "s" }, headers: { "trace-id": "one" }, httpTransport: true, httpClientPid: process.pid };
+    expect(await resolveCaller(input, config)).toEqual(caller);
+    expect(received).toMatchObject(input);
+    await expect(resolveCaller({ ...input, meta: { ...input.meta, endpoint_pid: process.pid } }, config)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(resolveCaller({ ...input, meta: { ...input.meta, caller_pid: process.pid } }, config)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(resolveCaller({ ...input, meta: { ...input.meta, codexThreadId: "other" } }, config)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  } finally { ADAPTER_REGISTRY.delete("editor"); }
 });
 test("socket probes distinguish matching, switched, definitive closure, dead process and transient failure", async () => {
   const f = await isolatedState(); cleanups.push(() => f.cleanup()); const config = loadConfig(f.env);

@@ -3,10 +3,10 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
-import { CodexDesktopAdapter, codexThreadId, readCodexThreadOptional } from "./codex.js";
+import { CodexDesktopAdapter } from "./codex.js";
 import { SocketBridgeAdapter, identifyBridge } from "./pi.js";
-import { gitMetadata, type RepoMetadata } from "./git.js";
-import type { HarnessAdapter } from "./types.js";
+import { gitMetadata } from "./git.js";
+import type { Caller, CallerDetectionContext, CallerInput, HarnessAdapter } from "./types.js";
 export * from "./codex.js";
 export * from "./git.js";
 export * from "./pi.js";
@@ -20,22 +20,22 @@ export function registerAdapter(adapter: HarnessAdapter): void {
 }
 registerAdapter(new CodexDesktopAdapter());
 registerAdapter(new SocketBridgeAdapter("pi"));
+registerAdapter(new SocketBridgeAdapter("claude", { confirmDelivery: false }));
 export function getAdapter(harness: string): HarnessAdapter | undefined {
   if (!harnessIdSchema.safeParse(harness).success) return;
   if (!ADAPTER_REGISTRY.has(harness)) registerAdapter(new SocketBridgeAdapter(harness));
   return ADAPTER_REGISTRY.get(harness);
 }
-export interface Caller extends RepoMetadata { harness: string; session_id: string; cwd: string; endpoint_pid?: number }
-export interface CachedSessionQuery { harness?: string; sessionId?: string; endpointPid?: number }
-export interface ResolveCallerOptions {
-  requireOpen?: boolean;
-  lookupCachedSession?: (query: CachedSessionQuery) => Caller | undefined | Promise<Caller | undefined>;
+export type ResolveCallerOptions = Pick<CallerDetectionContext, "requireOpen" | "lookupCachedSession">;
+// Preserve the legacy public error code without exposing driver naming to the service.
+export function callerBindingError(message: string): CitoError {
+  return new CitoError("PI_BRIDGE_UNAVAILABLE", message);
 }
 const pidKeys = ["endpoint_pid", "pi_pid", "caller_pid"];
 function explicitPid(meta: Record<string, unknown>): number | undefined {
   const values = pidKeys.filter(key => meta[key] !== undefined).map(key => meta[key]);
   if (values.some(v => typeof v !== "number" || !Number.isSafeInteger(v) || v <= 0)) {
-    throw new CitoError("PI_BRIDGE_UNAVAILABLE", "Invalid endpoint PID");
+    throw callerBindingError("Invalid endpoint PID");
   }
   if (new Set(values).size > 1) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
   return values[0] as number | undefined;
@@ -57,28 +57,23 @@ export function extractCallerPidRoots(meta: Record<string, unknown> = {}): numbe
   return meta.http_transport === true ? [] : [process.ppid];
 }
 const exec = promisify(execFile);
-/** Validate mutually exclusive explicit claims before reading either driver's state. */
-export async function resolveCaller(meta: Record<string, unknown> = {}, config: CitoConfig = loadConfig(), options: ResolveCallerOptions = {}): Promise<Caller> {
+/** Resolve explicit adapter claims before implicit discovery or service effects. */
+export async function resolveCaller(input: CallerInput = {}, config: CitoConfig = loadConfig(), options: ResolveCallerOptions = {}): Promise<Caller> {
+  // Direct embedders may still pass legacy metadata. HTTP callers always supply an envelope.
+  const ctx: CallerDetectionContext = input.meta && typeof input.meta === "object" && !Array.isArray(input.meta)
+    ? { ...input as CallerDetectionContext, ...options }
+    : { meta: input as Record<string, unknown>, httpClientPid: (input as Record<string, unknown>).http_client_pid as number | undefined,
+      httpTransport: (input as Record<string, unknown>).http_transport === true, ...options };
+  const meta = { ...ctx.meta, http_client_pid: ctx.httpClientPid, http_transport: ctx.httpTransport };
   const pid = explicitPid(meta);
-  let thread: string | undefined;
-  try { thread = codexThreadId(meta); }
-  catch (error) { if (!(error instanceof CitoError) || error.code !== "BINDING_REQUIRED") throw error; }
-  if (thread && pid !== undefined) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
-  if (thread) {
-    const row = readCodexThreadOptional(thread, config);
-    if (row.status === "found") return row;
-    if (row.status === "archived" && options.requireOpen !== false) throw new CitoError("SESSION_NOT_OPEN", "Codex thread is archived");
-    let cwd = typeof meta.cwd === "string" && meta.cwd.trim() ? meta.cwd : undefined;
-    if (!cwd && typeof meta.http_client_pid === "number" && Number.isSafeInteger(meta.http_client_pid) && meta.http_client_pid > 0) {
-      try {
-        const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(meta.http_client_pid), "-Fn"], { timeout: 1000 });
-        cwd = stdout.split("\n").find(line => line.startsWith("n"))?.slice(1) || undefined;
-      } catch { /* Optional OS metadata. */ }
-    }
-    if (!cwd) cwd = (await options.lookupCachedSession?.({ harness: "codex", sessionId: thread }))?.cwd;
-    cwd ||= process.cwd();
-    return { harness: "codex", session_id: thread, cwd, ...await gitMetadata(cwd, typeof meta.title === "string" ? meta.title : undefined) };
+  let explicit: Caller | undefined;
+  for (const adapter of ADAPTER_REGISTRY.values()) {
+    const caller = await adapter.detectExplicitCaller?.(ctx, config);
+    if (!caller) continue;
+    if (pid !== undefined || explicit) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
+    explicit = caller;
   }
+  if (explicit) return explicit;
   const roots = extractCallerPidRoots(meta);
   let failure: unknown;
   for (let ancestor of roots) {
@@ -98,9 +93,9 @@ export async function resolveCaller(meta: Record<string, unknown> = {}, config: 
             ...await gitMetadata(info.cwd, info.session_name) };
         } catch (error) { failure = error; }
       }
-      if (options.requireOpen === false) {
+      if (ctx.requireOpen === false) {
         // The lookup enforces uniqueness across every retained status and hub.
-        const cached = await options.lookupCachedSession?.({ endpointPid: ancestor });
+        const cached = await ctx.lookupCachedSession?.({ endpointPid: ancestor });
         if (cached) return cached;
       }
       try {

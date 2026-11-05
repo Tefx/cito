@@ -3,9 +3,9 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { normalizeRepo, type RepoMetadata } from "./git.js";
+import { normalizeRepo, gitMetadata, type RepoMetadata } from "./git.js";
 import type { ListenerRow } from "../shared/state-types.js";
-import type { HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
+import type { Caller, CallerDetectionContext, HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
 
 const exec = promisify(execFile);
 type CodexConfig = Pick<CitoConfig, "codexHome">;
@@ -57,6 +57,44 @@ export async function queueCodexWake(threadId: string, card: string, options: Co
 export class CodexDesktopAdapter implements HarnessAdapter {
   readonly id = "codex";
   readonly canJump = true;
+  async detectExplicitCaller(ctx: CallerDetectionContext, config: CitoConfig): Promise<Caller | null> {
+    const claim = (meta: Record<string, unknown>) => {
+      try { return codexThreadId(meta); }
+      catch (error) { if (error instanceof CitoError && error.code === "BINDING_REQUIRED") return; throw error; }
+    };
+    const turnObject = (value: unknown): Record<string, unknown> | undefined => {
+      if (typeof value === "string") { try { value = JSON.parse(value); } catch { return; } }
+      return record(value) ? value : undefined;
+    };
+    const meta = { ...ctx.meta };
+    const raw = ctx.headers?.["x-codex-turn-metadata"];
+    const headers = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+    let thread = claim(meta);
+    for (const header of headers) {
+      const headerThread = claim({ "x-codex-turn-metadata": header });
+      if (thread && headerThread && thread !== headerThread) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata in HTTP header");
+      const bodyTurn = turnObject(meta["x-codex-turn-metadata"]), headerTurn = turnObject(header);
+      meta["x-codex-turn-metadata"] = bodyTurn || headerTurn ? { ...bodyTurn, ...headerTurn } : header;
+      thread = claim(meta);
+    }
+    if (!thread) return null;
+    if (["endpoint_pid", "caller_pid", "pi_pid"].some(key => meta[key] !== undefined)) {
+      throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
+    }
+    const row = readCodexThreadOptional(thread, config);
+    if (row.status === "found") return row;
+    if (row.status === "archived" && ctx.requireOpen !== false) throw new CitoError("SESSION_NOT_OPEN", "Codex thread is archived");
+    let cwd = typeof meta.cwd === "string" && meta.cwd.trim() ? meta.cwd : undefined;
+    if (!cwd && Number.isSafeInteger(ctx.httpClientPid) && ctx.httpClientPid! > 0) {
+      try {
+        const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(ctx.httpClientPid), "-Fn"], { timeout: 1000 });
+        cwd = stdout.split("\n").find(line => line.startsWith("n"))?.slice(1) || undefined;
+      } catch { /* Optional OS metadata. */ }
+    }
+    if (!cwd) cwd = (await ctx.lookupCachedSession?.({ harness: this.id, sessionId: thread }))?.cwd;
+    cwd ||= process.cwd();
+    return { harness: this.id, session_id: thread, cwd, ...await gitMetadata(cwd, typeof meta.title === "string" ? meta.title : undefined) };
+  }
   async probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome> {
     try {
       if (readCodexThreadOptional(row.session_id, config).status === "archived") return { status: "closed_definitive" };

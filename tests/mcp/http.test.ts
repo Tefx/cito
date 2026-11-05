@@ -8,6 +8,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { startHttpServer, parseClientPid, httpMetadata, daemonHealth } from "../../src/mcp/server.js";
 import { loadConfig } from "../../src/shared/index.js";
+import type { CallerInput } from "../../src/adapters/index.js";
 import { fixture, waitFor, freePort } from "./support.js";
 
 const exec = promisify(execFile);
@@ -16,7 +17,7 @@ test("HTTP binds loopback, enforces Origin, attributes real client PID, rejects 
   const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
   const base = `http://127.0.0.1:${http.port}`;
   const client = new Client({ name: "http-test", version: "1" });
-  const captured: Record<string, unknown>[] = [], original = f.service.call.bind(f.service);
+  const captured: CallerInput[] = [], original = f.service.call.bind(f.service);
   const spy = vi.spyOn(f.service, "call").mockImplementation((name, input, meta) => { captured.push(meta ?? {}); return original(name, input, meta); });
   try {
     expect(http.http.address()).toMatchObject({ address: "127.0.0.1" });
@@ -26,7 +27,12 @@ test("HTTP binds loopback, enforces Origin, attributes real client PID, rejects 
     await client.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp")));
     const result = await client.callTool({ name: "cito_listen", arguments: { about: "OS attributed caller" }, _meta: { http_transport: false, http_client_pid: 999999 } });
     expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ status: "listening", harness: "pi" });
-    expect(captured.at(-1)).toMatchObject({ http_transport: true, http_client_pid: process.pid });
+    expect(captured.at(-1)).toMatchObject({ httpTransport: true, httpClientPid: process.pid });
+    const latestProtocol = await fetch(base + "/mcp", { method: "POST", headers: {
+      "content-type": "application/json", accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28",
+    }, body: JSON.stringify({ jsonrpc: "2.0", id: 101, method: "tools/list" }) });
+    expect(latestProtocol.status).toBe(200);
+    expect(await latestProtocol.text()).toContain("cito_listen");
     await client.close();
     const codex = new Client({ name: "header-test", version: "1" });
     try {
@@ -61,10 +67,9 @@ test("stdio forwarder walks the HTTP forwarder PID to its parent socket bridge a
 test("PID parser matches the client side endpoint and excludes daemon PID when another owner matches", () => {
   expect(parseClientPid(`p${process.pid}\nn127.0.0.1:5000->127.0.0.1:4290\np456\nn127.0.0.1:5000->127.0.0.1:4290\np789\nn127.0.0.1:4290->127.0.0.1:5000`, 5000, 4290)).toBe(456);
   expect(parseClientPid("p456\nn127.0.0.1:5001->127.0.0.1:4290", 5000, 4290)).toBeUndefined();
-  expect(httpMetadata({ http_transport: false, http_client_pid: 99 }, undefined)).toEqual({ http_transport: true, http_client_pid: undefined });
-  expect(() => httpMetadata({ "x-codex-turn-metadata": { session_id: "a" } }, 1, '{"thread_id":"b"}')).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
-  expect(httpMetadata({ "x-codex-turn-metadata": { thread_id: "a", turn_id: "body" } }, 1, '{"trace_id":"header"}'))
-    .toMatchObject({ "x-codex-turn-metadata": { thread_id: "a", turn_id: "body", trace_id: "header" } });
+  expect(httpMetadata({ http_transport: false, http_client_pid: 99 }, undefined, { "trace-id": "header" })).toEqual({
+    meta: { http_transport: false, http_client_pid: 99 }, httpTransport: true, httpClientPid: undefined, headers: { "trace-id": "header" },
+  });
 });
 
 test("singleton daemon returns zero on same port, rejects a different port and releases ownership on shutdown", async () => {

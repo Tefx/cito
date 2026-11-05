@@ -26,8 +26,8 @@ export function formatWakeCard(target: WakeTarget, signals: readonly WakeSignal[
     const signal = signals[0]!;
     return `🔔 Cito · ${formatSender(signal)}\n\n${escapeWakeCard(signal.message)}`;
   }
-  const targetTitle = target.title.trim() ? " · " + escapeWakeCard(target.title.trim()) : "";
+  const targetTitle = target.title.trim() ? " → " + escapeWakeCard(target.title.trim()) : "";
   const body = signals.map((signal, index) =>
     `[${index + 1}] ${formatSender(signal)}\n${escapeWakeCard(signal.message)}`).join("\n\n");
-  return `🔔 Cito · ${signals.length} 条唤醒消息${targetTitle}\n\n${body}`;
+  return `🔔 Cito · ${signals.length} notifications${targetTitle}\n\n${body}`;
 }

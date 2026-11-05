@@ -12,7 +12,7 @@
 
 ### 1.2 Language & Neutral Naming Policy
 - **English-Only UI/UX, Code, and Documentation**: All user-facing UI/UX surfaces (menu bar labels, buttons, tooltips, HUD banners, in-chat wake cards, status badges), error messages, source comments, and repository documentation (`README.md`, `docs/**`, `deploy/**`) MUST be written in English.
-- **Zero Company- or Environment-Specific Names**: No internal company, hub, identity-provider, project, or colleague names (such as `rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`) may appear anywhere in source code, UI, configuration defaults, tests, or documentation. All examples and tests use neutral generic names (`personal`, `work`, `cloud`, `alice`, `bob`, `acme/service`, `https://id.example.com`).
+- **Zero Company- or Environment-Specific Names**: No internal company, hub, identity-provider, project, or colleague names may appear anywhere in source code, UI, configuration defaults, tests, or documentation. All examples and tests use neutral generic names (`personal`, `work`, `cloud`, `alice`, `bob`, `acme/service`, `https://id.example.com`).
 
 ### 1.3 V4 Implementation Scope vs. Proposed Design Scope
 - **In Scope for Implementation & Verification**:
@@ -20,7 +20,7 @@
      - Registers `'2026-07-28'` in `SUPPORTED_PROTOCOL_VERSIONS` alongside `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`.
      - Serves stateless-per-request `StreamableHTTPServerTransport({ sessionIdGenerator: undefined })` at `http://127.0.0.1:4290/mcp` and health at `GET /health` (`{ ok: true, pid, stateDir }`).
      - Eliminates per-tab MCP subprocess memory overhead in Codex Desktop and Pi, and uses in-memory `KeyedMutex` instances inside the singleton daemon process.
-  2. **Pure Adapter Layer (`HarnessAdapter.detectCaller`) & Optional `CITO_CLAUDE_CHANNEL=1` Bridge**:
+  2. **Pure Adapter Layer (`HarnessAdapter.detectExplicitCaller`) & Optional `CITO_CLAUDE_CHANNEL=1` Bridge**:
      - `src/mcp/server.ts` has zero references to `codex`, `pi`, or `x-codex-turn-metadata`; it passes generic `{ meta, headers, httpClientPid, httpTransport }` into `resolveCaller` in `src/adapters/`.
      - `CodexDesktopAdapter` owns extraction and conflict validation of `x-codex-turn-metadata` from both JSON-RPC `_meta` and HTTP request headers.
      - When optional `CITO_CLAUDE_CHANNEL=1` (or `enableClaudeChannel: true` in config, default `false`) is enabled on the `cito-mcp` stdio forwarder, it advertises `capabilities: { tools: {}, experimental: { "claude/channel": {} } }`, binds `${stateDir}/sockets/claude-pid-${process.ppid}.sock`, and translates `{ op: "deliver" }` into a `notifications/claude/channel` JSON-RPC notification on `stdout` (returning `delivered_unconfirmed` so `cito_inbox()` remains available as a turn-start drain fallback).
@@ -31,7 +31,7 @@
   4. **Standard, Vendor-Neutral OIDC (`src/auth-callout/oidc.ts`, `src/mcp/oidc.ts`)**:
      - Supports `RS256`, `RS384`, `RS512`, `PS256`, `ES256`, `ES384`, and `EdDSA`, discovery-driven `scopes_supported` negotiation, optional fixed `oidcRedirectPort`, and principal-change fencing.
 - **Proposed Design Suggestion Only (Not Yet Implemented)**:
-  - **Claude Code Native Integration (`claude`)**: Documented in **Section 6** strictly as a **Proposed Design Suggestion Only — Not Yet Implemented**, describing the architectural design without concrete implementation code details.
+  - **Claude Code Native Integration (`claude`)**: Documented in **Section 5** strictly as a **Proposed Design Suggestion Only — Not Yet Implemented**, describing the architectural design without concrete implementation code details.
 
 ---
 
@@ -89,7 +89,7 @@ Built using custom `NSView` items hosted in `NSMenuItem.view` inside `NSMenu` (i
 ├──────────────────────────────────────────────────────────┤
 │ ┌──────────────────────────────────────────────────────┐ │
 │ │ ┌──────┐  agent  [Pi]            [🔒 Self] [↗] [✕]   │ │
-│ │ │ >_   │  dotfiles#rdap ⧉ · ~/dotfiles/agent         │ │
+│ │ │ >_   │  dotfiles#f8k2 ⧉ · ~/dotfiles/agent         │ │
 │ │ └──────┘                                             │ │
 │ └──────────────────────────────────────────────────────┘ │
 ├──────────────────────────────────────────────────────────┤

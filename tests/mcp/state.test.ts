@@ -9,7 +9,7 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 async function setup() {
   const dir = await mkdtemp("/tmp/cito-state-"); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const state = await LocalState.open(dir); cleanup.push(async () => state.close());
-  for (const hub of ["personal", "rda"]) state.run(`INSERT INTO local_listeners (hub,listener_id,principal_id,owner_user,host_id,host_name,
+  for (const hub of ["personal", "work"]) state.run(`INSERT INTO local_listeners (hub,listener_id,principal_id,owner_user,host_id,host_name,
     harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token)
     VALUES (?, 'c_abcdefgh2345','alice','alice','host','host','cursor','s',123,'/tmp','Title','About','self','ACTIVE',2,'owner')`, hub);
   return state;
@@ -27,10 +27,10 @@ test("admission is hub scoped, deduplicates and advances the cursor without any 
   const first = admit(state, wire(), 1).row!;
   expect(first).toMatchObject({ hub: "personal", state: "RECEIVED", held_reason: null });
   expect(admit(state, wire(), 3)).toEqual({ row: first, duplicate: true });
-  expect(admit(state, wire(), 1, "rda").duplicate).toBe(false);
+  expect(admit(state, wire(), 1, "work").duplicate).toBe(false);
   for (let i = 4; i <= 12; i++) expect(admit(state, wire("s" + i), i).row!.state).toBe("RECEIVED");
   expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(12);
-  expect(state.listener("c_abcdefgh2345", "rda")!.persisted_seq).toBe(1);
+  expect(state.listener("c_abcdefgh2345", "work")!.persisted_seq).toBe(1);
 });
 test("private cross-principal messages drop silently, workspace messages wake, stale generations stay passive", async () => {
   const state = await setup(), peer = wire().from; peer.principal_id = "bob";
@@ -56,9 +56,9 @@ test("schema reset atomically discards pre-V4 state, removes pairwise table and 
     expect(state.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => row.name))
       .toEqual(["daemon_owner", "local_listeners", "local_sent_idempotency", "local_signals"]);
     expect(state.db.prepare("PRAGMA table_info(local_listeners)").all().map(row => row.name)).toContain("endpoint_pid");
-    state.run("INSERT INTO local_sent_idempotency (hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES ('rda','d','h','s','t','queued','now',1)"); state.close();
+    state.run("INSERT INTO local_sent_idempotency (hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES ('work','d','h','s','t','queued','now',1)"); state.close();
     const reopened = await LocalState.open(dir);
-    try { expect(reopened.db.prepare("SELECT hub, dedup_id FROM local_sent_idempotency").all()).toEqual([{ hub: "rda", dedup_id: "d" }]); }
+    try { expect(reopened.db.prepare("SELECT hub, dedup_id FROM local_sent_idempotency").all()).toEqual([{ hub: "work", dedup_id: "d" }]); }
     finally { reopened.close(); }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

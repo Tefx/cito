@@ -3,12 +3,14 @@ import type { Socket } from "node:net";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { codexThreadId } from "../adapters/index.js";
+import type { CallerDetectionContext } from "../adapters/index.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { SUPPORTED_PROTOCOL_VERSIONS, CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { CitoError, errorResult, type CitoConfig, listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema } from "../shared/index.js";
 import { CitoService } from "./service.js";
+
+if (!SUPPORTED_PROTOCOL_VERSIONS.includes("2026-07-28")) SUPPORTED_PROTOCOL_VERSIONS.unshift("2026-07-28");
 
 // Derive the advertised schema from the same validation contract used by service calls.
 const descriptors = [
@@ -21,7 +23,7 @@ const descriptors = [
 export const tools: Tool[] = descriptors.map(([name, description, schema]) => ({
   name, description, inputSchema: z.toJSONSchema(schema, { io: "input", unrepresentable: "any" }) as Tool["inputSchema"],
 }));
-export function createMcpServer(service: CitoService, metadata: (meta: Record<string, unknown>) => Record<string, unknown> = meta => meta): Server {
+export function createMcpServer(service: CitoService, metadata: (meta: Record<string, unknown>) => CallerDetectionContext = meta => ({ meta })): Server {
   const server = new Server({ name: "cito-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async request => {
@@ -59,23 +61,9 @@ function resolveHttpClientPid(req: IncomingMessage, daemonPort: number): Promise
   }
   return result;
 }
-export function httpMetadata(meta: Record<string, unknown>, clientPid: number | undefined, header?: string): Record<string, unknown> {
-  const result = { ...meta, http_transport: true, http_client_pid: clientPid };
-  if (header !== undefined) {
-    const claim = (value: Record<string, unknown>) => {
-      try { return codexThreadId(value); } catch (e) { if (e instanceof CitoError && e.code === "BINDING_REQUIRED") return; throw e; }
-    };
-    const before = claim(meta), after = claim({ "x-codex-turn-metadata": header });
-    if (before && after && before !== after) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata in HTTP header");
-    const turnObject = (value: unknown): Record<string, unknown> | undefined => {
-      if (typeof value === "string") { try { value = JSON.parse(value); } catch { return; } }
-      return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-    };
-    const bodyTurn = turnObject(meta["x-codex-turn-metadata"]), headerTurn = turnObject(header);
-    Object.assign(result, { "x-codex-turn-metadata": bodyTurn || headerTurn ? { ...bodyTurn, ...headerTurn } : header });
-    claim(result);
-  }
-  return result;
+export function httpMetadata(meta: Record<string, unknown>, clientPid: number | undefined,
+  headers?: Record<string, string | string[] | undefined>): CallerDetectionContext {
+  return { meta, headers, httpTransport: true, httpClientPid: clientPid };
 }
 export async function startHttpServer(config: CitoConfig, service: CitoService) {
   const sessions = new Set<Server>();
@@ -92,8 +80,7 @@ export async function startHttpServer(config: CitoConfig, service: CitoService) 
       }
       if (path !== "/mcp") { res.writeHead(404).end("Not found"); return; }
       const pid = await resolveHttpClientPid(req, (http.address() as { port: number }).port);
-      const rawHeader = req.headers["x-codex-turn-metadata"];
-      const server = createMcpServer(service, meta => httpMetadata(meta, pid, Array.isArray(rawHeader) ? rawHeader[0] : rawHeader));
+      const server = createMcpServer(service, meta => httpMetadata(meta, pid, req.headers));
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       sessions.add(server);
       // IncomingMessage.close also fires when a POST body is consumed. Dispose on

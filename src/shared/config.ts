@@ -21,6 +21,7 @@ export interface HubConfig {
 export interface CitoConfig extends Omit<HubConfig, "name"> {
   stateDir: string;
   daemonPort: number;
+  enableClaudeChannel: boolean;
   /** Deterministic desktop liveness injection for embedders and tests. */
   codexDesktopRunning?: (signal: AbortSignal) => Promise<boolean>;
   codexHome: string;
@@ -83,12 +84,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     user: z.string().default(env.CITO_USER ?? userInfo().username), oidcIssuer: z.string().optional(),
     oidcClientId: z.string().optional(), oidcScopes: z.array(z.string().min(1)).optional(),
     oidcRedirectPort: z.number().int().min(1).max(65535).optional(), redirect_port: z.number().int().min(1).max(65535).optional() });
-  let json: { hubs: Record<string, z.infer<typeof entrySchema>>; default_hub?: string; daemonPort?: number } | undefined;
+  let json: { hubs: Record<string, z.infer<typeof entrySchema>>; default_hub?: string; daemonPort?: number; enable_claude_channel?: boolean; enableClaudeChannel?: boolean } | undefined;
   if ((env === process.env || env.CITO_STATE_DIR !== undefined || env.CITO_CONFIG_PATH !== undefined)
     && (env.CITO_CONFIG_PATH !== undefined || existsSync(path))) {
     try {
       json = z.object({ hubs: z.record(hubNameSchema, entrySchema).refine(v => Object.keys(v).length > 0),
-        default_hub: hubNameSchema.optional(), daemonPort: z.number().int().min(1).max(65535).optional() }).parse(JSON.parse(readFileSync(path, "utf8")));
+        default_hub: hubNameSchema.optional(), daemonPort: z.number().int().min(1).max(65535).optional(),
+        enable_claude_channel: z.boolean().optional(), enableClaudeChannel: z.boolean().optional() }).parse(JSON.parse(readFileSync(path, "utf8")));
     } catch (cause) { throw new CitoError("INVALID_INPUT", "Cannot load hub configuration: " + path, { cause }); }
   }
   const hubs: Record<string, HubConfig> = Object.create(null);
@@ -108,6 +110,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
   const { name: _name, ...mirror } = hubs[defaultHub]!;
   return {
     ...mirror, hubs, defaultHub, stateDir,
+    enableClaudeChannel: env.CITO_CLAUDE_CHANNEL !== undefined ? env.CITO_CLAUDE_CHANNEL === "1"
+      : json?.enable_claude_channel ?? json?.enableClaudeChannel ?? false,
     daemonPort: port(env.CITO_DAEMON_PORT === undefined ? json?.daemonPort ?? 4290 : Number(env.CITO_DAEMON_PORT), "CITO_DAEMON_PORT"),
     codexHome: directory(env.CITO_CODEX_HOME ?? "~/.codex"),
     codexBin: env.CITO_CODEX_BIN ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",

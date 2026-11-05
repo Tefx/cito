@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Events, ErrorCode } from "nats";
 import { UiBridge, type UiOptions, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { getAdapter, resolveCaller, type Caller, type CachedSessionQuery } from "../adapters/index.js";
+import { getAdapter, resolveCaller, callerBindingError, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
@@ -190,8 +190,7 @@ export class CitoService {
   }
   private constructor(readonly config: CitoConfig, readonly state: LocalState, readonly hostId: string, private readonly options: ServiceOptions) {
     for (const [name, hub] of Object.entries(config.hubs)) {
-      const { stateDir, codexHome, codexBin, openBin, daemonPort, hostName, defaultHub, hubs, codexDesktopRunning } = config;
-      const slotConfig = { stateDir, codexHome, codexBin, openBin, daemonPort, hostName, defaultHub, hubs, codexDesktopRunning, ...hub };
+      const slotConfig = { ...config, ...hub };
       this.slots.set(name, new HubSlot(name, slotConfig, options,
         broker => this.restoreReceivers(name, broker), () => {
           for (const receiver of this.receivers.values()) if (receiver.hub === name) { receiver.cancel(); void receiver.badge().catch(error => this.log(error)); }
@@ -340,7 +339,7 @@ export class CitoService {
     let rows: ListenerRow[];
     if (query.endpointPid !== undefined) {
       const pairs = this.state.db.prepare("SELECT DISTINCT harness, session_id FROM local_listeners WHERE endpoint_pid = ?").all(query.endpointPid);
-      if (pairs.length > 1) throw new CitoError("PI_BRIDGE_UNAVAILABLE", "Ambiguous cached endpoint PID");
+      if (pairs.length > 1) throw callerBindingError("Ambiguous cached endpoint PID");
       if (!pairs.length) return;
       rows = this.state.db.prepare("SELECT * FROM local_listeners WHERE harness = ? AND session_id = ? ORDER BY binding_generation DESC, hub ASC, listener_id ASC")
         .all(pairs[0]!.harness!, pairs[0]!.session_id!) as unknown as ListenerRow[];
@@ -350,10 +349,10 @@ export class CitoService {
     return row && { harness: row.harness, session_id: row.session_id, endpoint_pid: row.endpoint_pid ?? undefined,
       cwd: row.cwd, title: row.title, repo: row.repo, branch: row.branch };
   }
-  private caller(meta: Record<string, unknown>, open: boolean): Promise<Caller> {
+  private caller(meta: CallerInput, open: boolean): Promise<Caller> {
     return resolveCaller(meta, this.config, { requireOpen: open, lookupCachedSession: query => this.cachedCaller(query) });
   }
-  private async optionalCaller(meta: Record<string, unknown>): Promise<Caller | undefined> {
+  private async optionalCaller(meta: CallerInput): Promise<Caller | undefined> {
     try { return await this.caller(meta, false); }
     catch (error) {
       if (!(error instanceof CitoError) || !["BINDING_REQUIRED", "SESSION_NOT_OPEN"].includes(error.code)) throw error;
@@ -365,7 +364,7 @@ export class CitoService {
     const local = caller && this.state.listener(listenerId({ ...endpoint, harness: caller.harness, session_id: caller.session_id }), hub);
     return { endpoint, caller, local, key: senderEndpointKey(endpoint) };
   }
-  call(name: string, input: unknown = {}, meta: Record<string, unknown> = {}) {
+  call(name: string, input: unknown = {}, meta: CallerInput = {}) {
     const task = (async () => {
       try {
         if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
@@ -386,7 +385,7 @@ export class CitoService {
     })();
     this.calls.add(task); void task.finally(() => this.calls.delete(task)); return task;
   }
-  private async listen(input: z.infer<typeof listenInputSchema>, meta: Record<string, unknown>) {
+  private async listen(input: z.infer<typeof listenInputSchema>, meta: CallerInput) {
     const slot = this.slot(input.hub), hub = slot.name;
     const caller = await this.caller(meta, true), broker = await slot.network(), principal = await slot.identity();
     const normalizedTag = input.tag === undefined ? undefined : normalizeSlug(input.tag);
@@ -458,7 +457,7 @@ export class CitoService {
     const remoteWarning = await this.unlistenById(slot.name, id);
     return { ok: true, status: "unlistened", listener_id: this.scoped(slot.name, displayId(row)), warnings: remoteWarning ? [remoteWarning] : [] };
   }
-  private async unlisten(input: z.infer<typeof unlistenInputSchema>, meta: Record<string, unknown>) {
+  private async unlisten(input: z.infer<typeof unlistenInputSchema>, meta: CallerInput) {
     if (input.hub) this.slot(input.hub);
     const caller = await this.caller(meta, false);
     let slots = this.targetSlots(input.hub);
@@ -479,7 +478,7 @@ export class CitoService {
     return { ok: true, status: successes.some(r => r.status === "unlistened") ? "unlistened" : "not_listening",
       listener_id: successes.find(r => r.listener_id)?.listener_id ?? null, ...(warnings.length ? { warnings } : {}) };
   }
-  private async find(input: z.infer<typeof findInputSchema>, meta: Record<string, unknown>) {
+  private async find(input: z.infer<typeof findInputSchema>, meta: CallerInput) {
     const slots = this.targetSlots(input.hub);
     // Resolve once before any hub operation so metadata conflicts cannot be hidden by partial success.
     const caller = await this.optionalCaller(meta);
@@ -518,7 +517,7 @@ export class CitoService {
     return { ok: true, signal_id: this.scoped(row.hub, row.signal_id), seq: row.seq, to: this.scoped(row.hub, to),
       status: row.status, held_reason: row.held_reason, expires_at: row.expires_at_iso };
   }
-  private async send(input: z.infer<typeof sendInputSchema>, meta: Record<string, unknown>) {
+  private async send(input: z.infer<typeof sendInputSchema>, meta: CallerInput) {
     const { hub, id } = parseScopedId(input.to, this.config, input.hub);
     const replyId = input.in_reply_to === undefined ? null : parseScopedId(input.in_reply_to, this.config, hub).id;
     const canonicalTo = toCanonicalListenerId(id), slot = this.slot(hub);
@@ -572,7 +571,7 @@ export class CitoService {
       return this.sentResult(this.state.db.prepare("SELECT * FROM local_sent_idempotency WHERE hub = ? AND dedup_id = ?").get(hub, dedup) as unknown as SentRow, displayId(target));
     } finally { clearTimeout(timer); sub.unsubscribe(); operation.removeEventListener("abort", interrupt); }
   }
-  private async inbox(input: z.infer<typeof inboxInputSchema>, meta: Record<string, unknown>) {
+  private async inbox(input: z.infer<typeof inboxInputSchema>, meta: CallerInput) {
     const slots = this.targetSlots(input.hub);
     const parsedAcks = input.ack_ids?.map(raw => ({ raw, ...parseScopedId(raw, this.config, input.hub) }));
     const caller = await this.caller(meta, false);

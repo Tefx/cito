@@ -11,22 +11,22 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 async function setup() { const f = await fixture(); cleanups.push(() => f.close()); return f; }
 
 test("slug normalization, derivation priority and canonical/public grammar", () => {
-  expect(normalizeSlug("  RCATwin __ Teams!!! ")).toBe("rcatwin-teams");
+  expect(normalizeSlug("  Service __ Teams!!! ")).toBe("service-teams");
   expect(normalizeSlug("abcdefghijklmnopqrs--more")).toBe("abcdefghijklmnopqrs");
   expect(normalizeSlug("中文 🔔")).toBe("");
-  const metadata = { tag: "Custom Tag", repo: "cap-dcwiz/RCATwin", cwd: "/tmp/agent", title: "Conversation", harness: "pi" as const };
+  const metadata = { tag: "Custom Tag", repo: "acme/Service", cwd: "/tmp/agent", title: "Conversation", harness: "pi" as const };
   expect(listenerSlug(metadata)).toBe("custom-tag");
-  expect(listenerSlug({ ...metadata, tag: null })).toBe("rcatwin");
+  expect(listenerSlug({ ...metadata, tag: null })).toBe("service");
   expect(listenerSlug({ ...metadata, tag: null, repo: null })).toBe("agent");
   expect(listenerSlug({ ...metadata, tag: null, repo: null, cwd: "/中文" })).toBe("conversation");
   expect(listenerSlug({ ...metadata, tag: null, repo: null, cwd: "/中文", title: "中文" })).toBe("pi");
-  const canonical = "c_pbtjxcxkgw3y", display = publicListenerId("rcatwin-teams", canonical);
-  expect(display).toBe("rcatwin-teams-pbtjxcxkgw3y");
+  const canonical = "c_pbtjxcxkgw3y", display = publicListenerId("service-teams", canonical);
+  expect(display).toBe("service-teams-pbtjxcxkgw3y");
   for (const id of [canonical, display, "new-name-pbtjxcxkgw3y"]) {
     expect(toCanonicalListenerId(id)).toBe(canonical);
     expect(listenerIdSchema.safeParse(id).success).toBe(true);
   }
-  for (const id of ["RCATwin-pbtjxcxkgw3y", "-pbtjxcxkgw3y", "a--b-pbtjxcxkgw3y", "a-pbtjxcxkgw31", "c_short"]) {
+  for (const id of ["Service-pbtjxcxkgw3y", "-pbtjxcxkgw3y", "a--b-pbtjxcxkgw3y", "a-pbtjxcxkgw31", "c_short"]) {
     expect(() => toCanonicalListenerId(id)).toThrow();
     expect(listenerIdSchema.safeParse(id).success).toBe(false);
   }
@@ -37,9 +37,9 @@ test("tag renaming preserves canonical KV, subjects, SQLite keys and sender idem
   const f = await setup(), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   const sender = await call(f.service, "cito_listen", { about: "sender" }, desktop.meta);
   expect(sender.listener_id).toMatch(/^repo-[a-z2-7]{12}$/);
-  const first = await call(f.service, "cito_listen", { about: "receiver", tag: "  RCATwin Teams! " }, f.pi.meta);
+  const first = await call(f.service, "cito_listen", { about: "receiver", tag: "  Service Teams! " }, f.pi.meta);
   const id = toCanonicalListenerId(first.listener_id);
-  expect(first.listener_id).toBe(publicListenerId("rcatwin-teams", id));
+  expect(first.listener_id).toBe(publicListenerId("service-teams", id));
   const sent = await call(f.service, "cito_send", { to: first.listener_id, message: "one", idempotency_key: "same" }, desktop.meta);
   expect(await call(f.service, "cito_send", { to: id, message: "one", idempotency_key: "same" }, desktop.meta)).toEqual(sent);
   const preserved = await call(f.service, "cito_listen", { about: "updated" }, f.pi.meta);

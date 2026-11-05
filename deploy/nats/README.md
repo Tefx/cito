@@ -18,7 +18,7 @@ block. Application clients provision KV/stream topology on startup.
 Set the following environment variables before starting:
 
 - `CITO_AUTH_MODE=oidc`
-- `CITO_OIDC_ISSUER=https://your-provider`
+- `CITO_OIDC_ISSUER=https://id.example.com`
 - `CITO_OIDC_CLIENT_ID=<registered-client-id>`
 - `CITO_AUTH_CALLOUT_PASSWORD=<strong-service-password>`
 - `CITO_AUTH_CALLOUT_ISSUER_SEED=<SA... Account seed>`
@@ -50,6 +50,23 @@ CITO_NATS_STORE_DIR=/path/to/data nats-server -c deploy/nats/nats-server.conf
 bin/cito-auth-callout
 ```
 
+## Client configuration
+
+Clients can connect to neutral named hubs such as `personal` (no authentication)
+and `work` (OIDC issuer `https://id.example.com`) simultaneously. Start
+`cito daemon` once per user; its loopback MCP endpoint supports `2026-07-28`
+and existing `2025-*` clients. Caller detection belongs to registered adapters,
+not the MCP transport.
+
+The V4 macOS client includes the `makeCitoStatusIcon` template vector and a
+340pt Control-Center card menu with hub status pills and connection actions.
+See the [client guide](../../README.md#macos-menu-bar-extra-cito-ui) for controls
+and the [optional stdio channel bridge](../../README.md#optional-claude-stdio-channel-bridge)
+for `CITO_CLAUDE_CHANNEL=1`. Native Claude Code lifecycle integration remains
+**Proposed Design Suggestion Only — Not Yet Implemented**; see
+[DESIGN.md §5](../../docs/DESIGN.md#5-proposed-design-for-claude-code-integration-design-suggestion-only-not-yet-implemented).
+None of these client features changes the broker deployment or installs host hooks.
+
 ## Auth responder behavior and compatibility
 
 The executable validates config before connecting. It discovers OIDC and
@@ -60,7 +77,7 @@ signed `AUTH_UNAVAILABLE` rejection, and usable cached keys remain available.
 NATS reports all denied connections as `Authorization Violation`; callers
 must not assume that broker error distinguishes transient provider outages.
 
-Only RS256/ES256 tokens with matching issuer/audience, non-empty subject and
+Only RS256, RS384, RS512, PS256, ES256, ES384 and EdDSA tokens with matching issuer/audience, non-empty subject and
 `exp > now - 30s` pass OIDC verification. NATS user claims retain the
 original token expiry, so NATS itself can reject a token already expired
 within that tolerance. Signed JWT v2 permissions cover only the declared
@@ -77,5 +94,5 @@ error and uses SA seeds. SA-only enforcement is the approved resolution for
 this non-operator topology; an Operator-auth path is outside this deployment.
 
 Tests run against an installed official NATS 2.14.0 binary and a local mock
-OIDC HTTP server. Compose configuration is syntax-checked; a live Casdoor
+OIDC HTTP server. Compose configuration is syntax-checked; a live OIDC
 provider and Docker image deployment require separate operator verification.

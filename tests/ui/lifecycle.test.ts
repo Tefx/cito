@@ -10,9 +10,9 @@ let root: string, binary: string;
 beforeAll(async () => { root = await mkdtemp("/tmp/cito-ui-test-"); binary = await ensureUiCompiled(root); }, 120000);
 afterAll(async () => { await rm(root, { recursive: true, force: true }); });
 const listener: UiListenerSummary = { hub: "personal", listener_id: "c_abcdefghijkl", public_id: "repo-abcdefghijkl", scoped_id: "personal:repo-abcdefghijkl",
-  harness: "codex", session_id: "thread-1", title: "中文 conversation", cwd: "/tmp", repo: null, scope: "self", can_jump: true };
+  harness: "codex", session_id: "thread-1", title: "café conversation", cwd: "/tmp", repo: null, scope: "self", can_jump: true };
 const hubs = [{ name: "personal", status: "connected" as const, user: "alice", auth_mode: "oidc" as const, error: null }];
-const payload: BannerPayload = { target_harness: "codex", target_session_id: "thread-1", target_title: "中文 conversation", from_user: "alice", from_host: "host", from_title: "sender", message: "hello 中文", effective_wake: true };
+const payload: BannerPayload = { target_harness: "codex", target_session_id: "thread-1", target_title: "café conversation", from_user: "alice", from_host: "host", from_title: "sender", message: "hello café", effective_wake: true };
 function childOf(bridge: UiBridge) { return Reflect.get(bridge, "child") as ChildProcessWithoutNullStreams | undefined; }
 
 test("KeyedMutex serializes same-key async/sync work, releases failures and permits unrelated keys", async () => {
@@ -36,7 +36,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
   const send = (data: unknown) => child.stdin.write(JSON.stringify(data) + "\n");
   try {
     const state = Buffer.from(JSON.stringify({ op: "state", hubs, listeners: [listener] }) + "\n");
-    const split = state.indexOf(Buffer.from("中文")) + 1;
+    const split = state.indexOf(Buffer.from("café")) + 1;
     child.stdin.write(state.subarray(0, split)); child.stdin.write(state.subarray(split));
     await waitFor(() => stderr.includes("state hubs=1 listeners=1"));
     child.stdin.write("bad json\n" + "x".repeat(1048577) + "\n");
@@ -58,6 +58,78 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
     expect(stderr).toContain("invalid frame"); expect(stderr).toContain("oversized frame");
     child.stdin.end(); expect(await exited).toBe(0);
   } finally { if (child.exitCode === null) child.kill("SIGKILL"); await exited; }
+});
+
+interface MenuNode { id: string; text?: string; tooltip?: string; green?: boolean; width: number; height: number; x: number; radius: number; hidden?: boolean; children: MenuNode[] }
+interface MenuSnapshot { core_alpha: number; items: MenuNode[]; actions: number; count: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
+function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
+
+test("real AppKit card views expose template icon, geometry, hub drawers and inline copy/scope feedback", async () => {
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+  try {
+    await bridge.start(); bridge.state(hubs, [listener]);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1"));
+    const initial = await inspect(), nodes = flatten(initial.items);
+    expect(initial).toMatchObject({ actions: 10, count: 1, icon_template: true, icon_width: 18, icon_height: 18 });
+    expect(initial.core_alpha).toBeCloseTo(1, 1);
+    expect(initial.items.every(node => node.width === 340)).toBe(true);
+    expect(nodes).toContainEqual(expect.objectContaining({ width: 320, height: 58, x: 10, radius: 10 }));
+    expect(initial.items.find(node => node.id === "header")).toMatchObject({ height: 40 });
+    expect(initial.items.find(node => node.id === "footer")).toMatchObject({ height: 32 });
+    expect(initial.items.find(node => node.id === "drawer:personal")).toMatchObject({ height: 32, hidden: true });
+    expect(nodes.find(node => node.id === "copy:" + listener.scoped_id)).toMatchObject({ text: "repo#abcd ⧉", tooltip: listener.scoped_id });
+    send({ op: "test_control", id: "copy:" + listener.scoped_id });
+    const copied = await inspect();
+    expect(copied.clipboard).toBe(listener.scoped_id);
+    expect(flatten(copied.items).find(node => node.id === "copy:" + listener.scoped_id)).toMatchObject({ text: "✓ Copied", green: true });
+    await waitFor(async () => flatten((await inspect()).items).some(node => node.id === "copy:" + listener.scoped_id && node.text === "repo#abcd ⧉"), 2500);
+    send({ op: "test_control", id: "hub:personal" });
+    expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(false);
+    send({ op: "test_control", id: "hub:personal" });
+    expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(true);
+    send({ op: "test_control", id: "scope:" + listener.scoped_id });
+    expect(flatten((await inspect()).items).find(node => node.id === "scope:" + listener.scoped_id)?.text).toBe("👥 Team");
+    send({ op: "test_control", id: "scope:" + listener.scoped_id });
+    await waitFor(() => actions.length === 2);
+    expect(actions.map(action => action.op === "set_scope" && action.scope)).toEqual(["workspace", "self"]);
+    bridge.state([{ ...hubs[0]!, status: "auth_required", error: "Sign in required" }], []);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=0"));
+    const empty = await inspect();
+    expect(empty).toMatchObject({ count: 0, icon_template: true });
+    expect(empty.core_alpha).toBeCloseTo(0.4, 1);
+    expect(empty.items.find(node => node.id === "drawer:personal")?.hidden).toBe(false);
+    expect(flatten(empty.items)).toContainEqual(expect.objectContaining({ width: 320, height: 64 }));
+    expect(flatten(empty.items).map(node => node.text)).toContain("No active listeners");
+    bridge.state([{ ...hubs[0]!, name: "default", auth_mode: "none" }], [listener, { ...listener, hub: "work" }]);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=2"));
+    const duplicate = await inspect();
+    expect(duplicate.count).toBe(1);
+    expect(flatten(duplicate.items).map(node => node.text)).toContain("default · alice");
+  } finally { await bridge.close(); }
+}, 10000);
+
+test("HUD presents English wake/passive counts and harness-specific click labels", async () => {
+  const diagnostics: string[] = [];
+  const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line) });
+  try {
+    await bridge.start();
+    bridge.banner({ ...payload, count: 2 });
+    await waitFor(() => diagnostics.some(line => line.includes('"semantic_label":"Notification · ×2"')));
+    const wake = JSON.parse(diagnostics.find(line => line.startsWith("cito-ui: display "))!.slice("cito-ui: display ".length));
+    expect(wake.action_label).toBe("Open in Codex ↗");
+    bridge.banner({ ...payload, target_harness: "claude", effective_wake: false });
+    await waitFor(() => diagnostics.some(line => line.includes('"semantic_label":"Passive"')));
+    const passive = JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: display ")).at(-1)!.slice("cito-ui: display ".length));
+    expect(passive).toMatchObject({ action_label: "claude session · Click to dismiss", subtitle: "[Passive] alice@host · sender", display_subtitle: "[Passive] alice@host · sender" });
+  } finally { await bridge.close(); }
 });
 
 test("the default HUD timer hides after six seconds while the companion remains alive", async () => {
@@ -94,12 +166,12 @@ test("UiBridge coalesces snapshots, delivers banners and validated actions, resp
 
 test("UiBridge discards malformed/oversized action lines and preserves multibyte frames across stdout chunks", async () => {
   const script = join(root, "frames.cjs");
-  await writeFile(script, `#!${process.execPath}\nconst b=Buffer.from(JSON.stringify({op:'hub_action',hub:'中文',action:'disconnect'})+'\\n'); process.stdout.write('bad\\n'+JSON.stringify({op:'set_scope',hub:'a',listener_id:'invalid',scope:'self'})+'\\n'+'x'.repeat(1048577)+'\\n'); process.stdout.write(b.subarray(0,b.indexOf(Buffer.from('中文'))+1)); setTimeout(()=>process.stdout.write(b.subarray(b.indexOf(Buffer.from('中文'))+1)),20); process.stdin.resume(); process.stdin.on('end',()=>process.exit(0));`, { mode: 0o700 });
+  await writeFile(script, `#!${process.execPath}\nconst b=Buffer.from(JSON.stringify({op:'hub_action',hub:'café',action:'disconnect'})+'\\n'); process.stdout.write('bad\\n'+JSON.stringify({op:'set_scope',hub:'a',listener_id:'invalid',scope:'self'})+'\\n'+'x'.repeat(1048577)+'\\n'); process.stdout.write(b.subarray(0,b.indexOf(Buffer.from('café'))+1)); setTimeout(()=>process.stdout.write(b.subarray(b.indexOf(Buffer.from('café'))+1)),20); process.stdin.resume(); process.stdin.on('end',()=>process.exit(0));`, { mode: 0o700 });
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, { binary: script, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
   try {
     await bridge.start(); await waitFor(() => actions.length === 1);
-    expect(actions).toEqual([{ op: "hub_action", hub: "中文", action: "disconnect" }]);
+    expect(actions).toEqual([{ op: "hub_action", hub: "café", action: "disconnect" }]);
     expect(diagnostics.filter(line => line.includes("invalid frame")).length).toBe(2);
   } finally { await bridge.close(); }
 });

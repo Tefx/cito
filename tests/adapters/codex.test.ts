@@ -37,6 +37,27 @@ describe("non-intrusive Codex metadata and wake effects", () => {
     expect(extractCallerPidRoots({ http_transport: true })).toEqual([]);
     expect(extractCallerPidRoots()).toEqual([process.ppid]);
   });
+  it("adapter merges HTTP/body thread claims and rejects conflicting aliases and explicit bridge PIDs", async () => {
+    const config = loadConfig(state.env), adapter = new CodexDesktopAdapter();
+    const detect = (meta: Record<string, unknown>, header?: string | string[]) =>
+      adapter.detectExplicitCaller({ meta: { cwd: state.root, ...meta }, headers: { "x-codex-turn-metadata": header } }, config);
+    expect(await detect({}, JSON.stringify({ thread_id: threadId }))).toMatchObject({ harness: "codex", session_id: threadId, cwd: state.root });
+    expect(await detect({ "x-codex-turn-metadata": { thread_id: threadId, turn_id: "body" } }, '{"trace_id":"header"}'))
+      .toMatchObject({ session_id: threadId });
+    expect(await detect({ "x-codex-turn-metadata": JSON.stringify({ session_id: threadId }) }, JSON.stringify({ thread_id: threadId })))
+      .toMatchObject({ session_id: threadId });
+    expect(await detect({}, "invalid JSON")).toBeNull();
+    for (const meta of [{ codexThreadId: "other" }, { "openai/threadId": "other" },
+      { "x-codex-turn-metadata": { session_id: "other" } }, { endpoint_pid: 1 }, { caller_pid: 1 }]) {
+      await expect(detect(meta, JSON.stringify({ thread_id: threadId }))).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    }
+    await expect(detect({}, [JSON.stringify({ thread_id: threadId }), '{"session_id":"other"}']))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(detect({ "x-codex-turn-metadata": { thread_id: threadId } }, '{"session_id":"other"}'))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(resolveCaller({ meta: { endpoint_pid: 1 }, headers: { "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId }) } }, config))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
   it("reads exact SQLite row, keeps background threads open, and never contacts Desktop IPC", async () => {
     const db = database(); let connections = 0;
     const server = await unixServer(join(state.codexHome, "ipc/ipc.sock"), socket => { connections++; socket.destroy(); });

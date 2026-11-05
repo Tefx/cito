@@ -1,5 +1,18 @@
 import type { CitoConfig } from "../shared/index.js";
 import type { ListenerRow } from "../shared/state-types.js";
+import type { RepoMetadata } from "./git.js";
+
+export interface Caller extends RepoMetadata { harness: string; session_id: string; cwd: string; endpoint_pid?: number }
+export interface CachedSessionQuery { harness?: string; sessionId?: string; endpointPid?: number }
+export interface CallerDetectionContext {
+  meta: Record<string, unknown>;
+  headers?: Record<string, string | string[] | undefined>;
+  httpClientPid?: number;
+  httpTransport?: boolean;
+  requireOpen?: boolean;
+  lookupCachedSession?: (query: CachedSessionQuery) => Caller | undefined | Promise<Caller | undefined>;
+}
+export type CallerInput = CallerDetectionContext | Record<string, unknown>;
 
 export type ProbeOutcome =
   | { status: "alive" | "switched" | "closed_definitive" }
@@ -19,6 +32,7 @@ export interface DeliverContext {
 export interface HarnessAdapter {
   readonly id: string;
   readonly canJump?: boolean;
+  detectExplicitCaller?(ctx: CallerDetectionContext, config: CitoConfig): Promise<Caller | null>;
   probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome>;
   deliver(row: ListenerRow, ctx: DeliverContext): Promise<DeliverOutcome>;
   updateBadge?(row: ListenerRow, badge: string | undefined, config: CitoConfig, signal?: AbortSignal): Promise<void>;
