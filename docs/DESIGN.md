@@ -190,6 +190,71 @@ To let users enable or disable listening immediately—without spending an LLM t
   - Calls `await ensureDaemon(config)` and `POST http://127.0.0.1:${config.daemonPort}/mcp` (`Accept: application/json, text/event-stream`), decoding the SSE `data:` frame.
   - On success, prints a single-line summary to `stdout` (`Listening as <listener_id> (<scope>): <about>\n` or `Unlistened (<removed> removed)\n`) and exits `0`; on error, prints to `stderr` and exits non-zero.
 
+### 4.3 Menu Bar On-Demand Session Discovery, 1-Click Listen, Viewport Capping & Flicker-Free Dynamic Refresh (`src/adapters/`, `src/ui/index.ts`, `src/mcp/service.ts`, `src/macos/cito-ui.swift`)
+
+To provide a zero-intrusion, 1-click GUI control plane for local desktop sessions (especially Codex Desktop, which has no local zero-token slash-command extension API) while preserving zero background polling when idle:
+
+1. **Adapter Session Discovery Contract (`HarnessAdapter.discoverAvailableSessions`)**:
+   - `HarnessAdapter` (`src/adapters/types.ts`) adds an optional method:
+     ```ts
+     export interface AvailableSessionSummary {
+       harness: string;
+       session_id: string;
+       title: string;
+       cwd: string;
+       branch?: string | null;
+       endpoint_pid?: number;
+       updated_at_ms?: number;
+     }
+     ```
+     `discoverAvailableSessions?(config: CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]>`
+   - **`SocketBridgeAdapter` (`src/adapters/pi.ts`)**:
+     - `identifyBridge` accepts an optional `timeoutMs = 1500` parameter (`identifyBridge(harness, pid, config, signal, timeoutMs = 1500)`).
+     - `discoverAvailableSessions` scans `${config.stateDir}/sockets/${this.id}-pid-*.sock`, verifies `process.kill(pid, 0)` succeeds, calls `identifyBridge(this.id, pid, config, signal, 400)` concurrently (isolating per-socket errors), and returns live sessions ordered by socket `mtimeMs` descending.
+   - **`CodexDesktopAdapter` (`src/adapters/codex.ts`)**:
+     - Checks `await (config.codexDesktopRunning ?? codexDesktopRunning)(signal)` first; if Codex Desktop is not running, returns `[]` immediately (preventing ghost threads when the app is closed).
+     - Opens `${config.codexHome}/state_5.sqlite` read-only (`PRAGMA busy_timeout = 100`, closed in `finally`) and inspects `PRAGMA table_info(threads)`. If `id`, `cwd`, or `archived` is absent, returns `[]`.
+     - Dynamically builds user-thread predicates only from columns present in `PRAGMA table_info(threads)`:
+       - `if (cols.has("thread_source")) filters.push("COALESCE(thread_source, 'user') = 'user'");`
+       - `if (cols.has("source")) filters.push("COALESCE(source, '') NOT LIKE '{\"subagent\":%'");` (using `COALESCE` so `NULL` values are never dropped by SQLite 3-valued logic).
+     - Dynamically builds `ORDER BY`: `[...(cols.has("recency_at_ms") ? ["recency_at_ms DESC"] : []), ...(cols.has("updated_at") ? ["updated_at DESC"] : []), "rowid DESC"].join(", ")`.
+     - Queries `SELECT * FROM threads WHERE ${["archived = 0", ...filters].join(" AND ")} ORDER BY ${order} LIMIT 8` and computes `title = (typeof row.name === "string" && row.name.trim()) || (typeof row.title === "string" && row.title.trim()) || basename(row.cwd)` in TypeScript.
+     - Shares the same schema-aware user-thread predicate helper across all branches of `resolveCodexThreadId()` (retaining `cwd` precedence and `allowArchived` fallback).
+   - **`discoverAllAvailableSessions(config, activeListeners, signal)` (`src/adapters/index.ts`)**:
+     - Runs `discoverAvailableSessions` across registered adapters in parallel (catching individual adapter errors so one failing adapter never discards healthy results), filters out any session already present in `activeListeners` (matching `(harness, session_id)` or `(harness, endpoint_pid)`), sorts live socket sessions first followed by recent Codex user sessions, and caps the combined result at **10 candidates maximum**.
+
+2. **UI Wire Protocol, Identity Fencing & Synchronous State Publication (`src/ui/index.ts`, `src/mcp/service.ts`)**:
+   - `DaemonToUiMessage` `state` frame adds optional `available?: AvailableSessionSummary[]`. `UiBridge.state(hubs, listeners, available = [])` defaults `available` to `[]` so all existing 2-argument callers and tests remain 100% backward-compatible.
+   - `UiToDaemonAction` adds two actions validated in `validAction()` (`src/ui/index.ts`) **before** the `a.hub` check:
+     1. `{ op: "refresh_available" }`: triggered by `cito-ui.swift` on `NSMenuDelegate.menuWillOpen(_:)`.
+     2. `{ op: "listen_session"; harness: string; session_id: string; endpoint_pid?: number; cwd?: string; title?: string }`: validated for a valid harness ID, non-empty `session_id`, optional positive safe-integer `endpoint_pid`, and optional string `cwd`/`title`.
+   - **Identity Fencing on `listen_session`**:
+     - In `resolveCaller()` (`src/adapters/index.ts`), when `meta.expected_session_id` (or `meta.expected_harness`) is supplied alongside `endpoint_pid`, verify that the resolved caller's `(harness, session_id)` matches `(expected_harness, expected_session_id)`; otherwise throw `new CitoError("SESSION_NOT_OPEN", "Session changed since discovery")`.
+     - In `CitoService.handleUiAction` for `listen_session`, sanitize `about` (`(action.title || basename(action.cwd || "") || "Session").replace(/[\r\n]+/g, " ").trim().slice(0, 200) || "Session"`) and call `this.listen({ about, scope: "self" }, action.endpoint_pid ? { meta: { endpoint_pid: action.endpoint_pid, expected_harness: action.harness, expected_session_id: action.session_id } } : { meta: { codexThreadId: action.session_id, cwd: action.cwd, title: action.title } })`, followed by `void this.refreshAvailableSessions()`.
+   - **Synchronous `pushUiState()` + Generation-Guarded `refreshAvailableSessions()`**:
+     - `pushUiState(): void` remains **synchronous**: it filters cached `this.availableSessions` against current active `local_listeners` rows (`(harness, session_id)` and `(harness, endpoint_pid)`) and calls `this.ui?.state(hubs, listeners, available)`. Thus, when `listen()` completes, its synchronous `finally { this.pushUiState(); }` immediately removes the newly enrolled session from `available` in the same frame.
+     - `async refreshAvailableSessions(): Promise<void>` increments `const gen = ++this.discoveryGen`, awaits `discoverAllAvailableSessions(this.config, activeRows, this.shuttingDown.signal)`, and if `gen === this.discoveryGen && !this.closing`, updates `this.availableSessions` and calls `this.pushUiState()`.
+     - Triggered from `startUi()`, `handleUiAction({ op: "refresh_available" })`, `unlistenById()`, `unlistenAll()`, `revokeSession()`, and a debounced (`150ms`) `fs.watch` on `${config.stateDir}/sockets` (created via `mkdir(..., { recursive: true, mode: 0o700 })` first, with `.on("error", () => {})` and cleaned up in `close()`).
+
+3. **Menu Bar UI Layout, Viewport Capping & Flicker-Free Dynamic Refresh (`src/macos/cito-ui.swift`)**:
+   - **Figure-Ground Visual Hierarchy**:
+     - **Active Listeners (Top Section — Primary Cards)**: `360 × 58/72 pt` rounded cards (`radius: 10pt`, `alpha: 0.045`) inside `64/78 pt` row views. When `listeners.count > 4`, the active row views are hosted inside an `NSScrollView` (`id = "active_scroll"`, `width: 380, height: 260 pt`) using a top-down `FlippedView` (`override var isFlipped: Bool { true }`, document height = sum of `64/78 pt` row heights); when `1 <= listeners.count <= 4`, each row is hosted directly as its own `NSMenuItem`.
+     - **Compact Empty Banner When `listeners.isEmpty && !available.isEmpty`**: Renders a `380 × 34 pt` compact strip (`id = "empty"`, inner pill `360 × 28 pt` at `x: 10, y: 3, radius: 8`) with `waveform.slash` (`14×14pt`) and `"No active listeners — click + Listen below"`. (When both `listeners.isEmpty && available.isEmpty`, renders the full `70pt` empty card `"No active listeners"`).
+     - **Available Sessions Section (`!available.isEmpty`)**:
+       - **Section Header (`id = "available_header"`, `380 × 24 pt`)**: `1pt` top separator (`x: 12, y: 21, width: 356`, `alpha: 0.08`) + `"AVAILABLE SESSIONS"` (`10pt .semibold`, `.secondaryLabelColor`, `NSRect(x: 12, y: 4, width: 220, height: 14)`).
+       - **Candidate Rows (`380 × 36 pt`, `id = "candidate:\(c.harness):\(c.session_id)"`)**:
+         - Left: `22 × 22 pt` muted harness badge (`x: 12, y: 7, radius: 6`, `tint.withAlphaComponent(0.08)` fill, `12×12pt` SF Symbol in `tint.withAlphaComponent(0.75)`).
+         - Center (`NSRect(x: 42, y: 9, width: 254, height: 18)`): `"<title> · <short_cwd>"` (`toolTip = "\(c.title) — \(c.cwd)"`).
+         - Right (`NSRect(x: 304, y: 7, width: 64, height: 22)`): `MenuControl("Listen", ..., leadingSymbol: "plus", radius: 6)` (`id = "listen:\(c.harness):\(c.session_id)"`).
+       - **Viewport Capping (`max 4 visible rows = 144 pt`)**:
+         - When `available.count <= 4`, candidate rows are hosted directly (`36pt` each).
+         - When `available.count > 4`, candidate rows are hosted inside an `NSScrollView` (`id = "available_scroll"`, `width: 380, height: 144 pt`, using `FlippedView` with document height `available.count * 36 pt`) supporting trackpad scrolling for up to `10` candidates.
+   - **Flicker-Free Dynamic Refresh, `eventTracking` RunLoop Delivery & `menuActions` Compatibility**:
+     - **Persistent `NSMenu` Instance & `NSMenuDelegate`**: `Companion` conforms to `NSMenuDelegate`, creates a single `let cardMenu = NSMenu()` (`cardMenu.autoenablesItems = false; cardMenu.delegate = self; status?.menu = cardMenu`), and emits `["op": "refresh_available"]` in `menuWillOpen(_:)` (also exposed via headless `{"op": "test_menu_open"}`). `rebuild()` mutates `cardMenu` in-place (`cardMenu.removeAllItems()`, repopulates items, and calls `cardMenu.update()`) without replacing `status?.menu`.
+     - **Event-Tracking RunLoop Delivery**: Incoming `STDIN` frames are dispatched via `RunLoop.main.perform(inModes: [.common, .eventTracking]) { self?.receive(line) }` so frames arriving while the menu is open update the visible menu immediately.
+     - **`Equatable` State Diff Guard with `hasRenderedState` & `pendingMutation`**: `Hub`, `Listener`, and `Candidate` conform to `Equatable`. `Companion` tracks `hasRenderedState = false` and `pendingMutation = false` (set to `true` whenever a button optimistically mutates its label in-place, such as `scope` toggle or candidate `Listen` $\to$ `"…"`). `receive()` skips `rebuild()` only when `hasRenderedState && !pendingMutation && hubs == h && listeners == l && available == a`, ensuring initial renders and failed-action rollbacks are never skipped.
+     - **`emit([String: Any])` & `menuActions` Index Stability**: `emit(_ action: [String: Any])` serializes `endpoint_pid` as a JSON number (`Int`). Candidate `listen` closures are appended to `menuActions` **after** `quit` at the end of `rebuild()`, preserving existing action indices `0..9`.
+
 ---
 
 ## 5. Optional `CITO_CLAUDE_CHANNEL=1` Stdio Channel Bridge (`src/mcp/cli.ts`, `src/adapters/pi.ts`)
