@@ -61,7 +61,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
 });
 
 interface MenuNode { id: string; text?: string; tooltip?: string; green?: boolean; width: number; height: number; x: number; radius: number; hidden?: boolean; children: MenuNode[] }
-interface MenuSnapshot { core_alpha: number; items: MenuNode[]; actions: number; count: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
+interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
 test("real AppKit card views expose template icon, geometry, hub drawers and inline copy/scope feedback", async () => {
@@ -75,11 +75,29 @@ test("real AppKit card views expose template icon, geometry, hub drawers and inl
     return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
   };
   try {
-    await bridge.start(); bridge.state(hubs, [listener]);
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+    const idle = await inspect();
+    expect(idle).toMatchObject({ count: 0, button_title: "", button_image_position: 1 });
+    expect(idle.icon_alpha.arc).toBeGreaterThan(0.9);
+    expect(idle.icon_alpha.core).toBeCloseTo(0.4, 1);
+    expect(idle.icon_alpha.wave).toBeCloseTo(0.4, 1);
+    expect(idle.icon_alpha.arc_gap).toBeLessThan(0.05);
+    expect(idle.icon_alpha.warning_dot).toBeLessThan(0.05);
+    expect(idle.icon_alpha.warning_ring).toBeGreaterThan(0.9);
+    bridge.state(hubs, [listener]);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1"));
     const initial = await inspect(), nodes = flatten(initial.items);
     expect(initial).toMatchObject({ actions: 10, count: 1, icon_template: true, icon_width: 18, icon_height: 18 });
-    expect(initial.core_alpha).toBeCloseTo(1, 1);
+    expect(initial).toMatchObject({ button_title: " 1", button_image_position: 7, button_font_size: 12 });
+    expect(initial.button_font_weight).toBeCloseTo(0.3, 2);
+    expect(initial.button_font_features).toContainEqual({ type: 6, selector: 0 });
+    expect(initial.button_digit_widths[0]).toBeCloseTo(initial.button_digit_widths[1]!, 4);
+    expect(initial.icon_alpha.arc).toBeGreaterThan(0.9);
+    expect(initial.icon_alpha.core).toBeGreaterThan(0.9);
+    expect(initial.icon_alpha.wave).toBeGreaterThan(0.9);
+    expect(initial.icon_alpha.arc_gap).toBeLessThan(0.05);
+    expect(initial.icon_alpha.warning_dot).toBeLessThan(0.05);
     expect(initial.items.every(node => node.width === 340)).toBe(true);
     expect(nodes).toContainEqual(expect.objectContaining({ width: 320, height: 58, x: 10, radius: 10 }));
     expect(initial.items.find(node => node.id === "header")).toMatchObject({ height: 40 });
@@ -103,8 +121,14 @@ test("real AppKit card views expose template icon, geometry, hub drawers and inl
     bridge.state([{ ...hubs[0]!, status: "auth_required", error: "Sign in required" }], []);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=0"));
     const empty = await inspect();
-    expect(empty).toMatchObject({ count: 0, icon_template: true });
-    expect(empty.core_alpha).toBeCloseTo(0.4, 1);
+    expect(empty).toMatchObject({ count: 0, icon_template: true, button_title: "", button_image_position: 1 });
+    expect(empty.icon_alpha.arc).toBeGreaterThan(0.9);
+    expect(empty.icon_alpha.core).toBeCloseTo(0.4, 1);
+    expect(empty.icon_alpha.wave).toBeCloseTo(0.4, 1);
+    expect(empty.icon_alpha.warning_dot).toBeGreaterThan(0.9);
+    expect(empty.icon_alpha.inside_dot).toBeGreaterThan(0.9);
+    expect(empty.icon_alpha.warning_ring).toBeLessThan(0.05);
+    expect(empty.icon_alpha.outside_cutout).toBeGreaterThan(0.9);
     expect(empty.items.find(node => node.id === "drawer:personal")?.hidden).toBe(false);
     expect(flatten(empty.items)).toContainEqual(expect.objectContaining({ width: 320, height: 64 }));
     expect(flatten(empty.items).map(node => node.text)).toContain("No active listeners");

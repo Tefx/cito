@@ -190,7 +190,9 @@ export class CitoService {
   }
   private constructor(readonly config: CitoConfig, readonly state: LocalState, readonly hostId: string, private readonly options: ServiceOptions) {
     for (const [name, hub] of Object.entries(config.hubs)) {
-      const slotConfig = { ...config, ...hub };
+      // Optional authentication settings belong to this hub, never the mirrored default.
+      const slotConfig = { ...config, ...hub, oidcIssuer: hub.oidcIssuer, oidcClientId: hub.oidcClientId,
+        oidcScopes: hub.oidcScopes, oidcRedirectPort: hub.oidcRedirectPort };
       this.slots.set(name, new HubSlot(name, slotConfig, options,
         broker => this.restoreReceivers(name, broker), () => {
           for (const receiver of this.receivers.values()) if (receiver.hub === name) { receiver.cancel(); void receiver.badge().catch(error => this.log(error)); }

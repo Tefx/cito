@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { startHttpServer } from "../../src/mcp/server.js";
+import { encode } from "../../src/mcp/receiver.js";
 import { bridgeSocketPath, requestBridge } from "../../src/adapters/pi.js";
 import { toCanonicalListenerId } from "../../src/shared/index.js";
 import { fixture, call, payload, waitFor } from "../mcp/support.js";
@@ -44,11 +45,70 @@ test("opt-in stdio channel advertises capability, pushes real broker delivery an
     const inbox = await client.callTool({ name: "cito_inbox", arguments: {} });
     expect(payload(inbox as { content: { text: string }[] })).toMatchObject({ acknowledged_count: 1, signals: [{ signal_id: sent.signal_id, message: "Review available" }] });
     expect(notifications).toHaveLength(1);
+
+    // Hold the persisted dispatcher lease while the real broker admits the entire burst.
+    const id = toCanonicalListenerId(listener.listener_id as string), slot = f.service.slots.get("default")!;
+    const broker = await slot.network();
+    const publishBurst = async (count: number, title: string, prefix: string) => {
+      const before = f.service.state.signals("SELECT * FROM local_signals").length;
+      f.service.state.run("UPDATE local_listeners SET dispatcher_token = 'burst', lease_until_ms = ? WHERE listener_id = ?", Date.now() + 30000, id);
+      const messages = Array.from({ length: count }, (_, i) => prefix + String(i).padStart(4, "0") + "🙂".repeat(500 - prefix.length - 4));
+      for (const [i, message] of messages.entries()) broker.nc.publish("cito.signal." + id, encode({
+        signal_id: prefix + i, to: id, target_generation: listener.binding_generation, sender_endpoint_key: "burst-sender",
+        from: { principal_id: slot.principal!.principal_id, user: "alice", host_id: "source-host", host_name: "source",
+          harness: null, listener_id: null, title }, message, in_reply_to: null,
+      }));
+      await broker.nc.flush();
+      await waitFor(() => f.service.state.signals("SELECT * FROM local_signals").length === before + count, 10000);
+      f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
+      return messages;
+    };
+    const burstMessages = await publishBurst(600, "", "burst");
+    const firstBurstNotification = notifications.length;
+    await receiver.dispatch(); // A single dispatch must continue draining without another admission.
+    await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 601, 5000);
+    await waitFor(() => notifications.length === firstBurstNotification + 12);
+    const burstCards = notifications.slice(firstBurstNotification).map(notification => notification.params.content);
+    expect(burstCards.every(card => card.startsWith("🔔 Cito · 50 notifications"))).toBe(true);
+    expect(burstCards.every(card => Buffer.byteLength(JSON.stringify(card)) <= 256 * 1024)).toBe(true);
+    expect(burstCards.reduce((n, card) => n + Buffer.byteLength(card), 0)).toBeGreaterThan(1_048_576);
+    expect(f.service.state.signals("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL")).toHaveLength(600);
+    const drained: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const page = payload(await client.callTool({ name: "cito_inbox", arguments: {} }) as { content: { text: string }[] });
+      expect(page.acknowledged_count).toBe(50);
+      drained.push(...(page.signals as { message: string }[]).map(signal => signal.message));
+    }
+    expect(drained).toEqual(burstMessages);
+
+    // Long metadata exercises the serialized-byte ceiling before the 50-row ceiling.
+    await publishBurst(12, "<".repeat(15000), "large");
+    const firstLargeNotification = notifications.length;
+    await receiver.dispatch();
+    await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 613, 5000);
+    await waitFor(() => notifications.length >= firstLargeNotification + 3);
+    const largeCards = notifications.slice(firstLargeNotification).map(notification => notification.params.content);
+    expect(largeCards).toHaveLength(3);
+    expect(largeCards.every(card => Buffer.byteLength(JSON.stringify(card)) <= 256 * 1024)).toBe(true);
+    const batchSizes = f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_signals WHERE signal_id LIKE 'large%' GROUP BY batch_id").all();
+    expect(batchSizes.map(row => row.n)).toEqual([4, 4, 4]);
+
+    // A single oversized sender title stays in the inbox instead of wedging subsequent batches.
+    await publishBurst(1, "<".repeat(70000), "oversized");
+    await publishBurst(1, "", "after");
+    await receiver.dispatch();
+    await waitFor(() => notifications.length === firstLargeNotification + 4);
+    expect(notifications.at(-1)!.params.content).toContain("after0000");
+    expect(f.service.state.signals("SELECT * FROM local_signals WHERE signal_id = 'oversized0'")[0])
+      .toMatchObject({ state: "STORED_PASSIVE", held_reason: "driver_unavailable", acknowledged_at_ms: null });
+    const finalInbox = payload(await client.callTool({ name: "cito_inbox", arguments: {} }) as { content: { text: string }[] });
+    expect(finalInbox).toMatchObject({ acknowledged_count: 14 });
+    expect(notifications).toHaveLength(firstLargeNotification + 4);
     await client.close();
     await waitFor(async () => !(await stat(path).catch(() => undefined)));
     expect((await fetch(`http://127.0.0.1:${http.port}/health`)).status).toBe(200);
   } finally { await client.close(); await http.close(); await f.close(); }
-}, 20000);
+}, 30000);
 
 test("stdio channel startup and idle shutdown remove owned sockets on SIGINT and SIGTERM", async () => {
   const f = await fixture({ pi: false });

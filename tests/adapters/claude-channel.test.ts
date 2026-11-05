@@ -28,6 +28,19 @@ test("closing a channel releases its endpoint even while notification transport 
     await failed;
   } finally { release(); }
 });
+test("channel socket accepts serialized deliveries above one MiB within the four MiB bridge boundary", async () => {
+  const state = await isolatedState(); cleanups.push(() => state.cleanup());
+  const notifications: JSONRPCMessage[] = [];
+  const bridge = await startStdioChannelBridge(loadConfig(state.env), { send: async message => { notifications.push(message); } });
+  cleanups.push(() => bridge.close());
+  const path = bridgeSocketPath(state.stateDir, "claude", process.ppid);
+  const identity = await requestBridge(path, { op: "identify" }, 1500), content = "🙂".repeat(300000);
+  expect(Buffer.byteLength(content)).toBeGreaterThan(1_048_576);
+  expect(await requestBridge(path, { op: "deliver", session_id: identity.session_id, batch_id: "large", content }, 3000))
+    .toMatchObject({ delivered: true, deduplicated: false });
+  expect(notifications).toEqual([{ jsonrpc: "2.0", method: "notifications/claude/channel",
+    params: { content, meta: { origin: "cito" } } }]);
+});
 test("channel socket owns its endpoint, checks session identity, serializes dedup and bounds its ring at 200", async () => {
   const state = await isolatedState(); cleanups.push(() => state.cleanup());
   const config = loadConfig(state.env), notifications: JSONRPCMessage[] = [];

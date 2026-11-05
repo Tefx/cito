@@ -12,7 +12,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function setup(pi = true) { const f = await fixture({ pi }); cleanups.push(() => f.close()); return f; }
 
-test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pull without re-enrolling", async () => {
+test("restart restores persisted ACTIVE ownership and drains frozen then queued batches without re-enrolling", async () => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "restart" }, f.pi.meta);
   const id = toCanonicalListenerId(enrolled.listener_id);
@@ -28,10 +28,14 @@ test("restart restores persisted ACTIVE ownership, frozen dispatch and queued pu
     message: "queued offline", in_reply_to: null }));
   const restarted = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => restarted.close());
   expect((await call(restarted, "cito_find")).listeners).toMatchObject([{ listener_id: enrolled.listener_id }]);
-  await waitFor(() => restarted.state.listener(id)!.persisted_seq === 2 && restarted.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1);
+  await waitFor(() => restarted.state.listener(id)!.persisted_seq === 2 && restarted.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 2);
   expect(restarted.state.listener(id)).toMatchObject({ status: "ACTIVE", owner_token: owner, binding_generation: 1 });
-  expect(f.pi.messages.map(message => message.content)).toEqual(["Original frozen card"]);
-  expect((await call(restarted, "cito_inbox", {}, f.pi.meta)).signals).toMatchObject([{ signal_id: "queued-during-restart", message: "queued offline" }]);
+  expect(f.pi.messages.map(message => message.content)).toEqual(["Original frozen card", "🔔 Cito · alice@other\n\nqueued offline"]);
+  const delivered = restarted.state.signals("SELECT * FROM local_signals ORDER BY seq");
+  expect(delivered[0]!.batch_id).toBe("frozen-before-restart");
+  expect(delivered[1]!.batch_id).not.toBe(delivered[0]!.batch_id);
+  expect(delivered.every(row => row.acknowledged_at_ms !== null)).toBe(true);
+  expect((await call(restarted, "cito_inbox", {}, f.pi.meta)).signals).toEqual([]);
 }, 10_000); // Includes first-use Swift compilation and native startup under parallel test load.
 
 test("unlisten cleanup cannot delete the concurrently installed replacement receiver", async () => {

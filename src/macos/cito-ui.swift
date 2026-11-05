@@ -31,6 +31,16 @@ func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
     return image
 }
 
+func formatStatusButton(_ button: NSButton, count: Int, image: NSImage?) {
+    button.image = image
+    button.title = ""
+    button.imagePosition = count == 0 ? .imageOnly : .imageLeading
+    if count > 0 {
+        button.attributedTitle = NSAttributedString(string: " \(count)",
+            attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)])
+    }
+}
+
 func textLabel(_ title: String, _ frame: NSRect, size: CGFloat = 11, weight: NSFont.Weight = .regular,
                color: NSColor = .labelColor) -> NSTextField {
     let label = NSTextField(labelWithString: title)
@@ -177,6 +187,7 @@ final class Companion: NSObject {
     let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
     let dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
     var status: NSStatusItem?
+    var headlessStatusButton: NSButton?
     var panel: NSPanel?
     var labels: [NSTextField] = []
     var accentBar: NSView?
@@ -200,7 +211,8 @@ final class Companion: NSObject {
         clickSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         clickSource?.setEventHandler { [weak self] in self?.hide(clicked: true) }
         clickSource?.resume()
-        if !headless { status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
+        if headless { headlessStatusButton = NSButton(frame: .zero) }
+        else { status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
         DispatchQueue.global().async { [weak self] in
             var buffer = Data()
             var dropping = false
@@ -268,14 +280,8 @@ final class Companion: NSObject {
         let count = uniqueSessionCount
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
         statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
-        if let button = status?.button {
-            button.image = statusImage
-            button.title = ""
-            button.imagePosition = count == 0 ? .imageOnly : .imageLeading
-            if count > 0 {
-                button.attributedTitle = NSAttributedString(string: " \(count)",
-                    attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)])
-            }
+        if let button = status?.button ?? headlessStatusButton {
+            formatStatusButton(button, count: count, image: statusImage)
         }
         let menu = NSMenu(); menu.autoenablesItems = false
         cardMenu = menu
@@ -458,9 +464,25 @@ final class Companion: NSObject {
         NSGraphicsContext.current?.cgContext.scaleBy(x: 2, y: 2)
         statusImage?.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
         NSGraphicsContext.restoreGraphicsState()
-        let snapshot: [String: Any] = ["items": items, "core_alpha": bitmap.colorAt(x: 16, y: 18)?.alphaComponent ?? 0, "actions": menuActions.count, "count": uniqueSessionCount,
+        func alpha(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
+            // Bitmap rows start at the top; drawing coordinates start at the bottom.
+            return bitmap.colorAt(x: Int(x * 2), y: 35 - Int(y * 2))?.alphaComponent ?? 0
+        }
+        let probes: [String: CGFloat] = ["arc": alpha(2.5, 9), "core": alpha(8, 9),
+            "wave": alpha(15.75, 9), "arc_gap": alpha(13.5, 9), "warning_dot": alpha(14.2, 4),
+            "warning_ring": alpha(11.3, 4), "outside_cutout": alpha(10.2, 4), "inside_dot": alpha(16, 4)]
+        let button = status?.button ?? headlessStatusButton
+        let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
+        let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
+        let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "actions": menuActions.count, "count": uniqueSessionCount,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
-            "icon_height": statusImage?.size.height ?? 0, "clipboard": NSPasteboard.general.string(forType: .string) ?? ""]
+            "icon_height": statusImage?.size.height ?? 0, "clipboard": NSPasteboard.general.string(forType: .string) ?? "",
+            "button_title": button?.title ?? "", "button_image_position": button?.imagePosition.rawValue ?? -1,
+            "button_font_size": font?.pointSize ?? 0, "button_font_weight": traits?[.weight] as? CGFloat ?? 0,
+            "button_font_features": (font?.fontDescriptor.object(forKey: .featureSettings) as? [[NSFontDescriptor.FeatureKey: Any]] ?? []).map { feature in
+                ["type": feature[.typeIdentifier] as? Int ?? -1, "selector": feature[.selectorIdentifier] as? Int ?? -1]
+            },
+            "button_digit_widths": font.map { font in ["11111111", "88888888"].map { ($0 as NSString).size(withAttributes: [.font: font]).width } } ?? []]
         diagnostic("menu " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
     }
     func hide(clicked: Bool) {

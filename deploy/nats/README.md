@@ -46,9 +46,14 @@ Native server use requires `CITO_NATS_STORE_DIR` set to an isolated writable
 directory, plus the OIDC public-key/password variables above when applicable:
 
 ```sh
-CITO_NATS_STORE_DIR=/path/to/data nats-server -c deploy/nats/nats-server.conf
+CITO_NATS_STORE_DIR=/path/to/data nats-server -c deploy/nats/nats-server.oidc.conf
 bin/cito-auth-callout
 ```
+
+When `CITO_AUTH_CALLOUT_XKEY` is set, use
+`deploy/nats/nats-server.oidc-xkey.conf` instead to require encrypted callout
+requests. The native server does not select a configuration from `CITO_AUTH_MODE`;
+choose the OIDC configuration explicitly.
 
 ## Client configuration
 

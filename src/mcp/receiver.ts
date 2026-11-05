@@ -148,14 +148,15 @@ export class Receiver {
     this.track(this.badge()); this.schedule();
   }
   badge(): Promise<void> { const row = this.row(); return refreshSessionBadge(this.state, this.config, row.harness, row.session_id); }
-  private schedule(): void {
+  private schedule(delayMs = 1500): void {
     if (this.abort.signal.aborted) return;
-    clearTimeout(this.debounce); this.debounce = setTimeout(() => this.track(this.dispatch()), 1500); this.debounce.unref();
+    clearTimeout(this.debounce); this.debounce = setTimeout(() => this.track(this.dispatch()), delayMs); this.debounce.unref();
   }
   dispatch(): Promise<void> {
-    return this.dispatching ??= this.dispatchBatch().finally(() => {
+    let completed = false;
+    return this.dispatching ??= this.dispatchBatch().then(result => { completed = result; }).finally(() => {
       this.dispatching = undefined;
-      if (!this.abort.signal.aborted && this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND listener_id = ? AND state = 'RECEIVED' AND acknowledged_at_ms IS NULL LIMIT 1", this.hub, this.id).length) this.schedule();
+      if (!this.abort.signal.aborted && this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND listener_id = ? AND state = 'RECEIVED' AND acknowledged_at_ms IS NULL LIMIT 1", this.hub, this.id).length) this.schedule(completed ? 0 : 1500);
     });
   }
   private freeze(): SignalRow[] {
@@ -169,19 +170,32 @@ export class Receiver {
       const token = randomUUID();
       this.state.run("UPDATE local_listeners SET dispatcher_token = ?, lease_until_ms = ? WHERE hub = ? AND listener_id = ?", token, now + 30_000, this.hub, this.id);
       const old = this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND listener_id = ? AND binding_generation = ? AND state = 'DISPATCHING' ORDER BY seq", this.hub, this.id, this.generation)[0];
-      let rows: SignalRow[], batch: string, expires: number;
+      const render = (rows: SignalRow[]) => formatWakeCard(listener, rows.map(row => ({ ...row, from_host: row.from_host_name,
+        from_listener_id: row.from_listener_id ? formatScopedId(this.hub, row.from_listener_id, this.config) : null })));
+      let rows: SignalRow[], batch: string, expires: number, card: string;
       if (old) {
         batch = old.batch_id!; expires = old.batch_expires_at_ms!;
         rows = this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND batch_id = ? ORDER BY seq", this.hub, batch);
+        card = old.batch_card ?? render(rows);
       } else {
-        rows = this.state.signals(`SELECT * FROM local_signals WHERE hub = ? AND listener_id = ? AND binding_generation = ?
-          AND state = 'RECEIVED' AND acknowledged_at_ms IS NULL AND expires_at_ms > ? ORDER BY seq`, this.hub, this.id, this.generation, now);
+        const candidates = this.state.signals(`SELECT * FROM local_signals WHERE hub = ? AND listener_id = ? AND binding_generation = ?
+          AND state = 'RECEIVED' AND acknowledged_at_ms IS NULL AND expires_at_ms > ? ORDER BY seq LIMIT 50`, this.hub, this.id, this.generation, now);
+        rows = []; card = "";
+        for (const row of candidates) {
+          const next = render([...rows, row]);
+          // Include JSON escaping, leaving ample room for the bridge envelope.
+          if (Buffer.byteLength(JSON.stringify(next)) > 256 * 1024) {
+            if (rows.length) break;
+            // An oversized individual card remains readable through the inbox.
+            this.state.run("UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'driver_unavailable' WHERE hub = ? AND signal_id = ?", this.hub, row.signal_id);
+            continue;
+          }
+          rows.push(row); card = next;
+        }
         if (!rows.length) { this.releaseLease(token); return []; }
         batch = `batch_${this.hub}_${this.id}_${rows[0]!.seq}_${rows.at(-1)!.seq}_${this.generation}`;
         expires = Math.min(...rows.map(row => row.expires_at_ms));
       }
-      const card = old?.batch_card ?? formatWakeCard(listener, rows.map(row => ({ ...row, from_host: row.from_host_name,
-        from_listener_id: row.from_listener_id ? formatScopedId(this.hub, row.from_listener_id, this.config) : null })));
       for (const row of rows) this.state.run(`UPDATE local_signals SET state = 'DISPATCHING', batch_id = ?, batch_expires_at_ms = ?, dispatcher_token = ?, batch_card = ?
         WHERE hub = ? AND signal_id = ?`, batch, expires, token, card, this.hub, row.signal_id);
       return this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND batch_id = ? ORDER BY seq", this.hub, batch);
@@ -215,8 +229,8 @@ export class Receiver {
     }
     return false;
   }
-  private async dispatchBatch(): Promise<void> {
-    const rows = this.freeze(); if (!rows.length) return;
+  private async dispatchBatch(): Promise<boolean> {
+    const rows = this.freeze(); if (!rows.length) return false;
     const first = rows[0]!, token = first.dispatcher_token!, batch = first.batch_id!;
     try {
       const listener = this.row();
@@ -236,11 +250,12 @@ export class Receiver {
       }
       await this.badge();
     } catch (error) {
-      if (this.abort.signal.aborted) return;
+      if (this.abort.signal.aborted) return true;
       if (!(error instanceof DispatchStopped)) this.log(error);
       this.state.run(`UPDATE local_signals SET state = CASE WHEN batch_expires_at_ms <= ? THEN 'EXPIRED_UNSENT' ELSE 'STORED_PASSIVE' END
         WHERE hub = ? AND batch_id = ? AND state = 'DISPATCHING' AND dispatcher_token = ?`, Date.now(), this.hub, batch, token);
     } finally { this.releaseLease(token); }
+    return true;
   }
   async revoke(reason: string): Promise<void> {
     this.cancel();

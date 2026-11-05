@@ -38,7 +38,7 @@ export async function startStdioChannelBridge(config: CitoConfig, transport: { s
     socket.on("data", chunk => {
       if (received) return;
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > 1_048_576) { socket.destroy(); return; }
+      if (buffer.length > 4 * 1024 * 1024) { socket.destroy(); return; }
       const end = buffer.indexOf(10); if (end < 0) return;
       received = true;
       queue = queue.then(async () => {

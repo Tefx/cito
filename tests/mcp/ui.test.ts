@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { CitoService } from "../../src/mcp/service.js";
 import { registrationSchema } from "../../src/mcp/state.js";
 import { encode } from "../../src/mcp/receiver.js";
-import { toCanonicalListenerId } from "../../src/shared/index.js";
-import { fixture, call, waitFor } from "./support.js";
+import { loadConfig, toCanonicalListenerId } from "../../src/shared/index.js";
+import { fixture, call, waitFor, freePort } from "./support.js";
 import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -101,11 +101,27 @@ test("disconnect aborts interactive login and prevents a late connection; subseq
 
 test("HubSlot optional scopes and redirect ports cannot leak from the mirrored default hub", async () => {
   const f = await fixture(); cleanups.push(() => f.close());
-  const config = { ...f.config, oidcScopes: ["openid", "private"], oidcRedirectPort: 9999,
-    hubs: { ...f.config.hubs, secondary: { ...f.config.hubs.default!, name: "secondary" } } };
-  const service = await CitoService.create(config); cleanups.push(() => service.close());
-  expect(service.slots.get("secondary")!.config.oidcScopes).toBeUndefined();
-  expect(service.slots.get("secondary")!.config.oidcRedirectPort).toBeUndefined();
+  const key = await signingKey("ES256", "scopes"), oidc = await startOidc([key.jwk]); cleanups.push(() => oidc.stop());
+  oidc.state.scopesSupported = ["openid", "email"];
+  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims()) };
+  const path = join(f.stateDir, "config.json"), port = await freePort();
+  const hub = { natsUrl: f.broker.url, authMode: "oidc", oidcIssuer: oidc.issuer, oidcClientId: "cito" };
+  await writeFile(path, JSON.stringify({ default_hub: "work", hubs: {
+    work: { ...hub, oidcScopes: ["openid", "custom"], oidcRedirectPort: port }, cloud: hub,
+  } }));
+  const config = loadConfig({ ...f.env, CITO_CONFIG_PATH: path });
+  expect(config.oidcScopes).toEqual(["openid", "custom"]);
+  expect(config.hubs.cloud).not.toHaveProperty("oidcScopes");
+  const requestedScopes: string[] = [];
+  const service = await CitoService.create(config, { browserOpener: async (url, signal) => {
+    requestedScopes.push(new URL(url).searchParams.get("scope")!); await browser(url, signal);
+  } }); cleanups.push(() => service.close());
+  expect(service.slots.get("cloud")!.config.oidcScopes).toBeUndefined();
+  expect(service.slots.get("cloud")!.config.oidcRedirectPort).toBeUndefined();
+  await service.slots.get("work")!.network();
+  await service.slots.get("cloud")!.network();
+  expect(requestedScopes).toEqual(["openid custom", "openid email"]);
+  expect(service.slots.get("cloud")!.principal?.owner_user).toBe("alice");
 });
 
 test("non-interactive startup never opens a browser, and authenticating as a new principal fences previous listeners before restoration", async () => {
