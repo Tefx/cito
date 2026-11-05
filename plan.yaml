@@ -34,7 +34,7 @@ context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESI
   completions, and stateless HTTP POST /mcp binding via endpoint_pid; resolveCodexThreadId
   in src/adapters/codex.ts; CLI direct control cito listen and cito unlisten in src/mcp/cli.ts
   with caller_pid vs --codex metadata disambiguation; README.md documentation; unit/integration
-  tests; and iterative code-hygiene gate), and V7 (Menu Bar On-Demand Session Discovery,
+  tests; and iterative code-hygiene gate), V7 (Menu Bar On-Demand Session Discovery,
   1-Click Listen, Viewport Capping & Flicker-Free Dynamic Refresh per docs/DESIGN.md
   §4.3: AvailableSessionSummary and HarnessAdapter.discoverAvailableSessions across
   SocketBridgeAdapter and CodexDesktopAdapter, discoverAllAvailableSessions and expected_session_id/expected_harness
@@ -43,26 +43,38 @@ context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESI
   and debounced sockets watcher, and cito-ui.swift NSMenuDelegate in-place cardMenu
   rebuild, eventTracking RunLoop delivery, Equatable diff guard with hasRenderedState
   + pendingMutation, compact empty strip, AVAILABLE SESSIONS rows, FlippedView NSScrollView
-  viewport capping, and appended menuActions). Keep full native Claude Code lifecycle/hook
-  integration strictly as ''Proposed Design Suggestion Only — Not Yet Implemented''
-  in docs/DESIGN.md §6 and README.md, and forbid mutations to external dotfiles or
-  tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V5/V6/V7 — Theory-Grounded
-  macOS Menu Bar UI, Streamable HTTP, Pure Adapter Layer, Direct Session Control Commands
-  & Menu Bar On-Demand Session Discovery, §§1–6), AGENTS.md, and README.md.
+  viewport capping, and appended menuActions), and V8 (Ego-Centric Menu Bar Control
+  Plane, Spotlight Network Directory & Scalable NATS KV Discovery per docs/DESIGN.md
+  §§1.2–6: complete Claude Code removal from src/ and tests/ with transport-independent
+  regression tests migrated under pi, HubDirectoryIndex in src/mcp/service.ts with
+  single streams.info(KV_STREAM) + dual-termination watch + 16-worker concurrent point-get
+  fallback + directoryGen fencing + immediate local mutation coalescing + read-time
+  lease/visibility evaluation, removal of (!) replay_gap_detected badge suffix in
+  src/mcp/receiver.ts, Pi lastActiveMs interaction recency tracking and per-harness
+  candidate quota up to 8 per harness / max 16 total, Two-Surface macOS UI Architecture
+  with Surface 1 380pt Ego-Centric cardMenu Zones 1–4 and Surface 2 560x440pt Spotlight-style
+  DirectoryPanel KeyPanel: NSPanel + daemon-backed full-index query_directory, and
+  iterative code-hygiene gate). Keep Claude Code integration strictly as ''Proposed
+  Design Suggestion Only — Not Yet Implemented'' in docs/DESIGN.md §6 and README.md
+  with zero ''claude'' references in src/ or tests/, and forbid mutations to external
+  dotfiles or tela repositories.'
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V8 — Ego-Centric
+  Menu Bar Control Plane, Spotlight Network Directory & Scalable NATS KV Discovery,
+  §§1–6), AGENTS.md, and README.md.
 
   2. Hard boundaries: Enforce English-only UI/UX, code, and documentation (zero Chinese
   characters in src/, docs/, README.md, AGENTS.md, deploy/) and zero company/environment-specific
   names (rda, casdoor, rcatwin, keppel, mingchen) across src/, docs/, README.md, AGENTS.md,
-  deploy/, and tests/. Keep src/mcp/ harness-agnostic (zero references to pi, codex,
-  or x-codex-turn-metadata in src/mcp/ except src/mcp/cli.ts delegating --codex CLI
-  resolution to src/adapters/codex.ts) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$).
-  Keep src/pi-extension/cito-bridge.ts 100% standalone with zero external or relative
-  imports. Keep native Claude Code lifecycle integration documented strictly as Proposed
-  Design Suggestion Only — Not Yet Implemented in docs/DESIGN.md §6 and README.md.
-  Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
-  / ~/.codex state during tests; always isolate test state in temporary directories
-  and ephemeral test nats-server / HTTP instances.
+  deploy/, and tests/. Enforce zero case-insensitive ''claude'' matches across src/
+  and tests/, keeping Claude Code integration documented strictly as Proposed Design
+  Suggestion Only — Not Yet Implemented in docs/DESIGN.md §6 and README.md. Keep src/mcp/
+  harness-agnostic (zero references to pi, codex, or x-codex-turn-metadata in src/mcp/
+  except src/mcp/cli.ts delegating --codex CLI resolution to src/adapters/codex.ts)
+  and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$). Keep src/pi-extension/cito-bridge.ts
+  100% standalone with zero external or relative imports. Do NOT mutate external repositories
+  (/Users/tefx/dotfiles, tela) or live user ~/.cito / ~/.codex state during tests;
+  always isolate test state in temporary directories and ephemeral test nats-server
+  / HTTP instances.
 
   3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ & src/ui/ ->
   src/mcp/), unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing
