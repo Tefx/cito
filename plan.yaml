@@ -1026,7 +1026,7 @@ phases:
   name: Cito V4 English-Only Production Menu Bar Card UI, Bespoke Vector Icon, MCP
     2026-07-28 Support, Pure Adapter Boundary, Optional Claude Channel Bridge, Neutral
     Naming Cleanup, and Hygiene Gate
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, all docs/DESIGN.md §§1–5, AGENTS.md, README.md, and deploy/nats/README.md
     requirements are verified (including zero Chinese characters in src/, docs/, README.md,
@@ -1052,7 +1052,7 @@ phases:
     name: Implement V4 English-Only Production Menu Bar Card UI, Bespoke Vector Icon,
       MCP 2026-07-28 Support, Pure Adapter Boundary, Optional Claude Channel Bridge,
       Neutral Naming Cleanup, and Unit/E2E Tests
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/macos/cito-ui.swift\n    - src/adapters/**\n\
       \    - src/mcp/**\n    - src/shared/**\n    - src/ui/**\n    - src/auth-callout/**\n\
@@ -1144,6 +1144,8 @@ phases:
     - README.md
     - deploy/nats/README.md
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-05T04:57:36.108669Z'
   - id: v4.acceptance-and-hygiene-gate
     name: 'V4 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
