@@ -1346,7 +1346,7 @@ phases:
   - id: v5.theory-grounded-ui-and-hub-state-machine
     name: Implement V5 Theory-Grounded 380pt Menu Bar UI, State-Driven Hub Lifecycle
       & Drawer, SF Symbol Controls, and Unit/Lifecycle Tests
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/ui/index.ts\n    - src/mcp/service.ts\n\
       \    - src/macos/cito-ui.swift\n    - tests/ui/lifecycle.test.ts\n    - tests/mcp/**\n\
@@ -1450,6 +1450,22 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-05T07:07:19.352095Z'
+    done_at: '2026-11-05T07:34:23.199466+00:00'
+    evidence: "Commands run (npm run typecheck && npm run build && npm test), mechanical\
+      \ regex checks (0 Chinese chars, 0 forbidden names, 0 harness refs in src/mcp/),\
+      \ and verified docs/DESIGN.md §§2.2–3.3 deliverables:\n- Commit: 5a4da158d065a44510f2561fa381474b57900a30\
+      \ (implemented by uiux-designer after senior-engineer hit openai OAuth 400 invalid_grant\
+      \ at startup; fast-forwarded onto main)\n- npm run typecheck && npm run build\
+      \ && npm test: exit 0 (29 test files, 209 tests passed, 0 failed, 0 skipped)\n\
+      - Mechanical checks:\n  - [\\p{Script=Han}] in src/, docs/, README.md, AGENTS.md,\
+      \ deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/,\
+      \ docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md, deploy/,\
+      \ tests/: 0 matches\n  - \\b(codex|pi)\\b|x-codex-turn-metadata in src/mcp/:\
+      \ 0 matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n  - Fresh-context\
+      \ structural-auditor (01a1aa9d-5136-76d9-ba32-f148aecaba8e) and uiux-auditor\
+      \ (01a1aa9d-5184-70ed-856d-49ae586670b6) audited commit 5a4da158d065a44510f2561fa381474b57900a30\
+      \ across all 5 lenses and both certified Zero Actionable Findings (Completeness:\
+      \ CLEAN | Simplicity: ZERO_NEW_ISSUES) on Round 1."
   - id: v5.acceptance-and-hygiene-gate
     name: 'V5 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
