@@ -1224,7 +1224,7 @@ phases:
     agent: code-reviewer
   - id: v4.fix-claude-channel-burst-test-race
     name: Fix publishBurst notification baseline race in tests/e2e/claude-channel.test.ts
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - tests/e2e/claude-channel.test.ts\n  blocked_paths:\n\
       \    - plan.yaml\n```\n\n- **Deliver:** Fix the notification count baseline\
@@ -1244,3 +1244,5 @@ phases:
     depends_on:
     - v4.english-card-ui-mcp2026-and-adapter-purity
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-05T06:05:47.632581Z'
