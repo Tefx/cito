@@ -46,7 +46,7 @@ test("opt-in stdio channel advertises capability, pushes real broker delivery an
     expect(payload(inbox as { content: { text: string }[] })).toMatchObject({ acknowledged_count: 1, signals: [{ signal_id: sent.signal_id, message: "Review available" }] });
     expect(notifications).toHaveLength(1);
 
-    // Hold the persisted dispatcher lease while the real broker admits the entire burst.
+    // Keep the persisted dispatcher lease until each notification baseline is captured and dispatch is ready.
     const id = toCanonicalListenerId(listener.listener_id as string), slot = f.service.slots.get("default")!;
     const broker = await slot.network();
     const publishBurst = async (count: number, title: string, prefix: string) => {
@@ -60,11 +60,11 @@ test("opt-in stdio channel advertises capability, pushes real broker delivery an
       }));
       await broker.nc.flush();
       await waitFor(() => f.service.state.signals("SELECT * FROM local_signals").length === before + count, 10000);
-      f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
       return messages;
     };
     const burstMessages = await publishBurst(600, "", "burst");
     const firstBurstNotification = notifications.length;
+    f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
     await receiver.dispatch(); // A single dispatch must continue draining without another admission.
     await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 601, 5000);
     await waitFor(() => notifications.length === firstBurstNotification + 12);
@@ -84,6 +84,7 @@ test("opt-in stdio channel advertises capability, pushes real broker delivery an
     // Long metadata exercises the serialized-byte ceiling before the 50-row ceiling.
     await publishBurst(12, "<".repeat(15000), "large");
     const firstLargeNotification = notifications.length;
+    f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
     await receiver.dispatch();
     await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 613, 5000);
     await waitFor(() => notifications.length >= firstLargeNotification + 3);
@@ -96,6 +97,7 @@ test("opt-in stdio channel advertises capability, pushes real broker delivery an
     // A single oversized sender title stays in the inbox instead of wedging subsequent batches.
     await publishBurst(1, "<".repeat(70000), "oversized");
     await publishBurst(1, "", "after");
+    f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
     await receiver.dispatch();
     await waitFor(() => notifications.length === firstLargeNotification + 4);
     expect(notifications.at(-1)!.params.content).toContain("after0000");
