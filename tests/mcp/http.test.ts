@@ -4,9 +4,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { startHttpServer, parseClientPid, httpMetadata, daemonHealth } from "../../src/mcp/server.js";
+import { LocalState } from "../../src/mcp/state.js";
 import { loadConfig } from "../../src/shared/index.js";
 import type { CallerInput } from "../../src/adapters/index.js";
 import { fixture, waitFor, freePort } from "./support.js";
@@ -89,3 +91,65 @@ test("singleton daemon returns zero on same port, rejects a different port and r
     expect(errors).not.toContain("uncaught");
   } finally { if (child.exitCode === null) child.kill("SIGKILL"); await exited; await rm(root, { recursive: true, force: true }); }
 }, 15000);
+
+test("CLI listen and unlisten support socket-bridge parent discovery, --codex auto/explicit resolution, flags, and error exits", async () => {
+  const f = await fixture();
+  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
+  const state = await LocalState.open(f.stateDir);
+  state.claimDaemon(process.pid, http.port);
+  const captured: CallerInput[] = [], original = f.service.call.bind(f.service);
+  const spy = vi.spyOn(f.service, "call").mockImplementation((name, input, meta) => { captured.push(meta ?? {}); return original(name, input, meta); });
+  const env = { ...process.env, ...f.env, CITO_DAEMON_PORT: String(http.port), CITO_UI_HEADLESS: "1" };
+  const realRoot = await realpath(f.root);
+  const cli = (args: string[], cwd = realRoot) => exec(process.execPath, [resolve("bin/cito-mcp"), ...args], { env, cwd, timeout: 10000 });
+  const db = new DatabaseSync(join(f.codexHome, "state_5.sqlite"));
+  const codexUuid = "01234567-89ab-4cde-8123-0123456789ab";
+  try {
+    // 1. Default mode: sends caller_pid: process.ppid (no codexThreadId) and walks parent to Pi socket bridge.
+    const defaultListen = await cli(["listen", "--tag", "cli-tag", "Working", "on", "V6"]);
+    expect(defaultListen.stdout).toMatch(/^Listening as cli-tag-[a-z0-9]+ \(self\): Working on V6\n$/);
+    expect(captured.at(-1)).toMatchObject({ meta: { caller_pid: process.pid } });
+    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("codexThreadId");
+
+    const teamListen = await cli(["listen", "--team"]);
+    expect(teamListen.stdout).toMatch(new RegExp(`^Listening as cli-tag-[a-z0-9]+ \\(workspace\\): ${basename(realRoot)}\n$`));
+
+    const defaultUnlisten = await cli(["unlisten", "--hub", "default"]);
+    expect(defaultUnlisten.stdout).toBe("Unlistened (1 removed)\n");
+    expect((await cli(["unlisten"])).stdout).toBe("Unlistened (0 removed)\n");
+
+    // 2. Codex mode: --codex auto-resolution, --codex=<id>, and --codex <uuid> (no caller_pid/endpoint_pid/pi_pid).
+    await expect(cli(["listen", "--codex"])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("Codex thread metadata is required") });
+    db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, title TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, archived INTEGER, name TEXT, updated_at INTEGER)");
+    db.prepare("INSERT INTO threads VALUES (?, 'Codex title', ?, 'https://github.com/acme/service.git', 'main', 0, 'Codex session', 100)").run(codexUuid, realRoot);
+
+    const codexAuto = await cli(["listen", "--codex", "--scope=workspace", "--hub=default", "--tag=cdx", "Codex", "review"]);
+    expect(codexAuto.stdout).toMatch(/^Listening as cdx-[a-z0-9]+ \(workspace\): Codex review\n$/);
+    expect(captured.at(-1)).toMatchObject({ meta: { codexThreadId: codexUuid, cwd: realRoot } });
+    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("caller_pid");
+    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("endpoint_pid");
+    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("pi_pid");
+
+    // Archive thread and verify `cito unlisten --codex` resolves archived thread via allowArchived: true.
+    db.exec("UPDATE threads SET archived = 1");
+    expect((await cli(["unlisten", "--codex"])).stdout).toBe("Unlistened (1 removed)\n");
+
+    // Explicit --codex=<id> and --codex <uuid>.
+    db.exec("UPDATE threads SET archived = 0");
+    expect((await cli(["listen", `--codex=${codexUuid}`, "--scope", "self", "Explicit", "equals"])).stdout)
+      .toMatch(/^Listening as cdx-[a-z0-9]+ \(self\): Explicit equals\n$/);
+    expect((await cli(["unlisten", "--codex", codexUuid])).stdout).toBe("Unlistened (1 removed)\n");
+
+    // 3. Error exits on invalid flags / arguments.
+    for (const badArgs of [
+      ["listen", "--scope", "self", "--team"],
+      ["listen", "--scope", "invalid"],
+      ["listen", "--unknown-flag"],
+      ["unlisten", "unexpected-positional"],
+    ]) {
+      await expect(cli(badArgs)).rejects.toMatchObject({ code: 1, stderr: expect.stringMatching(/\S/) });
+    }
+  } finally {
+    db.close(); spy.mockRestore(); state.releaseDaemon(process.pid); state.close(); await http.close(); await f.close();
+  }
+}, 20000);

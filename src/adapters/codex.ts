@@ -26,6 +26,35 @@ export function codexThreadId(meta: Record<string, unknown> = {}): string {
   return id;
 }
 
+export function resolveCodexThreadId(cwd: string, config: CodexConfig = loadConfig(), options: { allowArchived?: boolean } = {}): string {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(join(config.codexHome, "state_5.sqlite"), { readOnly: true });
+    db.exec("PRAGMA busy_timeout = 1000");
+    const columns = db.prepare("PRAGMA table_info(threads)").all() as { name?: unknown }[];
+    if (!columns.length) throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
+    const order = columns.some(col => col.name === "updated_at") ? "updated_at DESC, rowid DESC" : "rowid DESC";
+    const queries: [string, ...string[]][] = [
+      [`SELECT id FROM threads WHERE archived = 0 AND cwd = ? ORDER BY ${order} LIMIT 1`, cwd],
+      [`SELECT id FROM threads WHERE archived = 0 ORDER BY ${order} LIMIT 1`],
+      ...(options.allowArchived ? [
+        [`SELECT id FROM threads WHERE cwd = ? ORDER BY ${order} LIMIT 1`, cwd] as [string, string],
+        [`SELECT id FROM threads ORDER BY ${order} LIMIT 1`] as [string],
+      ] : []),
+    ];
+    for (const [sql, ...params] of queries) {
+      const row = db.prepare(sql).get(...params) as { id?: unknown } | undefined;
+      if (nonempty(row?.id)) return row.id;
+    }
+  } catch (error) {
+    if (error instanceof CitoError) throw error;
+    throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required", { cause: error });
+  } finally {
+    db?.close();
+  }
+  throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
+}
+
 export type OptionalCodexThread = { status: "archived" } | { status: "unavailable" } | ({ status: "found" } & CodexCaller);
 /** Optional metadata: missing rows/schema and busy databases never prove closure. */
 export function readCodexThreadOptional(threadId: string, config: CodexConfig = loadConfig()): OptionalCodexThread {

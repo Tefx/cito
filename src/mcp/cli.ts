@@ -1,10 +1,12 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawn } from "node:child_process";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadConfig, type CitoConfig } from "../shared/index.js";
 import { startStdioChannelBridge } from "../adapters/claude-channel.js";
+import { readCodexThreadOptional, resolveCodexThreadId } from "../adapters/codex.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
 import { startHttpServer, daemonHealth } from "./server.js";
@@ -76,9 +78,120 @@ async function ensureDaemon(config: CitoConfig): Promise<void> {
   while (performance.now() < deadline) { if (await daemonHealth(config)) return; await delay(50); }
   throw new Error(`Daemon did not become healthy on 127.0.0.1:${config.daemonPort} for ${config.stateDir} within 5000ms`);
 }
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_unlisten",
+  args: Record<string, unknown>, meta: Record<string, unknown>): Promise<Record<string, unknown>> {
+  await ensureDaemon(config);
+  const res = await fetch(`http://127.0.0.1:${config.daemonPort}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args, _meta: meta },
+    }),
+  });
+  const raw = await res.text();
+  const dataLines = raw.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).filter(Boolean);
+  const jsonText = dataLines.at(-1) ?? (raw.trim().startsWith("{") ? raw.trim() : "");
+  if (!jsonText) throw new Error(raw.trim() || `HTTP ${res.status}`);
+  const rpc = JSON.parse(jsonText) as { error?: { message?: unknown }; result?: { isError?: boolean; content?: { type?: string; text?: string }[] } };
+  if (rpc.error) throw new Error(typeof rpc.error.message === "string" ? rpc.error.message : JSON.stringify(rpc.error));
+  const text = rpc.result?.content?.find(part => part?.type === "text" && typeof part.text === "string")?.text;
+  let payload: Record<string, unknown> = {};
+  if (text) {
+    try { payload = JSON.parse(text) as Record<string, unknown>; }
+    catch { if (rpc.result?.isError || !res.ok) throw new Error(text); }
+  }
+  if (rpc.result?.isError || payload.ok === false || !res.ok) {
+    const errObj = payload.error as { message?: unknown } | string | undefined;
+    const msg = typeof errObj === "object" && errObj && typeof errObj.message === "string"
+      ? errObj.message : typeof errObj === "string" ? errObj : text || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return payload;
+}
+async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], config: CitoConfig): Promise<void> {
+  try {
+    let explicitScope: "self" | "workspace" | undefined;
+    let team = false, hub: string | undefined, tag: string | undefined, useCodex = false, explicitCodexId: string | undefined;
+    const positionals: string[] = [], cwd = process.cwd();
+    const readValue = (arg: string, index: number, flag: string): [string, number] => {
+      if (arg.startsWith(flag + "=")) {
+        const val = arg.slice(flag.length + 1).trim();
+        if (!val) throw new Error(`Missing value for ${flag}`);
+        return [val, index];
+      }
+      const next = argv[index + 1];
+      if (next === undefined || next.startsWith("-")) throw new Error(`Missing value for ${flag}`);
+      return [next, index + 1];
+    };
+    for (let i = 0; i < argv.length; i++) {
+      const arg = argv[i]!;
+      if (arg === "--hub" || arg.startsWith("--hub=")) {
+        [hub, i] = readValue(arg, i, "--hub");
+      } else if (arg === "--codex" || arg.startsWith("--codex=")) {
+        useCodex = true;
+        if (arg.startsWith("--codex=")) {
+          const val = arg.slice("--codex=".length).trim();
+          if (!val) throw new Error("Missing value for --codex");
+          explicitCodexId = val;
+        } else {
+          const next = argv[i + 1];
+          if (next !== undefined && !next.startsWith("-")) {
+            if (cmd === "unlisten" || UUID_RE.test(next) || readCodexThreadOptional(next, config).status !== "unavailable") {
+              explicitCodexId = next;
+              i++;
+            }
+          }
+        }
+      } else if (cmd === "listen" && arg === "--team") {
+        team = true;
+      } else if (cmd === "listen" && (arg === "--scope" || arg.startsWith("--scope="))) {
+        let val: string;
+        [val, i] = readValue(arg, i, "--scope");
+        if (val !== "self" && val !== "workspace") throw new Error(`Invalid --scope: ${val}`);
+        if (explicitScope && explicitScope !== val) throw new Error("Conflicting --scope values");
+        explicitScope = val;
+      } else if (cmd === "listen" && (arg === "--tag" || arg.startsWith("--tag="))) {
+        [tag, i] = readValue(arg, i, "--tag");
+      } else if (arg.startsWith("-")) {
+        throw new Error(`Unknown flag: ${arg}`);
+      } else {
+        positionals.push(arg);
+      }
+    }
+    if (cmd === "unlisten" && positionals.length > 0) throw new Error(`Unexpected argument: ${positionals[0]}`);
+    if (team && explicitScope === "self") throw new Error("Conflicting --scope self and --team");
+    const meta: Record<string, unknown> = useCodex
+      ? { codexThreadId: explicitCodexId ?? resolveCodexThreadId(cwd, config, { allowArchived: cmd === "unlisten" }), cwd }
+      : { caller_pid: process.ppid };
+    if (cmd === "listen") {
+      const about = positionals.join(" ").trim() || basename(cwd) || "CLI session";
+      const scope = team ? "workspace" : (explicitScope ?? "self");
+      const payload = await callDaemonTool(config, "cito_listen", {
+        about, scope, ...(hub !== undefined ? { hub } : {}), ...(tag !== undefined ? { tag } : {}),
+      }, meta);
+      process.stdout.write(`Listening as ${String(payload.listener_id)} (${String(payload.scope)}): ${String(payload.about)}\n`);
+    } else {
+      const payload = await callDaemonTool(config, "cito_unlisten", { ...(hub !== undefined ? { hub } : {}) }, meta);
+      const removed = payload.removed ?? (payload.status === "unlistened" ? 1 : 0);
+      process.stdout.write(`Unlistened (${String(removed)} removed)\n`);
+    }
+  } catch (error) {
+    process.stderr.write((error instanceof Error ? error.message : String(error)) + "\n");
+    process.exitCode = 1;
+  }
+}
 export async function main(): Promise<void> {
   const config = loadConfig();
-  if (process.argv[2] === "daemon") { await runDaemon(config); return; }
+  const cmd = process.argv[2];
+  if (cmd === "daemon") { await runDaemon(config); return; }
+  if (cmd === "listen" || cmd === "unlisten") { await runDirectCommand(cmd, process.argv.slice(3), config); return; }
   await ensureDaemon(config);
   const stdio = new StdioServerTransport();
   const http = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${config.daemonPort}/mcp`));

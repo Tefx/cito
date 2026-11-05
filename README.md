@@ -78,6 +78,24 @@ Alternatively use `"command": "npx", "args": ["-y", "@tefx/cito@0.1.0"]` for the
 
 In a conversation, call `cito_listen({about: "Build verification", tag: "build"})`, then use `cito_find()` to discover other opted-in conversations and `cito_send({to: "<discovered-id>", message: "Build is ready"})` to notify one. Notifications enter the target conversation via `pi.sendMessage(..., {triggerTurn: true, deliverAs: "followUp"})`, waking idle sessions or entering a busy session's follow-up queue. Confirmed insertion automatically acknowledges the local signal. Use `cito_inbox()` to drain any unconfirmed/unavailable deliveries, and `cito_unlisten()` to opt out.
 
+### Direct Session Control (`/cito` and CLI `cito listen` / `cito unlisten`)
+
+The standalone Pi extension also registers the `/cito` slash command (with `on`, `team`, and `off` argument completions) so you can toggle or configure listening immediately without spending an LLM turn:
+
+- `/cito`: toggle listening for the current Pi session (`cito_unlisten({})` when active, or `cito_listen({about, scope: "self"})` using the session name or working directory basename).
+- `/cito on [about...]`: enable private (`self`) listening with an optional description.
+- `/cito team [about...]`: enable shared (`workspace`) listening with an optional description.
+- `/cito off`: stop listening for the current Pi session.
+
+From a terminal—or inline inside Pi or Claude Code via `!cito listen` and `!cito unlisten`—you can also control session enrollment directly through the CLI:
+
+```sh
+cito listen [--scope self|workspace] [--team] [--hub <name>] [--tag <tag>] [--codex[=<thread_id>]] [about...]
+cito unlisten [--hub <name>] [--codex[=<thread_id>]]
+```
+
+By default, `cito listen` and `cito unlisten` pass `_meta: { caller_pid: process.ppid }` so the daemon walks parent processes to locate the owning Pi or Claude socket bridge. With `--codex` (or `--codex=<thread_id>` / `--codex <uuid>`), the CLI sends `_meta: { codexThreadId, cwd: process.cwd() }` instead; when `--codex` is passed without an explicit thread ID, Cito resolves the most recent matching thread from `${CITO_CODEX_HOME}/state_5.sqlite` (preferring open threads in the current `cwd`).
+
 A gateway supporting Streamable HTTP may instead target `http://127.0.0.1:4290/mcp` after starting `cito daemon`. If the gateway runs outside Pi's ancestry, forward the Pi process PID as `_meta.endpoint_pid` (or a nested caller PID root) so discovery remains unambiguous.
 
 The extension listens on `sockets/pi-pid-<pid>.sock` (`0600`) from `session_start` until shutdown. Discovery walks up to six processes from the OS-attributed HTTP client's PID (including the stdio forwarder's Pi parent), or uses `_meta.endpoint_pid`, `_meta.pi_pid`, or `_meta.caller_pid`. A local gateway can forward nested PID roots; explicit roots prevent fallback to an unrelated parent. The bridge returns both `endpoint_pid` and `pi_pid`. Session switches clear stale badges immediately, and a per-session 200-batch deduplication ring prevents repeated insertions on socket retries.

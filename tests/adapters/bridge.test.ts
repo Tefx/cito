@@ -1,28 +1,34 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "node:net";
 import { stat } from "node:fs/promises";
-import citoBridge, { type BridgeAPI, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
+import { basename } from "node:path";
+import citoBridge, { type BridgeAPI, type BridgeCommandOptions, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
 import { bridgeSocketPath, identifyBridge, requestBridge, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
+import { startHttpServer } from "../../src/mcp/server.js";
 import { loadConfig } from "../../src/shared/index.js";
 import type { ListenerRow } from "../../src/mcp/state.js";
+import { fixture } from "../mcp/support.js";
 import { isolatedState } from "./support.js";
 
 describe("self-contained Pi bridge over real Unix sockets", () => {
   let state: Awaited<ReturnType<typeof isolatedState>>;
   let ctx: BridgeContext, currentId: string | undefined, name: string | undefined, api: BridgeAPI;
   let handlers: Map<string, (event: unknown, ctx: BridgeContext) => void | Promise<void>>;
+  let command: BridgeCommandOptions | undefined;
   const send = vi.fn<BridgeAPI["sendMessage"]>(), status = vi.fn<BridgeContext["ui"]["setStatus"]>();
+  const notify = vi.fn<NonNullable<BridgeContext["ui"]["notify"]>>();
   const register = vi.fn<NonNullable<BridgeAPI["registerMessageRenderer"]>>();
+  const registerCommand = vi.fn<NonNullable<BridgeAPI["registerCommand"]>>((_name, opts) => { command = opts; });
   const emit = async (event: string) => { await handlers.get(event)!({}, ctx); };
   const path = () => bridgeSocketPath(state.stateDir, "pi", process.pid);
   const request = (value: object) => requestBridge(path(), value, 1500);
   const identify = () => identifyBridge("pi", process.pid, state);
   beforeEach(async () => {
     state = await isolatedState(); vi.stubEnv("CITO_STATE_DIR", state.stateDir); vi.stubEnv("CITO_CODEX_HOME", state.codexHome);
-    currentId = "session-a"; name = "Human title";
-    ctx = { cwd: state.root, sessionManager: { getSessionId: () => currentId, getSessionName: () => name }, ui: { setStatus: status } };
-    handlers = new Map(); send.mockReset(); status.mockReset(); register.mockReset();
-    api = { on: (event, handler) => handlers.set(event, handler), sendMessage: send, registerMessageRenderer: register };
+    currentId = "session-a"; name = "Human title"; command = undefined;
+    ctx = { cwd: state.root, sessionManager: { getSessionId: () => currentId, getSessionName: () => name }, ui: { setStatus: status, notify } };
+    handlers = new Map(); send.mockReset(); status.mockReset(); notify.mockReset(); register.mockReset(); registerCommand.mockReset();
+    api = { on: (event, handler) => handlers.set(event, handler), sendMessage: send, registerMessageRenderer: register, registerCommand };
     citoBridge(api);
   });
   afterEach(async () => { await emit("session_shutdown"); vi.unstubAllEnvs(); await state.cleanup(); });
@@ -119,5 +125,46 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     const component = renderer({ content: "🔔 Cito\n你好🙂é" }, { expanded: false }, theme);
     expect(component.render(7)).toEqual(["🔔 Cito", "│ 你好 ", "│ 🙂é  "]); expect(component.render(1)).toEqual([" ", "C", "i", "t", "o", "é"]);
     style = "new-theme:"; component.invalidate(); expect(component.render(7).every(line => line.startsWith("new-theme:"))).toBe(true); expect(component.render(0)).toEqual([]);
+  });
+  it("registers /cito command, toggles via activeBadge, resets on session switch, and notifies on errors", async () => {
+    expect(registerCommand).toHaveBeenCalledWith("cito", expect.objectContaining({ description: "Toggle or configure Cito session listening" }));
+    expect(command!.getArgumentCompletions!("")).toEqual([{ value: "on", label: "on" }, { value: "team", label: "team" }, { value: "off", label: "off" }]);
+    expect(command!.getArgumentCompletions!(" o")).toEqual([{ value: "on", label: "on" }, { value: "off", label: "off" }]);
+    expect(command!.getArgumentCompletions!("te")).toEqual([{ value: "team", label: "team" }]);
+    expect(command!.getArgumentCompletions!("none")).toEqual([]);
+    const f = await fixture({ pi: false, env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome } });
+    const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
+    vi.stubEnv("CITO_DAEMON_PORT", String(http.port));
+    try {
+      await emit("session_start");
+      await command!.handler("", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(self\)$/), "info");
+      await command!.handler("", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Cito stopped listening", "info");
+      name = "   ";
+      await command!.handler("on", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(self\)$/), "info");
+      expect((await f.service.call("cito_find", {})).content[0]!.text).toContain(basename(state.root));
+      // Switching sessions clears activeBadge so bare /cito listens for the new session instead of unlistens.
+      currentId = "session-b";
+      await emit("session_tree");
+      await command!.handler("", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(self\)$/), "info");
+      await command!.handler("team Shared work", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(workspace\)$/), "info");
+      await command!.handler("off trailing", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [about...] | team [about...] | off]", "warning");
+      await command!.handler("unknown", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [about...] | team [about...] | off]", "warning");
+      await command!.handler("off", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Cito stopped listening", "info");
+      // Tool error (SESSION_NOT_OPEN) and network error both notify with "error".
+      currentId = undefined;
+      await command!.handler("on", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("No caller socket bridge found"), "error");
+    } finally {
+      await http.close();
+      await f.close();
+    }
   });
 });

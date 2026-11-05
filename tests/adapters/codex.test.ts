@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { codexThreadId, readCodexThreadOptional, resolveCaller, extractCallerPidRoots, CodexDesktopAdapter,
+import { codexThreadId, readCodexThreadOptional, resolveCodexThreadId, resolveCaller, extractCallerPidRoots, CodexDesktopAdapter,
   queueCodexWake, triggerCodexWake } from "../../src/adapters/index.js";
 import { loadConfig } from "../../src/shared/index.js";
 import type { ListenerRow } from "../../src/shared/state-types.js";
@@ -116,5 +116,32 @@ describe("non-intrusive Codex metadata and wake effects", () => {
     await expect(queueCodexWake(threadId, card, { codexBin: "/missing" })).rejects.toMatchObject({ code: "ENOENT" });
     const controller = new AbortController(); controller.abort();
     await expect(queueCodexWake(threadId, card, { codexBin: bin, signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+  });
+  it("resolves Codex thread ID from state_5.sqlite with updated_at vs rowid ordering, cwd precedence, and allowArchived fallback", () => {
+    expect(() => resolveCodexThreadId(state.root, state)).toThrowError(expect.objectContaining({ code: "BINDING_REQUIRED" }));
+    const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
+    try {
+      expect(() => resolveCodexThreadId(state.root, state)).toThrowError(expect.objectContaining({ code: "BINDING_REQUIRED" }));
+      db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, cwd TEXT, archived INTEGER)");
+      expect(() => resolveCodexThreadId(state.root, state)).toThrowError(expect.objectContaining({ code: "BINDING_REQUIRED" }));
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?)").run("thread-cwd-1", state.root, 0);
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?)").run("thread-cwd-2", state.root, 0);
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?)").run("thread-other-3", "/other/path", 0);
+      // Prefers archived = 0 AND cwd = ?, ordered by rowid DESC when updated_at column is absent.
+      expect(resolveCodexThreadId(state.root, state)).toBe("thread-cwd-2");
+      // Falls back to archived = 0 when no open thread matches cwd.
+      expect(resolveCodexThreadId("/unmatched/cwd", state)).toBe("thread-other-3");
+      // When updated_at exists, orders by updated_at DESC, rowid DESC.
+      db.exec("DROP TABLE threads; CREATE TABLE threads(id TEXT PRIMARY KEY, cwd TEXT, archived INTEGER, updated_at INTEGER)");
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?)").run("older-rowid-newer-ts", state.root, 0, 500);
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?)").run("newer-rowid-older-ts", state.root, 0, 100);
+      expect(resolveCodexThreadId(state.root, state)).toBe("older-rowid-newer-ts");
+      // Archive all threads: default allowArchived=false throws BINDING_REQUIRED; allowArchived=true resolves archived thread.
+      db.exec("UPDATE threads SET archived = 1");
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?)").run("archived-other", "/other/path", 1, 999);
+      expect(() => resolveCodexThreadId(state.root, state)).toThrowError(expect.objectContaining({ code: "BINDING_REQUIRED" }));
+      expect(resolveCodexThreadId(state.root, state, { allowArchived: true })).toBe("older-rowid-newer-ts");
+      expect(resolveCodexThreadId("/unmatched/cwd", state, { allowArchived: true })).toBe("archived-other");
+    } finally { db.close(); }
   });
 });

@@ -16,6 +16,19 @@ manager.appendSessionInfo("Loader session");
 const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, manager, {});
 const errors = [];
 runner.onError(error => errors.push(error));
+runner.bindCommandContext();
+runner.setUIContext({
+  select: async () => undefined, confirm: async () => false, input: async () => undefined,
+  notify: (message, type) => { process.send({ type: "ui-notify", message, level: type }); },
+  onTerminalInput: () => () => {},
+  setStatus: (key, value) => { process.send({ type: "ui-status", key, value }); },
+  setWorkingMessage: () => {}, setWorkingVisible: () => {}, setWorkingIndicator: () => {},
+  setHiddenThinkingLabel: () => {}, setWidget: () => {}, setFooter: () => {}, setHeader: () => {},
+  setTitle: () => {}, custom: async () => undefined, pasteToEditor: () => {}, setEditorText: () => {},
+  getEditorText: () => "", editor: async () => undefined, get theme() { return {}; },
+  getAllThemes: () => [], getTheme: () => undefined, setTheme: () => ({ success: false }),
+  getToolsExpanded: () => false, setToolsExpanded: () => {},
+}, "interactive");
 // Observe the real ExtensionRunner.bindCore sendMessage boundary. The interactive
 // TUI owns transcript insertion and turn execution; this fixture does neither.
 runner.bindCore({ ...loaded.runtime, sendMessage: (message, options) => {
@@ -28,10 +41,26 @@ runner.bindCore({ ...loaded.runtime, sendMessage: (message, options) => {
 });
 await runner.emit({ type: "session_start", reason: "startup" });
 if (errors.length) throw new Error(JSON.stringify(errors));
-process.send({ type: "ready", session_id: manager.getSessionId() });
+const citoCmd = runner.getCommand("cito");
+process.send({
+  type: "ready",
+  session_id: manager.getSessionId(),
+  command: citoCmd ? {
+    name: citoCmd.name,
+    description: citoCmd.description,
+    completions_empty: await citoCmd.getArgumentCompletions?.(""),
+    completions_o: await citoCmd.getArgumentCompletions?.(" o "),
+    completions_te: await citoCmd.getArgumentCompletions?.("te"),
+    completions_none: await citoCmd.getArgumentCompletions?.("xyz"),
+  } : null,
+});
 process.on("message", async message => {
   try {
-    if (message.op === "shutdown") {
+    if (message.op === "command") {
+      const cmd = runner.getCommand(message.name);
+      await cmd.handler(message.args ?? "", runner.createCommandContext());
+      process.send({ type: "command-done", id: message.id });
+    } else if (message.op === "shutdown") {
       await runner.emit({ type: "session_shutdown", reason: "quit" });
       process.send({ type: "shutdown", errors }, () => process.exit(0));
     } else if (message.op === "exit") {

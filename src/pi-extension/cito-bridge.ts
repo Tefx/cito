@@ -1,14 +1,22 @@
 import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
 /** Structural subset of Pi 1.5.0's public API: no host package is needed to load this file. */
 export interface BridgeContext {
   cwd: string;
   sessionManager: { getSessionId(): string | undefined; getSessionName(): string | undefined };
-  ui: { setStatus(key: string, value: string | undefined): void };
+  ui: {
+    setStatus(key: string, value: string | undefined): void;
+    notify?(message: string, type?: "info" | "warning" | "error"): void;
+  };
+}
+export interface BridgeCommandOptions {
+  description: string;
+  getArgumentCompletions?: (prefix: string) => { value: string; label: string }[] | null;
+  handler: (args: string, ctx: BridgeContext) => void | Promise<void>;
 }
 interface NotificationTheme {
   fg(color: "accent" | "borderAccent", text: string): string;
@@ -19,6 +27,7 @@ export type NotificationRenderer = (message: { content: unknown }, options: { ex
   theme: NotificationTheme) => { render(width: number): string[]; invalidate(): void };
 export interface BridgeAPI {
   registerMessageRenderer?(customType: string, renderer: NotificationRenderer): void;
+  registerCommand?(name: string, options: BridgeCommandOptions): void;
   on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree",
     handler: (event: unknown, ctx: BridgeContext) => void | Promise<void>): unknown;
   sendMessage(message: { customType: string; content: string; display: boolean },
@@ -75,6 +84,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
+  let activeBadge: string | undefined;
   let context: BridgeContext | undefined;
   let server: Server | undefined;
   let ownsSocket = false;
@@ -83,10 +93,58 @@ export default function citoBridge(pi: BridgeAPI): void {
   const directory = join(stateDir === "~" ? homedir() : stateDir.startsWith("~/")
     ? join(homedir(), stateDir.slice(2)) : resolve(stateDir), "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
+  const subcommands = ["on", "team", "off"];
+  const usage = "Usage: /cito [on [about...] | team [about...] | off]";
+
+  function defaultAbout(ctx: BridgeContext): string {
+    return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
+  }
+  async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const port = Number(process.env.CITO_DAEMON_PORT) || 4290;
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name,
+          arguments: args,
+          _meta: { endpoint_pid: process.pid },
+        },
+      }),
+    });
+    const raw = await res.text();
+    const dataLines = raw.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).filter(Boolean);
+    const jsonText = dataLines.at(-1) ?? (raw.trim().startsWith("{") ? raw.trim() : "");
+    if (!jsonText) throw new Error(raw.trim() || `HTTP ${res.status}`);
+    const rpc = JSON.parse(jsonText) as { error?: { message?: unknown }; result?: { isError?: boolean; content?: { type?: string; text?: string }[] } };
+    if (rpc.error) throw new Error(typeof rpc.error.message === "string" ? rpc.error.message : JSON.stringify(rpc.error));
+    const text = rpc.result?.content?.find(part => part?.type === "text" && typeof part.text === "string")?.text;
+    let payload: Record<string, unknown> = {};
+    if (text) {
+      try { payload = JSON.parse(text) as Record<string, unknown>; }
+      catch { if (rpc.result?.isError || !res.ok) throw new Error(text); }
+    }
+    if (rpc.result?.isError || payload.ok === false || !res.ok) {
+      const errObj = payload.error as { message?: unknown } | string | undefined;
+      const msg = typeof errObj === "object" && errObj && typeof errObj.message === "string"
+        ? errObj.message : typeof errObj === "string" ? errObj : text || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return payload;
+  }
 
   function update(ctx: BridgeContext): void {
     const nextSessionId = ctx.sessionManager.getSessionId();
-    if (nextSessionId !== sessionId) ctx.ui.setStatus("cito", undefined);
+    if (nextSessionId !== sessionId) {
+      activeBadge = undefined;
+      ctx.ui.setStatus("cito", undefined);
+    }
     sessionId = nextSessionId;
     if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
     context = ctx;
@@ -109,7 +167,8 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (!ctx || !sessionId || req.session_id !== sessionId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
-      ctx.ui.setStatus("cito", req.badge ?? undefined);
+      activeBadge = (req.badge as string | undefined) ?? undefined;
+      ctx.ui.setStatus("cito", activeBadge);
       return { ok: true };
     }
     const processedBatchIds = sessions.get(sessionId)!;
@@ -176,10 +235,66 @@ export default function citoBridge(pi: BridgeAPI): void {
       throw error;
     }
   });
+  pi.registerCommand?.("cito", {
+    description: "Toggle or configure Cito session listening",
+    getArgumentCompletions(prefix) {
+      const trimmed = prefix.trim();
+      return subcommands.filter(cmd => cmd.startsWith(trimmed)).map(value => ({ value, label: value }));
+    },
+    async handler(args, ctx) {
+      update(ctx);
+      const trimmed = args.trim();
+      let tool: "cito_listen" | "cito_unlisten";
+      let toolArgs: Record<string, unknown>;
+      if (!trimmed) {
+        if (activeBadge) {
+          tool = "cito_unlisten";
+          toolArgs = {};
+        } else {
+          tool = "cito_listen";
+          toolArgs = { about: defaultAbout(ctx), scope: "self" };
+        }
+      } else {
+        const space = trimmed.search(/\s/);
+        const sub = space < 0 ? trimmed : trimmed.slice(0, space);
+        const rest = space < 0 ? "" : trimmed.slice(space).trim();
+        if (sub === "on") {
+          tool = "cito_listen";
+          toolArgs = { about: rest || defaultAbout(ctx), scope: "self" };
+        } else if (sub === "team") {
+          tool = "cito_listen";
+          toolArgs = { about: rest || defaultAbout(ctx), scope: "workspace" };
+        } else if (sub === "off") {
+          if (rest) {
+            ctx.ui.notify?.(usage, "warning");
+            return;
+          }
+          tool = "cito_unlisten";
+          toolArgs = {};
+        } else {
+          ctx.ui.notify?.(usage, "warning");
+          return;
+        }
+      }
+      try {
+        const payload = await callMcpTool(tool, toolArgs);
+        if (tool === "cito_listen") {
+          activeBadge ??= `🔔 ${String(payload.listener_id ?? "cito")}`;
+          ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
+        } else {
+          activeBadge = undefined;
+          ctx.ui.notify?.("Cito stopped listening", "info");
+        }
+      } catch (error) {
+        ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
   pi.on("session_info_changed", (_event, ctx) => update(ctx));
   pi.on("session_tree", (_event, ctx) => update(ctx));
   pi.on("session_shutdown", async () => {
     context = undefined;
+    activeBadge = undefined;
     for (const socket of connections) socket.destroy();
     const instance = server;
     server = undefined;
