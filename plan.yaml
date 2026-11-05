@@ -1848,3 +1848,37 @@ phases:
       - V6-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
       structural-auditor 01a1aae4-5887-7213-8762-44fc93d260b8 and uiux-auditor 01a1aae4-58dc-74cc-bd49-22a65418ed0e
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v7
+  name: Cito V7 Menu Bar On-Demand Session Discovery, 1-Click Listen, Viewport Capping,
+    Flicker-Free Dynamic Refresh, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    harness references exist in src/mcp/ except src/mcp/cli.ts delegating --codex
+    resolution to src/adapters/codex.ts, all docs/DESIGN.md §4.3 requirements are
+    verified, and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE]
+    converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V7 Menu Bar On-Demand Session Discovery, 1-Click
+    Listen, Viewport Capping & Flicker-Free Dynamic Refresh per docs/DESIGN.md §4.3
+    and AGENTS.md: add AvailableSessionSummary and HarnessAdapter.discoverAvailableSessions
+    across src/adapters/types.ts, src/adapters/pi.ts (identifyBridge timeoutMs = 1500
+    default and 400ms concurrent socket discovery sorted by mtimeMs desc), src/adapters/codex.ts
+    (codexDesktopRunning check, PRAGMA table_info(threads) schema-aware COALESCE user-thread
+    filters shared with resolveCodexThreadId, recency_at_ms/updated_at/rowid ordering,
+    LIMIT 8, TypeScript title fallback), and src/adapters/index.ts (discoverAllAvailableSessions
+    excluding active listeners and capping at 10, plus expected_session_id/expected_harness
+    identity fencing in resolveCaller); extend DaemonToUiMessage, UiBridge.state(hubs,
+    listeners, available = []), UiToDaemonAction, validAction() (refresh_available
+    and listen_session validated before a.hub), and CitoService (synchronous pushUiState
+    filtering cached availableSessions, generation-guarded refreshAvailableSessions,
+    and debounced 150ms fs.watch on sockets dir) in src/ui/index.ts and src/mcp/service.ts;
+    implement Candidate, Equatable diff guard with hasRenderedState + pendingMutation,
+    NSMenuDelegate menuWillOpen + test_menu_open, persistent in-place cardMenu rebuild,
+    eventTracking RunLoop STDIN delivery, compact 34pt empty strip, AVAILABLE SESSIONS
+    section, FlippedView NSScrollView viewport capping (active_scroll 260pt >4, available_scroll
+    144pt >4), and appended menuActions in src/macos/cito-ui.swift; update README.md
+    and tests/; and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v6
