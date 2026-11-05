@@ -1887,7 +1887,7 @@ phases:
     name: 'Implement V7 Menu Bar on-demand session discovery, 1-click Listen, viewport
       capping, flicker-free dynamic refresh, README docs, and tests [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/adapters/types.ts\n    - src/adapters/pi.ts\n\
       \    - src/adapters/codex.ts\n    - src/adapters/index.ts\n    - src/ui/index.ts\n\
@@ -2006,6 +2006,24 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-05T11:29:36.329589Z'
+    done_at: '2026-11-05T11:55:55.200639+00:00'
+    evidence: "Commands run (npm run typecheck && npm run build && npm test), mechanical\
+      \ checks (0 Chinese chars, 0 forbidden names, 0 harness refs in src/mcp/ except\
+      \ cli.ts delegating to src/adapters/codex.ts), and verified docs/DESIGN.md §4.3\
+      \ deliverables:\n- Commit: bbd0ce54a6bf1406adce324bca32ed77423a3500 (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable; fast-forwarded onto main)\n- npm run typecheck && npm run build\
+      \ && npm test: exit 0 (29 test files, 216 tests passed, 0 failed, 0 skipped)\n\
+      - Mechanical checks:\n  - [\\p{Script=Han}] in src/, docs/, README.md, AGENTS.md,\
+      \ deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/,\
+      \ docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md, deploy/,\
+      \ tests/: 0 matches\n  - Non-node imports in src/pi-extension/cito-bridge.ts:\
+      \ 0 matches\n  - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating\
+      \ --codex to src/adapters/codex.ts): 0 matches\n- [REQUIRES_SKILL: code-hygiene]\
+      \ ITERATIVE_CONVERGENCE:\n  - Fresh-context structural-auditor (01a1ab8c-0874-7636-83b1-6c69be1e53be)\
+      \ and uiux-auditor (01a1ab8c-0828-7171-9e71-69f3d946c6e3) audited commit bbd0ce54a6bf1406adce324bca32ed77423a3500\
+      \ across all 5 lenses and both certified Zero Actionable Findings (Completeness:\
+      \ CLEAN | Simplicity: ZERO_NEW_ISSUES) on Round 1."
   - id: v7.acceptance-and-hygiene-gate
     name: 'V7 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
