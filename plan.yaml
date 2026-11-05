@@ -1342,3 +1342,109 @@ phases:
     acceptance gate.'
   depends_on:
   - v4
+  steps:
+  - id: v5.theory-grounded-ui-and-hub-state-machine
+    name: Implement V5 Theory-Grounded 380pt Menu Bar UI, State-Driven Hub Lifecycle
+      & Drawer, SF Symbol Controls, and Unit/Lifecycle Tests
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/ui/index.ts\n    - src/mcp/service.ts\n\
+      \    - src/macos/cito-ui.swift\n    - tests/ui/lifecycle.test.ts\n    - tests/mcp/**\n\
+      \  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n  - Implement the\
+      \ complete V5 Theory-Grounded UI/UX & Hub State-Machine specification in `docs/DESIGN.md`\
+      \ §§2.2–3.3 and `AGENTS.md` across `src/ui/index.ts`, `src/mcp/service.ts`,\
+      \ `src/macos/cito-ui.swift`, and `tests/`:\n    1. **Extended `UiListenerSummary`\
+      \ & UI State Payload (`src/ui/index.ts`, `src/mcp/service.ts`, `src/macos/cito-ui.swift`,\
+      \ `docs/DESIGN.md` §2.2.1)**:\n       - Extend `UiListenerSummary` (`src/ui/index.ts`)\
+      \ and Swift's `Listener` (`src/macos/cito-ui.swift`) with optional `about?:\
+      \ string` and `branch?: string | null` (falling back gracefully when omitted\
+      \ in legacy/minimal payloads).\n       - Populate `about: row.about` and `branch:\
+      \ row.branch` in `CitoService.pushUiState()` (`src/mcp/service.ts`) from `local_listeners`.\n\
+      \    2. **Clean Manual `disconnect()` & Forced Interactive `login` (`src/mcp/service.ts`,\
+      \ `docs/DESIGN.md` §2.2.2)**:\n       - In `HubSlot.disconnect()` (`src/mcp/service.ts`),\
+      \ clear `this.error = null` when setting `this.manuallyDisconnected = true`\
+      \ and `this.status = \"disconnected\"` so an intentional user `Disconnect` or\
+      \ `Cancel` does not leave a stale abort error (`\"CitoError: Hub disconnected\"\
+      `) in `slot.error`.\n       - In `HubSlot.reconnect(interactive: boolean, {\
+      \ forceLogin = false } = {})` / `handleUiAction`, pass `forceLogin: action.action\
+      \ === \"login\"` and ensure that when `forceLogin === true` and `this.login`\
+      \ is defined, any active `this.broker?.nc` is closed first and interactive OIDC\
+      \ re-authentication (`this.login.recover(null, true, signal)`) is forced so\
+      \ clicking `Switch Account` when already connected (`connected (oidc)`) works\
+      \ and performs principal-change fencing.\n    3. **Cell-Accurate `measureTextWidth`\
+      \ & Monochrome SF Symbol `MenuControl` (`src/macos/cito-ui.swift`, `docs/DESIGN.md`\
+      \ §§3.1.4–3.1.5)**:\n       - Implement `measureTextWidth(_ text: String, font:\
+      \ NSFont) -> CGFloat` via `ceil(NSTextField(labelWithString: text).fittingSize.width)`\
+      \ with the exact rendered `NSFont`.\n       - Add `leadingSymbol: String?` support\
+      \ (`leadingSymbolView: NSImageView?`) to `MenuControl`, replacing all color\
+      \ emojis (`\U0001F512`, `\U0001F465`, `⏹`, `⧉`) with monochrome SF Symbols (`lock.fill`,\
+      \ `person.2.fill`, `doc.on.doc`, `stop.fill`).\n    4. **Zero-Entropy Default\
+      \ Hub Elimination & Header Bar (`380x40pt`, `src/macos/cito-ui.swift`, `docs/DESIGN.md`\
+      \ §§3.1.1, 3.3.1)**:\n       - Eliminate `\"default\"` in single-default-hub\
+      \ mode (`hubs.count == 1 && hub.name == \"default\"`):\n         - Render a\
+      \ compact `44x22pt` icon pill (`title = \"\"`, `6x6pt` green dot at `x: 7, y:\
+      \ 8` + `network` SF Symbol `12x12pt` at `x: 16, y: 5` + `chevron.down` `8x8pt`\
+      \ at `x: 31, y: 7`, `toolTip = \"Connected · \\(hub.user ?? \"local\")\"`) when\
+      \ `auth_mode == \"none\" && status == \"connected\" && error == nil`.\n    \
+      \     - Render `6x6pt` dot + `title` (`hub.user ?? \"Connected\"` / `\"Connecting…\"\
+      ` / `\"Sign In\"` / `\"Offline\"`) with `width = min(180, measureTextWidth(title,\
+      \ font: .systemFont(ofSize: 11, weight: .medium)) + 26)` otherwise.\n      \
+      \ - In named or multi-hub mode (`hubs.count > 1 || hub.name != \"default\"`),\
+      \ render `6x6pt` status dot + `hub.name` (`width = min(180, measureTextWidth(hub.name,\
+      \ font: .systemFont(ofSize: 11, weight: .medium)) + 26)`, `toolTip = \"\\(hub.name)\
+      \ · \\(hub.status)\"`).\n    5. **State-Driven Hub Action Drawer (`380x32pt`,\
+      \ `src/macos/cito-ui.swift`, `docs/DESIGN.md` §§3.1.2, 3.3.2)**:\n       - Implement\
+      \ the state-driven Hub action drawer (`380x32pt`, `id = \"drawer:\\(hub.name)\"\
+      `, auto-expanded when `hub.status != \"connected\" || hub.error != nil`, and\
+      \ toggled via `drawer.isHidden = !drawer.isHidden` when `hub:<name>` is clicked).\n\
+      \       - Render the left status summary (`hub.error!` when `hub.error != nil`,\
+      \ `\"Connected · \\(hub.user ?? \"local\")\"`, `\"Connected as \\(hub.user ??\
+      \ \"user\")\"`, `\"Connecting to hub…\"`, `\"Authentication required\"`, or\
+      \ `\"Disconnected\"`) and only the valid right-aligned buttons for `hub.status`\
+      \ and `hub.error` (`Disconnect`, `Switch Account` + `Disconnect`, `Reconnect`\
+      \ + `Disconnect`, `Connect`, `Connect` + `Sign In…`, `Sign In…` + `Disconnect`,\
+      \ or `Cancel`) sized dynamically via `measureTextWidth(title, font: .systemFont(ofSize:\
+      \ 11, weight: .medium)) + 16` right-to-left from `x = 368`, while keeping `menuActions`\
+      \ deterministic (`[login (if oidc), reconnect, disconnect]`).\n    6. **380pt\
+      \ Control-Center Menu Panel, 360pt Session Cards & 36pt Footer (`src/macos/cito-ui.swift`,\
+      \ `docs/DESIGN.md` §§3.1.3, 3.3.3–3.3.4)**:\n       - Widen the menu panel to\
+      \ `380pt` (`360pt` session cards at `x: 10`, `360x64pt` empty-state card, `380x36pt`\
+      \ footer with `Stop All` (`leadingSymbol: \"stop.fill\"`, `82x24pt`) and `Quit\
+      \ Cito ⌘Q` (`106x24pt`)).\n       - Remove the redundant `[Pi]` / `[Codex]`\
+      \ text capsule from Row 1 (`34x34pt` left harness badge at `x: 10, y: cardHeight\
+      \ - 44`), anchor the action cluster (`Self`/`Team` `62x22pt` with `lock.fill`/`person.2.fill`,\
+      \ `↗` `22x22pt`, `✕` `22x22pt`) to Row 1 (`y = cardHeight - 28`, `x = 350 -\
+      \ actionWidth`), and render Row 2 `about` across the full `296pt` span (`x:\
+      \ 54..350`, `y: 28`, producing a `72pt` card height / `78pt` row height when\
+      \ `about` is non-empty and case-insensitively distinct from `title`, else `58pt`\
+      \ card height / `64pt` row height).\n       - Render the bottom row (`y: 7`,\
+      \ full `296pt` span `x: 54..350`) with an untruncated `<slug>#<fp4>` copy pill\
+      \ (`leadingSymbol: \"doc.on.doc\"`, `copyWidth = max(measureTextWidth(\"✓ Copied\"\
+      , font: copyFont), measureTextWidth(short, font: copyFont)) + 24`, hiding `leadingSymbolView`\
+      \ during `\"✓ Copied\"` feedback and restoring both after 1.2s) + `cwd` (`~`\
+      \ abbreviated) + optional `\" · \\(branch)\"` (when `branch` is non-empty and\
+      \ not `\"HEAD\"`).\n    7. **Unit & Lifecycle Tests (`tests/ui/lifecycle.test.ts`,\
+      \ `tests/mcp/`)**:\n       - Update and expand `tests/ui/lifecycle.test.ts`\
+      \ and `tests/mcp/` to verify all V5 behaviors.\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `/Users/tefx/Projects/cito` (`src/ui/index.ts`, `src/mcp/service.ts`,\
+      \ `src/macos/cito-ui.swift`, `tests/`). Must preserve English-only UI/UX/code/docs,\
+      \ neutral example names, and 100% harness-agnostic `src/mcp/`. Must not mutate\
+      \ external repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito`\
+      \ / `~/.codex` directories.\n- **Admit:** Completed Phase `v4`, `docs/DESIGN.md`\
+      \ (V5 §§2.2–3.3), and `AGENTS.md`. Verified by `npm run typecheck && npm run\
+      \ build && npm test` exiting `0`. Consumed by `v5.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing Swift compilation, typecheck, build, or unit/E2E\
+      \ test in place within the isolated worktree and clean up any temporary test\
+      \ sockets, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run build && npm test
+    evidence_template: Commands run (npm run typecheck && npm run build && npm test),
+      mechanical regex checks (0 Chinese chars, 0 forbidden names, 0 harness refs
+      in src/mcp/), and verified docs/DESIGN.md §§2.2–3.3 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - src/ui/index.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - tests/ui/lifecycle.test.ts
+    agent: senior-engineer
