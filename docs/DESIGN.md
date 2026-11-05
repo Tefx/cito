@@ -158,14 +158,48 @@ Every layout, control, and typography choice in `src/macos/cito-ui.swift` is gov
 
 ---
 
-## 4. Optional `CITO_CLAUDE_CHANNEL=1` Stdio Channel Bridge (`src/mcp/cli.ts`, `src/adapters/pi.ts`)
+## 4. Direct Session Control Commands (`Pi /cito` & CLI `cito listen` / `cito unlisten`)
+
+To let users enable or disable listening immediately—without spending an LLM turn, waiting for a busy agent, or polluting conversation history—Cito provides two lightweight, zero-token entrypoints that reuse `cito-daemon`'s existing `POST /mcp` (`tools/call` `cito_listen` / `cito_unlisten`) pipeline:
+
+### 4.1 Pi Slash Command (`/cito` in `src/pi-extension/cito-bridge.ts`)
+- **Zero-Dependency Standalone Contract**: `src/pi-extension/cito-bridge.ts` is copied standalone to `~/.pi/agent/extensions/cito-bridge.ts` and MUST NOT import any `../shared/*` or external npm modules.
+- **Registration & Completion**:
+  - Registers `pi.registerCommand?.("cito", { description: "Toggle or configure Cito session listening", getArgumentCompletions, handler })`.
+  - `getArgumentCompletions(prefix)` filters `["on", "team", "off"]` by `startsWith(prefix.trim())`.
+- **Subcommands**:
+  - `/cito` (no arguments): toggles listening for the current Pi session (`activeBadge ? cito_unlisten({}) : cito_listen({ about: defaultAbout(ctx), scope: "self" })`).
+  - `/cito on [about...]`: calls `cito_listen({ about: rest || defaultAbout(ctx), scope: "self" })`.
+  - `/cito team [about...]`: calls `cito_listen({ about: rest || defaultAbout(ctx), scope: "workspace" })`.
+  - `/cito off`: calls `cito_unlisten({})` (rejecting trailing arguments with the usage warning).
+  - Any unknown subcommand notifies `ctx.ui.notify?.("Usage: /cito [on [about...] | team [about...] | off]", "warning")` without mutating state.
+- **Transport & Caller Binding**:
+  - Sends a stateless `POST http://127.0.0.1:${port}/mcp` with headers `Content-Type: application/json` and `Accept: application/json, text/event-stream`, method `"tools/call"`, and `params._meta: { endpoint_pid: process.pid }`.
+  - Parses either SSE (`data: {...}`) or JSON response payloads, and reports the outcome via `ctx.ui.notify?.(...)` (`"Cito listening as <listener_id> (<scope>)"`, `"Cito stopped listening"`, or error message).
+
+### 4.2 CLI Direct Control (`cito listen` & `cito unlisten` in `src/mcp/cli.ts`, `src/adapters/codex.ts`)
+- **Invocation**:
+  - `cito listen [--scope self|workspace] [--team] [--hub <name>] [--tag <tag>] [--codex[=<thread_id>]] [about...]`
+  - `cito unlisten [--hub <name>] [--codex[=<thread_id>]]`
+  - Can be invoked from any terminal or inline inside Pi / Claude Code via `!cito listen` and `!cito unlisten` (0 tokens, `<50ms`).
+- **Caller Metadata Disambiguation**:
+  - **Default (Pi / Claude Code / Socket Bridge ancestry)**: sends `_meta: { caller_pid: process.ppid }` (must NOT include `codexThreadId`).
+  - **Codex Mode (`--codex` or `--codex=<thread_id>` or `--codex <uuid>`)**: sends `_meta: { codexThreadId, cwd: process.cwd() }` (must NOT include `caller_pid`, `endpoint_pid`, or `pi_pid`).
+  - When `--codex` is passed without an explicit UUID, `resolveCodexThreadId(process.cwd(), config, { allowArchived: cmd === "unlisten" })` in `src/adapters/codex.ts` queries `state_5.sqlite` (dynamically checking `PRAGMA table_info(threads)` for `updated_at` vs `rowid` ordering), preferring `archived = 0 AND cwd = ?` before falling back to `archived = 0` (and archived rows when `allowArchived: true`).
+- **Execution & Output**:
+  - Calls `await ensureDaemon(config)` and `POST http://127.0.0.1:${config.daemonPort}/mcp` (`Accept: application/json, text/event-stream`), decoding the SSE `data:` frame.
+  - On success, prints a single-line summary to `stdout` (`Listening as <listener_id> (<scope>): <about>\n` or `Unlistened (<removed> removed)\n`) and exits `0`; on error, prints to `stderr` and exits non-zero.
+
+---
+
+## 5. Optional `CITO_CLAUDE_CHANNEL=1` Stdio Channel Bridge (`src/mcp/cli.ts`, `src/adapters/pi.ts`)
 
 - When `env.CITO_CLAUDE_CHANNEL === "1"` (or `config.enableClaudeChannel === true`, default `false`):
   - `cito-mcp` in stdio mode advertises `capabilities: { tools: {}, experimental: { "claude/channel": {} } }`, binds `${stateDir}/sockets/claude-pid-${process.ppid}.sock`, and emits `notifications/claude/channel` on `deliver` (`confirmDelivery: false` $\to$ `delivered_unconfirmed`).
 
 ---
 
-## 5. Proposed Design for Claude Code Integration (Design Suggestion Only — Not Yet Implemented)
+## 6. Proposed Design for Claude Code Integration (Design Suggestion Only — Not Yet Implemented)
 
 > **Status Notice (Proposed Design Suggestion Only — Not Yet Implemented)**: This section records the architectural design suggestion for full native Claude Code integration. The opt-in `CITO_CLAUDE_CHANNEL=1` stdio forwarding bridge provides experimental channel push, while native Claude Code lifecycle hooks and session-discovery integration remain a design proposal for future implementation.
 
