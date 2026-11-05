@@ -60,7 +60,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
   } finally { if (child.exitCode === null) child.kill("SIGKILL"); await exited; }
 });
 
-interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
+interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; hovered?: boolean; reuse_identifier?: string; background?: number[]; border?: number[]; border_width?: number; foreground?: number[]; tint?: number[]; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
 interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
@@ -104,6 +104,39 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
     expect(initial.items.find(node => node.id === "footer")).toMatchObject({ width: 380, height: 36 });
     expect(nodes.find(node => node.id === "stop_all")).toMatchObject({ text: "Stop All", symbol: "stop.fill", x: 12, y: 6, width: 82, height: 24 });
     expect(nodes.find(node => node.id === "quit")).toMatchObject({ text: "Quit Cito ⌘Q", x: 262, y: 6, width: 106, height: 24 });
+    send({ op: "test_hover", id: "hub:personal", hovered: true });
+    expect(flatten((await inspect()).items).find(node => node.id === "hub:personal")?.hovered).toBe(true);
+    send({ op: "test_hover", id: "quit", hovered: true });
+    const movedHover = flatten((await inspect()).items);
+    expect(movedHover.find(node => node.id === "hub:personal")?.hovered).toBe(false);
+    expect(movedHover.find(node => node.id === "quit")?.hovered).toBe(true);
+    send({ op: "test_menu_close" });
+    expect(flatten((await inspect()).items).filter(node => node.hovered)).toEqual([]);
+
+    // Appearance changes resolve semantic CALayer colors and keep neutral hover achromatic.
+    for (const appearance of ["dark", "light"]) {
+      send({ op: "test_appearance", appearance });
+      const resting = flatten((await inspect()).items);
+      const neutral = resting.find(node => node.id === "quit")!;
+      expect(neutral.background?.[3]).toBeCloseTo(0.09, 2);
+      expect(neutral.border?.[3]).toBeCloseTo(0.14, 2);
+      expect(neutral.border_width).toBe(1);
+      const card = resting.find(node => node.width === 360 && node.height === 58)!;
+      expect(card.background?.[3]).toBeCloseTo(0.07, 2);
+      expect(card.border?.[3]).toBeCloseTo(0.11, 2);
+      expect(card.background?.[0]).toBe(appearance === "dark" ? 1 : 0);
+      send({ op: "test_hover", id: "quit", hovered: true });
+      const hovered = flatten((await inspect()).items).find(node => node.id === "quit")!;
+      expect(hovered.background?.[3]).toBeCloseTo(0.18, 2);
+      expect(hovered.border?.[3]).toBeCloseTo(0.28, 2);
+      expect(hovered.foreground?.slice(0, 3)).toEqual(appearance === "dark" ? [1, 1, 1] : [0, 0, 0]);
+      send({ op: "test_hover", id: "stop:" + listener.scoped_id, hovered: true });
+      const destructive = flatten((await inspect()).items).find(node => node.id === "stop:" + listener.scoped_id)!;
+      expect(destructive.background?.[3]).toBeCloseTo(0.88, 2);
+      expect(destructive.border?.[3]).toBeCloseTo(0.26, 2);
+      expect(destructive.children.find(child => child.tint?.length)?.tint).toEqual([1, 1, 1, 1]);
+      send({ op: "test_menu_close" });
+    }
     expect(initial.items.find(node => node.id === "drawer:personal")).toMatchObject({ width: 380, height: 32, hidden: true });
     expect(nodes.map(node => node.text)).not.toContain("Codex");
     const copyNode = nodes.find(node => node.id === "copy:" + listener.scoped_id)!;
@@ -114,6 +147,8 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
     expect(copied.clipboard).toBe(listener.scoped_id);
     const copiedNode = flatten(copied.items).find(node => node.id === "copy:" + listener.scoped_id)!;
     expect(copiedNode).toMatchObject({ text: "✓ Copied", green: true });
+    expect(copiedNode.background?.[3]).toBeCloseTo(0.16, 2);
+    expect(copiedNode.border?.[3]).toBeCloseTo(0.36, 2);
     expect(copiedNode.children.some(child => child.hidden === true && child.width === 12)).toBe(true);
     await waitFor(async () => {
       const restored = flatten((await inspect()).items).find(node => node.id === "copy:" + listener.scoped_id);
@@ -125,7 +160,9 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
     expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(true);
     expect(nodes.find(node => node.id === "scope:" + listener.scoped_id)).toMatchObject({ text: "Self", symbol: "lock.fill", x: 236, y: 30, width: 62, height: 22 });
     send({ op: "test_control", id: "scope:" + listener.scoped_id });
-    expect(flatten((await inspect()).items).find(node => node.id === "scope:" + listener.scoped_id)).toMatchObject({ text: "Team", symbol: "person.2.fill" });
+    const teamToggle = flatten((await inspect()).items).find(node => node.id === "scope:" + listener.scoped_id)!;
+    expect(teamToggle).toMatchObject({ text: "Team", symbol: "person.2.fill", foreground: [1, 1, 1, 1] });
+    expect(teamToggle.background?.[3]).toBeCloseTo(0.88, 2);
     send({ op: "test_control", id: "scope:" + listener.scoped_id });
     await waitFor(() => actions.length === 2);
     expect(actions.map(action => action.op === "set_scope" && action.scope)).toEqual(["workspace", "self"]);
@@ -439,8 +476,23 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
       directory_selected_id: myRemote[0]!.scoped_id,
     });
     expect(dirNodes.find(n => n.id === "directory_panel")).toMatchObject({ width: 560, height: 440 });
-    expect(dirNodes.find(n => n.id === "dir_peer:" + myRemote[0]!.scoped_id)).toMatchObject({ width: 560, height: 52 });
-    expect(dirNodes.find(n => n.id === "dir_peer:" + teamPeer.scoped_id)).toMatchObject({ width: 560, height: 52 });
+    expect(dirNodes.find(n => n.id === "dir_peer:" + myRemote[0]!.scoped_id)).toMatchObject({ width: 560, height: 52, reuse_identifier: "DirectoryPeerCell" });
+    expect(dirNodes.find(n => n.id === "dir_peer:" + teamPeer.scoped_id)).toMatchObject({ width: 560, height: 52, reuse_identifier: "DirectoryPeerCell" });
+
+    // Menu lifecycle changes must not clear hover in the unchanged directory surface.
+    send({ op: "test_hover", id: "dir_scope:mine", hovered: true });
+    expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(true);
+    bridge.state(hubs, [listener], multiGroupCandidates, myRemote, 413);
+    await waitFor(async () => (await inspect()).rebuilds! > dirSnap.rebuilds!);
+    const rebuilt = await inspect();
+    expect(rebuilt.rebuilds).toBeGreaterThan(dirSnap.rebuilds!);
+    expect(flatten(rebuilt.directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(true);
+    send({ op: "test_menu_open" });
+    await waitFor(() => actions.at(-1)?.op === "refresh_available");
+    expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(true);
+    send({ op: "test_menu_close" });
+    expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(true);
+    actions.pop(); // The menu-open refresh is independent of directory query actions.
     expect(dirNodes.find(n => n.id === "directory_summary")?.text).toBe("2 of 412 online");
 
     // Keyboard navigation (Down -> Return copies selected peer -> Up)
@@ -452,7 +504,9 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect(afterReturn.clipboard).toBe(teamPeer.scoped_id);
     expect(flatten(afterReturn.directory_items ?? []).find(n => n.id === "copy_dir:" + teamPeer.scoped_id)).toMatchObject({ text: "✓ Copied", green: true });
     send({ op: "test_directory_key", key: "up" });
-    expect((await inspect()).directory_selected_id).toBe(myRemote[0]!.scoped_id);
+    const afterUp = await inspect();
+    expect(afterUp.directory_selected_id).toBe(myRemote[0]!.scoped_id);
+    expect(flatten(afterUp.directory_items ?? []).find(n => n.id === "copy_dir:" + teamPeer.scoped_id)).toMatchObject({ green: false, hovered: false });
 
     // Facet pills and search query hooks
     send({ op: "test_control", id: "dir_scope:mine" });
@@ -468,10 +522,14 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect(actions[4]).toEqual({ op: "query_directory", query: "@bob repo:billing", scope: "all", harness: "codex" });
     expect((await inspect()).directory_selected_id).toBe(teamPeer.scoped_id);
 
-    // Escape closes DirectoryPanel and emits close_directory
+    // Escape closes DirectoryPanel, clears its hover, and emits close_directory.
+    send({ op: "test_hover", id: "dir_scope:mine", hovered: true });
+    expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(true);
     send({ op: "test_directory_key", key: "escape" });
     await waitFor(() => actions.length === 6);
     expect(actions[5]).toEqual({ op: "close_directory" });
-    expect((await inspect()).directory_open).toBe(false);
+    const closed = await inspect();
+    expect(closed.directory_open).toBe(false);
+    expect(flatten(closed.directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(false);
   } finally { await bridge.close(); }
 }, 20000);

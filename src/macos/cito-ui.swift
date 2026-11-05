@@ -48,10 +48,47 @@ func textLabel(_ title: String, _ frame: NSRect, size: CGFloat = 11, weight: NSF
     label.lineBreakMode = .byTruncatingTail; label.maximumNumberOfLines = 1
     return label
 }
-func roundedView(_ frame: NSRect, radius: CGFloat, color: NSColor) -> NSView {
-    let view = NSView(frame: frame); view.wantsLayer = true
-    view.layer?.cornerRadius = radius; view.layer?.backgroundColor = color.cgColor
-    return view
+extension NSColor {
+    // Applying alpha eagerly snapshots semantic RGB values; defer it until appearance resolution.
+    func withAppearanceAlpha(_ alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            var resolved = self
+            appearance.performAsCurrentDrawingAppearance { resolved = self.withAlphaComponent(alpha) }
+            return resolved
+        }
+    }
+}
+
+final class SurfaceView: NSView {
+    var fillColor: NSColor { didSet { needsDisplay = true; applyLayerColors() } }
+    var strokeColor: NSColor? { didSet { needsDisplay = true; applyLayerColors() } }
+    var cornerRadiusValue: CGFloat { didSet { layer?.cornerRadius = cornerRadiusValue; needsDisplay = true } }
+    override var wantsUpdateLayer: Bool { true }
+
+    init(frame: NSRect, radius: CGFloat, color: NSColor, border: NSColor? = nil) {
+        fillColor = color; strokeColor = border; cornerRadiusValue = radius
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = radius
+        layer?.cornerCurve = .continuous
+        applyLayerColors()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    func applyLayerColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = fillColor.cgColor
+            layer?.borderColor = strokeColor?.cgColor
+            layer?.borderWidth = strokeColor == nil ? 0 : 1
+        }
+    }
+    override func updateLayer() { applyLayerColors() }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyLayerColors()
+    }
+}
+func roundedView(_ frame: NSRect, radius: CGFloat, color: NSColor, border: NSColor? = nil) -> SurfaceView {
+    SurfaceView(frame: frame, radius: radius, color: color, border: border)
 }
 func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
     let field = NSTextField(labelWithString: text)
@@ -68,8 +105,19 @@ func harnessVisual(_ harness: String) -> (symbol: String, tint: NSColor, name: S
     switch harness {
     case "pi": return ("terminal.fill", .systemIndigo, "Pi")
     case "codex": return ("sparkles", .systemTeal, "Codex")
-    default: return ("bolt.horizontal.fill", .secondaryLabelColor, harness.capitalized)
+    default: return ("bolt.horizontal.fill", .systemBlue, harness.capitalized)
     }
+}
+
+func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harness: String) -> SurfaceView {
+    let visual = harnessVisual(harness)
+    let badge = roundedView(frame, radius: radius, color: visual.tint.withAppearanceAlpha(0.88),
+        border: .white.withAlphaComponent(0.18))
+    let icon = NSImageView(frame: badge.bounds.insetBy(dx: iconInset, dy: iconInset))
+    icon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name)
+    icon.contentTintColor = .white
+    badge.addSubview(icon)
+    return badge
 }
 
 final class KeyPanel: NSPanel {
@@ -80,20 +128,29 @@ final class KeyPanel: NSPanel {
 /** Menu controls own their clicks so copy and scope changes keep native tracking open. */
 final class MenuControl: NSControl {
     let label: NSTextField
+    enum Style { case neutral, prominent, subtleHeader, destructiveHover }
     var leadingSymbolView: NSImageView?
+    var centerSymbolView: NSImageView?
+    var accessorySymbolView: NSImageView? { didSet { applyVisualState() } }
     var symbolName: String?
     var pressed: (() -> Void)?
-    var hoverColor: NSColor?
-    var normalColor: NSColor = .labelColor
-    var normalBackground = NSColor.labelColor.withAlphaComponent(0.06)
+    var style: Style = .neutral { didSet { applyVisualState() } }
+    var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
     var feedbackTimer: Timer?
+    private(set) var isHovered = false
+    private var trackingArea: NSTrackingArea?
+    static weak var activeHovered: MenuControl?
+    private static var hoverWatchTimer: Timer?
+    // Headless hooks exercise logical transitions without a visible window or physical pointer.
+    static var tracksPhysicalPointer = true
+    override var wantsUpdateLayer: Bool { true }
     init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6) {
         let hasLeading = leadingSymbol != nil
         label = textLabel(title, NSRect(x: hasLeading ? 20 : 3, y: (frame.height - 15) / 2, width: frame.width - (hasLeading ? 24 : 6), height: 15))
         symbolName = leadingSymbol ?? symbol
         super.init(frame: frame)
         wantsLayer = true; layer?.cornerRadius = radius
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        layer?.cornerCurve = .continuous
         label.alignment = .center; label.textColor = color; normalColor = color
         addSubview(label)
         if let leadingSymbol = leadingSymbol {
@@ -104,9 +161,10 @@ final class MenuControl: NSControl {
         if let symbol = symbol {
             let image = NSImageView(frame: bounds.insetBy(dx: 5, dy: 5))
             image.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-            image.contentTintColor = color; addSubview(image); label.isHidden = true
+            image.contentTintColor = color; addSubview(image); centerSymbolView = image; label.isHidden = true
         }
         setAccessibilityElement(true); setAccessibilityRole(.button); setAccessibilityLabel(title)
+        applyVisualState()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     func setLeadingSymbol(_ name: String?) {
@@ -126,6 +184,7 @@ final class MenuControl: NSControl {
             leadingSymbolView?.isHidden = true
             label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
         }
+        applyVisualState()
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { frame.contains(point) ? self : nil }
@@ -133,19 +192,96 @@ final class MenuControl: NSControl {
     override func accessibilityPerformPress() -> Bool { pressed?(); return true }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        if trackingArea == nil {
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+            trackingArea = area
+            addTrackingArea(area)
+        }
+        if isHovered { MenuControl.reconcileActiveHover() }
     }
-    override func mouseEntered(with event: NSEvent) {
-        let tint = hoverColor ?? .controlAccentColor
-        layer?.backgroundColor = tint.withAlphaComponent(0.15).cgColor
-        label.textColor = feedbackTimer?.isValid == true ? .systemGreen : tint
-        for case let image as NSImageView in subviews { image.contentTintColor = tint }
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    func setHovered(_ hovered: Bool) {
+        if hovered {
+            if let previous = MenuControl.activeHovered, previous !== self { previous.setHovered(false) }
+            MenuControl.activeHovered = self
+        } else if MenuControl.activeHovered === self {
+            MenuControl.activeHovered = nil
+        }
+        isHovered = hovered
+        applyVisualState()
+        if MenuControl.activeHovered != nil { MenuControl.startHoverWatchTimer() }
+        else { MenuControl.stopHoverWatchTimerIfIdle() }
     }
-    override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = normalBackground.cgColor
-        label.textColor = feedbackTimer?.isValid == true ? .systemGreen : normalColor
-        for case let image as NSImageView in subviews { image.contentTintColor = normalColor }
+    static func clearHoverWhere(_ predicate: (MenuControl) -> Bool) {
+        if let control = activeHovered, predicate(control) { control.setHovered(false) }
+        stopHoverWatchTimerIfIdle()
+    }
+    static func reconcileActiveHover() {
+        guard let control = activeHovered else { stopHoverWatchTimerIfIdle(); return }
+        guard tracksPhysicalPointer else { return }
+        guard let window = control.window, window.isVisible, !control.isHiddenOrHasHiddenAncestor,
+              control.enclosingMenuItem?.isHidden != true else { control.setHovered(false); return }
+        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let localPoint = control.convert(windowPoint, from: nil)
+        if !control.visibleRect.contains(localPoint) { control.setHovered(false) }
+    }
+    private static func startHoverWatchTimer() {
+        guard hoverWatchTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.08, repeats: true) { _ in reconcileActiveHover() }
+        hoverWatchTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+    }
+    private static func stopHoverWatchTimerIfIdle() {
+        guard activeHovered == nil else { return }
+        hoverWatchTimer?.invalidate()
+        hoverWatchTimer = nil
+    }
+    func applyVisualState() {
+        let fill: NSColor
+        let border: NSColor?
+        let foreground: NSColor
+        let primarySymbol: NSColor
+        let accessorySymbol: NSColor
+        switch style {
+        case .neutral:
+            fill = .labelColor.withAppearanceAlpha(isHovered ? 0.18 : 0.09)
+            border = .labelColor.withAppearanceAlpha(isHovered ? 0.28 : 0.14)
+            foreground = isHovered ? .labelColor : normalColor
+            primarySymbol = foreground
+            accessorySymbol = isHovered ? .labelColor : .secondaryLabelColor
+        case .prominent:
+            fill = isHovered ? .systemBlue : .systemBlue.withAppearanceAlpha(0.88)
+            border = .white.withAlphaComponent(isHovered ? 0.36 : 0.22)
+            foreground = .white; primarySymbol = .white; accessorySymbol = .white
+        case .subtleHeader:
+            fill = isHovered ? .labelColor.withAppearanceAlpha(0.10) : .clear
+            border = nil
+            foreground = isHovered ? .labelColor : normalColor
+            primarySymbol = isHovered ? .labelColor : .secondaryLabelColor
+            accessorySymbol = primarySymbol
+        case .destructiveHover:
+            fill = isHovered ? .systemRed.withAppearanceAlpha(0.88) : .labelColor.withAppearanceAlpha(0.09)
+            border = isHovered ? .white.withAlphaComponent(0.26) : .labelColor.withAppearanceAlpha(0.14)
+            foreground = isHovered ? .white : .secondaryLabelColor
+            primarySymbol = foreground; accessorySymbol = foreground
+        }
+        let isCopied = feedbackTimer?.isValid == true
+        label.textColor = isCopied ? .systemGreen : foreground
+        leadingSymbolView?.contentTintColor = primarySymbol
+        centerSymbolView?.contentTintColor = primarySymbol
+        accessorySymbolView?.contentTintColor = accessorySymbol
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isCopied ? NSColor.systemGreen.withAppearanceAlpha(0.16) : fill).cgColor
+            layer?.borderColor = (isCopied ? NSColor.systemGreen.withAppearanceAlpha(0.36) : border)?.cgColor
+            layer?.borderWidth = isCopied || border != nil ? 1 : 0
+        }
+    }
+    override func updateLayer() { applyVisualState() }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyVisualState()
     }
     func copied() {
         feedbackTimer?.invalidate()
@@ -158,9 +294,12 @@ final class MenuControl: NSControl {
                 self.leadingSymbolView?.isHidden = false
                 self.label.frame = NSRect(x: 20, y: (self.bounds.height - 15) / 2, width: self.bounds.width - 24, height: 15)
             }
-            self.label.stringValue = self.accessibilityLabel() ?? ""; self.label.textColor = self.normalColor
+            self.feedbackTimer = nil
+            self.label.stringValue = self.accessibilityLabel() ?? ""
+            self.applyVisualState()
         }
         feedbackTimer = restore
+        applyVisualState()
         RunLoop.main.add(restore, forMode: .common); RunLoop.main.add(restore, forMode: .eventTracking)
     }
 }
@@ -260,7 +399,10 @@ struct Frame: Decodable {
 }
 
 final class DirectoryPeerCellView: NSTableCellView {
-    let badgeView: NSView
+    let badgeView: SurfaceView
+    var inspectionId = ""
+    private var isSelectedRow = false
+    override var wantsUpdateLayer: Bool { true }
     let badgeIcon: NSImageView
     let line1TitleLabel: NSTextField
     let line1RepoLabel: NSTextField
@@ -278,6 +420,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         line2MetaLabel = textLabel("", NSRect(x: 132, y: 7, width: 280, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor)
         copyControl = MenuControl("", frame: NSRect(x: 440, y: 16, width: 104, height: 22), leadingSymbol: "doc.on.doc")
         super.init(frame: frameRect)
+        identifier = NSUserInterfaceItemIdentifier("DirectoryPeerCell")
         wantsLayer = true
         addSubview(badgeView)
         addSubview(line1TitleLabel)
@@ -288,24 +431,39 @@ final class DirectoryPeerCellView: NSTableCellView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    private func applySelectionColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isSelectedRow ? NSColor.controlAccentColor.withAlphaComponent(0.22) : NSColor.clear).cgColor
+        }
+    }
+    override func updateLayer() { applySelectionColor() }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applySelectionColor()
+    }
+
     func configure(with peer: RemotePeer, selected: Bool) {
-        identifier = NSUserInterfaceItemIdentifier("dir_peer:\(peer.scoped_id)")
+        inspectionId = "dir_peer:\(peer.scoped_id)"
+        isSelectedRow = selected
         frame = NSRect(x: 0, y: 0, width: 560, height: 52)
-        layer?.backgroundColor = selected ? NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor : NSColor.clear.cgColor
+        applySelectionColor()
         let visual = harnessVisual(peer.harness)
-        badgeView.layer?.backgroundColor = visual.tint.withAlphaComponent(0.14).cgColor
+        badgeView.fillColor = visual.tint.withAppearanceAlpha(0.88)
+        badgeView.strokeColor = .white.withAlphaComponent(0.18)
         badgeIcon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name)
-        badgeIcon.contentTintColor = visual.tint
+        badgeIcon.contentTintColor = .white
 
         let short = shortPublicId(peer.public_id)
         let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
         let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 24
         copyControl.feedbackTimer?.invalidate()
+        copyControl.feedbackTimer = nil
+        copyControl.setHovered(false)
         copyControl.frame = NSRect(x: 544 - copyWidth, y: 16, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
         copyControl.label.stringValue = short
-        copyControl.label.textColor = copyControl.normalColor
+        copyControl.applyVisualState()
         copyControl.setAccessibilityLabel(short)
         copyControl.toolTip = peer.scoped_id
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
@@ -359,6 +517,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var visible = false
     var timer: DispatchWorkItem?
     var clickSource: DispatchSourceSignal?
+    var hoverEventMonitor: Any?
     var menuActions: [() -> Void] = []
     let cardMenu = NSMenu()
     var selectedHubs = Set<String>()
@@ -389,7 +548,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var rebuildCount = 0
 
     func menuWillOpen(_ menu: NSMenu) {
+        MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || $0.window !== self.directoryPanel }
         emit(["op": "refresh_available"])
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || $0.window !== self.directoryPanel }
     }
     func start() {
         signal(SIGPIPE, SIG_IGN)
@@ -399,10 +562,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         clickSource?.resume()
         cardMenu.autoenablesItems = false
         cardMenu.delegate = self
+        MenuControl.tracksPhysicalPointer = !headless
         if headless { headlessStatusButton = NSButton(frame: .zero) }
         else {
             status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             status?.menu = cardMenu
+            hoverEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
+                MenuControl.reconcileActiveHover()
+                return event
+            }
         }
         DispatchQueue.global().async { [weak self] in
             var buffer = Data()
@@ -451,6 +619,25 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if op == "test_click" { hide(clicked: true); return }
             if op == "test_inspect" { inspectMenu(); return }
             if op == "test_menu_open" { menuWillOpen(cardMenu); return }
+            if op == "test_menu_close" { menuDidClose(cardMenu); return }
+            if op == "test_appearance", let name = object["appearance"] as? String, ["light", "dark"].contains(name) {
+                let appearance = NSAppearance(named: name == "dark" ? .darkAqua : .aqua)
+                for item in cardMenu.items { item.view?.appearance = appearance }
+                directoryPanel?.appearance = appearance
+                return
+            }
+            if op == "test_hover", let id = object["id"] as? String, let hovered = object["hovered"] as? Bool {
+                for item in cardMenu.items {
+                    if let view = item.view, let control = findControl(in: view, id: id) {
+                        control.setHovered(hovered)
+                        return
+                    }
+                }
+                if let rootView = directoryPanel?.contentView, let control = findControl(in: rootView, id: id) {
+                    control.setHovered(hovered)
+                }
+                return
+            }
             if op == "test_directory_query", let query = object["query"] as? String {
                 if directoryPanel == nil { openDirectoryPanel() }
                 directorySearchField?.stringValue = query
@@ -522,6 +709,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         FileHandle.standardOutput.write(data + Data([10]))
     }
     func rebuild() {
+        MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || $0.window !== self.directoryPanel }
         rebuildCount += 1
         menuActions.removeAll()
         let count = uniqueSessionCount
@@ -581,12 +769,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             for (title, action, primary, run) in buttons.reversed() {
                 let width = measureTextWidth(title, font: btnFont) + 16
                 btnX -= width
-                let control = MenuControl(title, frame: NSRect(x: btnX, y: 5, width: width, height: 22), color: primary ? .systemBlue : .labelColor)
+                let control = MenuControl(title, frame: NSRect(x: btnX, y: 5, width: width, height: 22))
                 control.label.font = btnFont
-                if primary {
-                    control.normalBackground = NSColor.systemBlue.withAlphaComponent(0.15)
-                    control.layer?.backgroundColor = control.normalBackground.cgColor
-                }
+                control.style = primary ? .prominent : .neutral
                 control.identifier = NSUserInterfaceItemIdentifier("\(action):\(hub.name)")
                 control.pressed = run; drawer.addSubview(control); btnX -= 4
             }
@@ -597,7 +782,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             else if hub.status == "connecting" { statusText = "Connecting to hub…" }
             else if hub.status == "auth_required" { statusText = "Authentication required" }
             else { statusText = "Disconnected" }
-            let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: max(40, buttonsMinX - 20), height: 16), color: .secondaryLabelColor)
+            let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: max(40, buttonsMinX - 20), height: 16),
+                color: hub.error != nil || hub.status == "auth_required" ? .labelColor : .secondaryLabelColor)
             detail.toolTip = hub.error ?? statusText; drawer.addSubview(detail)
             let item = host(drawer, id: "drawer:\(hub.name)")
             let autoExpand = hub.status != "connected" || hub.error != nil
@@ -637,10 +823,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
                 let net = NSImageView(frame: NSRect(x: 16, y: 5, width: 12, height: 12))
                 net.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Connected")
-                net.contentTintColor = .labelColor; pill.addSubview(net)
+                net.contentTintColor = .labelColor; pill.addSubview(net); pill.centerSymbolView = net
                 let chev = NSImageView(frame: NSRect(x: 31, y: 7, width: 8, height: 8))
                 chev.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)
-                chev.contentTintColor = .secondaryLabelColor; pill.addSubview(chev)
+                chev.contentTintColor = .secondaryLabelColor; pill.addSubview(chev); pill.accessorySymbolView = chev
                 pill.toolTip = "Connected · \(hub.user ?? "local")"
             } else {
                 pill.label.font = btnFont
@@ -654,6 +840,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if drawer.isHidden { self.selectedHubs.remove(hub.name) }
                 else { self.selectedHubs.insert(hub.name) }
                 menu?.update()
+                MenuControl.reconcileActiveHover()
             }
             pillContainer.addSubview(pill); pillX -= 4
         }
@@ -671,14 +858,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: rowHeight))
             row.identifier = NSUserInterfaceItemIdentifier("session:\(listener.scoped_id)")
             let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: cardHeight), radius: 10,
-                color: .labelColor.withAlphaComponent(0.045))
+                color: .labelColor.withAppearanceAlpha(0.07), border: .labelColor.withAppearanceAlpha(0.11))
             row.addSubview(card)
             activeRows.append((id: "session:\(listener.scoped_id)", view: row))
-            let visual = harnessVisual(listener.harness)
-            let badge = roundedView(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34), radius: 8, color: visual.tint.withAlphaComponent(0.13))
-            let icon = NSImageView(frame: NSRect(x: 8, y: 8, width: 18, height: 18))
-            icon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name); icon.contentTintColor = visual.tint
-            badge.addSubview(icon); card.addSubview(badge)
+            let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34),
+                radius: 8, iconInset: 8, harness: listener.harness)
+            card.addSubview(badge)
             let actionWidth: CGFloat = listener.can_jump ? 114 : 88
             let title = textLabel(listener.title + (hubs.count > 1 ? " · \(listener.hub)" : ""),
                 NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
@@ -702,7 +887,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
             let path = textLabel(pathText,
-                NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: .tertiaryLabelColor)
+                NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: .secondaryLabelColor)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = listener.cwd; card.addSubview(path)
             var x: CGFloat = 350 - actionWidth
             var scope = listener.scope
@@ -710,8 +895,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
             toggle.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
             let scopeColor = { [weak toggle] in
-                toggle?.normalBackground = scope == "workspace" ? NSColor.systemBlue.withAlphaComponent(0.15) : NSColor.labelColor.withAlphaComponent(0.06)
-                toggle?.layer?.backgroundColor = toggle?.normalBackground.cgColor
+                toggle?.style = scope == "workspace" ? .prominent : .neutral
             }
             scopeColor()
             toggle.pressed = { [weak self, weak toggle] in
@@ -733,7 +917,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             register { [weak copy] in copy?.pressed?() }
             register { [weak toggle] in toggle?.pressed?() }
             let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
-            stop.toolTip = "Stop listening"; stop.hoverColor = .systemRed
+            stop.toolTip = "Stop listening"; stop.style = .destructiveHover
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
             stop.pressed = unlisten; card.addSubview(stop); register(unlisten); register(unlisten)
@@ -756,7 +940,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if listeners.isEmpty {
             if available.isEmpty {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 70))
-                let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 64), radius: 10, color: .labelColor.withAlphaComponent(0.045))
+                let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 64), radius: 10, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
                 icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
                 icon.contentTintColor = .secondaryLabelColor; card.addSubview(icon)
@@ -766,7 +950,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 row.addSubview(card); _ = host(row, id: "empty")
             } else {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 34))
-                let pill = roundedView(NSRect(x: 10, y: 3, width: 360, height: 28), radius: 8, color: .labelColor.withAlphaComponent(0.045))
+                let pill = roundedView(NSRect(x: 10, y: 3, width: 360, height: 28), radius: 8, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 7, width: 14, height: 14))
                 icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
                 icon.contentTintColor = .secondaryLabelColor; pill.addSubview(icon)
@@ -778,12 +962,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         // Zone 2 — My Other Hosts
         if !myRemote.isEmpty {
             let remoteHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 26))
-            remoteHeader.addSubview(roundedView(NSRect(x: 12, y: 24, width: 356, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+            remoteHeader.addSubview(roundedView(NSRect(x: 12, y: 24, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
             let toggleRemote = MenuControl("MY OTHER HOSTS · \(myRemote.count)", frame: NSRect(x: 8, y: 1, width: 364, height: 22),
                 leadingSymbol: myRemoteCollapsed ? "chevron.right" : "chevron.down", color: .secondaryLabelColor, radius: 6)
             toggleRemote.identifier = NSUserInterfaceItemIdentifier("toggle_my_remote")
-            toggleRemote.normalBackground = .clear
-            toggleRemote.layer?.backgroundColor = NSColor.clear.cgColor
+            toggleRemote.style = .subtleHeader
             toggleRemote.label.font = .systemFont(ofSize: 10, weight: .semibold)
             toggleRemote.label.alignment = .left
             toggleRemote.pressed = { [weak self] in
@@ -847,7 +1030,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var candidateActions: [() -> Void] = []
         if !available.isEmpty {
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
-            availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+            availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
             availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: 220, height: 14),
                 size: 10, weight: .semibold, color: .secondaryLabelColor))
             _ = host(availHeader, id: "available_header")
@@ -860,7 +1043,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
             for (harness, items) in groupedCandidates {
-                let visual = harnessVisual(harness)
                 let isCollapsed = collapsedGroups.contains(harness)
                 let groupTitle: String
                 switch harness {
@@ -871,18 +1053,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
                 let groupControl = MenuControl(groupTitle, frame: NSRect(x: 8, y: 2, width: 364, height: 24), radius: 6)
                 groupControl.identifier = NSUserInterfaceItemIdentifier("toggle_group:\(harness)")
-                groupControl.normalBackground = .clear
-                groupControl.layer?.backgroundColor = NSColor.clear.cgColor
+                groupControl.style = .subtleHeader
                 groupControl.symbolName = isCollapsed ? "chevron.right" : "chevron.down"
                 let chev = NSImageView(frame: NSRect(x: 6, y: 7, width: 10, height: 10))
                 chev.image = NSImage(systemSymbolName: isCollapsed ? "chevron.right" : "chevron.down", accessibilityDescription: nil)
                 chev.contentTintColor = .secondaryLabelColor
                 groupControl.addSubview(chev)
-                let badge = roundedView(NSRect(x: 20, y: 3, width: 18, height: 18), radius: 5, color: visual.tint.withAlphaComponent(0.12))
-                let badgeIcon = NSImageView(frame: NSRect(x: 3, y: 3, width: 12, height: 12))
-                badgeIcon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name)
-                badgeIcon.contentTintColor = visual.tint
-                badge.addSubview(badgeIcon)
+                groupControl.accessorySymbolView = chev
+                let badge = makeHarnessBadge(NSRect(x: 20, y: 3, width: 18, height: 18),
+                    radius: 5, iconInset: 3, harness: harness)
                 groupControl.addSubview(badge)
                 groupControl.label.frame = NSRect(x: 44, y: 4, width: 310, height: 16)
                 groupControl.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
@@ -947,7 +1126,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         // Zone 4 — Network Directory Launcher Row
         if !hubs.isEmpty {
             let dirRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 34))
-            dirRow.addSubview(roundedView(NSRect(x: 12, y: 32, width: 356, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+            dirRow.addSubview(roundedView(NSRect(x: 12, y: 32, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
             let openDir = MenuControl("Search Network Directory…", frame: NSRect(x: 10, y: 4, width: 360, height: 26),
                 leadingSymbol: "magnifyingglass", radius: 7)
             openDir.identifier = NSUserInterfaceItemIdentifier("open_directory")
@@ -1004,14 +1183,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         window.backgroundColor = .clear
         window.hasShadow = true
 
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 440))
+        let root = SurfaceView(frame: NSRect(x: 0, y: 0, width: 560, height: 440), radius: 14,
+            color: .clear, border: .labelColor.withAppearanceAlpha(0.15))
         root.identifier = NSUserInterfaceItemIdentifier("directory_panel")
-        root.wantsLayer = true
-        root.layer?.cornerRadius = 14
-        root.layer?.cornerCurve = .continuous
         root.layer?.masksToBounds = true
-        root.layer?.borderWidth = 1
-        root.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.15).cgColor
 
         let effect = NSVisualEffectView(frame: root.bounds)
         effect.material = .popover
@@ -1034,7 +1209,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         closeBtn.toolTip = "Close Directory"
         closeBtn.pressed = { [weak self] in self?.closeDirectoryPanel(emitAction: true) }
         searchBar.addSubview(closeBtn)
-        searchBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+        searchBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         root.addSubview(searchBar)
 
         // Facet Bar (560 × 32 pt, y: 362)
@@ -1079,7 +1254,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             facetBar.addSubview(pill)
             directoryFacetControls[id] = pill
         }
-        facetBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+        facetBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         root.addSubview(facetBar)
 
         // Virtualized Result List (560 × 334 pt, y: 28)
@@ -1109,7 +1284,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         // Footer Shortcut Bar (560 × 28 pt, y: 0)
         let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 28))
         footerBar.identifier = NSUserInterfaceItemIdentifier("directory_footer")
-        footerBar.addSubview(roundedView(NSRect(x: 0, y: 27, width: 560, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+        footerBar.addSubview(roundedView(NSRect(x: 0, y: 27, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         let shortcuts = textLabel("↵ Copy Selected ID    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: .secondaryLabelColor)
         shortcuts.identifier = NSUserInterfaceItemIdentifier("directory_shortcuts")
         footerBar.addSubview(shortcuts)
@@ -1128,10 +1303,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func updateDirectoryFacetStyles() {
         for (id, pill) in directoryFacetControls {
             let active = (id == "dir_scope:\(directoryScopeFilter)") || (id == "dir_harness:\(directoryHarnessFilter)")
-            pill.normalBackground = active ? NSColor.controlAccentColor.withAlphaComponent(0.18) : NSColor.labelColor.withAlphaComponent(0.06)
-            pill.normalColor = active ? .controlAccentColor : .labelColor
-            pill.layer?.backgroundColor = pill.normalBackground.cgColor
-            pill.label.textColor = pill.normalColor
+            pill.style = active ? .prominent : .neutral
         }
     }
 
@@ -1151,6 +1323,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func closeDirectoryPanel(emitAction: Bool) {
+        MenuControl.clearHoverWhere { $0.window === self.directoryPanel }
         directoryVisible = false
         directoryPanel?.orderOut(nil)
         if emitAction { emit(["op": "close_directory"]) }
@@ -1271,6 +1444,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
     func inspectMenu() {
+        func components(_ color: NSColor?) -> [CGFloat] {
+            guard let rgb = color?.usingColorSpace(.deviceRGB) else { return [] }
+            return [rgb.redComponent, rgb.greenComponent, rgb.blueComponent, rgb.alphaComponent]
+        }
         func project(_ view: NSView) -> [String: Any] {
             let childViews: [NSView]
             if let table = view as? NSTableView {
@@ -1285,14 +1462,23 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             } else {
                 childViews = view.subviews
             }
-            var result: [String: Any] = ["id": view.identifier?.rawValue ?? "", "width": view.frame.width,
+            var result: [String: Any] = ["id": (view as? DirectoryPeerCellView)?.inspectionId ?? view.identifier?.rawValue ?? "", "width": view.frame.width,
                 "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
                 "children": childViews.map { project($0) }]
+            result["background"] = components(view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) })
+            result["border"] = components(view.layer?.borderColor.flatMap { NSColor(cgColor: $0) })
+            result["border_width"] = view.layer?.borderWidth ?? 0
+            if let image = view as? NSImageView {
+                view.effectiveAppearance.performAsCurrentDrawingAppearance { result["tint"] = components(image.contentTintColor) }
+            }
+            if let cell = view as? DirectoryPeerCellView { result["reuse_identifier"] = cell.identifier?.rawValue ?? "" }
             if let label = view as? NSTextField { result["text"] = label.stringValue }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
                 result["green"] = control.label.textColor == NSColor.systemGreen
+                result["hovered"] = control.isHovered
+                control.effectiveAppearance.performAsCurrentDrawingAppearance { result["foreground"] = components(control.label.textColor) }
                 if let symbol = control.symbolName { result["symbol"] = symbol }
             }
             return result

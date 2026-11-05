@@ -129,11 +129,31 @@ To scale `cito_find` and UI discovery to $U = 500+$ users and $N = 2,000+$ onlin
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+#### Appearance, Contrast, and Hover Behavior
+
+Controls use four Apple HIG-oriented styles with distinct contrast and action hierarchy. Borders are `1 pt` unless omitted:
+
+| `MenuControl.Style` | Resting | Hovered | Uses |
+| --- | --- | --- | --- |
+| `.neutral` | `labelColor` fill at `0.09`, border at `0.14`; `normalColor` label and primary symbol, `secondaryLabelColor` accessory | `labelColor` fill at `0.18`, border at `0.28`; label and owned symbols use `labelColor` | Hub pills, secondary drawer actions, Copy, Self, Open, Listen, Directory launcher, Stop All, Quit, inactive facets, Close |
+| `.prominent` | `systemBlue` fill at `0.88`, white border at `0.22`, white label and symbols | Solid `systemBlue`, white border at `0.36`, white label and symbols | Primary Sign In / Connect action, Team scope, active Directory facets |
+| `.subtleHeader` | Clear fill, no border; `normalColor` label, `secondaryLabelColor` chevrons | `labelColor` fill at `0.10`, no border; label and chevrons use `labelColor` | My Other Hosts and collapsible harness-group headers |
+| `.destructiveHover` | `labelColor` fill at `0.09`, border at `0.14`, `secondaryLabelColor` symbol | `systemRed` fill at `0.88`, white border at `0.26`, white symbol | Individual Stop listening controls |
+
+- Neutral hover stays achromatic in Light and Dark Mode. Header labels rest in `secondaryLabelColor` for My Other Hosts and `labelColor` for harness groups. Owned leading, center, and accessory symbols receive control styling; nested harness badges and status dots retain their colors.
+- Copy feedback synchronously shows `✓ Copied` in `systemGreen`, with green fill at `0.16` and border at `0.36`. Its `1.2 s` timer runs in common and event-tracking modes, then restores the original label, geometry, and current hover style.
+- `SurfaceView` retains semantic fill/stroke colors and resolves their `CGColor` values under `effectiveAppearance` at initialization, layer updates, and appearance changes. `withAppearanceAlpha` defers alpha application through an `NSColor` dynamic provider: AppKit's eager `withAlphaComponent` can freeze semantic RGB values before a later appearance switch. Corner radius is available immediately for headless inspection.
+- Harness badges use `systemIndigo` / `terminal.fill` for Pi, `systemTeal` / `sparkles` for Codex, and `systemBlue` / `bolt.horizontal.fill` for other harnesses. All have tint fill at `0.88`, a white border at `0.18`, and a white icon. Zone 1 uses `34 × 34 pt`, radius `8`, inset `8`; group headers use `18 × 18 pt`, radius `5`, inset `3`.
+- Each control retains one visible-rect tracking area. A weak single-active-hover coordinator clears the previous control when another enters. Screen-coordinate reconciliation checks window visibility, hidden ancestors/menu items, and the control's visible rect on local pointer/drag/scroll/button events and a `0.08 s` timer in common and event-tracking modes. The timer stops when no active hover remains.
+- Menu rebuild, open, and close clear hover only on menu-owned controls or controls outside the Directory panel. Toggling a drawer reconciles visibility immediately. Closing the Directory clears its own hover; an unrelated menu rebuild or close preserves hover on unchanged Directory controls.
+- Headless hooks exercise these logical lifecycle transitions without a physical pointer or visible window. Appearance tests switch real AppKit views between Aqua and Dark Aqua and inspect resolved layer colors; they do not claim physical cursor-event coverage.
+
 #### Exact Menu Bar Zones & Geometry (`src/macos/cito-ui.swift`):
 1. **Header Bar (`380 × 40 pt`, `id = "header"`)**:
+   - Hub drawer detail uses `labelColor` for errors or authentication-required status and `secondaryLabelColor` for other status text. Primary drawer actions use `.prominent`; other drawer actions and hub pills use `.neutral`.
    - Left: **`Cito`** (`13pt .bold`) + dynamic subtitle (`"1 listening"`, `"1 listening · 2 remote"`, `"Idle · 2 remote"`, or `"Idle"`). Compute `subWidth = ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8`, set subtitle width to `subWidth`, and place `hubStrip` at `x = max(138, 54 + subWidth), width = 368 - max(138, 54 + subWidth)` so the subtitle is never clipped.
 2. **Zone 1 — Active on This Mac (`listeners`)**:
-   - `360 × 58/72 pt` rounded cards (`id = "session:\(listener.scoped_id)"`). Capped inside `active_scroll` (`260pt` `FlippedView` `NSScrollView`) when `listeners.count > 4`.
+   - `360 × 58/72 pt` rounded cards (`id = "session:\(listener.scoped_id)"`), with radius `10`, `labelColor` fill at `0.07`, and border at `0.11`. Path/branch text uses `secondaryLabelColor`. Capped inside `active_scroll` (`260pt` `FlippedView` `NSScrollView`) when `listeners.count > 4`.
    - When `listeners.isEmpty && !available.isEmpty`, renders the `380 × 34 pt` compact strip (`id = "empty"`, `"No active listeners — click + Listen below"`).
 3. **Zone 2 — My Other Hosts (`my_remote_listeners`, shown when `!myRemote.isEmpty`)**:
    - Contains only active registrations from connected hubs where `reg.principal_id === principal.principal_id && reg.host_id !== this.hostId`.
@@ -149,7 +169,7 @@ To scale `cito_find` and UI discovery to $U = 500+$ users and $N = 2,000+$ onlin
      - Partition `available` by `harness` in deterministic order (`"pi"`, `"codex"`, then any other harness alphabetically).
      - Interactive `MenuControl` (`id = "toggle_group:\(harness)"`, `NSRect(x: 8, y: 2, width: 364, height: 24)`, `radius: 6`):
        - Disclosure chevron (`x: 6, y: 7, width: 10, height: 10`): `collapsedGroups.contains(harness) ? "chevron.right" : "chevron.down"`.
-       - Harness icon badge (`18 × 18 pt` at `x: 20, y: 3, radius: 5`, `tint.withAlphaComponent(0.12)`): `"terminal.fill"` (`.systemIndigo`) for `pi`, `"sparkles"` (`.systemTeal`) for `codex`, `"bolt.horizontal.fill"` for others.
+       - Filled harness icon badge (`18 × 18 pt` at `x: 20, y: 3, radius: 5`, tint fill at `0.88`, white border at `0.18`, white icon): `"terminal.fill"` (`.systemIndigo`) for `pi`, `"sparkles"` (`.systemTeal`) for `codex`, `"bolt.horizontal.fill"` (`.systemBlue`) for others.
        - Group label (`NSRect(x: 44, y: 4, width: 310, height: 16)`, `11.5pt .semibold`): `"Pi · \(items.count) open"` for `pi`, `"Codex · \(items.count) recent"` for `codex`, `"\(harness.capitalized) · \(items.count) available"` for others.
        - Clicking toggles `collapsedGroups` membership for `harness` and calls `rebuild()` in-place.
    - **Icon-Free Candidate Rows (`380 × 36 pt`, `id = "candidate:\(c.harness):\(c.session_id)"`, shown when `!collapsedGroups.contains(harness)`)**:
@@ -170,7 +190,8 @@ To scale `cito_find` and UI discovery to $U = 500+$ users and $N = 2,000+$ onlin
 
 1. **Window & Focus Lifecycle**:
    - `final class KeyPanel: NSPanel { override var canBecomeKey: Bool { true }; override var canBecomeMain: Bool { false } }`
-   - Separate from the notification HUD `panel` (`directoryPanel` is centered at `NSRect(x: 0, y: 0, width: 560, height: 440)`).
+   - Separate from the notification HUD `panel` (`directoryPanel` is centered at `NSRect(x: 0, y: 0, width: 560, height: 440)`). Its clipped `SurfaceView` root has radius `14`, clear fill, and an appearance-aware `labelColor` border at `0.15`.
+   - Menu lifecycle hover clearing excludes unchanged Directory controls. Closing this panel clears only its active hover before hiding it.
    - In non-headless mode, opening `directoryPanel` calls `NSApp.activate(ignoringOtherApps: true)`, `directoryPanel.makeKeyAndOrderFront(nil)`, and focuses `directorySearchField`; in `headless` mode, `openDirectoryPanel()` constructs the real `KeyPanel` and subviews and marks `directoryVisible = true` without calling `NSApp.activate` or `makeKeyAndOrderFront`.
    - Pressing `Escape` (when `!directorySearchField.currentEditor()?.hasMarkedText()` so active IME composition is never aborted) or clicking `id = "close_directory"` sets `directoryVisible = false`, hides `directoryPanel`, and emits `["op": "close_directory"]`.
 2. **Search Field, Scope/Harness Facet Pills & Daemon-Backed Full-Index Search**:
@@ -178,14 +199,16 @@ To scale `cito_find` and UI discovery to $U = 500+$ users and $N = 2,000+$ onlin
    - **Facet Bar (`560 × 32 pt`)**:
      - Scope pills: `All` (`id = "dir_scope:all"`), `My Hosts` (`id = "dir_scope:mine"`).
      - Harness pills: `All Harnesses` (`id = "dir_harness:all"`), `Pi` (`id = "dir_harness:pi"`), `Codex` (`id = "dir_harness:codex"`).
+     - Active scope/harness pills use `.prominent`; inactive pills and Close use `.neutral`.
    - **Full-Index Query Execution (`query_directory`)**:
      - Whenever `openDirectoryPanel()` runs, or the search query / scope pill / harness pill changes, `cito-ui` immediately filters its currently loaded `directoryPeers` in-memory for instant `0ms` UI feedback AND emits `["op": "query_directory", "query": query, "scope": scope, "harness": harness]` to `cito-daemon`.
      - `CitoService` evaluates the query (supporting space-separated free-text tokens AND prefix tokens `@<user>`, `user:<user>`, `repo:<repo>`, `host:<host>`, `is:<harness>`, `#<id>`) across the **entire in-memory `HubDirectoryIndex` (all 2,000+ peers, zero pre-filter truncation!)**, sorts matches (`is_self_principal` first, exact/prefix `title`/`user`/`repo` matches second, `last_seen_at` descending third, `scoped_id` ascending fourth), and sends back `{ op: "directory", peers: matched.slice(0, 100), matched_count: matched.length, online_count: totalOnline }`.
      - Because each `op: "directory"` response carries at most `100` matched rows (with `about`/`title`/`cwd` truncated to bounded display lengths if needed so serialized UTF-8 is always `< 128 KiB`), every single peer in a 2,000-peer network is 100% searchable while every stdio frame stays far below the 1 MiB limit!
 3. **Virtualized Result List (`NSTableView` inside `NSScrollView`, `560 × 334 pt`)**:
-   - Uses a view-based `NSTableView` (`rowHeight = 52`) with `makeView(withIdentifier:owner:)` cell reuse.
+   - Uses a view-based `NSTableView` (`rowHeight = 52`) with `makeView(withIdentifier:owner:)` cell reuse. Each cell keeps the constant reuse identifier `DirectoryPeerCell`; its separate `inspectionId` exposes `dir_peer:<scoped_id>` to headless inspection. Reconfiguration invalidates copy-feedback timers and clears stale copied/hover state.
+   - Selected cells resolve `controlAccentColor` fill at `0.22` on layer and appearance updates; other cells remain clear.
    - Each row (`height: 52 pt`, `id = "dir_peer:\(peer.scoped_id)"`) displays:
-     - Left: `28 × 28 pt` tinted harness badge (`terminal.fill` for `pi`, `sparkles` for `codex`).
+     - Left: `28 × 28 pt` filled harness badge (radius `7`, icon inset `6`, tint fill at `0.88`, white border at `0.18`, white icon; `terminal.fill` for `pi`, `sparkles` for `codex`, `bolt.horizontal.fill` for others).
      - Line 1 (`y: 26`): **`<peer.title>`** (`13pt .semibold`) + `" · \(peer.repo ?? "")\(branchSuffix)"` (`11.5pt .secondaryLabelColor`).
      - Line 2 (`y: 7`): **`@\(peer.user)`** (`11.5pt .medium .labelColor`) + `"@\(cleanHost) · \(peer.about)"` (`11.5pt .secondaryLabelColor`).
      - Right (`x: 544 - copyWidth, y: 16, height: 22 pt`): `MenuControl(short, ..., leadingSymbol: "doc.on.doc")` (`id = "copy_dir:\(peer.scoped_id)"`) that copies `peer.scoped_id` to `NSPasteboard.general` and shows `"✓ Copied"` in `.systemGreen`.
