@@ -16,7 +16,7 @@ export interface UiHubSummary {
 }
 export interface UiListenerSummary {
   hub: string; listener_id: string; public_id: string; scoped_id: string; harness: string; session_id: string;
-  title: string; cwd: string; repo: string | null; scope: "self" | "workspace"; can_jump: boolean;
+  title: string; about?: string; cwd: string; repo: string | null; branch?: string | null; scope: "self" | "workspace"; can_jump: boolean;
 }
 export type DaemonToUiMessage = { op: "state"; hubs: UiHubSummary[]; listeners: UiListenerSummary[] } | { op: "banner"; payload: BannerPayload };
 export type UiToDaemonAction = { op: "unlisten"; hub: string; listener_id: string }

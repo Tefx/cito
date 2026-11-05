@@ -60,11 +60,11 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
   } finally { if (child.exitCode === null) child.kill("SIGKILL"); await exited; }
 });
 
-interface MenuNode { id: string; text?: string; tooltip?: string; green?: boolean; width: number; height: number; x: number; radius: number; hidden?: boolean; children: MenuNode[] }
+interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
 interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
-test("real AppKit card views expose template icon, geometry, hub drawers and inline copy/scope feedback", async () => {
+test("real AppKit card views expose template icon, 380pt control-center geometry, state-driven hub drawers, and SF Symbol controls", async () => {
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
   const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
@@ -98,29 +98,40 @@ test("real AppKit card views expose template icon, geometry, hub drawers and inl
     expect(initial.icon_alpha.wave).toBeGreaterThan(0.9);
     expect(initial.icon_alpha.arc_gap).toBeLessThan(0.05);
     expect(initial.icon_alpha.warning_dot).toBeLessThan(0.05);
-    expect(initial.items.every(node => node.width === 340)).toBe(true);
-    expect(nodes).toContainEqual(expect.objectContaining({ width: 320, height: 58, x: 10, radius: 10 }));
-    expect(initial.items.find(node => node.id === "header")).toMatchObject({ height: 40 });
-    expect(initial.items.find(node => node.id === "footer")).toMatchObject({ height: 32 });
-    expect(initial.items.find(node => node.id === "drawer:personal")).toMatchObject({ height: 32, hidden: true });
-    expect(nodes.find(node => node.id === "copy:" + listener.scoped_id)).toMatchObject({ text: "repo#abcd ⧉", tooltip: listener.scoped_id });
+    expect(initial.items.every(node => node.width === 380)).toBe(true);
+    expect(nodes).toContainEqual(expect.objectContaining({ width: 360, height: 58, x: 10, radius: 10 }));
+    expect(initial.items.find(node => node.id === "header")).toMatchObject({ width: 380, height: 40 });
+    expect(initial.items.find(node => node.id === "footer")).toMatchObject({ width: 380, height: 36 });
+    expect(nodes.find(node => node.id === "stop_all")).toMatchObject({ text: "Stop All", symbol: "stop.fill", x: 12, y: 6, width: 82, height: 24 });
+    expect(nodes.find(node => node.id === "quit")).toMatchObject({ text: "Quit Cito ⌘Q", x: 262, y: 6, width: 106, height: 24 });
+    expect(initial.items.find(node => node.id === "drawer:personal")).toMatchObject({ width: 380, height: 32, hidden: true });
+    expect(nodes.map(node => node.text)).not.toContain("Codex");
+    const copyNode = nodes.find(node => node.id === "copy:" + listener.scoped_id)!;
+    expect(copyNode).toMatchObject({ text: "repo#abcd", symbol: "doc.on.doc", tooltip: listener.scoped_id, x: 54, y: 7, height: 19 });
+    expect(copyNode.children.some(child => child.hidden === false && child.width === 12)).toBe(true);
     send({ op: "test_control", id: "copy:" + listener.scoped_id });
     const copied = await inspect();
     expect(copied.clipboard).toBe(listener.scoped_id);
-    expect(flatten(copied.items).find(node => node.id === "copy:" + listener.scoped_id)).toMatchObject({ text: "✓ Copied", green: true });
-    await waitFor(async () => flatten((await inspect()).items).some(node => node.id === "copy:" + listener.scoped_id && node.text === "repo#abcd ⧉"), 2500);
+    const copiedNode = flatten(copied.items).find(node => node.id === "copy:" + listener.scoped_id)!;
+    expect(copiedNode).toMatchObject({ text: "✓ Copied", green: true });
+    expect(copiedNode.children.some(child => child.hidden === true && child.width === 12)).toBe(true);
+    await waitFor(async () => {
+      const restored = flatten((await inspect()).items).find(node => node.id === "copy:" + listener.scoped_id);
+      return restored?.text === "repo#abcd" && restored.children.some(child => child.hidden === false && child.width === 12);
+    }, 2500);
     send({ op: "test_control", id: "hub:personal" });
     expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(false);
     send({ op: "test_control", id: "hub:personal" });
     expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(true);
+    expect(nodes.find(node => node.id === "scope:" + listener.scoped_id)).toMatchObject({ text: "Self", symbol: "lock.fill", x: 236, y: 30, width: 62, height: 22 });
     send({ op: "test_control", id: "scope:" + listener.scoped_id });
-    expect(flatten((await inspect()).items).find(node => node.id === "scope:" + listener.scoped_id)?.text).toBe("👥 Team");
+    expect(flatten((await inspect()).items).find(node => node.id === "scope:" + listener.scoped_id)).toMatchObject({ text: "Team", symbol: "person.2.fill" });
     send({ op: "test_control", id: "scope:" + listener.scoped_id });
     await waitFor(() => actions.length === 2);
     expect(actions.map(action => action.op === "set_scope" && action.scope)).toEqual(["workspace", "self"]);
     bridge.state([{ ...hubs[0]!, status: "auth_required", error: "Sign in required" }], []);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=0"));
-    const empty = await inspect();
+    const empty = await inspect(), emptyNodes = flatten(empty.items);
     expect(empty).toMatchObject({ count: 0, icon_template: true, button_title: "", button_image_position: 1 });
     expect(empty.icon_alpha.arc).toBeGreaterThan(0.9);
     expect(empty.icon_alpha.core).toBeCloseTo(0.4, 1);
@@ -130,15 +141,56 @@ test("real AppKit card views expose template icon, geometry, hub drawers and inl
     expect(empty.icon_alpha.warning_ring).toBeLessThan(0.05);
     expect(empty.icon_alpha.outside_cutout).toBeGreaterThan(0.9);
     expect(empty.items.find(node => node.id === "drawer:personal")?.hidden).toBe(false);
-    expect(flatten(empty.items)).toContainEqual(expect.objectContaining({ width: 320, height: 64 }));
-    expect(flatten(empty.items).map(node => node.text)).toContain("No active listeners");
-    bridge.state([{ ...hubs[0]!, name: "default", auth_mode: "none" }], [listener, { ...listener, hub: "work" }]);
+    expect(emptyNodes).toContainEqual(expect.objectContaining({ width: 360, height: 64 }));
+    expect(emptyNodes.map(node => node.text)).toContain("No active listeners");
+    expect(emptyNodes.find(node => node.id === "login:personal")).toMatchObject({ text: "Sign In…" });
+    expect(emptyNodes.find(node => node.id === "disconnect:personal")).toMatchObject({ text: "Disconnect" });
+    expect(emptyNodes.find(node => node.id === "reconnect:personal")).toBeUndefined();
+    send({ op: "test_control", id: "hub:personal" });
+    expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(true);
+    // Single-default-hub mode eliminates literal "default" and renders compact 44x22pt icon pill when connected (none)
+    const richListener: UiListenerSummary = {
+      ...listener, hub: "default", public_id: "superlongrepositoryslugname-f8k2abcdefgh",
+      scoped_id: "superlongrepositoryslugname-f8k2abcdefgh", harness: "pi", can_jump: false,
+      about: "Primary workspace orchestrator session", branch: "main",
+    };
+    bridge.state([{ name: "default", status: "connected", user: "alice", auth_mode: "none", error: null }],
+      [richListener, { ...listener, hub: "work", about: "CAFÉ CONVERSATION", branch: "HEAD" }]);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=2"));
-    const duplicate = await inspect();
-    expect(duplicate.count).toBe(1);
-    expect(flatten(duplicate.items).map(node => node.text)).toContain("default · alice");
+    const duplicate = await inspect(), dupNodes = flatten(duplicate.items);
+    expect(duplicate.count).toBe(2);
+    const defaultPill = dupNodes.find(node => node.id === "hub:default")!;
+    expect(defaultPill).toMatchObject({ text: "", tooltip: "Connected · alice", width: 44, height: 22 });
+    expect(dupNodes.some(node => (node.text ?? "").includes("default"))).toBe(false);
+    expect(dupNodes.find(node => node.id === "session:" + richListener.scoped_id)).toMatchObject({ width: 380, height: 78 });
+    expect(dupNodes).toContainEqual(expect.objectContaining({ width: 360, height: 72, x: 10, radius: 10 }));
+    expect(dupNodes.map(node => node.text)).toContain("Primary workspace orchestrator session");
+    expect(dupNodes.find(node => node.id === "copy:" + richListener.scoped_id)?.text).toBe("superlon…lugname#f8k2");
+    expect(dupNodes.map(node => node.text)).toContain("/tmp · main");
+    // Second listener has case-insensitively identical about == title and branch == "HEAD" -> 2-row 64pt row / 58pt card, no branch suffix
+    expect(dupNodes.find(node => node.id === "session:" + listener.scoped_id)).toMatchObject({ width: 380, height: 64 });
+    expect(dupNodes.map(node => node.text)).toContain("/tmp");
+    expect(dupNodes.map(node => node.text)).not.toContain("/tmp · HEAD");
+    // State-driven hub drawer matrix across statuses and auth modes
+    for (const [hubState, pillText, summaryText, buttonTexts] of [
+      [{ name: "default", status: "connected" as const, user: "alice", auth_mode: "oidc" as const, error: null }, "alice", "Connected as alice", ["Switch Account", "Disconnect"]],
+      [{ name: "default", status: "connected" as const, user: "alice", auth_mode: "none" as const, error: "Restore failed" }, "alice", "Restore failed", ["Reconnect", "Disconnect"]],
+      [{ name: "default", status: "disconnected" as const, user: null, auth_mode: "none" as const, error: null }, "Offline", "Disconnected", ["Connect"]],
+      [{ name: "default", status: "disconnected" as const, user: null, auth_mode: "oidc" as const, error: null }, "Offline", "Disconnected", ["Connect", "Sign In…"]],
+      [{ name: "default", status: "connecting" as const, user: null, auth_mode: "none" as const, error: null }, "Connecting…", "Connecting to hub…", ["Cancel"]],
+    ] as const) {
+      diagnostics.length = 0;
+      bridge.state([hubState], []);
+      await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=0"));
+      const snap = await inspect(), snapNodes = flatten(snap.items);
+      expect(snapNodes.find(node => node.id === "hub:default")?.text).toBe(pillText);
+      const drawer = snap.items.find(node => node.id === "drawer:default")!;
+      expect(flatten([drawer]).map(node => node.text)).toContain(summaryText);
+      const renderedButtons = drawer.children.filter(child => child.id.endsWith(":default")).map(child => child.text);
+      expect([...renderedButtons].sort()).toEqual([...buttonTexts].sort());
+    }
   } finally { await bridge.close(); }
-}, 10000);
+}, 15000);
 
 test("HUD presents English wake/passive counts and harness-specific click labels", async () => {
   const diagnostics: string[] = [];

@@ -17,17 +17,20 @@ test("menu disconnect retains ACTIVE rows while removing live receivers, blocks 
   const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "disconnect", tag: "connected" }, f.pi.meta);
   const id = toCanonicalListenerId(publicId), old = f.service.receivers.get(`default:${id}`)!;
   const states = vi.spyOn(f.service.ui!, "state");
+  f.service.pushUiState();
+  expect(states.mock.lastCall?.[1]).toMatchObject([{ listener_id: id, about: "disconnect", branch: f.service.state.listener(id)!.branch }]);
+  slot.error = "CitoError: Hub disconnected";
   await f.service.handleUiAction({ op: "hub_action", hub: "default", action: "disconnect" });
-  expect(slot.manuallyDisconnected).toBe(true); expect(slot.status).toBe("disconnected");
+  expect(slot.manuallyDisconnected).toBe(true); expect(slot.status).toBe("disconnected"); expect(slot.error).toBeNull();
   expect(old.abort.signal.aborted).toBe(true); expect(f.service.state.listener(id)!.status).toBe("ACTIVE");
   expect(f.pi.badges.at(-1)).toBeUndefined(); expect(states.mock.lastCall?.[1]).toEqual([]);
   await expect(slot.network()).rejects.toMatchObject({ code: "NATS_UNAVAILABLE", message: "Hub 'default' is manually disconnected" });
   expect((await f.service.call("cito_find")).isError).toBe(true);
   for (const action of ["reconnect", "login"] as const) {
     await f.service.handleUiAction({ op: "hub_action", hub: "default", action });
-    expect(slot.manuallyDisconnected).toBe(false); expect(slot.status).toBe("connected");
+    expect(slot.manuallyDisconnected).toBe(false); expect(slot.status).toBe("connected"); expect(slot.error).toBeNull();
     expect(f.service.receivers.get(`default:${id}`)!.abort.signal.aborted).toBe(false);
-    expect(states.mock.lastCall?.[1]).toMatchObject([{ listener_id: id }]);
+    expect(states.mock.lastCall?.[1]).toMatchObject([{ listener_id: id, about: "disconnect" }]);
   }
 });
 
@@ -92,11 +95,11 @@ test("disconnect aborts interactive login and prevents a late connection; subseq
   await waitFor(() => opened);
   await slot.disconnect(); await failure;
   expect(slot.connectedBroker()).toBeUndefined(); expect(slot.manuallyDisconnected).toBe(true);
-  expect(slot.status).toBe("disconnected");
+  expect(slot.status).toBe("disconnected"); expect(slot.error).toBeNull();
   // Both operations act on the same lifetime queue. Disconnect interrupts login.
   const login = slot.reconnect(true); const cancelled = expect(login).rejects.toBeDefined();
   await waitFor(() => slot.status === "connecting"); await slot.disconnect(); await cancelled;
-  expect(slot.connectedBroker()).toBeUndefined(); expect(slot.status).toBe("disconnected");
+  expect(slot.connectedBroker()).toBeUndefined(); expect(slot.status).toBe("disconnected"); expect(slot.error).toBeNull();
 });
 
 test("HubSlot optional scopes and redirect ports cannot leak from the mirrored default hub", async () => {
@@ -142,4 +145,15 @@ test("non-interactive startup never opens a browser, and authenticating as a new
   expect(f.service.state.listener(id)!.status).toBe("FENCED_INACTIVE");
   expect(receiver.abort.signal.aborted).toBe(true);
   expect(f.service.slots.get("default")!.receivers.get(id)?.abort.signal.aborted).toBe(true);
+  // Switch Account (action: "login") while already connected forces interactive OIDC re-login and fences bob's listener
+  const { listener_id: bobPublicId } = await call(f.service, "cito_listen", { about: "bob session" }, f.pi.meta);
+  const bobId = toCanonicalListenerId(bobPublicId), bobReceiver = f.service.receivers.get(`default:${bobId}`)!;
+  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "third-account", preferred_username: "carol" })) };
+  await f.service.handleUiAction({ op: "hub_action", hub: "default", action: "login" });
+  expect(opened).toBe(2);
+  expect(f.service.slots.get("default")!.status).toBe("connected");
+  expect(f.service.slots.get("default")!.error).toBeNull();
+  expect(f.service.slots.get("default")!.principal?.owner_user).toBe("carol");
+  expect(f.service.state.listener(bobId)!.status).toBe("FENCED_INACTIVE");
+  expect(bobReceiver.abort.signal.aborted).toBe(true);
 });

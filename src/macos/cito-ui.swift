@@ -53,22 +53,36 @@ func roundedView(_ frame: NSRect, radius: CGFloat, color: NSColor) -> NSView {
     view.layer?.cornerRadius = radius; view.layer?.backgroundColor = color.cgColor
     return view
 }
+func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
+    let field = NSTextField(labelWithString: text)
+    field.font = font
+    return ceil(field.fittingSize.width)
+}
 
 /** Menu controls own their clicks so copy and scope changes keep native tracking open. */
 final class MenuControl: NSControl {
     let label: NSTextField
+    var leadingSymbolView: NSImageView?
+    var symbolName: String?
     var pressed: (() -> Void)?
     var hoverColor: NSColor?
     var normalColor: NSColor = .labelColor
     var normalBackground = NSColor.labelColor.withAlphaComponent(0.06)
     var feedbackTimer: Timer?
-    init(_ title: String, frame: NSRect, symbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6) {
-        label = textLabel(title, NSRect(x: 3, y: (frame.height - 15) / 2, width: frame.width - 6, height: 15))
+    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6) {
+        let hasLeading = leadingSymbol != nil
+        label = textLabel(title, NSRect(x: hasLeading ? 20 : 3, y: (frame.height - 15) / 2, width: frame.width - (hasLeading ? 24 : 6), height: 15))
+        symbolName = leadingSymbol ?? symbol
         super.init(frame: frame)
         wantsLayer = true; layer?.cornerRadius = radius
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
         label.alignment = .center; label.textColor = color; normalColor = color
         addSubview(label)
+        if let leadingSymbol = leadingSymbol {
+            let image = NSImageView(frame: NSRect(x: 6, y: (frame.height - 12) / 2, width: 12, height: 12))
+            image.image = NSImage(systemSymbolName: leadingSymbol, accessibilityDescription: nil)
+            image.contentTintColor = color; addSubview(image); leadingSymbolView = image
+        }
         if let symbol = symbol {
             let image = NSImageView(frame: bounds.insetBy(dx: 5, dy: 5))
             image.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
@@ -77,6 +91,17 @@ final class MenuControl: NSControl {
         setAccessibilityElement(true); setAccessibilityRole(.button); setAccessibilityLabel(title)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    func setLeadingSymbol(_ name: String?) {
+        symbolName = name
+        if let name = name {
+            leadingSymbolView?.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            leadingSymbolView?.isHidden = false
+            label.frame = NSRect(x: 20, y: (bounds.height - 15) / 2, width: bounds.width - 24, height: 15)
+        } else {
+            leadingSymbolView?.isHidden = true
+            label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
+        }
+    }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { frame.contains(point) ? self : nil }
     override func mouseDown(with event: NSEvent) { pressed?() }
@@ -99,9 +124,15 @@ final class MenuControl: NSControl {
     }
     func copied() {
         feedbackTimer?.invalidate()
+        leadingSymbolView?.isHidden = true
+        label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
         label.stringValue = "✓ Copied"; label.textColor = .systemGreen
         let restore = Timer(timeInterval: 1.2, repeats: false) { [weak self] _ in
             guard let self = self else { return }
+            if self.leadingSymbolView != nil {
+                self.leadingSymbolView?.isHidden = false
+                self.label.frame = NSRect(x: 20, y: (self.bounds.height - 15) / 2, width: self.bounds.width - 24, height: 15)
+            }
             self.label.stringValue = self.accessibilityLabel() ?? ""; self.label.textColor = self.normalColor
         }
         feedbackTimer = restore
@@ -174,7 +205,7 @@ struct Hub: Decodable {
 struct Listener: Decodable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
     let harness: String, session_id: String, title: String, cwd: String, scope: String
-    let repo: String?
+    let about: String?, repo: String?, branch: String?
     let can_jump: Bool
 }
 struct Frame: Decodable {
@@ -290,61 +321,127 @@ final class Companion: NSObject {
             let item = NSMenuItem(); item.view = view; menu.addItem(item); return item
         }
         func register(_ action: @escaping () -> Void) { menuActions.append(action) }
-        let header = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 40))
+        let header = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 40))
         header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 32, height: 18), size: 13, weight: .bold))
         header.addSubview(textLabel(count > 0 ? "\(count) listening" : "Idle",
-            NSRect(x: 50, y: 12, width: 80, height: 17), size: 11.5, color: .secondaryLabelColor))
+            NSRect(x: 50, y: 12, width: 84, height: 17), size: 11.5, color: .secondaryLabelColor))
         _ = host(header, id: "header")
         var drawerItems: [String: NSMenuItem] = [:]
         var hubActions: [() -> Void] = []
+        let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         for hub in hubs {
-            let drawer = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 32))
-            let detail = textLabel("\(hub.name) · \(hub.error ?? hub.status.replacingOccurrences(of: "_", with: " "))",
-                NSRect(x: 12, y: 9, width: hub.auth_mode == "oidc" ? 110 : 153, height: 16), color: .secondaryLabelColor)
-            detail.toolTip = hub.error ?? hub.status; drawer.addSubview(detail)
-            var x: CGFloat = hub.auth_mode == "oidc" ? 126 : 169
-            for (title, action, width) in [("Sign In", "login", CGFloat(45)), ("Reconnect", "reconnect", 70), ("Disconnect", "disconnect", 75)] {
-                if action == "login" && hub.auth_mode != "oidc" { continue }
-                let control = MenuControl(title, frame: NSRect(x: x, y: 5, width: width, height: 22))
-                control.identifier = NSUserInterfaceItemIdentifier("\(action):\(hub.name)")
-                let run = { self.emit(["op": "hub_action", "hub": hub.name, "action": action]) }
-                control.pressed = run; hubActions.append(run); drawer.addSubview(control); x += width + 3
+            let drawer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 32))
+            let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "login"]) }
+            let reconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "reconnect"]) }
+            let disconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "disconnect"]) }
+            if hub.auth_mode == "oidc" { hubActions.append(loginRun) }
+            hubActions.append(reconnectRun); hubActions.append(disconnectRun)
+            let buttons: [(String, String, Bool, () -> Void)]
+            switch hub.status {
+            case "connected" where hub.error != nil:
+                buttons = [("Reconnect", "reconnect", false, reconnectRun), ("Disconnect", "disconnect", false, disconnectRun)]
+            case "connected" where hub.auth_mode == "oidc":
+                buttons = [("Switch Account", "login", false, loginRun), ("Disconnect", "disconnect", false, disconnectRun)]
+            case "connected":
+                buttons = [("Disconnect", "disconnect", false, disconnectRun)]
+            case "connecting":
+                buttons = [("Cancel", "disconnect", false, disconnectRun)]
+            case "auth_required":
+                buttons = [("Sign In…", "login", true, loginRun), ("Disconnect", "disconnect", false, disconnectRun)]
+            default:
+                buttons = hub.auth_mode == "oidc"
+                    ? [("Connect", "reconnect", true, reconnectRun), ("Sign In…", "login", false, loginRun)]
+                    : [("Connect", "reconnect", true, reconnectRun)]
             }
+            var btnX: CGFloat = 368
+            for (title, action, primary, run) in buttons.reversed() {
+                let width = measureTextWidth(title, font: btnFont) + 16
+                btnX -= width
+                let control = MenuControl(title, frame: NSRect(x: btnX, y: 5, width: width, height: 22), color: primary ? .systemBlue : .labelColor)
+                control.label.font = btnFont
+                if primary {
+                    control.normalBackground = NSColor.systemBlue.withAlphaComponent(0.15)
+                    control.layer?.backgroundColor = control.normalBackground.cgColor
+                }
+                control.identifier = NSUserInterfaceItemIdentifier("\(action):\(hub.name)")
+                control.pressed = run; drawer.addSubview(control); btnX -= 4
+            }
+            let buttonsMinX = btnX + 4
+            let statusText: String
+            if let error = hub.error { statusText = error }
+            else if hub.status == "connected" { statusText = hub.auth_mode == "oidc" ? "Connected as \(hub.user ?? "user")" : "Connected · \(hub.user ?? "local")" }
+            else if hub.status == "connecting" { statusText = "Connecting to hub…" }
+            else if hub.status == "auth_required" { statusText = "Authentication required" }
+            else { statusText = "Disconnected" }
+            let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: max(40, buttonsMinX - 20), height: 16), color: .secondaryLabelColor)
+            detail.toolTip = hub.error ?? statusText; drawer.addSubview(detail)
             let item = host(drawer, id: "drawer:\(hub.name)")
-            item.isHidden = !selectedHubs.contains(hub.name) && !["auth_required", "disconnected"].contains(hub.status) && hub.error == nil
+            let autoExpand = hub.status != "connected" || hub.error != nil
+            item.isHidden = selectedHubs.contains(hub.name) ? false : !autoExpand
             drawerItems[hub.name] = item
         }
-        let hubStrip = NSScrollView(frame: NSRect(x: 132, y: 9, width: 196, height: 22))
+        let hubStrip = NSScrollView(frame: NSRect(x: 138, y: 9, width: 230, height: 22))
         hubStrip.drawsBackground = false; hubStrip.hasHorizontalScroller = false
-        let pillContainer = NSView(frame: NSRect(x: 0, y: 0, width: 196, height: 22))
+        let pillContainer = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 22))
         hubStrip.documentView = pillContainer; header.addSubview(hubStrip)
-        var pillX: CGFloat = 196
+        var pillX: CGFloat = 230
         for hub in hubs.reversed() {
-            let title = hubs.count == 1 && hub.name == "default" ? "default · \(hub.user ?? "—")" : hub.name
-            let width = min(CGFloat(150), max(45, (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width + 25))
+            let color: NSColor = hub.status == "connected" ? .systemGreen : hub.status == "connecting" ? .systemOrange : hub.status == "auth_required" ? .systemRed : .systemGray
+            let isSingleDefault = hubs.count == 1 && hub.name == "default"
+            let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
+            let title: String
+            if isCompactIcon {
+                title = ""
+            } else if isSingleDefault {
+                switch hub.status {
+                case "connected": title = hub.user ?? "Connected"
+                case "connecting": title = "Connecting…"
+                case "auth_required": title = "Sign In"
+                default: title = "Offline"
+                }
+            } else {
+                title = hub.name
+            }
+            let width: CGFloat = isCompactIcon ? 44 : min(180, measureTextWidth(title, font: btnFont) + 26)
             pillX -= width
             let pill = MenuControl(title, frame: NSRect(x: pillX, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
-            pill.label.frame.origin.x = 15; pill.label.frame.size.width = width - 19
-            let color: NSColor = hub.status == "connected" ? .systemGreen : hub.status == "connecting" ? .systemOrange : hub.status == "auth_required" ? .systemRed : .systemGray
-            pill.addSubview(roundedView(NSRect(x: 6, y: 8, width: 6, height: 6), radius: 3, color: color))
-            pill.toolTip = "\(hub.name) · \(hub.status)"
+            if isCompactIcon {
+                pill.label.isHidden = true
+                pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
+                let net = NSImageView(frame: NSRect(x: 16, y: 5, width: 12, height: 12))
+                net.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Connected")
+                net.contentTintColor = .labelColor; pill.addSubview(net)
+                let chev = NSImageView(frame: NSRect(x: 31, y: 7, width: 8, height: 8))
+                chev.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)
+                chev.contentTintColor = .secondaryLabelColor; pill.addSubview(chev)
+                pill.toolTip = "Connected · \(hub.user ?? "local")"
+            } else {
+                pill.label.font = btnFont
+                pill.label.frame.origin.x = 16; pill.label.frame.size.width = width - 20
+                pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
+                pill.toolTip = isSingleDefault ? (hub.status == "connected" ? "Connected · \(hub.user ?? "local")" : title) : "\(hub.name) · \(hub.status)"
+            }
             pill.pressed = { [weak self, weak menu] in
                 guard let self = self, let drawer = drawerItems[hub.name] else { return }
-                if self.selectedHubs.contains(hub.name) { self.selectedHubs.remove(hub.name) }
+                drawer.isHidden = !drawer.isHidden
+                if drawer.isHidden { self.selectedHubs.remove(hub.name) }
                 else { self.selectedHubs.insert(hub.name) }
-                drawer.isHidden = !self.selectedHubs.contains(hub.name) && !["auth_required", "disconnected"].contains(hub.status) && hub.error == nil
                 menu?.update()
             }
             pillContainer.addSubview(pill); pillX -= 4
         }
         if pillX < 0 {
             for pill in pillContainer.subviews { pill.frame.origin.x -= pillX }
-            pillContainer.frame.size.width = 196 - pillX
+            pillContainer.frame.size.width = 230 - pillX
         }
         for listener in listeners {
-            let row = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 64))
-            let card = roundedView(NSRect(x: 10, y: 3, width: 320, height: 58), radius: 10,
+            let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasDistinctAbout = !aboutText.isEmpty && aboutText.caseInsensitiveCompare(listener.title.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame
+            let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
+            let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
+            let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: rowHeight))
+            let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: cardHeight), radius: 10,
                 color: .labelColor.withAlphaComponent(0.045))
             row.addSubview(card)
             _ = host(row, id: "session:\(listener.scoped_id)")
@@ -355,23 +452,29 @@ final class Companion: NSObject {
             case "claude": symbol = "cpu.fill"; tint = .systemOrange; harnessName = "Claude"
             default: symbol = "bolt.horizontal.fill"; tint = .secondaryLabelColor; harnessName = listener.harness.capitalized
             }
-            let badge = roundedView(NSRect(x: 8, y: 13, width: 32, height: 32), radius: 8, color: tint.withAlphaComponent(0.13))
-            let icon = NSImageView(frame: NSRect(x: 7, y: 7, width: 18, height: 18))
+            let badge = roundedView(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34), radius: 8, color: tint.withAlphaComponent(0.13))
+            let icon = NSImageView(frame: NSRect(x: 8, y: 8, width: 18, height: 18))
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: harnessName); icon.contentTintColor = tint
             badge.addSubview(icon); card.addSubview(badge)
-            let actionWidth: CGFloat = listener.can_jump ? 116 : 88
-            let centerWidth = 320 - 48 - actionWidth - 16
-            let capsuleWidth = min(centerWidth / 2, (harnessName as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]).width + 8)
-            let title = textLabel(listener.title + (hubs.count > 1 ? " · \(listener.hub)" : ""), NSRect(x: 48, y: 32, width: centerWidth - capsuleWidth - 4, height: 18), size: 13, weight: .semibold)
+            let actionWidth: CGFloat = listener.can_jump ? 114 : 88
+            let title = textLabel(listener.title + (hubs.count > 1 ? " · \(listener.hub)" : ""),
+                NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
             title.toolTip = listener.title; card.addSubview(title)
-            let capsule = textLabel(harnessName, NSRect(x: 48 + centerWidth - capsuleWidth, y: 34, width: capsuleWidth, height: 14), size: 10, weight: .semibold, color: tint)
-            capsule.alignment = .center; capsule.wantsLayer = true; capsule.layer?.cornerRadius = 4
-            capsule.layer?.backgroundColor = tint.withAlphaComponent(0.1).cgColor; card.addSubview(capsule)
+            if hasDistinctAbout {
+                let aboutLabel = textLabel(aboutText, NSRect(x: 54, y: 28, width: 296, height: 16), size: 11.5, color: .secondaryLabelColor)
+                aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
+            }
             let raw = listener.public_id, split = raw.lastIndex(of: "-")
-            let short = split.map { String(raw[..<$0]) + "#" + String(raw[raw.index(after: $0)...].prefix(4)) } ?? raw
-            let copyWidth = min(centerWidth * 0.72, max(60, (short as NSString).size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]).width + 20))
-            let copy = MenuControl(short + " ⧉", frame: NSRect(x: 48, y: 7, width: copyWidth, height: 20))
-            copy.label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            let short: String
+            if let split = split {
+                let slug = String(raw[..<split]), fp4 = String(raw[raw.index(after: split)...].prefix(4))
+                let cleanSlug = slug.count > 18 ? String(slug.prefix(8)) + "…" + String(slug.suffix(7)) : slug
+                short = "\(cleanSlug)#\(fp4)"
+            } else { short = raw }
+            let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+            let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 24
+            let copy = MenuControl(short, frame: NSRect(x: 54, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
+            copy.label.font = copyFont
             copy.toolTip = listener.scoped_id; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
             copy.pressed = { [weak copy] in
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(listener.scoped_id, forType: .string)
@@ -380,12 +483,15 @@ final class Companion: NSObject {
             card.addSubview(copy)
             let home = NSHomeDirectory()
             let cwd = listener.cwd == home ? "~" : listener.cwd.hasPrefix(home + "/") ? "~" + listener.cwd.dropFirst(home.count) : listener.cwd
-            let path = textLabel(cwd,
-                NSRect(x: 52 + copyWidth, y: 9, width: max(0, centerWidth - copyWidth - 4), height: 16), color: .tertiaryLabelColor)
+            let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
+            let path = textLabel(pathText,
+                NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: .tertiaryLabelColor)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = listener.cwd; card.addSubview(path)
-            var x = 320 - actionWidth - 8
+            var x: CGFloat = 350 - actionWidth
             var scope = listener.scope
-            let toggle = MenuControl(scope == "self" ? "🔒 Self" : "👥 Team", frame: NSRect(x: x, y: 17, width: 60, height: 24))
+            let toggle = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
+                leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
             toggle.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
             let scopeColor = { [weak toggle] in
                 toggle?.normalBackground = scope == "workspace" ? NSColor.systemBlue.withAlphaComponent(0.15) : NSColor.labelColor.withAlphaComponent(0.06)
@@ -394,44 +500,47 @@ final class Companion: NSObject {
             scopeColor()
             toggle.pressed = { [weak toggle] in
                 scope = scope == "self" ? "workspace" : "self"
-                toggle?.label.stringValue = scope == "self" ? "🔒 Self" : "👥 Team"
+                toggle?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
+                toggle?.label.stringValue = scope == "self" ? "Self" : "Team"
                 toggle?.setAccessibilityLabel(toggle?.label.stringValue); scopeColor()
                 self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
             }
-            card.addSubview(toggle); x += 64
+            card.addSubview(toggle); x += 66
             if listener.can_jump {
-                let open = MenuControl("Open in Codex", frame: NSRect(x: x, y: 17, width: 24, height: 24), symbol: "arrow.up.forward.app")
+                let open = MenuControl("Open in Codex", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "arrow.up.forward.app")
                 open.toolTip = "Open in Codex"; open.identifier = NSUserInterfaceItemIdentifier("open:\(listener.scoped_id)")
                 let run = { [weak menu] in self.openCodex(listener.session_id); menu?.cancelTracking() }
-                open.pressed = run; register(run); card.addSubview(open); x += 28
+                open.pressed = run; register(run); card.addSubview(open); x += 26
             }
             register { [weak copy] in copy?.pressed?() }
             register { [weak toggle] in toggle?.pressed?() }
-            let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: 17, width: 24, height: 24), symbol: "xmark")
+            let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
             stop.toolTip = "Stop listening"; stop.hoverColor = .systemRed
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
             stop.pressed = unlisten; card.addSubview(stop); register(unlisten); register(unlisten)
         }
         if listeners.isEmpty {
-            let row = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 70))
-            let card = roundedView(NSRect(x: 10, y: 3, width: 320, height: 64), radius: 10, color: .labelColor.withAlphaComponent(0.045))
+            let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 70))
+            let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 64), radius: 10, color: .labelColor.withAlphaComponent(0.045))
             let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
             icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
             icon.contentTintColor = .secondaryLabelColor; card.addSubview(icon)
-            card.addSubview(textLabel("No active listeners", NSRect(x: 44, y: 33, width: 264, height: 18), size: 13, weight: .semibold))
+            card.addSubview(textLabel("No active listeners", NSRect(x: 44, y: 33, width: 304, height: 18), size: 13, weight: .semibold))
             card.addSubview(textLabel("Call cito_listen in a session to receive notifications",
-                NSRect(x: 44, y: 12, width: 270, height: 16), size: 10, color: .secondaryLabelColor))
+                NSRect(x: 44, y: 12, width: 304, height: 16), size: 11, color: .secondaryLabelColor))
             row.addSubview(card); _ = host(row, id: "empty")
         }
-        let footer = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 32))
+        let footer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
         if !listeners.isEmpty {
-            let stopAll = MenuControl("⏹ Stop All", frame: NSRect(x: 12, y: 4, width: 84, height: 24))
+            let stopAll = MenuControl("Stop All", frame: NSRect(x: 12, y: 6, width: 82, height: 24), leadingSymbol: "stop.fill")
+            stopAll.identifier = NSUserInterfaceItemIdentifier("stop_all")
             stopAll.pressed = { self.emit(["op": "unlisten_all"]) }
             footer.addSubview(stopAll); register { [weak stopAll] in stopAll?.pressed?() }
         }
         hubActions.forEach { register($0) }
-        let quit = MenuControl("Quit Cito ⌘Q", frame: NSRect(x: 222, y: 4, width: 106, height: 24))
+        let quit = MenuControl("Quit Cito ⌘Q", frame: NSRect(x: 262, y: 6, width: 106, height: 24))
+        quit.identifier = NSUserInterfaceItemIdentifier("quit")
         quit.pressed = { self.emit(["op": "quit"]) }
         footer.addSubview(quit); register { [weak quit] in quit?.pressed?() }
         let footerItem = host(footer, id: "footer")
@@ -444,12 +553,14 @@ final class Companion: NSObject {
     func inspectMenu() {
         func project(_ view: NSView) -> [String: Any] {
             var result: [String: Any] = ["id": view.identifier?.rawValue ?? "", "width": view.frame.width,
-                "height": view.frame.height, "x": view.frame.origin.x, "radius": view.layer?.cornerRadius ?? 0,
+                "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
+                "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
                 "children": view.subviews.map { project($0) }]
             if let label = view as? NSTextField { result["text"] = label.stringValue }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
                 result["green"] = control.label.textColor == NSColor.systemGreen
+                if let symbol = control.symbolName { result["symbol"] = symbol }
             }
             return result
         }

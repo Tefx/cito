@@ -44,15 +44,30 @@ export class HubSlot {
     if (!this.principal) await this.network();
     return this.principal!;
   }
-  async network({ interactive = true }: { interactive?: boolean } = {}): Promise<Broker> {
+  async network({ interactive = true, forceLogin = false }: { interactive?: boolean; forceLogin?: boolean } = {}): Promise<Broker> {
     if (this.manuallyDisconnected) throw new CitoError("NATS_UNAVAILABLE", `Hub '${this.name}' is manually disconnected`);
     if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
+    if (forceLogin && this.login) {
+      this.restoreRetry?.abort(); this.cancel();
+      const prev = this.broker; this.broker = undefined;
+      await prev?.nc.close();
+    }
     if (this.broker && !this.broker.nc.isClosed() && !this.rejectedHash) { await this.restore(this.broker); return this.broker; }
     return this.brokerPromise ??= (async () => {
       const signal = this.connectionAbort.signal;
       this.status = "connecting"; this.error = null; this.changed();
       if (this.rejectedHash) await this.broker?.nc.close();
-      let token = this.login ? (this.rejectedHash ? await this.login.recover(this.rejectedHash, interactive, signal) : await this.login.current(interactive, signal)) : undefined;
+      let token: Awaited<ReturnType<OidcLogin["current"]>> | undefined;
+      if (this.login) {
+        if (forceLogin) {
+          const login = this.login, origCached = login.cached;
+          login.cached = async () => undefined;
+          try { token = await login.recover(null, true, signal); }
+          finally { login.cached = origCached; }
+        } else {
+          token = this.rejectedHash ? await this.login.recover(this.rejectedHash, interactive, signal) : await this.login.current(interactive, signal);
+        }
+      }
       this.rejectedHash = undefined;
       const connect = () => connectNats({ servers: this.config.natsUrl, token: token?.id_token,
         name: "cito-mcp-" + this.name, timeout: 10_000, maxReconnectAttempts: -1 });
@@ -76,7 +91,7 @@ export class HubSlot {
         return this.broker;
       } catch (cause) { await nc.close(); throw new CitoError("NATS_UNAVAILABLE", "NATS topology unavailable", { cause }); }
     })().catch(error => {
-      this.error = String(error);
+      this.error = this.manuallyDisconnected || this.closing ? null : String(error);
       this.status = this.manuallyDisconnected || this.closing ? "disconnected" : error instanceof CitoError && ["UNAUTHORIZED", "OIDC_LOGIN_TIMEOUT"].includes(error.code) ? "auth_required" : "disconnected";
       throw error;
     }).finally(() => { this.brokerPromise = undefined; this.changed(); });
@@ -152,18 +167,23 @@ export class HubSlot {
   }
   connectedBroker(): Broker | undefined { return this.broker && !this.broker.nc.isClosed() && !this.manuallyDisconnected ? this.broker : undefined; }
   async disconnect(): Promise<void> {
-    this.manuallyDisconnected = true; this.connectionAbort.abort(); this.cancel();
+    this.manuallyDisconnected = true; this.error = null; this.connectionAbort.abort(); this.cancel();
     await this.actions.run(this.name, async () => {
       await this.broker?.nc.close(); await this.brokerPromise?.catch(() => {}); await this.broker?.nc.close();
-      this.broker = undefined; this.status = "disconnected"; this.changed();
+      this.broker = undefined; this.status = "disconnected"; this.error = null; this.changed();
     });
   }
-  async reconnect(interactive: boolean): Promise<void> {
+  async reconnect(interactive: boolean, { forceLogin = false }: { forceLogin?: boolean } = {}): Promise<void> {
     await this.actions.run(this.name, async () => {
       await this.brokerPromise?.catch(() => {});
       if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
       this.manuallyDisconnected = false; this.connectionAbort = new AbortController();
-      await this.network({ interactive });
+      if (forceLogin && this.login) {
+        this.restoreRetry?.abort(); this.cancel();
+        const prev = this.broker; this.broker = undefined;
+        await prev?.nc.close();
+      }
+      await this.network({ interactive, forceLogin });
     });
   }
   async close(): Promise<void> {
@@ -223,7 +243,7 @@ export class CitoService {
       const receiver = this.receivers.get(`${row.hub}:${row.listener_id}`);
       return receiver && !receiver.abort.signal.aborted && receiver.owner === row.owner_token;
     }).map(row => ({ hub: row.hub, listener_id: row.listener_id, public_id: displayId(row), scoped_id: this.scoped(row.hub, displayId(row)),
-      harness: row.harness, session_id: row.session_id, title: row.title, cwd: row.cwd, repo: row.repo, scope: row.scope,
+      harness: row.harness, session_id: row.session_id, title: row.title, about: row.about, cwd: row.cwd, repo: row.repo, branch: row.branch, scope: row.scope,
       can_jump: getAdapter(row.harness)?.canJump === true }));
     this.ui?.state(hubs, listeners);
   }
@@ -241,7 +261,7 @@ export class CitoService {
             await slot.disconnect();
             await Promise.allSettled([...slot.receivers.values()].map(receiver => receiver.badge()));
           }
-          else await slot.reconnect(action.action === "login");
+          else await slot.reconnect(action.action === "login", { forceLogin: action.action === "login" });
           break;
         }
       }
