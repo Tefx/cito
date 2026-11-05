@@ -1182,32 +1182,32 @@ phases:
       \ to `senior-engineer` before Delta re-verification); gate step itself is read-only\
       \ (`repo_change_policy: no_repo_change`) and does not directly mutate repository\
       \ files, Plan state, or external host directories.\n- **Admit:**\n  - Included\
-      \ phase and terminal outcomes: Phase `v4` (`v4.english-card-ui-mcp2026-and-adapter-purity`)\
-      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
-      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run build\
-      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
-      \ tree (`git status --short`).\n    2. Mechanical language and neutral-naming\
-      \ verification:\n       - Zero Chinese characters (`[\\p{Script=Han}]`) in `src/`,\
-      \ `docs/`, `README.md`, and `deploy/`.\n       - Zero case-insensitive matches\
-      \ for `rda|casdoor|rcatwin|keppel|mingchen` in `src/`, `docs/`, `README.md`,\
-      \ `deploy/`, and `tests/`.\n       - Zero references to `codex`, `pi`, or `x-codex-turn-metadata`\
-      \ in `src/mcp/`.\n    3. Code & documentation conformance with `docs/DESIGN.md`\
-      \ §§1–5, `AGENTS.md`, `README.md`, and `deploy/nats/README.md`: bespoke monochrome\
-      \ vector status icon `makeCitoStatusIcon` (`18x18pt`, `1.75pt` stroke, `isTemplate\
-      \ = true`) and `340pt`-wide Control-Center custom AppKit card menu panel (`NSMenuItem.view`\
-      \ cards) in `src/macos/cito-ui.swift`; English HUD banner & Wake Card text;\
-      \ `2026-07-28` in `SUPPORTED_PROTOCOL_VERSIONS`; `CodexDesktopAdapter.detectExplicitCaller`\
-      \ in `src/adapters/codex.ts`; opt-in `CITO_CLAUDE_CHANNEL=1` (`enableClaudeChannel`)\
-      \ stdio channel bridge (`claude-pid-${process.ppid}.sock` + `notifications/claude/channel`\
-      \ + `delivered_unconfirmed`); and Claude Code native integration marked as `\"\
-      Proposed Design Suggestion Only — Not Yet Implemented\"` referencing `docs/DESIGN.md`\
-      \ §5.\n    4. Iterative `[REQUIRES_SKILL: code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`)\
-      \ audit-and-fix convergence across all 5 lenses reaching `Completeness: CLEAN`\
-      \ and `Simplicity: ZERO_NEW_ISSUES`.\n- **Recovery:** If any check fails or\
-      \ any actionable `code-hygiene` finding is admitted, record the concrete file/line\
-      \ counterexamples and route a cohesive writable repair to `senior-engineer`\
-      \ before re-running this gate in Delta mode until `Completeness: CLEAN` and\
-      \ `Simplicity: ZERO_NEW_ISSUES` are achieved."
+      \ phase and terminal outcomes: Phase `v4` (`v4.english-card-ui-mcp2026-and-adapter-purity`,\
+      \ `v4.fix-claude-channel-burst-test-race`) bound to the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence and checks:\n\
+      \    1. `npm run typecheck && npm run build && npm test` passes 100% with zero\
+      \ skipped or failing tests and clean working tree (`git status --short`).\n\
+      \    2. Mechanical language and neutral-naming verification:\n       - Zero\
+      \ Chinese characters (`[\\p{Script=Han}]`) in `src/`, `docs/`, `README.md`,\
+      \ and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/`, `README.md`, `deploy/`, and `tests/`.\n       - Zero references\
+      \ to `codex`, `pi`, or `x-codex-turn-metadata` in `src/mcp/`.\n    3. Code &\
+      \ documentation conformance with `docs/DESIGN.md` §§1–5, `AGENTS.md`, `README.md`,\
+      \ and `deploy/nats/README.md`: bespoke monochrome vector status icon `makeCitoStatusIcon`\
+      \ (`18x18pt`, `1.75pt` stroke, `isTemplate = true`) and `340pt`-wide Control-Center\
+      \ custom AppKit card menu panel (`NSMenuItem.view` cards) in `src/macos/cito-ui.swift`;\
+      \ English HUD banner & Wake Card text; `2026-07-28` in `SUPPORTED_PROTOCOL_VERSIONS`;\
+      \ `CodexDesktopAdapter.detectExplicitCaller` in `src/adapters/codex.ts`; opt-in\
+      \ `CITO_CLAUDE_CHANNEL=1` (`enableClaudeChannel`) stdio channel bridge (`claude-pid-${process.ppid}.sock`\
+      \ + `notifications/claude/channel` + `delivered_unconfirmed`); and Claude Code\
+      \ native integration marked as `\"Proposed Design Suggestion Only — Not Yet\
+      \ Implemented\"` referencing `docs/DESIGN.md` §5.\n    4. Iterative `[REQUIRES_SKILL:\
+      \ code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`) audit-and-fix convergence\
+      \ across all 5 lenses reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable `code-hygiene` finding\
+      \ is admitted, record the concrete file/line counterexamples and route a cohesive\
+      \ writable repair to `senior-engineer` before re-running this gate in Delta\
+      \ mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved."
     verification: npm run typecheck && npm run build && npm test && git status --short
     evidence_template: 'Gate verdict (PASS/FAIL), test output (npm run typecheck &&
       npm run build && npm test), mechanical regex verification for zero Chinese characters
@@ -1220,4 +1220,27 @@ phases:
     - deploy/nats/README.md
     depends_on:
     - v4.english-card-ui-mcp2026-and-adapter-purity
+    - v4.fix-claude-channel-burst-test-race
     agent: code-reviewer
+  - id: v4.fix-claude-channel-burst-test-race
+    name: Fix publishBurst notification baseline race in tests/e2e/claude-channel.test.ts
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - tests/e2e/claude-channel.test.ts\n  blocked_paths:\n\
+      \    - plan.yaml\n```\n\n- **Deliver:** Fix the notification count baseline\
+      \ race in `tests/e2e/claude-channel.test.ts` by capturing `firstBurstNotification`\
+      \ / `firstLargeNotification` before releasing the `dispatcher_token = 'burst'`\
+      \ lease (or keeping the lease held until immediately before `await receiver.dispatch()`),\
+      \ so background debounce timers cannot deliver a batch before the baseline count\
+      \ is recorded under full-suite CPU load.\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `tests/e2e/claude-channel.test.ts`.\n- **Admit:** `v4.english-card-ui-mcp2026-and-adapter-purity`.\
+      \ Verified by `npm run typecheck && npm run build && npm test` exiting `0`.\
+      \ Consumed by `v4.acceptance-and-hygiene-gate`.\n- **Recovery:** Revert broken\
+      \ edits in worktree and re-verify `npm test`."
+    verification: npm run typecheck && npm run build && npm test
+    refs:
+    - docs/DESIGN.md
+    - tests/e2e/claude-channel.test.ts
+    depends_on:
+    - v4.english-card-ui-mcp2026-and-adapter-purity
+    agent: senior-engineer
