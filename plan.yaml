@@ -2212,3 +2212,176 @@ phases:
     and pass the iterative code-hygiene gate.'
   depends_on:
   - v7
+  steps:
+  - id: v8.scalable-network-directory-and-ego-menu-ui
+    name: 'Implement V8 Claude removal, HubDirectoryIndex NATS KV discovery, actionable
+      Pi badge, Pi recency & per-harness quota, and Two-Surface macOS Ego-Menu + Spotlight
+      DirectoryPanel UI [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/adapters/**\n    - src/pi-extension/cito-bridge.ts\n\
+      \    - src/shared/config.ts\n    - src/mcp/cli.ts\n    - src/mcp/receiver.ts\n\
+      \    - src/mcp/service.ts\n    - src/ui/index.ts\n    - src/macos/cito-ui.swift\n\
+      \    - docs/DESIGN.md\n    - README.md\n    - deploy/nats/README.md\n    - tests/**\n\
+      \  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n  - Implement `docs/DESIGN.md`\
+      \ §§1.2–6 across `src/adapters/`, `src/pi-extension/cito-bridge.ts`, `src/shared/config.ts`,\
+      \ `src/mcp/cli.ts`, `src/mcp/receiver.ts`, `src/mcp/service.ts`, `src/ui/index.ts`,\
+      \ `src/macos/cito-ui.swift`, `docs/DESIGN.md`, `README.md`, `deploy/nats/README.md`,\
+      \ and `tests/`:\n    1. **Complete Claude Code Removal & English-Only Doc Cleanup\
+      \ (`docs/DESIGN.md` §1.2)**:\n       - Delete `src/adapters/claude-channel.ts`\
+      \ and `tests/adapters/claude-channel.test.ts`.\n       - Migrate transport-independent\
+      \ regression tests (600-message burst pagination, 256 KiB batch byte-ceiling\
+      \ splitting, 70 KB oversized sender title handling, and plain `cito-mcp` stdio\
+      \ forwarding/shutdown) from `tests/e2e/claude-channel.test.ts` into `tests/mcp/dispatch.test.ts`\
+      \ / `tests/e2e/lifecycle.test.ts` under `'pi'`, then delete `tests/e2e/claude-channel.test.ts`.\n\
+      \       - Remove `claude` default registration (`registerAdapter(new SocketBridgeAdapter(\"\
+      claude\", ...))`) from `src/adapters/index.ts`, `enableClaudeChannel` / `CITO_CLAUDE_CHANNEL`\
+      \ from `src/shared/config.ts` and `src/mcp/cli.ts`, `case \"claude\":` from\
+      \ `src/macos/cito-ui.swift`, the channel config test from `tests/shared/multi-hub.test.ts`,\
+      \ and replace `'claude'` with `'custom'` in `tests/adapters/pi.test.ts` and\
+      \ `tests/ui/lifecycle.test.ts` so zero case-insensitive `'claude'` matches remain\
+      \ anywhere in `src/` and `tests/`.\n       - Update `README.md` and `deploy/nats/README.md`\
+      \ to remove `CITO_CLAUDE_CHANNEL` / `enableClaudeChannel` documentation while\
+      \ keeping Claude Code documented strictly as `\"Proposed Design Suggestion Only\
+      \ — Not Yet Implemented\"` (`docs/DESIGN.md` §6), and replace any remaining\
+      \ Chinese diagram labels in `docs/DESIGN.md` (`(可折叠)` / `(已折叠)`) with English\
+      \ (`(collapsible)` / `(collapsed)`).\n    2. **Scalable NATS KV Discovery (`HubDirectoryIndex`\
+      \ in `src/mcp/service.ts`, `docs/DESIGN.md` §2.2)**:\n       - Give each `HubSlot`\
+      \ a `HubDirectoryIndex` caching active `IndexedRegistration` entries (`{ hub,\
+      \ value: Registration, revision, createdIso, createdMs, haystack }`) with a\
+      \ `5,000 ms` (`5s`) freshness window, singleflight promise coalescing (`inflight?:\
+      \ Promise<void>`), and `directoryGen` counter.\n       - Implement `syncSnapshot`\
+      \ with a single `broker.jsm.streams.info(KV_STREAM)` (`\"KV_cito_listeners\"\
+      `) call for `brokerTs` (`info.ts`, anchored to `sampleMonoMs = performance.now()`),\
+      \ `info.state.messages` (committing an empty `Map` and returning immediately\
+      \ without creating a consumer when `messages === 0`), and `targetSeq = info.state.last_seq`.\n\
+      \       - Primary fast path: `broker.kv.watch({ ignoreDeletes: false, initializedFn:\
+      \ () => { initDone = true; watch?.stop(); } })` terminating on `initDone ||\
+      \ entry.delta === 0 || entry.revision >= targetSeq` (handling synchronous `initDone`\
+      \ before `await broker.kv.watch()` returns) with a `2,500 ms` deadline timer.\n\
+      \       - Guaranteed non-hanging fallback (`boundedPointGetSnapshot`): `2,500\
+      \ ms` deadline-bounded `broker.kv.keys()` + 16-worker concurrent `broker.kv.get(key)`\
+      \ pool when `watch` throws or hits its `2,500 ms` deadline.\n       - Fence\
+      \ commits and resets with `directoryGen` (`gen === this.directoryGen`; increment\
+      \ and clear on `HubSlot.disconnect()`, `close()`, or `forceLogin` account switch).\n\
+      \       - Coalesce local mutations immediately on `listen()`, `unlistenById()`,\
+      \ `setScope()`, and `Receiver.revoke()` / `Receiver.sweep()` heartbeat renewal,\
+      \ evaluate lease/visibility at read time (`currentBrokerIso = new Date(this.anchorBrokerMs\
+      \ + (performance.now() - this.anchorMonoMs)).toISOString()`, `evaluateLease(...)\
+      \ === \"ACTIVE\"`, `scope === \"workspace\" || principal_id === principal.principal_id`),\
+      \ and refactor `find()` to read from `HubDirectoryIndex`.\n    3. **Actionable\
+      \ Pi Footer Status Badge (`src/mcp/receiver.ts`, `docs/DESIGN.md` §2.3)**:\n\
+      \       - Remove the `'(!)'` / `'!'` `replay_gap_detected` badge suffix in `refreshSessionBadge()`\
+      \ (`const count = unread > 0 ? \\` (${unread})\\` : \"\";`) while retaining\
+      \ `replay_gap_detected` and `replay_gap_range` in SQLite and `cito_inbox`.\n\
+      \       - Update lines 112, 114, 117 of `tests/mcp/identity-and-badge.test.ts`\
+      \ from `\"\U0001F514 abcdefghijkl (!)\"` / `\"\U0001F514 abcdefghijkl (1!)\"\
+      ` to `\"\U0001F514 abcdefghijkl\"` / `\"\U0001F514 abcdefghijkl (1)\"` while\
+      \ keeping `replay_gap_detected: true` assertions on `cito_inbox`.\n    4. **Pi\
+      \ Interaction Recency Tracking & Per-Harness Candidate Quota (`src/pi-extension/cito-bridge.ts`,\
+      \ `src/adapters/pi.ts`, `src/adapters/index.ts`, `docs/DESIGN.md` §3)**:\n \
+      \      - Maintain `lastActiveMs` in `src/pi-extension/cito-bridge.ts`, kept\
+      \ read-only during `{ op: \"identify\" }` and `{ op: \"status\" }` polling (inside\
+      \ `update(ctx)`, update `lastActiveMs = Date.now()` only when `nextSessionId\
+      \ !== sessionId`; advance on `session_start`, `session_info_changed`, `session_tree`,\
+      \ `/cito` command execution, and accepted `deliver` notifications), and return\
+      \ `updated_at_ms: lastActiveMs` in `identify`.\n       - In `SocketBridgeAdapter.discoverAvailableSessions`\
+      \ (`src/adapters/pi.ts`), compute `updated_at_ms` from `info.updated_at_ms`\
+      \ (fallback `Math.round(st.mtimeMs)`) and sort Pi candidates by `updated_at_ms\
+      \ DESC, endpoint_pid DESC`.\n       - In `discoverAllAvailableSessions` (`src/adapters/index.ts`),\
+      \ exclude active local listeners by `(harness, session_id)` or `(harness, endpoint_pid)`\
+      \ and retain up to **8 candidates per harness** (`\"pi\"` first, `\"codex\"\
+      ` second, any other harness alphabetically; max **16 total**).\n    5. **Two-Surface\
+      \ macOS UI Architecture (`src/ui/index.ts`, `src/mcp/service.ts`, `src/macos/cito-ui.swift`,\
+      \ `docs/DESIGN.md` §4)**:\n       - **Surface 1 (`380pt` Ego-Centric `cardMenu`,\
+      \ `docs/DESIGN.md` §4.2)**:\n         - Dynamic header subtitle width (`\"1\
+      \ listening\"`, `\"1 listening · 2 remote\"`, `\"Idle · 2 remote\"`, `\"Idle\"\
+      `, `subWidth = ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize:\
+      \ 11.5))) + 8`, `hubStrip` at `x = max(138, 54 + subWidth), width = 368 - max(138,\
+      \ 54 + subWidth)`).\n         - Zone 1 Active on This Mac (`listeners`, `active_scroll`\
+      \ `260pt` at `>4`, `empty` strip when `listeners.isEmpty && !available.isEmpty`).\n\
+      \         - Zone 2 collapsible `MY OTHER HOSTS` (`my_remote_listeners` where\
+      \ `reg.principal_id === principal.principal_id && reg.host_id !== this.hostId`,\
+      \ with `my_remote_header` `380x26pt`, `toggle_my_remote`, `remote:<scoped_id>`\
+      \ `380x34pt`, `copy_remote:<scoped_id>`, and `my_remote_scroll` `102pt` at `>3`).\n\
+      \         - Zone 3 `AVAILABLE SESSIONS` with collapsible Harness group headers\
+      \ (`group:<harness>` `380x28pt`, `toggle_group:<harness>`, `\"Pi · \\(items.count)\
+      \ open\"`, `\"Codex · \\(items.count) recent\"`, `\"\\(harness.capitalized)\
+      \ · \\(items.count) available\"`), icon-free `274pt`-wide candidate rows (`candidate:<harness>:<session_id>`\
+      \ `380x36pt`, text at `x: 24, y: 9, width: 274`, `listen:<harness>:<session_id>`\
+      \ at `x: 304, y: 7, width: 64, height: 22`), and per-group scroll container\
+      \ (`available_scroll` when 1 group, `available_scroll:<harness>` when `>1` group,\
+      \ `144pt` when `items.count > 4`).\n         - Zone 4 Network Directory Launcher\
+      \ row (`directory_row` `380x34pt` when `!hubs.isEmpty`, `open_directory` with\
+      \ `\"Search Network Directory…\"` and right-aligned `\"\\(directoryOnlineCount)\
+      \ online\"` badge when `directoryOnlineCount > 0`).\n         - Keep `menuActions`\
+      \ indices `0..9` unchanged (do not append `toggle_my_remote`, `copy_remote:*`,\
+      \ `toggle_group:*`, or `open_directory` to `menuActions`; only existing listener/footer/hub\
+      \ actions `0..9` plus `candidateActions` after `quit`).\n       - **Surface\
+      \ 2 (`560x440pt` Spotlight-Style `DirectoryPanel` `KeyPanel: NSPanel`, `docs/DESIGN.md`\
+      \ §§4.3–4.4)**:\n         - `NSSearchField` (`directory_search`, placeholder\
+      \ `\"Search by user, repo, title, host, or #id…\"`), `close_directory`, and\
+      \ facet pills (`dir_scope:all`, `dir_scope:mine`, `dir_harness:all`, `dir_harness:pi`,\
+      \ `dir_harness:codex`).\n         - Daemon-backed full-index `query_directory`\
+      \ evaluating free-text tokens + `@<user>`, `user:<user>`, `repo:<repo>`, `host:<host>`,\
+      \ `is:<harness>`, `#<id>` prefixes across the entire in-memory `HubDirectoryIndex`,\
+      \ sorting by `is_self_principal` first, exact/prefix `title`/`user`/`repo` second,\
+      \ `last_seen_at` desc third, `scoped_id` asc fourth, and returning top `100`\
+      \ matched rows + `matched_count` + `online_count` via `UiBridge.directory`.\n\
+      \         - View-based `NSTableView` (`rowHeight = 52`, `dir_peer:<scoped_id>`,\
+      \ `copy_dir:<scoped_id>`) and `560x28pt` footer shortcut bar (`\"↵ Copy Selected\
+      \ ID    ⎋ Close\"` and `\"\\(directoryMatchedCount) of \\(directoryOnlineCount)\
+      \ online\"`).\n         - Keyboard navigation (`up`/`down`/`return`/`escape`\
+      \ respecting IME `hasMarkedText()`).\n         - Backward-compatible `UiBridge.state(hubs,\
+      \ listeners, available = [], myRemoteListeners = [], directoryOnlineCount =\
+      \ 0)` and `UiBridge.directory(peers, matchedCount, onlineCount)` (replayed on\
+      \ child restart), plus headless inspection/control hooks (`test_directory_query`,\
+      \ `test_directory_key`, `test_control` fallback to `directoryPanel?.contentView`,\
+      \ and `directory_open`, `directory_online_count`, `directory_matched_count`,\
+      \ `directory_query`, `directory_scope`, `directory_harness`, `directory_selected_id`,\
+      \ `directory_items` in `inspectMenu()`).\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `/Users/tefx/Projects/cito` (`src/adapters/**`, `src/pi-extension/cito-bridge.ts`,\
+      \ `src/shared/config.ts`, `src/mcp/cli.ts`, `src/mcp/receiver.ts`, `src/mcp/service.ts`,\
+      \ `src/ui/index.ts`, `src/macos/cito-ui.swift`, `docs/DESIGN.md`, `README.md`,\
+      \ `deploy/nats/README.md`, `tests/**`). Must enforce English-only UI/UX/code/docs\
+      \ (0 Chinese chars in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`),\
+      \ 0 company/environment-specific names, 0 case-insensitive `'claude'` matches\
+      \ in `src/` and `tests/`, 100% standalone `src/pi-extension/cito-bridge.ts`\
+      \ (0 non-Node built-in imports), and harness-agnostic `src/mcp/` (0 references\
+      \ to `pi`, `codex`, or `x-codex-turn-metadata` in `src/mcp/` except `src/mcp/cli.ts`\
+      \ delegating `--codex` resolution to `src/adapters/codex.ts`). Must not mutate\
+      \ external repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito`\
+      \ / `~/.codex` state.\n- **Admit:** Completed Phase `v7`, `docs/DESIGN.md` (§§1.2–6),\
+      \ `AGENTS.md`, and `README.md`. Verified by `npm run typecheck && npm run build\
+      \ && npm test` exiting `0`. Consumed by `v8.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, Swift compilation, build, or unit/E2E\
+      \ test in place within the isolated worktree and clean up any temporary test\
+      \ sockets, SQLite files, watchers, or child processes."
+    verification: npm run typecheck && npm run build && npm test
+    evidence_template: Commands run (npm run typecheck && npm run build && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 case-insensitive 'claude'
+      matches in src/ and tests/, 0 non-Node imports in cito-bridge.ts, 0 non-cli
+      harness refs in src/mcp/), and verified docs/DESIGN.md §§1.2–6 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - deploy/nats/README.md
+    - src/pi-extension/cito-bridge.ts
+    - src/adapters/index.ts
+    - src/adapters/pi.ts
+    - src/adapters/codex.ts
+    - src/shared/config.ts
+    - src/mcp/cli.ts
+    - src/mcp/receiver.ts
+    - src/mcp/service.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - tests/ui/lifecycle.test.ts
+    - tests/mcp/dispatch.test.ts
+    - tests/mcp/identity-and-badge.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/e2e/lifecycle.test.ts
+    - tests/adapters/pi.test.ts
+    - tests/shared/multi-hub.test.ts
+    agent: senior-engineer
