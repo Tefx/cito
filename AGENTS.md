@@ -52,3 +52,8 @@ directly as a workaround. Use `vectl guide stuck` for troubleshooting.
   - `--evidence-template`: Force workers to provide specific proof.
   - `--refs`: Pin specific files (e.g., `src/auth.py`) to worker context.
 <!-- VECTL:AGENTS:END -->
+
+## Language & Neutral Examples Policy
+
+- **English-Only UI/UX, Code, and Documentation**: All user-facing UI/UX surfaces (menu bar labels, buttons, tooltips, HUD banners, in-chat wake cards, status badges), error messages, source comments, and repository documentation (`README.md`, `docs/**`) MUST be written in English, even when conversation with the user is in Chinese. (Unicode/CJK strings may appear only in targeted character-width or slug-sanitization test inputs).
+- **Zero Company- or Environment-Specific Names**: Never hardcode or use internal company, hub, identity-provider, project, or colleague names (such as `rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`) anywhere in source code, UI, configuration defaults, tests, or documentation. Use vendor-neutral generic examples (`personal`, `work`, `cloud`, `alice`, `bob`, `acme/service`, `https://id.example.com`).
