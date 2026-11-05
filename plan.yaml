@@ -1224,7 +1224,7 @@ phases:
     agent: code-reviewer
   - id: v4.fix-claude-channel-burst-test-race
     name: Fix publishBurst notification baseline race in tests/e2e/claude-channel.test.ts
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - tests/e2e/claude-channel.test.ts\n  blocked_paths:\n\
       \    - plan.yaml\n```\n\n- **Deliver:** Fix the notification count baseline\
@@ -1246,3 +1246,20 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-05T06:05:47.632581Z'
+    done_at: '2026-11-05T06:09:28.877244+00:00'
+    evidence: 'Artifact:
+
+      - Commit: cb2c7e07fa744ff26d5c5fee2f68c4a0193f6971 (fast-forwarded onto main)
+
+
+      Verification:
+
+      - Run: npx vitest run tests/e2e/claude-channel.test.ts -> exit 0 (3 tests passed)
+
+      - Run: npm run typecheck && npm run build && npm test -> exit 0 (29 test files,
+      209 tests passed, 0 failed, 0 skipped)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §4 and tests/e2e/claude-channel.test.ts'
