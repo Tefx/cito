@@ -1052,7 +1052,7 @@ phases:
     name: Implement V4 English-Only Production Menu Bar Card UI, Bespoke Vector Icon,
       MCP 2026-07-28 Support, Pure Adapter Boundary, Optional Claude Channel Bridge,
       Neutral Naming Cleanup, and Unit/E2E Tests
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/macos/cito-ui.swift\n    - src/adapters/**\n\
       \    - src/mcp/**\n    - src/shared/**\n    - src/ui/**\n    - src/auth-callout/**\n\
@@ -1146,6 +1146,24 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-05T04:57:36.108669Z'
+    done_at: '2026-11-05T06:00:37.291977+00:00'
+    evidence: "Commands run (npm run typecheck && npm run build && npm test), zero-Chinese\
+      \ and zero-company-name regex checks, zero-codex/pi check in src/mcp/, and verified\
+      \ docs/DESIGN.md §§1–5 & AGENTS.md deliverables:\n- Commits: 1925761b596225aa385c4baaa8d4bb8f42782f06,\
+      \ a4f09441695c77a9b3786030d5e034c07c7cda2d (fast-forwarded onto main)\n- npm\
+      \ run typecheck && npm run build && npm test: exit 0 (29 test files, 209 tests\
+      \ passed, 0 failed, 0 skipped)\n- npx tsc --noEmit --noUnusedLocals --noUnusedParameters:\
+      \ exit 0\n- Mechanical checks:\n  - [\\p{Script=Han}] in src/, docs/, README.md,\
+      \ AGENTS.md, deploy/: 0 matches\n  - rda|casdoor|rcatwin|keppel|mingchen (case-insensitive)\
+      \ in src/, docs/, README.md, AGENTS.md, deploy/, tests/: 0 matches\n  - codex|pi|x-codex-turn-metadata\
+      \ (harness/header identifiers) in src/mcp/: 0 matches\n- [REQUIRES_SKILL: code-hygiene]\
+      \ ITERATIVE_CONVERGENCE:\n  - Round 1 fresh-context structural-auditor (01a1aa2a-124b-725a-b03b-0fe2196b0f0c)\
+      \ returned Zero Actionable Findings (Simplicity: ZERO_NEW_ISSUES); pathway-auditor\
+      \ (01a1aa2a-129d-7759-b967-19d1693b9dcb) identified 4 items (P1-P4), all resolved\
+      \ in commit a4f09441695c77a9b3786030d5e034c07c7cda2d.\n  - Round 2 fresh-context\
+      \ structural-auditor (01a1aa44-c642-772e-b0b5-7ac4043567a7) and pathway-auditor\
+      \ (01a1aa44-c5ef-71db-b97b-4adb2a7a02e7) verified P1-P4 CLOSED and certified\
+      \ Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES."
   - id: v4.acceptance-and-hygiene-gate
     name: 'V4 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
