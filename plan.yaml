@@ -2167,7 +2167,7 @@ phases:
 - id: v8
   name: Cito V8 Ego-Centric Menu Bar Control Plane, Spotlight Network Directory, Scalable
     NATS KV Discovery, Claude Removal, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -2413,7 +2413,7 @@ phases:
   - id: v8.acceptance-and-hygiene-gate
     name: 'V8 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v8` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -2511,3 +2511,53 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-05T15:43:40.771761Z'
+    done_at: '2026-11-05T15:54:45.537242+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v8-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:1c888cdf00e1877c542358ebb447f83c795a3ef9).
+
+      Test output (npm run typecheck && npm run build && npm test): exit 0 (27 test
+      files, 213 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Case-insensitive ''claude'' matches in src/ and tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V8-1-CLAUDE-REMOVAL-AND-ENGLISH-NEUTRAL-POLICY: PROVEN (src/adapters/claude-channel.ts,
+      tests/adapters/claude-channel.test.ts, and tests/e2e/claude-channel.test.ts
+      deleted after migrating generic regression tests to tests/mcp/dispatch.test.ts
+      & tests/e2e/lifecycle.test.ts under ''pi''; zero ''claude'' matches in src/
+      and tests/).
+
+      - V8-2-HUB-DIRECTORY-INDEX-SCALABLE-KV-DISCOVERY: PROVEN (src/mcp/service.ts
+      HubDirectoryIndex with 5s TTL, singleflight coalescing, directoryGen fencing,
+      single streams.info(KV_cito_listeners) call, 2500ms dual-termination kv.watch
+      fast path, 16-worker concurrent boundedPointGetSnapshot fallback, immediate
+      local mutation coalescing, and read-time lease evaluation).
+
+      - V8-3-ACTIONABLE-PI-BADGE-AND-INTERACTION-RECENCY: PROVEN (src/mcp/receiver.ts
+      refreshSessionBadge without ''(!)'' suffix, src/pi-extension/cito-bridge.ts
+      polling-stable lastActiveMs / updated_at_ms, src/adapters/pi.ts & src/adapters/index.ts
+      per-harness quota max 8 per harness / 16 total).
+
+      - V8-4-TWO-SURFACE-EGO-MENU-AND-SPOTLIGHT-DIRECTORY-PANEL: PROVEN (src/ui/index.ts,
+      src/mcp/service.ts, and src/macos/cito-ui.swift 380pt Ego-Centric cardMenu Zones
+      1-4 + 560x440pt Spotlight DirectoryPanel KeyPanel: NSPanel with NSSearchField,
+      facet pills, query_directory prefix search, and view-based NSTableView).
+
+      - V8-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 P1 README.md:243
+      closed in a00f3f88b2bae006169144fad1069ae43f62dc4a; Round 2 fresh-context structural-auditor
+      01a1ac5f-02b3-7727-b245-31d30d5888c5 and uiux-auditor 01a1ac5f-0304-7781-90c7-331ce032c6ad
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
