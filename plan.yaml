@@ -2217,7 +2217,7 @@ phases:
     name: 'Implement V8 Claude removal, HubDirectoryIndex NATS KV discovery, actionable
       Pi badge, Pi recency & per-harness quota, and Two-Surface macOS Ego-Menu + Spotlight
       DirectoryPanel UI [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/adapters/**\n    - src/pi-extension/cito-bridge.ts\n\
       \    - src/shared/config.ts\n    - src/mcp/cli.ts\n    - src/mcp/receiver.ts\n\
@@ -2387,6 +2387,29 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-05T14:49:48.869226Z'
+    done_at: '2026-11-05T15:43:40.504813+00:00'
+    evidence: "Commands run (npm run typecheck && npm run build && npm test), mechanical\
+      \ checks (0 Chinese chars, 0 forbidden names, 0 case-insensitive 'claude' matches\
+      \ in src/ and tests/, 0 non-Node imports in cito-bridge.ts, 0 non-cli harness\
+      \ refs in src/mcp/), and verified docs/DESIGN.md §§1.2–6 deliverables:\n- Commits:\
+      \ b4919c6d0a72b87915d95bd9d9e6b484bcb226a7, a00f3f88b2bae006169144fad1069ae43f62dc4a\
+      \ (implemented by uiux-designer on openrouter/google/gemini-4-argon while openai\
+      \ OAuth is unavailable; fast-forwarded onto main)\n- npm run typecheck && npm\
+      \ run build && npm test: exit 0 (27 test files, 213 tests passed, 0 failed,\
+      \ 0 skipped)\n- Mechanical checks:\n  - [\\p{Script=Han}] in src/, docs/, README.md,\
+      \ AGENTS.md, deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b in src/, docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md,\
+      \ deploy/, tests/: 0 matches\n  - Case-insensitive 'claude' matches in src/\
+      \ and tests/: 0 matches\n  - Non-node imports in src/pi-extension/cito-bridge.ts:\
+      \ 0 matches\n  - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating\
+      \ --codex to src/adapters/codex.ts): 0 matches\n- [REQUIRES_SKILL: code-hygiene]\
+      \ ITERATIVE_CONVERGENCE:\n  - Round 1 fresh-context structural-auditor (01a1ac56-8db3-74ff-8e51-4876f0b3c3fd)\
+      \ returned Zero Actionable Findings (Simplicity: ZERO_NEW_ISSUES) and uiux-auditor\
+      \ (01a1ac56-8d5b-752e-a392-79e930b239bc) identified 1 documentation item (README.md:243),\
+      \ resolved in a00f3f88b2bae006169144fad1069ae43f62dc4a.\n  - Round 2 fresh-context\
+      \ structural-auditor (01a1ac5f-02b3-7727-b245-31d30d5888c5) and uiux-auditor\
+      \ (01a1ac5f-0304-7781-90c7-331ce032c6ad) verified P1 CLOSED and certified Completeness:\
+      \ CLEAN | Simplicity: ZERO_NEW_ISSUES."
   - id: v8.acceptance-and-hygiene-gate
     name: 'V8 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
