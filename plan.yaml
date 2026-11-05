@@ -1614,7 +1614,7 @@ phases:
     name: Implement V6 Pi /cito slash command, Codex thread auto-resolution (resolveCodexThreadId),
       CLI direct control (cito listen / cito unlisten), README documentation, and
       unit/integration tests
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/pi-extension/cito-bridge.ts\n    - src/adapters/codex.ts\n\
       \    - src/adapters/index.ts\n    - src/mcp/cli.ts\n    - README.md\n    - tests/adapters/**\n\
@@ -1711,6 +1711,24 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-05T08:25:58.516040Z'
+    done_at: '2026-11-05T08:51:45.355781+00:00'
+    evidence: "Commands run (npm run typecheck && npm run build && npm test), mechanical\
+      \ checks (0 Chinese chars, 0 forbidden names, 0 non-node imports in cito-bridge.ts,\
+      \ 0 harness refs in src/mcp/ except cli.ts delegating to src/adapters/codex.ts),\
+      \ and verified docs/DESIGN.md §4 deliverables:\n- Commit: b4085da82c9346be93ca3b454228a13428c9cb66\
+      \ (implemented by software-architect on openrouter/google/gemini-4-argon while\
+      \ openai OAuth is unavailable; fast-forwarded onto main)\n- npm run typecheck\
+      \ && npm run build && npm test: exit 0 (29 test files, 212 tests passed, 0 failed,\
+      \ 0 skipped)\n- Mechanical checks:\n  - [\\p{Script=Han}] in src/, docs/, README.md,\
+      \ AGENTS.md, deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b in src/, docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md,\
+      \ deploy/, tests/: 0 matches\n  - Non-node imports in src/pi-extension/cito-bridge.ts:\
+      \ 0 matches\n  - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating\
+      \ --codex to src/adapters/codex.ts): 0 matches\n- [REQUIRES_SKILL: code-hygiene]\
+      \ ITERATIVE_CONVERGENCE:\n  - Fresh-context structural-auditor (01a1aae4-5887-7213-8762-44fc93d260b8)\
+      \ and uiux-auditor (01a1aae4-58dc-74cc-bd49-22a65418ed0e) audited commit b4085da82c9346be93ca3b454228a13428c9cb66\
+      \ across all 5 lenses and both certified Zero Actionable Findings (Completeness:\
+      \ CLEAN | Simplicity: ZERO_NEW_ISSUES) on Round 1."
   - id: v6.acceptance-and-hygiene-gate
     name: 'V6 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
