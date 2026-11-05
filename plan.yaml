@@ -1581,3 +1581,31 @@ phases:
       - V5-6-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
       structural-auditor 01a1aa9d-5136-76d9-ba32-f148aecaba8e and uiux-auditor 01a1aa9d-5184-70ed-856d-49ae586670b6
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v6
+  name: Cito V6 Direct Session Control Commands (Pi /cito & CLI cito listen / cito
+    unlisten), Codex Thread Auto-Resolution, Documentation, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    harness references exist in src/mcp/ except src/mcp/cli.ts delegating --codex
+    resolution to src/adapters/codex.ts, all docs/DESIGN.md §4 requirements are verified,
+    and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE] converges
+    to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V6 Direct Session Control Commands per docs/DESIGN.md
+    §4 and AGENTS.md: extend the 100% standalone src/pi-extension/cito-bridge.ts with
+    /cito slash command registration, argument completions ([''on'', ''team'', ''off'']),
+    activeBadge tracking across update(ctx)/status/session_shutdown, and stateless
+    POST http://127.0.0.1:${port}/mcp caller binding (_meta: { endpoint_pid: process.pid
+    }); export resolveCodexThreadId(cwd, config, options) in src/adapters/codex.ts
+    querying state_5.sqlite with dynamic PRAGMA table_info(threads) ordering (updated_at
+    DESC, rowid DESC vs rowid DESC) and archived/cwd precedence; implement cito listen
+    and cito unlisten CLI subcommands in src/mcp/cli.ts with caller_pid vs --codex
+    metadata disambiguation, ensureDaemon(config), SSE data: response decoding, and
+    stdout/stderr exit semantics; document /cito and cito listen / cito unlisten in
+    README.md; add comprehensive unit/integration tests in tests/adapters/pi-host.test.ts,
+    tests/adapters/codex.test.ts, and tests/mcp/; and pass the iterative code-hygiene
+    acceptance gate.'
+  depends_on:
+  - v5
