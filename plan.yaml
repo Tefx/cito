@@ -1047,3 +1047,100 @@ phases:
     & unit/E2E tests, and iterative code-hygiene acceptance gate.'
   depends_on:
   - v3
+  steps:
+  - id: v4.english-card-ui-mcp2026-and-adapter-purity
+    name: Implement V4 English-Only Production Menu Bar Card UI, Bespoke Vector Icon,
+      MCP 2026-07-28 Support, Pure Adapter Boundary, Optional Claude Channel Bridge,
+      Neutral Naming Cleanup, and Unit/E2E Tests
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/macos/cito-ui.swift\n    - src/adapters/**\n\
+      \    - src/mcp/**\n    - src/shared/**\n    - src/ui/**\n    - src/auth-callout/**\n\
+      \    - README.md\n    - deploy/nats/**\n    - docs/DESIGN.md\n    - AGENTS.md\n\
+      \    - tests/**\n  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n\
+      \  - Implement the complete V4 specification in `docs/DESIGN.md` §§1–5 and `AGENTS.md`\
+      \ across `src/macos/cito-ui.swift`, `src/adapters/`, `src/mcp/`, `src/shared/`,\
+      \ `README.md`, `deploy/nats/README.md`, and `tests/`:\n    1. **Bespoke Vector\
+      \ Status Icon & 340pt Control-Center Card Menu Panel (`src/macos/cito-ui.swift`,\
+      \ `docs/DESIGN.md` §§3.1–3.2)**:\n       - Implement the bespoke monochrome\
+      \ template vector status icon `makeCitoStatusIcon` (`18x18pt`, `1.75pt` stroke,\
+      \ `isTemplate = true`: C-resonator arc centered at `(8.0, 9.0)` radius `5.50pt`\
+      \ `42°..318°` + focal core node radius `1.65pt` + outbound signal wave radius\
+      \ `7.75pt` `-28°..+28°` + `.warning` cutout `r = 3.6pt` `.destinationOut` and\
+      \ `r = 2.4pt` solid dot at `(14.2, 4.0)`) and `NSStatusBarButton` monospaced\
+      \ count badge (`\" \\(uniqueSessionCount)\"` with `NSFont.monospacedDigitSystemFont(ofSize:\
+      \ 12, weight: .semibold)` when `> 0`, `.imageOnly` when `0`).\n       - Implement\
+      \ the `340pt`-wide Control-Center custom AppKit card menu panel (`NSMenuItem.view`\
+      \ cards):\n         - Header Bar (`340x40pt`) with `Cito` (`13pt .bold`) + subtitle\
+      \ (`\"\\(count) listening\"` or `\"Idle\"`), interactive Hub status pills (`22pt`\
+      \ height, `6x6pt` semantic dot, `default · <user>` in single-default mode or\
+      \ `<hub.name>` in multi-hub mode), and expandable Hub action drawer (`340x32pt`,\
+      \ auto-expanded when any hub is `auth_required`, `disconnected`, or `error !=\
+      \ nil`, or toggled on pill click) with `Sign In` (`login`), `Reconnect` (`reconnect`),\
+      \ and `Disconnect` (`disconnect`) buttons.\n         - Rounded Active Session\
+      \ Cards (`320x58pt`, `cornerRadius: 10pt`, `x: 10`) with `32x32pt` tinted SF\
+      \ Symbol Harness badge (`\"pi\"` -> `\"terminal.fill\"` indigo, `\"codex\"`\
+      \ -> `\"sparkles\"` cyan/teal, `\"claude\"` -> `\"cpu.fill\"` orange, other\
+      \ -> `\"bolt.horizontal.fill\"` secondary), bold `listener.title` + Harness\
+      \ capsule pill + optional `\"· \\(listener.hub)\"`, click-to-copy `<slug>#<fp4>\
+      \ ⧉` short ID pill (full `listener.scoped_id` tooltip, copying `listener.scoped_id`\
+      \ to `NSPasteboard.general` and showing green `✓ Copied` feedback for 1.2s without\
+      \ closing menu), `~`-abbreviated middle-truncated `listener.cwd`, and inline\
+      \ `\U0001F512 Self` / `\U0001F465 Team` (`set_scope` without closing menu),\
+      \ `↗` (`\"arrow.up.forward.app\"` calling `openCodex` + `menu.cancelTracking()`\
+      \ when `can_jump`), and `✕` (`\"xmark\"` emitting `unlisten`) buttons.\n   \
+      \      - Empty State Card (`320x64pt`: `\"waveform.slash\"` + `\"No active listeners\"\
+      ` + `\"Call cito_listen in a session to receive notifications\"`), Footer Bar\
+      \ (`340x32pt`: `\"⏹ Stop All\"` when `!listeners.isEmpty` and `\"Quit Cito ⌘Q\"\
+      `), and `menuActions` test indexing compatibility (`openCodex` if `can_jump`,\
+      \ `copyId`, `set_scope`, `unlisten` twice, `unlisten_all`, per-hub `login`/`reconnect`/`disconnect`,\
+      \ `quit`).\n    2. **English-Only UI/UX, Code, and Documentation & Neutral Naming\
+      \ Cleanup (`docs/DESIGN.md` §§1.2, 3.3, `AGENTS.md`)**:\n       - Enforce English-only\
+      \ UI/UX, code, and documentation across `src/`, `docs/`, `README.md`, and `deploy/`,\
+      \ and eliminate all environment/company-specific example names (`rda`, `casdoor`,\
+      \ `rcatwin`, `keppel`, `mingchen`) across `src/`, `docs/`, `README.md`, `deploy/`,\
+      \ and `tests/` (using `work` / `personal` for hubs, `Notification` / `Notification\
+      \ · ×N` / `Passive` / `[Passive] ` / `Open in Codex ↗` / `<Harness> session\
+      \ · Click to dismiss` in `cito-ui.swift`, and `\U0001F514 Cito · N notifications`\
+      \ in `src/adapters/wake-card.ts`).\n    3. **MCP `2026-07-28` Protocol Support\
+      \ & Pure Adapter Boundary (`src/mcp/server.ts`, `src/adapters/types.ts`, `src/adapters/codex.ts`,\
+      \ `src/adapters/index.ts`, `docs/DESIGN.md` §2.1)**:\n       - Register `\"\
+      2026-07-28\"` in `SUPPORTED_PROTOCOL_VERSIONS` in `src/mcp/server.ts`.\n   \
+      \    - Move `codexThreadId` and `x-codex-turn-metadata` HTTP header extraction\
+      \ and conflict checking from `src/mcp/server.ts` into `src/adapters/codex.ts`\
+      \ (`detectExplicitCaller` on `HarnessAdapter` receiving `CallerDetectionContext\
+      \ { meta, headers, httpClientPid, httpTransport, requireOpen, lookupCachedSession\
+      \ }`) so `src/mcp/` has zero references to `codex`, `pi`, or `x-codex-turn-metadata`.\n\
+      \    4. **Optional `CITO_CLAUDE_CHANNEL=1` Stdio Channel Bridge (`src/shared/config.ts`,\
+      \ `src/mcp/cli.ts`, `src/mcp/server.ts`, `src/adapters/pi.ts`, `src/adapters/index.ts`,\
+      \ `docs/DESIGN.md` §4)**:\n       - Implement opt-in `CITO_CLAUDE_CHANNEL=1`\
+      \ (`enableClaudeChannel`, default `false`) in `cito-mcp` stdio mode: advertise\
+      \ `capabilities: { tools: {}, experimental: { \"claude/channel\": {} } }`, bind\
+      \ `${stateDir}/sockets/claude-pid-${process.ppid}.sock` (`0600`), handle `identify`\
+      \ and `deliver` (deduplicating `batch_id` and emitting `notifications/claude/channel`\
+      \ on stdio with `{ content, meta: { origin: \"cito\" } }`), and register `SocketBridgeAdapter(\"\
+      claude\", { confirmDelivery: false })` returning `delivered_unconfirmed`.\n\
+      \    5. **Documentation & Unit/E2E Tests (`README.md`, `deploy/nats/README.md`,\
+      \ `tests/`, `docs/DESIGN.md` §5)**:\n       - Update `README.md` and `deploy/nats/README.md`\
+      \ in English with neutral examples (keeping Claude Code native integration marked\
+      \ as `\"Proposed Design Suggestion Only — Not Yet Implemented\"` referencing\
+      \ `docs/DESIGN.md` §5), and update/add behavioral unit & E2E tests in `tests/`.\n\
+      - **Boundary:** Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito`.\
+      \ Must not implement native Claude Code lifecycle hooks (`docs/DESIGN.md` §5\
+      \ is design suggestion only) or mutate external repositories (`/Users/tefx/dotfiles`,\
+      \ `tela`) or live user `~/.cito` / `~/.codex` directories.\n- **Admit:** Completed\
+      \ Phase `v3`, `docs/DESIGN.md` (V4 §§1–5), `AGENTS.md`, `README.md`, and `deploy/nats/README.md`.\
+      \ Verified by `npm run typecheck && npm run build && npm test` exiting `0`.\
+      \ Consumed by `v4.acceptance-and-hygiene-gate`.\n- **Recovery:** Fix any failing\
+      \ typecheck, build, or unit/E2E test in place within the isolated worktree and\
+      \ clean up any temporary test sockets, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run build && npm test
+    evidence_template: Commands run (npm run typecheck && npm run build && npm test),
+      zero-Chinese and zero-company-name regex checks, zero-codex/pi check in src/mcp/,
+      and verified docs/DESIGN.md §§1–5 & AGENTS.md deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - deploy/nats/README.md
+    agent: senior-engineer
