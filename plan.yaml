@@ -1851,7 +1851,7 @@ phases:
 - id: v7
   name: Cito V7 Menu Bar On-Demand Session Discovery, 1-Click Listen, Viewport Capping,
     Flicker-Free Dynamic Refresh, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -2027,7 +2027,7 @@ phases:
   - id: v7.acceptance-and-hygiene-gate
     name: 'V7 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v7` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -2108,3 +2108,47 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-05T11:55:55.449661Z'
+    done_at: '2026-11-05T12:04:25.520902+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v7-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:df5b947bb6e0a46f005ede59c8c4e5da739f4334).
+
+      Test output (npm run typecheck && npm run build && npm test): exit 0 (29 test
+      files, 216 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V7-1-ADAPTER-SESSION-DISCOVERY-AND-IDENTITY-FENCING: PROVEN (src/adapters/types.ts,
+      src/adapters/pi.ts 400ms concurrent socket discovery, src/adapters/codex.ts
+      schema-aware COALESCE user-thread filters + LIMIT 8, src/adapters/index.ts discoverAllAvailableSessions
+      + expected_harness/expected_session_id identity fencing).
+
+      - V7-2-UI-PROTOCOL-SYNC-PUSH-AND-GENERATION-DISCOVERY: PROVEN (src/ui/index.ts
+      refresh_available & listen_session, src/mcp/service.ts synchronous pushUiState
+      + generation-guarded refreshAvailableSessions + 150ms debounced fs.watch on
+      sockets dir).
+
+      - V7-3-MENUBAR-AVAILABLE-SESSIONS-AND-VIEWPORT-CAPPING: PROVEN (src/macos/cito-ui.swift
+      380x34pt compact empty strip, AVAILABLE SESSIONS section, FlippedView NSScrollView
+      active_scroll 260pt & available_scroll 144pt).
+
+      - V7-4-FLICKER-FREE-REFRESH-AND-MENU-ACTIONS-STABILITY: PROVEN (src/macos/cito-ui.swift
+      Equatable diff guard with hasRenderedState + pendingMutation, NSMenuDelegate
+      menuWillOpen + test_menu_open, persistent cardMenu, eventTracking RunLoop STDIN
+      delivery, and candidate actions appended after quit).
+
+      - V7-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
+      structural-auditor 01a1ab8c-0874-7636-83b1-6c69be1e53be and uiux-auditor 01a1ab8c-0828-7171-9e71-69f3d946c6e3
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
