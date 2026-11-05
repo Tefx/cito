@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
 import { normalizeRepo, gitMetadata, type RepoMetadata } from "./git.js";
 import type { ListenerRow } from "../shared/state-types.js";
-import type { Caller, CallerDetectionContext, HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
+import type { AvailableSessionSummary, Caller, CallerDetectionContext, HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
 
 const exec = promisify(execFile);
 type CodexConfig = Pick<CitoConfig, "codexHome">;
@@ -18,12 +18,27 @@ function nonempty(value: unknown): value is string { return typeof value === "st
 export function codexThreadId(meta: Record<string, unknown> = {}): string {
   let turn = meta["x-codex-turn-metadata"];
   if (typeof turn === "string") { try { turn = JSON.parse(turn); } catch { turn = undefined; } }
-  const candidates = [...(record(turn) ? [turn.thread_id, turn.session_id] : []), meta["openai/threadId"], meta.codexThreadId];
+  const expectedCodex = meta.expected_harness === "codex" ? meta.expected_session_id : undefined;
+  const candidates = [...(record(turn) ? [turn.thread_id, turn.session_id] : []), meta["openai/threadId"], meta.codexThreadId, expectedCodex];
   const ids = [...new Set(candidates.filter(nonempty))];
   if (ids.length > 1) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
   const id = ids[0];
   if (!id) throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
   return id;
+}
+
+function userThreadFilters(cols: Set<string>): string[] {
+  const filters: string[] = [];
+  if (cols.has("thread_source")) filters.push("COALESCE(thread_source, 'user') = 'user'");
+  if (cols.has("source")) filters.push('COALESCE(source, \'\') NOT LIKE \'{"subagent":%\'');
+  return filters;
+}
+function threadOrderBy(cols: Set<string>): string {
+  return [
+    ...(cols.has("recency_at_ms") ? ["recency_at_ms DESC"] : []),
+    ...(cols.has("updated_at") ? ["updated_at DESC"] : []),
+    "rowid DESC",
+  ].join(", ");
 }
 
 export function resolveCodexThreadId(cwd: string, config: CodexConfig = loadConfig(), options: { allowArchived?: boolean } = {}): string {
@@ -33,13 +48,15 @@ export function resolveCodexThreadId(cwd: string, config: CodexConfig = loadConf
     db.exec("PRAGMA busy_timeout = 1000");
     const columns = db.prepare("PRAGMA table_info(threads)").all() as { name?: unknown }[];
     if (!columns.length) throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
-    const order = columns.some(col => col.name === "updated_at") ? "updated_at DESC, rowid DESC" : "rowid DESC";
+    const cols = new Set(columns.flatMap(col => typeof col.name === "string" ? [col.name] : []));
+    const userFilters = userThreadFilters(cols), order = threadOrderBy(cols);
+    const whereClause = (preds: string[]) => preds.length ? `WHERE ${preds.join(" AND ")} ` : "";
     const queries: [string, ...string[]][] = [
-      [`SELECT id FROM threads WHERE archived = 0 AND cwd = ? ORDER BY ${order} LIMIT 1`, cwd],
-      [`SELECT id FROM threads WHERE archived = 0 ORDER BY ${order} LIMIT 1`],
+      [`SELECT id FROM threads ${whereClause(["archived = 0", "cwd = ?", ...userFilters])}ORDER BY ${order} LIMIT 1`, cwd],
+      [`SELECT id FROM threads ${whereClause(["archived = 0", ...userFilters])}ORDER BY ${order} LIMIT 1`],
       ...(options.allowArchived ? [
-        [`SELECT id FROM threads WHERE cwd = ? ORDER BY ${order} LIMIT 1`, cwd] as [string, string],
-        [`SELECT id FROM threads ORDER BY ${order} LIMIT 1`] as [string],
+        [`SELECT id FROM threads ${whereClause(["cwd = ?", ...userFilters])}ORDER BY ${order} LIMIT 1`, cwd] as [string, string],
+        [`SELECT id FROM threads ${whereClause(userFilters)}ORDER BY ${order} LIMIT 1`] as [string],
       ] : []),
     ];
     for (const [sql, ...params] of queries) {
@@ -86,6 +103,42 @@ export async function queueCodexWake(threadId: string, card: string, options: Co
 export class CodexDesktopAdapter implements HarnessAdapter {
   readonly id = "codex";
   readonly canJump = true;
+  async discoverAvailableSessions(config: CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]> {
+    try {
+      if (!await (config.codexDesktopRunning ?? codexDesktopRunning)(signal ?? new AbortController().signal)) return [];
+    } catch { return []; }
+    let db: DatabaseSync | undefined;
+    try {
+      db = new DatabaseSync(join(config.codexHome, "state_5.sqlite"), { readOnly: true });
+      db.exec("PRAGMA busy_timeout = 100");
+      const columns = db.prepare("PRAGMA table_info(threads)").all() as { name?: unknown }[];
+      const cols = new Set(columns.flatMap(col => typeof col.name === "string" ? [col.name] : []));
+      if (!cols.has("id") || !cols.has("cwd") || !cols.has("archived")) return [];
+      const where = ["archived = 0", ...userThreadFilters(cols)].join(" AND ");
+      const order = threadOrderBy(cols);
+      const rows = db.prepare(`SELECT * FROM threads WHERE ${where} ORDER BY ${order} LIMIT 8`).all() as Record<string, unknown>[];
+      const summaries: AvailableSessionSummary[] = [];
+      for (const row of rows) {
+        if (!nonempty(row.id) || !nonempty(row.cwd)) continue;
+        const title = (typeof row.name === "string" && row.name.trim())
+          || (typeof row.title === "string" && row.title.trim())
+          || basename(row.cwd) || "codex";
+        const branch = typeof row.git_branch === "string" && row.git_branch.trim() ? row.git_branch.trim() : null;
+        const rawTs = typeof row.recency_at_ms === "number" && Number.isFinite(row.recency_at_ms) ? row.recency_at_ms
+          : typeof row.updated_at === "number" && Number.isFinite(row.updated_at) ? (row.updated_at < 1e11 ? row.updated_at * 1000 : row.updated_at)
+          : undefined;
+        summaries.push({
+          harness: this.id,
+          session_id: row.id,
+          title,
+          cwd: row.cwd,
+          branch,
+          ...(rawTs !== undefined ? { updated_at_ms: Math.round(rawTs) } : {}),
+        });
+      }
+      return summaries;
+    } catch { return []; } finally { db?.close(); }
+  }
   async detectExplicitCaller(ctx: CallerDetectionContext, config: CitoConfig): Promise<Caller | null> {
     const claim = (meta: Record<string, unknown>) => {
       try { return codexThreadId(meta); }

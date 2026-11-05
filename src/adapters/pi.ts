@@ -1,8 +1,10 @@
+import { readdir, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import { CitoError, validateHarness, type CitoConfig } from "../shared/index.js";
+import { CitoError, loadConfig, validateHarness, type CitoConfig } from "../shared/index.js";
 import type { ListenerRow } from "../shared/state-types.js";
-import type { DeliverContext, DeliverOutcome, HarnessAdapter, ProbeOutcome } from "./types.js";
+import { gitMetadata } from "./git.js";
+import type { AvailableSessionSummary, DeliverContext, DeliverOutcome, HarnessAdapter, ProbeOutcome } from "./types.js";
 
 type BridgeConfig = Pick<CitoConfig, "stateDir">;
 export interface BridgeIdentity { endpoint_pid: number; session_id: string; session_name: string; cwd: string }
@@ -48,8 +50,8 @@ export async function requestBridge(path: string, request: object, timeout: numb
     });
   });
 }
-export async function identifyBridge(harness: string, pid: number, config: BridgeConfig, signal?: AbortSignal): Promise<BridgeIdentity & Record<string, unknown>> {
-  const record = await requestBridge(bridgeSocketPath(config.stateDir, harness, pid), { op: "identify" }, 1500, signal);
+export async function identifyBridge(harness: string, pid: number, config: BridgeConfig = loadConfig(), signal?: AbortSignal, timeoutMs = 1500): Promise<BridgeIdentity & Record<string, unknown>> {
+  const record = await requestBridge(bridgeSocketPath(config.stateDir, harness, pid), { op: "identify" }, timeoutMs, signal);
   if ((record.endpoint_pid ?? record.pi_pid) !== pid || typeof record.session_id !== "string" || !record.session_id
     || typeof record.session_name !== "string" || typeof record.cwd !== "string" || !record.cwd) throw new PiBridgeError("INVALID_RESPONSE");
   return { ...record, endpoint_pid: pid, session_id: record.session_id, session_name: record.session_name, cwd: record.cwd };
@@ -59,6 +61,37 @@ export class SocketBridgeAdapter implements HarnessAdapter {
   private readonly confirmDelivery: boolean;
   constructor(harnessId: string, { confirmDelivery = true }: { confirmDelivery?: boolean } = {}) {
     this.id = validateHarness(harnessId); this.confirmDelivery = confirmDelivery;
+  }
+  async discoverAvailableSessions(config: CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]> {
+    const socketsDir = join(config.stateDir, "sockets");
+    let names: string[];
+    try { names = await readdir(socketsDir); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    const pattern = new RegExp(`^${this.id}-pid-([1-9][0-9]*)\\.sock$`);
+    const settled = await Promise.allSettled(names.map(async (name): Promise<AvailableSessionSummary | null> => {
+      const match = pattern.exec(name);
+      if (!match) return null;
+      const pid = Number(match[1]);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+      try { process.kill(pid, 0); } catch { return null; }
+      const st = await stat(join(socketsDir, name));
+      if (!st.isSocket()) return null;
+      const info = await identifyBridge(this.id, pid, config, signal, 400);
+      const meta = await gitMetadata(info.cwd, info.session_name);
+      return {
+        harness: this.id,
+        session_id: info.session_id,
+        title: meta.title,
+        cwd: info.cwd,
+        branch: meta.branch,
+        endpoint_pid: pid,
+        updated_at_ms: Math.round(st.mtimeMs),
+      };
+    }));
+    const sessions = settled.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+    sessions.sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0) || (b.endpoint_pid ?? 0) - (a.endpoint_pid ?? 0));
+    const seen = new Set<string>();
+    return sessions.filter(s => { if (seen.has(s.session_id)) return false; seen.add(s.session_id); return true; });
   }
   async probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome> {
     try {

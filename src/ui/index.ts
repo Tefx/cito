@@ -18,10 +18,22 @@ export interface UiListenerSummary {
   hub: string; listener_id: string; public_id: string; scoped_id: string; harness: string; session_id: string;
   title: string; about?: string; cwd: string; repo: string | null; branch?: string | null; scope: "self" | "workspace"; can_jump: boolean;
 }
-export type DaemonToUiMessage = { op: "state"; hubs: UiHubSummary[]; listeners: UiListenerSummary[] } | { op: "banner"; payload: BannerPayload };
+export interface AvailableSessionSummary {
+  harness: string;
+  session_id: string;
+  title: string;
+  cwd: string;
+  branch?: string | null;
+  endpoint_pid?: number;
+  updated_at_ms?: number;
+}
+export type DaemonToUiMessage = { op: "state"; hubs: UiHubSummary[]; listeners: UiListenerSummary[]; available?: AvailableSessionSummary[] } | { op: "banner"; payload: BannerPayload };
 export type UiToDaemonAction = { op: "unlisten"; hub: string; listener_id: string }
   | { op: "unlisten_all" } | { op: "set_scope"; hub: string; listener_id: string; scope: "self" | "workspace" }
-  | { op: "hub_action"; hub: string; action: "login" | "reconnect" | "disconnect" } | { op: "quit" };
+  | { op: "hub_action"; hub: string; action: "login" | "reconnect" | "disconnect" }
+  | { op: "refresh_available" }
+  | { op: "listen_session"; harness: string; session_id: string; endpoint_pid?: number; cwd?: string; title?: string }
+  | { op: "quit" };
 export interface UiOptions {
   env?: NodeJS.ProcessEnv; sourcePath?: string; binary?: string;
   diagnostic?: (message: string) => void; onAction?: (action: UiToDaemonAction) => void | Promise<void>;
@@ -48,7 +60,15 @@ export async function ensureUiCompiled(stateDir: string, source?: string): Promi
 function validAction(value: unknown): value is UiToDaemonAction {
   if (!value || typeof value !== "object") return false;
   const a = value as Record<string, unknown>;
-  if (a.op === "quit" || a.op === "unlisten_all") return true;
+  if (a.op === "quit" || a.op === "unlisten_all" || a.op === "refresh_available") return true;
+  if (a.op === "listen_session") {
+    if (typeof a.harness !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(a.harness)) return false;
+    if (typeof a.session_id !== "string" || !a.session_id.trim()) return false;
+    if (a.endpoint_pid !== undefined && (typeof a.endpoint_pid !== "number" || !Number.isSafeInteger(a.endpoint_pid) || a.endpoint_pid <= 0)) return false;
+    if (a.cwd !== undefined && typeof a.cwd !== "string") return false;
+    if (a.title !== undefined && typeof a.title !== "string") return false;
+    return true;
+  }
   if (typeof a.hub !== "string" || !a.hub) return false;
   if (a.op === "hub_action") return ["login", "reconnect", "disconnect"].includes(String(a.action));
   if (typeof a.listener_id !== "string" || !/^c_[a-z2-7]{12}$/.test(a.listener_id)) return false;
@@ -59,7 +79,7 @@ export class UiBridge {
   private child?: ChildProcessWithoutNullStreams;
   private stopped = false;
   private restart?: ReturnType<typeof setTimeout>;
-  private snapshot: Extract<DaemonToUiMessage, { op: "state" }> = { op: "state", hubs: [], listeners: [] };
+  private snapshot: Extract<DaemonToUiMessage, { op: "state" }> = { op: "state", hubs: [], listeners: [], available: [] };
   private pending = false;
   private scheduled = false;
   private blocked = false;
@@ -106,8 +126,8 @@ export class UiBridge {
     if (this.stopped) return;
     this.restart = setTimeout(() => { void this.start().catch(error => { this.log(error); this.scheduleRestart(); }); }, 500);
   }
-  state(hubs: UiHubSummary[], listeners: UiListenerSummary[]): void {
-    this.snapshot = { op: "state", hubs, listeners }; this.pending = true;
+  state(hubs: UiHubSummary[], listeners: UiListenerSummary[], available: AvailableSessionSummary[] = []): void {
+    this.snapshot = { op: "state", hubs, listeners, available }; this.pending = true;
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
   }
   banner(payload: BannerPayload): void { this.banners.push(payload); if (this.banners.length > 100) this.banners.shift(); this.flush(); }

@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { watch, type FSWatcher } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { z } from "zod";
 import { Events, ErrorCode } from "nats";
 import { UiBridge, type UiOptions, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { getAdapter, resolveCaller, callerBindingError, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
+import { discoverAllAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
@@ -197,6 +200,10 @@ export class CitoService {
   readonly receivers = new Map<string, Receiver>();
   ui?: UiBridge;
   private uiStarting?: Promise<void>;
+  private availableSessions: AvailableSessionSummary[] = [];
+  private discoveryGen = 0;
+  private socketWatcher?: FSWatcher;
+  private socketWatchTimer?: ReturnType<typeof setTimeout>;
   readonly slots = new Map<string, HubSlot>();
   private closing = false;
   private readonly shuttingDown = new AbortController();
@@ -226,32 +233,82 @@ export class CitoService {
   startUi(): Promise<void> {
     if (this.closing) return Promise.resolve();
     return this.uiStarting ??= (async () => {
+      const socketsDir = join(this.config.stateDir, "sockets");
+      await mkdir(socketsDir, { recursive: true, mode: 0o700 }).catch(() => {});
+      if (!this.closing && !this.socketWatcher) {
+        try {
+          this.socketWatcher = watch(socketsDir, () => {
+            if (this.closing) return;
+            clearTimeout(this.socketWatchTimer);
+            this.socketWatchTimer = setTimeout(() => { void this.refreshAvailableSessions(); }, 150);
+          });
+          this.socketWatcher.on("error", () => {});
+        } catch { /* Optional watcher. */ }
+      }
       this.ui ??= new UiBridge(this.config.stateDir, { ...this.options.ui, onAction: action => this.handleUiAction(action) });
       await this.ui.start(); this.pushUiState();
+      void this.refreshAvailableSessions();
     })();
   }
   async connectBackground(): Promise<void> {
     await Promise.allSettled([...this.slots.values()].map(slot => slot.network({ interactive: false })));
     this.pushUiState();
   }
+  private liveActiveRows(): ListenerRow[] {
+    const rows = this.state.db.prepare("SELECT * FROM local_listeners WHERE status = 'ACTIVE' ORDER BY hub, listener_id").all() as unknown as ListenerRow[];
+    return rows.filter(row => {
+      const receiver = this.receivers.get(`${row.hub}:${row.listener_id}`);
+      return receiver && !receiver.abort.signal.aborted && receiver.owner === row.owner_token;
+    });
+  }
+  async refreshAvailableSessions(): Promise<void> {
+    if (this.closing) return;
+    const gen = ++this.discoveryGen;
+    try {
+      const discovered = await discoverAllAvailableSessions(this.config, this.liveActiveRows(), this.shuttingDown.signal);
+      if (gen !== this.discoveryGen || this.closing) return;
+      this.availableSessions = discovered;
+      this.pushUiState();
+    } catch (error) {
+      if (!this.closing) this.log(error);
+    }
+  }
   pushUiState(): void {
     if (this.closing) return;
     const hubs = [...this.slots.values()].map(slot => ({ name: slot.name, status: slot.status,
       user: slot.principal?.owner_user ?? null, auth_mode: slot.config.authMode, error: slot.error }));
-    const rows = this.state.db.prepare("SELECT * FROM local_listeners WHERE status = 'ACTIVE' ORDER BY hub, listener_id").all() as unknown as ListenerRow[];
-    const listeners = rows.filter(row => {
-      const receiver = this.receivers.get(`${row.hub}:${row.listener_id}`);
-      return receiver && !receiver.abort.signal.aborted && receiver.owner === row.owner_token;
-    }).map(row => ({ hub: row.hub, listener_id: row.listener_id, public_id: displayId(row), scoped_id: this.scoped(row.hub, displayId(row)),
+    const activeRows = this.liveActiveRows();
+    const listeners = activeRows.map(row => ({ hub: row.hub, listener_id: row.listener_id, public_id: displayId(row), scoped_id: this.scoped(row.hub, displayId(row)),
       harness: row.harness, session_id: row.session_id, title: row.title, about: row.about, cwd: row.cwd, repo: row.repo, branch: row.branch, scope: row.scope,
       can_jump: getAdapter(row.harness)?.canJump === true }));
-    this.ui?.state(hubs, listeners);
+    const available = this.availableSessions.filter(c => !activeRows.some(r =>
+      r.harness === c.harness && (r.session_id === c.session_id || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)),
+    ));
+    this.ui?.state(hubs, listeners, available);
   }
   async handleUiAction(action: UiToDaemonAction): Promise<void> {
     if (action.op === "quit") { await this.close(); await this.options.onQuit?.(); return; }
     if (this.closing) return;
     const task = (async () => {
       switch (action.op) {
+        case "refresh_available": await this.refreshAvailableSessions(); break;
+        case "listen_session": {
+          const about = (action.title || basename(action.cwd || "") || "Session").replace(/[\r\n]+/g, " ").trim().slice(0, 200) || "Session";
+          try {
+            await this.listen({ about, scope: "self" }, {
+              meta: {
+                ...(action.endpoint_pid !== undefined ? { endpoint_pid: action.endpoint_pid } : {}),
+                expected_harness: action.harness,
+                expected_session_id: action.session_id,
+                ...(action.cwd ? { cwd: action.cwd } : {}),
+                ...(action.title ? { title: action.title } : {}),
+              },
+            });
+          } finally {
+            void this.refreshAvailableSessions();
+          }
+          break;
+        }
         case "unlisten": await this.unlistenById(action.hub, action.listener_id); break;
         case "unlisten_all": await this.unlistenAll(); break;
         case "set_scope": await this.setScope(action.hub, action.listener_id, action.scope); break;
@@ -294,11 +351,13 @@ export class CitoService {
     });
     await previous?.stop();
     if (this.receivers.get(key) === previous) { this.receivers.delete(key); this.state.liveReceivers.delete(key); slot.receivers.delete(id); }
+    void this.refreshAvailableSessions();
     return remoteWarning;
   }
   async unlistenAll(): Promise<void> {
     const rows = this.state.db.prepare("SELECT hub, listener_id FROM local_listeners WHERE status IN ('ACTIVE','REBINDING')").all();
     await Promise.all(rows.map(row => this.unlistenById(String(row.hub), String(row.listener_id))));
+    void this.refreshAvailableSessions();
   }
   async setScope(hub: string, listenerId: string, scope: "self" | "workspace"): Promise<void> {
     if (scope !== "self" && scope !== "workspace") throw new CitoError("INVALID_INPUT", "Invalid scope");
@@ -658,10 +717,15 @@ export class CitoService {
         encode({ ...value, state: "UNLISTENED", binding_generation: row.binding_generation + 1 }), entry.revision);
     }));
     await refreshSessionBadge(this.state, this.config, harness, sessionId).catch(error => this.log(error));
+    this.pushUiState();
+    void this.refreshAvailableSessions();
   }
   close(): Promise<void> { return this.closePromise ??= this.shutdown(); }
   private async shutdown(): Promise<void> {
     this.closing = true; this.shuttingDown.abort();
+    clearTimeout(this.socketWatchTimer);
+    this.socketWatcher?.close();
+    this.socketWatcher = undefined;
     // Mark the bridge stopped before waiting for a cold compilation to finish.
     const uiClosing = this.ui?.close();
     const closingKeys = new Set(this.receivers.keys()), receivers = [...this.receivers.values()];

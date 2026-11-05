@@ -6,7 +6,7 @@ import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shar
 import { CodexDesktopAdapter } from "./codex.js";
 import { SocketBridgeAdapter, identifyBridge } from "./pi.js";
 import { gitMetadata } from "./git.js";
-import type { Caller, CallerDetectionContext, CallerInput, HarnessAdapter } from "./types.js";
+import type { AvailableSessionSummary, Caller, CallerDetectionContext, CallerInput, HarnessAdapter } from "./types.js";
 export * from "./codex.js";
 export * from "./git.js";
 export * from "./pi.js";
@@ -25,6 +25,52 @@ export function getAdapter(harness: string): HarnessAdapter | undefined {
   if (!harnessIdSchema.safeParse(harness).success) return;
   if (!ADAPTER_REGISTRY.has(harness)) registerAdapter(new SocketBridgeAdapter(harness));
   return ADAPTER_REGISTRY.get(harness);
+}
+export async function discoverAllAvailableSessions(
+  config: CitoConfig = loadConfig(),
+  activeListeners: readonly { harness: string; session_id: string; endpoint_pid?: number | null }[] = [],
+  signal?: AbortSignal,
+): Promise<AvailableSessionSummary[]> {
+  try {
+    const names = await readdir(join(config.stateDir, "sockets"));
+    for (const name of names) {
+      const match = /^([a-z][a-z0-9_-]{0,31})-pid-[1-9][0-9]*\.sock$/.exec(name);
+      if (match) getAdapter(match[1]!);
+    }
+  } catch { /* Missing sockets dir is normal. */ }
+  const settled = await Promise.allSettled(
+    [...ADAPTER_REGISTRY.values()].map(adapter => adapter.discoverAvailableSessions?.(config, signal) ?? Promise.resolve([])),
+  );
+  const raw = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
+  const seen = new Set<string>();
+  const filtered = raw.filter(c => {
+    const isActive = activeListeners.some(a =>
+      a.harness === c.harness && (
+        a.session_id === c.session_id
+        || (c.endpoint_pid !== undefined && a.endpoint_pid != null && a.endpoint_pid === c.endpoint_pid)
+      ),
+    );
+    if (isActive) return false;
+    const key = `${c.harness}:${c.session_id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  filtered.sort((a, b) => {
+    const aSocket = a.endpoint_pid !== undefined ? 1 : 0;
+    const bSocket = b.endpoint_pid !== undefined ? 1 : 0;
+    if (aSocket !== bSocket) return bSocket - aSocket;
+    if (aSocket && bSocket) return (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0) || (b.endpoint_pid ?? 0) - (a.endpoint_pid ?? 0);
+    return 0;
+  });
+  return filtered.slice(0, 10);
+}
+function verifyExpectedIdentity(caller: Caller, meta: Record<string, unknown>): Caller {
+  if ((typeof meta.expected_harness === "string" && meta.expected_harness && caller.harness !== meta.expected_harness)
+    || (typeof meta.expected_session_id === "string" && meta.expected_session_id && caller.session_id !== meta.expected_session_id)) {
+    throw new CitoError("SESSION_NOT_OPEN", "Session changed since discovery");
+  }
+  return caller;
 }
 export type ResolveCallerOptions = Pick<CallerDetectionContext, "requireOpen" | "lookupCachedSession">;
 // Preserve the legacy public error code without exposing driver naming to the service.
@@ -64,7 +110,7 @@ export async function resolveCaller(input: CallerInput = {}, config: CitoConfig 
     ? { ...input as CallerDetectionContext, ...options }
     : { meta: input as Record<string, unknown>, httpClientPid: (input as Record<string, unknown>).http_client_pid as number | undefined,
       httpTransport: (input as Record<string, unknown>).http_transport === true, ...options };
-  const meta = { ...ctx.meta, http_client_pid: ctx.httpClientPid, http_transport: ctx.httpTransport };
+  const meta: Record<string, unknown> = { ...ctx.meta, http_client_pid: ctx.httpClientPid, http_transport: ctx.httpTransport };
   const pid = explicitPid(meta);
   let explicit: Caller | undefined;
   for (const adapter of ADAPTER_REGISTRY.values()) {
@@ -73,7 +119,7 @@ export async function resolveCaller(input: CallerInput = {}, config: CitoConfig 
     if (pid !== undefined || explicit) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
     explicit = caller;
   }
-  if (explicit) return explicit;
+  if (explicit) return verifyExpectedIdentity(explicit, meta);
   const roots = extractCallerPidRoots(meta);
   let failure: unknown;
   for (let ancestor of roots) {
@@ -83,15 +129,18 @@ export async function resolveCaller(input: CallerInput = {}, config: CitoConfig 
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const pattern = new RegExp(`^([a-z][a-z0-9_-]{0,31})-pid-${ancestor}\\.sock$`);
       const harnesses = names.flatMap(name => { const match = pattern.exec(name); return match ? [match[1]!] : []; });
-      harnesses.sort((a, b) => Number(ADAPTER_REGISTRY.get(b) instanceof SocketBridgeAdapter)
-        - Number(ADAPTER_REGISTRY.get(a) instanceof SocketBridgeAdapter) || a.localeCompare(b));
+      const expectedHarness = typeof meta.expected_harness === "string" ? meta.expected_harness : undefined;
+      harnesses.sort((a, b) => Number(b === expectedHarness) - Number(a === expectedHarness)
+        || Number(ADAPTER_REGISTRY.get(b) instanceof SocketBridgeAdapter) - Number(ADAPTER_REGISTRY.get(a) instanceof SocketBridgeAdapter)
+        || a.localeCompare(b));
       for (const harness of harnesses) {
+        let info;
         try {
-          const info = await identifyBridge(harness, ancestor, config);
-          getAdapter(harness);
-          return { harness, endpoint_pid: info.endpoint_pid, session_id: info.session_id, cwd: info.cwd,
-            ...await gitMetadata(info.cwd, info.session_name) };
-        } catch (error) { failure = error; }
+          info = await identifyBridge(harness, ancestor, config);
+        } catch (error) { failure = error; continue; }
+        getAdapter(harness);
+        return verifyExpectedIdentity({ harness, endpoint_pid: info.endpoint_pid, session_id: info.session_id, cwd: info.cwd,
+          ...await gitMetadata(info.cwd, info.session_name) }, meta);
       }
       if (ctx.requireOpen === false) {
         // The lookup enforces uniqueness across every retained status and hub.

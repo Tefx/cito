@@ -61,7 +61,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
 });
 
 interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
-interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
+interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
 test("real AppKit card views expose template icon, 380pt control-center geometry, state-driven hub drawers, and SF Symbol controls", async () => {
@@ -251,3 +251,76 @@ test("UiBridge discards malformed/oversized action lines and preserves multibyte
     expect(diagnostics.filter(line => line.includes("invalid frame")).length).toBe(2);
   } finally { await bridge.close(); }
 });
+
+test("cito-ui renders available session candidates, compact empty banner, viewport-capped scroll views, and flicker-free state diffing", async () => {
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+  try {
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+    // menuWillOpen triggers refresh_available
+    send({ op: "test_menu_open" });
+    await waitFor(() => actions.length === 1);
+    expect(actions[0]).toEqual({ op: "refresh_available" });
+    // Compact empty strip + available sessions (<= 4 hosted directly)
+    const candidates = [
+      { harness: "pi", session_id: "pi-1", title: "Pi Build", cwd: "/tmp/project", endpoint_pid: 4242 },
+      { harness: "codex", session_id: "codex-1", title: "Codex Review", cwd: "/tmp/review" },
+    ];
+    bridge.state(hubs, [], candidates);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=0 available=2"));
+    const compactSnap = await inspect(), compactNodes = flatten(compactSnap.items);
+    expect(compactSnap.items.find(n => n.id === "empty")).toMatchObject({ width: 380, height: 34 });
+    expect(compactNodes.map(n => n.text)).toContain("No active listeners — click + Listen below");
+    expect(compactSnap.items.find(n => n.id === "available_header")).toMatchObject({ width: 380, height: 24 });
+    expect(compactNodes.map(n => n.text)).toContain("AVAILABLE SESSIONS");
+    expect(compactSnap.items.find(n => n.id === "candidate:pi:pi-1")).toMatchObject({ width: 380, height: 36 });
+    expect(compactNodes.find(n => n.id === "listen:pi:pi-1")).toMatchObject({ text: "Listen", symbol: "plus", x: 304, y: 7, width: 64, height: 22 });
+    // Equatable diff guard skips rebuild() on identical state when !pendingMutation
+    const rebuildsBefore = compactSnap.rebuilds!;
+    send({ op: "state", hubs, listeners: [], available: candidates });
+    await waitFor(() => diagnostics.filter(l => l === "cito-ui: state hubs=1 listeners=0 available=2").length === 2);
+    const afterIdentical = await inspect();
+    expect(afterIdentical.rebuilds).toBe(rebuildsBefore);
+    // Clicking + Listen mutates button to "…" with pendingMutation = true and emits listen_session with integer endpoint_pid
+    send({ op: "test_control", id: "listen:pi:pi-1" });
+    await waitFor(() => actions.length === 2);
+    expect(actions[1]).toEqual({ op: "listen_session", harness: "pi", session_id: "pi-1", cwd: "/tmp/project", title: "Pi Build", endpoint_pid: 4242 });
+    const optimisticSnap = await inspect();
+    expect(flatten(optimisticSnap.items).find(n => n.id === "listen:pi:pi-1")?.text).toBe("…");
+    // Sending identical state while pendingMutation == true forces rebuild() and rolls back optimistic "…"
+    send({ op: "state", hubs, listeners: [], available: candidates });
+    await waitFor(() => diagnostics.filter(l => l === "cito-ui: state hubs=1 listeners=0 available=2").length === 3);
+    const rolledBack = await inspect();
+    expect(rolledBack.rebuilds).toBe(rebuildsBefore + 1);
+    expect(flatten(rolledBack.items).find(n => n.id === "listen:pi:pi-1")?.text).toBe("Listen");
+    // Viewport capping: > 4 active listeners -> active_scroll (380 x 260) and > 4 available -> available_scroll (380 x 144)
+    const fiveListeners = Array.from({ length: 5 }, (_, i) => ({
+      ...listener, listener_id: `c_abcdefghijk${i + 2}`, public_id: `repo-abcdefghijk${i + 2}`,
+      scoped_id: `personal:repo-abcdefghijk${i + 2}`, session_id: `s-${i}`, title: `Active ${i}`,
+    }));
+    const sixCandidates = Array.from({ length: 6 }, (_, i) => ({
+      harness: "codex", session_id: `cand-${i}`, title: `Cand ${i}`, cwd: `/tmp/c${i}`,
+    }));
+    bridge.state(hubs, fiveListeners, sixCandidates);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=5 available=6"));
+    const cappedSnap = await inspect();
+    const activeScroll = cappedSnap.items.find(n => n.id === "active_scroll")!;
+    expect(activeScroll).toMatchObject({ width: 380, height: 260 });
+    expect(activeScroll.children.map(c => ({ id: c.id, y: c.y }))).toEqual(
+      fiveListeners.map((l, i) => ({ id: "session:" + l.scoped_id, y: i * 64 })),
+    );
+    const availScroll = cappedSnap.items.find(n => n.id === "available_scroll")!;
+    expect(availScroll).toMatchObject({ width: 380, height: 144 });
+    expect(availScroll.children.map(c => ({ id: c.id, y: c.y }))).toEqual(
+      sixCandidates.map((c, i) => ({ id: `candidate:codex:${c.session_id}`, y: i * 36 })),
+    );
+  } finally { await bridge.close(); }
+}, 15000);

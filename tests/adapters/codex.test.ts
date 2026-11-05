@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { codexThreadId, readCodexThreadOptional, resolveCodexThreadId, resolveCaller, extractCallerPidRoots, CodexDesktopAdapter,
+import { bridgeSocketPath, codexThreadId, discoverAllAvailableSessions, readCodexThreadOptional, resolveCodexThreadId, resolveCaller, extractCallerPidRoots, CodexDesktopAdapter,
   queueCodexWake, triggerCodexWake } from "../../src/adapters/index.js";
 import { loadConfig } from "../../src/shared/index.js";
 import type { ListenerRow } from "../../src/shared/state-types.js";
@@ -142,6 +142,56 @@ describe("non-intrusive Codex metadata and wake effects", () => {
       expect(() => resolveCodexThreadId(state.root, state)).toThrowError(expect.objectContaining({ code: "BINDING_REQUIRED" }));
       expect(resolveCodexThreadId(state.root, state, { allowArchived: true })).toBe("older-rowid-newer-ts");
       expect(resolveCodexThreadId("/unmatched/cwd", state, { allowArchived: true })).toBe("archived-other");
+      // Filters out subagent threads via thread_source and source while keeping NULL values via COALESCE
+      db.exec("DROP TABLE threads; CREATE TABLE threads(id TEXT PRIMARY KEY, cwd TEXT, archived INTEGER, thread_source TEXT, source TEXT, recency_at_ms INTEGER, updated_at INTEGER)");
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)").run("subagent-source-col", state.root, 0, "subagent", null, 9000, 900);
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)").run("subagent-json-col", state.root, 0, "user", '{"subagent":"review"}', 8000, 800);
+      db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)").run("null-cols-user-thread", state.root, 0, null, null, 7000, 700);
+      expect(resolveCodexThreadId(state.root, state)).toBe("null-cols-user-thread");
     } finally { db.close(); }
+  });
+  it("discovers open Codex user threads when Desktop is running, excludes subagents/active listeners, and merges with live sockets up to 10 candidates", async () => {
+    const config = loadConfig(state.env), adapter = new CodexDesktopAdapter();
+    const db = new DatabaseSync(join(state.codexHome, "state_5.sqlite"));
+    servers: {
+      const sockServer = await unixServer(bridgeSocketPath(state.stateDir, "pi", process.pid), socket => {
+        socket.once("data", () => socket.end(JSON.stringify({
+          ok: true, endpoint_pid: process.pid, session_id: "pi-live-1", session_name: "Pi Build", cwd: state.root,
+        }) + "\n"));
+      });
+      try {
+        db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, name TEXT, title TEXT, cwd TEXT, git_branch TEXT, archived INTEGER, thread_source TEXT, source TEXT, recency_at_ms INTEGER)");
+        db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("sub-1", "Subagent 1", null, state.root, "main", 0, "subagent", null, 99999);
+        db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("sub-2", "Subagent 2", null, state.root, "main", 0, "user", '{"subagent":"worker"}', 99998);
+        db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("arch-1", "Archived", null, state.root, "main", 1, "user", null, 99997);
+        for (let i = 1; i <= 10; i++) {
+          db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+            `codex-u-${i}`, i === 10 ? "   " : `Thread ${i}`, i === 10 ? "Fallback Title 10" : null,
+            state.root, i % 2 === 0 ? "feat/v7" : null, 0, i === 9 ? null : "user", null, i * 1000,
+          );
+        }
+        // Returns [] when Codex Desktop is not running
+        config.codexDesktopRunning = async () => false;
+        expect(await adapter.discoverAvailableSessions(config)).toEqual([]);
+        // Returns up to 8 most recent non-archived user threads when Desktop is running
+        config.codexDesktopRunning = async () => true;
+        const codexOnly = await adapter.discoverAvailableSessions(config);
+        expect(codexOnly).toHaveLength(8);
+        expect(codexOnly[0]).toMatchObject({ harness: "codex", session_id: "codex-u-10", title: "Fallback Title 10", branch: "feat/v7" });
+        expect(codexOnly[1]).toMatchObject({ harness: "codex", session_id: "codex-u-9", title: "Thread 9", branch: null });
+        expect(codexOnly.some(c => c.session_id.startsWith("sub-") || c.session_id === "arch-1")).toBe(false);
+        // Combined discovery puts live socket sessions first, filters active listeners, and caps at 10
+        const combined = await discoverAllAvailableSessions(config, [{ harness: "codex", session_id: "codex-u-10" }]);
+        expect(combined).toHaveLength(8); // 1 pi + 7 remaining codex (out of 8 returned by codex adapter)
+        expect(combined[0]).toMatchObject({ harness: "pi", session_id: "pi-live-1", endpoint_pid: process.pid });
+        expect(combined.some(c => c.session_id === "codex-u-10")).toBe(false);
+        // Filtering by active endpoint_pid also excludes the socket candidate
+        const withoutPi = await discoverAllAvailableSessions(config, [{ harness: "pi", session_id: "other", endpoint_pid: process.pid }]);
+        expect(withoutPi.some(c => c.harness === "pi")).toBe(false);
+      } finally {
+        db.close();
+        await sockServer.stop();
+      }
+    }
   });
 });

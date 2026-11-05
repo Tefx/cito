@@ -157,3 +157,41 @@ test("non-interactive startup never opens a browser, and authenticating as a new
   expect(f.service.state.listener(bobId)!.status).toBe("FENCED_INACTIVE");
   expect(bobReceiver.abort.signal.aborted).toBe(true);
 });
+
+test("refresh_available and listen_session enroll discovered sessions, synchronously filter active listeners, and fence changed sessions", async () => {
+  const f = await setup();
+  const states = vi.spyOn(f.service.ui!, "state");
+  await f.service.handleUiAction({ op: "refresh_available" });
+  expect(states.mock.lastCall?.[2]).toMatchObject([
+    { harness: "pi", session_id: "pi-session-1", endpoint_pid: f.pi.meta.pi_pid, title: "Pi receiver" },
+  ]);
+  // 1-click listen_session enrolls the candidate and synchronously removes it from available in pushUiState()
+  await f.service.handleUiAction({
+    op: "listen_session",
+    harness: "pi",
+    session_id: "pi-session-1",
+    endpoint_pid: f.pi.meta.pi_pid,
+    cwd: f.stateDir,
+    title: "Multi-line\nSession Title",
+  });
+  expect(states.mock.lastCall?.[1]).toMatchObject([
+    { harness: "pi", session_id: "pi-session-1", about: "Multi-line Session Title", scope: "self" },
+  ]);
+  expect(states.mock.lastCall?.[2]).toEqual([]);
+  // Unlistening restores the live session to available
+  await f.service.handleUiAction({ op: "unlisten_all" });
+  await waitFor(() => (states.mock.lastCall?.[2]?.length ?? 0) === 1);
+  expect(states.mock.lastCall?.[2]).toMatchObject([{ harness: "pi", session_id: "pi-session-1" }]);
+  // Identity fencing: if the session switches before listen_session runs, it fails with SESSION_NOT_OPEN and refreshes available
+  f.pi.switchSession("switched-session-id");
+  await expect(f.service.handleUiAction({
+    op: "listen_session",
+    harness: "pi",
+    session_id: "pi-session-1",
+    endpoint_pid: f.pi.meta.pi_pid,
+    cwd: f.stateDir,
+    title: "Old Session",
+  })).rejects.toMatchObject({ code: "SESSION_NOT_OPEN", message: "Session changed since discovery" });
+  expect(f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_listeners WHERE status = 'ACTIVE'").get()!.n).toBe(0);
+  await waitFor(() => states.mock.lastCall?.[2]?.[0]?.session_id === "switched-session-id");
+});

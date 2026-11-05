@@ -198,23 +198,32 @@ final class ClickView: NSView {
 }
 
 
-struct Hub: Decodable {
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+struct Hub: Decodable, Equatable {
     let name: String, status: String, auth_mode: String
     let user: String?, error: String?
 }
-struct Listener: Decodable {
+struct Listener: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
     let harness: String, session_id: String, title: String, cwd: String, scope: String
     let about: String?, repo: String?, branch: String?
     let can_jump: Bool
 }
+struct Candidate: Decodable, Equatable {
+    let harness: String, session_id: String, title: String, cwd: String
+    let branch: String?, endpoint_pid: Int?, updated_at_ms: Double?
+}
 struct Frame: Decodable {
     let op: String
     let hubs: [Hub]?
     let listeners: [Listener]?
+    let available: [Candidate]?
     let payload: Payload?
 }
-final class Companion: NSObject {
+final class Companion: NSObject, NSMenuDelegate {
     let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
     let dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
     var status: NSStatusItem?
@@ -230,20 +239,32 @@ final class Companion: NSObject {
     var timer: DispatchWorkItem?
     var clickSource: DispatchSourceSignal?
     var menuActions: [() -> Void] = []
-    var cardMenu: NSMenu?
+    let cardMenu = NSMenu()
     var selectedHubs = Set<String>()
     var statusImage: NSImage?
     var uniqueSessionCount: Int { Set(listeners.map { "\($0.harness):\($0.session_id)" }).count }
     var hubs: [Hub] = []
     var listeners: [Listener] = []
+    var available: [Candidate] = []
+    var hasRenderedState = false
+    var pendingMutation = false
+    var rebuildCount = 0
+    func menuWillOpen(_ menu: NSMenu) {
+        emit(["op": "refresh_available"])
+    }
     func start() {
         signal(SIGPIPE, SIG_IGN)
         signal(SIGUSR1, SIG_IGN)
         clickSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         clickSource?.setEventHandler { [weak self] in self?.hide(clicked: true) }
         clickSource?.resume()
+        cardMenu.autoenablesItems = false
+        cardMenu.delegate = self
         if headless { headlessStatusButton = NSButton(frame: .zero) }
-        else { status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
+        else {
+            status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            status?.menu = cardMenu
+        }
         DispatchQueue.global().async { [weak self] in
             var buffer = Data()
             var dropping = false
@@ -256,7 +277,7 @@ final class Companion: NSObject {
                     if byte == 10 {
                         let line = buffer; buffer.removeAll(keepingCapacity: true)
                         if dropping { dropping = false; continue }
-                        DispatchQueue.main.async { self?.receive(line) }
+                        RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self] in self?.receive(line) }
                     } else if !dropping {
                         buffer.append(byte)
                         if buffer.count > 1_048_576 { diagnostic("oversized frame"); buffer.removeAll(); dropping = true }
@@ -271,12 +292,14 @@ final class Companion: NSObject {
            let op = object["op"] as? String {
             if op == "test_click" { hide(clicked: true); return }
             if op == "test_inspect" { inspectMenu(); return }
+            if op == "test_menu_open" { menuWillOpen(cardMenu); return }
             if op == "test_control", let id = object["id"] as? String {
                 func find(_ view: NSView) -> MenuControl? {
                     if view.identifier?.rawValue == id, let control = view as? MenuControl { return control }
-                    return view.subviews.compactMap { find($0) }.first
+                    let children = (view as? NSScrollView)?.documentView?.subviews ?? view.subviews
+                    return children.compactMap { find($0) }.first
                 }
-                for item in cardMenu?.items ?? [] {
+                for item in cardMenu.items {
                     if let view = item.view, let control = find(view) { _ = control.accessibilityPerformPress(); break }
                 }
                 return
@@ -289,8 +312,20 @@ final class Companion: NSObject {
         if frame.op == "state", let h = frame.hubs, let l = frame.listeners,
            h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "oidc"].contains($0.auth_mode) }),
            l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
-            hubs = h; listeners = l; rebuild()
-            if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)") }
+            let a = frame.available ?? []
+            if hasRenderedState && !pendingMutation && h == hubs && l == listeners && a == available {
+                let count = uniqueSessionCount
+                let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
+                statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
+                if let button = status?.button ?? headlessStatusButton {
+                    formatStatusButton(button, count: count, image: statusImage)
+                }
+            } else {
+                hubs = h; listeners = l; available = a
+                hasRenderedState = true; pendingMutation = false
+                rebuild()
+            }
+            if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
         } else if frame.op == "banner", let value = frame.payload, !value.target_harness.isEmpty {
             if visible, let previous = payload, previous.target_session_id == value.target_session_id && previous.target_harness == value.target_harness && previous.effective_wake == value.effective_wake {
                 displayedCount += value.count ?? 1
@@ -302,11 +337,12 @@ final class Companion: NSObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(dismissMs), execute: work)
         } else { diagnostic("invalid frame") }
     }
-    func emit(_ action: [String: String]) {
+    func emit(_ action: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: action, options: [.sortedKeys]) else { return }
         FileHandle.standardOutput.write(data + Data([10]))
     }
     func rebuild() {
+        rebuildCount += 1
         menuActions.removeAll()
         let count = uniqueSessionCount
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
@@ -314,8 +350,8 @@ final class Companion: NSObject {
         if let button = status?.button ?? headlessStatusButton {
             formatStatusButton(button, count: count, image: statusImage)
         }
-        let menu = NSMenu(); menu.autoenablesItems = false
-        cardMenu = menu
+        let menu = cardMenu
+        menu.removeAllItems()
         func host(_ view: NSView, id: String) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
             let item = NSMenuItem(); item.view = view; menu.addItem(item); return item
@@ -435,16 +471,19 @@ final class Companion: NSObject {
             for pill in pillContainer.subviews { pill.frame.origin.x -= pillX }
             pillContainer.frame.size.width = 230 - pillX
         }
+        var activeRows: [(id: String, view: NSView)] = []
+        let home = NSHomeDirectory()
         for listener in listeners {
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let hasDistinctAbout = !aboutText.isEmpty && aboutText.caseInsensitiveCompare(listener.title.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
             let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
             let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: rowHeight))
+            row.identifier = NSUserInterfaceItemIdentifier("session:\(listener.scoped_id)")
             let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: cardHeight), radius: 10,
                 color: .labelColor.withAlphaComponent(0.045))
             row.addSubview(card)
-            _ = host(row, id: "session:\(listener.scoped_id)")
+            activeRows.append((id: "session:\(listener.scoped_id)", view: row))
             let symbol: String, tint: NSColor, harnessName: String
             switch listener.harness {
             case "pi": symbol = "terminal.fill"; tint = .systemIndigo; harnessName = "Pi"
@@ -481,7 +520,6 @@ final class Companion: NSObject {
                 copy?.copied()
             }
             card.addSubview(copy)
-            let home = NSHomeDirectory()
             let cwd = listener.cwd == home ? "~" : listener.cwd.hasPrefix(home + "/") ? "~" + listener.cwd.dropFirst(home.count) : listener.cwd
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
@@ -498,7 +536,9 @@ final class Companion: NSObject {
                 toggle?.layer?.backgroundColor = toggle?.normalBackground.cgColor
             }
             scopeColor()
-            toggle.pressed = { [weak toggle] in
+            toggle.pressed = { [weak self, weak toggle] in
+                guard let self = self else { return }
+                self.pendingMutation = true
                 scope = scope == "self" ? "workspace" : "self"
                 toggle?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
                 toggle?.label.stringValue = scope == "self" ? "Self" : "Team"
@@ -520,16 +560,103 @@ final class Companion: NSObject {
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
             stop.pressed = unlisten; card.addSubview(stop); register(unlisten); register(unlisten)
         }
+        if activeRows.count <= 4 {
+            for (id, row) in activeRows { _ = host(row, id: id) }
+        } else {
+            let totalHeight = activeRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 260))
+            scroll.drawsBackground = false; scroll.hasVerticalScroller = true
+            scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
+            let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: 380, height: totalHeight))
+            var y: CGFloat = 0
+            for (_, row) in activeRows {
+                row.frame.origin = NSPoint(x: 0, y: y)
+                doc.addSubview(row); y += row.frame.height
+            }
+            scroll.documentView = doc; _ = host(scroll, id: "active_scroll")
+        }
         if listeners.isEmpty {
-            let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 70))
-            let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 64), radius: 10, color: .labelColor.withAlphaComponent(0.045))
-            let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
-            icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
-            icon.contentTintColor = .secondaryLabelColor; card.addSubview(icon)
-            card.addSubview(textLabel("No active listeners", NSRect(x: 44, y: 33, width: 304, height: 18), size: 13, weight: .semibold))
-            card.addSubview(textLabel("Call cito_listen in a session to receive notifications",
-                NSRect(x: 44, y: 12, width: 304, height: 16), size: 11, color: .secondaryLabelColor))
-            row.addSubview(card); _ = host(row, id: "empty")
+            if available.isEmpty {
+                let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 70))
+                let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 64), radius: 10, color: .labelColor.withAlphaComponent(0.045))
+                let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
+                icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
+                icon.contentTintColor = .secondaryLabelColor; card.addSubview(icon)
+                card.addSubview(textLabel("No active listeners", NSRect(x: 44, y: 33, width: 304, height: 18), size: 13, weight: .semibold))
+                card.addSubview(textLabel("Call cito_listen in a session to receive notifications",
+                    NSRect(x: 44, y: 12, width: 304, height: 16), size: 11, color: .secondaryLabelColor))
+                row.addSubview(card); _ = host(row, id: "empty")
+            } else {
+                let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 34))
+                let pill = roundedView(NSRect(x: 10, y: 3, width: 360, height: 28), radius: 8, color: .labelColor.withAlphaComponent(0.045))
+                let icon = NSImageView(frame: NSRect(x: 12, y: 7, width: 14, height: 14))
+                icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
+                icon.contentTintColor = .secondaryLabelColor; pill.addSubview(icon)
+                pill.addSubview(textLabel("No active listeners — click + Listen below",
+                    NSRect(x: 32, y: 6, width: 316, height: 16), size: 11, color: .secondaryLabelColor))
+                row.addSubview(pill); _ = host(row, id: "empty")
+            }
+        }
+        var candidateActions: [() -> Void] = []
+        if !available.isEmpty {
+            let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
+            availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+            availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: 220, height: 14),
+                size: 10, weight: .semibold, color: .secondaryLabelColor))
+            _ = host(availHeader, id: "available_header")
+            var candidateRows: [(id: String, view: NSView)] = []
+            for c in available {
+                let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
+                let rowId = "candidate:\(c.harness):\(c.session_id)"
+                row.identifier = NSUserInterfaceItemIdentifier(rowId)
+                let symbol: String, tint: NSColor, harnessName: String
+                switch c.harness {
+                case "pi": symbol = "terminal.fill"; tint = .systemIndigo; harnessName = "Pi"
+                case "codex": symbol = "sparkles"; tint = .systemTeal; harnessName = "Codex"
+                case "claude": symbol = "cpu.fill"; tint = .systemOrange; harnessName = "Claude"
+                default: symbol = "bolt.horizontal.fill"; tint = .secondaryLabelColor; harnessName = c.harness.capitalized
+                }
+                let badge = roundedView(NSRect(x: 12, y: 7, width: 22, height: 22), radius: 6, color: tint.withAlphaComponent(0.08))
+                let icon = NSImageView(frame: NSRect(x: 5, y: 5, width: 12, height: 12))
+                icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: harnessName)
+                icon.contentTintColor = tint.withAlphaComponent(0.75)
+                badge.addSubview(icon); row.addSubview(badge)
+                let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
+                let info = textLabel("\(c.title) · \(shortCwd)", NSRect(x: 42, y: 9, width: 254, height: 18), size: 12, weight: .regular, color: .labelColor)
+                info.lineBreakMode = .byTruncatingMiddle
+                info.toolTip = "\(c.title) — \(c.cwd)"
+                row.addSubview(info)
+                let listenBtn = MenuControl("Listen", frame: NSRect(x: 304, y: 7, width: 64, height: 22), leadingSymbol: "plus", radius: 6)
+                listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
+                listenBtn.toolTip = "Start listening in \(c.title)"
+                let listenRun = { [weak self, weak listenBtn] in
+                    guard let self = self else { return }
+                    self.pendingMutation = true
+                    listenBtn?.setLeadingSymbol(nil)
+                    listenBtn?.label.stringValue = "…"
+                    listenBtn?.setAccessibilityLabel("…")
+                    var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.title]
+                    if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
+                    self.emit(action)
+                }
+                listenBtn.pressed = listenRun; row.addSubview(listenBtn)
+                candidateActions.append({ [weak listenBtn] in listenBtn?.pressed?() })
+                candidateRows.append((id: rowId, view: row))
+            }
+            if candidateRows.count <= 4 {
+                for (id, row) in candidateRows { _ = host(row, id: id) }
+            } else {
+                let totalHeight = CGFloat(candidateRows.count) * 36
+                let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 144))
+                scroll.drawsBackground = false; scroll.hasVerticalScroller = true
+                scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
+                let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: 380, height: totalHeight))
+                for (idx, (_, row)) in candidateRows.enumerated() {
+                    row.frame.origin = NSPoint(x: 0, y: CGFloat(idx) * 36)
+                    doc.addSubview(row)
+                }
+                scroll.documentView = doc; _ = host(scroll, id: "available_scroll")
+            }
         }
         let footer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
         if !listeners.isEmpty {
@@ -543,19 +670,21 @@ final class Companion: NSObject {
         quit.identifier = NSUserInterfaceItemIdentifier("quit")
         quit.pressed = { self.emit(["op": "quit"]) }
         footer.addSubview(quit); register { [weak quit] in quit?.pressed?() }
+        candidateActions.forEach { register($0) }
         let footerItem = host(footer, id: "footer")
         footerItem.target = self; footerItem.action = #selector(quitMenu)
         footerItem.keyEquivalent = "q"; footerItem.keyEquivalentModifierMask = [.command]
-        status?.menu = menu
+        menu.update()
     }
     @objc func quitMenu() { emit(["op": "quit"]) }
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
     func inspectMenu() {
         func project(_ view: NSView) -> [String: Any] {
+            let childViews = (view as? NSScrollView)?.documentView?.subviews ?? view.subviews
             var result: [String: Any] = ["id": view.identifier?.rawValue ?? "", "width": view.frame.width,
                 "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
-                "children": view.subviews.map { project($0) }]
+                "children": childViews.map { project($0) }]
             if let label = view as? NSTextField { result["text"] = label.stringValue }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
@@ -564,7 +693,7 @@ final class Companion: NSObject {
             }
             return result
         }
-        let items = (cardMenu?.items ?? []).compactMap { item -> [String: Any]? in
+        let items = cardMenu.items.compactMap { item -> [String: Any]? in
             guard let view = item.view else { return nil }
             var value = project(view); value["hidden"] = item.isHidden; return value
         }
@@ -586,6 +715,7 @@ final class Companion: NSObject {
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "actions": menuActions.count, "count": uniqueSessionCount,
+            "available_count": available.count, "rebuilds": rebuildCount,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
             "icon_height": statusImage?.size.height ?? 0, "clipboard": NSPasteboard.general.string(forType: .string) ?? "",
             "button_title": button?.title ?? "", "button_image_position": button?.imagePosition.rawValue ?? -1,

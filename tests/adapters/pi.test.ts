@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, utimes, writeFile } from "node:fs/promises";
 import { bridgeSocketPath, identifyBridge, resolveCaller, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
 import { loadConfig } from "../../src/shared/index.js";
 import type { ListenerRow } from "../../src/mcp/state.js";
@@ -79,5 +79,29 @@ describe("socket receiver resolution and drivers", () => {
     const pending = adapter.deliver(row, context(controller.signal)), rejection = expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await connected; controller.abort(); await rejection;
     await expect(adapter.deliver(row, context(controller.signal))).rejects.toMatchObject({ name: "AbortError" });
+  });
+  it("discovers live socket sessions ordered by mtimeMs while isolating dead PIDs, non-sockets, and slow bridges, and fences changed sessions", async () => {
+    const config = loadConfig(state.env), adapter = new SocketBridgeAdapter("pi");
+    expect(await adapter.discoverAvailableSessions(config)).toEqual([]);
+    await bridge(process.pid, { ok: true, endpoint_pid: process.pid, session_id: "live-current", session_name: "Current Session", cwd: state.root });
+    await bridge(process.ppid, { ok: true, endpoint_pid: process.ppid, session_id: "live-parent", session_name: "Parent Session", cwd: state.root });
+    // Dead PID socket and non-socket file are ignored without failing discovery
+    await bridge(2147483647, { ok: true, endpoint_pid: 2147483647, session_id: "dead-pid", session_name: "Dead", cwd: state.root });
+    await writeFile(path(99999), "not-a-socket");
+    const nowSec = Math.floor(Date.now() / 1000);
+    await utimes(path(process.pid), nowSec - 10, nowSec - 10);
+    await utimes(path(process.ppid), nowSec, nowSec);
+    const discovered = await adapter.discoverAvailableSessions(config);
+    expect(discovered.map(s => ({ session_id: s.session_id, title: s.title, endpoint_pid: s.endpoint_pid }))).toEqual([
+      { session_id: "live-parent", title: "Parent Session", endpoint_pid: process.ppid },
+      { session_id: "live-current", title: "Current Session", endpoint_pid: process.pid },
+    ]);
+    // Identity fencing on resolveCaller verifies expected_harness and expected_session_id
+    expect(await resolveCaller({ endpoint_pid: process.pid, expected_harness: "pi", expected_session_id: "live-current" }, config))
+      .toMatchObject({ harness: "pi", session_id: "live-current", endpoint_pid: process.pid });
+    await expect(resolveCaller({ endpoint_pid: process.pid, expected_harness: "pi", expected_session_id: "stale-session" }, config))
+      .rejects.toMatchObject({ code: "SESSION_NOT_OPEN", message: "Session changed since discovery" });
+    await expect(resolveCaller({ endpoint_pid: process.pid, expected_harness: "claude", expected_session_id: "live-current" }, config))
+      .rejects.toMatchObject({ code: "SESSION_NOT_OPEN", message: "Session changed since discovery" });
   });
 });
