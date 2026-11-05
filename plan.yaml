@@ -1609,3 +1609,103 @@ phases:
     acceptance gate.'
   depends_on:
   - v5
+  steps:
+  - id: v6.direct-listen-commands-pi-and-cli
+    name: Implement V6 Pi /cito slash command, Codex thread auto-resolution (resolveCodexThreadId),
+      CLI direct control (cito listen / cito unlisten), README documentation, and
+      unit/integration tests
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/pi-extension/cito-bridge.ts\n    - src/adapters/codex.ts\n\
+      \    - src/adapters/index.ts\n    - src/mcp/cli.ts\n    - README.md\n    - tests/adapters/**\n\
+      \    - tests/mcp/**\n  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n\
+      ```\n\n- **Deliver:**\n  - Implement `docs/DESIGN.md` §4 across `src/pi-extension/cito-bridge.ts`,\
+      \ `src/adapters/codex.ts`, `src/mcp/cli.ts`, `README.md`, and `tests/`:\n  \
+      \  1. **Standalone Pi Slash Command (`/cito` in `src/pi-extension/cito-bridge.ts`,\
+      \ `docs/DESIGN.md` §4.1)**:\n       - Keep `src/pi-extension/cito-bridge.ts`\
+      \ 100% standalone with zero external npm or relative (`../shared/*`) imports.\n\
+      \       - Extend `BridgeContext` with optional `ui.notify?(message: string,\
+      \ type?: \"info\" | \"warning\" | \"error\"): void` and `BridgeAPI` with optional\
+      \ `registerCommand?(name: string, options: BridgeCommandOptions): void`.\n \
+      \      - Track `activeBadge: string | undefined` across `update(ctx)` (clearing\
+      \ `activeBadge = undefined` when `nextSessionId !== sessionId`), `req.op ===\
+      \ \"status\"` (`activeBadge = req.badge ?? undefined`), and `session_shutdown`\
+      \ (`activeBadge = undefined`).\n       - Register `pi.registerCommand?.(\"cito\"\
+      , { description: \"Toggle or configure Cito session listening\", getArgumentCompletions,\
+      \ handler })` where `getArgumentCompletions(prefix)` filters `[\"on\", \"team\"\
+      , \"off\"]` by `startsWith(prefix.trim())`.\n       - Support subcommands:\n\
+      \         - `/cito` (no arguments): toggles listening via `activeBadge` (`activeBadge\
+      \ ? cito_unlisten({}) : cito_listen({ about: defaultAbout(ctx), scope: \"self\"\
+      \ })`).\n         - `/cito on [about...]`: calls `cito_listen({ about: rest\
+      \ || defaultAbout(ctx), scope: \"self\" })`.\n         - `/cito team [about...]`:\
+      \ calls `cito_listen({ about: rest || defaultAbout(ctx), scope: \"workspace\"\
+      \ })`.\n         - `/cito off`: calls `cito_unlisten({})` (rejecting any trailing\
+      \ arguments with the usage warning without mutating state).\n         - Unknown\
+      \ subcommands: call `ctx.ui.notify?.(\"Usage: /cito [on [about...] | team [about...]\
+      \ | off]\", \"warning\")` without mutating state.\n       - Send a stateless\
+      \ `POST http://127.0.0.1:${port}/mcp` with `Content-Type: application/json`,\
+      \ `Accept: application/json, text/event-stream`, JSON-RPC method `\"tools/call\"\
+      `, and `params._meta: { endpoint_pid: process.pid }`, parse either SSE (`data:\
+      \ {...}`) or JSON response payloads, and report the outcome via `ctx.ui.notify?.(...)`\
+      \ (`\"Cito listening as <listener_id> (<scope>)\"`, `\"Cito stopped listening\"\
+      `, or error message).\n    2. **Codex Thread Auto-Resolution (`src/adapters/codex.ts`,\
+      \ `src/adapters/index.ts`, `docs/DESIGN.md` §4.2)**:\n       - Export `resolveCodexThreadId(cwd:\
+      \ string, config?: CodexConfig, options?: { allowArchived?: boolean }): string`\
+      \ from `src/adapters/codex.ts` (and re-export via `src/adapters/index.ts`).\n\
+      \       - Inspect `PRAGMA table_info(threads)` in read-only `${codexHome}/state_5.sqlite`\
+      \ to order by `updated_at DESC, rowid DESC` when `updated_at` column exists,\
+      \ else `rowid DESC`.\n       - Prefer `archived = 0 AND cwd = ?` before falling\
+      \ back to `archived = 0` (and archived rows `cwd = ?` then any row when `options?.allowArchived\
+      \ === true`).\n       - Throw `new CitoError(\"BINDING_REQUIRED\", \"Codex thread\
+      \ metadata is required\")` when no matching thread is found or database is unavailable.\n\
+      \    3. **CLI Direct Control (`cito listen` & `cito unlisten` in `src/mcp/cli.ts`,\
+      \ `docs/DESIGN.md` §4.2)**:\n       - Support `cito listen [--scope self|workspace]\
+      \ [--team] [--hub <name>] [--tag <tag>] [--codex[=<thread_id>]] [about...]`\
+      \ and `cito unlisten [--hub <name>] [--codex[=<thread_id>]]`.\n       - Disambiguate\
+      \ caller `_meta`:\n         - Default mode (Pi / Claude Code / Socket Bridge\
+      \ ancestry): sends `_meta: { caller_pid: process.ppid }` (must NOT include `codexThreadId`).\n\
+      \         - `--codex` mode (`--codex`, `--codex=<thread_id>`, or `--codex <uuid>`):\
+      \ sends `_meta: { codexThreadId: explicitId || resolveCodexThreadId(process.cwd(),\
+      \ config, { allowArchived: cmd === \"unlisten\" }), cwd: process.cwd() }` (must\
+      \ NOT include `caller_pid`, `endpoint_pid`, or `pi_pid`).\n       - Call `await\
+      \ ensureDaemon(config)` and `POST http://127.0.0.1:${config.daemonPort}/mcp`\
+      \ (`Content-Type: application/json`, `Accept: application/json, text/event-stream`),\
+      \ decode the SSE `data:` (or JSON) response, print a single-line summary to\
+      \ `stdout` (`Listening as <listener_id> (<scope>): <about>\\n` or `Unlistened\
+      \ (<removed> removed)\\n`) on success, or print the error message to `stderr`\
+      \ with a non-zero exit code.\n    4. **Documentation & Automated Tests (`README.md`,\
+      \ `tests/adapters/pi-host.test.ts`, `tests/adapters/codex.test.ts`, `tests/mcp/`)**:\n\
+      \       - Document `/cito` and `cito listen` / `cito unlisten` (including `!cito\
+      \ listen` / `!cito unlisten` and `--codex`) in `README.md`.\n       - Add comprehensive\
+      \ unit and integration tests in `tests/adapters/pi-host.test.ts`, `tests/adapters/codex.test.ts`,\
+      \ and `tests/mcp/` covering `/cito` completions, subcommands, toggle via `activeBadge`,\
+      \ usage warnings, `resolveCodexThreadId` (`updated_at` vs `rowid`, `cwd` preference,\
+      \ `allowArchived`, `BINDING_REQUIRED`), and `cito listen` / `cito unlisten`\
+      \ CLI execution across default and `--codex` modes.\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `/Users/tefx/Projects/cito` (`src/pi-extension/cito-bridge.ts`, `src/adapters/codex.ts`,\
+      \ `src/adapters/index.ts`, `src/mcp/cli.ts`, `README.md`, `tests/adapters/**`,\
+      \ `tests/mcp/**`). Must preserve 100% standalone `src/pi-extension/cito-bridge.ts`,\
+      \ English-only UI/UX/code/docs, neutral example names, and harness-agnostic\
+      \ `src/mcp/` (except `src/mcp/cli.ts` delegating `--codex` resolution to `src/adapters/codex.ts`).\
+      \ Must not mutate external repositories (`/Users/tefx/dotfiles`, `tela`) or\
+      \ live user `~/.cito` / `~/.codex` directories.\n- **Admit:** Completed Phase\
+      \ `v5`, `docs/DESIGN.md` (§4), `AGENTS.md`, and `README.md`. Verified by `npm\
+      \ run typecheck && npm run build && npm test` exiting `0`. Consumed by `v6.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, build, or unit/E2E test in place\
+      \ within the isolated worktree and clean up any temporary test sockets, SQLite\
+      \ files, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run build && npm test
+    evidence_template: Commands run (npm run typecheck && npm run build && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 non-node imports in
+      cito-bridge.ts, 0 harness refs in src/mcp/ except cli.ts delegating to src/adapters/codex.ts),
+      and verified docs/DESIGN.md §4 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - src/pi-extension/cito-bridge.ts
+    - src/adapters/codex.ts
+    - src/mcp/cli.ts
+    - tests/adapters/pi-host.test.ts
+    - tests/adapters/codex.test.ts
+    agent: senior-engineer
