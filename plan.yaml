@@ -1319,7 +1319,7 @@ phases:
 - id: v5
   name: Cito V5 Theory-Grounded macOS Menu Bar UI, State-Driven Hub Lifecycle & Drawer,
     380pt Session Cards, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/ and zero company/environment-specific names (rda, casdoor, rcatwin,
@@ -1469,7 +1469,7 @@ phases:
   - id: v5.acceptance-and-hygiene-gate
     name: 'V5 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v5` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -1531,3 +1531,45 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-05T07:34:23.436099Z'
+    done_at: '2026-11-05T07:47:26.115034+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v5-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:26387a32b33ededa3af552603eee33e8bcb553a3).
+
+      Test output (npm run typecheck && npm run build && npm test): exit 0 (29 test
+      files, 209 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - \b(codex|pi)\b|x-codex-turn-metadata in src/mcp/: 0 matches
+
+      Requirement results:
+
+      - V5-1-UI-LISTENER-SUMMARY-ABOUT-AND-BRANCH: PROVEN (src/ui/index.ts, src/mcp/service.ts
+      pushUiState, src/macos/cito-ui.swift Listener, tests/mcp/ui.test.ts).
+
+      - V5-2-CLEAN-DISCONNECT-AND-FORCE-LOGIN-SWITCH-ACCOUNT: PROVEN (HubSlot.disconnect()
+      clearing error=null and HubSlot.reconnect(interactive, { forceLogin }) forcing
+      interactive OIDC account switch + principal fencing, tests/mcp/ui.test.ts).
+
+      - V5-3-MEASURE-TEXT-WIDTH-AND-SF-SYMBOL-CONTROLS: PROVEN (measureTextWidth via
+      ceil(NSTextField.fittingSize.width) and MenuControl monochrome SF Symbols lock.fill,
+      person.2.fill, doc.on.doc, stop.fill, tests/ui/lifecycle.test.ts).
+
+      - V5-4-SINGLE-DEFAULT-HUB-ICON-PILL-AND-STATE-DRIVEN-DRAWER: PROVEN (44x22pt
+      compact icon pill omitting ''default'', state-driven 380x32pt Hub action drawer
+      across all statuses, tests/ui/lifecycle.test.ts).
+
+      - V5-5-380PT-PANEL-360PT-CARDS-AND-36PT-FOOTER: PROVEN (380pt menu panel, 360pt
+      72pt/58pt dynamic session cards, Row 1 top-right actions without harness text
+      capsule, Row 2 296pt about, Row 3 untruncated <slug>#<fp4> copy pill + cwd ·
+      branch, 380x36pt footer, tests/ui/lifecycle.test.ts).
+
+      - V5-6-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
+      structural-auditor 01a1aa9d-5136-76d9-ba32-f148aecaba8e and uiux-auditor 01a1aa9d-5184-70ed-856d-49ae586670b6
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
