@@ -1584,7 +1584,7 @@ phases:
 - id: v6
   name: Cito V6 Direct Session Control Commands (Pi /cito & CLI cito listen / cito
     unlisten), Codex Thread Auto-Resolution, Documentation, and Hygiene Gate
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -1614,7 +1614,7 @@ phases:
     name: Implement V6 Pi /cito slash command, Codex thread auto-resolution (resolveCodexThreadId),
       CLI direct control (cito listen / cito unlisten), README documentation, and
       unit/integration tests
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/pi-extension/cito-bridge.ts\n    - src/adapters/codex.ts\n\
       \    - src/adapters/index.ts\n    - src/mcp/cli.ts\n    - README.md\n    - tests/adapters/**\n\
@@ -1709,6 +1709,8 @@ phases:
     - tests/adapters/pi-host.test.ts
     - tests/adapters/codex.test.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-05T08:25:58.516040Z'
   - id: v6.acceptance-and-hygiene-gate
     name: 'V6 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
