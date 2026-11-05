@@ -1584,7 +1584,7 @@ phases:
 - id: v6
   name: Cito V6 Direct Session Control Commands (Pi /cito & CLI cito listen / cito
     unlisten), Codex Thread Auto-Resolution, Documentation, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -1732,7 +1732,7 @@ phases:
   - id: v6.acceptance-and-hygiene-gate
     name: 'V6 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v6` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -1797,3 +1797,45 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-05T08:51:45.597650Z'
+    done_at: '2026-11-05T08:57:16.170874+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v6-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:630b8daecb3221639fae39c838028e937875119f).
+
+      Test output (npm run typecheck && npm run build && npm test): exit 0 (29 test
+      files, 212 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V6-1-STANDALONE-PI-CITO-SLASH-COMMAND: PROVEN (src/pi-extension/cito-bridge.ts
+      /cito registration, completions [''on'', ''team'', ''off''], activeBadge tracking
+      across update/status/session_shutdown, toggle/on/team/off/usage warning, stateless
+      POST /mcp with _meta.endpoint_pid, tests/adapters/pi-host.test.ts, tests/adapters/bridge.test.ts).
+
+      - V6-2-RESOLVE-CODEX-THREAD-ID-SQLITE-LOOKUP: PROVEN (src/adapters/codex.ts
+      resolveCodexThreadId with PRAGMA table_info(threads) updated_at vs rowid ordering,
+      archived = 0 AND cwd = ? precedence, allowArchived fallback, BINDING_REQUIRED
+      error, tests/adapters/codex.test.ts).
+
+      - V6-3-CLI-CITO-LISTEN-AND-UNLISTEN-DIRECT-CONTROL: PROVEN (src/mcp/cli.ts cito
+      listen / cito unlisten with caller_pid vs --codex metadata disambiguation, ensureDaemon,
+      SSE data: decoding, stdout/stderr exit semantics, tests/mcp/http.test.ts).
+
+      - V6-4-README-DOCS-AND-LANGUAGE-PURITY: PROVEN (README.md /cito and cito listen/unlisten
+      documentation, 100% English & neutral naming).
+
+      - V6-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
+      structural-auditor 01a1aae4-5887-7213-8762-44fc93d260b8 and uiux-auditor 01a1aae4-58dc-74cc-bd49-22a65418ed0e
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
