@@ -1882,3 +1882,125 @@ phases:
     and tests/; and pass the iterative code-hygiene gate.'
   depends_on:
   - v6
+  steps:
+  - id: v7.menu-bar-session-discovery-and-dynamic-refresh
+    name: 'Implement V7 Menu Bar on-demand session discovery, 1-click Listen, viewport
+      capping, flicker-free dynamic refresh, README docs, and tests [REQUIRES_SKILL:
+      code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/adapters/types.ts\n    - src/adapters/pi.ts\n\
+      \    - src/adapters/codex.ts\n    - src/adapters/index.ts\n    - src/ui/index.ts\n\
+      \    - src/mcp/service.ts\n    - src/macos/cito-ui.swift\n    - README.md\n\
+      \    - tests/ui/lifecycle.test.ts\n    - tests/adapters/**\n    - tests/mcp/**\n\
+      \  blocked_paths:\n    - plan.yaml\n    - docs/DESIGN.md\n```\n\n- **Deliver:**\n\
+      \  - Implement `docs/DESIGN.md` §4.3 across `src/adapters/`, `src/ui/index.ts`,\
+      \ `src/mcp/service.ts`, `src/macos/cito-ui.swift`, `README.md`, and `tests/`:\n\
+      \    1. **Adapter Session Discovery & Identity Fencing (`src/adapters/types.ts`,\
+      \ `src/adapters/pi.ts`, `src/adapters/codex.ts`, `src/adapters/index.ts`)**:\n\
+      \       - Add `AvailableSessionSummary` (`harness`, `session_id`, `title`, `cwd`,\
+      \ `branch?`, `endpoint_pid?`, `updated_at_ms?`) and `HarnessAdapter.discoverAvailableSessions?(config:\
+      \ CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]>` in\
+      \ `src/adapters/types.ts`.\n       - In `src/adapters/pi.ts`, extend `identifyBridge(harness,\
+      \ pid, config, signal, timeoutMs = 1500)` and implement `SocketBridgeAdapter.discoverAvailableSessions(config,\
+      \ signal)` scanning `${config.stateDir}/sockets/${this.id}-pid-*.sock`, verifying\
+      \ `process.kill(pid, 0)`, probing `identifyBridge(this.id, pid, config, signal,\
+      \ 400)` concurrently (isolating per-socket errors), and returning live sessions\
+      \ sorted by socket `mtimeMs` descending.\n       - In `src/adapters/codex.ts`,\
+      \ implement `CodexDesktopAdapter.discoverAvailableSessions(config, signal)`:\
+      \ check `await (config.codexDesktopRunning ?? codexDesktopRunning)(signal)`\
+      \ first (returning `[]` if not running), open `${config.codexHome}/state_5.sqlite`\
+      \ read-only (`PRAGMA busy_timeout = 100`, closed in `finally`), inspect `PRAGMA\
+      \ table_info(threads)` (returning `[]` if `id`, `cwd`, or `archived` is missing),\
+      \ dynamically build schema-aware user-thread filters (`COALESCE(thread_source,\
+      \ 'user') = 'user'` when `thread_source` exists and `COALESCE(source, '') NOT\
+      \ LIKE '{\"subagent\":%'` when `source` exists), order by `recency_at_ms DESC,\
+      \ updated_at DESC, rowid DESC` (for present columns), `LIMIT 8`, compute `title`\
+      \ in TypeScript (`row.name?.trim() || row.title?.trim() || basename(row.cwd)`),\
+      \ and share the schema-aware user-thread filter across all branches of `resolveCodexThreadId()`.\n\
+      \       - In `src/adapters/index.ts`, export `discoverAllAvailableSessions(config,\
+      \ activeListeners, signal)` (running adapter discovery in parallel, isolating\
+      \ per-adapter errors, excluding active `(harness, session_id)` and `(harness,\
+      \ endpoint_pid)`, ordering live socket sessions before Codex user sessions,\
+      \ and capping at `10` candidates) and enforce `expected_session_id` / `expected_harness`\
+      \ identity fencing in `resolveCaller()` when supplied alongside `endpoint_pid`\
+      \ (throwing `new CitoError(\"SESSION_NOT_OPEN\", \"Session changed since discovery\"\
+      )` on mismatch).\n    2. **UI Wire Protocol, Synchronous `pushUiState()` & Generation-Guarded\
+      \ Discovery (`src/ui/index.ts`, `src/mcp/service.ts`)**:\n       - Extend `DaemonToUiMessage`\
+      \ `state` frame with optional `available?: AvailableSessionSummary[]` and `UiBridge.state(hubs,\
+      \ listeners, available = [])`.\n       - Extend `UiToDaemonAction` and `validAction()`\
+      \ (validated before `a.hub`) to accept `{ op: \"refresh_available\" }` and `{\
+      \ op: \"listen_session\"; harness: string; session_id: string; endpoint_pid?:\
+      \ number; cwd?: string; title?: string }`.\n       - In `CitoService` (`src/mcp/service.ts`),\
+      \ handle `refresh_available` and `listen_session` (sanitizing `about` to `<=\
+      \ 200` chars without newlines, passing `{ endpoint_pid, expected_harness, expected_session_id\
+      \ }` or `{ codexThreadId, cwd, title }`, and calling `void this.refreshAvailableSessions()`).\n\
+      \       - Keep `pushUiState(): void` synchronous, filtering cached `this.availableSessions`\
+      \ against live `local_listeners` rows (`(harness, session_id)` and `(harness,\
+      \ endpoint_pid)`).\n       - Implement generation-guarded `refreshAvailableSessions()`\
+      \ (`const gen = ++this.discoveryGen`, checking `gen === this.discoveryGen &&\
+      \ !this.closing`) and a debounced (`150ms`) `fs.watch` on `${stateDir}/sockets`\
+      \ (ensured via `mkdir(..., { recursive: true, mode: 0o700 })`, with `.on(\"\
+      error\", () => {})` and cleanup in `close()`), triggered from `startUi()`, `refresh_available`,\
+      \ `unlistenById()`, `unlistenAll()`, `revokeSession()`, and socket directory\
+      \ changes.\n    3. **Menu Bar UI Layout, Viewport Capping & Flicker-Free Dynamic\
+      \ Refresh (`src/macos/cito-ui.swift`)**:\n       - Add `Candidate: Decodable,\
+      \ Equatable`, conform `Hub` and `Listener` to `Equatable`, widen `emit(_ action:\
+      \ [String: Any])` so `endpoint_pid` serializes as a JSON integer, conform `Companion`\
+      \ to `NSMenuDelegate` (`menuWillOpen(_:)` emits `[\"op\": \"refresh_available\"\
+      ]`, plus headless `{\"op\": \"test_menu_open\"}`), reuse a persistent `cardMenu`\
+      \ instance in-place (`removeAllItems()` + `update()`), and dispatch `STDIN`\
+      \ lines via `RunLoop.main.perform(inModes: [.common, .eventTracking])`.\n  \
+      \     - Implement the `hasRenderedState` + `pendingMutation` diff guard in `receive()`,\
+      \ the `380x34pt` compact empty strip (`id = \"empty\"`, `\"No active listeners\
+      \ — click + Listen below\"`) when `listeners.isEmpty && !available.isEmpty`,\
+      \ the `AVAILABLE SESSIONS` section (`id = \"available_header\"` `380x24pt` header\
+      \ + `380x36pt` `candidate:<harness>:<session_id>` rows with `22x22pt` muted\
+      \ harness badge, `<title> · <short_cwd>`, and `64x22pt` `listen:<harness>:<session_id>`\
+      \ `[ + Listen ]` button), `FlippedView` `NSScrollView` viewport capping (`active_scroll`\
+      \ at `260pt` when `listeners.count > 4`; `available_scroll` at `144pt` when\
+      \ `available.count > 4`), and append candidate `listen` closures to `menuActions`\
+      \ after `quit`.\n    4. **Documentation & Automated Tests (`README.md`, `tests/ui/lifecycle.test.ts`,\
+      \ `tests/adapters/`, `tests/mcp/`)**:\n       - Update `README.md` to document\
+      \ Menu Bar on-demand session discovery and 1-click `+ Listen`.\n       - Add\
+      \ comprehensive unit and lifecycle tests in `tests/ui/lifecycle.test.ts`, `tests/adapters/`,\
+      \ and `tests/mcp/` covering socket/Codex discovery, subagent/non-user thread\
+      \ filtering, identity fencing, `refresh_available` / `listen_session` validation\
+      \ and execution, synchronous `pushUiState()` candidate removal, `cito-ui.swift`\
+      \ compact empty strip, `AVAILABLE SESSIONS` rows, `active_scroll` / `available_scroll`\
+      \ viewport capping, `test_menu_open`, `pendingMutation` rollback re-render,\
+      \ and `menuActions` index stability.\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `/Users/tefx/Projects/cito` (`src/adapters/**`, `src/ui/index.ts`,\
+      \ `src/mcp/service.ts`, `src/macos/cito-ui.swift`, `README.md`, `tests/ui/**`,\
+      \ `tests/adapters/**`, `tests/mcp/**`). Must preserve English-only UI/UX/code/docs,\
+      \ neutral example names, 100% standalone `src/pi-extension/cito-bridge.ts`,\
+      \ and harness-agnostic `src/mcp/` (zero references to `pi`, `codex`, or `x-codex-turn-metadata`\
+      \ in `src/mcp/` except `src/mcp/cli.ts` delegating `--codex` resolution to `src/adapters/codex.ts`).\
+      \ Must not mutate external repositories (`/Users/tefx/dotfiles`, `tela`) or\
+      \ live user `~/.cito` / `~/.codex` state.\n- **Admit:** Completed Phase `v6`,\
+      \ `docs/DESIGN.md` (§4.3), `AGENTS.md`, and `README.md`. Verified by `npm run\
+      \ typecheck && npm run build && npm test` exiting `0`. Consumed by `v7.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, Swift compilation, build, or unit/E2E\
+      \ test in place within the isolated worktree and clean up any temporary test\
+      \ sockets, SQLite files, watchers, or child processes."
+    verification: npm run typecheck && npm run build && npm test
+    evidence_template: Commands run (npm run typecheck && npm run build && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 harness refs in src/mcp/
+      except cli.ts delegating to src/adapters/codex.ts), and verified docs/DESIGN.md
+      §4.3 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - src/adapters/types.ts
+    - src/adapters/pi.ts
+    - src/adapters/codex.ts
+    - src/adapters/index.ts
+    - src/ui/index.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - tests/ui/lifecycle.test.ts
+    - tests/adapters/codex.test.ts
+    - tests/adapters/pi.test.ts
+    - tests/mcp/ui.test.ts
+    agent: senior-engineer
