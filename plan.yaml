@@ -22,29 +22,37 @@ context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESI
   in cito-ui.swift, MCP 2026-07-28 protocol version support, pure adapter boundary
   with detectExplicitCaller in src/adapters/codex.ts, optional CITO_CLAUDE_CHANNEL=1
   stdio channel bridge, neutral example naming cleanup across src/, docs/, README.md,
-  deploy/, and tests/, and iterative code-hygiene gate), and V5 (Theory-Grounded macOS
+  deploy/, and tests/, and iterative code-hygiene gate), V5 (Theory-Grounded macOS
   Menu Bar UI & Hub State-Machine: extended UiListenerSummary with about & branch,
   clean manual HubSlot.disconnect error clearing and forced interactive OIDC re-login
   on Switch Account, cell-accurate measureTextWidth and monochrome SF Symbol MenuControl,
   zero-entropy default hub elimination with compact 44x22pt icon trigger, state-driven
   380x32pt Hub action drawer, 380pt Control-Center menu panel with 360pt 2-row/3-row
-  session cards and untruncated short-ID copy pill, and iterative code-hygiene gate).
-  Keep full native Claude Code lifecycle/hook integration strictly as ''Proposed Design
-  Suggestion Only — Not Yet Implemented'' in docs/DESIGN.md §5 and README.md, and
-  forbid mutations to external dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V5 — Theory-Grounded
-  macOS Menu Bar UI, Streamable HTTP & Pure Adapter Layer, §§1–5), AGENTS.md, and
-  README.md.
+  session cards and untruncated short-ID copy pill, and iterative code-hygiene gate),
+  and V6 (Direct Session Control Commands per docs/DESIGN.md §4: zero-dependency standalone
+  Pi /cito slash command in src/pi-extension/cito-bridge.ts with activeBadge tracking,
+  completions, and stateless HTTP POST /mcp binding via endpoint_pid; resolveCodexThreadId
+  in src/adapters/codex.ts; CLI direct control cito listen and cito unlisten in src/mcp/cli.ts
+  with caller_pid vs --codex metadata disambiguation; README.md documentation; unit/integration
+  tests; and iterative code-hygiene gate). Keep full native Claude Code lifecycle/hook
+  integration strictly as ''Proposed Design Suggestion Only — Not Yet Implemented''
+  in docs/DESIGN.md §6 and README.md, and forbid mutations to external dotfiles or
+  tela repositories.'
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V5/V6 — Theory-Grounded
+  macOS Menu Bar UI, Streamable HTTP, Pure Adapter Layer & Direct Session Control
+  Commands, §§1–6), AGENTS.md, and README.md.
 
   2. Hard boundaries: Enforce English-only UI/UX, code, and documentation (zero Chinese
   characters in src/, docs/, README.md, AGENTS.md, deploy/) and zero company/environment-specific
   names (rda, casdoor, rcatwin, keppel, mingchen) across src/, docs/, README.md, AGENTS.md,
-  deploy/, and tests/. Keep src/mcp/ 100% harness-agnostic (zero references to pi,
-  codex, or x-codex-turn-metadata) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$).
-  Keep native Claude Code lifecycle integration documented strictly as Proposed Design
-  Suggestion Only — Not Yet Implemented in docs/DESIGN.md §5 and README.md. Do NOT
-  mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito /
-  ~/.codex state during tests; always isolate test state in temporary directories
+  deploy/, and tests/. Keep src/mcp/ harness-agnostic (zero references to pi, codex,
+  or x-codex-turn-metadata in src/mcp/ except src/mcp/cli.ts delegating --codex CLI
+  resolution to src/adapters/codex.ts) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$).
+  Keep src/pi-extension/cito-bridge.ts 100% standalone with zero external or relative
+  imports. Keep native Claude Code lifecycle integration documented strictly as Proposed
+  Design Suggestion Only — Not Yet Implemented in docs/DESIGN.md §6 and README.md.
+  Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
+  / ~/.codex state during tests; always isolate test state in temporary directories
   and ephemeral test nats-server / HTTP instances.
 
   3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ & src/ui/ ->
