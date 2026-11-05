@@ -58,6 +58,24 @@ func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
     field.font = font
     return ceil(field.fittingSize.width)
 }
+func shortPublicId(_ raw: String) -> String {
+    guard let split = raw.lastIndex(of: "-") else { return raw }
+    let slug = String(raw[..<split]), fp4 = String(raw[raw.index(after: split)...].prefix(4))
+    let cleanSlug = slug.count > 18 ? String(slug.prefix(8)) + "…" + String(slug.suffix(7)) : slug
+    return "\(cleanSlug)#\(fp4)"
+}
+func harnessVisual(_ harness: String) -> (symbol: String, tint: NSColor, name: String) {
+    switch harness {
+    case "pi": return ("terminal.fill", .systemIndigo, "Pi")
+    case "codex": return ("sparkles", .systemTeal, "Codex")
+    default: return ("bolt.horizontal.fill", .secondaryLabelColor, harness.capitalized)
+    }
+}
+
+final class KeyPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
 
 /** Menu controls own their clicks so copy and scope changes keep native tracking open. */
 final class MenuControl: NSControl {
@@ -94,6 +112,13 @@ final class MenuControl: NSControl {
     func setLeadingSymbol(_ name: String?) {
         symbolName = name
         if let name = name {
+            if leadingSymbolView == nil {
+                let image = NSImageView(frame: NSRect(x: 6, y: (bounds.height - 12) / 2, width: 12, height: 12))
+                image.contentTintColor = normalColor
+                addSubview(image)
+                leadingSymbolView = image
+            }
+            leadingSymbolView?.frame = NSRect(x: 6, y: (bounds.height - 12) / 2, width: 12, height: 12)
             leadingSymbolView?.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
             leadingSymbolView?.isHidden = false
             label.frame = NSRect(x: 20, y: (bounds.height - 15) / 2, width: bounds.width - 24, height: 15)
@@ -167,7 +192,6 @@ struct Payload: Decodable {
     }
 }
 
-
 func diagnostic(_ message: String) {
     FileHandle.standardError.write(Data(("cito-ui: " + message + "\n").utf8))
 }
@@ -197,7 +221,6 @@ final class ClickView: NSView {
     }
 }
 
-
 final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -216,14 +239,112 @@ struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
     let branch: String?, endpoint_pid: Int?, updated_at_ms: Double?
 }
+struct RemotePeer: Decodable, Equatable {
+    let hub: String, listener_id: String, public_id: String, scoped_id: String
+    let user: String, host_id: String, host_name: String, harness: String
+    let title: String, about: String, scope: String, last_seen_at: String
+    let repo: String?, branch: String?
+    let is_self_principal: Bool?
+}
 struct Frame: Decodable {
     let op: String
     let hubs: [Hub]?
     let listeners: [Listener]?
     let available: [Candidate]?
+    let my_remote_listeners: [RemotePeer]?
+    let directory_online_count: Int?
+    let peers: [RemotePeer]?
+    let matched_count: Int?
+    let online_count: Int?
     let payload: Payload?
 }
-final class Companion: NSObject, NSMenuDelegate {
+
+final class DirectoryPeerCellView: NSTableCellView {
+    let badgeView: NSView
+    let badgeIcon: NSImageView
+    let line1TitleLabel: NSTextField
+    let line1RepoLabel: NSTextField
+    let line2UserLabel: NSTextField
+    let line2MetaLabel: NSTextField
+    let copyControl: MenuControl
+
+    override init(frame frameRect: NSRect) {
+        badgeView = roundedView(NSRect(x: 14, y: 12, width: 28, height: 28), radius: 7, color: .clear)
+        badgeIcon = NSImageView(frame: NSRect(x: 6, y: 6, width: 16, height: 16))
+        badgeView.addSubview(badgeIcon)
+        line1TitleLabel = textLabel("", NSRect(x: 52, y: 26, width: 180, height: 18), size: 13, weight: .semibold, color: .labelColor)
+        line1RepoLabel = textLabel("", NSRect(x: 232, y: 26, width: 180, height: 18), size: 11.5, weight: .regular, color: .secondaryLabelColor)
+        line2UserLabel = textLabel("", NSRect(x: 52, y: 7, width: 80, height: 16), size: 11.5, weight: .medium, color: .labelColor)
+        line2MetaLabel = textLabel("", NSRect(x: 132, y: 7, width: 280, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor)
+        copyControl = MenuControl("", frame: NSRect(x: 440, y: 16, width: 104, height: 22), leadingSymbol: "doc.on.doc")
+        super.init(frame: frameRect)
+        wantsLayer = true
+        addSubview(badgeView)
+        addSubview(line1TitleLabel)
+        addSubview(line1RepoLabel)
+        addSubview(line2UserLabel)
+        addSubview(line2MetaLabel)
+        addSubview(copyControl)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func configure(with peer: RemotePeer, selected: Bool) {
+        identifier = NSUserInterfaceItemIdentifier("dir_peer:\(peer.scoped_id)")
+        frame = NSRect(x: 0, y: 0, width: 560, height: 52)
+        layer?.backgroundColor = selected ? NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor : NSColor.clear.cgColor
+        let visual = harnessVisual(peer.harness)
+        badgeView.layer?.backgroundColor = visual.tint.withAlphaComponent(0.14).cgColor
+        badgeIcon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name)
+        badgeIcon.contentTintColor = visual.tint
+
+        let short = shortPublicId(peer.public_id)
+        let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 24
+        copyControl.feedbackTimer?.invalidate()
+        copyControl.frame = NSRect(x: 544 - copyWidth, y: 16, width: copyWidth, height: 22)
+        copyControl.setLeadingSymbol("doc.on.doc")
+        copyControl.label.font = copyFont
+        copyControl.label.stringValue = short
+        copyControl.label.textColor = copyControl.normalColor
+        copyControl.setAccessibilityLabel(short)
+        copyControl.toolTip = peer.scoped_id
+        copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
+        copyControl.pressed = { [weak copyControl] in
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+            copyControl?.copied()
+        }
+
+        let availWidth = max(120, 544 - copyWidth - 60)
+        let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let titleW = min(availWidth, measureTextWidth(peer.title, font: titleFont) + 4)
+        line1TitleLabel.stringValue = peer.title
+        line1TitleLabel.frame = NSRect(x: 52, y: 26, width: titleW, height: 18)
+        line1TitleLabel.identifier = NSUserInterfaceItemIdentifier("dir_title:\(peer.scoped_id)")
+
+        let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
+        let repoText = (peer.repo ?? "").isEmpty ? branchSuffix : " · \(peer.repo ?? "")\(branchSuffix)"
+        line1RepoLabel.stringValue = repoText
+        line1RepoLabel.frame = NSRect(x: 52 + titleW, y: 26, width: max(0, availWidth - titleW), height: 18)
+        line1RepoLabel.identifier = NSUserInterfaceItemIdentifier("dir_repo:\(peer.scoped_id)")
+
+        let userText = "@\(peer.user)"
+        let userFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let userW = min(availWidth, measureTextWidth(userText, font: userFont) + 2)
+        line2UserLabel.stringValue = userText
+        line2UserLabel.frame = NSRect(x: 52, y: 7, width: userW, height: 16)
+        line2UserLabel.identifier = NSUserInterfaceItemIdentifier("dir_user:\(peer.scoped_id)")
+
+        let cleanHost = peer.host_name.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
+        let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
+        line2MetaLabel.stringValue = "@\(hostText) · \(peer.about)"
+        line2MetaLabel.frame = NSRect(x: 52 + userW, y: 7, width: max(0, availWidth - userW), height: 16)
+        line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("dir_meta:\(peer.scoped_id)")
+    }
+}
+
+final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
     let dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
     var status: NSStatusItem?
@@ -246,9 +367,27 @@ final class Companion: NSObject, NSMenuDelegate {
     var hubs: [Hub] = []
     var listeners: [Listener] = []
     var available: [Candidate] = []
+    var myRemote: [RemotePeer] = []
+    var myRemoteCollapsed = false
+    var collapsedGroups = Set<String>()
+    var directoryOnlineCount = 0
+    var directoryMatchedCount = 0
+    var directoryAllPeers: [RemotePeer] = []
+    var directoryFilteredPeers: [RemotePeer] = []
+    var directoryVisible = false
+    var directoryQuery = ""
+    var directoryScopeFilter = "all"
+    var directoryHarnessFilter = "all"
+    var directorySelectedIndex = 0
+    var directoryPanel: KeyPanel?
+    var directorySearchField: NSSearchField?
+    var directoryTableView: NSTableView?
+    var directorySummaryLabel: NSTextField?
+    var directoryFacetControls: [String: MenuControl] = [:]
     var hasRenderedState = false
     var pendingMutation = false
     var rebuildCount = 0
+
     func menuWillOpen(_ menu: NSMenu) {
         emit(["op": "refresh_available"])
     }
@@ -286,6 +425,25 @@ final class Companion: NSObject, NSMenuDelegate {
             }
         }
     }
+    func findControl(in view: NSView, id: String) -> MenuControl? {
+        if view.identifier?.rawValue == id, let control = view as? MenuControl { return control }
+        if let table = view as? NSTableView {
+            let count = min(table.numberOfRows, 100)
+            for r in 0..<count {
+                if let cell = table.view(atColumn: 0, row: r, makeIfNecessary: true),
+                   let found = findControl(in: cell, id: id) {
+                    return found
+                }
+            }
+        }
+        let children: [NSView]
+        if let scroll = view as? NSScrollView, let doc = scroll.documentView {
+            children = [doc]
+        } else {
+            children = view.subviews
+        }
+        return children.compactMap { findControl(in: $0, id: id) }.first
+    }
     func receive(_ data: Data) {
         // Headless hooks use the exact same menu handlers and banner click path.
         if headless, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -293,14 +451,28 @@ final class Companion: NSObject, NSMenuDelegate {
             if op == "test_click" { hide(clicked: true); return }
             if op == "test_inspect" { inspectMenu(); return }
             if op == "test_menu_open" { menuWillOpen(cardMenu); return }
+            if op == "test_directory_query", let query = object["query"] as? String {
+                if directoryPanel == nil { openDirectoryPanel() }
+                directorySearchField?.stringValue = query
+                directoryQuery = query
+                applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                emit(["op": "query_directory", "query": directoryQuery, "scope": directoryScopeFilter, "harness": directoryHarnessFilter])
+                return
+            }
+            if op == "test_directory_key", let key = object["key"] as? String {
+                handleDirectoryKey(key)
+                return
+            }
             if op == "test_control", let id = object["id"] as? String {
-                func find(_ view: NSView) -> MenuControl? {
-                    if view.identifier?.rawValue == id, let control = view as? MenuControl { return control }
-                    let children = (view as? NSScrollView)?.documentView?.subviews ?? view.subviews
-                    return children.compactMap { find($0) }.first
-                }
                 for item in cardMenu.items {
-                    if let view = item.view, let control = find(view) { _ = control.accessibilityPerformPress(); break }
+                    if let view = item.view, let control = findControl(in: view, id: id) {
+                        _ = control.accessibilityPerformPress()
+                        return
+                    }
+                }
+                if let rootView = directoryPanel?.contentView, let control = findControl(in: rootView, id: id) {
+                    _ = control.accessibilityPerformPress()
+                    return
                 }
                 return
             }
@@ -313,7 +485,9 @@ final class Companion: NSObject, NSMenuDelegate {
            h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "oidc"].contains($0.auth_mode) }),
            l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
             let a = frame.available ?? []
-            if hasRenderedState && !pendingMutation && h == hubs && l == listeners && a == available {
+            let r = frame.my_remote_listeners ?? []
+            let onlineCount = frame.directory_online_count ?? max(directoryOnlineCount, r.count)
+            if hasRenderedState && !pendingMutation && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
                 let count = uniqueSessionCount
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
                 statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
@@ -321,11 +495,17 @@ final class Companion: NSObject, NSMenuDelegate {
                     formatStatusButton(button, count: count, image: statusImage)
                 }
             } else {
-                hubs = h; listeners = l; available = a
+                hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
                 hasRenderedState = true; pendingMutation = false
                 rebuild()
             }
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
+        } else if frame.op == "directory", let peers = frame.peers {
+            directoryAllPeers = peers
+            directoryOnlineCount = frame.online_count ?? peers.count
+            applyDirectoryFilter(fromDaemonFrame: true, daemonMatchedCount: frame.matched_count)
+            if hasRenderedState { rebuild() }
+            if headless { diagnostic("directory peers=\(peers.count) matched=\(directoryMatchedCount) online=\(directoryOnlineCount)") }
         } else if frame.op == "banner", let value = frame.payload, !value.target_harness.isEmpty {
             if visible, let previous = payload, previous.target_session_id == value.target_session_id && previous.target_harness == value.target_harness && previous.effective_wake == value.effective_wake {
                 displayedCount += value.count ?? 1
@@ -359,8 +539,16 @@ final class Companion: NSObject, NSMenuDelegate {
         func register(_ action: @escaping () -> Void) { menuActions.append(action) }
         let header = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 40))
         header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 32, height: 18), size: 13, weight: .bold))
-        header.addSubview(textLabel(count > 0 ? "\(count) listening" : "Idle",
-            NSRect(x: 50, y: 12, width: 84, height: 17), size: 11.5, color: .secondaryLabelColor))
+        let subtitleText: String
+        if count > 0 {
+            subtitleText = myRemote.isEmpty ? "\(count) listening" : "\(count) listening · \(myRemote.count) remote"
+        } else {
+            subtitleText = myRemote.isEmpty ? "Idle" : "Idle · \(myRemote.count) remote"
+        }
+        let subWidth = ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8
+        let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: .secondaryLabelColor)
+        subLabel.identifier = NSUserInterfaceItemIdentifier("header_subtitle")
+        header.addSubview(subLabel)
         _ = host(header, id: "header")
         var drawerItems: [String: NSMenuItem] = [:]
         var hubActions: [() -> Void] = []
@@ -416,11 +604,13 @@ final class Companion: NSObject, NSMenuDelegate {
             item.isHidden = selectedHubs.contains(hub.name) ? false : !autoExpand
             drawerItems[hub.name] = item
         }
-        let hubStrip = NSScrollView(frame: NSRect(x: 138, y: 9, width: 230, height: 22))
+        let stripX = max(138, 54 + subWidth)
+        let stripWidth = max(44, 368 - stripX)
+        let hubStrip = NSScrollView(frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22))
         hubStrip.drawsBackground = false; hubStrip.hasHorizontalScroller = false
-        let pillContainer = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 22))
+        let pillContainer = NSView(frame: NSRect(x: 0, y: 0, width: stripWidth, height: 22))
         hubStrip.documentView = pillContainer; header.addSubview(hubStrip)
-        var pillX: CGFloat = 230
+        var pillX: CGFloat = stripWidth
         for hub in hubs.reversed() {
             let color: NSColor = hub.status == "connected" ? .systemGreen : hub.status == "connecting" ? .systemOrange : hub.status == "auth_required" ? .systemRed : .systemGray
             let isSingleDefault = hubs.count == 1 && hub.name == "default"
@@ -469,7 +659,7 @@ final class Companion: NSObject, NSMenuDelegate {
         }
         if pillX < 0 {
             for pill in pillContainer.subviews { pill.frame.origin.x -= pillX }
-            pillContainer.frame.size.width = 230 - pillX
+            pillContainer.frame.size.width = stripWidth - pillX
         }
         var activeRows: [(id: String, view: NSView)] = []
         let home = NSHomeDirectory()
@@ -484,16 +674,10 @@ final class Companion: NSObject, NSMenuDelegate {
                 color: .labelColor.withAlphaComponent(0.045))
             row.addSubview(card)
             activeRows.append((id: "session:\(listener.scoped_id)", view: row))
-            let symbol: String, tint: NSColor, harnessName: String
-            switch listener.harness {
-            case "pi": symbol = "terminal.fill"; tint = .systemIndigo; harnessName = "Pi"
-            case "codex": symbol = "sparkles"; tint = .systemTeal; harnessName = "Codex"
-            case "claude": symbol = "cpu.fill"; tint = .systemOrange; harnessName = "Claude"
-            default: symbol = "bolt.horizontal.fill"; tint = .secondaryLabelColor; harnessName = listener.harness.capitalized
-            }
-            let badge = roundedView(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34), radius: 8, color: tint.withAlphaComponent(0.13))
+            let visual = harnessVisual(listener.harness)
+            let badge = roundedView(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34), radius: 8, color: visual.tint.withAlphaComponent(0.13))
             let icon = NSImageView(frame: NSRect(x: 8, y: 8, width: 18, height: 18))
-            icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: harnessName); icon.contentTintColor = tint
+            icon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name); icon.contentTintColor = visual.tint
             badge.addSubview(icon); card.addSubview(badge)
             let actionWidth: CGFloat = listener.can_jump ? 114 : 88
             let title = textLabel(listener.title + (hubs.count > 1 ? " · \(listener.hub)" : ""),
@@ -503,13 +687,7 @@ final class Companion: NSObject, NSMenuDelegate {
                 let aboutLabel = textLabel(aboutText, NSRect(x: 54, y: 28, width: 296, height: 16), size: 11.5, color: .secondaryLabelColor)
                 aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
             }
-            let raw = listener.public_id, split = raw.lastIndex(of: "-")
-            let short: String
-            if let split = split {
-                let slug = String(raw[..<split]), fp4 = String(raw[raw.index(after: split)...].prefix(4))
-                let cleanSlug = slug.count > 18 ? String(slug.prefix(8)) + "…" + String(slug.suffix(7)) : slug
-                short = "\(cleanSlug)#\(fp4)"
-            } else { short = raw }
+            let short = shortPublicId(listener.public_id)
             let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
             let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 24
             let copy = MenuControl(short, frame: NSRect(x: 54, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
@@ -597,6 +775,75 @@ final class Companion: NSObject, NSMenuDelegate {
                 row.addSubview(pill); _ = host(row, id: "empty")
             }
         }
+        // Zone 2 — My Other Hosts
+        if !myRemote.isEmpty {
+            let remoteHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 26))
+            remoteHeader.addSubview(roundedView(NSRect(x: 12, y: 24, width: 356, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+            let toggleRemote = MenuControl("MY OTHER HOSTS · \(myRemote.count)", frame: NSRect(x: 8, y: 1, width: 364, height: 22),
+                leadingSymbol: myRemoteCollapsed ? "chevron.right" : "chevron.down", color: .secondaryLabelColor, radius: 6)
+            toggleRemote.identifier = NSUserInterfaceItemIdentifier("toggle_my_remote")
+            toggleRemote.normalBackground = .clear
+            toggleRemote.layer?.backgroundColor = NSColor.clear.cgColor
+            toggleRemote.label.font = .systemFont(ofSize: 10, weight: .semibold)
+            toggleRemote.label.alignment = .left
+            toggleRemote.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.myRemoteCollapsed.toggle()
+                self.rebuild()
+            }
+            remoteHeader.addSubview(toggleRemote)
+            _ = host(remoteHeader, id: "my_remote_header")
+            if !myRemoteCollapsed {
+                var remoteRows: [(id: String, view: NSView)] = []
+                let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+                for peer in myRemote {
+                    let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 34))
+                    let rowId = "remote:\(peer.scoped_id)"
+                    row.identifier = NSUserInterfaceItemIdentifier(rowId)
+                    let hostIcon = NSImageView(frame: NSRect(x: 16, y: 10, width: 14, height: 14))
+                    hostIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Remote host")
+                    hostIcon.contentTintColor = .secondaryLabelColor
+                    row.addSubview(hostIcon)
+                    let short = shortPublicId(peer.public_id)
+                    let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 24
+                    let copy = MenuControl(short, frame: NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20), leadingSymbol: "doc.on.doc")
+                    copy.label.font = copyFont
+                    copy.toolTip = peer.scoped_id
+                    copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
+                    copy.pressed = { [weak copy] in
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+                        copy?.copied()
+                    }
+                    row.addSubview(copy)
+                    let cleanHost = peer.host_name.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
+                    let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
+                    let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
+                    let info = textLabel("\(hostText) · \(peer.title)\(branchSuffix)",
+                        NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
+                    info.lineBreakMode = .byTruncatingMiddle
+                    info.toolTip = "\(peer.scoped_id) — \(peer.about)"
+                    row.addSubview(info)
+                    remoteRows.append((id: rowId, view: row))
+                }
+                if remoteRows.count <= 3 {
+                    for (id, row) in remoteRows { _ = host(row, id: id) }
+                } else {
+                    let totalHeight = CGFloat(remoteRows.count) * 34
+                    let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 102))
+                    scroll.drawsBackground = false; scroll.hasVerticalScroller = true
+                    scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
+                    let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: 380, height: totalHeight))
+                    for (idx, (_, row)) in remoteRows.enumerated() {
+                        row.frame.origin = NSPoint(x: 0, y: CGFloat(idx) * 34)
+                        doc.addSubview(row)
+                    }
+                    scroll.documentView = doc; _ = host(scroll, id: "my_remote_scroll")
+                }
+            }
+        }
+        // Zone 3 — Available Sessions with Collapsible Harness Groups
         var candidateActions: [() -> Void] = []
         if !available.isEmpty {
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
@@ -604,59 +851,124 @@ final class Companion: NSObject, NSMenuDelegate {
             availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: 220, height: 14),
                 size: 10, weight: .semibold, color: .secondaryLabelColor))
             _ = host(availHeader, id: "available_header")
-            var candidateRows: [(id: String, view: NSView)] = []
-            for c in available {
-                let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
-                let rowId = "candidate:\(c.harness):\(c.session_id)"
-                row.identifier = NSUserInterfaceItemIdentifier(rowId)
-                let symbol: String, tint: NSColor, harnessName: String
-                switch c.harness {
-                case "pi": symbol = "terminal.fill"; tint = .systemIndigo; harnessName = "Pi"
-                case "codex": symbol = "sparkles"; tint = .systemTeal; harnessName = "Codex"
-                case "claude": symbol = "cpu.fill"; tint = .systemOrange; harnessName = "Claude"
-                default: symbol = "bolt.horizontal.fill"; tint = .secondaryLabelColor; harnessName = c.harness.capitalized
+            var groupsByHarness: [String: [Candidate]] = [:]
+            for c in available { groupsByHarness[c.harness, default: []].append(c) }
+            let orderedHarnesses = groupsByHarness.keys.sorted { a, b in
+                let rankA = a == "pi" ? 0 : a == "codex" ? 1 : 2
+                let rankB = b == "pi" ? 0 : b == "codex" ? 1 : 2
+                return rankA != rankB ? rankA < rankB : a < b
+            }
+            let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
+            for (harness, items) in groupedCandidates {
+                let visual = harnessVisual(harness)
+                let isCollapsed = collapsedGroups.contains(harness)
+                let groupTitle: String
+                switch harness {
+                case "pi": groupTitle = "Pi · \(items.count) open"
+                case "codex": groupTitle = "Codex · \(items.count) recent"
+                default: groupTitle = "\(harness.capitalized) · \(items.count) available"
                 }
-                let badge = roundedView(NSRect(x: 12, y: 7, width: 22, height: 22), radius: 6, color: tint.withAlphaComponent(0.08))
-                let icon = NSImageView(frame: NSRect(x: 5, y: 5, width: 12, height: 12))
-                icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: harnessName)
-                icon.contentTintColor = tint.withAlphaComponent(0.75)
-                badge.addSubview(icon); row.addSubview(badge)
-                let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
-                let info = textLabel("\(c.title) · \(shortCwd)", NSRect(x: 42, y: 9, width: 254, height: 18), size: 12, weight: .regular, color: .labelColor)
-                info.lineBreakMode = .byTruncatingMiddle
-                info.toolTip = "\(c.title) — \(c.cwd)"
-                row.addSubview(info)
-                let listenBtn = MenuControl("Listen", frame: NSRect(x: 304, y: 7, width: 64, height: 22), leadingSymbol: "plus", radius: 6)
-                listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
-                listenBtn.toolTip = "Start listening in \(c.title)"
-                let listenRun = { [weak self, weak listenBtn] in
+                let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
+                let groupControl = MenuControl(groupTitle, frame: NSRect(x: 8, y: 2, width: 364, height: 24), radius: 6)
+                groupControl.identifier = NSUserInterfaceItemIdentifier("toggle_group:\(harness)")
+                groupControl.normalBackground = .clear
+                groupControl.layer?.backgroundColor = NSColor.clear.cgColor
+                groupControl.symbolName = isCollapsed ? "chevron.right" : "chevron.down"
+                let chev = NSImageView(frame: NSRect(x: 6, y: 7, width: 10, height: 10))
+                chev.image = NSImage(systemSymbolName: isCollapsed ? "chevron.right" : "chevron.down", accessibilityDescription: nil)
+                chev.contentTintColor = .secondaryLabelColor
+                groupControl.addSubview(chev)
+                let badge = roundedView(NSRect(x: 20, y: 3, width: 18, height: 18), radius: 5, color: visual.tint.withAlphaComponent(0.12))
+                let badgeIcon = NSImageView(frame: NSRect(x: 3, y: 3, width: 12, height: 12))
+                badgeIcon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name)
+                badgeIcon.contentTintColor = visual.tint
+                badge.addSubview(badgeIcon)
+                groupControl.addSubview(badge)
+                groupControl.label.frame = NSRect(x: 44, y: 4, width: 310, height: 16)
+                groupControl.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
+                groupControl.label.alignment = .left
+                groupControl.pressed = { [weak self] in
                     guard let self = self else { return }
-                    self.pendingMutation = true
-                    listenBtn?.setLeadingSymbol(nil)
-                    listenBtn?.label.stringValue = "…"
-                    listenBtn?.setAccessibilityLabel("…")
-                    var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.title]
-                    if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
-                    self.emit(action)
+                    if self.collapsedGroups.contains(harness) { self.collapsedGroups.remove(harness) }
+                    else { self.collapsedGroups.insert(harness) }
+                    self.rebuild()
                 }
-                listenBtn.pressed = listenRun; row.addSubview(listenBtn)
-                candidateActions.append({ [weak listenBtn] in listenBtn?.pressed?() })
-                candidateRows.append((id: rowId, view: row))
-            }
-            if candidateRows.count <= 4 {
-                for (id, row) in candidateRows { _ = host(row, id: id) }
-            } else {
-                let totalHeight = CGFloat(candidateRows.count) * 36
-                let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 144))
-                scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-                scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
-                let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: 380, height: totalHeight))
-                for (idx, (_, row)) in candidateRows.enumerated() {
-                    row.frame.origin = NSPoint(x: 0, y: CGFloat(idx) * 36)
-                    doc.addSubview(row)
+                groupRow.addSubview(groupControl)
+                _ = host(groupRow, id: "group:\(harness)")
+                if !isCollapsed {
+                    var candidateRows: [(id: String, view: NSView)] = []
+                    for c in items {
+                        let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
+                        let rowId = "candidate:\(c.harness):\(c.session_id)"
+                        row.identifier = NSUserInterfaceItemIdentifier(rowId)
+                        let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
+                        let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
+                        let info = textLabel("\(c.title) · \(shortCwd)\(branchSuffix)", NSRect(x: 24, y: 9, width: 274, height: 18),
+                            size: 12, weight: .regular, color: .labelColor)
+                        info.lineBreakMode = .byTruncatingMiddle
+                        info.toolTip = "\(c.title) — \(c.cwd)"
+                        row.addSubview(info)
+                        let listenBtn = MenuControl("Listen", frame: NSRect(x: 304, y: 7, width: 64, height: 22), leadingSymbol: "plus", radius: 6)
+                        listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
+                        listenBtn.toolTip = "Start listening in \(c.title)"
+                        let listenRun = { [weak self, weak listenBtn] in
+                            guard let self = self else { return }
+                            self.pendingMutation = true
+                            listenBtn?.setLeadingSymbol(nil)
+                            listenBtn?.label.stringValue = "…"
+                            listenBtn?.setAccessibilityLabel("…")
+                            var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.title]
+                            if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
+                            self.emit(action)
+                        }
+                        listenBtn.pressed = listenRun; row.addSubview(listenBtn)
+                        candidateActions.append({ [weak listenBtn] in listenBtn?.pressed?() })
+                        candidateRows.append((id: rowId, view: row))
+                    }
+                    if candidateRows.count <= 4 {
+                        for (id, row) in candidateRows { _ = host(row, id: id) }
+                    } else {
+                        let totalHeight = CGFloat(candidateRows.count) * 36
+                        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 144))
+                        scroll.drawsBackground = false; scroll.hasVerticalScroller = true
+                        scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
+                        let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: 380, height: totalHeight))
+                        for (idx, (_, row)) in candidateRows.enumerated() {
+                            row.frame.origin = NSPoint(x: 0, y: CGFloat(idx) * 36)
+                            doc.addSubview(row)
+                        }
+                        let scrollId = groupedCandidates.count == 1 ? "available_scroll" : "available_scroll:\(harness)"
+                        scroll.documentView = doc; _ = host(scroll, id: scrollId)
+                    }
                 }
-                scroll.documentView = doc; _ = host(scroll, id: "available_scroll")
             }
+        }
+        // Zone 4 — Network Directory Launcher Row
+        if !hubs.isEmpty {
+            let dirRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 34))
+            dirRow.addSubview(roundedView(NSRect(x: 12, y: 32, width: 356, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+            let openDir = MenuControl("Search Network Directory…", frame: NSRect(x: 10, y: 4, width: 360, height: 26),
+                leadingSymbol: "magnifyingglass", radius: 7)
+            openDir.identifier = NSUserInterfaceItemIdentifier("open_directory")
+            openDir.label.font = .systemFont(ofSize: 11.5, weight: .medium)
+            openDir.label.alignment = .left
+            openDir.label.frame = NSRect(x: 24, y: 5, width: 230, height: 16)
+            if directoryOnlineCount > 0 {
+                let countBadge = textLabel("\(directoryOnlineCount) online", NSRect(x: 256, y: 5, width: 96, height: 16),
+                    size: 11, weight: .regular, color: .secondaryLabelColor)
+                countBadge.alignment = .right
+                countBadge.identifier = NSUserInterfaceItemIdentifier("directory_online_badge")
+                openDir.addSubview(countBadge)
+            }
+            openDir.pressed = { [weak self, weak menu] in
+                guard let self = self else { return }
+                menu?.cancelTracking()
+                self.openDirectoryPanel()
+                self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
+            }
+            dirRow.addSubview(openDir)
+            _ = host(dirRow, id: "directory_row")
         }
         let footer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
         if !listeners.isEmpty {
@@ -677,10 +989,302 @@ final class Companion: NSObject, NSMenuDelegate {
         menu.update()
     }
     @objc func quitMenu() { emit(["op": "quit"]) }
+
+    // MARK: - Surface 2: Spotlight-Style Network Directory Panel (560 × 440 pt KeyPanel: NSPanel)
+
+    func ensureDirectoryPanel() {
+        if directoryPanel != nil { return }
+        let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
+                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isFloatingPanel = true
+        window.hidesOnDeactivate = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 440))
+        root.identifier = NSUserInterfaceItemIdentifier("directory_panel")
+        root.wantsLayer = true
+        root.layer?.cornerRadius = 14
+        root.layer?.cornerCurve = .continuous
+        root.layer?.masksToBounds = true
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.15).cgColor
+
+        let effect = NSVisualEffectView(frame: root.bounds)
+        effect.material = .popover
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        root.addSubview(effect)
+
+        // Top Search Bar (560 × 46 pt, y: 394)
+        let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
+        searchBar.identifier = NSUserInterfaceItemIdentifier("directory_search_bar")
+        let searchField = NSSearchField(frame: NSRect(x: 16, y: 9, width: 500, height: 28))
+        searchField.identifier = NSUserInterfaceItemIdentifier("directory_search")
+        searchField.placeholderString = "Search by user, repo, title, host, or #id…"
+        searchField.delegate = self
+        searchBar.addSubview(searchField)
+        directorySearchField = searchField
+
+        let closeBtn = MenuControl("Close", frame: NSRect(x: 524, y: 11, width: 24, height: 24), symbol: "xmark")
+        closeBtn.identifier = NSUserInterfaceItemIdentifier("close_directory")
+        closeBtn.toolTip = "Close Directory"
+        closeBtn.pressed = { [weak self] in self?.closeDirectoryPanel(emitAction: true) }
+        searchBar.addSubview(closeBtn)
+        searchBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+        root.addSubview(searchBar)
+
+        // Facet Bar (560 × 32 pt, y: 362)
+        let facetBar = NSView(frame: NSRect(x: 0, y: 362, width: 560, height: 32))
+        facetBar.identifier = NSUserInterfaceItemIdentifier("directory_facet_bar")
+        let scopePills: [(String, String, CGFloat, CGFloat)] = [
+            ("dir_scope:all", "All", 16, 42),
+            ("dir_scope:mine", "My Hosts", 62, 76)
+        ]
+        for (id, title, x, w) in scopePills {
+            let pill = MenuControl(title, frame: NSRect(x: x, y: 5, width: w, height: 22), radius: 11)
+            pill.identifier = NSUserInterfaceItemIdentifier(id)
+            pill.label.font = .systemFont(ofSize: 11, weight: .medium)
+            let scopeVal = id == "dir_scope:mine" ? "mine" : "all"
+            pill.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.directoryScopeFilter = scopeVal
+                self.updateDirectoryFacetStyles()
+                self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
+            }
+            facetBar.addSubview(pill)
+            directoryFacetControls[id] = pill
+        }
+        let harnessPills: [(String, String, CGFloat, CGFloat)] = [
+            ("dir_harness:all", "All Harnesses", 154, 98),
+            ("dir_harness:pi", "Pi", 256, 42),
+            ("dir_harness:codex", "Codex", 302, 58)
+        ]
+        for (id, title, x, w) in harnessPills {
+            let pill = MenuControl(title, frame: NSRect(x: x, y: 5, width: w, height: 22), radius: 11)
+            pill.identifier = NSUserInterfaceItemIdentifier(id)
+            pill.label.font = .systemFont(ofSize: 11, weight: .medium)
+            let harnessVal = String(id.dropFirst("dir_harness:".count))
+            pill.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.directoryHarnessFilter = harnessVal
+                self.updateDirectoryFacetStyles()
+                self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
+            }
+            facetBar.addSubview(pill)
+            directoryFacetControls[id] = pill
+        }
+        facetBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+        root.addSubview(facetBar)
+
+        // Virtualized Result List (560 × 334 pt, y: 28)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 28, width: 560, height: 334))
+        scroll.identifier = NSUserInterfaceItemIdentifier("directory_scroll")
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 560, height: 334))
+        table.identifier = NSUserInterfaceItemIdentifier("directory_table")
+        if #available(macOS 11.0, *) { table.style = .plain }
+        table.rowHeight = 52
+        table.intercellSpacing = .zero
+        table.headerView = nil
+        table.backgroundColor = .clear
+        table.selectionHighlightStyle = .regular
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("peer"))
+        col.width = 560
+        table.addTableColumn(col)
+        table.delegate = self
+        table.dataSource = self
+        scroll.documentView = table
+        directoryTableView = table
+        root.addSubview(scroll)
+
+        // Footer Shortcut Bar (560 × 28 pt, y: 0)
+        let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 28))
+        footerBar.identifier = NSUserInterfaceItemIdentifier("directory_footer")
+        footerBar.addSubview(roundedView(NSRect(x: 0, y: 27, width: 560, height: 1), radius: 0, color: .labelColor.withAlphaComponent(0.08)))
+        let shortcuts = textLabel("↵ Copy Selected ID    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: .secondaryLabelColor)
+        shortcuts.identifier = NSUserInterfaceItemIdentifier("directory_shortcuts")
+        footerBar.addSubview(shortcuts)
+        let summary = textLabel("0 of 0 online", NSRect(x: 320, y: 6, width: 224, height: 16), size: 11, color: .secondaryLabelColor)
+        summary.alignment = .right
+        summary.identifier = NSUserInterfaceItemIdentifier("directory_summary")
+        footerBar.addSubview(summary)
+        directorySummaryLabel = summary
+        root.addSubview(footerBar)
+
+        window.contentView = root
+        directoryPanel = window
+        updateDirectoryFacetStyles()
+    }
+
+    func updateDirectoryFacetStyles() {
+        for (id, pill) in directoryFacetControls {
+            let active = (id == "dir_scope:\(directoryScopeFilter)") || (id == "dir_harness:\(directoryHarnessFilter)")
+            pill.normalBackground = active ? NSColor.controlAccentColor.withAlphaComponent(0.18) : NSColor.labelColor.withAlphaComponent(0.06)
+            pill.normalColor = active ? .controlAccentColor : .labelColor
+            pill.layer?.backgroundColor = pill.normalBackground.cgColor
+            pill.label.textColor = pill.normalColor
+        }
+    }
+
+    func openDirectoryPanel() {
+        ensureDirectoryPanel()
+        directoryVisible = true
+        applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+        if !headless, let window = directoryPanel {
+            if let screen = NSScreen.main {
+                let area = screen.visibleFrame
+                window.setFrameOrigin(NSPoint(x: area.midX - 280, y: area.midY - 180))
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            if let field = directorySearchField { window.makeFirstResponder(field) }
+        }
+    }
+
+    func closeDirectoryPanel(emitAction: Bool) {
+        directoryVisible = false
+        directoryPanel?.orderOut(nil)
+        if emitAction { emit(["op": "close_directory"]) }
+    }
+
+    func matchesDirectoryPeer(_ peer: RemotePeer) -> Bool {
+        if directoryScopeFilter == "mine" && peer.is_self_principal != true { return false }
+        if directoryHarnessFilter != "all" && !directoryHarnessFilter.isEmpty && peer.harness != directoryHarnessFilter { return false }
+        let tokens = directoryQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        for tok in tokens {
+            if tok.hasPrefix("@") && tok.count > 1 {
+                if !peer.user.lowercased().contains(tok.dropFirst()) { return false }
+            } else if tok.hasPrefix("user:") && tok.count > 5 {
+                if !peer.user.lowercased().contains(tok.dropFirst(5)) { return false }
+            } else if tok.hasPrefix("repo:") && tok.count > 5 {
+                if !(peer.repo ?? "").lowercased().contains(tok.dropFirst(5)) { return false }
+            } else if tok.hasPrefix("host:") && tok.count > 5 {
+                let h = String(tok.dropFirst(5))
+                if !peer.host_name.lowercased().contains(h) && !peer.host_id.lowercased().contains(h) { return false }
+            } else if tok.hasPrefix("is:") && tok.count > 3 {
+                if peer.harness.lowercased() != tok.dropFirst(3) { return false }
+            } else if tok.hasPrefix("#") && tok.count > 1 {
+                let idTok = String(tok.dropFirst())
+                if !peer.public_id.lowercased().contains(idTok) && !peer.scoped_id.lowercased().contains(idTok) && !peer.listener_id.lowercased().contains(idTok) { return false }
+            } else {
+                let hay = [peer.title, peer.about, peer.repo ?? "", peer.branch ?? "", peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
+                    .joined(separator: " ").lowercased()
+                if !hay.contains(tok) { return false }
+            }
+        }
+        return true
+    }
+
+    func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
+        let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
+        directoryFilteredPeers = fromDaemonFrame ? directoryAllPeers : directoryAllPeers.filter { matchesDirectoryPeer($0) }
+        directoryMatchedCount = daemonMatchedCount ?? directoryFilteredPeers.count
+        if directoryFilteredPeers.isEmpty {
+            directorySelectedIndex = 0
+        } else if let prev = previousSelectedId, let idx = directoryFilteredPeers.firstIndex(where: { $0.scoped_id == prev }) {
+            directorySelectedIndex = idx
+        } else {
+            directorySelectedIndex = min(max(0, directorySelectedIndex), directoryFilteredPeers.count - 1)
+        }
+        directorySummaryLabel?.stringValue = "\(directoryMatchedCount) of \(directoryOnlineCount) online"
+        if let table = directoryTableView {
+            table.reloadData()
+            if !directoryFilteredPeers.isEmpty {
+                table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
+                table.scrollRowToVisible(directorySelectedIndex)
+            }
+            table.layoutSubtreeIfNeeded()
+        }
+    }
+
+    func handleDirectoryKey(_ key: String) {
+        if (directorySearchField?.currentEditor() as? NSTextInputClient)?.hasMarkedText() == true { return }
+        switch key.lowercased() {
+        case "down":
+            guard !directoryFilteredPeers.isEmpty else { return }
+            directorySelectedIndex = min(directoryFilteredPeers.count - 1, directorySelectedIndex + 1)
+            directoryTableView?.reloadData()
+            directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
+            directoryTableView?.scrollRowToVisible(directorySelectedIndex)
+            directoryTableView?.layoutSubtreeIfNeeded()
+        case "up":
+            guard !directoryFilteredPeers.isEmpty else { return }
+            directorySelectedIndex = max(0, directorySelectedIndex - 1)
+            directoryTableView?.reloadData()
+            directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
+            directoryTableView?.scrollRowToVisible(directorySelectedIndex)
+            directoryTableView?.layoutSubtreeIfNeeded()
+        case "return":
+            guard directoryFilteredPeers.indices.contains(directorySelectedIndex) else { return }
+            let peer = directoryFilteredPeers[directorySelectedIndex]
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+            if let table = directoryTableView,
+               let cell = table.view(atColumn: 0, row: directorySelectedIndex, makeIfNecessary: true) as? DirectoryPeerCellView {
+                cell.copyControl.copied()
+            }
+        case "escape":
+            closeDirectoryPanel(emitAction: true)
+        default:
+            break
+        }
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSSearchField, field === directorySearchField else { return }
+        directoryQuery = field.stringValue
+        applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+        emit(["op": "query_directory", "query": directoryQuery, "scope": directoryScopeFilter, "harness": directoryHarnessFilter])
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if textView.hasMarkedText() { return false }
+        if commandSelector == #selector(NSResponder.moveDown(_:)) { handleDirectoryKey("down"); return true }
+        if commandSelector == #selector(NSResponder.moveUp(_:)) { handleDirectoryKey("up"); return true }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) { handleDirectoryKey("return"); return true }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { handleDirectoryKey("escape"); return true }
+        return false
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        return directoryFilteredPeers.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard directoryFilteredPeers.indices.contains(row) else { return nil }
+        let id = NSUserInterfaceItemIdentifier("DirectoryPeerCell")
+        let cell = (tableView.makeView(withIdentifier: id, owner: self) as? DirectoryPeerCellView)
+            ?? DirectoryPeerCellView(frame: NSRect(x: 0, y: 0, width: 560, height: 52))
+        cell.configure(with: directoryFilteredPeers[row], selected: row == directorySelectedIndex)
+        return cell
+    }
+
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
     func inspectMenu() {
         func project(_ view: NSView) -> [String: Any] {
-            let childViews = (view as? NSScrollView)?.documentView?.subviews ?? view.subviews
+            let childViews: [NSView]
+            if let table = view as? NSTableView {
+                let count = min(table.numberOfRows, 100)
+                childViews = (0..<count).compactMap { table.view(atColumn: 0, row: $0, makeIfNecessary: true) }
+            } else if let scroll = view as? NSScrollView, let doc = scroll.documentView {
+                if let table = doc as? NSTableView {
+                    childViews = [table]
+                } else {
+                    childViews = doc.subviews
+                }
+            } else {
+                childViews = view.subviews
+            }
             var result: [String: Any] = ["id": view.identifier?.rawValue ?? "", "width": view.frame.width,
                 "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
@@ -697,6 +1301,14 @@ final class Companion: NSObject, NSMenuDelegate {
             guard let view = item.view else { return nil }
             var value = project(view); value["hidden"] = item.isHidden; return value
         }
+        let directoryItems: [[String: Any]]
+        if let rootView = directoryPanel?.contentView {
+            directoryItems = [project(rootView)]
+        } else {
+            directoryItems = []
+        }
+        let selectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex)
+            ? directoryFilteredPeers[directorySelectedIndex].scoped_id : ""
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36, bitsPerSample: 8,
             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         NSGraphicsContext.saveGraphicsState()
@@ -716,6 +1328,10 @@ final class Companion: NSObject, NSMenuDelegate {
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "actions": menuActions.count, "count": uniqueSessionCount,
             "available_count": available.count, "rebuilds": rebuildCount,
+            "directory_open": directoryVisible, "directory_online_count": directoryOnlineCount,
+            "directory_matched_count": directoryMatchedCount, "directory_query": directoryQuery,
+            "directory_scope": directoryScopeFilter, "directory_harness": directoryHarnessFilter,
+            "directory_selected_id": selectedId, "directory_items": directoryItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
             "icon_height": statusImage?.size.height ?? 0, "clipboard": NSPasteboard.general.string(forType: .string) ?? "",
             "button_title": button?.title ?? "", "button_image_position": button?.imagePosition.rawValue ?? -1,
@@ -848,26 +1464,24 @@ final class Companion: NSObject, NSMenuDelegate {
         panel?.orderFrontRegardless() // Never makeKey, activate, or change first responder.
     }
 
-
     func openCodex(_ session: String) {
         var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/?#%")
-        guard let encoded = session.addingPercentEncoding(withAllowedCharacters: allowed),
-              let url = URL(string: "codex://threads/" + encoded) else { return }
-        if let override = ProcessInfo.processInfo.environment["CITO_BANNER_URL_OPENER"] {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: override)
-            process.arguments = [url.absoluteString]
-            do { try process.run(); process.waitUntilExit() }
-            catch { diagnostic("URL opener failed: \(error)") }
-        } else if headless { diagnostic("open " + url.absoluteString) }
-        else { NSWorkspace.shared.open(url) }
+        allowed.remove(charactersIn: "/?#[]")
+        guard let encoded = session.addingPercentEncoding(withAllowedCharacters: allowed) else { return }
+        let url = "codex://threads/\(encoded)"
+        if let opener = ProcessInfo.processInfo.environment["CITO_BANNER_URL_OPENER"], !opener.isEmpty {
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: opener)
+            child.arguments = [url]
+            try? child.run()
+        } else if let target = URL(string: url) {
+            NSWorkspace.shared.open(target)
+        }
     }
 }
 
-
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
 let companion = Companion()
+app.setActivationPolicy(.accessory)
 companion.start()
 app.run()

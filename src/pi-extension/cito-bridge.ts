@@ -85,6 +85,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
   let activeBadge: string | undefined;
+  let lastActiveMs = Date.now();
   let context: BridgeContext | undefined;
   let server: Server | undefined;
   let ownsSocket = false;
@@ -144,6 +145,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (nextSessionId !== sessionId) {
       activeBadge = undefined;
       ctx.ui.setStatus("cito", undefined);
+      lastActiveMs = Date.now();
     }
     sessionId = nextSessionId;
     if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
@@ -161,7 +163,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     if (req.op === "identify") {
       if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
       return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: sessionId,
-        session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd };
+        session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd, updated_at_ms: lastActiveMs };
     }
     if (req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
     if (!ctx || !sessionId || req.session_id !== sessionId) return { ok: false, error: "SESSION_MISMATCH" };
@@ -178,12 +180,14 @@ export default function citoBridge(pi: BridgeAPI): void {
     // Pi 1.5.0 sendMessage is synchronous. No await between the effect and recording its ID.
     pi.sendMessage({ customType: "cito-notification", content: req.content, display: true },
       { triggerTurn: req.wake, deliverAs: "followUp" });
+    lastActiveMs = Date.now();
     processedBatchIds.add(req.batch_id);
     if (processedBatchIds.size > 200) processedBatchIds.delete(processedBatchIds.values().next().value!);
     return { ok: true, delivered: true, deduplicated: false };
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    lastActiveMs = Date.now();
     update(ctx);
     if (server) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -242,6 +246,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       return subcommands.filter(cmd => cmd.startsWith(trimmed)).map(value => ({ value, label: value }));
     },
     async handler(args, ctx) {
+      lastActiveMs = Date.now();
       update(ctx);
       const trimmed = args.trim();
       let tool: "cito_listen" | "cito_unlisten";
@@ -290,8 +295,8 @@ export default function citoBridge(pi: BridgeAPI): void {
       }
     },
   });
-  pi.on("session_info_changed", (_event, ctx) => update(ctx));
-  pi.on("session_tree", (_event, ctx) => update(ctx));
+  pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
+  pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
     context = undefined;
     activeBadge = undefined;

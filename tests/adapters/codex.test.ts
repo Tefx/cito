@@ -188,6 +188,19 @@ describe("non-intrusive Codex metadata and wake effects", () => {
         // Filtering by active endpoint_pid also excludes the socket candidate
         const withoutPi = await discoverAllAvailableSessions(config, [{ harness: "pi", session_id: "other", endpoint_pid: process.pid }]);
         expect(withoutPi.some(c => c.harness === "pi")).toBe(false);
+        // Per-harness quota retains up to 8 Pi and 8 Codex without starving either group
+        const ppidServer = await unixServer(bridgeSocketPath(state.stateDir, "pi", process.ppid), socket => {
+          socket.once("data", () => socket.end(JSON.stringify({
+            ok: true, endpoint_pid: process.ppid, session_id: "pi-live-2", session_name: "Pi Newer", cwd: state.root, updated_at_ms: Date.now() + 50_000,
+          }) + "\n"));
+        });
+        try {
+          const allOpen = await discoverAllAvailableSessions(config, []);
+          expect(allOpen.filter(c => c.harness === "pi").map(c => c.session_id)).toEqual(["pi-live-2", "pi-live-1"]);
+          expect(allOpen.filter(c => c.harness === "codex")).toHaveLength(8);
+        } finally {
+          await ppidServer.stop();
+        }
       } finally {
         db.close();
         await sockServer.stop();

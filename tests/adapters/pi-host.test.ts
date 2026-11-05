@@ -55,7 +55,7 @@ it.skipIf(!hostAvailable)("loads a standalone file through Pi 1.5.0 and verifies
         const pid = child.pid!;
         const info = await identifyBridge("pi", pid, f);
         expect(info).toEqual({ ok: true, endpoint_pid: pid, pi_pid: pid, session_id: ready.session_id,
-          session_name: "Loader session", cwd: f.root });
+          session_name: "Loader session", cwd: f.root, updated_at_ms: expect.any(Number) });
         if (stop === "shutdown") {
           await runCmd("toggle-on", "");
           await runCmd("toggle-off", "");

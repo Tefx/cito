@@ -78,6 +78,8 @@ export class SocketBridgeAdapter implements HarnessAdapter {
       if (!st.isSocket()) return null;
       const info = await identifyBridge(this.id, pid, config, signal, 400);
       const meta = await gitMetadata(info.cwd, info.session_name);
+      const updatedAtMs = typeof info.updated_at_ms === "number" && Number.isFinite(info.updated_at_ms) && info.updated_at_ms > 0
+        ? Math.round(info.updated_at_ms) : Math.round(st.mtimeMs);
       return {
         harness: this.id,
         session_id: info.session_id,
@@ -85,7 +87,7 @@ export class SocketBridgeAdapter implements HarnessAdapter {
         cwd: info.cwd,
         branch: meta.branch,
         endpoint_pid: pid,
-        updated_at_ms: Math.round(st.mtimeMs),
+        updated_at_ms: updatedAtMs,
       };
     }));
     const sessions = settled.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);

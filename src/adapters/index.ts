@@ -20,7 +20,6 @@ export function registerAdapter(adapter: HarnessAdapter): void {
 }
 registerAdapter(new CodexDesktopAdapter());
 registerAdapter(new SocketBridgeAdapter("pi"));
-registerAdapter(new SocketBridgeAdapter("claude", { confirmDelivery: false }));
 export function getAdapter(harness: string): HarnessAdapter | undefined {
   if (!harnessIdSchema.safeParse(harness).success) return;
   if (!ADAPTER_REGISTRY.has(harness)) registerAdapter(new SocketBridgeAdapter(harness));
@@ -56,14 +55,27 @@ export async function discoverAllAvailableSessions(
     seen.add(key);
     return true;
   });
-  filtered.sort((a, b) => {
-    const aSocket = a.endpoint_pid !== undefined ? 1 : 0;
-    const bSocket = b.endpoint_pid !== undefined ? 1 : 0;
-    if (aSocket !== bSocket) return bSocket - aSocket;
-    if (aSocket && bSocket) return (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0) || (b.endpoint_pid ?? 0) - (a.endpoint_pid ?? 0);
-    return 0;
-  });
-  return filtered.slice(0, 10);
+  const byHarness = new Map<string, AvailableSessionSummary[]>();
+  for (const c of filtered) {
+    let list = byHarness.get(c.harness);
+    if (!list) { list = []; byHarness.set(c.harness, list); }
+    list.push(c);
+  }
+  const rank = (h: string) => h === "pi" ? 0 : h === "codex" ? 1 : 2;
+  const harnesses = [...byHarness.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  const result: AvailableSessionSummary[] = [];
+  for (const harness of harnesses) {
+    const group = byHarness.get(harness)!;
+    if (group.some(item => item.endpoint_pid !== undefined)) {
+      group.sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0) || (b.endpoint_pid ?? 0) - (a.endpoint_pid ?? 0));
+    }
+    for (const item of group.slice(0, 8)) {
+      if (result.length >= 16) break;
+      result.push(item);
+    }
+    if (result.length >= 16) break;
+  }
+  return result;
 }
 function verifyExpectedIdentity(caller: Caller, meta: Record<string, unknown>): Caller {
   if ((typeof meta.expected_harness === "string" && meta.expected_harness && caller.harness !== meta.expected_harness)

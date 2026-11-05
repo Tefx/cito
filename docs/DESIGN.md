@@ -110,18 +110,18 @@ To scale `cito_find` and UI discovery to $U = 500+$ users and $N = 2,000+$ onlin
 │ ┌──────────────────────────────────────────────────────────────────┐ │ ← Zone 1: Active on This Mac
 │ │ ┌──────┐  dotfiles                     [ 🔒 Self ]  [ ↗ ]  [ ✕ ] │ │   (id="session:<scoped_id>",
 │ │ │  >_  │  Local dotfiles/agent Pi main session                   │ │    360×72pt inside 380×78pt)
-│ │ └──────┘  [ ⧉ dotfiles#rdap ]   ~/dotfiles/agent · main          │ │
+│ │ └──────┘  [ ⧉ dotfiles#f8k2 ]   ~/dotfiles/agent · main          │ │
 │ └──────────────────────────────────────────────────────────────────┘ │
 ├──────────────────────────────────────────────────────────────────────┤
-│  ▾  MY OTHER HOSTS · 2                                      (可折叠) │ ← Zone 2: My Remote Sessions
-│     💻 Tefx-MBP-Personal · cito · main             [ ⧉ cito#8f3a ]   │   (id="my_remote_header" +
-│     💻 Tefx-MBP-Personal · larva                   [ ⧉ larv#4d2e ]   │    34pt rows id="remote:<scoped_id>")
+│  ▾  MY OTHER HOSTS · 2                                 (collapsible) │ ← Zone 2: My Remote Sessions
+│     💻 MacBook-Personal · cito · main              [ ⧉ cito#8f3a ]   │   (id="my_remote_header" +
+│     💻 MacBook-Personal · larva                    [ ⧉ larv#4d2e ]   │    34pt rows id="remote:<scoped_id>")
 ├──────────────────────────────────────────────────────────────────────┤
 │  AVAILABLE SESSIONS                                                  │ ← Zone 3: Local Candidates
-│  ▾  [>_] Pi · 2 open                                        (可折叠) │   (id="group:pi", 28pt)
+│  ▾  [>_] Pi · 2 open                                   (collapsible) │   (id="group:pi", 28pt)
 │     cito · ~/Projects/cito · main                       [ + Listen ] │   (id="candidate:pi:...", 36pt,
 │     larva · ~/Projects/larva · feat/ui                  [ + Listen ] │    x:24..298 icon-free text)
-│  ▸  [✦] Codex · 5 recent                                    (已折叠) │   (id="group:codex", 28pt)
+│  ▸  [✦] Codex · 5 recent                                 (collapsed) │   (id="group:codex", 28pt)
 ├──────────────────────────────────────────────────────────────────────┤
 │  [ 🔍 Search Network Directory…                        412 online ]  │ ← Zone 4: Directory Launcher (34pt)
 ├──────────────────────────────────────────────────────────────────────┤

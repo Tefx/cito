@@ -1,9 +1,13 @@
 import { afterEach, expect, test } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawn } from "node:child_process";
 import { readFile, stat, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fixture, call, payload, waitFor, codexDesktop } from "../mcp/support.js";
 import { toCanonicalListenerId } from "../../src/shared/index.js";
 import { CitoService } from "../../src/mcp/service.js";
+import { startHttpServer } from "../../src/mcp/server.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
 afterEach(async () => { for (const f of fixtures.splice(0)) await f.close(); });
@@ -181,3 +185,49 @@ test("PENDING_PUBLISH recovery reuses exact signal ID and JetStream dedup sequen
   expect(f.service.state.listener(toCanonicalListenerId(id))!.persisted_seq).toBe(1);
   expect(f.service.state.signals("SELECT * FROM local_signals")).toHaveLength(1);
 }, 10_000);
+
+test("plain cito-mcp stdio forwarding discovers parent Pi bridge and exits cleanly on SIGINT and SIGTERM", async () => {
+  const f = await setup(true);
+  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
+  const client = new Client({ name: "stdio-pi-e2e", version: "1" });
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve("bin/cito-mcp")],
+      env: { PATH: process.env.PATH!, ...f.env, CITO_DAEMON_PORT: String(http.port) },
+      stderr: "pipe",
+    }));
+    expect(client.getServerCapabilities()).toMatchObject({ tools: {} });
+    expect(client.getServerCapabilities()?.experimental).toBeUndefined();
+    const enrollment = await client.callTool({ name: "cito_listen", arguments: { about: "stdio pi receiver" } });
+    expect(payload(enrollment as { content: { text: string }[] })).toMatchObject({ status: "listening", harness: "pi", session_id: "pi-session-1" });
+    await client.close();
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      const child = spawn(process.execPath, [resolve("bin/cito-mcp")], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, ...f.env, CITO_DAEMON_PORT: String(http.port) },
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+      child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+      const exited = new Promise<number | null>(resolveExit => child.once("exit", resolveExit));
+      try {
+        child.stdin.write(JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "sig-test", version: "1" } },
+        }) + "\n");
+        await waitFor(() => stdout.includes('"result"'), 5000);
+        child.kill(signal);
+        expect(await exited, stderr).toBe(0);
+      } finally {
+        if (child.exitCode === null) child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  } finally {
+    await client.close();
+    await http.close();
+  }
+}, 15_000);

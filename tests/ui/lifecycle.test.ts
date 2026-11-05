@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ensureUiCompiled, UiBridge, type BannerPayload, type UiToDaemonAction, type UiListenerSummary } from "../../src/ui/index.js";
+import { ensureUiCompiled, UiBridge, type BannerPayload, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
 import { KeyedMutex } from "../../src/shared/index.js";
 import { waitFor } from "../mcp/support.js";
 
@@ -61,7 +61,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
 });
 
 interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
-interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
+interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
 test("real AppKit card views expose template icon, 380pt control-center geometry, state-driven hub drawers, and SF Symbol controls", async () => {
@@ -201,10 +201,10 @@ test("HUD presents English wake/passive counts and harness-specific click labels
     await waitFor(() => diagnostics.some(line => line.includes('"semantic_label":"Notification · ×2"')));
     const wake = JSON.parse(diagnostics.find(line => line.startsWith("cito-ui: display "))!.slice("cito-ui: display ".length));
     expect(wake.action_label).toBe("Open in Codex ↗");
-    bridge.banner({ ...payload, target_harness: "claude", effective_wake: false });
+    bridge.banner({ ...payload, target_harness: "custom", effective_wake: false });
     await waitFor(() => diagnostics.some(line => line.includes('"semantic_label":"Passive"')));
     const passive = JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: display ")).at(-1)!.slice("cito-ui: display ".length));
-    expect(passive).toMatchObject({ action_label: "claude session · Click to dismiss", subtitle: "[Passive] alice@host · sender", display_subtitle: "[Passive] alice@host · sender" });
+    expect(passive).toMatchObject({ action_label: "custom session · Click to dismiss", subtitle: "[Passive] alice@host · sender", display_subtitle: "[Passive] alice@host · sender" });
   } finally { await bridge.close(); }
 });
 
@@ -229,6 +229,11 @@ test("UiBridge coalesces snapshots, delivers banners and validated actions, resp
     bridge.state(hubs, []); bridge.state(hubs, [listener]); bridge.state(hubs, []); bridge.state(hubs, [listener]);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1"));
     expect(diagnostics.filter(line => line.startsWith("cito-ui: state"))).toEqual(["cito-ui: state hubs=1 listeners=1"]);
+    bridge.directory([{
+      hub: "personal", listener_id: "c_abcdefghijkl", public_id: "repo-abcdefghijkl", scoped_id: "personal:repo-abcdefghijkl",
+      user: "alice", host_id: "h1", host_name: "host", harness: "pi", title: "peer", about: "about", repo: null, scope: "workspace", last_seen_at: "2026-01-01T00:00:00Z",
+    }], 1, 1);
+    await waitFor(() => diagnostics.includes("cito-ui: directory peers=1 matched=1 online=1"));
     bridge.banner(payload); await waitFor(() => diagnostics.some(line => line.startsWith("cito-ui: display")));
     const old = childOf(bridge)!;
     old.stdin.write(JSON.stringify({ op: "test_action", index: 3 }) + "\n");
@@ -236,6 +241,7 @@ test("UiBridge coalesces snapshots, delivers banners and validated actions, resp
     old.kill("SIGKILL");
     await waitFor(() => childOf(bridge)?.pid !== undefined && childOf(bridge)?.pid !== old.pid);
     await waitFor(() => diagnostics.filter(line => line === "cito-ui: state hubs=1 listeners=1").length === 2);
+    await waitFor(() => diagnostics.filter(line => line === "cito-ui: directory peers=1 matched=1 online=1").length === 2);
     const current = childOf(bridge)!; await bridge.close(); expect(current.exitCode).toBe(0);
   } finally { await bridge.close(); }
 });
@@ -324,3 +330,148 @@ test("cito-ui renders available session candidates, compact empty banner, viewpo
     );
   } finally { await bridge.close(); }
 }, 15000);
+
+test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, multi-group scroll IDs, Directory launcher) and Spotlight Directory KeyPanel", async () => {
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+  try {
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+    const myRemote: UiRemotePeerSummary[] = Array.from({ length: 4 }, (_, i) => ({
+      hub: "personal",
+      listener_id: `c_remotehost0${i + 2}`,
+      public_id: `remoteproj-remotehost0${i + 2}`,
+      scoped_id: `personal:remoteproj-remotehost0${i + 2}`,
+      user: "alice",
+      host_id: `host-remote-${i}`,
+      host_name: "MacBook-Personal.local",
+      harness: i % 2 === 0 ? "pi" : "codex",
+      title: `Remote Work ${i}`,
+      about: `Remote task ${i}`,
+      repo: "acme/service",
+      branch: "main",
+      scope: "self",
+      last_seen_at: new Date(Date.now() - i * 1000).toISOString(),
+      is_self_principal: true,
+    }));
+    const multiGroupCandidates = [
+      ...Array.from({ length: 5 }, (_, i) => ({ harness: "pi", session_id: `pi-${i}`, title: `Pi ${i}`, cwd: `/tmp/pi${i}`, branch: "main", endpoint_pid: 1000 + i })),
+      ...Array.from({ length: 5 }, (_, i) => ({ harness: "codex", session_id: `cx-${i}`, title: `Codex ${i}`, cwd: `/tmp/cx${i}`, branch: "feat/ui" })),
+    ];
+    bridge.state(hubs, [listener], multiGroupCandidates, myRemote, 412);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1 available=10"));
+    const snap = await inspect(), nodes = flatten(snap.items);
+    // Header dynamic subtitle and hubStrip shift
+    const subtitleNode = nodes.find(n => n.id === "header_subtitle")!;
+    expect(subtitleNode.text).toBe("1 listening · 4 remote");
+    expect(subtitleNode.width).toBeGreaterThan(84);
+    // Zone 2: My Other Hosts header + >3 scroll container + copy button
+    expect(snap.items.find(n => n.id === "my_remote_header")).toMatchObject({ width: 380, height: 26 });
+    expect(nodes.find(n => n.id === "toggle_my_remote")).toMatchObject({ text: "MY OTHER HOSTS · 4", symbol: "chevron.down" });
+    const remoteScroll = snap.items.find(n => n.id === "my_remote_scroll")!;
+    expect(remoteScroll).toMatchObject({ width: 380, height: 102 });
+    expect(remoteScroll.children).toHaveLength(4);
+    send({ op: "test_control", id: "copy_remote:" + myRemote[0]!.scoped_id });
+    expect((await inspect()).clipboard).toBe(myRemote[0]!.scoped_id);
+    // Collapse and re-expand My Other Hosts in-place
+    send({ op: "test_control", id: "toggle_my_remote" });
+    const collapsedRemoteSnap = await inspect();
+    expect(collapsedRemoteSnap.items.find(n => n.id === "my_remote_scroll")).toBeUndefined();
+    expect(flatten(collapsedRemoteSnap.items).find(n => n.id === "toggle_my_remote")?.symbol).toBe("chevron.right");
+    send({ op: "test_control", id: "toggle_my_remote" });
+    expect((await inspect()).items.find(n => n.id === "my_remote_scroll")).toBeDefined();
+
+    // Zone 3: Collapsible harness groups + disambiguated scroll IDs + icon-free candidate rows at x: 24
+    expect(nodes.find(n => n.id === "toggle_group:pi")).toMatchObject({ text: "Pi · 5 open", symbol: "chevron.down" });
+    expect(nodes.find(n => n.id === "toggle_group:codex")).toMatchObject({ text: "Codex · 5 recent", symbol: "chevron.down" });
+    expect(snap.items.find(n => n.id === "available_scroll:pi")).toMatchObject({ width: 380, height: 144 });
+    expect(snap.items.find(n => n.id === "available_scroll:codex")).toMatchObject({ width: 380, height: 144 });
+    const firstCand = nodes.find(n => n.id === "candidate:pi:pi-0")!;
+    expect(firstCand.children.find(c => c.text?.includes("Pi 0 · /tmp/pi0 · main"))).toMatchObject({ x: 24, width: 274 });
+    send({ op: "test_control", id: "toggle_group:codex" });
+    const collapsedGroupSnap = await inspect();
+    expect(collapsedGroupSnap.items.find(n => n.id === "available_scroll:codex")).toBeUndefined();
+    expect(flatten(collapsedGroupSnap.items).find(n => n.id === "toggle_group:codex")?.symbol).toBe("chevron.right");
+
+    // Zone 4: Network Directory Launcher Row + opening Surface 2 KeyPanel
+    expect(snap.items.find(n => n.id === "directory_row")).toMatchObject({ width: 380, height: 34 });
+    expect(nodes.find(n => n.id === "open_directory")).toMatchObject({ text: "Search Network Directory…", symbol: "magnifyingglass" });
+    expect(nodes.find(n => n.id === "directory_online_badge")?.text).toBe("412 online");
+    send({ op: "test_control", id: "open_directory" });
+    await waitFor(() => actions.length === 1);
+    expect(actions[0]).toEqual({ op: "query_directory", query: "", scope: "all", harness: "all" });
+
+    // Populate DirectoryPanel via bridge.directory(...)
+    const teamPeer: UiRemotePeerSummary = {
+      hub: "personal",
+      listener_id: "c_bobpeer23456",
+      public_id: "billing-bobpeer23456",
+      scoped_id: "personal:billing-bobpeer23456",
+      user: "bob",
+      host_id: "host-bob",
+      host_name: "bob-mac.local",
+      harness: "codex",
+      title: "Billing API migration",
+      about: "Reviewing schema changes",
+      repo: "acme/billing",
+      branch: "feat/v8",
+      scope: "workspace",
+      last_seen_at: new Date().toISOString(),
+      is_self_principal: false,
+    };
+    bridge.directory([myRemote[0]!, teamPeer], 2, 412);
+    await waitFor(() => diagnostics.some(l => l.startsWith("cito-ui: directory peers=2 matched=2 online=412")));
+    const dirSnap = await inspect(), dirNodes = flatten(dirSnap.directory_items ?? []);
+    expect(dirSnap).toMatchObject({
+      directory_open: true,
+      directory_online_count: 412,
+      directory_matched_count: 2,
+      directory_query: "",
+      directory_scope: "all",
+      directory_harness: "all",
+      directory_selected_id: myRemote[0]!.scoped_id,
+    });
+    expect(dirNodes.find(n => n.id === "directory_panel")).toMatchObject({ width: 560, height: 440 });
+    expect(dirNodes.find(n => n.id === "dir_peer:" + myRemote[0]!.scoped_id)).toMatchObject({ width: 560, height: 52 });
+    expect(dirNodes.find(n => n.id === "dir_peer:" + teamPeer.scoped_id)).toMatchObject({ width: 560, height: 52 });
+    expect(dirNodes.find(n => n.id === "directory_summary")?.text).toBe("2 of 412 online");
+
+    // Keyboard navigation (Down -> Return copies selected peer -> Up)
+    send({ op: "test_directory_key", key: "down" });
+    const afterDown = await inspect();
+    expect(afterDown.directory_selected_id).toBe(teamPeer.scoped_id);
+    send({ op: "test_directory_key", key: "return" });
+    const afterReturn = await inspect();
+    expect(afterReturn.clipboard).toBe(teamPeer.scoped_id);
+    expect(flatten(afterReturn.directory_items ?? []).find(n => n.id === "copy_dir:" + teamPeer.scoped_id)).toMatchObject({ text: "✓ Copied", green: true });
+    send({ op: "test_directory_key", key: "up" });
+    expect((await inspect()).directory_selected_id).toBe(myRemote[0]!.scoped_id);
+
+    // Facet pills and search query hooks
+    send({ op: "test_control", id: "dir_scope:mine" });
+    await waitFor(() => actions.length === 2);
+    expect(actions[1]).toEqual({ op: "query_directory", query: "", scope: "mine", harness: "all" });
+    expect((await inspect()).directory_matched_count).toBe(1);
+    send({ op: "test_control", id: "dir_scope:all" });
+    send({ op: "test_control", id: "dir_harness:codex" });
+    await waitFor(() => actions.length === 4);
+    expect(actions[3]).toEqual({ op: "query_directory", query: "", scope: "all", harness: "codex" });
+    send({ op: "test_directory_query", query: "@bob repo:billing" });
+    await waitFor(() => actions.length === 5);
+    expect(actions[4]).toEqual({ op: "query_directory", query: "@bob repo:billing", scope: "all", harness: "codex" });
+    expect((await inspect()).directory_selected_id).toBe(teamPeer.scoped_id);
+
+    // Escape closes DirectoryPanel and emits close_directory
+    send({ op: "test_directory_key", key: "escape" });
+    await waitFor(() => actions.length === 6);
+    expect(actions[5]).toEqual({ op: "close_directory" });
+    expect((await inspect()).directory_open).toBe(false);
+  } finally { await bridge.close(); }
+}, 20000);

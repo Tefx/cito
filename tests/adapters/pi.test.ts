@@ -101,7 +101,7 @@ describe("socket receiver resolution and drivers", () => {
       .toMatchObject({ harness: "pi", session_id: "live-current", endpoint_pid: process.pid });
     await expect(resolveCaller({ endpoint_pid: process.pid, expected_harness: "pi", expected_session_id: "stale-session" }, config))
       .rejects.toMatchObject({ code: "SESSION_NOT_OPEN", message: "Session changed since discovery" });
-    await expect(resolveCaller({ endpoint_pid: process.pid, expected_harness: "claude", expected_session_id: "live-current" }, config))
+    await expect(resolveCaller({ endpoint_pid: process.pid, expected_harness: "custom", expected_session_id: "live-current" }, config))
       .rejects.toMatchObject({ code: "SESSION_NOT_OPEN", message: "Session changed since discovery" });
   });
 });

@@ -6,7 +6,7 @@ import type { BannerPayload } from "../ui/index.js";
 import { getAdapter, formatWakeCard, type DeliverContext } from "../adapters/index.js";
 import { listenMutex, sessionMutex, brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
   type CitoConfig, type provisionNats } from "../shared/index.js";
-import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type SignalRow } from "./state.js";
+import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type Registration, type SignalRow } from "./state.js";
 
 export type Broker = Awaited<ReturnType<typeof provisionNats>> & { nc: NatsConnection };
 export interface ReceiverOptions {
@@ -14,6 +14,8 @@ export interface ReceiverOptions {
   onStateChanged?: () => void;
   diagnostic?: (message: string) => void;
   onSessionSwitched?: (harness: string, sessionId: string) => Promise<void>;
+  onDirectoryUpsert?: (hub: string, id: string, value: Registration, revision: number) => void;
+  onDirectoryRemove?: (hub: string, id: string) => void;
 }
 class DispatchStopped extends Error {}
 export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -42,8 +44,8 @@ export async function refreshSessionBadge(state: LocalState, config: CitoConfig,
       .get(row.hub, row.listener_id, Date.now())!.n), 0);
     const slug = target.public_id ? target.public_id.slice(0, -13) : listenerSlug(target);
     const badgeSlug = slug.slice(0, 12).replace(/-+$/g, "") || harness;
-    const count = `${unread || ""}${active.some(row => row.replay_gap_detected === 1) ? "!" : ""}`;
-    await adapter?.updateBadge?.(target, `🔔 ${badgeSlug}${count ? ` (${count})` : ""}`, config, options.signal);
+    const count = unread > 0 ? ` (${unread})` : "";
+    await adapter?.updateBadge?.(target, `🔔 ${badgeSlug}${count}`, config, options.signal);
   });
 }
 
@@ -266,6 +268,7 @@ export class Receiver {
         this.state.run(`UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = ? WHERE hub = ? AND listener_id = ?
           AND binding_generation <= ? AND state IN ('RECEIVED','DISPATCHING')`, reason, this.hub, this.id, this.generation);
       });
+      this.options.onDirectoryRemove?.(this.hub, this.id);
       await this.badge().catch(error => this.log(error));
       const entry = await this.broker.kv.get(this.id);
       if (entry) {
@@ -296,9 +299,11 @@ export class Receiver {
       const row = this.row(); if (this.abort.signal.aborted || row.owner_token !== this.owner || row.status !== "ACTIVE") return;
       this.state.run("UPDATE local_listeners SET consecutive_probe_failures = 0 WHERE hub = ? AND listener_id = ? AND owner_token = ?", this.hub, this.id, this.owner);
       const entry = await this.broker.kv.get(this.id), value = entry && registrationSchema.parse(entry.json());
-      if (!value || value.owner_token !== this.owner || value.binding_generation !== this.generation || value.state !== "ACTIVE") { this.fence(); return; }
+      if (!value || value.owner_token !== this.owner || value.binding_generation !== this.generation || value.state !== "ACTIVE") { this.options.onDirectoryRemove?.(this.hub, this.id); this.fence(); return; }
       if (row.scope !== value.scope) { this.state.run("UPDATE local_listeners SET scope = ? WHERE hub = ? AND listener_id = ?", value.scope, this.hub, this.id); this.options.onStateChanged?.(); }
-      await this.broker.kv.update(this.id, encode(registration(this.row())), entry!.revision);
+      const nextReg = registration(this.row());
+      const rev = await this.broker.kv.update(this.id, encode(nextReg), entry!.revision);
+      this.options.onDirectoryUpsert?.(this.hub, this.id, nextReg, rev);
     });
   }
 }

@@ -3,8 +3,8 @@ import { watch, type FSWatcher } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
-import { Events, ErrorCode } from "nats";
-import { UiBridge, type UiOptions, type UiToDaemonAction } from "../ui/index.js";
+import { Events, ErrorCode, type KvEntry, type QueuedIterator } from "nats";
+import { UiBridge, type UiOptions, type UiRemotePeerSummary, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverAllAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
@@ -20,6 +20,246 @@ export interface ServiceOptions extends ReceiverOptions { browserOpener?: Browse
 const ackSchema = z.object({ signal_id: z.string(), status: z.enum(["wake_accepted", "stored_passive"]), held_reason: z.string().nullable() });
 const displayId = (row: ListenerRow | Registration): string => row.public_id || publicListenerId(listenerSlug(row), row.listener_id);
 const warning = (hub: string, error: unknown) => ({ hub, code: error instanceof CitoError ? error.code : "NATS_UNAVAILABLE", message: error instanceof Error ? error.message : String(error) });
+const lower = (text: string | null | undefined): string => (text ?? "").toLowerCase();
+const buildHaystack = (value: Registration): string =>
+  [value.about, value.repo, value.branch, value.title, value.owner_user, value.host_name].map(lower).join(" ");
+
+export interface IndexedRegistration {
+  hub: string;
+  value: Registration;
+  revision: number;
+  createdIso: string;
+  createdMs: number;
+  haystack: string;
+}
+
+/** Per-hub coalesced KV snapshot cache with watch fast-path, 16-worker fallback, and read-time lease evaluation. */
+export class HubDirectoryIndex {
+  entries = new Map<string, IndexedRegistration>();
+  anchorBrokerMs = 0;
+  anchorMonoMs = 0;
+  lastSyncMonoMs = 0;
+  directoryGen = 0;
+  inflight?: Promise<void>;
+  private static readonly TTL_MS = 5_000;
+
+  constructor(readonly hub: string) {}
+
+  isFresh(): boolean {
+    return this.lastSyncMonoMs > 0 && performance.now() - this.lastSyncMonoMs < HubDirectoryIndex.TTL_MS;
+  }
+
+  clear(): void {
+    this.directoryGen += 1;
+    this.entries = new Map();
+    this.anchorBrokerMs = 0;
+    this.anchorMonoMs = 0;
+    this.lastSyncMonoMs = 0;
+    this.inflight = undefined;
+  }
+
+  currentBrokerMs(): number {
+    return this.anchorBrokerMs > 0
+      ? this.anchorBrokerMs + Math.max(0, performance.now() - this.anchorMonoMs)
+      : Date.now();
+  }
+
+  upsert(key: string, value: Registration, revision: number, createdMs?: number): void {
+    if (value.state !== "ACTIVE") {
+      this.entries.delete(key);
+      return;
+    }
+    const tsMs = createdMs ?? this.currentBrokerMs();
+    this.entries.set(key, {
+      hub: this.hub,
+      value,
+      revision,
+      createdIso: new Date(tsMs).toISOString(),
+      createdMs: tsMs,
+      haystack: buildHaystack(value),
+    });
+  }
+
+  remove(key: string): void {
+    this.entries.delete(key);
+  }
+
+  async ensureFresh(broker: Broker): Promise<void> {
+    if (this.isFresh()) return;
+    return this.inflight ??= this.syncSnapshot(broker).finally(() => {
+      this.inflight = undefined;
+    });
+  }
+
+  async syncSnapshot(broker: Broker): Promise<void> {
+    const gen = this.directoryGen;
+    const sampleMonoMs = performance.now();
+    const info = await broker.jsm.streams.info("KV_cito_listeners");
+    if (!info.ts || !Number.isFinite(Date.parse(info.ts))) {
+      throw new Error("NATS >= 2.10 with broker StreamInfo.ts is required");
+    }
+    const brokerTs = info.ts;
+    const targetSeq = info.state.last_seq;
+    if (info.state.messages === 0) {
+      if (gen === this.directoryGen) {
+        this.entries = new Map();
+        this.anchorBrokerMs = Date.parse(brokerTs);
+        this.anchorMonoMs = sampleMonoMs;
+        this.lastSyncMonoMs = performance.now();
+      }
+      return;
+    }
+    let next: Map<string, IndexedRegistration>;
+    try {
+      next = await this.watchSnapshot(broker, targetSeq);
+    } catch {
+      next = await this.boundedPointGetSnapshot(broker);
+    }
+    if (gen === this.directoryGen) {
+      this.entries = next;
+      this.anchorBrokerMs = Date.parse(brokerTs);
+      this.anchorMonoMs = sampleMonoMs;
+      this.lastSyncMonoMs = performance.now();
+    }
+  }
+
+  private async watchSnapshot(broker: Broker, targetSeq: number): Promise<Map<string, IndexedRegistration>> {
+    let initDone = false;
+    let timedOut = false;
+    let watch: QueuedIterator<KvEntry> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        watch?.stop(new Error("KV watch snapshot timed out"));
+        reject(new CitoError("NATS_UNAVAILABLE", "KV watch snapshot timed out"));
+      }, 2500);
+      timer.unref();
+    });
+    try {
+      const work = (async () => {
+        const wPromise = broker.kv.watch({
+          ignoreDeletes: false,
+          initializedFn: () => {
+            initDone = true;
+            watch?.stop();
+          },
+        });
+        void wPromise.then(w => { if (timedOut) w.stop(); }, () => {});
+        watch = await wPromise;
+        if (timedOut) {
+          watch.stop();
+          throw new CitoError("NATS_UNAVAILABLE", "KV watch snapshot timed out");
+        }
+        if (initDone) watch.stop();
+        const next = new Map<string, IndexedRegistration>();
+        for await (const entry of watch) {
+          if (timedOut) throw new CitoError("NATS_UNAVAILABLE", "KV watch snapshot timed out");
+          if (entry.operation === "PUT") {
+            try {
+              const value = registrationSchema.parse(entry.json());
+              const createdMs = entry.created.getTime();
+              next.set(entry.key, {
+                hub: this.hub,
+                value,
+                revision: entry.revision,
+                createdIso: entry.created.toISOString(),
+                createdMs,
+                haystack: buildHaystack(value),
+              });
+            } catch { /* Skip malformed records. */ }
+          } else if (entry.operation === "DEL" || entry.operation === "PURGE") {
+            next.delete(entry.key);
+          }
+          const drained = typeof watch.getPending === "function" ? watch.getPending() === 0 : true;
+          if ((initDone && drained) || entry.delta === 0 || entry.revision >= targetSeq) break;
+        }
+        return next;
+      })();
+      return await Promise.race([work, timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
+      watch?.stop();
+    }
+  }
+
+  private async boundedPointGetSnapshot(broker: Broker): Promise<Map<string, IndexedRegistration>> {
+    let timedOut = false;
+    let keysIter: QueuedIterator<string> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        keysIter?.stop(new Error("KV point-get fallback timed out"));
+        reject(new CitoError("NATS_UNAVAILABLE", "KV point-get fallback timed out"));
+      }, 2500);
+      timer.unref();
+    });
+    try {
+      const work = (async () => {
+        const kPromise = broker.kv.keys();
+        void kPromise.then(k => { if (timedOut) k.stop(); }, () => {});
+        keysIter = await kPromise;
+        if (timedOut) {
+          keysIter.stop();
+          throw new CitoError("NATS_UNAVAILABLE", "KV point-get fallback timed out");
+        }
+        const names: string[] = [];
+        for await (const key of keysIter) {
+          if (timedOut) throw new CitoError("NATS_UNAVAILABLE", "KV point-get fallback timed out");
+          names.push(key);
+        }
+        const next = new Map<string, IndexedRegistration>();
+        let cursor = 0;
+        const workerCount = Math.min(16, names.length);
+        await Promise.all(Array.from({ length: workerCount }, async () => {
+          while (!timedOut) {
+            const idx = cursor++;
+            if (idx >= names.length) break;
+            const key = names[idx]!;
+            const entry = await broker.kv.get(key);
+            if (timedOut) throw new CitoError("NATS_UNAVAILABLE", "KV point-get fallback timed out");
+            if (!entry || entry.operation !== "PUT") continue;
+            try {
+              const value = registrationSchema.parse(entry.json());
+              const createdMs = entry.created.getTime();
+              next.set(key, {
+                hub: this.hub,
+                value,
+                revision: entry.revision,
+                createdIso: entry.created.toISOString(),
+                createdMs,
+                haystack: buildHaystack(value),
+              });
+            } catch { /* Skip malformed records. */ }
+          }
+        }));
+        return next;
+      })();
+      return await Promise.race([work, timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
+      keysIter?.stop();
+    }
+  }
+
+  async read(broker: Broker, principal: Principal): Promise<IndexedRegistration[]> {
+    await this.ensureFresh(broker);
+    return this.readCached(principal);
+  }
+
+  readCached(principal?: Principal): IndexedRegistration[] {
+    if (!principal) return [];
+    const currentBrokerIso = new Date(this.currentBrokerMs()).toISOString();
+    const active: IndexedRegistration[] = [];
+    for (const item of this.entries.values()) {
+      if (evaluateLease(item.value.state, currentBrokerIso, new Date(item.createdMs)) !== "ACTIVE") continue;
+      if (item.value.scope !== "workspace" && item.value.principal_id !== principal.principal_id) continue;
+      active.push(item);
+    }
+    return active;
+  }
+}
 
 /** A slot owns authentication and transport. No connection/token can leak across hubs. */
 export class HubSlot {
@@ -34,11 +274,13 @@ export class HubSlot {
   private restoreRetry?: AbortController;
   private readonly actions = new KeyedMutex();
   readonly receivers = new Map<string, Receiver>();
+  readonly directoryIndex: HubDirectoryIndex;
   private readonly login?: OidcLogin;
   private readonly background = new Set<Promise<unknown>>();
   private closing = false;
   constructor(readonly name: string, readonly config: CitoConfig, private readonly options: ServiceOptions,
     private readonly restore: (broker: Broker) => Promise<void>, private readonly cancel: () => void, private readonly changed: () => void = () => {}) {
+    this.directoryIndex = new HubDirectoryIndex(name);
     if (config.authMode === "oidc") this.login = new OidcLogin(config, options.browserOpener, name);
     else this.principal = localPrincipal(config.user);
   }
@@ -51,6 +293,7 @@ export class HubSlot {
     if (this.manuallyDisconnected) throw new CitoError("NATS_UNAVAILABLE", `Hub '${this.name}' is manually disconnected`);
     if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
     if (forceLogin && this.login) {
+      this.directoryIndex.clear();
       this.restoreRetry?.abort(); this.cancel();
       const prev = this.broker; this.broker = undefined;
       await prev?.nc.close();
@@ -170,6 +413,7 @@ export class HubSlot {
   }
   connectedBroker(): Broker | undefined { return this.broker && !this.broker.nc.isClosed() && !this.manuallyDisconnected ? this.broker : undefined; }
   async disconnect(): Promise<void> {
+    this.directoryIndex.clear();
     this.manuallyDisconnected = true; this.error = null; this.connectionAbort.abort(); this.cancel();
     await this.actions.run(this.name, async () => {
       await this.broker?.nc.close(); await this.brokerPromise?.catch(() => {}); await this.broker?.nc.close();
@@ -182,6 +426,7 @@ export class HubSlot {
       if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
       this.manuallyDisconnected = false; this.connectionAbort = new AbortController();
       if (forceLogin && this.login) {
+        this.directoryIndex.clear();
         this.restoreRetry?.abort(); this.cancel();
         const prev = this.broker; this.broker = undefined;
         await prev?.nc.close();
@@ -190,6 +435,7 @@ export class HubSlot {
     });
   }
   async close(): Promise<void> {
+    this.directoryIndex.clear();
     this.closing = true; this.connectionAbort.abort(); await this.broker?.nc.close();
     await this.brokerPromise?.catch(() => {}); await this.broker?.nc.close(); await Promise.allSettled([...this.background]);
   }
@@ -197,11 +443,16 @@ export class HubSlot {
 
 /** One shared SQLite database, lazily connected independent HubSlots. */
 export class CitoService {
+  private static readonly liveServices = new Set<CitoService>();
   readonly receivers = new Map<string, Receiver>();
   ui?: UiBridge;
   private uiStarting?: Promise<void>;
   private availableSessions: AvailableSessionSummary[] = [];
   private discoveryGen = 0;
+  private directoryOpen = false;
+  private directoryQuery = "";
+  private directoryScope: "all" | "mine" = "all";
+  private directoryHarness = "all";
   private socketWatcher?: FSWatcher;
   private socketWatchTimer?: ReturnType<typeof setTimeout>;
   readonly slots = new Map<string, HubSlot>();
@@ -216,14 +467,44 @@ export class CitoService {
     void task.finally(() => this.retirements.delete(task));
   }
   private constructor(readonly config: CitoConfig, readonly state: LocalState, readonly hostId: string, private readonly options: ServiceOptions) {
+    CitoService.liveServices.add(this);
     for (const [name, hub] of Object.entries(config.hubs)) {
       // Optional authentication settings belong to this hub, never the mirrored default.
       const slotConfig = { ...config, ...hub, oidcIssuer: hub.oidcIssuer, oidcClientId: hub.oidcClientId,
         oidcScopes: hub.oidcScopes, oidcRedirectPort: hub.oidcRedirectPort };
       this.slots.set(name, new HubSlot(name, slotConfig, options,
         broker => this.restoreReceivers(name, broker), () => {
+          this.slots.get(name)?.directoryIndex.clear();
           for (const receiver of this.receivers.values()) if (receiver.hub === name) { receiver.cancel(); void receiver.badge().catch(error => this.log(error)); }
         }, () => this.pushUiState()));
+    }
+  }
+  private upsertDirectoryEntry(hub: string, id: string, value: Registration, revision: number): void {
+    const slot = this.slots.get(hub);
+    if (!slot) return;
+    slot.directoryIndex.upsert(id, value, revision);
+    const natsUrl = slot.config.natsUrl;
+    for (const other of CitoService.liveServices) {
+      if (other === this || other.closing) continue;
+      for (const otherSlot of other.slots.values()) {
+        if (otherSlot.config.natsUrl === natsUrl && otherSlot.directoryIndex.lastSyncMonoMs > 0) {
+          otherSlot.directoryIndex.upsert(id, value, revision);
+        }
+      }
+    }
+  }
+  private removeDirectoryEntry(hub: string, id: string): void {
+    const slot = this.slots.get(hub);
+    if (!slot) return;
+    slot.directoryIndex.remove(id);
+    const natsUrl = slot.config.natsUrl;
+    for (const other of CitoService.liveServices) {
+      if (other === this || other.closing) continue;
+      for (const otherSlot of other.slots.values()) {
+        if (otherSlot.config.natsUrl === natsUrl && otherSlot.directoryIndex.lastSyncMonoMs > 0) {
+          otherSlot.directoryIndex.remove(id);
+        }
+      }
     }
   }
   private installReceiver(key: string, receiver: Receiver): void {
@@ -252,6 +533,7 @@ export class CitoService {
   }
   async connectBackground(): Promise<void> {
     await Promise.allSettled([...this.slots.values()].map(slot => slot.network({ interactive: false })));
+    await this.syncConnectedDirectories();
     this.pushUiState();
   }
   private liveActiveRows(): ListenerRow[] {
@@ -273,6 +555,117 @@ export class CitoService {
       if (!this.closing) this.log(error);
     }
   }
+  private toRemotePeerSummary(slot: HubSlot, item: IndexedRegistration): UiRemotePeerSummary {
+    const v = item.value;
+    const pubId = displayId(v);
+    const trunc = (s: string, max: number) => s.length > max ? s.slice(0, max) : s;
+    return {
+      hub: slot.name,
+      listener_id: v.listener_id,
+      public_id: pubId,
+      scoped_id: this.scoped(slot.name, pubId),
+      user: v.owner_user,
+      host_id: v.host_id,
+      host_name: v.host_name,
+      harness: v.harness,
+      title: trunc(v.title, 200),
+      about: trunc(v.about, 300),
+      repo: v.repo,
+      branch: v.branch,
+      scope: v.scope,
+      last_seen_at: item.createdIso,
+      is_self_principal: slot.principal ? v.principal_id === slot.principal.principal_id : false,
+    };
+  }
+  private collectNetworkPeers(): { myRemote: UiRemotePeerSummary[]; allPeers: UiRemotePeerSummary[] } {
+    const myRemoteItems: { slot: HubSlot; item: IndexedRegistration }[] = [];
+    const allPeerItems: { slot: HubSlot; item: IndexedRegistration }[] = [];
+    for (const slot of this.slots.values()) {
+      if (slot.status !== "connected" || slot.manuallyDisconnected || !slot.principal) continue;
+      for (const item of slot.directoryIndex.readCached(slot.principal)) {
+        const isSelfPrincipal = item.value.principal_id === slot.principal.principal_id;
+        const isLocalSelfHost = isSelfPrincipal && item.value.host_id === this.hostId;
+        if (isLocalSelfHost) continue;
+        if (isSelfPrincipal) myRemoteItems.push({ slot, item });
+        allPeerItems.push({ slot, item });
+      }
+    }
+    const sortByRev = (a: { slot: HubSlot; item: IndexedRegistration }, b: { slot: HubSlot; item: IndexedRegistration }) =>
+      b.item.revision - a.item.revision || a.slot.name.localeCompare(b.slot.name) || a.item.value.listener_id.localeCompare(b.item.value.listener_id);
+    myRemoteItems.sort(sortByRev);
+    allPeerItems.sort(sortByRev);
+    return {
+      myRemote: myRemoteItems.map(({ slot, item }) => this.toRemotePeerSummary(slot, item)),
+      allPeers: allPeerItems.map(({ slot, item }) => this.toRemotePeerSummary(slot, item)),
+    };
+  }
+  private evaluateDirectoryQuery(
+    allPeers: UiRemotePeerSummary[],
+    query = this.directoryQuery,
+    scope: "all" | "mine" = this.directoryScope,
+    harness = this.directoryHarness,
+  ): UiRemotePeerSummary[] {
+    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const matched = allPeers.filter(peer => {
+      if (scope === "mine" && !peer.is_self_principal) return false;
+      if (harness && harness !== "all" && peer.harness !== harness) return false;
+      for (const tok of tokens) {
+        if (tok.startsWith("@") && tok.length > 1) {
+          if (!lower(peer.user).includes(tok.slice(1))) return false;
+        } else if (tok.startsWith("user:") && tok.length > 5) {
+          if (!lower(peer.user).includes(tok.slice(5))) return false;
+        } else if (tok.startsWith("repo:") && tok.length > 5) {
+          if (!lower(peer.repo).includes(tok.slice(5))) return false;
+        } else if (tok.startsWith("host:") && tok.length > 5) {
+          const h = tok.slice(5);
+          if (!lower(peer.host_name).includes(h) && !lower(peer.host_id).includes(h)) return false;
+        } else if (tok.startsWith("is:") && tok.length > 3) {
+          if (lower(peer.harness) !== tok.slice(3)) return false;
+        } else if (tok.startsWith("#") && tok.length > 1) {
+          const idTok = tok.slice(1);
+          if (!lower(peer.public_id).includes(idTok) && !lower(peer.scoped_id).includes(idTok) && !lower(peer.listener_id).includes(idTok)) return false;
+        } else {
+          const hay = [peer.title, peer.about, peer.repo, peer.branch, peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
+            .map(lower).join(" ");
+          if (!hay.includes(tok)) return false;
+        }
+      }
+      return true;
+    });
+    const matchRank = (peer: UiRemotePeerSummary): number => {
+      if (!tokens.length) return 0;
+      const fields = [lower(peer.title), lower(peer.user), lower(peer.repo)];
+      let score = 0;
+      for (const tok of tokens) {
+        const clean = tok.replace(/^(@|user:|repo:|host:|is:|#)/, "");
+        if (!clean) continue;
+        if (fields.some(f => f === clean)) score = Math.max(score, 2);
+        else if (fields.some(f => f.startsWith(clean))) score = Math.max(score, 1);
+      }
+      return score;
+    };
+    matched.sort((a, b) =>
+      Number(Boolean(b.is_self_principal)) - Number(Boolean(a.is_self_principal))
+      || matchRank(b) - matchRank(a)
+      || b.last_seen_at.localeCompare(a.last_seen_at)
+      || a.scoped_id.localeCompare(b.scoped_id),
+    );
+    return matched;
+  }
+  private async syncConnectedDirectories(): Promise<void> {
+    const connected = [...this.slots.values()].filter(slot => slot.connectedBroker());
+    if (!connected.length) return;
+    await Promise.allSettled(connected.map(async slot => {
+      const broker = slot.connectedBroker();
+      if (broker) await slot.directoryIndex.ensureFresh(broker);
+    }));
+  }
+  pushUiDirectory(): void {
+    if (this.closing || !this.ui) return;
+    const { allPeers } = this.collectNetworkPeers();
+    const matched = this.evaluateDirectoryQuery(allPeers);
+    this.ui.directory(matched.slice(0, 100), matched.length, allPeers.length);
+  }
   pushUiState(): void {
     if (this.closing) return;
     const hubs = [...this.slots.values()].map(slot => ({ name: slot.name, status: slot.status,
@@ -284,14 +677,38 @@ export class CitoService {
     const available = this.availableSessions.filter(c => !activeRows.some(r =>
       r.harness === c.harness && (r.session_id === c.session_id || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)),
     ));
-    this.ui?.state(hubs, listeners, available);
+    const { myRemote, allPeers } = this.collectNetworkPeers();
+    this.ui?.state(hubs, listeners, available, myRemote, allPeers.length);
+    if (this.directoryOpen) this.pushUiDirectory();
   }
   async handleUiAction(action: UiToDaemonAction): Promise<void> {
     if (action.op === "quit") { await this.close(); await this.options.onQuit?.(); return; }
     if (this.closing) return;
     const task = (async () => {
       switch (action.op) {
-        case "refresh_available": await this.refreshAvailableSessions(); break;
+        case "refresh_available": {
+          await Promise.allSettled([this.refreshAvailableSessions(), this.syncConnectedDirectories()]);
+          break;
+        }
+        case "open_directory": {
+          this.directoryOpen = true;
+          await this.syncConnectedDirectories();
+          this.pushUiDirectory();
+          break;
+        }
+        case "close_directory": {
+          this.directoryOpen = false;
+          break;
+        }
+        case "query_directory": {
+          this.directoryOpen = true;
+          if (action.query !== undefined) this.directoryQuery = action.query;
+          if (action.scope === "all" || action.scope === "mine") this.directoryScope = action.scope;
+          if (action.harness !== undefined) this.directoryHarness = action.harness || "all";
+          await this.syncConnectedDirectories();
+          this.pushUiDirectory();
+          break;
+        }
         case "listen_session": {
           const about = (action.title || basename(action.cwd || "") || "Session").replace(/[\r\n]+/g, " ").trim().slice(0, 200) || "Session";
           try {
@@ -318,7 +735,10 @@ export class CitoService {
             await slot.disconnect();
             await Promise.allSettled([...slot.receivers.values()].map(receiver => receiver.badge()));
           }
-          else await slot.reconnect(action.action === "login", { forceLogin: action.action === "login" });
+          else {
+            await slot.reconnect(action.action === "login", { forceLogin: action.action === "login" });
+            await this.syncConnectedDirectories();
+          }
           break;
         }
       }
@@ -337,6 +757,7 @@ export class CitoService {
         this.state.run("UPDATE local_listeners SET status = 'UNLISTENED' WHERE hub = ? AND listener_id = ?", hub, id);
         this.state.run("UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'unlistened_before_dispatch' WHERE hub = ? AND listener_id = ? AND state IN ('RECEIVED','DISPATCHING')", hub, id);
       });
+      this.removeDirectoryEntry(hub, id);
       await refreshSessionBadge(this.state, this.config, row.harness, row.session_id).catch(error => this.log(error));
       this.pushUiState();
       // Local revocation must succeed even when the hub is offline or manually disconnected.
@@ -365,8 +786,10 @@ export class CitoService {
     await listenMutex.run(`${hub}:${id}`, async () => {
       const row = this.state.listener(id, hub), entry = await broker.kv.get(id), remote = entry && registrationSchema.parse(entry.json());
       if (!row || row.status !== "ACTIVE" || !remote || remote.state !== "ACTIVE" || row.owner_token !== remote.owner_token || row.binding_generation !== remote.binding_generation) throw new CitoError("STALE_GENERATION", "Listener ownership changed");
-      await broker.kv.update(id, encode({ ...remote, scope }), entry!.revision);
+      const updated = { ...remote, scope };
+      const rev = await broker.kv.update(id, encode(updated), entry!.revision);
       this.state.run("UPDATE local_listeners SET scope = ? WHERE hub = ? AND listener_id = ?", scope, hub, id);
+      this.upsertDirectoryEntry(hub, id, updated, rev);
       this.pushUiState();
     });
   }
@@ -381,7 +804,14 @@ export class CitoService {
   private targetSlots(hub?: string): HubSlot[] { return hub ? [this.slot(hub)] : [...this.slots.values()]; }
   private scoped(hub: string, id: string): string { return formatScopedId(hub, id, this.config); }
   private receiverOptions(): ReceiverOptions {
-    return { ...this.options, onStateChanged: () => this.pushUiState(), onBanner: payload => { this.ui?.banner(payload); this.options.onBanner?.(payload); }, onSessionSwitched: (harness, sessionId) => this.revokeSession(harness, sessionId) };
+    return {
+      ...this.options,
+      onStateChanged: () => this.pushUiState(),
+      onBanner: payload => { this.ui?.banner(payload); this.options.onBanner?.(payload); },
+      onSessionSwitched: (harness, sessionId) => this.revokeSession(harness, sessionId),
+      onDirectoryUpsert: (hub, id, value, revision) => { this.upsertDirectoryEntry(hub, id, value, revision); this.pushUiState(); },
+      onDirectoryRemove: (hub, id) => { this.removeDirectoryEntry(hub, id); this.pushUiState(); },
+    };
   }
   private log(error: unknown) { (this.options.diagnostic ?? console.error)(String(error)); }
   private async restoreReceivers(hub: string, broker: Broker): Promise<void> {
@@ -500,8 +930,10 @@ export class CitoService {
         const next = { ...registration(row), ...principal, host_name: this.config.hostName, cwd: caller.cwd, repo: caller.repo,
           branch: caller.branch, title: caller.title, about: input.about, tag, public_id: publicId,
           scope: input.scope ?? row.scope, state: "ACTIVE" as const, binding_generation: generation, owner_token: owner };
-        try { if (entry) await broker.kv.update(id, encode(next), entry.revision); else await broker.kv.create(id, encode(next)); }
+        let rev: number;
+        try { rev = entry ? await broker.kv.update(id, encode(next), entry.revision) : await broker.kv.create(id, encode(next)); }
         catch (error) { if (isJsApiError(error, 10071)) continue; throw error; }
+        this.upsertDirectoryEntry(hub, id, next, rev);
         this.state.transaction(() => {
           // Endpoint PIDs describe the host conversation, not one hub generation.
           this.state.run("UPDATE local_listeners SET endpoint_pid = ? WHERE harness = ? AND session_id = ?",
@@ -563,23 +995,19 @@ export class CitoService {
     const slots = this.targetSlots(input.hub);
     // Resolve once before any hub operation so metadata conflicts cannot be hidden by partial success.
     const caller = await this.optionalCaller(meta);
+    const queryWords = input.query ? input.query.trim().split(/\s+/).map(lower).filter(Boolean) : [];
     const results = await Promise.allSettled(slots.map(async slot => {
-      const broker = await slot.network(), principal = await slot.identity(), sender = this.sender(caller, principal, slot.name), now = await brokerNow(broker.jsm);
-      const keys = await broker.kv.keys(), names: string[] = []; for await (const key of keys) names.push(key);
+      const broker = await slot.network(), principal = await slot.identity(), sender = this.sender(caller, principal, slot.name);
+      const active = await slot.directoryIndex.read(broker, principal);
       const found: { hub: string; value: Registration; revision: number; created: string }[] = [];
-      const lower = (text: string | null) => (text ?? "").toLowerCase();
-      for (const key of names) {
-        const entry = await broker.kv.get(key); if (!entry || entry.operation !== "PUT") continue;
-        let value: Registration;
-        try { value = registrationSchema.parse(entry.json()); } catch { continue; }
-        if (evaluateLease(value.state, now, entry.created) !== "ACTIVE" || (value.scope !== "workspace" && value.principal_id !== principal.principal_id)) continue;
+      for (const item of active) {
+        const value = item.value;
         if (input.user && lower(value.owner_user) !== lower(input.user)) continue;
         if (input.host && value.host_id !== input.host && !lower(value.host_name).includes(lower(input.host))) continue;
         if (input.harness && value.harness !== input.harness) continue;
         if (input.repo && !lower(value.repo).includes(lower(input.repo))) continue;
-        const haystack = [value.about, value.repo, value.branch, value.title, value.owner_user, value.host_name].map(lower).join(" ");
-        if (input.query && !input.query.trim().split(/\s+/).every(word => haystack.includes(lower(word)))) continue;
-        found.push({ hub: slot.name, value, revision: entry.revision, created: entry.created.toISOString() });
+        if (queryWords.length && !queryWords.every(word => item.haystack.includes(word))) continue;
+        found.push({ hub: slot.name, value, revision: item.revision, created: item.createdIso });
       }
       return { found, caller: { hub: slot.name, user: principal.owner_user, host_id: this.hostId, host_name: this.config.hostName,
         harness: sender.endpoint.harness, session_id: sender.endpoint.session_id,
@@ -587,6 +1015,7 @@ export class CitoService {
     }));
     const successes = results.flatMap(r => r.status === "fulfilled" ? [r.value] : []);
     if (!successes.length) throw (results[0] as PromiseRejectedResult).reason;
+    this.pushUiState();
     const found = successes.flatMap(r => r.found).sort((a, b) => b.revision - a.revision || a.hub.localeCompare(b.hub) || a.value.listener_id.localeCompare(b.value.listener_id));
     const warnings = results.flatMap((r, i) => r.status === "rejected" ? [warning(slots[i]!.name, r.reason)] : []);
     return { ok: true, caller: successes[0]!.caller, listeners: found.slice(0, input.limit).map(({ hub, value, created }) => ({
@@ -705,6 +1134,7 @@ export class CitoService {
     for (const row of rows) this.receivers.get(`${row.hub}:${row.listener_id}`)?.cancel();
     this.state.transaction(() => {
       for (const row of rows) {
+        this.removeDirectoryEntry(row.hub, row.listener_id);
         this.state.run("UPDATE local_listeners SET status = 'UNLISTENED' WHERE hub = ? AND listener_id = ?", row.hub, row.listener_id);
         this.state.run("UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'session_switched' WHERE hub = ? AND listener_id = ? AND state IN ('RECEIVED','DISPATCHING')", row.hub, row.listener_id);
       }
@@ -722,6 +1152,7 @@ export class CitoService {
   }
   close(): Promise<void> { return this.closePromise ??= this.shutdown(); }
   private async shutdown(): Promise<void> {
+    CitoService.liveServices.delete(this);
     this.closing = true; this.shuttingDown.abort();
     clearTimeout(this.socketWatchTimer);
     this.socketWatcher?.close();

@@ -108,14 +108,15 @@ test("badge refresh covers waking/passive admission, gaps, acknowledgements and 
   const id = toCanonicalListenerId(enrolled.listener_id);
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl");
   f.service.state.run("UPDATE local_listeners SET replay_gap_detected = 1, replay_gap_range = 'offline_exceeded_30m' WHERE listener_id = ?", id);
-  await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta);
-  expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl (!)");
+  expect(await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta)).toMatchObject({ replay_gap_detected: true, replay_gap_range: "offline_exceeded_30m" });
+  expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl");
   const waking = await call(f.service, "cito_send", { to: enrolled.listener_id, message: "awake" });
-  await waitFor(() => f.pi.badges.at(-1) === "🔔 abcdefghijkl (1!)");
+  await waitFor(() => f.pi.badges.at(-1) === "🔔 abcdefghijkl (1)");
   expect(f.pi.messages).toEqual([]); // Admission updates before Stage-2 debounce.
-  await call(f.service, "cito_inbox", { ack_ids: [waking.signal_id] }, f.pi.meta);
-  expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl (!)");
-  await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta);
+  expect(await call(f.service, "cito_inbox", { ack_ids: [waking.signal_id] }, f.pi.meta)).toMatchObject({ replay_gap_detected: true });
+  expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl");
+  expect(await call(f.service, "cito_inbox", { ack_all: true }, f.pi.meta)).toMatchObject({ replay_gap_detected: true });
+  expect(await call(f.service, "cito_inbox", { ack_all: false }, f.pi.meta)).toMatchObject({ replay_gap_detected: false, replay_gap_range: null });
   expect(f.pi.badges.at(-1)).toBe("🔔 abcdefghijkl");
   await call(f.service, "cito_send", { to: id, message: "passive" });
   await waitFor(() => f.pi.badges.at(-1) === "🔔 abcdefghijkl (1)");

@@ -5,7 +5,6 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadConfig, type CitoConfig } from "../shared/index.js";
-import { startStdioChannelBridge } from "../adapters/claude-channel.js";
 import { readCodexThreadOptional, resolveCodexThreadId } from "../adapters/codex.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
@@ -196,19 +195,16 @@ export async function main(): Promise<void> {
   const stdio = new StdioServerTransport();
   const http = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${config.daemonPort}/mcp`));
   const report = (error: unknown) => { console.error(error); process.exitCode = 1; };
-  let channel: Awaited<ReturnType<typeof startStdioChannelBridge>> | undefined;
-  let channelStartup: ReturnType<typeof startStdioChannelBridge> | undefined;
   let stopped = false, stopping: Promise<void> | undefined;
   const stop = () => stopping ??= (async () => {
     stopped = true;
     process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
     process.stdin.removeListener("end", onSignal);
-    await (await channelStartup?.catch(() => undefined))?.close();
     await http.close(); await stdio.close();
     process.stdout.destroy();
   })();
   const onSignal = () => { void stop().catch(report); };
-  http.onmessage = message => { if (!stopped) void stdio.send(channel?.forward(message) ?? message).catch(report); };
+  http.onmessage = message => { if (!stopped) void stdio.send(message).catch(report); };
   stdio.onmessage = message => { if (stopped) return; void http.send(message).catch(error => {
     if ("id" in message) void stdio.send({ jsonrpc: "2.0", id: message.id!, error: { code: -32603, message: String(error) } }).catch(report);
     else report(error);
@@ -217,8 +213,6 @@ export async function main(): Promise<void> {
   process.once("SIGINT", onSignal); process.once("SIGTERM", onSignal); process.stdin.once("end", onSignal);
   try {
     await http.start();
-    if (stopped) return;
-    if (config.enableClaudeChannel) channel = await (channelStartup = startStdioChannelBridge(config, stdio));
     if (stopped) { await stop(); return; }
     await stdio.start();
   } catch (error) { await stop(); throw error; }

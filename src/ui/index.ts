@@ -27,12 +27,47 @@ export interface AvailableSessionSummary {
   endpoint_pid?: number;
   updated_at_ms?: number;
 }
-export type DaemonToUiMessage = { op: "state"; hubs: UiHubSummary[]; listeners: UiListenerSummary[]; available?: AvailableSessionSummary[] } | { op: "banner"; payload: BannerPayload };
+export interface UiRemotePeerSummary {
+  hub: string;
+  listener_id: string;
+  public_id: string;
+  scoped_id: string;
+  user: string;
+  host_id: string;
+  host_name: string;
+  harness: string;
+  title: string;
+  about: string;
+  repo: string | null;
+  branch?: string | null;
+  scope: "self" | "workspace";
+  last_seen_at: string;
+  is_self_principal?: boolean;
+}
+export type DaemonToUiMessage =
+  | {
+      op: "state";
+      hubs: UiHubSummary[];
+      listeners: UiListenerSummary[];
+      available?: AvailableSessionSummary[];
+      my_remote_listeners?: UiRemotePeerSummary[];
+      directory_online_count?: number;
+    }
+  | {
+      op: "directory";
+      peers: UiRemotePeerSummary[];
+      matched_count: number;
+      online_count: number;
+    }
+  | { op: "banner"; payload: BannerPayload };
 export type UiToDaemonAction = { op: "unlisten"; hub: string; listener_id: string }
   | { op: "unlisten_all" } | { op: "set_scope"; hub: string; listener_id: string; scope: "self" | "workspace" }
   | { op: "hub_action"; hub: string; action: "login" | "reconnect" | "disconnect" }
   | { op: "refresh_available" }
   | { op: "listen_session"; harness: string; session_id: string; endpoint_pid?: number; cwd?: string; title?: string }
+  | { op: "open_directory" }
+  | { op: "close_directory" }
+  | { op: "query_directory"; query?: string; scope?: "all" | "mine"; harness?: string }
   | { op: "quit" };
 export interface UiOptions {
   env?: NodeJS.ProcessEnv; sourcePath?: string; binary?: string;
@@ -60,7 +95,13 @@ export async function ensureUiCompiled(stateDir: string, source?: string): Promi
 function validAction(value: unknown): value is UiToDaemonAction {
   if (!value || typeof value !== "object") return false;
   const a = value as Record<string, unknown>;
-  if (a.op === "quit" || a.op === "unlisten_all" || a.op === "refresh_available") return true;
+  if (a.op === "quit" || a.op === "unlisten_all" || a.op === "refresh_available" || a.op === "open_directory" || a.op === "close_directory") return true;
+  if (a.op === "query_directory") {
+    if (a.query !== undefined && typeof a.query !== "string") return false;
+    if (a.scope !== undefined && a.scope !== "all" && a.scope !== "mine") return false;
+    if (a.harness !== undefined && (typeof a.harness !== "string" || (a.harness !== "all" && !/^[a-z][a-z0-9_-]{0,31}$/.test(a.harness)))) return false;
+    return true;
+  }
   if (a.op === "listen_session") {
     if (typeof a.harness !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(a.harness)) return false;
     if (typeof a.session_id !== "string" || !a.session_id.trim()) return false;
@@ -79,8 +120,10 @@ export class UiBridge {
   private child?: ChildProcessWithoutNullStreams;
   private stopped = false;
   private restart?: ReturnType<typeof setTimeout>;
-  private snapshot: Extract<DaemonToUiMessage, { op: "state" }> = { op: "state", hubs: [], listeners: [], available: [] };
+  private snapshot: Extract<DaemonToUiMessage, { op: "state" }> = { op: "state", hubs: [], listeners: [], available: [], my_remote_listeners: [], directory_online_count: 0 };
+  private directorySnapshot?: Extract<DaemonToUiMessage, { op: "directory" }>;
   private pending = false;
+  private directoryPending = false;
   private scheduled = false;
   private blocked = false;
   private banners: BannerPayload[] = [];
@@ -91,7 +134,7 @@ export class UiBridge {
     const binary = this.options.binary ?? await ensureUiCompiled(this.stateDir, this.options.sourcePath);
     if (this.stopped) return;
     const child = spawn(binary, [], { stdio: "pipe", env: { ...process.env, ...this.options.env } });
-    this.child = child; this.blocked = false; this.pending = true;
+    this.child = child; this.blocked = false; this.pending = true; this.directoryPending = this.directorySnapshot !== undefined;
     const decoder = new StringDecoder("utf8"); let buffer = "", dropping = false;
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += decoder.write(chunk);
@@ -126,8 +169,27 @@ export class UiBridge {
     if (this.stopped) return;
     this.restart = setTimeout(() => { void this.start().catch(error => { this.log(error); this.scheduleRestart(); }); }, 500);
   }
-  state(hubs: UiHubSummary[], listeners: UiListenerSummary[], available: AvailableSessionSummary[] = []): void {
-    this.snapshot = { op: "state", hubs, listeners, available }; this.pending = true;
+  state(
+    hubs: UiHubSummary[],
+    listeners: UiListenerSummary[],
+    available: AvailableSessionSummary[] = [],
+    myRemoteListeners: UiRemotePeerSummary[] = [],
+    directoryOnlineCount = 0,
+  ): void {
+    this.snapshot = {
+      op: "state",
+      hubs,
+      listeners,
+      available,
+      my_remote_listeners: myRemoteListeners,
+      directory_online_count: directoryOnlineCount,
+    };
+    this.pending = true;
+    if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
+  }
+  directory(peers: UiRemotePeerSummary[], matchedCount = peers.length, onlineCount = peers.length): void {
+    this.directorySnapshot = { op: "directory", peers, matched_count: matchedCount, online_count: onlineCount };
+    this.directoryPending = true;
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
   }
   banner(payload: BannerPayload): void { this.banners.push(payload); if (this.banners.length > 100) this.banners.shift(); this.flush(); }
@@ -135,6 +197,7 @@ export class UiBridge {
     const pipe = this.child?.stdin; if (!pipe || pipe.destroyed || this.blocked || this.stopped) return;
     const write = (msg: DaemonToUiMessage) => { this.blocked = !pipe.write(JSON.stringify(msg) + "\n"); };
     if (this.pending) { this.pending = false; write(this.snapshot); }
+    if (this.directoryPending && !this.blocked && this.directorySnapshot) { this.directoryPending = false; write(this.directorySnapshot); }
     while (this.banners.length && !this.blocked) write({ op: "banner", payload: this.banners.shift()! });
   }
   async close(): Promise<void> {

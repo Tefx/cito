@@ -23,19 +23,6 @@ test("daemon and OIDC redirect ports validate environment and JSON aliases", asy
   expect(config.daemonPort).toBe(3333); expect(config.hubs.a!.oidcRedirectPort).toBe(4444); expect(config.hubs.b!.oidcRedirectPort).toBe(5555);
 });
 
-test("channel config defaults off, accepts both JSON aliases, validates booleans and gives env precedence", async () => {
-  expect(loadConfig({}).enableClaudeChannel).toBe(false);
-  expect(loadConfig({ CITO_CLAUDE_CHANNEL: "1" }).enableClaudeChannel).toBe(true);
-  for (const key of ["enable_claude_channel", "enableClaudeChannel"]) {
-    const f = await configFile({ hubs: { personal }, [key]: true });
-    expect(loadConfig(f.env).enableClaudeChannel).toBe(true);
-    expect(loadConfig({ ...f.env, CITO_CLAUDE_CHANNEL: "0" }).enableClaudeChannel).toBe(false);
-    await writeFile(f.path, JSON.stringify({ hubs: { personal }, [key]: false }));
-    expect(loadConfig({ ...f.env, CITO_CLAUDE_CHANNEL: "1" }).enableClaudeChannel).toBe(true);
-    await writeFile(f.path, JSON.stringify({ hubs: { personal }, [key]: "true" }));
-    expect(() => loadConfig(f.env)).toThrow();
-  }
-});
 test("config file loads simultaneous hubs, defaults, scopes and mirrors the selected default", async () => {
   const f = await configFile({ default_hub: "personal", hubs: { personal, work } });
   const config = loadConfig(f.env);

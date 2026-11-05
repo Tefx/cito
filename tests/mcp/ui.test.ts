@@ -195,3 +195,80 @@ test("refresh_available and listen_session enroll discovered sessions, synchrono
   expect(f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_listeners WHERE status = 'ACTIVE'").get()!.n).toBe(0);
   await waitFor(() => states.mock.lastCall?.[2]?.[0]?.session_id === "switched-session-id");
 });
+
+test("CitoService populates my_remote_listeners and evaluates query_directory across HubDirectoryIndex with prefix tokens and facets", async () => {
+  const f = await setup();
+  const slot = f.service.slots.get("default")!;
+  const broker = await slot.network();
+  const principal = await slot.identity();
+  const states = vi.spyOn(f.service.ui!, "state");
+  const directories = vi.spyOn(f.service.ui!, "directory");
+
+  // Seed 1 remote session owned by alice (different host_id) and 2 workspace sessions owned by bob
+  const aliceRemoteReg = {
+    schema_version: 1 as const,
+    listener_id: "c_aliceremote2",
+    public_id: "cito-aliceremote2",
+    tag: "cito",
+    principal_id: principal.principal_id,
+    owner_user: principal.owner_user,
+    host_id: "11111111-1111-4111-8111-111111111111",
+    host_name: "alice-mini.local",
+    harness: "pi",
+    session_id: "remote-s1",
+    cwd: "/Users/alice/cito",
+    repo: "acme/cito",
+    branch: "main",
+    title: "Alice Remote Pi",
+    about: "Remote build check",
+    scope: "self" as const,
+    state: "ACTIVE" as const,
+    binding_generation: 1,
+    owner_token: "11111111-1111-4111-8111-222222222222",
+    lease_ttl_seconds: 60 as const,
+  };
+  const bobPeerReg = {
+    ...aliceRemoteReg,
+    listener_id: "c_bobworkspace",
+    public_id: "billing-bobworkspace",
+    tag: "billing",
+    principal_id: "none#bob",
+    owner_user: "bob",
+    host_id: "22222222-2222-4222-8222-222222222222",
+    host_name: "bob-studio",
+    harness: "codex",
+    session_id: "bob-s1",
+    repo: "acme/billing",
+    branch: "feat/payments",
+    title: "Billing Service",
+    about: "Payment webhook handler",
+    scope: "workspace" as const,
+  };
+  await broker.kv.create(aliceRemoteReg.listener_id, encode(aliceRemoteReg));
+  await broker.kv.create(bobPeerReg.listener_id, encode(bobPeerReg));
+
+  await f.service.handleUiAction({ op: "open_directory" });
+  expect(states.mock.lastCall?.[3]).toMatchObject([{ listener_id: "c_aliceremote2", is_self_principal: true }]);
+  expect(states.mock.lastCall?.[4]).toBe(2);
+  expect(directories.mock.lastCall).toEqual([
+    expect.arrayContaining([
+      expect.objectContaining({ listener_id: "c_aliceremote2", is_self_principal: true }),
+      expect.objectContaining({ listener_id: "c_bobworkspace", is_self_principal: false }),
+    ]),
+    2,
+    2,
+  ]);
+  // Self principal sorts before team peers by default
+  expect(directories.mock.lastCall?.[0]?.[0]?.listener_id).toBe("c_aliceremote2");
+
+  // Prefix token filtering: @bob repo:billing host:studio is:codex #bobwork
+  await f.service.handleUiAction({ op: "query_directory", query: "@bob repo:billing host:studio is:codex #bobwork", scope: "all", harness: "all" });
+  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_bobworkspace"]);
+  expect(directories.mock.lastCall?.[1]).toBe(1);
+  expect(directories.mock.lastCall?.[2]).toBe(2);
+
+  // Scope facet "mine" restricts to self principal
+  await f.service.handleUiAction({ op: "query_directory", query: "", scope: "mine", harness: "all" });
+  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_aliceremote2"]);
+  await f.service.handleUiAction({ op: "close_directory" });
+});

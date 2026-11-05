@@ -54,6 +54,15 @@ test("two real NATS hubs isolate wire IDs, batches and auto-acks while sharing o
 
 test("find queries hubs concurrently, deterministically merges revisions and skips malformed entries", async () => {
   const f = await multi();
+  // Empty stream (messages === 0) short-circuits without creating a KV watch or keys consumer
+  const initBrokers = await Promise.all([...f.service.slots.values()].map(slot => slot.network()));
+  const emptyWatchSpy = vi.spyOn(initBrokers[0]!.kv, "watch");
+  const emptyKeysSpy = vi.spyOn(initBrokers[0]!.kv, "keys");
+  expect((await call(f.service, "cito_find", { hub: "personal" })).listeners).toEqual([]);
+  expect(emptyWatchSpy).not.toHaveBeenCalled();
+  expect(emptyKeysSpy).not.toHaveBeenCalled();
+  emptyWatchSpy.mockRestore(); emptyKeysSpy.mockRestore();
+  f.service.slots.get("personal")!.directoryIndex.clear();
   const entries = [];
   for (const hub of ["work", "personal"]) entries.push(await call(f.service, "cito_listen", { about: "search", hub, tag: "agent" }, f.pi.meta));
   const brokers = await Promise.all([...f.service.slots.values()].map(slot => slot.network()));
@@ -61,13 +70,31 @@ test("find queries hubs concurrently, deterministically merges revisions and ski
   let entered = 0, release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const spies = brokers.map(broker => {
-    const keys = broker.kv.keys.bind(broker.kv);
-    return vi.spyOn(broker.kv, "keys").mockImplementation(async (...args) => { entered++; await gate; return keys(...args); });
+    const watch = broker.kv.watch.bind(broker.kv);
+    return vi.spyOn(broker.kv, "watch").mockImplementation(async (...args) => { entered++; await gate; return watch(...args); });
   });
   const pending = call(f.service, "cito_find", { query: "search" });
   try { await waitFor(() => entered === 2); } finally { release(); }
-  const found = await pending; spies.forEach(spy => spy.mockRestore());
+  const found = await pending;
   expect(found.listeners.map((row: { hub: string }) => row.hub)).toEqual(["personal", "work"]);
+  // Within the 5s TTL window, repeated cito_find calls coalesce and read from HubDirectoryIndex without re-watching
+  expect((await call(f.service, "cito_find", { query: "search" })).listeners.map((row: { hub: string }) => row.hub)).toEqual(["personal", "work"]);
+  expect(entered).toBe(2);
+  spies.forEach(spy => spy.mockRestore());
+  // When watch throws, HubDirectoryIndex falls back to boundedPointGetSnapshot (keys + 16-worker concurrent get)
+  f.service.slots.get("personal")!.directoryIndex.clear();
+  const watchFail = vi.spyOn(brokers[0]!.kv, "watch").mockRejectedValueOnce(new Error("watch failed"));
+  const keysSpy = vi.spyOn(brokers[0]!.kv, "keys");
+  expect((await call(f.service, "cito_find", { hub: "personal", query: "search" })).listeners).toHaveLength(1);
+  expect(keysSpy).toHaveBeenCalledTimes(1);
+  watchFail.mockRestore(); keysSpy.mockRestore();
+  // If both watch and boundedPointGetSnapshot fail, surface error without marking cache fresh
+  f.service.slots.get("personal")!.directoryIndex.clear();
+  const watchFail2 = vi.spyOn(brokers[0]!.kv, "watch").mockRejectedValueOnce(new Error("watch failed"));
+  const keysFail2 = vi.spyOn(brokers[0]!.kv, "keys").mockRejectedValueOnce(new Error("keys failed"));
+  expect(payload(await f.service.call("cito_find", { hub: "personal" }))).toMatchObject({ error: { code: "NATS_UNAVAILABLE" } });
+  expect(f.service.slots.get("personal")!.directoryIndex.isFresh()).toBe(false);
+  watchFail2.mockRestore(); keysFail2.mockRestore();
   const bad = vi.spyOn(f.service.slots.get("work")!, "network").mockRejectedValue(new Error("hub offline"));
   const partial = await call(f.service, "cito_find");
   expect(partial.listeners).toHaveLength(1); expect(partial.listeners[0].hub).toBe("personal");

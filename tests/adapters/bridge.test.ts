@@ -36,8 +36,20 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     await expect(stat(path())).rejects.toMatchObject({ code: "ENOENT" }); await emit("session_start");
     expect((await stat(path())).mode & 0o777).toBe(0o600);
     expect((await stat(state.stateDir + "/sockets")).mode & 0o777).toBe(0o700);
-    expect(await identify()).toEqual({ ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: "session-a", session_name: "Human title", cwd: state.root });
-    name = "Renamed"; await emit("session_info_changed"); expect((await identify()).session_name).toBe("Renamed");
+    const id1 = await identify();
+    expect(id1).toEqual({ ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: "session-a", session_name: "Human title", cwd: state.root, updated_at_ms: expect.any(Number) });
+    // Read-only identify and status probes must not advance updated_at_ms when sessionId is unchanged
+    await new Promise(r => setTimeout(r, 15));
+    const id2 = await identify();
+    expect(id2.updated_at_ms).toBe(id1.updated_at_ms);
+    await request({ op: "status", session_id: "session-a", badge: "🔔 test" });
+    await new Promise(r => setTimeout(r, 15));
+    expect((await identify()).updated_at_ms).toBe(id1.updated_at_ms);
+    // session_info_changed advances updated_at_ms
+    name = "Renamed"; await emit("session_info_changed");
+    const id3 = await identify();
+    expect(id3.session_name).toBe("Renamed");
+    expect(Number(id3.updated_at_ms)).toBeGreaterThan(Number(id1.updated_at_ms));
     currentId = undefined;
     await expect(identify()).rejects.toMatchObject({ bridgeError: "SESSION_NOT_OPEN" });
     await emit("session_shutdown"); await expect(stat(path())).rejects.toMatchObject({ code: "ENOENT" });

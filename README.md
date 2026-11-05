@@ -87,14 +87,14 @@ The standalone Pi extension also registers the `/cito` slash command (with `on`,
 - `/cito team [about...]`: enable shared (`workspace`) listening with an optional description.
 - `/cito off`: stop listening for the current Pi session.
 
-From a terminal—or inline inside Pi or Claude Code via `!cito listen` and `!cito unlisten`—you can also control session enrollment directly through the CLI:
+From a terminal—or inline inside Pi via `!cito listen` and `!cito unlisten`—you can also control session enrollment directly through the CLI:
 
 ```sh
 cito listen [--scope self|workspace] [--team] [--hub <name>] [--tag <tag>] [--codex[=<thread_id>]] [about...]
 cito unlisten [--hub <name>] [--codex[=<thread_id>]]
 ```
 
-By default, `cito listen` and `cito unlisten` pass `_meta: { caller_pid: process.ppid }` so the daemon walks parent processes to locate the owning Pi or Claude socket bridge. With `--codex` (or `--codex=<thread_id>` / `--codex <uuid>`), the CLI sends `_meta: { codexThreadId, cwd: process.cwd() }` instead; when `--codex` is passed without an explicit thread ID, Cito resolves the most recent matching thread from `${CITO_CODEX_HOME}/state_5.sqlite` (preferring open threads in the current `cwd`).
+By default, `cito listen` and `cito unlisten` pass `_meta: { caller_pid: process.ppid }` so the daemon walks parent processes to locate the owning Pi or custom socket bridge. With `--codex` (or `--codex=<thread_id>` / `--codex <uuid>`), the CLI sends `_meta: { codexThreadId, cwd: process.cwd() }` instead; when `--codex` is passed without an explicit thread ID, Cito resolves the most recent matching thread from `${CITO_CODEX_HOME}/state_5.sqlite` (preferring open threads in the current `cwd`).
 
 A gateway supporting Streamable HTTP may instead target `http://127.0.0.1:4290/mcp` after starting `cito daemon`. If the gateway runs outside Pi's ancestry, forward the Pi process PID as `_meta.endpoint_pid` (or a nested caller PID root) so discovery remains unambiguous.
 
@@ -147,7 +147,7 @@ A clean queue exit plus successful wake confirms delivery and auto-acknowledges 
 
 The daemon compiles `src/macos/cito-ui.swift` on demand into `${CITO_STATE_DIR}/bin/cito-ui`, then keeps one companion connected over UTF-8 newline-delimited JSON pipes. The menu shows ACTIVE listeners with a matching live receiver in a 380pt Control-Center custom AppKit card panel hosted in `NSMenuItem.view` (360×58pt or 360×72pt listener cards with harness badge, title, optional `about` subtitle, abbreviated cwd/branch, and middle-truncated `slug#fp4` copy pill). Copy stores the full scoped ID and displays green `✓ Copied` feedback for 1.2 seconds without closing the menu. Inline `Self` / `Team`, open-in-Codex and stop buttons replace submenus. `Stop All` revokes all local listeners; `Quit Cito ⌘Q` stops the daemon. `makeCitoStatusIcon` draws an 18×18pt monochrome template vector with a C-resonator, core node, outbound wave, and warning cutout dot, followed by a monospaced unique-session count when nonzero.
 
-Opening the menu (`NSMenuDelegate.menuWillOpen`) or changing `${CITO_STATE_DIR}/sockets` triggers on-demand discovery of local unenrolled sessions (`AVAILABLE SESSIONS`), combining live socket bridges (`pi`, `claude`, custom harnesses) and recent open user threads in `${CITO_CODEX_HOME}/state_5.sqlite` when ChatGPT/Codex Desktop is running (filtering out archived and subagent threads). Clicking `+ Listen` on any candidate row enrolls that session in 1 click with `scope: "self"` and identity fencing (`expected_harness` / `expected_session_id`) so a session switch between discovery and click fails safely with `SESSION_NOT_OPEN`. When active listeners or available candidates exceed 4 items, the menu caps their viewports inside top-down `NSScrollView` containers (`active_scroll` at 260pt and `available_scroll` at 144pt). Incoming state frames are delivered in `RunLoop.Mode.eventTracking` and guarded by an `Equatable` state diff (`hasRenderedState` / `pendingMutation`) so open menus update in place without flicker.
+Opening the menu (`NSMenuDelegate.menuWillOpen`) or changing `${CITO_STATE_DIR}/sockets` triggers on-demand discovery of local unenrolled sessions (`AVAILABLE SESSIONS`), combining live socket bridges (`pi`, custom harnesses) ordered by interaction recency (`updated_at_ms`) and recent open user threads in `${CITO_CODEX_HOME}/state_5.sqlite` when ChatGPT/Codex Desktop is running (filtering out archived and subagent threads, up to 8 candidates per harness). Candidates are grouped into collapsible per-harness sections (`Pi · N open`, `Codex · M recent`) with icon-free rows, alongside a collapsible `MY OTHER HOSTS` section for the current user's remote sessions and a `Search Network Directory…` launcher that opens a 560×440pt Spotlight-style `KeyPanel` backed by the daemon's `HubDirectoryIndex`. Clicking `+ Listen` on any candidate row enrolls that session in 1 click with `scope: "self"` and identity fencing (`expected_harness` / `expected_session_id`) so a session switch between discovery and click fails safely with `SESSION_NOT_OPEN`. When active listeners or available candidates exceed 4 items, the menu caps their viewports inside top-down `NSScrollView` containers (`active_scroll` at 260pt and `available_scroll` / `available_scroll:<harness>` at 144pt). Incoming state frames are delivered in `RunLoop.Mode.eventTracking` and guarded by an `Equatable` state diff (`hasRenderedState` / `pendingMutation`) so open menus update in place without flicker.
 
 Interactive semantic-color hub pills show status and user. Click a pill to expand its action drawer; authentication errors and disconnected hubs expand automatically. Drawers offer Sign In (OIDC), Reconnect and Disconnect. Disconnect aborts pending login, closes NATS and receivers, clears their badges, and retains ACTIVE SQLite registrations for reconnect. Foreground tools cannot silently reconnect a manually disconnected hub. Reconnect uses cached/refreshable credentials; Login permits interactive PKCE. Account changes fence the previous principal's ACTIVE/REBINDING listeners before restoration.
 
@@ -270,15 +270,9 @@ For hosts that only confirm queue/channel submission, register `new SocketBridge
 
 For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`, then call `registerAdapter(customAdapter)` from `src/adapters/index.ts` in your in-process entrypoint. Implement `probe`, `deliver`, and optional `updateBadge`; delivery returns `delivered`, `delivered_unconfirmed`, `driver_unavailable`, or `session_switched`. Use `ctx.runEffect` for each external effect so retries preserve cancellation and ownership fencing. Only return `delivered` after confirmed host insertion. Use `CitoService.create(config?, options?)`, `service.call(name, args, meta)`, and `await service.close()`; `createMcpServer(service)` supplies SDK handlers and `startHttpServer(config, service)` exposes them over loopback HTTP. An optional `detectExplicitCaller(ctx, config)` hook can resolve non-socket identity using generic context; multiple explicit adapter claims or a concurrent bridge PID claim return `INVALID_INPUT`. Socket-backed harnesses use the existing identity discovery protocol.
 
-### Optional Claude stdio channel bridge
+### Claude Code (Proposed Design Suggestion Only — Not Yet Implemented)
 
-Set `CITO_CLAUDE_CHANNEL=1` on the `cito-mcp` stdio forwarder, or set `enable_claude_channel: true` (alias `enableClaudeChannel`) in config.json. The default is false; an explicit environment value overrides the file and only `1` enables it. Direct HTTP clients do not gain a channel endpoint.
-
-The forwarder advertises `experimental: { "claude/channel": {} }` at initialization and binds `${CITO_STATE_DIR}/sockets/claude-pid-<parent-pid>.sock` with mode `0600`. Its identity uses `CLAUDE_SESSION_ID` or `claude-<parent-pid>`, the forwarder's cwd and directory name. One active forwarder owns a parent-PID endpoint; a second fails rather than replacing it. Close/EOF/signals remove the socket. Deliveries verify session identity, deduplicate the last 200 batch IDs and emit `notifications/claude/channel` with `{content, meta: {origin: "cito"}}`.
-
-The client must enable experimental channel support (such as `--channels`) for push to wake a conversation. Channel submission returns `delivered_unconfirmed`: SQLite records `DISPATCHED` with a null acknowledgement, so `cito_inbox()` still drains the message if push is ignored or delayed.
-
-**Native Claude Code lifecycle integration: Proposed Design Suggestion Only — Not Yet Implemented.** [DESIGN.md §5](docs/DESIGN.md#5-proposed-design-for-claude-code-integration-design-suggestion-only-not-yet-implemented) describes future native hooks and turn-start inbox draining. Cito installs no native lifecycle hooks or session-discovery integration.
+**Claude Code integration is a Proposed Design Suggestion Only — Not Yet Implemented.** See [DESIGN.md §6](docs/DESIGN.md#6-proposed-design-for-claude-code-integration-design-suggestion-only-not-yet-implemented) for the architectural design suggestion. No Claude Code adapter registration, CLI flag, or UI code is implemented in `src/`.
 
 ## Environment
 
@@ -293,7 +287,6 @@ The client must enable experimental channel support (such as `--channels`) for p
 | `CITO_OIDC_SCOPES` | Single-hub fallback explicit space-separated scopes; omitted defaults negotiate against discovery. |
 | `CITO_OIDC_REDIRECT_PORT` | Optional single-hub fixed callback port, 1..65535; omitted selects ephemeral. |
 | `CITO_DAEMON_PORT` | `4290`, or config `daemonPort`; 1..65535, loopback only. |
-| `CITO_CLAUDE_CHANNEL` | Opt-in stdio channel bridge: `1` enables, default false; config aliases `enable_claude_channel` / `enableClaudeChannel`. |
 | `CITO_STATE_DIR` | `~/.cito`; share between bridge and MCP. |
 | `CITO_HOST_NAME` | OS hostname, at most 128 printable ASCII characters. |
 | `CITO_CODEX_HOME` | `~/.codex`; reads only explicitly identified threads. |
@@ -305,4 +298,4 @@ The client must enable experimental channel support (such as `--channels`) for p
 
 OIDC verifies signatures before caching tokens and the offline principal (`0600`). Online connections verify cached tokens again. Per-hub rejected-token recovery rechecks under its in-memory mutex, refreshes silently, and falls back to S256 loopback PKCE only for missing refresh credentials or HTTP 400/401. Refresh network/5xx failures return `AUTH_UNAVAILABLE` without opening a browser. Lock wait and login share a 45-second deadline. Broker reconnect authorization failures defer login until the next online tool call.
 
-Cito installs no LaunchAgent automatically and uses NATS for cross-host delivery. The local HTTP endpoint exposes MCP only; keep it on loopback. See [DESIGN.md](docs/DESIGN.md) for the V4 protocol and the unimplemented Claude Code proposal.
+Cito installs no LaunchAgent automatically and uses NATS for cross-host delivery. The local HTTP endpoint exposes MCP only; keep it on loopback. See [DESIGN.md](docs/DESIGN.md) for the V8 architecture specification and the unimplemented Claude Code design suggestion.
