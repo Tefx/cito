@@ -9,36 +9,40 @@
 version: 1
 project: cito
 strategy_ref: docs/DESIGN.md
-context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md
-  and README.md across V1 (initial NATS JetStream relay, OIDC Auth Callout, Pi/Codex
-  host adapters, HUD banner, and MCP server), V2 (Multi-Hub & Extensible Harness Architecture,
-  3-table SQLite schema at PRAGMA user_version = 4, confirmed vs. unconfirmed auto-acknowledgment,
-  and default drain-on-read in cito_inbox), and V3 (macOS Menu Bar Daemon & Streamable
-  HTTP Edition: singleton cito daemon + Streamable HTTP MCP at http://127.0.0.1:4290/mcp
-  + GET /health + Origin check + lsof client-tuple PID attribution + cito-mcp stdio
-  auto-forwarding, replacement of cross-process file locks with in-memory KeyedMutex,
-  non-intrusive Codex Desktop adapter without ipc.sock, vendor-neutral standard OIDC,
-  progressive-disclosure NSStatusItem Menu Bar Extra + in-process NSPanel HUD in cito-ui.swift
-  & UiBridge, and updated README.md & docs/DESIGN.md §6). Exclude Claude Code runtime
-  implementation (documented in docs/DESIGN.md §6 and README.md strictly as ''尚未实现
-  / Not Yet Implemented'' design suggestion without implementation code details) and
-  forbid mutations to external dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V3 — macOS Menu
-  Bar Daemon & Streamable HTTP Edition, §§1–6) and README.md.
+context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md,
+  AGENTS.md, and README.md across V1 (initial NATS JetStream relay, OIDC Auth Callout,
+  Pi/Codex host adapters, HUD banner, and MCP server), V2 (Multi-Hub & Extensible
+  Harness Architecture, 3-table SQLite schema at PRAGMA user_version = 4, confirmed
+  vs. unconfirmed auto-acknowledgment, and default drain-on-read in cito_inbox), V3
+  (macOS Menu Bar Daemon & Streamable HTTP Edition: singleton cito daemon + Streamable
+  HTTP MCP at http://127.0.0.1:4290/mcp + GET /health + Origin check + lsof client-tuple
+  PID attribution + cito-mcp stdio auto-forwarding, in-memory KeyedMutex, non-intrusive
+  Codex Desktop adapter, vendor-neutral standard OIDC, and in-process UiBridge + cito-ui.swift),
+  and V4 (English-Only Production Menu Bar Card UI & Bespoke Vector Status Icon makeCitoStatusIcon
+  in cito-ui.swift, MCP 2026-07-28 protocol version support, pure adapter boundary
+  with detectExplicitCaller in src/adapters/codex.ts, optional CITO_CLAUDE_CHANNEL=1
+  stdio channel bridge, neutral example naming cleanup across src/, docs/, README.md,
+  deploy/, and tests/, and iterative code-hygiene gate). Keep full native Claude Code
+  lifecycle/hook integration strictly as ''Proposed Design Suggestion Only — Not Yet
+  Implemented'' in docs/DESIGN.md §5 and README.md, and forbid mutations to external
+  dotfiles or tela repositories.'
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V4 — macOS Menu
+  Bar Daemon, Streamable HTTP & Production Card UI, §§1–5), AGENTS.md, and README.md.
 
-  2. Hard boundaries: Keep src/mcp/ 100% harness-agnostic (zero hardcoded ''pi'' or
-  ''codex'' checks) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$). Do NOT
-  implement a runtime Claude Code adapter (docs/DESIGN.md §6 is a proposed design
-  suggestion only, free of implementation code details, and must be marked ''尚未实现
-  / Not Yet Implemented'' in README.md). Do NOT mutate external repositories (/Users/tefx/dotfiles,
-  tela) or live user ~/.cito / ~/.codex state during tests; always isolate test state
-  in temporary directories and ephemeral test nats-server / HTTP instances.
-
-  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ & src/ui/ ->
-  src/mcp/), unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing
-  (formatScopedId / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4),
-  in-memory KeyedMutex serialization (zero cross-process flock lockfiles), and zero-SQLite3
-  cito-ui.swift invariants.'
+  2. Hard boundaries: Enforce English-only UI/UX, code, and documentation (zero Chinese
+  characters in src/, docs/, README.md, deploy/) and zero company/environment-specific
+  names (rda, casdoor, rcatwin, keppel, mingchen) across src/, docs/, README.md, deploy/,
+  and tests/. Keep src/mcp/ 100% harness-agnostic (zero references to pi, codex, or
+  x-codex-turn-metadata) and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$). Keep
+  native Claude Code lifecycle integration documented strictly as Proposed Design
+  Suggestion Only — Not Yet Implemented in docs/DESIGN.md §5 and README.md. Do NOT
+  mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito /
+  ~/.codex state during tests; always isolate test state in temporary directories
+  and ephemeral test nats-server / HTTP instances.\n3. Preserve acyclic module boundaries
+  (src/shared/ -> src/adapters/ & src/ui/ -> src/mcp/), unprefixed NATS wire/SQLite
+  IDs with symmetric public <hub>:<id> addressing (formatScopedId / parseScopedId),
+  3-table SQLite schema (PRAGMA user_version = 4), in-memory KeyedMutex serialization
+  (zero cross-process flock lockfiles), and zero-SQLite3 cito-ui.swift invariants.'
 phases:
 - id: v1
   name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
