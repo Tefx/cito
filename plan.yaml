@@ -1022,3 +1022,28 @@ phases:
       \ and pathway-auditor 01a1a838-6712-721e-b4f3-03ed5022e562 certified Completeness:\
       \ CLEAN | Simplicity: ZERO_NEW_ISSUES).\n\nSpec link:\n- docs/DESIGN.md (V3\
       \ — macOS Menu Bar Daemon & Streamable HTTP Edition, §§1–6) and README.md"
+- id: v4
+  name: Cito V4 English-Only Production Menu Bar Card UI, Bespoke Vector Icon, MCP
+    2026-07-28 Support, Pure Adapter Boundary, Optional Claude Channel Bridge, Neutral
+    Naming Cleanup, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, all docs/DESIGN.md §§1–5, AGENTS.md, README.md, and deploy/nats/README.md
+    requirements are verified (including zero Chinese characters in src/, docs/, README.md,
+    deploy/ and zero matches for rda|casdoor|rcatwin|keppel|mingchen case-insensitively
+    in src/, docs/, README.md, deploy/, tests/), and [REQUIRES_SKILL: code-hygiene]
+    with [GATE_MODE: ITERATIVE_CONVERGENCE] converges to Completeness: CLEAN and Simplicity:
+    ZERO_NEW_ISSUES.'
+  context: 'Upgrade Cito to the V4 specification (docs/DESIGN.md §§1–5 and AGENTS.md):
+    bespoke monochrome template vector status icon makeCitoStatusIcon (18x18pt, 1.75pt
+    stroke, isTemplate = true) and 340pt-wide Control-Center custom AppKit card menu
+    panel (NSMenuItem.view cards) in src/macos/cito-ui.swift, English-only UI/UX/code/documentation
+    and elimination of all environment/company-specific example names (rda, casdoor,
+    rcatwin, keppel, mingchen) across src/, docs/, README.md, deploy/, and tests/,
+    MCP 2026-07-28 registration in SUPPORTED_PROTOCOL_VERSIONS, pure adapter boundary
+    moving codexThreadId and x-codex-turn-metadata HTTP header extraction/conflict
+    checking into src/adapters/codex.ts (detectExplicitCaller), opt-in CITO_CLAUDE_CHANNEL=1
+    (enableClaudeChannel) stdio channel bridge, updated README.md & deploy/nats/README.md
+    & unit/E2E tests, and iterative code-hygiene acceptance gate.'
+  depends_on:
+  - v3
