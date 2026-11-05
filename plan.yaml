@@ -2167,7 +2167,7 @@ phases:
 - id: v8
   name: Cito V8 Ego-Centric Menu Bar Control Plane, Spotlight Network Directory, Scalable
     NATS KV Discovery, Claude Removal, and Hygiene Gate
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -2217,7 +2217,7 @@ phases:
     name: 'Implement V8 Claude removal, HubDirectoryIndex NATS KV discovery, actionable
       Pi badge, Pi recency & per-harness quota, and Two-Surface macOS Ego-Menu + Spotlight
       DirectoryPanel UI [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/adapters/**\n    - src/pi-extension/cito-bridge.ts\n\
       \    - src/shared/config.ts\n    - src/mcp/cli.ts\n    - src/mcp/receiver.ts\n\
@@ -2385,6 +2385,8 @@ phases:
     - tests/adapters/pi.test.ts
     - tests/shared/multi-hub.test.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-05T14:49:48.869226Z'
   - id: v8.acceptance-and-hygiene-gate
     name: 'V8 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
