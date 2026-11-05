@@ -240,7 +240,7 @@ Review is ready.
 
 Cards escape angle brackets, strip `.local` from hosts, omit duplicate sender titles, and include scoped reply IDs. Batches use the English header `🔔 Cito · N notifications → Target` and numbered senders. There is no acknowledgement footer. Pi's self-contained renderer adds the host theme's background, header accent, and left body bar.
 
-Pi's badge aggregates all active hubs for its session: `🔔 <slug>`, unread count `(N)`, replay gap `(!)`, or both `(N!)`. Auto-acks, inbox commits, and enrollment/revocation refresh it under a session-wide lock. Only ACTIVE rows with a live, non-aborted receiver matching `owner_token` contribute to badges and menu state. Disconnecting one hub preserves other live hubs' badges.
+Pi's badge aggregates all active hubs for its session (`🔔 <slug>` or `🔔 <slug> (N)` when unread notifications exist, while `replay_gap_detected` and `replay_gap_range` are surfaced via `cito_inbox`). Auto-acks, inbox commits, and enrollment/revocation refresh it under a session-wide lock. Only ACTIVE rows with a live, non-aborted receiver matching `owner_token` contribute to badges and menu state. Disconnecting one hub preserves other live hubs' badges.
 
 The macOS HUD uses a dark 388×136pt nonactivating panel. It compiles on demand and has **no SQLite dependency**. The state pill reads `Notification` or `Passive`, with ` · ×N` for batches; passive subtitles start with `[Passive] `. The Codex action reads `Open in Codex ↗`; other harnesses read `<harness> session · Click to dismiss` and dismiss on click. Counts aggregate for the exact target/session/wake tuple. Headless diagnostics report the same presentation fields used by the UI.
 
