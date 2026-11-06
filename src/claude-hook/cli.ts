@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { loadConfig, type CitoConfig } from "../shared/index.js";
 import {
   claudeBadgePath, drainClaudeWakes, readClaudeSessionAlias, resolveClaudeSessionId,
-  validateClaudeSessionId, writeClaudeBadge, type ClaudeWake,
+  validateClaudeSessionId, writeClaudeBadge,
 } from "../adapters/claude.js";
 
 /** Only events that can carry text back into the turn may drain the queue; others must leave it intact. */
@@ -10,26 +10,22 @@ const INJECTABLE = new Set(["Stop", "SessionStart", "UserPromptSubmit"]);
 const USAGE = "Usage: cito-claude-hook (reads a Claude Code hook payload on stdin)\n"
   + "Install on Stop, SessionStart and UserPromptSubmit to deliver queued Cito wakes.\n";
 
-export interface HookInput {
+interface HookInput {
   session_id?: unknown;
   hook_event_name?: unknown;
   cwd?: unknown;
-  stop_hook_active?: unknown;
 }
-export function parseHookInput(text: string): HookInput {
+function parseHookInput(text: string): HookInput {
   if (!text.trim()) return {};
   const value: unknown = JSON.parse(text);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a hook payload object");
   return value as HookInput;
 }
-export function renderWakes(wakes: readonly ClaudeWake[]): string {
-  return wakes.map(wake => wake.content).join("\n\n");
-}
 /**
  * `Stop` is the only boundary that can restart an idle turn, so a wake blocks it with the card as the
  * reason. The context events can only prepend text to a turn the user already started.
  */
-export function hookOutput(event: string, text: string): Record<string, unknown> {
+function hookOutput(event: string, text: string): Record<string, unknown> {
   if (event === "Stop") return { decision: "block", reason: text };
   return { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
 }
@@ -89,7 +85,7 @@ export async function main(argv: string[] = process.argv.slice(2), config: CitoC
         }),
         signal: AbortSignal.timeout(500),
       }).then(res => res.text()).catch(() => {});
-      emit(hookOutput(event, renderWakes(wakes)));
+      emit(hookOutput(event, wakes.map(wake => wake.content).join("\n\n")));
       return;
     }
     emit({});
