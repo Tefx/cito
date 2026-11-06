@@ -2564,7 +2564,7 @@ phases:
 - id: v9
   name: Cito V9 Multi-Hub Session Attachment, Atomic Hub Migration, Target Hub Selector,
     Pi /cito --hub Support, and Hygiene Gate
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -2605,7 +2605,7 @@ phases:
     name: 'Implement V9 multi-hub candidate retention, atomic switch_hub migration,
       Zone 1 switch_hub pill, Zone 3 target_hub selector, and Pi /cito --hub support
       [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - src/adapters/types.ts\n    - src/adapters/index.ts\n\
       \    - src/ui/index.ts\n    - src/mcp/service.ts\n    - src/macos/cito-ui.swift\n\
@@ -2737,6 +2737,8 @@ phases:
     - tests/mcp/ui.test.ts
     - tests/adapters/bridge.test.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-06T02:26:29.067815Z'
   - id: v9.acceptance-and-hygiene-gate
     name: 'V9 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
