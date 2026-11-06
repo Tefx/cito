@@ -245,12 +245,23 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
 
 ---
 
-## 5. Direct Session Control Commands (`Pi /cito` & CLI `cito listen` / `cito unlisten`)
+## 5. Direct Session Control Commands & Zero-Script Packaging (`Pi /cito`, CLI `cito`, `package.json`)
 
+### 5.1 Direct Session Control Commands
 - **Pi Slash Command (`/cito` in `src/pi-extension/cito-bridge.ts`)**:
   - Standalone zero-dependency extension registering `/cito` (`["on", "team", "off"]` and `--hub ` completions, `Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]`, no-arg toggle via `activeBadge`, `/cito on [--hub <hub> | --hub=<hub>] [about...]`, `/cito team [--hub <hub> | --hub=<hub>] [about...]`, `/cito off [--hub <hub> | --hub=<hub>]`), calling stateless `POST http://127.0.0.1:${port}/mcp` with `_meta: { endpoint_pid: process.pid }`. When `--hub <hub>` is passed to `/cito off`, `activeBadge` is not blindly cleared after the RPC returns so the daemon's synchronous socket `status` update for any remaining active hubs remains authoritative, and the notification states `Cito stopped listening on <hub>`.
 - **CLI Direct Control (`cito listen` & `cito unlisten` in `src/mcp/cli.ts`)**:
   - Supports `cito listen` and `cito unlisten` for terminal/SSH and `--codex[=<thread_id>]`.
+
+### 5.2 Git & Global `npm install` Packaging Contract (`package.json`, `tsconfig.json`, `bin/`)
+1. **Avoiding `pacote` Git-Preparation Global Symlink Corruption**:
+   - In npm's `pacote/lib/git.js` (`GitFetcher.#prepareDir`), defining any of the six script keys `prepare`, `build`, `prepack`, `preinstall`, `install`, or `postinstall` in `package.json` causes `npm install -g github:<owner>/<repo>` to spawn a nested `npm install` inside `~/.npm/_cacache/tmp/git-clone*` that inherits `npm_config_global=true`, creating a broken global symlink or failing with `sh: tsc: command not found` (`code 127`).
+   - Therefore, `package.json` `scripts` MUST NOT define `prepare`, `build`, `prepack`, `preinstall`, `install`, or `postinstall`. TypeScript compilation is defined under `"compile": "rm -rf dist && tsc"` (with `"prepublishOnly": "npm run typecheck && npm run compile"`, `"typecheck": "tsc --noEmit"`, and `"test": "vitest run --dir tests"`).
+   - `package.json` `"files"` MUST be `["bin", "dist/src", "src", "README.md"]` so both Git installs (where `dist/` is gitignored) and prebuilt registry tarballs contain the complete `src/` tree alongside `bin/`.
+2. **Native Node TypeScript Execution & Zero-Install-Script Production Dependencies**:
+   - `tsconfig.json` enables `"erasableSyntaxOnly": true`, and all classes in `src/` use explicit field declarations and constructor assignments instead of TypeScript parameter properties (`constructor(readonly ...)`), allowing Node.js (`^22.13.0 || ^24.0.0 || >=26.0.0`) to execute `src/**/*.ts` directly via built-in TypeScript type-stripping.
+   - `bin/cito-mcp` and `bin/cito-auth-callout` resolve `../dist/src/.../cli.js` first when present; when `dist/` is absent, they register a built-in `node:module.register` hook that maps relative `.js` specifiers (`./*.js`, `../*.js`) to `.ts` on `ERR_MODULE_NOT_FOUND` and import `../src/mcp/cli.ts` / `../src/auth-callout/cli.ts` directly without `tsx`.
+   - `"tsx"` is kept only in `"devDependencies"` (never in `"dependencies"`), eliminating `esbuild` and `fsevents` install scripts from production and global installs.
 
 ---
 
