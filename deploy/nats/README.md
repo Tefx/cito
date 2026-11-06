@@ -63,12 +63,11 @@ and `work` (OIDC issuer `https://id.example.com`) simultaneously. Start
 and existing `2025-*` clients. Caller detection belongs to registered adapters,
 not the MCP transport.
 
-The V8 macOS client includes the `makeCitoStatusIcon` template vector, a
+The macOS client includes the `makeCitoStatusIcon` template vector, a
 380pt Ego-Centric Control-Center card menu with hub status pills and connection actions,
 and a 560×440pt Spotlight-style Network Directory panel.
-See the [client guide](../../README.md#macos-menu-bar-extra-cito-ui) for controls.
-Claude Code integration remains **Proposed Design Suggestion Only — Not Yet Implemented**; see
-[DESIGN.md §6](../../docs/DESIGN.md#6-proposed-design-for-claude-code-integration-design-suggestion-only-not-yet-implemented).
+See the [client guide](../../README.md#macos-menu-bar-extra-cito-ui) for controls and
+[DESIGN.md §6](../../docs/DESIGN.md#6-claude-code-integration-claude) for Claude Code integration.
 None of these client features changes the broker deployment or installs host hooks.
 
 ## Auth responder behavior and compatibility
