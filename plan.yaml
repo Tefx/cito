@@ -3798,7 +3798,7 @@ phases:
 - id: v13
   name: Cito V13 Network Directory Local-Host Peer Inclusion, Domain-Partition Test
     Coverage, and v0.11.1 Release
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -3918,7 +3918,7 @@ phases:
   - id: v13.acceptance-and-hygiene-gate
     name: 'V13 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v13` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -3993,3 +3993,40 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-06T15:51:39.904811Z'
+    done_at: '2026-11-06T15:54:51.465722+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v13-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:dc7a7d36f0e9510da881ac6c910f80e4274558f3).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (30 test
+      files, 238 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V13-1-COLLECT-NETWORK-PEERS-LOCAL-HOST-INCLUSION: PROVEN (src/mcp/service.ts:598-617
+      applies !isLocalSelfHost only to myRemoteItems and includes all visible active
+      registrations across connected hubs in allPeerItems, matching docs/DESIGN.md
+      §4.3).
+
+      - V13-2-DOMAIN-PARTITION-TEST-COVERAGE: PROVEN (tests/mcp/ui.test.ts:201-283
+      enrolls a local session on f.service.hostId alongside c_aliceremote2 and c_bobworkspace
+      and asserts my_remote_listeners length=1, directory_online_count=3, open_directory=3,
+      and query_directory scope=''mine''=2).
+
+      - V13-3-VERSION-0-11-1-AND-CODE-HYGIENE: PROVEN (package.json, package-lock.json,
+      src/shared/index.ts CITO_VERSION, tests/shared/shared.test.ts, and README.md
+      synchronized to 0.11.1; fresh-context structural-auditor 01a1b18b-617f-7396-8e87-c9a838c85696
+      and uiux-auditor 01a1b18b-612d-7284-9d18-2775964c22cb certified Completeness:
+      CLEAN | Simplicity: ZERO_NEW_ISSUES).'
