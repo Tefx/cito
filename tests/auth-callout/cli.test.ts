@@ -117,7 +117,8 @@ describe("public cito-auth-callout executable", () => {
     for (const forbidden of ["prepare", "build", "prepack", "preinstall", "install", "postinstall"]) {
       expect(pkg.scripts?.[forbidden]).toBeUndefined();
     }
-    expect(pkg.scripts?.compile).toBe("rm -rf dist && tsc");
+    expect(Object.keys(pkg.scripts ?? {})).toEqual(["test", "typecheck", "compile", "prepublishOnly"]);
+    expect(pkg.scripts?.compile).toBe("rm -rf dist && tsc && if [ \"$(uname -s)-$(uname -m)\" = \"Darwin-arm64\" ]; then swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64 && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64; fi");
     expect(pkg.scripts?.prepublishOnly).toBe("npm run typecheck && npm run compile");
     expect(pkg.dependencies?.tsx).toBeUndefined();
 
@@ -187,6 +188,7 @@ describe("public cito-auth-callout executable", () => {
 
       const installedPkgRoot = await realpath(join(prefix, "lib/node_modules/@tefx/cito"));
       expect(existsSync(join(installedPkgRoot, "dist"))).toBe(false);
+      expect(existsSync(join(installedPkgRoot, "bin/cito-ui-darwin-arm64"))).toBe(true);
       for (const [binName, targetRel] of [
         ["cito", "bin/cito-mcp"],
         ["cito-mcp", "bin/cito-mcp"],

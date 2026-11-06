@@ -1,6 +1,6 @@
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promisify } from "node:util";
-import { chmod, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
@@ -72,19 +72,41 @@ export interface UiOptions {
 const compileMutex = new KeyedMutex(), exec = promisify(execFile);
 export async function ensureUiCompiled(stateDir: string, source?: string): Promise<string> {
   return compileMutex.run(stateDir, async () => {
+    const customSource = source !== undefined;
     if (!source) {
       const direct = fileURLToPath(new URL("../macos/cito-ui.swift", import.meta.url));
       source = await stat(direct).then(() => direct, () => fileURLToPath(new URL("../../../src/macos/cito-ui.swift", import.meta.url)));
     }
+    const sourceStat = await stat(source);
     const binary = join(stateDir, "bin/cito-ui");
-    if (await stat(binary).then(async st => st.mtimeMs >= (await stat(source!)).mtimeMs, () => false)) return binary;
+    const prebuilt = !customSource && process.platform === "darwin" && process.arch === "arm64"
+      ? await (async () => {
+          const directPrebuilt = fileURLToPath(new URL("../../bin/cito-ui-darwin-arm64", import.meta.url));
+          const distPrebuilt = fileURLToPath(new URL("../../../bin/cito-ui-darwin-arm64", import.meta.url));
+          return stat(directPrebuilt).then(
+            st => ({ path: directPrebuilt, stat: st }),
+            () => stat(distPrebuilt).then(st => ({ path: distPrebuilt, stat: st }), () => undefined),
+          );
+        })()
+      : undefined;
+    const usePrebuilt = prebuilt !== undefined && prebuilt.stat.mtimeMs >= sourceStat.mtimeMs;
+    const targetMtimeMs = usePrebuilt ? prebuilt.stat.mtimeMs : sourceStat.mtimeMs;
+    if (await stat(binary).then(st => st.mtimeMs >= targetMtimeMs, () => false)) return binary;
     await mkdir(join(stateDir, "bin"), { recursive: true, mode: 0o700 });
     const scratch = await mkdtemp(join(stateDir, "bin/.ui-build-"));
     try {
       const temp = join(scratch, "cito-ui");
-      await exec("/usr/bin/swiftc", [source, "-o", temp], { timeout: 120_000, maxBuffer: 1024 * 1024 });
-      await chmod(temp, 0o755); await rename(temp, binary);
-    } finally { await rm(scratch, { recursive: true, force: true }); }
+      if (usePrebuilt) {
+        const bytes = await readFile(prebuilt.path);
+        await writeFile(temp, bytes, { mode: 0o755 });
+      } else {
+        await exec("/usr/bin/swiftc", [source, "-o", temp], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+      }
+      await chmod(temp, 0o755);
+      await rename(temp, binary);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
     return binary;
   });
 }

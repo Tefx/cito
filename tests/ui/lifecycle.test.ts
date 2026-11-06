@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, utimes, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { ensureUiCompiled, UiBridge, validAction, type BannerPayload, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
 import { KeyedMutex } from "../../src/shared/index.js";
 import { waitFor } from "../mcp/support.js";
@@ -646,3 +647,48 @@ test("V9 validAction validation, Zone 1 switch_hub:<scoped_id> pill, and Zone 3 
   await errBridge.start();
   await expect(errBridge.close()).resolves.toBeUndefined();
 }, 15000);
+
+test("prebuilt bin/cito-ui-darwin-arm64 is an ad-hoc-signed arm64 Mach-O installed in < 200ms with swiftc fallback on custom source", async () => {
+  const prebuiltPath = fileURLToPath(new URL("../../bin/cito-ui-darwin-arm64", import.meta.url));
+  const prebuiltStat = await stat(prebuiltPath);
+  expect(prebuiltStat.mode & 0o111).toBeGreaterThan(0);
+  const prebuiltBytes = await readFile(prebuiltPath);
+  // 64-bit Mach-O magic (MH_MAGIC_64 = 0xfeedfacf) and CPU_TYPE_ARM64 (0x0100000c)
+  expect(prebuiltBytes.readUInt32LE(0)).toBe(0xfeedfacf);
+  expect(prebuiltBytes.readUInt32LE(4)).toBe(0x0100000c);
+  const verifySign = spawnSync("codesign", ["-v", prebuiltPath], { encoding: "utf8" });
+  expect(verifySign.status).toBe(0);
+
+  const freshStateDir = await mkdtemp("/tmp/cito-ui-prebuilt-");
+  try {
+    const startMs = performance.now();
+    const installedPath = await ensureUiCompiled(freshStateDir);
+    const elapsedMs = performance.now() - startMs;
+    expect(elapsedMs).toBeLessThan(200);
+    expect(installedPath).toBe(join(freshStateDir, "bin/cito-ui"));
+    const installedStat1 = await stat(installedPath);
+    expect(installedStat1.mode & 0o777).toBe(0o755);
+    expect(installedStat1.ino).not.toBe(prebuiltStat.ino);
+    expect((await readFile(installedPath)).equals(prebuiltBytes)).toBe(true);
+
+    // Second ensureUiCompiled on up-to-date stateDir returns immediately without replacing the inode
+    const cachedStartMs = performance.now();
+    const cachedPath = await ensureUiCompiled(freshStateDir);
+    expect(performance.now() - cachedStartMs).toBeLessThan(50);
+    expect(cachedPath).toBe(installedPath);
+    expect((await stat(installedPath)).ino).toBe(installedStat1.ino);
+
+    // Explicit newer custom source triggers /usr/bin/swiftc fallback compilation
+    const customSwift = join(freshStateDir, "custom-ui.swift");
+    await writeFile(customSwift, 'print("custom-swiftc-fallback-ok")');
+    const future = new Date(Date.now() + 10_000);
+    await utimes(customSwift, future, future);
+    const fallbackPath = await ensureUiCompiled(freshStateDir, customSwift);
+    expect(fallbackPath).toBe(installedPath);
+    const runFallback = spawnSync(fallbackPath, [], { encoding: "utf8", timeout: 5000 });
+    expect(runFallback.status).toBe(0);
+    expect(runFallback.stdout.trim()).toBe("custom-swiftc-fallback-ok");
+  } finally {
+    await rm(freshStateDir, { recursive: true, force: true });
+  }
+}, 60000);
