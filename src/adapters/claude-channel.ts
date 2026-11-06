@@ -4,7 +4,10 @@ import { createServer, type Socket } from "node:net";
 import { basename, dirname } from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { CitoConfig } from "../shared/index.js";
-import { CLAUDE_HARNESS, appendClaudeWake, resolveClaudeSessionId, resolveClaudeSessionTitle, validateClaudeSessionId, writeClaudeBadge } from "./claude.js";
+import {
+  CLAUDE_HARNESS, appendClaudeWake, resolveClaudeSessionId, resolveClaudeSessionTitle,
+  validateClaudeSessionId, writeClaudeBadge, writeClaudeSessionAlias,
+} from "./claude.js";
 import { bridgeSocketPath, requestBridge } from "./pi.js";
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -38,28 +41,44 @@ export async function startClaudeChannelBridge(config: CitoConfig,
   const path = bridgeSocketPath(config.stateDir, CLAUDE_HARNESS, endpoint);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);
-  const delivered = new Set<string>(), clients = new Set<Socket>();
-  let queue = Promise.resolve(), owned = false, closed = false, lastActiveMs = Date.now(), badged: string | undefined;
-  // Re-resolved per request: /clear starts a new transcript, which must read as a switched session.
+  const delivered = new Set<string>(), clients = new Set<Socket>(), badgedSessions = new Set<string>();
+  const fallbackId = `claude-${endpoint}`;
+  let useFallbackAlias = !env.CLAUDE_SESSION_ID?.trim() && (await resolveClaudeSessionId(cwd, config)) === undefined;
+  let firstTranscript: string | undefined;
+  let queue = Promise.resolve(), owned = false, closed = false, lastActiveMs = Date.now();
+  // Re-resolved per request: /clear starts a new transcript, which must read as a switched session,
+  // while first-turn transcript creation preserves an initial claude-<endpoint> listener via alias.
   const sessionId = async (): Promise<string> => {
     const explicit = env.CLAUDE_SESSION_ID?.trim();
     if (explicit) return validateClaudeSessionId(explicit);
-    return await resolveClaudeSessionId(cwd, config) ?? `claude-${endpoint}`;
+    const resolved = await resolveClaudeSessionId(cwd, config);
+    if (!resolved) return fallbackId;
+    if (useFallbackAlias) {
+      if (firstTranscript === undefined || firstTranscript === resolved) {
+        firstTranscript = resolved;
+        await writeClaudeSessionAlias(config, resolved, fallbackId);
+        return fallbackId;
+      }
+      useFallbackAlias = false;
+    }
+    return resolved;
   };
   const handle = async (request: Record<string, unknown>): Promise<object> => {
     if (closed) return { ok: false, error: "BRIDGE_CLOSED" };
     const current = await sessionId();
     if (request.op === "identify") {
       // The transcript title is what the user named this session; the workspace name is the fallback.
-      const name = await resolveClaudeSessionTitle(cwd, current, config).catch(() => undefined);
+      const name = await resolveClaudeSessionTitle(cwd, firstTranscript ?? current, config).catch(() => undefined);
       return { ok: true, endpoint_pid: endpoint, session_id: current,
         session_name: name ?? basename(cwd), cwd, updated_at_ms: lastActiveMs };
     }
     if (request.session_id !== current) return { ok: false, error: "SESSION_MISMATCH" };
     if (request.op === "status") {
       if (request.badge != null && typeof request.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
-      badged = (request.badge as string | undefined) ?? undefined;
-      await writeClaudeBadge(config, current, badged);
+      const badge = (request.badge as string | undefined) ?? undefined;
+      if (badge !== undefined) badgedSessions.add(current);
+      else badgedSessions.delete(current);
+      await writeClaudeBadge(config, current, badge);
       return { ok: true };
     }
     if (request.op !== "deliver" || typeof request.batch_id !== "string" || !request.batch_id
@@ -73,7 +92,7 @@ export async function startClaudeChannelBridge(config: CitoConfig,
       if (delivered.size > MAX_TRACKED_BATCHES) delivered.delete(delivered.values().next().value!);
       lastActiveMs = Date.now();
       // A client without the channel capability simply ignores the notification.
-      await transport.send({ jsonrpc: "2.0", method: "notifications/claude/channel",
+      void transport.send({ jsonrpc: "2.0", method: "notifications/claude/channel",
         params: { content: request.content, meta: { origin: "cito", batch_id: request.batch_id } } }).catch(() => {});
     }
     return { ok: true, delivered: true, deduplicated };
@@ -136,11 +155,23 @@ export async function startClaudeChannelBridge(config: CitoConfig,
         closed = true;
         for (const client of clients) client.destroy();
         await new Promise<void>(resolve => server.close(() => resolve()));
-        // A stale badge outlives the session it described, so drop it with the bridge.
-        if (badged !== undefined) await writeClaudeBadge(config, await sessionId(), undefined).catch(() => {});
-        // A blocked stdout drain must not retain the socket or delay shutdown.
-        onExit(); owned = false; process.removeListener("exit", onExit);
+        // A stale badge outlives the session it described, so drop every badge written by this bridge.
+        await Promise.allSettled([...badgedSessions].map(id => writeClaudeBadge(config, id, undefined)));
+        badgedSessions.clear();
+        process.removeListener("exit", onExit);
+        if (owned) { owned = false; await unlink(path).catch(error => { if (error.code !== "ENOENT") throw error; }); }
+        await queue.catch(() => {});
       })();
     },
   };
+}
+
+export async function startOptionalStdioChannel(config: CitoConfig,
+  transport: { send(message: JSONRPCMessage): Promise<void> },
+  options: ClaudeChannelOptions = {}): Promise<ClaudeChannelBridge | undefined> {
+  if (!config.enableClaudeChannel) return undefined;
+  return startClaudeChannelBridge(config, transport, options).catch(error => {
+    console.error(error);
+    return undefined;
+  });
 }

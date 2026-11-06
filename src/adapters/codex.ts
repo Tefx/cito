@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { normalizeRepo, gitMetadata, type RepoMetadata } from "./git.js";
+import { normalizeRepo, resolveExplicitCaller, type RepoMetadata } from "./git.js";
 import type { ListenerRow } from "../shared/state-types.js";
 import type { AvailableSessionSummary, Caller, CallerDetectionContext, HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
 
@@ -166,16 +166,7 @@ export class CodexDesktopAdapter implements HarnessAdapter {
     const row = readCodexThreadOptional(thread, config);
     if (row.status === "found") return row;
     if (row.status === "archived" && ctx.requireOpen !== false) throw new CitoError("SESSION_NOT_OPEN", "Codex thread is archived");
-    let cwd = typeof meta.cwd === "string" && meta.cwd.trim() ? meta.cwd : undefined;
-    if (!cwd && Number.isSafeInteger(ctx.httpClientPid) && ctx.httpClientPid! > 0) {
-      try {
-        const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(ctx.httpClientPid), "-Fn"], { timeout: 1000 });
-        cwd = stdout.split("\n").find(line => line.startsWith("n"))?.slice(1) || undefined;
-      } catch { /* Optional OS metadata. */ }
-    }
-    if (!cwd) cwd = (await ctx.lookupCachedSession?.({ harness: this.id, sessionId: thread }))?.cwd;
-    cwd ||= process.cwd();
-    return { harness: this.id, session_id: thread, cwd, ...await gitMetadata(cwd, typeof meta.title === "string" ? meta.title : undefined) };
+    return resolveExplicitCaller(this.id, thread, { ...ctx, meta });
   }
   async probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome> {
     try {

@@ -1,5 +1,9 @@
+import { readFile } from "node:fs/promises";
 import { loadConfig, type CitoConfig } from "../shared/index.js";
-import { drainClaudeWakes, resolveClaudeSessionId, validateClaudeSessionId, type ClaudeWake } from "../adapters/claude.js";
+import {
+  claudeBadgePath, drainClaudeWakes, readClaudeSessionAlias, resolveClaudeSessionId,
+  validateClaudeSessionId, writeClaudeBadge, type ClaudeWake,
+} from "../adapters/claude.js";
 
 /** Only events that can carry text back into the turn may drain the queue; others must leave it intact. */
 const INJECTABLE = new Set(["Stop", "SessionStart", "UserPromptSubmit"]);
@@ -35,6 +39,13 @@ async function readStdin(): Promise<string> {
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks).toString("utf8");
 }
+async function stripBadgeUnreadCount(config: CitoConfig, sessionId: string): Promise<void> {
+  try {
+    const current = (await readFile(claudeBadgePath(config, sessionId), "utf8")).replace(/\r?\n$/, "");
+    const stripped = current.replace(/ \(\d+\)$/, "");
+    if (stripped && stripped !== current) await writeClaudeBadge(config, sessionId, stripped);
+  } catch { /* Best-effort badge update when daemon is unreachable. */ }
+}
 export async function main(argv: string[] = process.argv.slice(2), config: CitoConfig = loadConfig()): Promise<void> {
   if (argv.includes("--help") || argv.includes("-h")) { process.stderr.write(USAGE); return; }
   const emit = (value: Record<string, unknown>) => { process.stdout.write(JSON.stringify(value) + "\n"); };
@@ -44,13 +55,44 @@ export async function main(argv: string[] = process.argv.slice(2), config: CitoC
       ? input.hook_event_name.trim() : argv[0]?.trim() ?? "";
     if (!INJECTABLE.has(event)) { emit({}); return; }
     const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : process.cwd();
-    // The hook payload names the live session; a manual run falls back to the newest transcript.
-    const session = typeof input.session_id === "string" && input.session_id.trim()
-      ? validateClaudeSessionId(input.session_id) : await resolveClaudeSessionId(cwd, config);
+    const explicitSession = typeof input.session_id === "string" && input.session_id.trim()
+      ? input.session_id
+      : process.env.CLAUDE_SESSION_ID?.trim() || undefined;
+    // The hook payload or CLAUDE_SESSION_ID names the live session; a manual run falls back to the newest transcript.
+    const session = explicitSession
+      ? validateClaudeSessionId(explicitSession)
+      : await resolveClaudeSessionId(cwd, config);
     if (!session) { emit({}); return; }
     const wakes = await drainClaudeWakes(config, session);
-    // Draining empties the queue: cito keeps the signals unacknowledged, so cito_inbox() stays the net.
-    emit(wakes.length ? hookOutput(event, renderWakes(wakes)) : {});
+    if (wakes.length) {
+      const alias = await readClaudeSessionAlias(config, session);
+      const ackSession = alias ?? session;
+      await Promise.allSettled([
+        stripBadgeUnreadCount(config, session),
+        ...(alias ? [stripBadgeUnreadCount(config, alias)] : []),
+      ]);
+      await fetch(`http://127.0.0.1:${config.daemonPort}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "cito_inbox",
+            arguments: { ack_all: false, ack_ids: wakes.map(w => w.batch_id) },
+            _meta: { claudeSessionId: ackSession, cwd },
+          },
+        }),
+        signal: AbortSignal.timeout(500),
+      }).then(res => res.text()).catch(() => {});
+      emit(hookOutput(event, renderWakes(wakes)));
+      return;
+    }
+    emit({});
   } catch (error) {
     // A hook failure must never break the user's session: report on stderr and stay neutral.
     process.stderr.write("cito-claude-hook: " + (error instanceof Error ? error.message : String(error)) + "\n");

@@ -1,14 +1,11 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { gitMetadata } from "./git.js";
+import { resolveExplicitCaller } from "./git.js";
 import { SocketBridgeAdapter } from "./pi.js";
 import type { Caller, CallerDetectionContext } from "./types.js";
 
-const exec = promisify(execFile);
 type ClaudeConfig = Pick<CitoConfig, "claudeHome">;
 type QueueConfig = Pick<CitoConfig, "stateDir">;
 export const CLAUDE_HARNESS = "claude";
@@ -16,7 +13,7 @@ const TRANSCRIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // Session identifiers become file names: keep them to one path segment with no traversal.
 const QUEUE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DRAIN_SUFFIX = ".draining-";
-const MAX_QUEUE_BYTES = 4 * 1024 * 1024;
+const PID_KEYS = ["endpoint_pid", "caller_pid", "pi_pid"];
 
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 export function validateClaudeSessionId(value: unknown): string {
@@ -86,7 +83,10 @@ export async function resolveClaudeSessionTitle(cwd: string, sessionId: string,
       if (cleaned) title = [...cleaned].slice(0, TITLE_MAX_CHARS).join("");
     } catch { /* A truncated or malformed record is not a title. */ }
   }
-  if (titleCache.size >= TITLE_CACHE_ENTRIES) titleCache.delete(titleCache.keys().next().value!);
+  if (title === undefined && start > 0 && cached && info.size > cached.size) {
+    title = cached.title;
+  }
+  if (titleCache.size >= TITLE_CACHE_ENTRIES && !titleCache.has(path)) titleCache.delete(titleCache.keys().next().value!);
   titleCache.set(path, { size: info.size, mtimeMs: info.mtimeMs, title });
   return title;
 }
@@ -94,8 +94,9 @@ export async function resolveClaudeSessionTitle(cwd: string, sessionId: string,
 export function claudeSessionClaim(meta: Record<string, unknown> = {},
   headers?: Record<string, string | string[] | undefined>): string | undefined {
   const header = headers?.["x-claude-session-id"];
+  const hasPid = PID_KEYS.some(key => meta[key] !== undefined);
   const candidates = [meta.claudeSessionId, meta.claude_session_id,
-    meta.expected_harness === CLAUDE_HARNESS ? meta.expected_session_id : undefined,
+    !hasPid && meta.expected_harness === CLAUDE_HARNESS ? meta.expected_session_id : undefined,
     ...(Array.isArray(header) ? header : header === undefined ? [] : [header])];
   const ids = [...new Set(candidates.filter(nonempty).map(value => value.trim()))];
   if (ids.length > 1) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
@@ -109,6 +110,24 @@ export function claudeWakeQueuePath(config: QueueConfig, sessionId: string): str
 }
 export function claudeBadgePath(config: QueueConfig, sessionId: string): string {
   return join(config.stateDir, "claude", "badges", validateClaudeSessionId(sessionId));
+}
+export function claudeAliasPath(config: QueueConfig, sessionId: string): string {
+  return join(config.stateDir, "claude", "aliases", validateClaudeSessionId(sessionId));
+}
+export async function writeClaudeSessionAlias(config: QueueConfig, sessionId: string, targetSessionId: string): Promise<void> {
+  const path = claudeAliasPath(config, sessionId);
+  const target = validateClaudeSessionId(targetSessionId);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, target + "\n", { mode: 0o600 });
+  await chmod(path, 0o600);
+}
+export async function readClaudeSessionAlias(config: QueueConfig, sessionId: string): Promise<string | undefined> {
+  try {
+    const target = validateClaudeSessionId(await readFile(claudeAliasPath(config, sessionId), "utf8"));
+    return target.startsWith("claude-") && target !== sessionId ? target : undefined;
+  } catch {
+    return undefined;
+  }
 }
 /** Claude Code has no queue CLI and no wake URL scheme: the durable queue IS the delivery effect. */
 export async function appendClaudeWake(config: QueueConfig, sessionId: string, wake: ClaudeWake): Promise<void> {
@@ -131,30 +150,43 @@ function parseWakes(text: string): ClaudeWake[] {
     } catch { return []; } // A torn trailing line is recovered on the next append, never on a replay.
   });
 }
-async function readQueue(path: string): Promise<string> {
-  const info = await stat(path);
-  if (info.size > MAX_QUEUE_BYTES) throw new CitoError("INVALID_INPUT", "Claude wake queue exceeds 4 MiB");
-  return await readFile(path, "utf8");
-}
 export async function peekClaudeWakes(config: QueueConfig, sessionId: string): Promise<ClaudeWake[]> {
-  try { return parseWakes(await readQueue(claudeWakeQueuePath(config, sessionId))); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  const validId = validateClaudeSessionId(sessionId);
+  const alias = await readClaudeSessionAlias(config, validId);
+  const sessions = alias ? [alias, validId] : [validId];
+  const wakes: ClaudeWake[] = [], seen = new Set<string>();
+  for (const id of sessions) {
+    let text: string;
+    try { text = await readFile(claudeWakeQueuePath(config, id), "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+    for (const wake of parseWakes(text)) {
+      if (seen.has(wake.batch_id)) continue;
+      seen.add(wake.batch_id); wakes.push(wake);
+    }
+  }
+  return wakes;
 }
 /**
  * Rename-then-read: an appender racing the drain recreates the queue instead of losing a card, and a
- * drain that dies before unlinking leaves its staging file behind for the next run to pick up.
+ * drain that died before unlinking leaves its staging file behind for the next run to pick up.
  */
 export async function drainClaudeWakes(config: QueueConfig, sessionId: string): Promise<ClaudeWake[]> {
-  const path = claudeWakeQueuePath(config, sessionId), dir = dirname(path);
-  try { await rename(path, path + DRAIN_SUFFIX + randomUUID()); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const prefix = basename(path) + DRAIN_SUFFIX;
+  const validId = validateClaudeSessionId(sessionId);
+  const alias = await readClaudeSessionAlias(config, validId);
+  const sessions = alias ? [alias, validId] : [validId];
+  const dir = wakeDir(config);
+  for (const id of sessions) {
+    const path = claudeWakeQueuePath(config, id);
+    try { await rename(path, path + DRAIN_SUFFIX + randomUUID()); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  const prefixes = sessions.map(id => basename(claudeWakeQueuePath(config, id)) + DRAIN_SUFFIX);
   let names: string[];
   try { names = await readdir(dir); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
-  const staged = await Promise.all(names.filter(name => name.startsWith(prefix)).map(async name => {
+  const staged = await Promise.all(names.filter(name => prefixes.some(p => name.startsWith(p))).map(async name => {
     const file = join(dir, name);
-    try { return { file, at: (await stat(file)).mtimeMs, text: await readQueue(file) }; }
+    try { return { file, at: (await stat(file)).mtimeMs, text: await readFile(file, "utf8") }; }
     catch { return undefined; }
   }));
   const ordered = staged.flatMap(entry => entry ? [entry] : []).sort((a, b) => a.at - b.at || a.file.localeCompare(b.file));
@@ -187,19 +219,9 @@ export class ClaudeCodeAdapter extends SocketBridgeAdapter {
   async detectExplicitCaller(ctx: CallerDetectionContext, _config: CitoConfig): Promise<Caller | null> {
     const session = claudeSessionClaim(ctx.meta, ctx.headers);
     if (!session) return null;
-    if (["endpoint_pid", "caller_pid", "pi_pid"].some(key => ctx.meta[key] !== undefined)) {
+    if (PID_KEYS.some(key => ctx.meta[key] !== undefined)) {
       throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
     }
-    let cwd = typeof ctx.meta.cwd === "string" && ctx.meta.cwd.trim() ? ctx.meta.cwd.trim() : undefined;
-    if (!cwd && Number.isSafeInteger(ctx.httpClientPid) && ctx.httpClientPid! > 0) {
-      try {
-        const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(ctx.httpClientPid), "-Fn"], { timeout: 1000 });
-        cwd = stdout.split("\n").find(line => line.startsWith("n"))?.slice(1) || undefined;
-      } catch { /* Optional OS metadata. */ }
-    }
-    if (!cwd) cwd = (await ctx.lookupCachedSession?.({ harness: CLAUDE_HARNESS, sessionId: session }))?.cwd;
-    cwd ||= process.cwd();
-    const title = typeof ctx.meta.title === "string" ? ctx.meta.title : undefined;
-    return { harness: CLAUDE_HARNESS, session_id: session, cwd, ...await gitMetadata(cwd, title) };
+    return resolveExplicitCaller(CLAUDE_HARNESS, session, ctx);
   }
 }

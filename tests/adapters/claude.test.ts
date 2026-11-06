@@ -76,12 +76,18 @@ test("only the transcript tail is read, so a title older than the window yields 
   // Appending a fresh title both lands inside the window and invalidates the cached miss.
   await appendFile(path, JSON.stringify({ type: "custom-title", customTitle: "Current" }) + "\n");
   expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Current");
+  // Growing the transcript past the 128 KiB tail window without a newer custom-title preserves the cached title.
+  await appendFile(path, filler.repeat(50));
+  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Current");
 });
-test("explicit session claims accept one identifier and reject conflicts or unsafe names", () => {
+test("explicit session claims accept one identifier, defer expected_session_id when a socket PID is present, and reject conflicts", () => {
   expect(claudeSessionClaim({})).toBeUndefined();
   expect(claudeSessionClaim({ claudeSessionId: " " + SESSION + " " })).toBe(SESSION);
   expect(claudeSessionClaim({ claude_session_id: SESSION })).toBe(SESSION);
   expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION })).toBe(SESSION);
+  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION, endpoint_pid: process.pid })).toBeUndefined();
+  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION, caller_pid: process.pid })).toBeUndefined();
+  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION, pi_pid: process.pid })).toBeUndefined();
   expect(claudeSessionClaim({ expected_harness: "codex", expected_session_id: SESSION })).toBeUndefined();
   expect(claudeSessionClaim({ claudeSessionId: SESSION }, { "x-claude-session-id": SESSION })).toBe(SESSION);
   expect(() => claudeSessionClaim({ claudeSessionId: SESSION }, { "x-claude-session-id": OLDER }))
@@ -90,7 +96,7 @@ test("explicit session claims accept one identifier and reject conflicts or unsa
     expect(() => validateClaudeSessionId(bad)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   }
 });
-test("a claimed session binds to its workspace and cannot be mixed with a PID claim", async () => {
+test("a claimed session binds to its workspace, UI socket PID + expected_session_id resolves via socket bridge, and explicit + PID conflicts fail", async () => {
   const f = await isolatedState(); cleanups.push(() => f.cleanup());
   const config = loadConfig(f.env);
   expect(await resolveCaller({ meta: { claudeSessionId: SESSION, cwd: f.root }, httpTransport: true }, config))
@@ -100,20 +106,34 @@ test("a claimed session binds to its workspace and cannot be mixed with a PID cl
   // A claim for a session that moved on is rejected before any effect runs.
   await expect(resolveCaller({ meta: { claudeSessionId: SESSION, cwd: f.root, expected_harness: "claude", expected_session_id: OLDER }, httpTransport: true }, config))
     .rejects.toMatchObject({ code: "INVALID_INPUT" });
+  // UI listen_session / switch_hub pass both endpoint_pid and expected_session_id; resolve via socket bridge.
+  const server = await unixServer(join(f.stateDir, `sockets/claude-pid-${process.pid}.sock`),
+    socket => socket.once("data", () => socket.end(JSON.stringify({
+      ok: true, endpoint_pid: process.pid, session_id: SESSION, session_name: "Claude UI Session", cwd: f.root,
+    }) + "\n")));
+  cleanups.push(() => server.stop());
+  expect(await resolveCaller({
+    meta: { endpoint_pid: process.pid, expected_harness: "claude", expected_session_id: SESSION, cwd: f.root },
+  }, config)).toMatchObject({ harness: "claude", endpoint_pid: process.pid, session_id: SESSION, cwd: f.root, title: "Claude UI Session" });
+  await expect(resolveCaller({
+    meta: { endpoint_pid: process.pid, expected_harness: "claude", expected_session_id: OLDER, cwd: f.root },
+  }, config)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
 });
-test("the wake queue drains once, recovers a staging file and survives an append that races a drain", async () => {
+test("the wake queue drains once, merges aliased fallback queues, recovers staging files over 4 MiB, and survives an append that races a drain", async () => {
   const f = await isolatedState(); cleanups.push(() => f.cleanup());
   const config = loadConfig(f.env);
   expect(await drainClaudeWakes(config, SESSION)).toEqual([]);
   await appendClaudeWake(config, SESSION, { batch_id: "a", content: "first", wake: true, created_at_ms: 1 });
   await appendClaudeWake(config, SESSION, { batch_id: "b", content: "second", wake: true, created_at_ms: 2 });
   expect((await peekClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["a", "b"]);
-  // A drain that died after staging must not swallow the cards it had taken.
+  // A drain that died after staging must not swallow the cards it had taken, even when > 4 MiB.
   const path = claudeWakeQueuePath(config, SESSION);
   await rename(path, path + ".draining-abandoned");
-  await appendClaudeWake(config, SESSION, { batch_id: "c", content: "third", wake: false, created_at_ms: 3 });
+  const largePayload = "x".repeat(4.2 * 1024 * 1024);
+  await appendClaudeWake(config, SESSION, { batch_id: "c", content: largePayload, wake: false, created_at_ms: 3 });
   const drained = await drainClaudeWakes(config, SESSION);
   expect(drained.map(w => w.batch_id)).toEqual(["a", "b", "c"]);
+  expect(drained[2]!.content).toHaveLength(largePayload.length);
   expect(drained.map(w => w.wake)).toEqual([true, true, false]);
   expect(await drainClaudeWakes(config, SESSION)).toEqual([]);
   expect(await peekClaudeWakes(config, SESSION)).toEqual([]);
@@ -121,6 +141,16 @@ test("the wake queue drains once, recovers a staging file and survives an append
   await appendClaudeWake(config, SESSION, { batch_id: "d", content: "fourth", wake: true, created_at_ms: 4 });
   await writeFile(path, await readFile(path, "utf8") + '{"batch_id":"e","con', { flag: "w" });
   expect((await drainClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["d"]);
+  // Aliased first-turn fallback queues are drained and deduplicated alongside the transcript session queue.
+  const aliasDir = join(config.stateDir, "claude", "aliases");
+  await mkdir(aliasDir, { recursive: true });
+  await writeFile(join(aliasDir, SESSION), "claude-4242\n", { mode: 0o600 });
+  await appendClaudeWake(config, "claude-4242", { batch_id: "alias-1", content: "from-fallback", wake: true, created_at_ms: 5 });
+  await appendClaudeWake(config, SESSION, { batch_id: "alias-1", content: "from-fallback", wake: true, created_at_ms: 6 });
+  await appendClaudeWake(config, SESSION, { batch_id: "alias-2", content: "from-session", wake: true, created_at_ms: 7 });
+  expect((await peekClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["alias-1", "alias-2"]);
+  expect((await drainClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["alias-1", "alias-2"]);
+  expect(await peekClaudeWakes(config, "claude-4242")).toEqual([]);
 });
 test("badges are written beside the queue and removed with the session", async () => {
   const f = await isolatedState(); cleanups.push(() => f.cleanup());

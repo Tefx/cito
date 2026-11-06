@@ -1122,8 +1122,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             var groupsByHarness: [String: [Candidate]] = [:]
             for c in visibleAvailable { groupsByHarness[c.harness, default: []].append(c) }
             let orderedHarnesses = groupsByHarness.keys.sorted { a, b in
-                let rankA = a == "pi" ? 0 : a == "codex" ? 1 : 2
-                let rankB = b == "pi" ? 0 : b == "codex" ? 1 : 2
+                let rankA = a == "pi" ? 0 : a == "codex" ? 1 : a == "claude" ? 2 : 3
+                let rankB = b == "pi" ? 0 : b == "codex" ? 1 : b == "claude" ? 2 : 3
                 return rankA != rankB ? rankA < rankB : a < b
             }
             let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
@@ -1131,7 +1131,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let isCollapsed = collapsedGroups.contains(harness)
                 let groupTitle: String
                 switch harness {
-                case "pi": groupTitle = "Pi · \(items.count) open"
+                case "pi", "claude": groupTitle = "\(harnessVisual(harness).name) · \(items.count) open"
                 case "codex": groupTitle = "Codex · \(items.count) recent"
                 default: groupTitle = "\(harness.capitalized) · \(items.count) available"
                 }
@@ -1323,7 +1323,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let harnessPills: [(String, String, CGFloat, CGFloat)] = [
             ("dir_harness:all", "All Harnesses", 154, 98),
             ("dir_harness:pi", "Pi", 256, 42),
-            ("dir_harness:codex", "Codex", 302, 58)
+            ("dir_harness:codex", "Codex", 302, 58),
+            ("dir_harness:claude", "Claude", 364, 62)
         ]
         for (id, title, x, w) in harnessPills {
             let pill = MenuControl(title, frame: NSRect(x: x, y: 5, width: w, height: 22), radius: 11)

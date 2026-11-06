@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { spawn } from "node:child_process";
-import { readFile, stat, rm } from "node:fs/promises";
+import { mkdir, readFile, stat, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fixture, call, payload, waitFor, codexDesktop } from "../mcp/support.js";
 import { toCanonicalListenerId } from "../../src/shared/index.js";
@@ -187,11 +187,13 @@ test("PENDING_PUBLISH recovery reuses exact signal ID and JetStream dedup sequen
   expect(f.service.state.signals("SELECT * FROM local_signals")).toHaveLength(1);
 }, 10_000);
 
-test("cito-mcp stdio advertises the Claude channel, binds the hosting session and queues a wake for the hook", async () => {
+test("cito-mcp stdio advertises the Claude channel, preserves first-turn session_id across transcript creation, supports UI listen_session, and acknowledges exact drained batch_ids via cito-claude-hook", async () => {
   const f = await setup(false);
   const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
+  (f.service as unknown as { config: { daemonPort: number } }).config.daemonPort = http.port;
   const client = new Client({ name: "stdio-claude-e2e", version: "1" });
   const session = `claude-${process.pid}`;
+  const transcriptUuid = "11111111-2222-3333-4444-555555555555";
   try {
     await client.connect(new StdioClientTransport({
       command: process.execPath,
@@ -200,12 +202,53 @@ test("cito-mcp stdio advertises the Claude channel, binds the hosting session an
       stderr: "pipe",
     }));
     expect(client.getServerCapabilities()?.experimental).toMatchObject({ "claude/channel": {} });
-    // The MCP server is a child of the harness, so the daemon binds the session through its parent PID.
+    // UI listen_session passes both endpoint_pid and expected_session_id and must resolve via socket bridge without conflict.
+    await (f.service as unknown as { handleUiAction(action: unknown): Promise<void> }).handleUiAction({
+      op: "listen_session",
+      harness: "claude",
+      session_id: session,
+      endpoint_pid: process.pid,
+      cwd: f.root,
+      title: "claude code session",
+    });
     const enrolled = payload(await client.callTool({ name: "cito_listen", arguments: { about: "claude code session" } }) as { content: { text: string }[] });
     expect(enrolled).toMatchObject({ status: "listening", harness: "claude", session_id: session });
+    // First-turn transcript creation on disk aliases transcriptUuid -> claude-<pid> without revoking the listener.
+    const projDir = join(f.claudeHome, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"));
+    await mkdir(projDir, { recursive: true });
+    await writeFile(join(projDir, transcriptUuid + ".jsonl"), "{}\n");
     await call(f.service, "cito_send", { to: String(enrolled.listener_id), message: "ship the adapter" });
-    await waitFor(async () => (await peekClaudeWakes(f.config, session)).length > 0, 10_000);
-    expect((await peekClaudeWakes(f.config, session))[0]!.content).toContain("ship the adapter");
+    await waitFor(
+      async () =>
+        (await peekClaudeWakes(f.config, transcriptUuid)).length > 0
+        && f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1,
+      10_000,
+    );
+    const queuedWakes = await peekClaudeWakes(f.config, transcriptUuid);
+    expect(queuedWakes[0]!.content).toContain("ship the adapter");
+    // Insert a newly arrived RECEIVED signal that is NOT part of the drained batch; hook ack must not touch it.
+    const listenerCanon = toCanonicalListenerId(String(enrolled.listener_id));
+    f.service.state.run(
+      `INSERT INTO local_signals (hub, signal_id, listener_id, seq, binding_generation, from_user, from_host_name,
+        from_harness, from_listener_id, from_title, from_about, message, held_reason, in_reply_to, created_at,
+        expires_at_ms, state) VALUES ('default', 'sig_unbatched_new', ?, 99, 2, 'bob', 'mac', 'pi', NULL, 'bob', NULL,
+        'later message', NULL, NULL, ?, ?, 'RECEIVED')`,
+      listenerCanon, new Date().toISOString(), Date.now() + 60_000,
+    );
+    const hookProc = spawn(process.execPath, [resolve("bin/cito-claude-hook")], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { PATH: process.env.PATH!, ...f.env, CITO_DAEMON_PORT: String(http.port) },
+    });
+    let hookOut = "";
+    hookProc.stdout.on("data", chunk => { hookOut += String(chunk); });
+    const hookClosed = new Promise<number | null>(r => hookProc.once("close", r));
+    hookProc.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: transcriptUuid, cwd: process.cwd() }));
+    expect(await hookClosed).toBe(0);
+    expect(JSON.parse(hookOut.trim())).toMatchObject({ decision: "block", reason: expect.stringContaining("ship the adapter") });
+    const rows = f.service.state.signals("SELECT * FROM local_signals ORDER BY seq ASC");
+    expect(rows.find(r => r.batch_id === queuedWakes[0]!.batch_id)?.acknowledged_at_ms).toEqual(expect.any(Number));
+    expect(rows.find(r => r.signal_id === "sig_unbatched_new")?.acknowledged_at_ms).toBeNull();
+    expect(rows.find(r => r.signal_id === "sig_unbatched_new")?.state).toBe("RECEIVED");
   } finally {
     await client.close().catch(() => {});
     await http.close();

@@ -5,7 +5,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { CITO_VERSION, loadConfig, type CitoConfig } from "../shared/index.js";
-import { startClaudeChannelBridge } from "../adapters/claude-channel.js";
+import { startOptionalStdioChannel } from "../adapters/index.js";
 import { readCodexThreadOptional, resolveCodexThreadId } from "../adapters/codex.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
@@ -204,9 +204,7 @@ export async function main(): Promise<void> {
   const http = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${config.daemonPort}/mcp`));
   const report = (error: unknown) => { console.error(error); process.exitCode = 1; };
   // An unbindable wake channel must never keep the MCP server itself from forwarding.
-  const channel = config.enableClaudeChannel
-    ? await startClaudeChannelBridge(config, stdio).catch(error => { console.error(error); return undefined; })
-    : undefined;
+  const channel = await startOptionalStdioChannel(config, stdio);
   let stopped = false, stopping: Promise<void> | undefined;
   const stop = () => stopping ??= (async () => {
     stopped = true;

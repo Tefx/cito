@@ -5,8 +5,8 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { isolatedState, unixServer } from "./support.js";
 import { loadConfig } from "../../src/shared/index.js";
 import {
-  bridgeSocketPath, claudeBadgePath, claudeProjectDir, identifyBridge, peekClaudeWakes, requestBridge,
-  startClaudeChannelBridge,
+  bridgeSocketPath, claudeAliasPath, claudeBadgePath, claudeProjectDir, drainClaudeWakes, identifyBridge,
+  peekClaudeWakes, requestBridge, startClaudeChannelBridge, startOptionalStdioChannel,
 } from "../../src/adapters/index.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -58,20 +58,58 @@ test("identify reports the title the user gave the session, not the workspace fo
   await writeFile(path, '{"type":"user"}\n');
   expect((await identifyBridge("claude", process.pid, config)).session_name).toBe(basename(f.root));
 });
-test("an explicit session id wins over the transcript scan and a workspace with no transcript still binds", async () => {
+test("an explicit session id wins over the transcript scan, first-turn transcript creation preserves claude-<pid> via alias, and /clear switches to the second transcript", async () => {
   const explicit = await bridge({ transcript: SESSION, env: { CLAUDE_SESSION_ID: "env-session" } });
   expect(await explicit.channel.sessionId()).toBe("env-session");
-  const bare = await bridge({ pid: process.pid + 1 });
-  expect(await bare.channel.sessionId()).toBe(`claude-${process.pid + 1}`);
+  const pid = process.pid + 1;
+  const fallback = `claude-${pid}`;
+  const bare = await bridge({ pid });
+  expect(await bare.channel.sessionId()).toBe(fallback);
+  const dir = claudeProjectDir(bare.f.root, bare.config);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, SESSION + ".jsonl"), "{}\n");
+  // First transcript creation during turn 1 keeps the fallback session_id stable and writes an alias.
+  expect(await bare.channel.sessionId()).toBe(fallback);
+  expect((await readFile(claudeAliasPath(bare.config, SESSION), "utf8")).trim()).toBe(fallback);
+  expect((await stat(claudeAliasPath(bare.config, SESSION))).mode & 0o777).toBe(0o600);
+  await expect(requestBridge(bare.channel.socketPath, {
+    op: "deliver", session_id: fallback, batch_id: "first-turn-batch", wake: true, content: "🔔 Cito · first turn",
+  }, 2000)).resolves.toMatchObject({ delivered: true });
+  expect((await drainClaudeWakes(bare.config, SESSION)).map(w => w.batch_id)).toEqual(["first-turn-batch"]);
+  // A second distinct transcript (/clear) switches the session_id and rejects the old fallback binding.
+  const second = "22222222-3333-4444-5555-666666666666";
+  await new Promise(resolve => setTimeout(resolve, 15));
+  await writeFile(join(dir, second + ".jsonl"), "{}\n");
+  expect(await bare.channel.sessionId()).toBe(second);
+  await expect(requestBridge(bare.channel.socketPath, {
+    op: "deliver", session_id: fallback, batch_id: "after-clear", wake: true, content: "stale",
+  }, 2000)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
 });
-test("status writes a badge the session can render and closing the bridge clears it", async () => {
-  const { config, channel } = await bridge({ transcript: SESSION });
+test("status writes badges across session switches, non-blocking notifications never stall delivery, and closing clears all badged sessions", async () => {
+  const f = await isolatedState(); cleanups.push(() => f.cleanup());
+  const config = loadConfig({ ...f.env, CITO_CLAUDE_CHANNEL: "1" });
+  const dir = claudeProjectDir(f.root, config);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, SESSION + ".jsonl"), "{}\n");
+  // Transport send that never resolves must not block socket bridge delivery.
+  const channel = (await startOptionalStdioChannel(config, { send: () => new Promise<void>(() => {}) },
+    { endpointPid: process.pid, cwd: f.root, env: {} }))!;
+  cleanups.push(() => channel.close());
+  expect(await startOptionalStdioChannel({ ...config, enableClaudeChannel: false }, { send: async () => {} })).toBeUndefined();
   const path = bridgeSocketPath(config.stateDir, "claude", process.pid);
+  await expect(requestBridge(path, { op: "deliver", session_id: SESSION, batch_id: "nonblocking", wake: true, content: "card" }, 500))
+    .resolves.toMatchObject({ delivered: true });
   await requestBridge(path, { op: "status", session_id: SESSION, badge: "🔔 abcdefghijkl (2)" }, 2000);
   expect(await readFile(claudeBadgePath(config, SESSION), "utf8")).toBe("🔔 abcdefghijkl (2)\n");
-  await expect(requestBridge(path, { op: "status", session_id: SESSION, badge: 7 }, 2000)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
+  const second = "33333333-4444-5555-6666-777777777777";
+  await new Promise(resolve => setTimeout(resolve, 15));
+  await writeFile(join(dir, second + ".jsonl"), "{}\n");
+  await requestBridge(path, { op: "status", session_id: second, badge: "🔔 abcdefghijkl (1)" }, 2000);
+  expect(await readFile(claudeBadgePath(config, second), "utf8")).toBe("🔔 abcdefghijkl (1)\n");
+  await expect(requestBridge(path, { op: "status", session_id: second, badge: 7 }, 2000)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
   await channel.close();
   await expect(readFile(claudeBadgePath(config, SESSION), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(readFile(claudeBadgePath(config, second), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   // A closed bridge keeps its endpoint unbound instead of answering for a session it no longer hosts.
   await expect(requestBridge(path, { op: "identify" }, 500)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
 });
