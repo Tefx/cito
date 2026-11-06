@@ -30,14 +30,14 @@ Create `~/.cito/config.json` pointing to your team OIDC hub and optional persona
   "default_hub": "work",
   "hubs": {
     "work": {
-      "nats_url": "nats://hub.example.com:4222",
-      "auth_mode": "oidc",
-      "oidc_issuer": "https://id.example.com",
-      "oidc_client_id": "<your-oidc-client-id>"
+      "natsUrl": "nats://hub.example.com:4222",
+      "authMode": "oidc",
+      "oidcIssuer": "https://id.example.com",
+      "oidcClientId": "<your-oidc-client-id>"
     },
     "personal": {
-      "nats_url": "nats://127.0.0.1:4222",
-      "auth_mode": "none",
+      "natsUrl": "nats://127.0.0.1:4222",
+      "authMode": "none",
       "user": "alice"
     }
   }
