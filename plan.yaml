@@ -58,9 +58,9 @@ context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESI
   Design Suggestion Only — Not Yet Implemented'' in docs/DESIGN.md §6 and README.md
   with zero ''claude'' references in src/ or tests/, and forbid mutations to external
   dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V8 — Ego-Centric
-  Menu Bar Control Plane, Spotlight Network Directory & Scalable NATS KV Discovery,
-  §§1–6), AGENTS.md, and README.md.
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V9 — Multi-Hub
+  Session Attachment, Atomic Hub Migration, Ego-Centric Menu Bar Control Plane & Spotlight
+  Network Directory, §§1–6), AGENTS.md, and README.md.
 
   2. Hard boundaries: Enforce English-only UI/UX, code, and documentation (zero Chinese
   characters in src/, docs/, README.md, AGENTS.md, deploy/) and zero company/environment-specific
