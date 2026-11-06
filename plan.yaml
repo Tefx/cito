@@ -3307,7 +3307,7 @@ phases:
   - id: v11.acceptance-and-hygiene-gate
     name: 'V11 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v11` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -3380,3 +3380,5 @@ phases:
     depends_on:
     - v11.versioning-governance-and-daemon-handover
     agent: code-reviewer
+    claimed_by: code-reviewer
+    claimed_at: '2026-11-06T08:52:30.433302Z'
