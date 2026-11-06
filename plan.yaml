@@ -3586,3 +3586,99 @@ phases:
     - tests/auth-callout/cli.test.ts
     - tests/e2e/lifecycle.test.ts
     agent: senior-engineer
+  - id: v12.acceptance-and-hygiene-gate
+    name: 'V12 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v12` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run compile && npm test` passes 100%,\
+      \ mechanically verifying zero Chinese characters in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, `deploy/`, zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`, `tests/`, zero non-Node\
+      \ built-in imports in `src/pi-extension/cito-bridge.ts`, and zero harness references\
+      \ in `src/mcp/` except `src/mcp/cli.ts` delegating `--codex` resolution to `src/adapters/codex.ts`,\
+      \ and running iterative `code-hygiene` convergence until `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`.\n- **Boundary:** Owner `code-reviewer`\
+      \ (mapped to `gate-reviewer` / `pathway-auditor` + `structural-auditor` in the\
+      \ Larva roster, routing any admitted repair batch to `senior-engineer` before\
+      \ Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not directly mutate repository files, Plan state,\
+      \ or external host directories.\n- **Admit:**\n  - Included phase and terminal\
+      \ outcomes: Phase `v12` (`v12.claude-adapter-hardening-and-v0-11-0-release`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run compile\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Mechanical language, neutral-naming,\
+      \ standalone-extension, and adapter-purity verification:\n       - Zero Chinese\
+      \ characters (`[\\p{Script=Han}]`) in `src/`, `docs/`, `README.md`, `AGENTS.md`,\
+      \ and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/` (excluding policy rule line in `docs/DESIGN.md`), `README.md`,\
+      \ `AGENTS.md`, `deploy/`, and `tests/`.\n       - Zero relative or external\
+      \ npm imports in `src/pi-extension/cito-bridge.ts` (only `node:*` built-in imports).\n\
+      \       - Zero harness references (`claude`, `codex`, `pi`, or `x-codex-turn-metadata`)\
+      \ in `src/mcp/` except `src/mcp/cli.ts` delegating `--codex` CLI resolution\
+      \ to `src/adapters/codex.ts`.\n    3. Conformance with `docs/DESIGN.md` §§1.2,\
+      \ 2.1, 4.2, 4.3, 5.2, 5.3, 6.1, 6.2 and `AGENTS.md`:\n       - `claudeSessionClaim(meta,\
+      \ headers)` only treats `meta.expected_session_id` (`meta.expected_harness ===\
+      \ \"claude\"`) as an explicit non-socket claim when no socket PID (`endpoint_pid`,\
+      \ `caller_pid`, `pi_pid`) is present in `meta`.\n       - `startClaudeChannelBridge`\
+      \ preserves `claude-<endpoint>` on first-turn transcript `<u1>.jsonl` creation\
+      \ and writes `${stateDir}/claude/aliases/<u1>` -> `claude-<endpoint>`, transitions\
+      \ only on a second distinct transcript `<u2> !== <u1>`, and cleans up all written\
+      \ badge files on `close()`; `drainClaudeWakes` drains aliased `claude-<endpoint>`\
+      \ queues without failing on >4 MiB staging backlogs; `resolveClaudeSessionTitle`\
+      \ preserves cached titles when `start > 0` without a newer `custom-title`; and\
+      \ `src/claude-hook/cli.ts` honors `process.env.CLAUDE_SESSION_ID`.\n       -\
+      \ `CitoService.inbox()` matches `ack_ids` against `(signal_id = ? OR batch_id\
+      \ = ?)` and refreshes badges; `src/claude-hook/cli.ts` strips trailing unread\
+      \ counts from session/alias badges and sends a bounded (`AbortSignal.timeout(500)`)\
+      \ `POST /mcp` `cito_inbox` acknowledgment for drained `batch_id`s; and `src/adapters/claude-channel.ts`\
+      \ sends `notifications/claude/channel` non-blockingly.\n       - `src/macos/cito-ui.swift`\
+      \ includes `\"claude\"` in `orderedHarnesses`, `groupTitle`, and `DirectoryPanel`\
+      \ `harnessPills`; `startOptionalStdioChannel` is exported from `src/adapters/claude-channel.ts`\
+      \ / `src/adapters/index.ts` and invoked from `src/mcp/cli.ts`; `resolveExplicitCaller`\
+      \ is consolidated in `src/adapters/git.ts`; `runEntrypoint` is consolidated\
+      \ in `bin/loader.js` and `bin/cito-claude-hook` is covered in `tests/auth-callout/cli.test.ts`;\
+      \ and `package.json`, `package-lock.json`, and `CITO_VERSION` in `src/shared/index.ts`\
+      \ are set to `\"0.11.0\"`.\n    4. Iterative `[REQUIRES_SKILL: code-hygiene]`\
+      \ (`[GATE_MODE: ITERATIVE_CONVERGENCE]`) audit-and-fix convergence across all\
+      \ 5 lenses reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable `code-hygiene` finding\
+      \ is admitted, record the concrete file/line counterexamples and route a cohesive\
+      \ writable repair to `senior-engineer` before re-running this gate in Delta\
+      \ mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved."
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    evidence_template: 'Gate verdict (PASS/FAIL), test output (npm run typecheck &&
+      npm run compile && npm test), mechanical regex verification (0 Chinese chars,
+      0 forbidden names, 0 non-Node imports in cito-bridge.ts, 0 non-cli harness refs
+      in src/mcp/), and [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE convergence
+      summary.'
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - package.json
+    - package-lock.json
+    - src/shared/index.ts
+    - src/adapters/claude.ts
+    - src/adapters/claude-channel.ts
+    - src/adapters/codex.ts
+    - src/adapters/git.ts
+    - src/adapters/index.ts
+    - src/claude-hook/cli.ts
+    - src/mcp/service.ts
+    - src/mcp/cli.ts
+    - src/macos/cito-ui.swift
+    - bin/cito-mcp
+    - bin/cito-auth-callout
+    - bin/cito-claude-hook
+    - tests/adapters/claude.test.ts
+    - tests/adapters/claude-channel.test.ts
+    - tests/claude-hook/cli.test.ts
+    - tests/auth-callout/cli.test.ts
+    - tests/e2e/lifecycle.test.ts
+    depends_on:
+    - v12.claude-adapter-hardening-and-v0-11-0-release
+    agent: code-reviewer
