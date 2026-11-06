@@ -3166,3 +3166,40 @@ phases:
       - V10-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
       structural-auditor 01a1af67-74d9-71a1-8c21-6c5aa3569369 and uiux-auditor 01a1af67-7535-7444-8052-dc93885dde21
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v11
+  name: Cito V11 SemVer v0.10.0 Release Governance, CITO_VERSION Single Source of
+    Truth, /health Version Handshake, Automatic Stale-Daemon Handover, and Hygiene
+    Gate
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    case-insensitive ''claude'' matches exist in src/ or tests/, zero non-Node built-in
+    imports exist in src/pi-extension/cito-bridge.ts, zero harness references exist
+    in src/mcp/ except src/mcp/cli.ts delegating --codex resolution to src/adapters/codex.ts,
+    all AGENTS.md ("Versioning, Compatibility & Release Governance") and docs/DESIGN.md
+    §5.3 requirements are verified, and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE:
+    ITERATIVE_CONVERGENCE] converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V11 SemVer v0.10.0 Release Governance, CITO_VERSION
+    Single Source of Truth, /health Version Handshake, and Automatic Stale-Daemon
+    Handover per AGENTS.md ("Versioning, Compatibility & Release Governance") and
+    docs/DESIGN.md §5.3: set "version": "0.10.0" in package.json and package-lock.json
+    and export CITO_VERSION = "0.10.0" from src/shared/index.ts; update src/mcp/server.ts
+    so createMcpServer uses version: CITO_VERSION, GET /health returns { ok: true,
+    pid: process.pid, stateDir: config.stateDir, version: CITO_VERSION }, and daemonHealth
+    returns { pid: number; stateDir: string; version?: string } | undefined (preserving
+    version when typeof body.version === "string"); update src/mcp/cli.ts to support
+    cito --version and cito -v (printing cito v${CITO_VERSION}\n to stdout and exiting
+    0 without starting cito-daemon) and update ensureDaemon(config) so when daemonHealth(config)
+    returns a running daemon for config.stateDir, it returns immediately only if health.version
+    === CITO_VERSION, and if health.version !== CITO_VERSION it sends SIGTERM to health.pid,
+    waits up to 5000ms for !alive(health.pid), spawns the new cito-daemon, and waits
+    until (await daemonHealth(config))?.version === CITO_VERSION; update tests/mcp/http.test.ts
+    (updating the /health .toEqual(...) assertion to include version: CITO_VERSION,
+    adding tests for cito --version / -v, and testing automatic stale-daemon replacement
+    when a pre-existing /health server reports an older version and exits on SIGTERM)
+    and tests/shared/shared.test.ts (verifying CITO_VERSION === packageJson.version);
+    and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v10
