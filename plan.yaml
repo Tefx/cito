@@ -3709,7 +3709,7 @@ phases:
     agent: code-reviewer
   - id: v12.fix-e2e-claude-unbatched-signal-race
     name: Hold dispatcher lease for sig_unbatched_new in tests/e2e/lifecycle.test.ts
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - tests/e2e/lifecycle.test.ts\n  blocked_paths:\n\
       \    - plan.yaml\n```\n\n- **Deliver:** Hold the listener's `dispatcher_token`\
@@ -3730,3 +3730,20 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-06T11:18:48.032493Z'
+    done_at: '2026-11-06T11:24:21.183509+00:00'
+    evidence: 'Artifact:
+
+      - Commit: e4f7665e2021ab386058240c10287a4f78483aa8 (fast-forwarded onto main)
+
+
+      Verification:
+
+      - Run: npx vitest run tests/e2e/lifecycle.test.ts -> exit 0 (13 tests passed)
+
+      - Run: npm run typecheck && npm run compile && npm test -> exit 0 (30 test files,
+      238 tests passed, 0 failed, 0 skipped)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §6.2 and tests/e2e/lifecycle.test.ts'
