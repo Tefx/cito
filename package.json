@@ -1,0 +1,56 @@
+{
+  "name": "@tefx/cito",
+  "version": "0.10.0",
+  "description": "Notification-only cross-harness, cross-machine, multi-user wake and signaling service for coding agents",
+  "type": "module",
+  "main": "dist/src/mcp/service.js",
+  "types": "dist/src/mcp/service.d.ts",
+  "engines": {
+    "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
+  },
+  "bin": {
+    "cito": "bin/cito-mcp",
+    "cito-mcp": "bin/cito-mcp",
+    "cito-auth-callout": "bin/cito-auth-callout"
+  },
+  "pi": {
+    "extensions": [
+      "./src/pi-extension/cito-bridge.ts"
+    ]
+  },
+  "files": [
+    "bin",
+    "dist/src",
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tefx/cito.git"
+  },
+  "scripts": {
+    "test": "vitest run --dir tests",
+    "typecheck": "tsc --noEmit",
+    "compile": "rm -rf dist && tsc",
+    "prepublishOnly": "npm run typecheck && npm run compile"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@nats-io/jwt": "0.0.10-5",
+    "jose": "^6.1.3",
+    "nats": "^2.29.3",
+    "nats.ws": "^1.30.3",
+    "nkeys.js": "^1.1.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eplightning/nats-server": "2.14.0",
+    "@types/node": "^22.19.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}

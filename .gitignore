@@ -11,3 +11,4 @@ __pycache__/
 *.sock
 *.lock
 .env
+.pi/
