@@ -3918,7 +3918,7 @@ phases:
   - id: v13.acceptance-and-hygiene-gate
     name: 'V13 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v13` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -3991,3 +3991,5 @@ phases:
     depends_on:
     - v13.directory-local-peer-inclusion-and-v0-11-1
     agent: code-reviewer
+    claimed_by: code-reviewer
+    claimed_at: '2026-11-06T15:51:39.904811Z'
