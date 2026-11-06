@@ -2883,3 +2883,41 @@ phases:
       - V9-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
       structural-auditor 01a1aedd-4ded-76bd-ad17-19f713e35a37 and uiux-auditor 01a1aedd-4d9a-7109-a7ee-098425a295de
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v10
+  name: Cito V10 Zero-Script Git/Global npm Packaging, Native Node TypeScript Entrypoint,
+    erasableSyntaxOnly Compliance, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    case-insensitive ''claude'' matches exist in src/ or tests/, zero non-Node built-in
+    imports exist in src/pi-extension/cito-bridge.ts, zero harness references exist
+    in src/mcp/ except src/mcp/cli.ts delegating --codex resolution to src/adapters/codex.ts,
+    all docs/DESIGN.md §5.2 requirements are verified (including git+file:// global
+    npm install without dist/ or tsx), and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE:
+    ITERATIVE_CONVERGENCE] converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V10 Zero-Script Git/Global npm Packaging, Native
+    Node TypeScript Entrypoint, and erasableSyntaxOnly Compliance per docs/DESIGN.md
+    §5.2 and AGENTS.md: update package.json to set "files": ["bin", "dist/src", "src",
+    "README.md"], replace "build" and "prepare" in scripts with "compile": "rm -rf
+    dist && tsc" and "prepublishOnly": "npm run typecheck && npm run compile" (so
+    none of pacote/lib/git.js''s 6 trigger keys prepare, build, prepack, preinstall,
+    install, postinstall exist in scripts), and move "tsx" from "dependencies" to
+    "devDependencies", regenerating package-lock.json; enable "erasableSyntaxOnly":
+    true in tsconfig.json and replace all 10 TypeScript parameter property constructors
+    (constructor(readonly ...) / constructor(private readonly ...)) in src/shared/errors.ts,
+    src/adapters/pi.ts, src/ui/index.ts, src/mcp/oidc.ts, src/auth-callout/oidc.ts,
+    src/mcp/state.ts, src/mcp/receiver.ts, and src/mcp/service.ts with explicit field
+    declarations and constructor assignments; update bin/cito-mcp and bin/cito-auth-callout
+    so that when dist/ is absent, they register a built-in node:module.register hook
+    mapping relative .js imports to .ts and import ../src/mcp/cli.ts / ../src/auth-callout/cli.ts
+    directly on Node''s built-in TypeScript runtime without tsx; update README.md
+    (npm run build -> npm run compile) and add behavioral packaging verification in
+    tests/auth-callout/cli.test.ts verifying (a) package.json files includes "src",
+    scripts contains none of prepare|build|prepack|preinstall|install|postinstall,
+    and dependencies excludes tsx, and (b) npm install -g --prefix <tmp> "git+file://<repo>"
+    succeeds and the installed <tmp>/bin/cito and <tmp>/bin/cito-auth-callout execute
+    directly without dist/; and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v9
