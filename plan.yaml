@@ -3428,7 +3428,7 @@ phases:
 - id: v12
   name: Cito V12 Claude Code Adapter Hardening, Exact Hook Batch Acknowledgment, UI
     & Architecture Symmetry, and v0.11.0 Release
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -3478,7 +3478,7 @@ phases:
   - id: v12.claude-adapter-hardening-and-v0-11-0-release
     name: 'Implement V12 Claude Code adapter hardening, exact hook batch acknowledgment,
       UI & architecture symmetry, and v0.11.0 release [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ src/shared/index.ts\n    - src/adapters/claude.ts\n    - src/adapters/claude-channel.ts\n\
@@ -3586,6 +3586,8 @@ phases:
     - tests/auth-callout/cli.test.ts
     - tests/e2e/lifecycle.test.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-06T10:27:46.795395Z'
   - id: v12.acceptance-and-hygiene-gate
     name: 'V12 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
