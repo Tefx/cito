@@ -3795,3 +3795,37 @@ phases:
       Spec link:
 
       - docs/DESIGN.md §6.2 and tests/e2e/lifecycle.test.ts'
+- id: v13
+  name: Cito V13 Network Directory Local-Host Peer Inclusion, Domain-Partition Test
+    Coverage, and v0.11.1 Release
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    non-Node built-in imports exist in src/pi-extension/cito-bridge.ts, zero harness
+    references exist in src/mcp/ except src/mcp/cli.ts delegating --codex resolution
+    to src/adapters/codex.ts, all docs/DESIGN.md §4.3 and AGENTS.md requirements are
+    verified, and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE]
+    converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V13 Network Directory Local-Host Peer Inclusion,
+    Domain-Partition Test Coverage, and v0.11.1 Release per docs/DESIGN.md §4.3 and
+    AGENTS.md: (1) in CitoService.collectNetworkPeers() (src/mcp/service.ts), apply
+    !isLocalSelfHost only when populating myRemoteItems (for Menu Bar Zone 2 MY OTHER
+    HOSTS), and include all visible active registrations (including local-host sessions
+    on this.hostId, remote self-principal sessions, and workspace-scoped team peers)
+    in allPeerItems (Search Network Directory… and directory_online_count), matching
+    cito_find visibility; (2) in tests/mcp/ui.test.ts ("CitoService populates my_remote_listeners
+    and evaluates query_directory across HubDirectoryIndex with prefix tokens and
+    facets"), enroll a real local session on f.service (this.hostId) alongside the
+    remote self-principal session and remote team workspace session, and assert that:
+    (a) my_remote_listeners (states.mock.lastCall?.[3]) contains ONLY the remote self-principal
+    session (c_aliceremote2) and excludes the local session on this.hostId, (b) directory_online_count
+    (states.mock.lastCall?.[4]) and open_directory (scope: "all") include all 3 sessions
+    (local self-host, remote self-host, and remote team peer), and (c) query_directory
+    with scope: "mine" includes both the local self-host session and the remote self-host
+    session (2 sessions); and (3) bump version to "0.11.1" (PATCH increment per AGENTS.md)
+    across package.json, package-lock.json, CITO_VERSION in src/shared/index.ts, tests/shared/shared.test.ts,
+    and README.md Quick Start examples, and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v12
