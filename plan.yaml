@@ -4410,7 +4410,7 @@ phases:
     name: 'Implement V15 prebuilt Apple Silicon (arm64) cito-ui binary, quarantine-free
       ensureUiCompiled installation, swiftc fallback, and v0.11.3 release [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - bin/**\n    - src/shared/**\n    - src/ui/**\n    - src/macos/**\n\
@@ -4475,6 +4475,24 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-06T18:30:58.704222Z'
+    done_at: '2026-11-06T18:43:47.144471+00:00'
+    evidence: "Artifact:\n- Commit: 4ec9ea63ed0f5c2ca6a0bea7e7c80f4bf902fee8 (on top\
+      \ of 4cfb34d091ff26448b4ebeed98d88d319eb50e04; implemented by uiux-designer\
+      \ on openrouter/google/gemini-4-argon while openai OAuth is unavailable, and\
+      \ fast-forwarded onto main)\n\nVerification:\n- Run: npm run typecheck && npm\
+      \ run compile && npm test -> exit 0 (30 test files, 242 tests passed, 0 failed,\
+      \ 0 skipped)\n- Prebuilt binary: bin/cito-ui-darwin-arm64 (383,120 bytes, 64-bit\
+      \ arm64 Mach-O executable, stripped and ad-hoc signed) installed by ensureUiCompiled\
+      \ in < 200ms without invoking /usr/bin/swiftc, with automatic /usr/bin/swiftc\
+      \ fallback on custom/newer source\n- Mechanical checks:\n  - [\\p{Script=Han}]\
+      \ in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b in src/, docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md,\
+      \ deploy/, tests/: 0 matches\n  - Non-node imports in src/pi-extension/cito-bridge.ts:\
+      \ 0 matches\n  - Direct claude or pi identifiers in src/mcp/: 0 matches\n- [REQUIRES_SKILL:\
+      \ code-hygiene] ITERATIVE_CONVERGENCE:\n  - Round 1 fresh-context structural-auditor\
+      \ (01a1b227-9fd0-7647-bc13-3c499a670b56) and Round 2 uiux-auditor (01a1b227-a023-770c-822c-7ff421ab9f6c)\
+      \ verified #1 CLOSED and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md §4.4, §5.2, §5.3 and README.md"
   - id: v15.acceptance-and-hygiene-gate
     name: 'V15 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
