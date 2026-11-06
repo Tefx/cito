@@ -5,7 +5,8 @@ Cito is a notification bus for opted-in coding-agent conversations across users,
 ## Daemon architecture and startup
 
 ```sh
-npm install -g @tefx/cito
+npm install -g github:Tefx/cito#v0.10.0
+cito --version
 cito daemon
 # From a source checkout after npm ci:
 /absolute/path/to/cito/bin/cito-mcp daemon
@@ -13,7 +14,7 @@ cito daemon
 
 The daemon binds **only `127.0.0.1`**, rejects non-loopback HTTP Origins, and uses a transactional SQLite `daemon_owner` row plus PID/health checks to prevent a second owner of the same `CITO_STATE_DIR`. Starting it again on the same port exits 0; requesting another port for that state directory exits 1. On stale ownership after a crash, a new process can reclaim the directory. Each MCP HTTP request gets an independent transport/server sharing the service; closing a client never closes the daemon.
 
-The stdio entrypoint checks matching `/health`, starts a detached daemon when needed, and waits up to 5 seconds before forwarding JSON-RPC. Configure the daemon environment or `~/.cito/config.json` before its first start: subsequent stdio clients reuse its configuration. Startup connects all hubs non-interactively and restores matching ACTIVE listeners; OIDC hubs lacking valid/refreshable tokens show `auth_required` without a browser.
+The stdio entrypoint checks matching `/health` (`version: CITO_VERSION`), sends `SIGTERM` to replace any running daemon from an older release, starts a detached daemon when needed, and waits up to 5 seconds before forwarding JSON-RPC. Configure the daemon environment or `~/.cito/config.json` before its first start: subsequent stdio clients reuse its configuration. Startup connects all hubs non-interactively and restores matching ACTIVE listeners; OIDC hubs lacking valid/refreshable tokens show `auth_required` without a browser.
 
 For automatic login startup, configure a user LaunchAgent with absolute `ProgramArguments` (`/absolute/path/to/cito/bin/cito-mcp`, `daemon`), `RunAtLoad: true`, and `KeepAlive: { SuccessfulExit: false }`. Put `CITO_STATE_DIR` and other daemon environment overrides in that agent. Cito does not install or modify LaunchAgents. Menu Quit exits 0 and stays stopped with this policy; crashes restart. A subsequent stdio client can auto-start it again.
 
@@ -74,7 +75,7 @@ Configure `cito-mcp` separately in your Pi MCP client/gateway, using this stdio 
 }
 ```
 
-Alternatively use `"command": "npx", "args": ["-y", "@tefx/cito@0.1.0"]` for the published package. The extension provides host delivery; your MCP client exposes the tools to the agent.
+Alternatively use `"command": "npx", "args": ["-y", "@tefx/cito@0.10.0"]` for the published package. The extension provides host delivery; your MCP client exposes the tools to the agent.
 
 In a conversation, call `cito_listen({about: "Build verification", tag: "build"})`, then use `cito_find()` to discover other opted-in conversations and `cito_send({to: "<discovered-id>", message: "Build is ready"})` to notify one. Notifications enter the target conversation via `pi.sendMessage(..., {triggerTurn: true, deliverAs: "followUp"})`, waking idle sessions or entering a busy session's follow-up queue. Confirmed insertion automatically acknowledges the local signal. Use `cito_inbox()` to drain any unconfirmed/unavailable deliveries, and `cito_unlisten()` to opt out.
 
@@ -124,7 +125,7 @@ CITO_NATS_URL = "nats://127.0.0.1:4222"
 CITO_AUTH_MODE = "none"
 ```
 
-For the published package use `command = "npx"` and `args = ["-y", "@tefx/cito@0.1.0"]` instead.
+For the published package use `command = "npx"` and `args = ["-y", "@tefx/cito@0.10.0"]` instead.
 
 The host must supply the exact conversation ID in MCP request `_meta` using one of:
 

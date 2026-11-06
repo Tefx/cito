@@ -7,7 +7,7 @@ import type { CallerDetectionContext } from "../adapters/index.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SUPPORTED_PROTOCOL_VERSIONS, CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { CitoError, errorResult, type CitoConfig, listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema } from "../shared/index.js";
+import { CITO_VERSION, CitoError, errorResult, type CitoConfig, listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema } from "../shared/index.js";
 import { CitoService } from "./service.js";
 
 if (!SUPPORTED_PROTOCOL_VERSIONS.includes("2026-07-28")) SUPPORTED_PROTOCOL_VERSIONS.unshift("2026-07-28");
@@ -24,7 +24,7 @@ export const tools: Tool[] = descriptors.map(([name, description, schema]) => ({
   name, description, inputSchema: z.toJSONSchema(schema, { io: "input", unrepresentable: "any" }) as Tool["inputSchema"],
 }));
 export function createMcpServer(service: CitoService, metadata: (meta: Record<string, unknown>) => CallerDetectionContext = meta => ({ meta })): Server {
-  const server = new Server({ name: "cito-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "cito-mcp", version: CITO_VERSION }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async request => {
     try {
@@ -76,7 +76,7 @@ export async function startHttpServer(config: CitoConfig, service: CitoService) 
       }
       const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
       if (path === "/health" && req.method === "GET") {
-        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, pid: process.pid, stateDir: config.stateDir })); return;
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, pid: process.pid, stateDir: config.stateDir, version: CITO_VERSION })); return;
       }
       if (path !== "/mcp") { res.writeHead(404).end("Not found"); return; }
       const pid = await resolveHttpClientPid(req, (http.address() as { port: number }).port);
@@ -101,10 +101,11 @@ export async function startHttpServer(config: CitoConfig, service: CitoService) 
     },
   };
 }
-export async function daemonHealth(config: Pick<CitoConfig, "stateDir" | "daemonPort">): Promise<{ pid: number; stateDir: string } | undefined> {
+export async function daemonHealth(config: Pick<CitoConfig, "stateDir" | "daemonPort">): Promise<{ pid: number; stateDir: string; version?: string } | undefined> {
   try {
     const res = await fetch(`http://127.0.0.1:${config.daemonPort}/health`, { signal: AbortSignal.timeout(500) });
-    const body = await res.json() as { ok?: boolean; pid: number; stateDir: string };
-    return res.ok && body.ok === true && body.stateDir === config.stateDir && Number.isSafeInteger(body.pid) ? body : undefined;
+    const body = await res.json() as { ok?: boolean; pid: number; stateDir: string; version?: unknown };
+    if (!res.ok || body.ok !== true || body.stateDir !== config.stateDir || !Number.isSafeInteger(body.pid)) return undefined;
+    return { pid: body.pid, stateDir: body.stateDir, ...(typeof body.version === "string" ? { version: body.version } : {}) };
   } catch { return undefined; }
 }

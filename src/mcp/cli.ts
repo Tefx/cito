@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { loadConfig, type CitoConfig } from "../shared/index.js";
+import { CITO_VERSION, loadConfig, type CitoConfig } from "../shared/index.js";
 import { readCodexThreadOptional, resolveCodexThreadId } from "../adapters/codex.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
@@ -66,7 +66,13 @@ async function runDaemon(config: CitoConfig): Promise<void> {
   }
 }
 async function ensureDaemon(config: CitoConfig): Promise<void> {
-  if (await daemonHealth(config)) return;
+  const existing = await daemonHealth(config);
+  if (existing?.version === CITO_VERSION) return;
+  if (existing) {
+    try { process.kill(existing.pid, "SIGTERM"); } catch {}
+    const stopDeadline = performance.now() + 5000;
+    while (alive(existing.pid) && performance.now() < stopDeadline) await delay(50);
+  }
   const entry = fileURLToPath(new URL("../../../bin/cito-mcp", import.meta.url));
   const sourceEntry = fileURLToPath(new URL("../../bin/cito-mcp", import.meta.url));
   const { existsSync } = await import("node:fs");
@@ -74,7 +80,7 @@ async function ensureDaemon(config: CitoConfig): Promise<void> {
   await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   child.unref();
   const deadline = performance.now() + 5000;
-  while (performance.now() < deadline) { if (await daemonHealth(config)) return; await delay(50); }
+  while (performance.now() < deadline) { if ((await daemonHealth(config))?.version === CITO_VERSION) return; await delay(50); }
   throw new Error(`Daemon did not become healthy on 127.0.0.1:${config.daemonPort} for ${config.stateDir} within 5000ms`);
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -187,8 +193,9 @@ async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], conf
   }
 }
 export async function main(): Promise<void> {
-  const config = loadConfig();
   const cmd = process.argv[2];
+  if (cmd === "--version" || cmd === "-v") { process.stdout.write(`cito v${CITO_VERSION}\n`); return; }
+  const config = loadConfig();
   if (cmd === "daemon") { await runDaemon(config); return; }
   if (cmd === "listen" || cmd === "unlisten") { await runDirectCommand(cmd, process.argv.slice(3), config); return; }
   await ensureDaemon(config);

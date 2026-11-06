@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat, readFile, writeFile, chmod } from "node:fs/promises"
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
-  listenerId, localPrincipal, oidcPrincipal, senderEndpointKey, sanitizeMessage, escapeWakeCard,
+  CITO_VERSION, listenerId, localPrincipal, oidcPrincipal, senderEndpointKey, sanitizeMessage, escapeWakeCard,
   ERROR_RETRYABLE, errorResult, successResult, CitoError, loadConfig, getHostId,
   evaluateLease, brokerAgeMs, localExpirationMs, parseInput, listenInputSchema,
   sendInputSchema, findInputSchema, validateHarness,
@@ -107,6 +107,11 @@ describe("input and MCP envelopes", () => {
 });
 
 describe("configuration and machine identity", () => {
+  it("keeps CITO_VERSION synchronized with package.json version (0.10.0)", async () => {
+    const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
+    expect(CITO_VERSION).toBe("0.10.0");
+    expect(CITO_VERSION).toBe(pkg.version);
+  });
   it("loads defaults and validates OIDC and URL configuration", () => {
     const config = loadConfig({});
     expect(config.natsUrl).toBe("nats://127.0.0.1:4222");

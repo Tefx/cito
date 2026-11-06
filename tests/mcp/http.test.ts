@@ -4,12 +4,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { startHttpServer, parseClientPid, httpMetadata, daemonHealth } from "../../src/mcp/server.js";
 import { LocalState } from "../../src/mcp/state.js";
-import { loadConfig } from "../../src/shared/index.js";
+import { CITO_VERSION, loadConfig } from "../../src/shared/index.js";
 import type { CallerInput } from "../../src/adapters/index.js";
 import { fixture, waitFor, freePort } from "./support.js";
 
@@ -23,7 +23,7 @@ test("HTTP binds loopback, enforces Origin, attributes real client PID, rejects 
   const spy = vi.spyOn(f.service, "call").mockImplementation((name, input, meta) => { captured.push(meta ?? {}); return original(name, input, meta); });
   try {
     expect(http.http.address()).toMatchObject({ address: "127.0.0.1" });
-    expect(await (await fetch(base + "/health")).json()).toEqual({ ok: true, pid: process.pid, stateDir: f.stateDir });
+    expect(await (await fetch(base + "/health")).json()).toEqual({ ok: true, pid: process.pid, stateDir: f.stateDir, version: CITO_VERSION });
     for (const origin of ["https://example.com", "null", "not a URL"]) expect((await fetch(base + "/mcp", { headers: { origin } })).status).toBe(403);
     for (const origin of ["http://localhost:9999", "http://127.0.0.1"]) expect((await fetch(base + "/health", { headers: { origin } })).status).toBe(200);
     await client.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp")));
@@ -153,3 +153,86 @@ test("CLI listen and unlisten support socket-bridge parent discovery, --codex au
     db.close(); spy.mockRestore(); state.releaseDaemon(process.pid); state.close(); await http.close(); await f.close();
   }
 }, 20000);
+
+test("CLI --version / -v prints CITO_VERSION without starting a daemon, and ensureDaemon replaces a stale daemon on SIGTERM", async () => {
+  const root = await mkdtemp("/tmp/cito-version-");
+  const stateDir = join(root, "state"), codexHome = join(root, "codex"), port = await freePort();
+  const env = {
+    ...process.env,
+    CITO_STATE_DIR: stateDir,
+    CITO_CODEX_HOME: codexHome,
+    CITO_DAEMON_PORT: String(port),
+    CITO_UI_HEADLESS: "1",
+    CITO_NATS_URL: "nats://127.0.0.1:1",
+  };
+  await mkdir(join(stateDir, "bin"), { recursive: true, mode: 0o700 });
+  await writeFile(join(stateDir, "bin/cito-ui"), "#!/bin/sh\ncat >/dev/null\n", { mode: 0o755 });
+  await chmod(join(stateDir, "bin/cito-ui"), 0o755);
+  const stopActiveDaemon = async () => {
+    const health = await daemonHealth(loadConfig(env));
+    if (!health) return;
+    try { process.kill(health.pid, "SIGTERM"); } catch {}
+    await waitFor(() => { try { process.kill(health.pid, 0); return false; } catch { return true; } }, 10000);
+  };
+  try {
+    for (const flag of ["--version", "-v"]) {
+      const res = await exec(process.execPath, [resolve("bin/cito-mcp"), flag], {
+        env: { ...env, CITO_NATS_URL: "invalid-url" },
+        timeout: 10000,
+      });
+      expect(res.stdout).toBe(`cito v${CITO_VERSION}\n`);
+      expect(res.stderr).toBe("");
+    }
+    expect(await daemonHealth(loadConfig(env))).toBeUndefined();
+
+    for (const staleVersion of ["0.1.0", ""]) {
+      const staleScript = [
+        'const http = require("node:http");',
+        "const stateDir = process.env.CITO_STATE_DIR;",
+        "const port = Number(process.env.CITO_DAEMON_PORT);",
+        "const version = process.env.STALE_VERSION;",
+        "const srv = http.createServer((req, res) => {",
+        '  if (req.url === "/health") {',
+        "    const body = { ok: true, pid: process.pid, stateDir };",
+        "    if (version) body.version = version;",
+        '    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));',
+        "  } else { res.writeHead(404).end(); }",
+        "});",
+        'process.once("SIGTERM", () => srv.close(() => process.exit(0)));',
+        'srv.listen(port, "127.0.0.1");',
+      ].join("\n");
+      const stale = spawn(process.execPath, ["-e", staleScript], {
+        env: { ...env, STALE_VERSION: staleVersion },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      const staleExited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit =>
+        stale.once("exit", (code, signal) => resolveExit({ code, signal })),
+      );
+      try {
+        await waitFor(async () => (await daemonHealth(loadConfig(env)))?.pid === stale.pid, 5000);
+        expect(await daemonHealth(loadConfig(env))).toEqual({
+          pid: stale.pid,
+          stateDir,
+          ...(staleVersion ? { version: staleVersion } : {}),
+        });
+        const unlistenRes = await exec(
+          process.execPath,
+          [resolve("bin/cito-mcp"), "unlisten", "--codex", "01234567-89ab-4cde-8123-0123456789ab"],
+          { env, timeout: 10000 },
+        );
+        expect(unlistenRes.stdout).toBe("Unlistened (0 removed)\n");
+        expect(await staleExited).toEqual({ code: 0, signal: null });
+        const replaced = await daemonHealth(loadConfig(env));
+        expect(replaced).toEqual({ pid: expect.any(Number), stateDir, version: CITO_VERSION });
+        expect(replaced!.pid).not.toBe(stale.pid);
+        await stopActiveDaemon();
+      } finally {
+        if (stale.exitCode === null && stale.signalCode === null) stale.kill("SIGKILL");
+        await staleExited;
+      }
+    }
+  } finally {
+    await stopActiveDaemon();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 25000);
