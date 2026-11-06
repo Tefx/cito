@@ -217,17 +217,23 @@ test("cito-mcp stdio advertises the Claude channel, preserves first-turn session
     const projDir = join(f.claudeHome, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"));
     await mkdir(projDir, { recursive: true });
     await writeFile(join(projDir, transcriptUuid + ".jsonl"), "{}\n");
+    const listenerCanon = toCanonicalListenerId(String(enrolled.listener_id));
     await call(f.service, "cito_send", { to: String(enrolled.listener_id), message: "ship the adapter" });
     await waitFor(
       async () =>
         (await peekClaudeWakes(f.config, transcriptUuid)).length > 0
-        && f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1,
+        && f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 1
+        && f.service.state.listener(listenerCanon)?.dispatcher_token === null,
       10_000,
     );
     const queuedWakes = await peekClaudeWakes(f.config, transcriptUuid);
     expect(queuedWakes[0]!.content).toContain("ship the adapter");
     // Insert a newly arrived RECEIVED signal that is NOT part of the drained batch; hook ack must not touch it.
-    const listenerCanon = toCanonicalListenerId(String(enrolled.listener_id));
+    f.service.state.run(
+      "UPDATE local_listeners SET dispatcher_token = 'hold', lease_until_ms = ? WHERE listener_id = ?",
+      Date.now() + 30_000,
+      listenerCanon,
+    );
     f.service.state.run(
       `INSERT INTO local_signals (hub, signal_id, listener_id, seq, binding_generation, from_user, from_host_name,
         from_harness, from_listener_id, from_title, from_about, message, held_reason, in_reply_to, created_at,
