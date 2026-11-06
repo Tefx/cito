@@ -3613,7 +3613,7 @@ phases:
   - id: v12.acceptance-and-hygiene-gate
     name: 'V12 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v12` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -3707,6 +3707,8 @@ phases:
     - v12.claude-adapter-hardening-and-v0-11-0-release
     - v12.fix-e2e-claude-unbatched-signal-race
     agent: code-reviewer
+    claimed_by: code-reviewer
+    claimed_at: '2026-11-06T11:24:21.510836Z'
   - id: v12.fix-e2e-claude-unbatched-signal-race
     name: Hold dispatcher lease for sig_unbatched_new in tests/e2e/lifecycle.test.ts
     status: done
