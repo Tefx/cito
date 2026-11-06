@@ -4496,7 +4496,7 @@ phases:
   - id: v15.acceptance-and-hygiene-gate
     name: 'V15 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v15` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -4561,3 +4561,5 @@ phases:
     depends_on:
     - v15.prebuilt-arm64-ui-binary-and-v0-11-3-release
     agent: code-reviewer
+    claimed_by: code-reviewer
+    claimed_at: '2026-11-06T18:43:47.523660Z'
