@@ -2926,7 +2926,7 @@ phases:
     name: 'Implement V10 zero-script npm packaging, tsconfig erasableSyntaxOnly compliance,
       native Node TypeScript entrypoints, README update, and packaging tests [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ tsconfig.json\n    - bin/cito-mcp\n    - bin/cito-auth-callout\n    - src/shared/errors.ts\n\
@@ -3011,6 +3011,26 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-06T05:36:05.504355Z'
+    done_at: '2026-11-06T05:55:53.606158+00:00'
+    evidence: "Commands run (npm run typecheck && npm run compile && npm test), mechanical\
+      \ checks (0 Chinese chars, 0 forbidden names, 0 case-insensitive 'claude' matches\
+      \ in src/ and tests/, 0 non-Node imports in cito-bridge.ts, 0 non-cli harness\
+      \ refs in src/mcp/), and verified docs/DESIGN.md §5.2 deliverables:\n- Commit:\
+      \ d927d2ecdd2d31e38da2df978afb41e885f3d8c0 (implemented by software-architect\
+      \ on openrouter/google/gemini-4-argon while openai OAuth is unavailable; fast-forwarded\
+      \ onto main)\n- npm run typecheck && npm run compile && npm test: exit 0 (27\
+      \ test files, 217 tests passed, 0 failed, 0 skipped)\n- Mechanical checks:\n\
+      \  - [\\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches\n\
+      \  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/, docs/ (excluding policy\
+      \ rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches\n \
+      \ - Case-insensitive 'claude' matches in src/ and tests/: 0 matches\n  - Non-node\
+      \ imports in src/pi-extension/cito-bridge.ts: 0 matches\n  - Harness references\
+      \ in src/mcp/ (excluding src/mcp/cli.ts delegating --codex to src/adapters/codex.ts):\
+      \ 0 matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n  - Fresh-context\
+      \ structural-auditor (01a1af67-74d9-71a1-8c21-6c5aa3569369) and uiux-auditor\
+      \ (01a1af67-7535-7444-8052-dc93885dde21) audited commit d927d2ecdd2d31e38da2df978afb41e885f3d8c0\
+      \ across all 5 lenses and both certified Zero Actionable Findings (Completeness:\
+      \ CLEAN | Simplicity: ZERO_NEW_ISSUES) on Round 1."
   - id: v10.acceptance-and-hygiene-gate
     name: 'V10 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
