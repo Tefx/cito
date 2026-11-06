@@ -2600,3 +2600,140 @@ phases:
     and tests/adapters/bridge.test.ts; and pass the iterative code-hygiene gate.'
   depends_on:
   - v8
+  steps:
+  - id: v9.multi-hub-session-attachment-and-switching
+    name: 'Implement V9 multi-hub candidate retention, atomic switch_hub migration,
+      Zone 1 switch_hub pill, Zone 3 target_hub selector, and Pi /cito --hub support
+      [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - src/adapters/types.ts\n    - src/adapters/index.ts\n\
+      \    - src/ui/index.ts\n    - src/mcp/service.ts\n    - src/macos/cito-ui.swift\n\
+      \    - src/pi-extension/cito-bridge.ts\n    - docs/DESIGN.md\n    - README.md\n\
+      \    - tests/ui/lifecycle.test.ts\n    - tests/mcp/ui.test.ts\n    - tests/adapters/bridge.test.ts\n\
+      \  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n  - Implement Cito\
+      \ V9 Multi-Hub Session Attachment, Atomic Hub Migration, Target Hub Selector\
+      \ & Pi `/cito --hub` Support per `docs/DESIGN.md` §§4.2, 4.4, 5 across `src/adapters/types.ts`,\
+      \ `src/adapters/index.ts`, `src/ui/index.ts`, `src/mcp/service.ts`, `src/macos/cito-ui.swift`,\
+      \ `src/pi-extension/cito-bridge.ts`, `README.md`, `docs/DESIGN.md`, and `tests/`:\n\
+      \    1. **Multi-Hub Candidate Retention (`listening_hubs` in `src/adapters/types.ts`,\
+      \ `src/ui/index.ts`, `src/adapters/index.ts`, `src/mcp/service.ts`, `docs/DESIGN.md`\
+      \ §4.2)**:\n       - Consolidate `AvailableSessionSummary` in `src/adapters/types.ts`\
+      \ with optional `listening_hubs?: string[]` and re-export it from `src/ui/index.ts`.\n\
+      \       - In both `discoverAllAvailableSessions` (`src/adapters/index.ts`) and\
+      \ `CitoService.pushUiState()` (`src/mcp/service.ts`), compute `listening_hubs`\
+      \ for each candidate session from matching active listeners (`r.harness ===\
+      \ c.harness && (r.session_id === c.session_id || (c.endpoint_pid !== undefined\
+      \ && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid))`). Exclude\
+      \ a candidate only when it matches an active listener without a `hub` field\
+      \ (legacy unit-test callers) or when `listening_hubs` covers all configured\
+      \ hubs (`Object.keys(config.hubs)` / `this.slots.size`).\n    2. **UI Wire Protocol\
+      \ & Atomic Per-Session `switch_hub` Migration (`src/ui/index.ts`, `src/mcp/service.ts`,\
+      \ `docs/DESIGN.md` §4.4)**:\n       - Extend `UiAction` and `validAction()`\
+      \ in `src/ui/index.ts`:\n         - Accept `{ op: \"switch_hub\", from_hub:\
+      \ string, to_hub: string, listener_id: string }` before the generic `a.hub`\
+      \ check, validating `from_hub` and `to_hub` with `hubNameSchema`, requiring\
+      \ `from_hub !== to_hub`, and validating `listener_id` with `canonicalListenerIdSchema`.\n\
+      \         - Extend `listen_session` to accept optional `hub?: string` (`hubNameSchema`)\
+      \ and `scope?: \"self\" | \"workspace\"`.\n       - In `CitoService.handleUiAction`\
+      \ (`src/mcp/service.ts`), handle `switch_hub` inside a dedicated per-session\
+      \ `switchMutex` (`${harness}:${session_id}`):\n         - Verify the source\
+      \ listener is still live in `liveActiveRows()`.\n         - Check whether `to_hub`\
+      \ already has a live listener for that session in `liveActiveRows()`; otherwise\
+      \ enroll on `to_hub` via `this.listen(...)` inheriting `about`, `scope`, and\
+      \ `tag`.\n         - Call `unlistenById(from_hub, row.listener_id)` only after\
+      \ `to_hub` enrollment succeeds. If `to_hub` enrollment fails, record the error\
+      \ on `toSlot.error` and preserve the `from_hub` listener intact.\n         -\
+      \ Route `listen_session` to `action.hub` and `action.scope ?? \"self\"` when\
+      \ provided.\n    3. **Menu Bar Zone 1 `switch_hub:<scoped_id>` Pill & Zone 3\
+      \ `target_hub:<hub>` Selector (`src/macos/cito-ui.swift`, `docs/DESIGN.md` §4.2)**:\n\
+      \       - **Zone 1 Multi-Hub Card Switch Pill**:\n         - When `hubs.count\
+      \ <= 1`, render no hub switch pill and keep `actionWidth` (`114pt` when `can_jump`\
+      \ else `88pt`) and `scope:<scoped_id>` origin (`x = 236` when `can_jump` else\
+      \ `x = 262`) unchanged.\n         - When `hubs.count > 1`, render `listener.title`\
+      \ without a static `\" · \\(listener.hub)\"` suffix and place an interactive\
+      \ `MenuControl` pill (`id = \"switch_hub:\\(listener.scoped_id)\"`, `style =\
+      \ .neutral`, `height = 22 pt`, `radius = 6 pt`, `width = min(76, max(46, ceil(measureTextWidth(listener.hub,\
+      \ font: btnFont)) + 22))`) `4 pt` to the left of `scope:\\(listener.scoped_id)`\
+      \ with a `6 × 6 pt` hub connection status dot (`x: 7, y: 8, radius: 3`) and\
+      \ `listener.hub` text at `x: 16`. Include `hubPillWidth + 4` in `actionWidth`\
+      \ so `title` width (`350 - 54 - actionWidth - 6`) never overlaps controls.\n\
+      \         - Clicking `switch_hub:<scoped_id>` selects the next target hub in\
+      \ `hubs` ring order (`(currentIndex + 1) % hubs.count`, preferring connected\
+      \ hubs where the same `(harness, session_id)` is not already listening, falling\
+      \ back to the next hub with `name != listener.hub`), sets `pendingMutation =\
+      \ true`, and emits `[\"op\": \"switch_hub\", \"from_hub\": listener.hub, \"\
+      to_hub\": nextHub, \"listener_id\": listener.listener_id]`.\n       - **Zone\
+      \ 3 Target Hub Selector & Per-Target-Hub Filtering**:\n         - Track `selectedTargetHub:\
+      \ String = \"\"` on `Companion`, with `effectiveTargetHub` resolving `selectedTargetHub`\
+      \ if present in `hubs`, else the first connected hub with at least one unmounted\
+      \ candidate (`!($0.listening_hubs ?? []).contains(hub.name)`), else the first\
+      \ connected hub or `hubs.first?.name ?? \"\"`.\n         - When `hubs.count\
+      \ > 1`, narrow `\"AVAILABLE SESSIONS\"` label to `width: 124` (`220` when `hubs.count\
+      \ <= 1`) and host a horizontal `NSScrollView` (`NSRect(x: 140, y: 2, width:\
+      \ 228, height: 18)`, `drawsBackground = false`, hidden scrollers) containing\
+      \ `18 pt`-tall (`radius: 9`) `MenuControl` pills (`id = \"target_hub:\\(hub.name)\"\
+      `, `style = hub.name == effectiveTargetHub ? .prominent : .neutral`) that set\
+      \ `selectedTargetHub = hub.name` and call `rebuild()`.\n         - Filter candidates\
+      \ by `visibleAvailable = available.filter { !($0.listening_hubs ?? []).contains(effectiveTargetHub)\
+      \ }`. When `!available.isEmpty && visibleAvailable.isEmpty`, keep `available_header`\
+      \ visible and render a `380 × 28 pt` status row (`id = \"available_empty_target\"\
+      `, `\"All sessions listening on \\(effectiveTargetHub)\"`).\n         - When\
+      \ `hubs.count > 1 && !effectiveTargetHub.isEmpty`, clicking `listen:<harness>:<session_id>`\
+      \ includes `\"hub\": effectiveTargetHub` in `listen_session`; when `hubs.count\
+      \ <= 1`, omit `\"hub\"` for backward compatibility.\n         - Do NOT append\
+      \ `switch_hub:*` or `target_hub:*` to `menuActions` (keep `menuActions` indices\
+      \ `0..9` stable).\n    4. **Pi Slash Command `/cito --hub` Support (`src/pi-extension/cito-bridge.ts`,\
+      \ `docs/DESIGN.md` §5)**:\n       - Support `--hub <hub>` and `--hub=<hub>`\
+      \ across `/cito on`, `/cito team`, and `/cito off` (plus `--hub ` argument completions\
+      \ and updated usage string `Usage: /cito [on [--hub <hub>] [about...] | team\
+      \ [--hub <hub>] [about...] | off [--hub <hub>]]`).\n       - When `--hub <hub>`\
+      \ is passed to `/cito off`, do not blindly clear `activeBadge` after the RPC\
+      \ returns so the daemon's synchronous socket `status` update for any remaining\
+      \ active hubs stays authoritative, and notify `Cito stopped listening on <hub>`.\n\
+      \    5. **Documentation & Behavioral Tests (`README.md`, `docs/DESIGN.md`, `tests/ui/lifecycle.test.ts`,\
+      \ `tests/mcp/ui.test.ts`, `tests/adapters/bridge.test.ts`)**:\n       - Update\
+      \ `README.md` and `docs/DESIGN.md` with V9 multi-hub session attachment, `switch_hub`,\
+      \ `target_hub`, and `/cito --hub` documentation.\n       - Add unit and headless\
+      \ UI / daemon tests in `tests/ui/lifecycle.test.ts`, `tests/mcp/ui.test.ts`,\
+      \ and `tests/adapters/bridge.test.ts` covering `validAction` validation, multi-hub\
+      \ `listening_hubs` candidate retention, `target_hub:<hub>` switching and `available_empty_target`,\
+      \ `switch_hub:<scoped_id>` emission and atomic enroll-before-unlisten migration\
+      \ (including failure rollback preserving `from_hub`), and Pi `/cito` `--hub`\
+      \ parsing and multi-hub `activeBadge` retention.\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `/Users/tefx/Projects/cito` (`src/adapters/types.ts`, `src/adapters/index.ts`,\
+      \ `src/ui/index.ts`, `src/mcp/service.ts`, `src/macos/cito-ui.swift`, `src/pi-extension/cito-bridge.ts`,\
+      \ `docs/DESIGN.md`, `README.md`, `tests/ui/lifecycle.test.ts`, `tests/mcp/ui.test.ts`,\
+      \ `tests/adapters/bridge.test.ts`). Must enforce English-only UI/UX/code/docs\
+      \ (0 Chinese chars in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`),\
+      \ 0 company/environment-specific names, 0 case-insensitive `'claude'` matches\
+      \ in `src/` and `tests/`, 100% standalone `src/pi-extension/cito-bridge.ts`\
+      \ (0 non-Node built-in imports), and harness-agnostic `src/mcp/` (0 references\
+      \ to `pi`, `codex`, or `x-codex-turn-metadata` in `src/mcp/` except `src/mcp/cli.ts`\
+      \ delegating `--codex` resolution to `src/adapters/codex.ts`). Must not mutate\
+      \ external repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito`\
+      \ / `~/.codex` state.\n- **Admit:** Completed Phase `v8`, `docs/DESIGN.md` (V9\
+      \ §§4.2, 4.4, 5), `AGENTS.md`, and `README.md`. Verified by `npm run typecheck\
+      \ && npm run build && npm test` exiting `0`. Consumed by `v9.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, Swift compilation, build, or unit/E2E\
+      \ test in place within the isolated worktree and clean up any temporary test\
+      \ sockets, SQLite files, watchers, or child processes."
+    verification: npm run typecheck && npm run build && npm test
+    evidence_template: Commands run (npm run typecheck && npm run build && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 case-insensitive 'claude'
+      matches in src/ and tests/, 0 non-Node imports in cito-bridge.ts, 0 non-cli
+      harness refs in src/mcp/), and verified docs/DESIGN.md §§4.2, 4.4, 5 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - src/adapters/types.ts
+    - src/adapters/index.ts
+    - src/ui/index.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - src/pi-extension/cito-bridge.ts
+    - tests/ui/lifecycle.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/adapters/bridge.test.ts
+    agent: senior-engineer
