@@ -231,14 +231,19 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
 
 ---
 
-### 4.4 Wire Protocol & Headless Inspection Contract (`src/ui/index.ts`, `src/macos/cito-ui.swift`)
+### 4.4 Wire Protocol, Prebuilt `arm64` Companion & Headless Inspection Contract (`src/ui/index.ts`, `src/macos/cito-ui.swift`)
 
-1. **`UiBridge` & `DaemonToUiMessage` (`src/ui/index.ts`)**:
+1. **Prebuilt Apple Silicon Binary with Automatic `swiftc` Fallback (`ensureUiCompiled` in `src/ui/index.ts`, `bin/cito-ui-darwin-arm64`)**:
+   - `npm run compile` compiles `src/macos/cito-ui.swift` with `swiftc -O -target arm64-apple-macos13.0`, strips symbols (`strip -x`), and applies an ad-hoc code signature (`codesign -s - --force`) at `bin/cito-ui-darwin-arm64` (committed and shipped inside `"files": ["bin", ...]`).
+   - In `ensureUiCompiled(stateDir, source?)`:
+     - When no custom `source` override is passed, `process.platform === "darwin" && process.arch === "arm64"`, and `bin/cito-ui-darwin-arm64` exists with `mtimeMs >= stat(src/macos/cito-ui.swift).mtimeMs`, `ensureUiCompiled` installs `bin/cito-ui-darwin-arm64` into `${stateDir}/bin/cito-ui` by reading its bytes (`readFile`) and writing a new temporary inode (`writeFile` + `chmod 0o755` + `rename`) so any extended attributes (`com.apple.quarantine`) are stripped and Apple Silicon kernel vnode code-signature caches stay valid—requiring zero `/usr/bin/swiftc` execution on Apple Silicon Macs.
+     - When `process.arch !== "arm64"`, when a custom `source` path is supplied, when `bin/cito-ui-darwin-arm64` is absent, or when `src/macos/cito-ui.swift` has a newer `mtimeMs` than `bin/cito-ui-darwin-arm64`, `ensureUiCompiled` automatically falls back to compiling `source` with `/usr/bin/swiftc`.
+2. **`UiBridge` & `DaemonToUiMessage` (`src/ui/index.ts`)**:
    - `UiBridge.state(hubs, listeners, available = [], myRemoteListeners = [], directoryOnlineCount = 0)` defaults optional parameters so existing 2- or 3-argument callers in `tests/ui/lifecycle.test.ts` remain 100% compatible.
    - `UiBridge.directory(peers: UiRemotePeerSummary[], matchedCount = peers.length, onlineCount = peers.length)` sends `{ op: "directory", peers, matched_count: matchedCount, online_count: onlineCount }` and caches the latest directory frame for replay on child restart.
    - `validAction()` accepts `{ op: "open_directory" }`, `{ op: "close_directory" }`, `{ op: "query_directory", query?: string, scope?: "all" | "mine", harness?: string }`, and `{ op: "switch_hub", from_hub: string, to_hub: string, listener_id: string }` (validating `from_hub` and `to_hub` with `hubNameSchema`, requiring `from_hub !== to_hub`, and validating `listener_id` with `canonicalListenerIdSchema`) before the generic `a.hub` check. `listen_session` additionally accepts optional `hub?: string` (`hubNameSchema`) and `scope?: "self" | "workspace"`.
    - `CitoService.handleUiAction` handles `switch_hub` inside a dedicated per-session `switchMutex` (`${harness}:${session_id}`): it verifies the source listener is still live in `liveActiveRows()`, checks whether the target hub already has a live listener for that session in `liveActiveRows()`, otherwise enrolls on `to_hub` via `this.listen(...)` inheriting `about`, `scope`, and `tag`, and only calls `unlistenById(from_hub, row.listener_id)` after `to_hub` enrollment succeeds. If `to_hub` enrollment fails, it records the error on `toSlot.error` and preserves the `from_hub` listener intact.
-2. **Headless Inspection & Control Hooks (`src/macos/cito-ui.swift`)**:
+3. **Headless Inspection & Control Hooks (`src/macos/cito-ui.swift`)**:
    - `test_control` searches `cardMenu.items` first, and if not found, searches `directoryPanel?.contentView` (including visible `NSTableView` row views).
    - Headless command `{"op": "test_directory_query", "query": "..."}` updates `directorySearchField.stringValue`, triggers filtering, and emits `query_directory`.
    - Headless command `{"op": "test_directory_key", "key": "down" | "up" | "return" | "escape"}` invokes the production keyboard navigation / Return-copy / Escape-close handlers on `DirectoryPanel`.
@@ -267,7 +272,7 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
 
 ### 5.3 Versioning, `/health` Handshake & Automatic Stale-Daemon Handover (`src/shared/index.ts`, `src/mcp/server.ts`, `src/mcp/cli.ts`)
 1. **Single Source of Truth (`CITO_VERSION`)**:
-   - `CITO_VERSION` (exported from `src/shared/index.ts`, set to `"0.11.2"` matching `package.json` `"version"`) is the canonical product SemVer string. Automated tests verify `CITO_VERSION === packageJson.version`.
+   - `CITO_VERSION` (exported from `src/shared/index.ts`, set to `"0.11.3"` matching `package.json` `"version"`) is the canonical product SemVer string. Automated tests verify `CITO_VERSION === packageJson.version`.
    - `cito --version` and `cito -v` (in `src/mcp/cli.ts`) print `cito v${CITO_VERSION}\n` to `stdout` and exit `0` without starting `cito-daemon`.
    - `createMcpServer` (`src/mcp/server.ts`) advertises `version: CITO_VERSION`, and `GET /health` returns `{ ok: true, pid: process.pid, stateDir: config.stateDir, version: CITO_VERSION }`.
 2. **Automatic Stale-Daemon Replacement (`ensureDaemon` in `src/mcp/cli.ts`)**:

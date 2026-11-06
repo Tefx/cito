@@ -1,6 +1,6 @@
 {
   "name": "@tefx/cito",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "Notification-only cross-harness, cross-machine, multi-user wake and signaling service for coding agents",
   "type": "module",
   "main": "dist/src/mcp/service.js",
@@ -35,7 +35,7 @@
   "scripts": {
     "test": "vitest run --dir tests",
     "typecheck": "tsc --noEmit",
-    "compile": "rm -rf dist && tsc",
+    "compile": "rm -rf dist && tsc && if [ \"$(uname -s)-$(uname -m)\" = \"Darwin-arm64\" ]; then swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64 && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64; fi",
     "prepublishOnly": "npm run typecheck && npm run compile"
   },
   "dependencies": {

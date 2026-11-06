@@ -107,9 +107,9 @@ describe("input and MCP envelopes", () => {
 });
 
 describe("configuration and machine identity", () => {
-  it("keeps CITO_VERSION synchronized with package.json version (0.11.2)", async () => {
+  it("keeps CITO_VERSION synchronized with package.json version (0.11.3)", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
-    expect(CITO_VERSION).toBe("0.11.2");
+    expect(CITO_VERSION).toBe("0.11.3");
     expect(CITO_VERSION).toBe(pkg.version);
   });
   it("loads defaults and validates OIDC and URL configuration", () => {

@@ -14,7 +14,7 @@ Cito is a cross-harness, cross-machine, multi-hub notification and wake bus for 
 ## Quick Start (Client Installation & Setup)
 
 ### Prerequisites
-- **macOS** with Xcode Command Line Tools (`xcode-select --install`, providing `/usr/bin/swiftc` to compile the native Menu Bar app on first launch).
+- **macOS** on Apple Silicon (`arm64` ships a prebuilt `cito-ui` binary out of the box; local `cito-ui.swift` edits automatically fall back to `/usr/bin/swiftc`).
 - **Node.js `>= 22.13.0`** (`^22.13.0 || ^24.0.0 || >=26.0.0`).
 
 ### 1. Install `@tefx/cito`
@@ -24,10 +24,10 @@ Install globally so `cito`, `cito-mcp`, and `cito-claude-hook` are on your `PATH
 ```sh
 npm install -g @tefx/cito
 # Or install directly from an annotated GitHub release tag:
-npm install -g github:Tefx/cito#v0.11.2
+npm install -g github:Tefx/cito#v0.11.3
 
 cito --version
-# -> cito v0.11.2
+# -> cito v0.11.3
 ```
 
 *(To upgrade later, run `npm install -g @tefx/cito@latest`; the running background daemon will be replaced automatically on the next command.)*
@@ -77,7 +77,7 @@ args = []
 1. Install the standalone bridge extension (enables live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command) by adding `"npm:@tefx/cito"` to `packages` in `~/.pi/agent/settings.json`, or by copying the single zero-dependency file into `~/.pi/agent/extensions/`:
    ```sh
    mkdir -p ~/.pi/agent/extensions
-   curl -fsSL https://raw.githubusercontent.com/Tefx/cito/v0.11.2/src/pi-extension/cito-bridge.ts \
+   curl -fsSL https://raw.githubusercontent.com/Tefx/cito/v0.11.3/src/pi-extension/cito-bridge.ts \
      -o ~/.pi/agent/extensions/cito-bridge.ts
    ```
 2. Register the MCP server in `~/.pi/agent/mcp/global.mcp.json` (or `pi.mcp.json`):
