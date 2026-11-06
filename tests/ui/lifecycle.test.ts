@@ -401,9 +401,10 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     const multiGroupCandidates = [
       ...Array.from({ length: 5 }, (_, i) => ({ harness: "pi", session_id: `pi-${i}`, title: `Pi ${i}`, cwd: `/tmp/pi${i}`, branch: "main", endpoint_pid: 1000 + i })),
       ...Array.from({ length: 5 }, (_, i) => ({ harness: "codex", session_id: `cx-${i}`, title: `Codex ${i}`, cwd: `/tmp/cx${i}`, branch: "feat/ui" })),
+      { harness: "claude", session_id: "claude-1", title: "Claude 1", cwd: "/tmp/claude1", branch: "main", endpoint_pid: 2001 },
     ];
     bridge.state(hubs, [listener], multiGroupCandidates, myRemote, 412);
-    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1 available=10"));
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1 available=11"));
     const snap = await inspect(), nodes = flatten(snap.items);
     // Header dynamic subtitle and hubStrip shift
     const subtitleNode = nodes.find(n => n.id === "header_subtitle")!;
@@ -428,6 +429,9 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     // Zone 3: Collapsible harness groups + disambiguated scroll IDs + icon-free candidate rows at x: 24
     expect(nodes.find(n => n.id === "toggle_group:pi")).toMatchObject({ text: "Pi · 5 open", symbol: "chevron.down" });
     expect(nodes.find(n => n.id === "toggle_group:codex")).toMatchObject({ text: "Codex · 5 recent", symbol: "chevron.down" });
+    expect(nodes.find(n => n.id === "toggle_group:claude")).toMatchObject({ text: "Claude · 1 open", symbol: "chevron.down" });
+    const groupOrder = snap.items.filter(n => n.id.startsWith("group:")).map(n => n.id);
+    expect(groupOrder).toEqual(["group:pi", "group:codex", "group:claude"]);
     expect(snap.items.find(n => n.id === "available_scroll:pi")).toMatchObject({ width: 380, height: 144 });
     expect(snap.items.find(n => n.id === "available_scroll:codex")).toMatchObject({ width: 380, height: 144 });
     const firstCand = nodes.find(n => n.id === "candidate:pi:pi-0")!;
@@ -509,25 +513,29 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect(flatten(afterUp.directory_items ?? []).find(n => n.id === "copy_dir:" + teamPeer.scoped_id)).toMatchObject({ green: false, hovered: false });
 
     // Facet pills and search query hooks
+    expect(dirNodes.find(n => n.id === "dir_harness:claude")).toMatchObject({ text: "Claude", x: 364, width: 62 });
     send({ op: "test_control", id: "dir_scope:mine" });
     await waitFor(() => actions.length === 2);
     expect(actions[1]).toEqual({ op: "query_directory", query: "", scope: "mine", harness: "all" });
     expect((await inspect()).directory_matched_count).toBe(1);
     send({ op: "test_control", id: "dir_scope:all" });
-    send({ op: "test_control", id: "dir_harness:codex" });
+    send({ op: "test_control", id: "dir_harness:claude" });
     await waitFor(() => actions.length === 4);
-    expect(actions[3]).toEqual({ op: "query_directory", query: "", scope: "all", harness: "codex" });
-    send({ op: "test_directory_query", query: "@bob repo:billing" });
+    expect(actions[3]).toEqual({ op: "query_directory", query: "", scope: "all", harness: "claude" });
+    send({ op: "test_control", id: "dir_harness:codex" });
     await waitFor(() => actions.length === 5);
-    expect(actions[4]).toEqual({ op: "query_directory", query: "@bob repo:billing", scope: "all", harness: "codex" });
+    expect(actions[4]).toEqual({ op: "query_directory", query: "", scope: "all", harness: "codex" });
+    send({ op: "test_directory_query", query: "@bob repo:billing" });
+    await waitFor(() => actions.length === 6);
+    expect(actions[5]).toEqual({ op: "query_directory", query: "@bob repo:billing", scope: "all", harness: "codex" });
     expect((await inspect()).directory_selected_id).toBe(teamPeer.scoped_id);
 
     // Escape closes DirectoryPanel, clears its hover, and emits close_directory.
     send({ op: "test_hover", id: "dir_scope:mine", hovered: true });
     expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(true);
     send({ op: "test_directory_key", key: "escape" });
-    await waitFor(() => actions.length === 6);
-    expect(actions[5]).toEqual({ op: "close_directory" });
+    await waitFor(() => actions.length === 7);
+    expect(actions[6]).toEqual({ op: "close_directory" });
     const closed = await inspect();
     expect(closed.directory_open).toBe(false);
     expect(flatten(closed.directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(false);

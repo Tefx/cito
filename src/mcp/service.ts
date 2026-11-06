@@ -1177,7 +1177,7 @@ export class CitoService {
       for (const ack of parsedAcks ?? []) {
         const scoped = ack.raw.includes(":");
         if (scoped && !authorized.some(row => row.hub === ack.hub)) throw new CitoError("INVALID_INPUT", "Ack hub is outside the authorized inbox");
-        const matches = this.state.signals(`SELECT * FROM local_signals WHERE (${where}) AND signal_id = ?${scoped ? " AND hub = ?" : ""}`, ...values, ack.id, ...(scoped ? [ack.hub] : []));
+        const matches = this.state.signals(`SELECT * FROM local_signals WHERE (${where}) AND (signal_id = ? OR batch_id = ?)${scoped ? " AND hub = ?" : ""}`, ...values, ack.id, ack.id, ...(scoped ? [ack.hub] : []));
         if (!scoped && new Set(matches.map(row => row.hub)).size > 1) throw new CitoError("INVALID_INPUT", "Ambiguous bare signal ID; use a hub prefix");
         ackRows.push(...matches);
       }

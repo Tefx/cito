@@ -1,6 +1,6 @@
 {
   "name": "@tefx/cito",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Notification-only cross-harness, cross-machine, multi-user wake and signaling service for coding agents",
   "type": "module",
   "main": "dist/src/mcp/service.js",
@@ -11,7 +11,8 @@
   "bin": {
     "cito": "bin/cito-mcp",
     "cito-mcp": "bin/cito-mcp",
-    "cito-auth-callout": "bin/cito-auth-callout"
+    "cito-auth-callout": "bin/cito-auth-callout",
+    "cito-claude-hook": "bin/cito-claude-hook"
   },
   "pi": {
     "extensions": [

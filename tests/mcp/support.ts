@@ -58,10 +58,10 @@ export async function piBridge(stateDir: string) {
 }
 export async function fixture(options: { broker?: TestNats; user?: string; service?: ServiceOptions; env?: NodeJS.ProcessEnv; pi?: boolean; observeBanner?: boolean } = {}) {
   const root = await mkdtemp("/tmp/cito-mcp-");
-  const stateDir = join(root, "state"), codexHome = join(root, "codex");
-  await mkdir(join(stateDir, "bin"), { recursive: true }); await mkdir(codexHome);
+  const stateDir = join(root, "state"), codexHome = join(root, "codex"), claudeHome = join(root, "claude");
+  await mkdir(join(stateDir, "bin"), { recursive: true }); await mkdir(codexHome); await mkdir(claudeHome);
   const broker = options.broker ?? await startNats();
-  const env = { CITO_STATE_DIR: stateDir, CITO_CODEX_HOME: codexHome, CITO_NATS_URL: broker.url,
+  const env = { CITO_STATE_DIR: stateDir, CITO_CODEX_HOME: codexHome, CITO_CLAUDE_HOME: claudeHome, CITO_NATS_URL: broker.url,
     CITO_USER: options.user ?? "alice", ...options.env };
   const uiBinary = await bannerBinary();
   const diagnostics: string[] = [];
@@ -77,7 +77,7 @@ export async function fixture(options: { broker?: TestNats; user?: string; servi
   const pi = options.pi === false ? undefined : await piBridge(stateDir);
   let closed = false;
 
-  const result = { root, config, env, stateDir, codexHome, broker, service, serviceOptions, pi: pi!, diagnostics, bannerDisplays,
+  const result = { root, config, env, stateDir, codexHome, claudeHome, broker, service, serviceOptions, pi: pi!, diagnostics, bannerDisplays,
     async close() {
       if (closed) return; closed = true;
       await service.close(); await pi?.stop();

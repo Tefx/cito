@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import { promisify } from "node:util";
+import type { Caller, CallerDetectionContext } from "./types.js";
 
 const exec = promisify(execFile);
 
@@ -29,4 +30,21 @@ export async function gitMetadata(cwd: string, sessionName?: string | null): Pro
     git(["remote", "get-url", "origin"]), git(["rev-parse", "--abbrev-ref", "HEAD"]),
   ]);
   return { repo: normalizeRepo(origin), branch, title: sessionName || basename(cwd) };
+}
+export async function resolveExplicitCaller(
+  harness: string,
+  sessionId: string,
+  ctx: CallerDetectionContext,
+): Promise<Caller> {
+  let cwd = typeof ctx.meta.cwd === "string" && ctx.meta.cwd.trim() ? ctx.meta.cwd.trim() : undefined;
+  if (!cwd && Number.isSafeInteger(ctx.httpClientPid) && ctx.httpClientPid! > 0) {
+    try {
+      const { stdout } = await exec("/usr/sbin/lsof", ["-a", "-d", "cwd", "-p", String(ctx.httpClientPid), "-Fn"], { timeout: 1000 });
+      cwd = stdout.split("\n").find(line => line.startsWith("n"))?.slice(1) || undefined;
+    } catch { /* Optional OS metadata. */ }
+  }
+  if (!cwd) cwd = (await ctx.lookupCachedSession?.({ harness, sessionId }))?.cwd;
+  cwd ||= process.cwd();
+  const title = typeof ctx.meta.title === "string" ? ctx.meta.title : undefined;
+  return { harness, session_id: sessionId, cwd, ...await gitMetadata(cwd, title) };
 }

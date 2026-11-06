@@ -150,6 +150,17 @@ describe("public cito-auth-callout executable", () => {
       expect(authSandbox.status).toBe(1);
       expect(authSandbox.stderr).toMatch(/cito-auth-callout:.*CITO_AUTH_MODE/);
 
+      const hookSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-claude-hook")], {
+        cwd: directory,
+        env: isolatedEnv(directory),
+        input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(hookSandbox.error).toBeUndefined();
+      expect(hookSandbox.status).toBe(0);
+      expect(hookSandbox.stdout).toBe("{}\n");
+
       const repo = join(directory, "repo");
       const prefix = join(directory, "prefix");
       for (const item of ["package.json", "package-lock.json", "tsconfig.json", "README.md", "bin", "src"]) {
@@ -180,6 +191,7 @@ describe("public cito-auth-callout executable", () => {
         ["cito", "bin/cito-mcp"],
         ["cito-mcp", "bin/cito-mcp"],
         ["cito-auth-callout", "bin/cito-auth-callout"],
+        ["cito-claude-hook", "bin/cito-claude-hook"],
       ] as const) {
         const binPath = join(prefix, "bin", binName);
         expect((await lstat(binPath)).isSymbolicLink()).toBe(true);
@@ -205,6 +217,17 @@ describe("public cito-auth-callout executable", () => {
       expect(installedAuthCallout.error).toBeUndefined();
       expect(installedAuthCallout.status).toBe(1);
       expect(installedAuthCallout.stderr).toMatch(/cito-auth-callout:.*CITO_AUTH_MODE/);
+
+      const installedHook = spawnSync(join(prefix, "bin/cito-claude-hook"), [], {
+        cwd: directory,
+        env: isolatedEnv(directory),
+        input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(installedHook.error).toBeUndefined();
+      expect(installedHook.status).toBe(0);
+      expect(installedHook.stdout).toBe("{}\n");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

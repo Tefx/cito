@@ -25,6 +25,9 @@ export interface CitoConfig extends Omit<HubConfig, "name"> {
   codexDesktopRunning?: (signal: AbortSignal) => Promise<boolean>;
   codexHome: string;
   codexBin: string;
+  claudeHome: string;
+  /** Opt-in only: an auto-detected channel would bind a second bridge inside unrelated harnesses. */
+  enableClaudeChannel: boolean;
   openBin: string;
   hostName: string;
   defaultHub: string;
@@ -73,7 +76,7 @@ function port(value: number, name: string): number {
   return value;
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
-  for (const key of ["CITO_STATE_DIR", "CITO_CODEX_HOME", "CITO_CODEX_BIN", "CITO_OPEN_BIN", "CITO_CONFIG_PATH"] as const) {
+  for (const key of ["CITO_STATE_DIR", "CITO_CODEX_HOME", "CITO_CODEX_BIN", "CITO_CLAUDE_HOME", "CITO_OPEN_BIN", "CITO_CONFIG_PATH"] as const) {
     if (env[key] !== undefined && !env[key]?.trim()) throw new Error(key + " must not be empty");
   }
   const stateDir = directory(env.CITO_STATE_DIR ?? "~/.cito");
@@ -111,6 +114,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     daemonPort: port(env.CITO_DAEMON_PORT === undefined ? json?.daemonPort ?? 4290 : Number(env.CITO_DAEMON_PORT), "CITO_DAEMON_PORT"),
     codexHome: directory(env.CITO_CODEX_HOME ?? "~/.codex"),
     codexBin: env.CITO_CODEX_BIN ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    claudeHome: directory(env.CITO_CLAUDE_HOME ?? "~/.claude"),
+    enableClaudeChannel: ["1", "true", "yes"].includes((env.CITO_CLAUDE_CHANNEL ?? "").trim().toLowerCase()),
     openBin: env.CITO_OPEN_BIN ?? "/usr/bin/open",
     hostName: (env.CITO_HOST_NAME ?? hostname()).replace(/[^\x20-\x7e]/g, "").slice(0, 128),
   };
