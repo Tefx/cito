@@ -4361,3 +4361,183 @@ phases:
       README.md, and CITO_VERSION = ''0.11.2''; fresh-context structural-auditor 01a1b1f3-acfb-7569-a568-f0394b1bdc4c
       and uiux-auditor 01a1b1f3-acae-75a7-823b-4a68ca72e194 certified Completeness:
       CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v15
+  name: Cito V15 Prebuilt Apple Silicon (arm64) Menu Bar Companion Binary, Quarantine-Free
+    Installation, swiftc Fallback, and v0.11.3 Release
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, bin/cito-ui-darwin-arm64 is tracked and verified as a valid ad-hoc-signed
+    arm64 Mach-O executable installed in < 200ms without invoking /usr/bin/swiftc
+    (with automatic swiftc fallback on custom/newer source), zero Chinese characters
+    exist in src/, docs/, README.md, AGENTS.md, or deploy/, zero company/environment-specific
+    names (rda, casdoor, rcatwin, keppel, mingchen) exist in src/, docs/, README.md,
+    AGENTS.md, deploy/, or tests/, zero non-Node built-in imports exist in src/pi-extension/cito-bridge.ts,
+    zero direct claude or pi identifiers exist in src/mcp/, version is "0.11.3" across
+    package.json, package-lock.json, CITO_VERSION, tests/shared/shared.test.ts, and
+    README.md, and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE]
+    converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify docs/DESIGN.md §4.4 and §5.3: (1) Prebuilt Apple
+    Silicon (arm64) Companion Binary in npm run compile (package.json, bin/cito-ui-darwin-arm64):
+    update the compile script (or a helper script invoked by compile) so that on darwin
+    arm64, npm run compile builds bin/cito-ui-darwin-arm64 from src/macos/cito-ui.swift
+    (swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64
+    && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64)
+    and commits bin/cito-ui-darwin-arm64 to the repository ("files" already includes
+    "bin"); (2) Quarantine-Free Installation & Automatic swiftc Fallback in ensureUiCompiled(stateDir,
+    source?) (src/ui/index.ts): resolve prebuiltPath (../bin/cito-ui-darwin-arm64
+    from src/ui/index.ts or ../../../bin/cito-ui-darwin-arm64 from dist/src/ui/index.js);
+    when no custom source override is passed, process.platform === "darwin" && process.arch
+    === "arm64", and prebuiltPath exists with mtimeMs >= (await stat(source)).mtimeMs,
+    return ${stateDir}/bin/cito-ui immediately if it already exists with mtimeMs >=
+    prebuiltStat.mtimeMs, or otherwise install prebuiltPath to ${stateDir}/bin/cito-ui
+    by reading its bytes (await readFile(prebuiltPath)), writing a fresh temporary
+    inode (await writeFile(temp, bytes, { mode: 0o755 })), and atomically renaming
+    (await rename(temp, binary)) without invoking /usr/bin/swiftc; when source is
+    explicitly passed, when prebuiltPath is absent, or when src/macos/cito-ui.swift
+    has a newer mtimeMs than prebuiltPath, fall back to /usr/bin/swiftc compilation
+    as before; (3) Behavioral Tests for Prebuilt Binary & swiftc Fallback (tests/ui/lifecycle.test.ts):
+    verify that bin/cito-ui-darwin-arm64 exists, is a valid ad-hoc-signed arm64 Mach-O
+    executable, and ensureUiCompiled(freshStateDir) installs ${freshStateDir}/bin/cito-ui
+    in < 200ms without invoking /usr/bin/swiftc while a newer custom source file still
+    triggers swiftc fallback; and (4) Version 0.11.3 Release Sync (package.json, package-lock.json,
+    src/shared/index.ts, tests/shared/shared.test.ts, README.md): bump version to
+    "0.11.3" across package.json, package-lock.json, CITO_VERSION in src/shared/index.ts,
+    tests/shared/shared.test.ts, and README.md.'
+  depends_on:
+  - v14
+  steps:
+  - id: v15.prebuilt-arm64-ui-binary-and-v0-11-3-release
+    name: 'Implement V15 prebuilt Apple Silicon (arm64) cito-ui binary, quarantine-free
+      ensureUiCompiled installation, swiftc fallback, and v0.11.3 release [REQUIRES_SKILL:
+      code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - bin/**\n    - src/shared/**\n    - src/ui/**\n    - src/macos/**\n\
+      \    - tests/**\n  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n\
+      \  - Implement and verify `docs/DESIGN.md` §4.4 and §5.3 for Cito `v0.11.3`:\n\
+      \    1. **Prebuilt Apple Silicon (`arm64`) Menu Bar Companion Binary (`package.json`,\
+      \ `bin/cito-ui-darwin-arm64`)**:\n       - Update `package.json` `\"compile\"\
+      ` script (or a helper script invoked by `\"compile\"`) so that on `darwin` `arm64`,\
+      \ `npm run compile` builds `bin/cito-ui-darwin-arm64` from `src/macos/cito-ui.swift`\
+      \ (`swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64\
+      \ && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64`)\
+      \ and commits `bin/cito-ui-darwin-arm64` to the repository (`\"files\"` already\
+      \ includes `\"bin\"`).\n    2. **Quarantine-Free Prebuilt Installation & Automatic\
+      \ `/usr/bin/swiftc` Fallback (`ensureUiCompiled` in `src/ui/index.ts`)**:\n\
+      \       - Resolve `prebuiltPath` (`../bin/cito-ui-darwin-arm64` from `src/ui/index.ts`\
+      \ or `../../../bin/cito-ui-darwin-arm64` from `dist/src/ui/index.js`).\n   \
+      \    - When no custom `source` override is passed, `process.platform === \"\
+      darwin\" && process.arch === \"arm64\"`, and `prebuiltPath` exists with `mtimeMs\
+      \ >= (await stat(source)).mtimeMs`:\n         - If `${stateDir}/bin/cito-ui`\
+      \ already exists with `mtimeMs >= prebuiltStat.mtimeMs`, return `${stateDir}/bin/cito-ui`\
+      \ immediately.\n         - Otherwise, install `prebuiltPath` to `${stateDir}/bin/cito-ui`\
+      \ by reading its bytes (`await readFile(prebuiltPath)`), writing a fresh temporary\
+      \ inode (`await writeFile(temp, bytes, { mode: 0o755 })`), and atomically renaming\
+      \ (`await rename(temp, binary)`), without invoking `/usr/bin/swiftc` (stripping\
+      \ any `com.apple.quarantine` extended attributes and keeping Apple Silicon kernel\
+      \ vnode code-signature caches valid).\n       - When `source` is explicitly\
+      \ passed, when `prebuiltPath` is absent, or when `src/macos/cito-ui.swift` has\
+      \ a newer `mtimeMs` than `prebuiltPath`, fall back to `/usr/bin/swiftc` compilation\
+      \ as before.\n    3. **Behavioral Tests (`tests/ui/lifecycle.test.ts` and/or\
+      \ `tests/auth-callout/cli.test.ts`)**:\n       - Add behavioral tests verifying\
+      \ that `bin/cito-ui-darwin-arm64` exists, is a valid ad-hoc-signed `arm64` Mach-O\
+      \ executable, and `ensureUiCompiled(freshStateDir)` installs `${freshStateDir}/bin/cito-ui`\
+      \ in `< 200ms` without invoking `/usr/bin/swiftc` while a newer custom `source`\
+      \ file still triggers `swiftc` fallback.\n    4. **Version `0.11.3` Release\
+      \ Sync (`package.json`, `package-lock.json`, `src/shared/index.ts`, `tests/shared/shared.test.ts`,\
+      \ `README.md`)**:\n       - Bump version to `\"0.11.3\"` across `package.json`,\
+      \ `package-lock.json`, `CITO_VERSION` in `src/shared/index.ts`, `tests/shared/shared.test.ts`,\
+      \ and `README.md`.\n- **Boundary:** Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito`\
+      \ (`package.json`, `package-lock.json`, `README.md`, `bin/cito-ui-darwin-arm64`,\
+      \ `src/**`, `tests/**`). Must enforce English-only UI/UX/code/docs (`0` Chinese\
+      \ chars in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`), `0` company/environment-specific\
+      \ names (`rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`), 100% standalone\
+      \ `src/pi-extension/cito-bridge.ts` (`0` non-Node built-in imports), and harness-agnostic\
+      \ `src/mcp/` (`0` direct `claude` or `pi` identifiers in `src/mcp/`). Must not\
+      \ mutate external repositories (`/Users/tefx/dotfiles`, `tela`) or live user\
+      \ `~/.cito` / `~/.codex` / `~/.claude` state.\n- **Admit:** Completed Phase\
+      \ `v14`, `docs/DESIGN.md` (§4.4, §5.3), `README.md`, and `AGENTS.md`. Verified\
+      \ by `npm run typecheck && npm run compile && npm test` exiting `0` and `[REQUIRES_SKILL:\
+      \ code-hygiene]` self-check. Consumed by `v15.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck, compilation, Swift build, signature\
+      \ check, or unit/E2E test in place within the isolated worktree and clean up\
+      \ any temporary test directories, sockets, HTTP servers, or child processes.\n"
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - package.json
+    - src/ui/index.ts
+    - src/shared/index.ts
+    - tests/ui/lifecycle.test.ts
+    - tests/shared/shared.test.ts
+    agent: senior-engineer
+  - id: v15.acceptance-and-hygiene-gate
+    name: 'V15 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v15` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run compile && npm test` passes 100%,\
+      \ verifying `docs/DESIGN.md` §4.4 and §5.3 conformance (`bin/cito-ui-darwin-arm64`\
+      \ prebuilt `arm64` Mach-O binary, quarantine-free `readFile` + `writeFile` +\
+      \ `rename` installation in `ensureUiCompiled` in `< 200ms` without `/usr/bin/swiftc`,\
+      \ automatic `/usr/bin/swiftc` fallback when a custom or newer `source` is supplied,\
+      \ and version `\"0.11.3\"` across `package.json`, `package-lock.json`, `CITO_VERSION`,\
+      \ `tests/shared/shared.test.ts`, and `README.md`), mechanically verifying zero\
+      \ Chinese characters in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`,\
+      \ zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen` in\
+      \ `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`, `tests/`, zero non-Node\
+      \ built-in imports in `src/pi-extension/cito-bridge.ts`, and zero direct `claude`\
+      \ or `pi` identifiers in `src/mcp/`, and running iterative `code-hygiene` convergence\
+      \ until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n- **Boundary:**\
+      \ Owner `code-reviewer` (mapped to `gate-reviewer` / `pathway-auditor` + `structural-auditor`\
+      \ in the Larva roster, routing any admitted repair batch to `senior-engineer`\
+      \ before Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not directly mutate repository files, Plan state,\
+      \ or external host directories.\n- **Admit:**\n  - Included phase and terminal\
+      \ outcomes: Phase `v15` (`v15.prebuilt-arm64-ui-binary-and-v0-11-3-release`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run compile\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Prebuilt binary and `ensureUiCompiled`\
+      \ verification (`docs/DESIGN.md` §4.4 & §5.3):\n       - `bin/cito-ui-darwin-arm64`\
+      \ is tracked in Git, built by `npm run compile` on `darwin` `arm64` with `-O\
+      \ -target arm64-apple-macos13.0`, stripped (`strip -x`), and ad-hoc signed (`codesign\
+      \ -s - --force`).\n       - `ensureUiCompiled(stateDir)` installs `bin/cito-ui-darwin-arm64`\
+      \ to `${stateDir}/bin/cito-ui` via fresh temporary inode write + atomic rename\
+      \ in `< 200ms` without invoking `/usr/bin/swiftc`, returns immediately when\
+      \ `${stateDir}/bin/cito-ui` is already up to date, and falls back to `/usr/bin/swiftc`\
+      \ when a custom `source` or newer `src/macos/cito-ui.swift` is present.\n  \
+      \     - Version is `\"0.11.3\"` across `package.json`, `package-lock.json`,\
+      \ `CITO_VERSION` in `src/shared/index.ts`, `tests/shared/shared.test.ts`, and\
+      \ `README.md`.\n    3. Mechanical language, neutral-naming, standalone-extension,\
+      \ and adapter-purity verification:\n       - Zero Chinese characters (`[\\p{Script=Han}]`)\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, and `deploy/`.\n       - Zero\
+      \ case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen` in `src/`,\
+      \ `docs/` (excluding policy rule line in `docs/DESIGN.md`), `README.md`, `AGENTS.md`,\
+      \ `deploy/`, and `tests/`.\n       - Zero relative or external npm imports in\
+      \ `src/pi-extension/cito-bridge.ts` (only `node:*` built-in imports).\n    \
+      \   - Zero direct `claude` or `pi` identifiers in `src/mcp/` (with `src/mcp/cli.ts`\
+      \ delegating adapter CLI flags via `src/adapters/`).\n    4. Iterative `[REQUIRES_SKILL:\
+      \ code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`) audit-and-fix convergence\
+      \ across all 5 lenses reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable `code-hygiene` finding\
+      \ is admitted, record the concrete file/line counterexamples and route a cohesive\
+      \ writable repair to `senior-engineer` before re-running this gate in Delta\
+      \ mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved.\n"
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - package.json
+    - src/ui/index.ts
+    - src/shared/index.ts
+    - tests/ui/lifecycle.test.ts
+    - tests/shared/shared.test.ts
+    depends_on:
+    - v15.prebuilt-arm64-ui-binary-and-v0-11-3-release
+    agent: code-reviewer
