@@ -13,12 +13,12 @@ Cito is a notification bus for opted-in coding-agent conversations across users,
 Install globally from npm or directly from an annotated Git release tag:
 
 ```sh
-npm install -g @tefx/cito@0.11.0
+npm install -g @tefx/cito@0.11.1
 # Or from GitHub:
-npm install -g github:Tefx/cito#v0.11.0
+npm install -g github:Tefx/cito#v0.11.1
 
 cito --version
-# -> cito v0.11.0
+# -> cito v0.11.1
 ```
 
 ### 2. Configure Hubs (`~/.cito/config.json`)
@@ -51,7 +51,7 @@ Create `~/.cito/config.json` pointing to your team OIDC hub and optional persona
 ```toml
 [mcp_servers.cito]
 command = "npx"
-args = ["-y", "@tefx/cito@0.11.0"]
+args = ["-y", "@tefx/cito@0.11.1"]
 # Or use the globally installed binary:
 # command = "cito-mcp"
 # args = []
@@ -109,7 +109,7 @@ Add both the opt-in stdio channel (`CITO_CLAUDE_CHANNEL=1`) and the turn-boundar
 ## Daemon architecture and startup
 
 ```sh
-npm install -g github:Tefx/cito#v0.11.0
+npm install -g github:Tefx/cito#v0.11.1
 cito --version
 cito daemon
 # From a source checkout after npm ci:
@@ -179,7 +179,7 @@ Configure `cito-mcp` separately in your Pi MCP client/gateway, using this stdio 
 }
 ```
 
-Alternatively use `"command": "npx", "args": ["-y", "@tefx/cito@0.11.0"]` for the published package. The extension provides host delivery; your MCP client exposes the tools to the agent.
+Alternatively use `"command": "npx", "args": ["-y", "@tefx/cito@0.11.1"]` for the published package. The extension provides host delivery; your MCP client exposes the tools to the agent.
 
 In a conversation, call `cito_listen({about: "Build verification", tag: "build"})`, then use `cito_find()` to discover other opted-in conversations and `cito_send({to: "<discovered-id>", message: "Build is ready"})` to notify one. Notifications enter the target conversation via `pi.sendMessage(..., {triggerTurn: true, deliverAs: "followUp"})`, waking idle sessions or entering a busy session's follow-up queue. Confirmed insertion automatically acknowledges the local signal. Use `cito_inbox()` to drain any unconfirmed/unavailable deliveries, and `cito_unlisten()` to opt out.
 
@@ -229,7 +229,7 @@ CITO_NATS_URL = "nats://127.0.0.1:4222"
 CITO_AUTH_MODE = "none"
 ```
 
-For the published package use `command = "npx"` and `args = ["-y", "@tefx/cito@0.11.0"]` instead.
+For the published package use `command = "npx"` and `args = ["-y", "@tefx/cito@0.11.1"]` instead.
 
 The host must supply the exact conversation ID in MCP request `_meta` using one of:
 

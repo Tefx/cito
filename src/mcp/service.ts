@@ -602,8 +602,7 @@ export class CitoService {
       for (const item of slot.directoryIndex.readCached(slot.principal)) {
         const isSelfPrincipal = item.value.principal_id === slot.principal.principal_id;
         const isLocalSelfHost = isSelfPrincipal && item.value.host_id === this.hostId;
-        if (isLocalSelfHost) continue;
-        if (isSelfPrincipal) myRemoteItems.push({ slot, item });
+        if (isSelfPrincipal && !isLocalSelfHost) myRemoteItems.push({ slot, item });
         allPeerItems.push({ slot, item });
       }
     }

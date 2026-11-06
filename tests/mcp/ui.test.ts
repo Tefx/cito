@@ -205,7 +205,9 @@ test("CitoService populates my_remote_listeners and evaluates query_directory ac
   const states = vi.spyOn(f.service.ui!, "state");
   const directories = vi.spyOn(f.service.ui!, "directory");
 
-  // Seed 1 remote session owned by alice (different host_id) and 2 workspace sessions owned by bob
+  // Enroll 1 real local session on this host, plus seed 1 remote self-principal session and 1 team workspace peer
+  const { listener_id: localPublicId } = await call(f.service, "cito_listen", { about: "Local Pi session", tag: "local" }, f.pi.meta);
+  const localId = toCanonicalListenerId(localPublicId);
   const aliceRemoteReg = {
     schema_version: 1 as const,
     listener_id: "c_aliceremote2",
@@ -249,28 +251,34 @@ test("CitoService populates my_remote_listeners and evaluates query_directory ac
   await broker.kv.create(bobPeerReg.listener_id, encode(bobPeerReg));
 
   await f.service.handleUiAction({ op: "open_directory" });
+  expect(states.mock.lastCall?.[3]).toHaveLength(1);
   expect(states.mock.lastCall?.[3]).toMatchObject([{ listener_id: "c_aliceremote2", is_self_principal: true }]);
-  expect(states.mock.lastCall?.[4]).toBe(2);
+  expect(states.mock.lastCall?.[4]).toBe(3);
   expect(directories.mock.lastCall).toEqual([
     expect.arrayContaining([
+      expect.objectContaining({ listener_id: localId, host_id: f.service.hostId, is_self_principal: true }),
       expect.objectContaining({ listener_id: "c_aliceremote2", is_self_principal: true }),
       expect.objectContaining({ listener_id: "c_bobworkspace", is_self_principal: false }),
     ]),
-    2,
-    2,
+    3,
+    3,
   ]);
-  // Self principal sorts before team peers by default
-  expect(directories.mock.lastCall?.[0]?.[0]?.listener_id).toBe("c_aliceremote2");
+  // Self principal sessions sort before team peers by default
+  expect(directories.mock.lastCall?.[0]?.slice(0, 2).every(p => p.is_self_principal)).toBe(true);
+  expect(directories.mock.lastCall?.[0]?.[2]?.listener_id).toBe("c_bobworkspace");
 
   // Prefix token filtering: @bob repo:billing host:studio is:codex #bobwork
   await f.service.handleUiAction({ op: "query_directory", query: "@bob repo:billing host:studio is:codex #bobwork", scope: "all", harness: "all" });
   expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_bobworkspace"]);
   expect(directories.mock.lastCall?.[1]).toBe(1);
-  expect(directories.mock.lastCall?.[2]).toBe(2);
+  expect(directories.mock.lastCall?.[2]).toBe(3);
 
-  // Scope facet "mine" restricts to self principal
+  // Scope facet "mine" restricts to self principal across both local and remote hosts
   await f.service.handleUiAction({ op: "query_directory", query: "", scope: "mine", harness: "all" });
-  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_aliceremote2"]);
+  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toHaveLength(2);
+  expect(new Set(directories.mock.lastCall?.[0]?.map(p => p.listener_id))).toEqual(new Set([localId, "c_aliceremote2"]));
+  expect(directories.mock.lastCall?.[1]).toBe(2);
+  expect(directories.mock.lastCall?.[2]).toBe(3);
   await f.service.handleUiAction({ op: "close_directory" });
 });
 
