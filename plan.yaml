@@ -2737,3 +2737,82 @@ phases:
     - tests/mcp/ui.test.ts
     - tests/adapters/bridge.test.ts
     agent: senior-engineer
+  - id: v9.acceptance-and-hygiene-gate
+    name: 'V9 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v9` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run build && npm test` passes 100%,\
+      \ mechanically verifying zero Chinese characters in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, `deploy/`, zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`, `tests/`, zero case-insensitive\
+      \ `'claude'` matches in `src/` and `tests/`, zero non-Node built-in imports\
+      \ in `src/pi-extension/cito-bridge.ts`, and zero harness references (`codex|pi|x-codex-turn-metadata`)\
+      \ in `src/mcp/` except `src/mcp/cli.ts` delegating `--codex` resolution to `src/adapters/codex.ts`,\
+      \ and running iterative `code-hygiene` convergence until `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`.\n- **Boundary:** Owner `code-reviewer`\
+      \ (mapped to `gate-reviewer` / `pathway-auditor` + `structural-auditor` in the\
+      \ Larva roster, routing any admitted repair batch to `senior-engineer` before\
+      \ Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not directly mutate repository files, Plan state,\
+      \ or external host directories.\n- **Admit:**\n  - Included phase and terminal\
+      \ outcomes: Phase `v9` (`v9.multi-hub-session-attachment-and-switching`) bound\
+      \ to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n  -\
+      \ Consumed evidence and checks:\n    1. `npm run typecheck && npm run build\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Mechanical language, neutral-naming,\
+      \ Claude-removal, standalone-extension, and adapter-purity verification:\n \
+      \      - Zero Chinese characters (`[\\p{Script=Han}]`) in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/` (excluding policy rule line in `docs/DESIGN.md`), `README.md`,\
+      \ `AGENTS.md`, `deploy/`, and `tests/`.\n       - Zero case-insensitive matches\
+      \ for `claude` in `src/` and `tests/`.\n       - Zero relative or external npm\
+      \ imports in `src/pi-extension/cito-bridge.ts` (only `node:*` built-in imports).\n\
+      \       - Zero references to `codex`, `pi`, or `x-codex-turn-metadata` in `src/mcp/`\
+      \ except `src/mcp/cli.ts` delegating `--codex` CLI resolution to `src/adapters/codex.ts`.\n\
+      \    3. Conformance with `docs/DESIGN.md` §§4.2, 4.4, 5, `AGENTS.md`, and `README.md`:\n\
+      \       - `AvailableSessionSummary` (`listening_hubs?: string[]`) consolidated\
+      \ in `src/adapters/types.ts`, re-exported from `src/ui/index.ts`, and computed\
+      \ in both `discoverAllAvailableSessions` (`src/adapters/index.ts`) and `CitoService.pushUiState()`\
+      \ (`src/mcp/service.ts`).\n       - `listen_session` optional `hub` / `scope`\
+      \ and `switch_hub` action + `validAction()` validation in `src/ui/index.ts`.\n\
+      \       - Per-session `switchMutex`-serialized atomic enroll-before-unlisten\
+      \ `switch_hub` in `CitoService.handleUiAction` (`src/mcp/service.ts`) with live-receiver\
+      \ verification and `toSlot.error` fallback preserving `from_hub`.\n       -\
+      \ Zone 1 `switch_hub:<scoped_id>` card pill (when `hubs.count > 1`) and Zone\
+      \ 3 `target_hub:<hub>` header selector pills, per-target-hub `visibleAvailable`\
+      \ filtering, `available_empty_target` status row, and stable `menuActions` indices\
+      \ `0..9` in `src/macos/cito-ui.swift`.\n       - Pi `/cito` `--hub <hub>` /\
+      \ `--hub=<hub>` parsing, completions, and multi-hub `activeBadge` preservation\
+      \ in `src/pi-extension/cito-bridge.ts`.\n    4. Iterative `[REQUIRES_SKILL:\
+      \ code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`) audit-and-fix convergence\
+      \ across all 5 lenses reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable `code-hygiene` finding\
+      \ is admitted, record the concrete file/line counterexamples and route a cohesive\
+      \ writable repair to `senior-engineer` before re-running this gate in Delta\
+      \ mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved."
+    verification: npm run typecheck && npm run build && npm test && git status --short
+    evidence_template: 'Gate verdict (PASS/FAIL), test output (npm run typecheck &&
+      npm run build && npm test), mechanical regex verification (0 Chinese chars,
+      0 forbidden names, 0 case-insensitive ''claude'' matches in src/ and tests/,
+      0 non-Node imports in cito-bridge.ts, 0 non-cli harness refs in src/mcp/), and
+      [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE convergence summary.'
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - src/adapters/types.ts
+    - src/adapters/index.ts
+    - src/ui/index.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - src/pi-extension/cito-bridge.ts
+    - tests/ui/lifecycle.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/adapters/bridge.test.ts
+    depends_on:
+    - v9.multi-hub-session-attachment-and-switching
+    agent: code-reviewer
