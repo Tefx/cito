@@ -3478,7 +3478,7 @@ phases:
   - id: v12.claude-adapter-hardening-and-v0-11-0-release
     name: 'Implement V12 Claude Code adapter hardening, exact hook batch acknowledgment,
       UI & architecture symmetry, and v0.11.0 release [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ src/shared/index.ts\n    - src/adapters/claude.ts\n    - src/adapters/claude-channel.ts\n\
@@ -3588,6 +3588,28 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-06T10:27:46.795395Z'
+    done_at: '2026-11-06T11:13:10.092373+00:00'
+    evidence: "Commands run (npm run typecheck && npm run compile && npm test), mechanical\
+      \ checks (0 Chinese chars, 0 forbidden names, 0 non-Node imports in cito-bridge.ts,\
+      \ 0 non-cli harness refs in src/mcp/), and verified docs/DESIGN.md §§1.2, 2.1,\
+      \ 4.2, 4.3, 5.2, 5.3, 6.1, 6.2 & AGENTS.md deliverables:\n- Commits: b30973b3835cd5af3bd74ef79170de8f72f0cbd9,\
+      \ 0c540474628542a9058388b3ad3248ae22fa8490, 55d7cdbf8a51f1addf4e1333147b7348a620e525\
+      \ (implemented by uiux-designer on openrouter/google/gemini-4-argon while openai\
+      \ OAuth is unavailable; fast-forwarded onto main)\n- npm run typecheck && npm\
+      \ run compile && npm test: exit 0 (30 test files, 238 tests passed, 0 failed,\
+      \ 0 skipped)\n- Mechanical checks:\n  - [\\p{Script=Han}] in src/, docs/, README.md,\
+      \ AGENTS.md, deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b in src/, docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md,\
+      \ deploy/, tests/: 0 matches\n  - Non-node imports in src/pi-extension/cito-bridge.ts:\
+      \ 0 matches\n  - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating\
+      \ --codex to src/adapters/codex.ts): 0 matches\n- [REQUIRES_SKILL: code-hygiene]\
+      \ ITERATIVE_CONVERGENCE:\n  - Round 1 fresh-context structural-auditor (01a1b07a-2639-7082-bc23-f0cdb77d08c3)\
+      \ and uiux-auditor (01a1b07a-25e5-72df-9541-1c95352e079b) audited commit b30973b3835cd5af3bd74ef79170de8f72f0cbd9;\
+      \ S1 in src/claude-hook/cli.ts and Quick Start in README.md were resolved in\
+      \ 0c540474628542a9058388b3ad3248ae22fa8490 and 55d7cdbf8a51f1addf4e1333147b7348a620e525.\n\
+      \  - Round 2 fresh-context structural-auditor (01a1b08a-42cb-74a3-bf6a-831598f7cd82)\
+      \ and uiux-auditor (01a1b08a-4277-778d-ac44-9bec484ec874) verified all items\
+      \ CLOSED and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES."
   - id: v12.acceptance-and-hygiene-gate
     name: 'V12 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
