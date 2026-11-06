@@ -4104,7 +4104,7 @@ phases:
       mutation coalescing, Dockerfile loader, Claude title/recency, NSTableView selection
       sync, symmetric-difference witnesses, and v0.11.2 release) [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - deploy/nats/Dockerfile\n    - src/shared/**\n    - src/adapters/**\n\
@@ -4214,6 +4214,22 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-06T17:08:29.478617Z'
+    done_at: '2026-11-06T17:47:43.201498+00:00'
+    evidence: "Artifact:\n- Commit: bd1dc9bf96182c42a3184a54659f61aa65f701d5 (on top\
+      \ of e9cec5d912c99f58abc8e6eb904c70eacb24a91f and 32b017081293d4a0bc37de727b5c1e049583feaf;\
+      \ implemented by uiux-designer on openrouter/google/gemini-4-argon while openai\
+      \ OAuth is unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run:\
+      \ npm run typecheck && npm run compile && npm test -> exit 0 (30 test files,\
+      \ 241 tests passed, 0 failed, 0 skipped)\n- Mechanical checks:\n  - [\\p{Script=Han}]\
+      \ in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b in src/, docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md,\
+      \ deploy/, tests/: 0 matches\n  - Non-node imports in src/pi-extension/cito-bridge.ts:\
+      \ 0 matches\n  - Direct claude or pi identifiers in src/mcp/: 0 matches\n- [REQUIRES_SKILL:\
+      \ code-hygiene] ITERATIVE_CONVERGENCE:\n  - Fresh-context structural-auditor\
+      \ (01a1b1f3-acfb-7569-a568-f0394b1bdc4c) and uiux-auditor (01a1b1f3-acae-75a7-823b-4a68ca72e194)\
+      \ audited the V14 changes across all 5 lenses and certified Completeness: CLEAN\
+      \ | Simplicity: ZERO_NEW_ISSUES.\n\nSpec link:\n- docs/DESIGN.md §§1–6, AGENTS.md,\
+      \ and README.md"
   - id: v14.acceptance-and-hygiene-gate
     name: 'V14 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
