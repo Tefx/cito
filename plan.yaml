@@ -3705,4 +3705,26 @@ phases:
     - tests/e2e/lifecycle.test.ts
     depends_on:
     - v12.claude-adapter-hardening-and-v0-11-0-release
+    - v12.fix-e2e-claude-unbatched-signal-race
     agent: code-reviewer
+  - id: v12.fix-e2e-claude-unbatched-signal-race
+    name: Hold dispatcher lease for sig_unbatched_new in tests/e2e/lifecycle.test.ts
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - tests/e2e/lifecycle.test.ts\n  blocked_paths:\n\
+      \    - plan.yaml\n```\n\n- **Deliver:** Hold the listener's `dispatcher_token`\
+      \ lease in `tests/e2e/lifecycle.test.ts` before inserting `sig_unbatched_new`\
+      \ so the background 1500ms debounce timer from the earlier `cito_send` cannot\
+      \ freeze and deliver `sig_unbatched_new` into `wakes/` while `bin/cito-claude-hook`\
+      \ is spawning under full-suite CPU load.\n- **Boundary:** Owner `senior-engineer`;\
+      \ modifies `tests/e2e/lifecycle.test.ts`.\n- **Admit:** `v12.claude-adapter-hardening-and-v0-11-0-release`.\
+      \ Verified by `npm run typecheck && npm run compile && npm test` exiting `0`.\
+      \ Consumed by `v12.acceptance-and-hygiene-gate`.\n- **Recovery:** Revert broken\
+      \ edits in worktree and re-verify `npm test`."
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - tests/e2e/lifecycle.test.ts
+    depends_on:
+    - v12.claude-adapter-hardening-and-v0-11-0-release
+    agent: senior-engineer
