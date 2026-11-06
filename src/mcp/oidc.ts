@@ -19,9 +19,15 @@ const openBrowser: BrowserOpener = async (url, signal) => { await exec("/usr/bin
 
 /** The lock covers double-check, refresh/PKCE, cryptographic verification and atomic publication. */
 export class OidcLogin {
+  private readonly config: CitoConfig;
+  private readonly opener: BrowserOpener;
+  private readonly hub: string;
   private readonly path: string;
   private readonly verifier: OidcVerifier;
-  constructor(private readonly config: CitoConfig, private readonly opener: BrowserOpener = openBrowser, private readonly hub = config.defaultHub) {
+  constructor(config: CitoConfig, opener: BrowserOpener = openBrowser, hub = config.defaultHub) {
+    this.config = config;
+    this.opener = opener;
+    this.hub = hub;
     this.path = join(config.stateDir, `oidc-token-${hub}.json`);
     this.verifier = new OidcVerifier({ issuer: config.oidcIssuer!, clientId: config.oidcClientId! });
   }

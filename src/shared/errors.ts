@@ -18,9 +18,11 @@ export const ERROR_RETRYABLE = {
 export type ErrorCode = keyof typeof ERROR_RETRYABLE;
 
 export class CitoError extends Error {
+  readonly code: ErrorCode;
   readonly retryable: boolean;
-  constructor(readonly code: ErrorCode, message: string, options?: ErrorOptions) {
+  constructor(code: ErrorCode, message: string, options?: ErrorOptions) {
     super(message, options);
+    this.code = code;
     this.name = "CitoError";
     this.retryable = ERROR_RETRYABLE[code];
   }

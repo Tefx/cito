@@ -15,6 +15,7 @@ export type VerifiedOidcClaims = JWTPayload & { iss: string; sub: string; exp: n
 
 /** Shared by the callout and local MCP identity verification; no disk token/key cache. */
 export class OidcVerifier {
+  private readonly options: OidcVerifierOptions;
   private readonly issuer: string;
   private readonly fetch: typeof globalThis.fetch;
   private readonly now: () => number;
@@ -23,7 +24,8 @@ export class OidcVerifier {
   private refreshAt = -Infinity;
   private refreshing?: Promise<void>;
   private unavailable = false;
-  constructor(private readonly options: OidcVerifierOptions) {
+  constructor(options: OidcVerifierOptions) {
+    this.options = options;
     this.issuer = normalizeIssuer(validateHttpUrl(options.issuer, "OIDC issuer"));
     this.fetch = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? Date.now;

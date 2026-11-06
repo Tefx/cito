@@ -61,9 +61,14 @@ export class Receiver {
   private dispatching?: Promise<void>;
   private probing?: Promise<void>;
   private stopped?: Promise<void>;
+  private readonly state: LocalState;
+  private readonly config: CitoConfig;
+  private readonly broker: Broker;
+  private readonly options: ReceiverOptions;
   readonly id: string; readonly hub: string; readonly owner: string; readonly generation: number;
-  constructor(private readonly state: LocalState, private readonly config: CitoConfig, private readonly broker: Broker,
-    row: ListenerRow, private readonly options: ReceiverOptions = {}) {
+  constructor(state: LocalState, config: CitoConfig, broker: Broker,
+    row: ListenerRow, options: ReceiverOptions = {}) {
+    this.state = state; this.config = config; this.broker = broker; this.options = options;
     this.id = row.listener_id; this.hub = row.hub; this.owner = row.owner_token; this.generation = row.binding_generation;
   }
   private row() { return this.state.listener(this.id, this.hub)!; }

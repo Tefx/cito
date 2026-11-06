@@ -130,7 +130,12 @@ export class UiBridge {
   private scheduled = false;
   private blocked = false;
   private banners: BannerPayload[] = [];
-  constructor(readonly stateDir: string, private readonly options: UiOptions = {}) {}
+  readonly stateDir: string;
+  private readonly options: UiOptions;
+  constructor(stateDir: string, options: UiOptions = {}) {
+    this.stateDir = stateDir;
+    this.options = options;
+  }
   private log(error: unknown) { (this.options.diagnostic ?? console.error)(String(error)); }
   async start(): Promise<void> {
     if (this.stopped || this.child) return;

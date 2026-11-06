@@ -29,7 +29,10 @@ export type Signal = z.infer<typeof signalSchema>;
 /** All transactions are synchronous: no awaited effects can interleave their writes. */
 export class LocalState {
   readonly liveReceivers = new Map<string, { owner: string; abort: AbortController }>();
-  private constructor(readonly db: DatabaseSync) {}
+  readonly db: DatabaseSync;
+  private constructor(db: DatabaseSync) {
+    this.db = db;
+  }
   static async open(stateDir: string): Promise<LocalState> {
     await mkdir(join(stateDir, "sockets"), { recursive: true, mode: 0o700 });
     await chmod(stateDir, 0o700);

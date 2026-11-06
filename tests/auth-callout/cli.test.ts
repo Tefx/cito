@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createAccount, createOperator, createUser } from "nkeys.js";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { cp, lstat, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "nats";
@@ -110,4 +111,102 @@ describe("public cito-auth-callout executable", () => {
       expect(info.streams).toBe(0);
     } finally { await client?.close(); await broker.stop(); }
   });
+  it("enforces zero-script git packaging contract and executes native TypeScript entrypoints without dist/", async () => {
+    const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+    expect(pkg.files).toEqual(["bin", "dist/src", "src", "README.md"]);
+    for (const forbidden of ["prepare", "build", "prepack", "preinstall", "install", "postinstall"]) {
+      expect(pkg.scripts?.[forbidden]).toBeUndefined();
+    }
+    expect(pkg.scripts?.compile).toBe("rm -rf dist && tsc");
+    expect(pkg.scripts?.prepublishOnly).toBe("npm run typecheck && npm run compile");
+    expect(pkg.dependencies?.tsx).toBeUndefined();
+
+    const directory = await mkdtemp(join(tmpdir(), "cito-pkg-"));
+    try {
+      const sandbox = join(directory, "sandbox");
+      for (const item of ["package.json", "bin", "src"]) {
+        await cp(resolve(item), join(sandbox, item), { recursive: true });
+      }
+      await symlink(resolve("node_modules"), join(sandbox, "node_modules"), "dir");
+      expect(existsSync(join(sandbox, "dist"))).toBe(false);
+
+      const mcpSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-mcp"), "listen", "--unknown-flag"], {
+        cwd: directory,
+        env: isolatedEnv(directory),
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(mcpSandbox.error).toBeUndefined();
+      expect(mcpSandbox.status).toBe(1);
+      expect(mcpSandbox.stderr).toContain("Unknown flag: --unknown-flag");
+
+      const authSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-auth-callout")], {
+        cwd: directory,
+        env: { ...isolatedEnv(directory), CITO_AUTH_MODE: "other" },
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(authSandbox.error).toBeUndefined();
+      expect(authSandbox.status).toBe(1);
+      expect(authSandbox.stderr).toMatch(/cito-auth-callout:.*CITO_AUTH_MODE/);
+
+      const repo = join(directory, "repo");
+      const prefix = join(directory, "prefix");
+      for (const item of ["package.json", "package-lock.json", "tsconfig.json", "README.md", "bin", "src"]) {
+        await cp(resolve(item), join(repo, item), { recursive: true });
+      }
+      for (const args of [
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "test"],
+        ["add", "."],
+        ["commit", "-q", "-m", "init"],
+      ]) {
+        const git = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+        expect(git.status).toBe(0);
+      }
+
+      const install = spawnSync(
+        "npm",
+        ["install", "-g", "--prefix", prefix, "--prefer-offline", "--no-audit", "--no-fund", `git+file://${repo}`],
+        { cwd: directory, encoding: "utf8", timeout: 30_000 },
+      );
+      expect(install.error).toBeUndefined();
+      expect(install.status).toBe(0);
+
+      const installedPkgRoot = await realpath(join(prefix, "lib/node_modules/@tefx/cito"));
+      expect(existsSync(join(installedPkgRoot, "dist"))).toBe(false);
+      for (const [binName, targetRel] of [
+        ["cito", "bin/cito-mcp"],
+        ["cito-mcp", "bin/cito-mcp"],
+        ["cito-auth-callout", "bin/cito-auth-callout"],
+      ] as const) {
+        const binPath = join(prefix, "bin", binName);
+        expect((await lstat(binPath)).isSymbolicLink()).toBe(true);
+        expect(await realpath(binPath)).toBe(join(installedPkgRoot, targetRel));
+      }
+
+      const installedCito = spawnSync(join(prefix, "bin/cito"), ["listen", "--unknown-flag"], {
+        cwd: directory,
+        env: isolatedEnv(directory),
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(installedCito.error).toBeUndefined();
+      expect(installedCito.status).toBe(1);
+      expect(installedCito.stderr).toContain("Unknown flag: --unknown-flag");
+
+      const installedAuthCallout = spawnSync(join(prefix, "bin/cito-auth-callout"), [], {
+        cwd: directory,
+        env: { ...isolatedEnv(directory), CITO_AUTH_MODE: "other" },
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(installedAuthCallout.error).toBeUndefined();
+      expect(installedAuthCallout.status).toBe(1);
+      expect(installedAuthCallout.stderr).toMatch(/cito-auth-callout:.*CITO_AUTH_MODE/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 45_000);
 });

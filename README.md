@@ -26,13 +26,13 @@ Requirements: Node **22.13+** on supported even-numbered releases (see `package.
 ```sh
 npm ci
 npm run typecheck
-npm run build
+npm run compile
 npm test
 # Focused suites:
 npm test -- tests/mcp/ tests/e2e/
 ```
 
-`bin/cito-mcp` and `bin/cito-auth-callout` prefer compiled JavaScript under `dist/` when present and fall back to loading TypeScript through `tsx`, independently of the caller's working directory. The build emits JavaScript/declarations under `dist/`.
+`bin/cito-mcp` and `bin/cito-auth-callout` prefer compiled JavaScript under `dist/` when present and fall back to running `src/**/*.ts` directly on Node's native TypeScript runtime, independently of the caller's working directory. `npm run compile` emits JavaScript and type declarations under `dist/`.
 
 Tests use the installed official `nats-server` **2.14.0**, temporary SQLite databases, real Unix sockets, a local OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS tests compile and run the real Swift companion headlessly, including JSON-line framing, menu actions, HUD auto-hide, click behavior, EOF and crash/respawn replay. The installed-Pi loader test uses Pi 1.5.0 when available. The complete V4 acceptance suite requires macOS and Swift. All test state and child processes are isolated and cleaned up. Tests require no Docker, live OIDC account, or running Desktop app. Visible HUD presentation, installed `ChatGPT.app` compatibility, live OIDC providers, and production TLS/deployment require operator verification.
 

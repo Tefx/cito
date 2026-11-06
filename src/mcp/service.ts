@@ -35,6 +35,7 @@ export interface IndexedRegistration {
 
 /** Per-hub coalesced KV snapshot cache with watch fast-path, 16-worker fallback, and read-time lease evaluation. */
 export class HubDirectoryIndex {
+  readonly hub: string;
   entries = new Map<string, IndexedRegistration>();
   anchorBrokerMs = 0;
   anchorMonoMs = 0;
@@ -43,7 +44,9 @@ export class HubDirectoryIndex {
   inflight?: Promise<void>;
   private static readonly TTL_MS = 5_000;
 
-  constructor(readonly hub: string) {}
+  constructor(hub: string) {
+    this.hub = hub;
+  }
 
   isFresh(): boolean {
     return this.lastSyncMonoMs > 0 && performance.now() - this.lastSyncMonoMs < HubDirectoryIndex.TTL_MS;
@@ -263,6 +266,12 @@ export class HubDirectoryIndex {
 
 /** A slot owns authentication and transport. No connection/token can leak across hubs. */
 export class HubSlot {
+  readonly name: string;
+  readonly config: CitoConfig;
+  private readonly options: ServiceOptions;
+  private readonly restore: (broker: Broker) => Promise<void>;
+  private readonly cancel: () => void;
+  private readonly changed: () => void;
   private brokerPromise?: Promise<Broker>;
   private broker?: Broker;
   private rejectedHash?: string;
@@ -278,8 +287,10 @@ export class HubSlot {
   private readonly login?: OidcLogin;
   private readonly background = new Set<Promise<unknown>>();
   private closing = false;
-  constructor(readonly name: string, readonly config: CitoConfig, private readonly options: ServiceOptions,
-    private readonly restore: (broker: Broker) => Promise<void>, private readonly cancel: () => void, private readonly changed: () => void = () => {}) {
+  constructor(name: string, config: CitoConfig, options: ServiceOptions,
+    restore: (broker: Broker) => Promise<void>, cancel: () => void, changed: () => void = () => {}) {
+    this.name = name; this.config = config; this.options = options;
+    this.restore = restore; this.cancel = cancel; this.changed = changed;
     this.directoryIndex = new HubDirectoryIndex(name);
     if (config.authMode === "oidc") this.login = new OidcLogin(config, options.browserOpener, name);
     else this.principal = localPrincipal(config.user);
@@ -462,12 +473,17 @@ export class CitoService {
   private readonly switchMutex = new KeyedMutex();
   private readonly calls = new Set<Promise<unknown>>();
   private readonly retirements = new Set<Promise<void>>();
+  readonly config: CitoConfig;
+  readonly state: LocalState;
+  readonly hostId: string;
+  private readonly options: ServiceOptions;
   private retire(receiver?: Receiver): void {
     if (!receiver) return;
     const task = receiver.stop().catch(error => this.log(error)); this.retirements.add(task);
     void task.finally(() => this.retirements.delete(task));
   }
-  private constructor(readonly config: CitoConfig, readonly state: LocalState, readonly hostId: string, private readonly options: ServiceOptions) {
+  private constructor(config: CitoConfig, state: LocalState, hostId: string, options: ServiceOptions) {
+    this.config = config; this.state = state; this.hostId = hostId; this.options = options;
     CitoService.liveServices.add(this);
     for (const [name, hub] of Object.entries(config.hubs)) {
       // Optional authentication settings belong to this hub, never the mirrored default.

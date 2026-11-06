@@ -9,9 +9,11 @@ import type { AvailableSessionSummary, DeliverContext, DeliverOutcome, HarnessAd
 type BridgeConfig = Pick<CitoConfig, "stateDir">;
 export interface BridgeIdentity { endpoint_pid: number; session_id: string; session_name: string; cwd: string }
 class PiBridgeError extends CitoError {
-  constructor(readonly bridgeError: string) {
+  readonly bridgeError: string;
+  constructor(bridgeError: string) {
     super(bridgeError === "SESSION_MISMATCH" || bridgeError === "SESSION_NOT_OPEN"
       ? "SESSION_NOT_OPEN" : "PI_BRIDGE_UNAVAILABLE", `Socket bridge: ${bridgeError}`);
+    this.bridgeError = bridgeError;
   }
 }
 export function bridgeSocketPath(stateDir: string, harness: string, pid: number): string {
