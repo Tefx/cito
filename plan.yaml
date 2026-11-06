@@ -4030,3 +4030,275 @@ phases:
       synchronized to 0.11.1; fresh-context structural-auditor 01a1b18b-617f-7396-8e87-c9a838c85696
       and uiux-auditor 01a1b18b-612d-7284-9d18-2775964c22cb certified Completeness:
       CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v14
+  name: Cito V14 Full-Scan Remediation (Directory Full-Field Parity, Snapshot Mutation
+    Coalescing, Dockerfile Loader, Claude Title/Recency, NSTableView Selection Sync,
+    Symmetric-Difference Witnesses, and v0.11.2 Release)
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    non-Node built-in imports exist in src/pi-extension/cito-bridge.ts, zero direct
+    claude or pi identifiers exist in src/mcp/ (with src/mcp/cli.ts delegating adapter
+    CLI flags via src/adapters/), all 11 V14 full-scan remediation items per docs/DESIGN.md
+    and AGENTS.md are verified, and [REQUIRES_SKILL: code-hygiene] with [GATE_MODE:
+    ITERATIVE_CONVERGENCE] converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify all 11 full-scan remediation items per docs/DESIGN.md
+    and AGENTS.md: (1) Directory Full-Field Search Parity & Decoupled Collectors (src/mcp/service.ts,
+    src/ui/index.ts, src/macos/cito-ui.swift): decouple collectNetworkPeers() into
+    a lightweight collectMyRemoteAndOnlineCount() for pushUiState() (avoiding allocating/sorting
+    all directory DTOs on every state push) and full-record evaluation in pushUiDirectory()
+    / evaluateDirectoryQuery over IndexedRegistration before truncating display fields
+    (title <= 200, about <= 300) and enforcing < 128 KiB UTF-8 serialized frame size,
+    so a keyword at chars 301-500 of about is found by both cito_find and Search Network
+    Directory…; (2) In-Flight HubDirectoryIndex.syncSnapshot Local Mutation Preservation
+    (src/mcp/service.ts): track local upsert() and remove() mutations that occur while
+    syncSnapshot() is in flight (or re-apply them onto next before committing this.entries
+    = next) so an in-flight snapshot never resurrects a locally removed listener or
+    overwrites a newer local upsert(), and share a single recordKvEntry helper across
+    watchSnapshot and boundedPointGetSnapshot that skips value.state !== "ACTIVE";
+    (3) deploy/nats/Dockerfile bin/loader.js Inclusion (deploy/nats/Dockerfile): update
+    COPY bin/cito-auth-callout ./bin/cito-auth-callout to COPY bin/cito-auth-callout
+    bin/loader.js ./bin/ so the container entrypoint resolves ./loader.js; (4) Claude
+    Code /clear Title Reset & Interaction Recency (src/adapters/claude-channel.ts,
+    src/adapters/claude.ts): in startClaudeChannelBridge, pass aliasActive ? firstTranscript
+    : current (not firstTranscript ?? current) to resolveClaudeSessionTitle so after
+    /clear (aliasActive === false), identify resolves the new transcript''s title
+    instead of firstTranscript, and advance lastActiveMs on session changes and report
+    updated_at_ms: Math.max(lastActiveMs, transcriptMtimeMs) in identify so Claude
+    sessions in AVAILABLE SESSIONS sort by interaction recency; (5) DirectoryPanel
+    Mouse Selection Sync (src/macos/cito-ui.swift): implement tableViewSelectionDidChange(_
+    notification: Notification) on Companion so clicking a row in directoryTableView
+    updates directorySelectedIndex and row selection backgrounds, keeping mouse selection
+    and Return copy in sync; (6) CLI --claude[=<session_id>] Support without src/mcp/
+    Claude References (src/mcp/cli.ts, src/adapters/index.ts, src/adapters/codex.ts,
+    src/adapters/git.ts): centralize PID_KEYS / hasExplicitPid in src/adapters/git.ts,
+    trim candidate IDs and guard expected_session_id on !hasExplicitPid(meta) in codexThreadId
+    (src/adapters/codex.ts), and support --claude[=<session_id>] in cito listen /
+    cito unlisten via a generic adapter CLI helper in src/adapters/index.ts so src/mcp/cli.ts
+    remains free of direct claude identifiers; (7) Lifecycle Cleanup, UiBridge.close(),
+    & Pi /cito Session-Switch Fence (src/mcp/service.ts, src/mcp/receiver.ts, src/ui/index.ts,
+    src/pi-extension/cito-bridge.ts, src/adapters/index.ts): clean up receiver maps
+    (this.receivers, this.state.liveReceivers, slot.receivers), use slot.connectedBroker(),
+    and refresh availableSessions in revokeSession / Receiver.revoke / Receiver.fence
+    / HubSlot.disconnect, remove the duplicate if (forceLogin && this.login) block
+    in HubSlot.reconnect, share filterAvailableSessions between discoverAllAvailableSessions
+    and pushUiState, settle UiBridge.close() when the child emits error or close as
+    well as exit, and capture sessionId before awaiting callMcpTool in src/pi-extension/cito-bridge.ts
+    /cito handler and skip mutating activeBadge if sessionId changed while awaiting;
+    and (8) Symmetric-Difference (O_i \ O_j) Test Witnesses & Version 0.11.2 (tests/ui/lifecycle.test.ts,
+    tests/mcp/ui.test.ts, tests/shared/shared.test.ts, package.json, package-lock.json,
+    src/shared/index.ts, README.md): add a multi-hub same-session ((harness, session_id)
+    on both default and work) test case in tests/ui/lifecycle.test.ts proving uniqueSessionCount
+    === 1 while listeners.count === 2 (O_listeners \ O_uniqueSessions != empty), add
+    near-miss peers in tests/mcp/ui.test.ts testing each query_directory prefix filter
+    (@user, repo:, host:, is:, #id) and >300-char about full-field search parity independently,
+    and bump version to "0.11.2" across package.json, package-lock.json, CITO_VERSION
+    in src/shared/index.ts, tests/shared/shared.test.ts, and README.md.'
+  depends_on:
+  - v13
+  steps:
+  - id: v14.full-scan-remediation-and-v0-11-2-release
+    name: 'Implement V14 full-scan remediation (directory full-field parity, snapshot
+      mutation coalescing, Dockerfile loader, Claude title/recency, NSTableView selection
+      sync, symmetric-difference witnesses, and v0.11.2 release) [REQUIRES_SKILL:
+      code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - deploy/nats/Dockerfile\n    - src/shared/**\n    - src/adapters/**\n\
+      \    - src/mcp/**\n    - src/ui/**\n    - src/macos/**\n    - src/pi-extension/**\n\
+      \    - tests/**\n  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n\
+      \  - Implement and verify all 11 full-scan remediation items per `docs/DESIGN.md`\
+      \ and `AGENTS.md`:\n    1. **Directory Full-Field Search Parity & Decoupled\
+      \ Collectors (`src/mcp/service.ts`, `src/ui/index.ts`, `src/macos/cito-ui.swift`)**:\n\
+      \       - Decouple `collectNetworkPeers()` into a lightweight `collectMyRemoteAndOnlineCount()`\
+      \ for `pushUiState()` (avoiding allocating/sorting all directory DTOs on every\
+      \ state push) and full-record evaluation in `pushUiDirectory()` / `evaluateDirectoryQuery`\
+      \ over `IndexedRegistration` before truncating display fields (`title <= 200`,\
+      \ `about <= 300`) and enforcing `< 128 KiB` UTF-8 serialized frame size, so\
+      \ a keyword at chars `301–500` of `about` is found by both `cito_find` and `Search\
+      \ Network Directory…`.\n    2. **In-Flight `HubDirectoryIndex.syncSnapshot`\
+      \ Local Mutation Preservation (`src/mcp/service.ts`)**:\n       - Track local\
+      \ `upsert()` and `remove()` mutations that occur while `syncSnapshot()` is in\
+      \ flight (or re-apply them onto `next` before committing `this.entries = next`)\
+      \ so an in-flight snapshot never resurrects a locally removed listener or overwrites\
+      \ a newer local `upsert()`. Also share a single `recordKvEntry` helper across\
+      \ `watchSnapshot` and `boundedPointGetSnapshot` that skips `value.state !==\
+      \ \"ACTIVE\"`.\n    3. **`deploy/nats/Dockerfile` `bin/loader.js` Inclusion\
+      \ (`deploy/nats/Dockerfile`)**:\n       - Update `COPY bin/cito-auth-callout\
+      \ ./bin/cito-auth-callout` to `COPY bin/cito-auth-callout bin/loader.js ./bin/`\
+      \ so the container entrypoint resolves `./loader.js`.\n    4. **Claude Code\
+      \ `/clear` Title Reset & Interaction Recency (`src/adapters/claude-channel.ts`,\
+      \ `src/adapters/claude.ts`)**:\n       - In `startClaudeChannelBridge`, pass\
+      \ `aliasActive ? firstTranscript : current` (not `firstTranscript ?? current`)\
+      \ to `resolveClaudeSessionTitle` so after `/clear` (`aliasActive === false`),\
+      \ `identify` resolves the new transcript's title instead of `firstTranscript`.\n\
+      \       - In `startClaudeChannelBridge`, advance `lastActiveMs` on session changes\
+      \ and report `updated_at_ms: Math.max(lastActiveMs, transcriptMtimeMs)` in `identify`\
+      \ so Claude sessions in `AVAILABLE SESSIONS` sort by interaction recency.\n\
+      \    5. **`DirectoryPanel` Mouse Selection Sync (`src/macos/cito-ui.swift`)**:\n\
+      \       - Implement `tableViewSelectionDidChange(_ notification: Notification)`\
+      \ on `Companion` so clicking a row in `directoryTableView` updates `directorySelectedIndex`\
+      \ and row selection backgrounds, keeping mouse selection and `Return` copy in\
+      \ sync.\n    6. **CLI `--claude[=<session_id>]` Support without `src/mcp/` Claude\
+      \ References (`src/mcp/cli.ts`, `src/adapters/index.ts`, `src/adapters/codex.ts`,\
+      \ `src/adapters/git.ts`)**:\n       - Centralize `PID_KEYS` / `hasExplicitPid`\
+      \ in `src/adapters/git.ts`, trim candidate IDs and guard `expected_session_id`\
+      \ on `!hasExplicitPid(meta)` in `codexThreadId` (`src/adapters/codex.ts`), and\
+      \ support `--claude[=<session_id>]` in `cito listen` / `cito unlisten` via a\
+      \ generic adapter CLI helper in `src/adapters/index.ts` so `src/mcp/cli.ts`\
+      \ remains free of direct `claude` identifiers.\n    7. **Lifecycle Cleanup,\
+      \ `UiBridge.close()`, & Pi `/cito` Session-Switch Fence (`src/mcp/service.ts`,\
+      \ `src/mcp/receiver.ts`, `src/ui/index.ts`, `src/pi-extension/cito-bridge.ts`,\
+      \ `src/adapters/index.ts`)**:\n       - Clean up receiver maps (`this.receivers`,\
+      \ `this.state.liveReceivers`, `slot.receivers`), use `slot.connectedBroker()`,\
+      \ and refresh `availableSessions` in `revokeSession` / `Receiver.revoke` / `Receiver.fence`\
+      \ / `HubSlot.disconnect`; remove the duplicate `if (forceLogin && this.login)`\
+      \ block in `HubSlot.reconnect`; share `filterAvailableSessions` between `discoverAllAvailableSessions`\
+      \ and `pushUiState`.\n       - Settle `UiBridge.close()` when the child emits\
+      \ `error` or `close` as well as `exit`.\n       - Capture `sessionId` before\
+      \ awaiting `callMcpTool` in `src/pi-extension/cito-bridge.ts` `/cito` handler\
+      \ and skip mutating `activeBadge` if `sessionId` changed while awaiting.\n \
+      \   8. **Symmetric-Difference ($O_i \\setminus O_j$) Test Witnesses & Version\
+      \ `0.11.2` (`tests/ui/lifecycle.test.ts`, `tests/mcp/ui.test.ts`, `tests/shared/shared.test.ts`,\
+      \ `package.json`, `package-lock.json`, `src/shared/index.ts`, `README.md`)**:\n\
+      \       - Add a multi-hub same-session (`(harness, session_id)` on both `default`\
+      \ and `work`) test case in `tests/ui/lifecycle.test.ts` proving `uniqueSessionCount\
+      \ === 1` while `listeners.count === 2` ($O_{\\text{listeners}} \\setminus O_{\\\
+      text{uniqueSessions}} \\neq \\emptyset$).\n       - Add near-miss peers in `tests/mcp/ui.test.ts`\
+      \ testing each `query_directory` prefix filter (`@user`, `repo:`, `host:`, `is:`,\
+      \ `#id`) and `>300`-char `about` full-field search parity independently.\n \
+      \      - Bump version to `\"0.11.2\"` across `package.json`, `package-lock.json`,\
+      \ `CITO_VERSION` in `src/shared/index.ts`, `tests/shared/shared.test.ts`, and\
+      \ `README.md`.\n- **Boundary:** Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito`\
+      \ (`package.json`, `package-lock.json`, `README.md`, `deploy/nats/Dockerfile`,\
+      \ `src/**`, `tests/**`). Must enforce English-only UI/UX/code/docs (`0` Chinese\
+      \ chars in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`), `0` company/environment-specific\
+      \ names (`rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`), 100% standalone\
+      \ `src/pi-extension/cito-bridge.ts` (`0` non-Node built-in imports), and harness-agnostic\
+      \ `src/mcp/` (`0` direct `claude` or `pi` identifiers in `src/mcp/`, with `src/mcp/cli.ts`\
+      \ delegating adapter CLI flags via `src/adapters/`). Must not mutate external\
+      \ repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito` / `~/.codex`\
+      \ / `~/.claude` state.\n- **Admit:** Completed Phase `v13`, `docs/DESIGN.md`,\
+      \ and `AGENTS.md`. Verified by `npm run typecheck && npm run compile && npm\
+      \ test` exiting `0` and `[REQUIRES_SKILL: code-hygiene]` self-check. Consumed\
+      \ by `v14.acceptance-and-hygiene-gate`.\n- **Recovery:** Fix any failing typecheck,\
+      \ compilation, Swift build, or unit/E2E test in place within the isolated worktree\
+      \ and clean up any temporary test directories, sockets, HTTP servers, or child\
+      \ processes.\n"
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - package-lock.json
+    - deploy/nats/Dockerfile
+    - src/shared/index.ts
+    - src/adapters/index.ts
+    - src/adapters/git.ts
+    - src/adapters/codex.ts
+    - src/adapters/claude.ts
+    - src/adapters/claude-channel.ts
+    - src/mcp/cli.ts
+    - src/mcp/service.ts
+    - src/mcp/receiver.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - src/pi-extension/cito-bridge.ts
+    - tests/ui/lifecycle.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/shared/shared.test.ts
+    agent: senior-engineer
+  - id: v14.acceptance-and-hygiene-gate
+    name: 'V14 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v14` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run compile && npm test` passes 100%,\
+      \ mechanically verifying zero Chinese characters in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, `deploy/`, zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`, `tests/`, zero non-Node\
+      \ built-in imports in `src/pi-extension/cito-bridge.ts`, and zero direct `claude`\
+      \ or `pi` identifiers in `src/mcp/`, verifying all 11 V14 full-scan remediation\
+      \ items per `docs/DESIGN.md` and `AGENTS.md`, and running iterative `code-hygiene`\
+      \ convergence until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Boundary:** Owner `code-reviewer` (mapped to `gate-reviewer` / `pathway-auditor`\
+      \ + `structural-auditor` in the Larva roster, routing any admitted repair batch\
+      \ to `senior-engineer` before Delta re-verification); gate step itself is read-only\
+      \ (`repo_change_policy: no_repo_change`) and does not directly mutate repository\
+      \ files, Plan state, or external host directories.\n- **Admit:**\n  - Included\
+      \ phase and terminal outcomes: Phase `v14` (`v14.full-scan-remediation-and-v0-11-2-release`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run compile\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Mechanical language, neutral-naming,\
+      \ standalone-extension, and adapter-purity verification:\n       - Zero Chinese\
+      \ characters (`[\\p{Script=Han}]`) in `src/`, `docs/`, `README.md`, `AGENTS.md`,\
+      \ and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/` (excluding policy rule line in `docs/DESIGN.md`), `README.md`,\
+      \ `AGENTS.md`, `deploy/`, and `tests/`.\n       - Zero relative or external\
+      \ npm imports in `src/pi-extension/cito-bridge.ts` (only `node:*` built-in imports).\n\
+      \       - Zero direct `claude` or `pi` identifiers in `src/mcp/` (with `src/mcp/cli.ts`\
+      \ delegating adapter CLI flags via `src/adapters/`).\n    3. Conformance with\
+      \ `docs/DESIGN.md` and `AGENTS.md` across all 11 V14 items:\n       - Decoupled\
+      \ `collectMyRemoteAndOnlineCount()` in `pushUiState()` and full-record `evaluateDirectoryQuery`\
+      \ over `IndexedRegistration` before display truncation (`title <= 200`, `about\
+      \ <= 300`) and `< 128 KiB` UTF-8 frame bounding in `pushUiDirectory()`.\n  \
+      \     - In-flight `HubDirectoryIndex.syncSnapshot` local `upsert()` / `remove()`\
+      \ mutation overlay preservation and shared `recordKvEntry` helper skipping `value.state\
+      \ !== \"ACTIVE\"`.\n       - `deploy/nats/Dockerfile` copies both `bin/cito-auth-callout`\
+      \ and `bin/loader.js` into `./bin/`.\n       - `startClaudeChannelBridge` passes\
+      \ `aliasActive ? firstTranscript : current` to `resolveClaudeSessionTitle` and\
+      \ reports `updated_at_ms: Math.max(lastActiveMs, transcriptMtimeMs)` in `identify`.\n\
+      \       - `Companion.tableViewSelectionDidChange(_:)` in `src/macos/cito-ui.swift`\
+      \ synchronizes mouse row clicks with `directorySelectedIndex` and row selection\
+      \ backgrounds.\n       - Centralized `PID_KEYS` / `hasExplicitPid` in `src/adapters/git.ts`,\
+      \ trimmed candidate IDs and `!hasExplicitPid(meta)` guard in `codexThreadId`,\
+      \ and `--claude[=<session_id>]` CLI support via `src/adapters/index.ts`.\n \
+      \      - Receiver map cleanup, `slot.connectedBroker()`, `availableSessions`\
+      \ refresh, deduplicated `HubSlot.reconnect` login clearing, shared `filterAvailableSessions`,\
+      \ `UiBridge.close()` settlement on `error`/`close`/`exit`, and `sessionId` fencing\
+      \ across `await callMcpTool` in `src/pi-extension/cito-bridge.ts`.\n       -\
+      \ Multi-hub same-session test witness in `tests/ui/lifecycle.test.ts` ($O_{\\\
+      text{listeners}} \\setminus O_{\\text{uniqueSessions}} \\neq \\emptyset$), near-miss\
+      \ prefix-filter and `>300`-char `about` parity witnesses in `tests/mcp/ui.test.ts`,\
+      \ and version `\"0.11.2\"` across `package.json`, `package-lock.json`, `CITO_VERSION`,\
+      \ `tests/shared/shared.test.ts`, and `README.md`.\n    4. Iterative `[REQUIRES_SKILL:\
+      \ code-hygiene]` (`[GATE_MODE: ITERATIVE_CONVERGENCE]`) audit-and-fix convergence\
+      \ across all 5 lenses reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable `code-hygiene` finding\
+      \ is admitted, record the concrete file/line counterexamples and route a cohesive\
+      \ writable repair to `senior-engineer` before re-running this gate in Delta\
+      \ mode until `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved.\n"
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - package-lock.json
+    - deploy/nats/Dockerfile
+    - src/shared/index.ts
+    - src/adapters/index.ts
+    - src/adapters/git.ts
+    - src/adapters/codex.ts
+    - src/adapters/claude.ts
+    - src/adapters/claude-channel.ts
+    - src/mcp/cli.ts
+    - src/mcp/service.ts
+    - src/mcp/receiver.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - src/pi-extension/cito-bridge.ts
+    - tests/ui/lifecycle.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/shared/shared.test.ts
+    depends_on:
+    - v14.full-scan-remediation-and-v0-11-2-release
+    agent: code-reviewer
