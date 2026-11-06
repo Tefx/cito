@@ -89,7 +89,7 @@ export async function ensureUiCompiled(stateDir: string, source?: string): Promi
           );
         })()
       : undefined;
-    const usePrebuilt = prebuilt !== undefined && prebuilt.stat.mtimeMs >= sourceStat.mtimeMs;
+    const usePrebuilt = prebuilt !== undefined && prebuilt.stat.mtimeMs + 5_000 >= sourceStat.mtimeMs;
     const targetMtimeMs = usePrebuilt ? prebuilt.stat.mtimeMs : sourceStat.mtimeMs;
     if (await stat(binary).then(st => st.mtimeMs >= targetMtimeMs, () => false)) return binary;
     await mkdir(join(stateDir, "bin"), { recursive: true, mode: 0o700 });
