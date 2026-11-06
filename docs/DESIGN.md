@@ -263,6 +263,18 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
    - `bin/cito-mcp` and `bin/cito-auth-callout` resolve `../dist/src/.../cli.js` first when present; when `dist/` is absent, they register a built-in `node:module.register` hook that maps relative `.js` specifiers (`./*.js`, `../*.js`) to `.ts` on `ERR_MODULE_NOT_FOUND` and import `../src/mcp/cli.ts` / `../src/auth-callout/cli.ts` directly without `tsx`.
    - `"tsx"` is kept only in `"devDependencies"` (never in `"dependencies"`), eliminating `esbuild` and `fsevents` install scripts from production and global installs.
 
+### 5.3 Versioning, `/health` Handshake & Automatic Stale-Daemon Handover (`src/shared/index.ts`, `src/mcp/server.ts`, `src/mcp/cli.ts`)
+1. **Single Source of Truth (`CITO_VERSION`)**:
+   - `CITO_VERSION` (exported from `src/shared/index.ts`, set to `"0.10.0"` matching `package.json` `"version"`) is the canonical product SemVer string. Automated tests verify `CITO_VERSION === packageJson.version`.
+   - `cito --version` and `cito -v` (in `src/mcp/cli.ts`) print `cito v${CITO_VERSION}\n` to `stdout` and exit `0` without starting `cito-daemon`.
+   - `createMcpServer` (`src/mcp/server.ts`) advertises `version: CITO_VERSION`, and `GET /health` returns `{ ok: true, pid: process.pid, stateDir: config.stateDir, version: CITO_VERSION }`.
+2. **Automatic Stale-Daemon Replacement (`ensureDaemon` in `src/mcp/cli.ts`)**:
+   - `daemonHealth(config)` returns `{ pid: number; stateDir: string; version?: string } | undefined`.
+   - In `ensureDaemon(config)`:
+     - If `const health = await daemonHealth(config)`:
+       - When `health.version === CITO_VERSION`, return immediately.
+       - When `health.version !== CITO_VERSION` (e.g. a pre-upgrade daemon is still running on `config.daemonPort`), send `SIGTERM` to `health.pid` (`try { process.kill(health.pid, "SIGTERM"); } catch {}`) and poll until `!alive(health.pid)` (up to `5000ms`), then proceed to spawn the new `cito-daemon` and wait until `(await daemonHealth(config))?.version === CITO_VERSION`.
+
 ---
 
 ## 6. Proposed Design for Claude Code Integration (Design Suggestion Only — Not Yet Implemented)
