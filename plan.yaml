@@ -2561,3 +2561,42 @@ phases:
       closed in a00f3f88b2bae006169144fad1069ae43f62dc4a; Round 2 fresh-context structural-auditor
       01a1ac5f-02b3-7727-b245-31d30d5888c5 and uiux-auditor 01a1ac5f-0304-7781-90c7-331ce032c6ad
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v9
+  name: Cito V9 Multi-Hub Session Attachment, Atomic Hub Migration, Target Hub Selector,
+    Pi /cito --hub Support, and Hygiene Gate
+  status: pending
+  gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    case-insensitive ''claude'' matches exist in src/ or tests/, zero non-Node built-in
+    imports exist in src/pi-extension/cito-bridge.ts, zero harness references exist
+    in src/mcp/ except src/mcp/cli.ts delegating --codex resolution to src/adapters/codex.ts,
+    all docs/DESIGN.md §§4.2, 4.4, 5 V9 requirements are verified, and [REQUIRES_SKILL:
+    code-hygiene] with [GATE_MODE: ITERATIVE_CONVERGENCE] converges to Completeness:
+    CLEAN and Simplicity: ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V9 Multi-Hub Session Attachment, Atomic Hub
+    Migration, Target Hub Selector & Pi /cito --hub Support per docs/DESIGN.md §§4.2,
+    4.4, 5 and AGENTS.md: consolidate AvailableSessionSummary with optional listening_hubs?:
+    string[] in src/adapters/types.ts (re-exported from src/ui/index.ts) and compute
+    listening_hubs in both discoverAllAvailableSessions (src/adapters/index.ts) and
+    CitoService.pushUiState() (src/mcp/service.ts) so a local candidate is excluded
+    only when matching a hub-less legacy listener or when listening_hubs covers all
+    configured hubs; extend UiAction and validAction() in src/ui/index.ts so listen_session
+    accepts optional hub (hubNameSchema) and scope (''self'' | ''workspace'') and
+    switch_hub validates from_hub, to_hub (from_hub !== to_hub), and canonical listener_id
+    before the generic a.hub check; implement per-session switchMutex-serialized atomic
+    enroll-before-unlisten switch_hub in CitoService.handleUiAction (src/mcp/service.ts)
+    verifying live source/target rows in liveActiveRows(), inheriting about/scope/tag
+    on to_hub, unlistening from_hub only after to_hub enrollment succeeds, and recording
+    failures on toSlot.error while preserving from_hub; implement Zone 1 interactive
+    switch_hub:<scoped_id> card pill (when hubs.count > 1) and Zone 3 target_hub:<hub>
+    header selector pills + per-target-hub visibleAvailable filtering + available_empty_target
+    status row in src/macos/cito-ui.swift while keeping menuActions indices 0..9 stable;
+    extend Pi /cito in src/pi-extension/cito-bridge.ts with --hub <hub> / --hub=<hub>
+    parsing, completions, and authoritative multi-hub activeBadge preservation on
+    /cito off --hub <hub>; update README.md and docs/DESIGN.md; add/update behavioral
+    unit and headless UI tests in tests/ui/lifecycle.test.ts, tests/mcp/ui.test.ts,
+    and tests/adapters/bridge.test.ts; and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v8
