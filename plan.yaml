@@ -3709,7 +3709,7 @@ phases:
     agent: code-reviewer
   - id: v12.fix-e2e-claude-unbatched-signal-race
     name: Hold dispatcher lease for sig_unbatched_new in tests/e2e/lifecycle.test.ts
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - tests/e2e/lifecycle.test.ts\n  blocked_paths:\n\
       \    - plan.yaml\n```\n\n- **Deliver:** Hold the listener's `dispatcher_token`\
@@ -3728,3 +3728,5 @@ phases:
     depends_on:
     - v12.claude-adapter-hardening-and-v0-11-0-release
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-06T11:18:48.032493Z'
