@@ -3203,3 +3203,82 @@ phases:
     and pass the iterative code-hygiene gate.'
   depends_on:
   - v10
+  steps:
+  - id: v11.versioning-governance-and-daemon-handover
+    name: 'Implement V11 SemVer v0.10.0 release governance, CITO_VERSION single source
+      of truth, /health version handshake, automatic stale-daemon handover, and unit/E2E
+      tests [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ src/shared/index.ts\n    - src/mcp/server.ts\n    - src/mcp/cli.ts\n    -\
+      \ tests/mcp/http.test.ts\n    - tests/shared/shared.test.ts\n    - AGENTS.md\n\
+      \    - docs/DESIGN.md\n    - README.md\n  blocked_paths:\n    - plan.yaml\n\
+      ```\n\n- **Deliver:**\n  - Implement and verify Cito V11 SemVer `v0.10.0` Release\
+      \ Governance, `CITO_VERSION` Single Source of Truth, `/health` Version Handshake,\
+      \ and Automatic Stale-Daemon Handover per `AGENTS.md` (\"Versioning, Compatibility\
+      \ & Release Governance\") and `docs/DESIGN.md` §5.3:\n    1. **Single Version\
+      \ Source of Truth (`package.json`, `package-lock.json`, `src/shared/index.ts`)**:\n\
+      \       - Set `\"version\": \"0.10.0\"` in `package.json` and `package-lock.json`.\n\
+      \       - Export `export const CITO_VERSION = \"0.10.0\";` from `src/shared/index.ts`.\n\
+      \    2. **MCP Server Metadata & `/health` Version Handshake (`src/mcp/server.ts`)**:\n\
+      \       - Update `createMcpServer` to pass `version: CITO_VERSION` to `new Server({\
+      \ name: \"cito-mcp\", version: CITO_VERSION }, ...)`.\n       - Update `GET\
+      \ /health` in `startHttpServer` to return `{ ok: true, pid: process.pid, stateDir:\
+      \ config.stateDir, version: CITO_VERSION }`.\n       - Update `daemonHealth`\
+      \ to return `Promise<{ pid: number; stateDir: string; version?: string } | undefined>`,\
+      \ preserving `version` when `typeof body.version === \"string\"`.\n    3. **CLI\
+      \ `--version` / `-v` & Automatic Stale-Daemon Handover (`src/mcp/cli.ts`)**:\n\
+      \       - In `main()`, support `cito --version` and `cito -v` before starting\
+      \ the daemon: write `cito v${CITO_VERSION}\\n` to `process.stdout` and return\
+      \ `0` without calling `ensureDaemon`.\n       - Update `ensureDaemon(config)`:\n\
+      \         - When `const health = await daemonHealth(config)` is returned for\
+      \ `config.stateDir`:\n           - If `health.version === CITO_VERSION`, return\
+      \ immediately.\n           - If `health.version !== CITO_VERSION` (including\
+      \ legacy daemons omitting `version`), send `SIGTERM` to `health.pid` (`try {\
+      \ process.kill(health.pid, \"SIGTERM\"); } catch {}`) and wait up to `5000ms`\
+      \ until `!alive(health.pid)`, then proceed to spawn the new `cito-daemon` and\
+      \ poll until `(await daemonHealth(config))?.version === CITO_VERSION`.\n   \
+      \ 4. **Behavioral Unit & E2E Verification (`tests/mcp/http.test.ts`, `tests/shared/shared.test.ts`)**:\n\
+      \       - In `tests/shared/shared.test.ts`, verify `CITO_VERSION === packageJson.version`\
+      \ (`\"0.10.0\"`).\n       - In `tests/mcp/http.test.ts`:\n         - Update\
+      \ the `GET /health` `.toEqual(...)` assertion to include `version: CITO_VERSION`.\n\
+      \         - Add behavioral tests for `cito --version` and `cito -v` (verifying\
+      \ `stdout === \"cito v\" + CITO_VERSION + \"\\n\"` and that no daemon is started\
+      \ on `CITO_DAEMON_PORT`).\n         - Add an E2E test for automatic stale-daemon\
+      \ replacement when a pre-existing `/health` server for `stateDir` reports an\
+      \ older version (`\"0.1.0\"` or omitted `version`), verifying that invoking\
+      \ `cito` sends `SIGTERM` to the stale daemon, replaces it with a new `cito-daemon`,\
+      \ and leaves `/health` reporting `version: CITO_VERSION`.\n- **Boundary:** Owner\
+      \ `senior-engineer`; modifies `/Users/tefx/Projects/cito` (`package.json`, `package-lock.json`,\
+      \ `src/shared/index.ts`, `src/mcp/server.ts`, `src/mcp/cli.ts`, `tests/mcp/http.test.ts`,\
+      \ `tests/shared/shared.test.ts`). Must enforce English-only UI/UX/code/docs\
+      \ (0 Chinese chars in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`),\
+      \ 0 company/environment-specific names, 0 case-insensitive `'claude'` matches\
+      \ in `src/` and `tests/`, 100% standalone `src/pi-extension/cito-bridge.ts`\
+      \ (0 non-Node built-in imports), and harness-agnostic `src/mcp/` (0 references\
+      \ to `pi`, `codex`, or `x-codex-turn-metadata` in `src/mcp/` except `src/mcp/cli.ts`\
+      \ delegating `--codex` resolution to `src/adapters/codex.ts`). Must not mutate\
+      \ external repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito`\
+      \ / `~/.codex` state.\n- **Admit:** Completed Phase `v10`, `AGENTS.md` (\"Versioning,\
+      \ Compatibility & Release Governance\"), and `docs/DESIGN.md` (§5.3). Verified\
+      \ by `npm run typecheck && npm run compile && npm test` exiting `0`. Consumed\
+      \ by `v11.acceptance-and-hygiene-gate`.\n- **Recovery:** Fix any failing typecheck,\
+      \ compilation, or unit/E2E test in place within the isolated worktree and clean\
+      \ up any temporary test directories, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run compile && npm test
+    evidence_template: Commands run (npm run typecheck && npm run compile && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 case-insensitive 'claude'
+      matches in src/ and tests/, 0 non-Node imports in cito-bridge.ts, 0 non-cli
+      harness refs in src/mcp/), and verified AGENTS.md & docs/DESIGN.md §5.3 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - package.json
+    - package-lock.json
+    - src/shared/index.ts
+    - src/mcp/server.ts
+    - src/mcp/cli.ts
+    - tests/mcp/http.test.ts
+    - tests/shared/shared.test.ts
+    agent: senior-engineer
