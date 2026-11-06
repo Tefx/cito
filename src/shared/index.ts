@@ -1,4 +1,4 @@
-export const CITO_VERSION = "0.11.0";
+export const CITO_VERSION = "0.11.1";
 export * from "./config.js";
 export * from "./mutex.js";
 export * from "./errors.js";
