@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ensureUiCompiled, UiBridge, type BannerPayload, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
+import { ensureUiCompiled, UiBridge, validAction, type BannerPayload, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
 import { KeyedMutex } from "../../src/shared/index.js";
 import { waitFor } from "../mcp/support.js";
 
@@ -533,3 +533,75 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect(flatten(closed.directory_items ?? []).find(n => n.id === "dir_scope:mine")?.hovered).toBe(false);
   } finally { await bridge.close(); }
 }, 20000);
+
+test("V9 validAction validation, Zone 1 switch_hub:<scoped_id> pill, and Zone 3 target_hub:<hub> selector & filtering", async () => {
+  expect(validAction({ op: "switch_hub", from_hub: "personal", to_hub: "work", listener_id: "c_abcdefghijkl" })).toBe(true);
+  expect(validAction({ op: "switch_hub", from_hub: "personal", to_hub: "personal", listener_id: "c_abcdefghijkl" })).toBe(false);
+  expect(validAction({ op: "switch_hub", from_hub: "BAD!", to_hub: "work", listener_id: "c_abcdefghijkl" })).toBe(false);
+  expect(validAction({ op: "switch_hub", from_hub: "personal", to_hub: "work", listener_id: "invalid_id" })).toBe(false);
+  expect(validAction({ op: "listen_session", harness: "pi", session_id: "s1", hub: "work", scope: "workspace" })).toBe(true);
+  expect(validAction({ op: "listen_session", harness: "pi", session_id: "s1", hub: "BAD!" })).toBe(false);
+  expect(validAction({ op: "listen_session", harness: "pi", session_id: "s1", scope: "invalid" })).toBe(false);
+
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+  try {
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+    const twoHubs = [
+      { name: "personal", status: "connected" as const, user: "alice", auth_mode: "none" as const, error: null },
+      { name: "work", status: "connected" as const, user: "alice", auth_mode: "oidc" as const, error: null },
+    ];
+    const candidates = [
+      { harness: "pi", session_id: "pi-1", title: "Pi Partial", cwd: "/tmp/pi1", endpoint_pid: 4242, listening_hubs: ["personal"] },
+    ];
+    bridge.state(twoHubs, [listener], candidates);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=2 listeners=1 available=1"));
+    const snap = await inspect(), nodes = flatten(snap.items);
+
+    // Zone 1: switch_hub pill rendered to the left of scope pill, title omits static " · personal" suffix
+    const switchPill = nodes.find(n => n.id === "switch_hub:" + listener.scoped_id)!;
+    const scopePill = nodes.find(n => n.id === "scope:" + listener.scoped_id)!;
+    expect(switchPill).toMatchObject({ text: "personal", height: 22, radius: 6, y: 30 });
+    expect(switchPill.x).toBe(scopePill.x - switchPill.width - 4);
+    expect(nodes.map(n => n.text)).toContain("café conversation");
+    expect(nodes.map(n => n.text)).not.toContain("café conversation · personal");
+
+    // Clicking switch_hub pill emits switch_hub to next connected hub ("work")
+    send({ op: "test_control", id: "switch_hub:" + listener.scoped_id });
+    await waitFor(() => actions.length === 1);
+    expect(actions[0]).toEqual({ op: "switch_hub", from_hub: "personal", to_hub: "work", listener_id: listener.listener_id });
+
+    // Zone 3: effectiveTargetHub defaults to "work" (first connected hub with unmounted candidate)
+    expect(nodes.find(n => n.id === "target_hub:personal")).toMatchObject({ text: "personal", height: 18, radius: 9 });
+    expect(nodes.find(n => n.id === "target_hub:work")).toMatchObject({ text: "work", height: 18, radius: 9, foreground: [1, 1, 1, 1] });
+    expect(nodes.find(n => n.id === "candidate:pi:pi-1")).toBeDefined();
+
+    // Clicking + Listen in multi-hub mode includes "hub": "work"
+    send({ op: "test_control", id: "listen:pi:pi-1" });
+    await waitFor(() => actions.length === 2);
+    expect(actions[1]).toEqual({
+      op: "listen_session",
+      harness: "pi",
+      session_id: "pi-1",
+      cwd: "/tmp/pi1",
+      title: "Pi Partial",
+      endpoint_pid: 4242,
+      hub: "work",
+    });
+
+    // Switching target_hub to "personal" (where pi-1 is already listening) renders available_empty_target
+    send({ op: "test_control", id: "target_hub:personal" });
+    const personalSnap = await inspect(), personalNodes = flatten(personalSnap.items);
+    expect(personalSnap.items.find(n => n.id === "available_empty_target")).toMatchObject({ width: 380, height: 28 });
+    expect(personalNodes.map(n => n.text)).toContain("All sessions listening on personal");
+    expect(personalNodes.find(n => n.id === "candidate:pi:pi-1")).toBeUndefined();
+  } finally { await bridge.close(); }
+}, 15000);

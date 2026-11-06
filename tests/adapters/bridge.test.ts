@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "node:net";
-import { stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import citoBridge, { type BridgeAPI, type BridgeCommandOptions, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
 import { bridgeSocketPath, identifyBridge, requestBridge, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
 import { startHttpServer } from "../../src/mcp/server.js";
@@ -144,6 +144,10 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     expect(command!.getArgumentCompletions!(" o")).toEqual([{ value: "on", label: "on" }, { value: "off", label: "off" }]);
     expect(command!.getArgumentCompletions!("te")).toEqual([{ value: "team", label: "team" }]);
     expect(command!.getArgumentCompletions!("none")).toEqual([]);
+    expect(command!.getArgumentCompletions!("on -")).toEqual([{ value: "on --hub ", label: "--hub <hub>" }]);
+    expect(command!.getArgumentCompletions!("team --h")).toEqual([{ value: "team --hub ", label: "--hub <hub>" }]);
+    expect(command!.getArgumentCompletions!("off --hub")).toEqual([{ value: "off --hub ", label: "--hub <hub>" }]);
+    expect(command!.getArgumentCompletions!("on --other")).toEqual([]);
     const f = await fixture({ pi: false, env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome } });
     const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
     vi.stubEnv("CITO_DAEMON_PORT", String(http.port));
@@ -166,6 +170,12 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
       expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(workspace\)$/), "info");
       await command!.handler("off trailing", ctx);
       expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [about...] | team [about...] | off]", "warning");
+      await command!.handler("on --hub", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]", "warning");
+      await command!.handler("on --hub=BAD!", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]", "warning");
+      await command!.handler("off --hub default extra", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]", "warning");
       await command!.handler("unknown", ctx);
       expect(notify).toHaveBeenLastCalledWith("Usage: /cito [on [about...] | team [about...] | off]", "warning");
       await command!.handler("off", ctx);
@@ -177,6 +187,47 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     } finally {
       await http.close();
       await f.close();
+    }
+  });
+  it("supports /cito on|team|off with --hub <hub> and --hub=<hub>, preserving activeBadge when another hub remains active", async () => {
+    const base = await fixture({ pi: false, env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome } });
+    const configPath = join(state.stateDir, "multi-hub.json");
+    await writeFile(configPath, JSON.stringify({
+      default_hub: "default",
+      hubs: {
+        default: { natsUrl: base.broker.url, authMode: "none", user: "alice" },
+        work: { natsUrl: base.broker.url, authMode: "none", user: "bob" },
+      },
+    }));
+    const multiConfig = loadConfig({ ...base.env, CITO_CONFIG_PATH: configPath });
+    const f = await fixture({
+      broker: base.broker,
+      pi: false,
+      env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome, CITO_CONFIG_PATH: configPath },
+    });
+    const http = await startHttpServer({ ...multiConfig, daemonPort: 0 }, f.service);
+    vi.stubEnv("CITO_DAEMON_PORT", String(http.port));
+    try {
+      await emit("session_start");
+      await command!.handler("on --hub default Default task", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(self\)$/), "info");
+      await command!.handler("team --hub=work Work task", ctx);
+      expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as work:.+ \(workspace\)$/), "info");
+      expect(status).toHaveBeenLastCalledWith("cito", expect.stringMatching(/^🔔 /));
+
+      // Unlistening only --hub work keeps default active and preserves activeBadge so bare /cito unlistens default!
+      await command!.handler("off --hub work", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Cito stopped listening on work", "info");
+      expect(status.mock.calls.at(-1)?.[1]).toEqual(expect.stringMatching(/^🔔 /));
+
+      // Bare /cito now sees activeBadge is still set and unlistens the remaining default hub
+      await command!.handler("", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Cito stopped listening", "info");
+      expect(status).toHaveBeenLastCalledWith("cito", undefined);
+    } finally {
+      await http.close();
+      await f.close();
+      await base.close();
     }
   });
 });

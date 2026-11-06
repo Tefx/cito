@@ -27,7 +27,7 @@ export function getAdapter(harness: string): HarnessAdapter | undefined {
 }
 export async function discoverAllAvailableSessions(
   config: CitoConfig = loadConfig(),
-  activeListeners: readonly { harness: string; session_id: string; endpoint_pid?: number | null }[] = [],
+  activeListeners: readonly { harness: string; session_id: string; endpoint_pid?: number | null; hub?: string }[] = [],
   signal?: AbortSignal,
 ): Promise<AvailableSessionSummary[]> {
   try {
@@ -41,19 +41,23 @@ export async function discoverAllAvailableSessions(
     [...ADAPTER_REGISTRY.values()].map(adapter => adapter.discoverAvailableSessions?.(config, signal) ?? Promise.resolve([])),
   );
   const raw = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
+  const totalHubs = Math.max(1, Object.keys(config.hubs).length);
   const seen = new Set<string>();
-  const filtered = raw.filter(c => {
-    const isActive = activeListeners.some(a =>
-      a.harness === c.harness && (
-        a.session_id === c.session_id
-        || (c.endpoint_pid !== undefined && a.endpoint_pid != null && a.endpoint_pid === c.endpoint_pid)
+  const filtered = raw.flatMap(c => {
+    const matching = activeListeners.filter(r =>
+      r.harness === c.harness && (
+        r.session_id === c.session_id
+        || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)
       ),
     );
-    if (isActive) return false;
+    if (matching.some(r => r.hub === undefined)) return [];
+    const hubs = [...new Set(matching.map(r => r.hub!))];
+    if (hubs.length >= totalHubs) return [];
     const key = `${c.harness}:${c.session_id}`;
-    if (seen.has(key)) return false;
+    if (seen.has(key)) return [];
     seen.add(key);
-    return true;
+    const { listening_hubs: _, ...rest } = c;
+    return [hubs.length ? { ...rest, listening_hubs: hubs } : rest];
   });
   const byHarness = new Map<string, AvailableSessionSummary[]>();
   for (const c of filtered) {

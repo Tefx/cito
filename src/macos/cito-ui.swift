@@ -377,6 +377,7 @@ struct Listener: Decodable, Equatable {
 struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
     let branch: String?, endpoint_pid: Int?, updated_at_ms: Double?
+    let listening_hubs: [String]?
 }
 struct RemotePeer: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
@@ -527,8 +528,23 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var listeners: [Listener] = []
     var available: [Candidate] = []
     var myRemote: [RemotePeer] = []
+    var selectedTargetHub: String = ""
     var myRemoteCollapsed = false
     var collapsedGroups = Set<String>()
+    func statusColor(_ status: String) -> NSColor {
+        status == "connected" ? .systemGreen : status == "connecting" ? .systemOrange : status == "auth_required" ? .systemRed : .systemGray
+    }
+    var effectiveTargetHub: String {
+        if !selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub }) {
+            return selectedTargetHub
+        }
+        if let firstUnmountedConnected = hubs.first(where: { hub in
+            hub.status == "connected" && available.contains(where: { !($0.listening_hubs ?? []).contains(hub.name) })
+        }) {
+            return firstUnmountedConnected.name
+        }
+        return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
+    }
     var directoryOnlineCount = 0
     var directoryMatchedCount = 0
     var directoryAllPeers: [RemotePeer] = []
@@ -798,7 +814,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hubStrip.documentView = pillContainer; header.addSubview(hubStrip)
         var pillX: CGFloat = stripWidth
         for hub in hubs.reversed() {
-            let color: NSColor = hub.status == "connected" ? .systemGreen : hub.status == "connecting" ? .systemOrange : hub.status == "auth_required" ? .systemRed : .systemGray
+            let color = statusColor(hub.status)
             let isSingleDefault = hubs.count == 1 && hub.name == "default"
             let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
             let title: String
@@ -864,8 +880,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34),
                 radius: 8, iconInset: 8, harness: listener.harness)
             card.addSubview(badge)
-            let actionWidth: CGFloat = listener.can_jump ? 114 : 88
-            let title = textLabel(listener.title + (hubs.count > 1 ? " · \(listener.hub)" : ""),
+            let hubPillWidth = min(76, max(46, ceil(measureTextWidth(listener.hub, font: btnFont)) + 22))
+            let baseActionWidth: CGFloat = listener.can_jump ? 114 : 88
+            let actionWidth: CGFloat = hubs.count > 1 ? baseActionWidth + hubPillWidth + 4 : baseActionWidth
+            let title = textLabel(listener.title,
                 NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
             title.toolTip = listener.title; card.addSubview(title)
             if hasDistinctAbout {
@@ -889,7 +907,32 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let path = textLabel(pathText,
                 NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: .secondaryLabelColor)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = listener.cwd; card.addSubview(path)
-            var x: CGFloat = 350 - actionWidth
+            let scopeX: CGFloat = 350 - baseActionWidth
+            if hubs.count > 1 {
+                let hubPill = MenuControl(listener.hub, frame: NSRect(x: scopeX - hubPillWidth - 4, y: cardHeight - 28, width: hubPillWidth, height: 22), radius: 6)
+                hubPill.identifier = NSUserInterfaceItemIdentifier("switch_hub:\(listener.scoped_id)")
+                hubPill.style = .neutral
+                hubPill.label.font = btnFont
+                hubPill.label.alignment = .left
+                hubPill.label.frame = NSRect(x: 16, y: 3.5, width: hubPillWidth - 20, height: 15)
+                let hubStatus = hubs.first(where: { $0.name == listener.hub })?.status ?? "disconnected"
+                hubPill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: statusColor(hubStatus)))
+                let currentIndex = hubs.firstIndex(where: { $0.name == listener.hub }) ?? 0
+                let ring = (1..<hubs.count).map { hubs[(currentIndex + $0) % hubs.count] }.filter { $0.name != listener.hub }
+                let nextTarget = ring.first(where: { h in
+                    h.status == "connected" && !listeners.contains(where: { $0.hub == h.name && $0.harness == listener.harness && $0.session_id == listener.session_id })
+                }) ?? ring.first
+                if let nextHub = nextTarget?.name {
+                    hubPill.toolTip = "Switch hub to \(nextHub)"
+                    hubPill.pressed = { [weak self] in
+                        guard let self = self else { return }
+                        self.pendingMutation = true
+                        self.emit(["op": "switch_hub", "from_hub": listener.hub, "to_hub": nextHub, "listener_id": listener.listener_id])
+                    }
+                }
+                card.addSubview(hubPill)
+            }
+            var x: CGFloat = scopeX
             var scope = listener.scope
             let toggle = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
                 leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
@@ -1026,16 +1069,57 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
         }
-        // Zone 3 — Available Sessions with Collapsible Harness Groups
+        // Zone 3 — Available Sessions with Per-Hub Target Selector & Collapsible Harness Groups
         var candidateActions: [() -> Void] = []
         if !available.isEmpty {
+            let targetHub = effectiveTargetHub
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
             availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-            availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: 220, height: 14),
+            availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: hubs.count > 1 ? 124 : 220, height: 14),
                 size: 10, weight: .semibold, color: .secondaryLabelColor))
+            if hubs.count > 1 {
+                let targetStrip = NSScrollView(frame: NSRect(x: 140, y: 2, width: 228, height: 18))
+                targetStrip.drawsBackground = false
+                targetStrip.hasHorizontalScroller = false
+                targetStrip.hasVerticalScroller = false
+                let targetContainer = NSView(frame: NSRect(x: 0, y: 0, width: 228, height: 18))
+                targetStrip.documentView = targetContainer
+                availHeader.addSubview(targetStrip)
+                let targetFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+                var targetX: CGFloat = 228
+                for hub in hubs.reversed() {
+                    let w = max(38, ceil(measureTextWidth(hub.name, font: targetFont)) + 16)
+                    targetX -= w
+                    let pill = MenuControl(hub.name, frame: NSRect(x: targetX, y: 0, width: w, height: 18), radius: 9)
+                    pill.identifier = NSUserInterfaceItemIdentifier("target_hub:\(hub.name)")
+                    pill.label.font = targetFont
+                    pill.style = hub.name == targetHub ? .prominent : .neutral
+                    pill.toolTip = "Listen on \(hub.name)"
+                    pill.pressed = { [weak self] in
+                        guard let self = self else { return }
+                        self.selectedTargetHub = hub.name
+                        self.rebuild()
+                    }
+                    targetContainer.addSubview(pill)
+                    targetX -= 4
+                }
+                if targetX < 0 {
+                    for pill in targetContainer.subviews { pill.frame.origin.x -= targetX }
+                    targetContainer.frame.size.width = 228 - targetX
+                }
+            }
             _ = host(availHeader, id: "available_header")
+            let visibleAvailable = hubs.count > 1 && !targetHub.isEmpty
+                ? available.filter { !($0.listening_hubs ?? []).contains(targetHub) }
+                : available
+            if visibleAvailable.isEmpty {
+                let emptyTarget = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
+                emptyTarget.addSubview(textLabel("All sessions listening on \(targetHub)",
+                    NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor))
+                _ = host(emptyTarget, id: "available_empty_target")
+            }
             var groupsByHarness: [String: [Candidate]] = [:]
-            for c in available { groupsByHarness[c.harness, default: []].append(c) }
+            for c in visibleAvailable { groupsByHarness[c.harness, default: []].append(c) }
             let orderedHarnesses = groupsByHarness.keys.sorted { a, b in
                 let rankA = a == "pi" ? 0 : a == "codex" ? 1 : 2
                 let rankB = b == "pi" ? 0 : b == "codex" ? 1 : 2
@@ -1099,6 +1183,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             listenBtn?.setAccessibilityLabel("…")
                             var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.title]
                             if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
+                            if self.hubs.count > 1 && !targetHub.isEmpty { action["hub"] = targetHub }
                             self.emit(action)
                         }
                         listenBtn.pressed = listenRun; row.addSubview(listenBtn)

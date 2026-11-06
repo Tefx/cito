@@ -459,6 +459,7 @@ export class CitoService {
   private closing = false;
   private readonly shuttingDown = new AbortController();
   private closePromise?: Promise<void>;
+  private readonly switchMutex = new KeyedMutex();
   private readonly calls = new Set<Promise<unknown>>();
   private readonly retirements = new Set<Promise<void>>();
   private retire(receiver?: Receiver): void {
@@ -674,9 +675,20 @@ export class CitoService {
     const listeners = activeRows.map(row => ({ hub: row.hub, listener_id: row.listener_id, public_id: displayId(row), scoped_id: this.scoped(row.hub, displayId(row)),
       harness: row.harness, session_id: row.session_id, title: row.title, about: row.about, cwd: row.cwd, repo: row.repo, branch: row.branch, scope: row.scope,
       can_jump: getAdapter(row.harness)?.canJump === true }));
-    const available = this.availableSessions.filter(c => !activeRows.some(r =>
-      r.harness === c.harness && (r.session_id === c.session_id || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)),
-    ));
+    const totalHubs = Math.max(1, this.slots.size);
+    const available = this.availableSessions.flatMap(c => {
+      const matching = activeRows.filter(r =>
+        r.harness === c.harness && (
+          r.session_id === c.session_id
+          || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)
+        ),
+      );
+      if (matching.some(r => r.hub === undefined)) return [];
+      const activeHubs = [...new Set(matching.map(r => r.hub))];
+      if (activeHubs.length >= totalHubs) return [];
+      const { listening_hubs: _, ...rest } = c;
+      return [activeHubs.length ? { ...rest, listening_hubs: activeHubs } : rest];
+    });
     const { myRemote, allPeers } = this.collectNetworkPeers();
     this.ui?.state(hubs, listeners, available, myRemote, allPeers.length);
     if (this.directoryOpen) this.pushUiDirectory();
@@ -712,7 +724,11 @@ export class CitoService {
         case "listen_session": {
           const about = (action.title || basename(action.cwd || "") || "Session").replace(/[\r\n]+/g, " ").trim().slice(0, 200) || "Session";
           try {
-            await this.listen({ about, scope: "self" }, {
+            await this.listen({
+              about,
+              scope: action.scope ?? "self",
+              ...(action.hub ? { hub: action.hub } : {}),
+            }, {
               meta: {
                 ...(action.endpoint_pid !== undefined ? { endpoint_pid: action.endpoint_pid } : {}),
                 expected_harness: action.harness,
@@ -724,6 +740,46 @@ export class CitoService {
           } finally {
             void this.refreshAvailableSessions();
           }
+          break;
+        }
+        case "switch_hub": {
+          const source = this.liveActiveRows().find(r => r.hub === action.from_hub && r.listener_id === action.listener_id);
+          const toSlot = this.slots.get(action.to_hub);
+          if (!source || !toSlot) break;
+          await this.switchMutex.run(`${source.harness}:${source.session_id}`, async () => {
+            const current = this.liveActiveRows().find(r => r.hub === action.from_hub && r.listener_id === action.listener_id);
+            if (!current) return;
+            const alreadyActive = this.liveActiveRows().some(
+              r => r.hub === action.to_hub && r.harness === current.harness && r.session_id === current.session_id,
+            );
+            if (!alreadyActive) {
+              try {
+                await this.listen(
+                  {
+                    about: current.about,
+                    scope: current.scope,
+                    ...(current.tag ? { tag: current.tag } : {}),
+                    hub: action.to_hub,
+                  },
+                  {
+                    meta: {
+                      ...(current.endpoint_pid != null ? { endpoint_pid: current.endpoint_pid } : {}),
+                      expected_harness: current.harness,
+                      expected_session_id: current.session_id,
+                      cwd: current.cwd,
+                      title: current.title,
+                    },
+                  },
+                );
+              } catch (error) {
+                toSlot.error = error instanceof Error ? error.message : String(error);
+                this.pushUiState();
+                return;
+              }
+            }
+            await this.unlistenById(action.from_hub, current.listener_id);
+            void this.refreshAvailableSessions();
+          });
           break;
         }
         case "unlisten": await this.unlistenById(action.hub, action.listener_id); break;

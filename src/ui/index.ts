@@ -4,7 +4,9 @@ import { chmod, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
-import { KeyedMutex } from "../shared/index.js";
+import { KeyedMutex, hubNameSchema, canonicalListenerIdSchema } from "../shared/index.js";
+import type { AvailableSessionSummary } from "../adapters/types.js";
+export type { AvailableSessionSummary } from "../adapters/types.js";
 
 export interface BannerPayload {
   target_harness: string; target_session_id: string; target_title: string;
@@ -18,15 +20,7 @@ export interface UiListenerSummary {
   hub: string; listener_id: string; public_id: string; scoped_id: string; harness: string; session_id: string;
   title: string; about?: string; cwd: string; repo: string | null; branch?: string | null; scope: "self" | "workspace"; can_jump: boolean;
 }
-export interface AvailableSessionSummary {
-  harness: string;
-  session_id: string;
-  title: string;
-  cwd: string;
-  branch?: string | null;
-  endpoint_pid?: number;
-  updated_at_ms?: number;
-}
+
 export interface UiRemotePeerSummary {
   hub: string;
   listener_id: string;
@@ -64,7 +58,8 @@ export type UiToDaemonAction = { op: "unlisten"; hub: string; listener_id: strin
   | { op: "unlisten_all" } | { op: "set_scope"; hub: string; listener_id: string; scope: "self" | "workspace" }
   | { op: "hub_action"; hub: string; action: "login" | "reconnect" | "disconnect" }
   | { op: "refresh_available" }
-  | { op: "listen_session"; harness: string; session_id: string; endpoint_pid?: number; cwd?: string; title?: string }
+  | { op: "listen_session"; harness: string; session_id: string; endpoint_pid?: number; cwd?: string; title?: string; hub?: string; scope?: "self" | "workspace" }
+  | { op: "switch_hub"; from_hub: string; to_hub: string; listener_id: string }
   | { op: "open_directory" }
   | { op: "close_directory" }
   | { op: "query_directory"; query?: string; scope?: "all" | "mine"; harness?: string }
@@ -92,7 +87,7 @@ export async function ensureUiCompiled(stateDir: string, source?: string): Promi
     return binary;
   });
 }
-function validAction(value: unknown): value is UiToDaemonAction {
+export function validAction(value: unknown): value is UiToDaemonAction {
   if (!value || typeof value !== "object") return false;
   const a = value as Record<string, unknown>;
   if (a.op === "quit" || a.op === "unlisten_all" || a.op === "refresh_available" || a.op === "open_directory" || a.op === "close_directory") return true;
@@ -108,6 +103,14 @@ function validAction(value: unknown): value is UiToDaemonAction {
     if (a.endpoint_pid !== undefined && (typeof a.endpoint_pid !== "number" || !Number.isSafeInteger(a.endpoint_pid) || a.endpoint_pid <= 0)) return false;
     if (a.cwd !== undefined && typeof a.cwd !== "string") return false;
     if (a.title !== undefined && typeof a.title !== "string") return false;
+    if (a.hub !== undefined && !hubNameSchema.safeParse(a.hub).success) return false;
+    if (a.scope !== undefined && a.scope !== "self" && a.scope !== "workspace") return false;
+    return true;
+  }
+  if (a.op === "switch_hub") {
+    if (!hubNameSchema.safeParse(a.from_hub).success || !hubNameSchema.safeParse(a.to_hub).success) return false;
+    if (a.from_hub === a.to_hub) return false;
+    if (!canonicalListenerIdSchema.safeParse(a.listener_id).success) return false;
     return true;
   }
   if (typeof a.hub !== "string" || !a.hub) return false;

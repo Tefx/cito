@@ -95,7 +95,9 @@ export default function citoBridge(pi: BridgeAPI): void {
     ? join(homedir(), stateDir.slice(2)) : resolve(stateDir), "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
   const subcommands = ["on", "team", "off"];
+  const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
+  const hubUsage = "Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]";
 
   function defaultAbout(ctx: BridgeContext): string {
     return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
@@ -243,7 +245,14 @@ export default function citoBridge(pi: BridgeAPI): void {
     description: "Toggle or configure Cito session listening",
     getArgumentCompletions(prefix) {
       const trimmed = prefix.trim();
-      return subcommands.filter(cmd => cmd.startsWith(trimmed)).map(value => ({ value, label: value }));
+      if (!/\s/.test(trimmed)) {
+        return subcommands.filter(cmd => cmd.startsWith(trimmed)).map(value => ({ value, label: value }));
+      }
+      const match = /^(on|team|off)\s+(\S*)$/.exec(trimmed);
+      if (match && match[2]!.startsWith("-") && "--hub".startsWith(match[2]!)) {
+        return [{ value: `${match[1]} --hub `, label: "--hub <hub>" }];
+      }
+      return [];
     },
     async handler(args, ctx) {
       lastActiveMs = Date.now();
@@ -251,6 +260,7 @@ export default function citoBridge(pi: BridgeAPI): void {
       const trimmed = args.trim();
       let tool: "cito_listen" | "cito_unlisten";
       let toolArgs: Record<string, unknown>;
+      let targetHub: string | undefined;
       if (!trimmed) {
         if (activeBadge) {
           tool = "cito_unlisten";
@@ -262,23 +272,45 @@ export default function citoBridge(pi: BridgeAPI): void {
       } else {
         const space = trimmed.search(/\s/);
         const sub = space < 0 ? trimmed : trimmed.slice(0, space);
-        const rest = space < 0 ? "" : trimmed.slice(space).trim();
+        let rest = space < 0 ? "" : trimmed.slice(space).trim();
+        if (sub !== "on" && sub !== "team" && sub !== "off") {
+          ctx.ui.notify?.(usage, "warning");
+          return;
+        }
+        const firstSpace = rest.search(/\s/);
+        const firstToken = firstSpace < 0 ? rest : rest.slice(0, firstSpace);
+        const afterFirst = firstSpace < 0 ? "" : rest.slice(firstSpace).trim();
+        if (firstToken === "--hub") {
+          const secondSpace = afterFirst.search(/\s/);
+          const candidateHub = secondSpace < 0 ? afterFirst : afterFirst.slice(0, secondSpace);
+          if (!candidateHub || !hubPattern.test(candidateHub)) {
+            ctx.ui.notify?.(hubUsage, "warning");
+            return;
+          }
+          targetHub = candidateHub;
+          rest = secondSpace < 0 ? "" : afterFirst.slice(secondSpace).trim();
+        } else if (firstToken.startsWith("--hub=")) {
+          const candidateHub = firstToken.slice("--hub=".length);
+          if (!candidateHub || !hubPattern.test(candidateHub)) {
+            ctx.ui.notify?.(hubUsage, "warning");
+            return;
+          }
+          targetHub = candidateHub;
+          rest = afterFirst;
+        }
         if (sub === "on") {
           tool = "cito_listen";
-          toolArgs = { about: rest || defaultAbout(ctx), scope: "self" };
+          toolArgs = { about: rest || defaultAbout(ctx), scope: "self", ...(targetHub ? { hub: targetHub } : {}) };
         } else if (sub === "team") {
           tool = "cito_listen";
-          toolArgs = { about: rest || defaultAbout(ctx), scope: "workspace" };
-        } else if (sub === "off") {
+          toolArgs = { about: rest || defaultAbout(ctx), scope: "workspace", ...(targetHub ? { hub: targetHub } : {}) };
+        } else {
           if (rest) {
-            ctx.ui.notify?.(usage, "warning");
+            ctx.ui.notify?.(targetHub ? hubUsage : usage, "warning");
             return;
           }
           tool = "cito_unlisten";
-          toolArgs = {};
-        } else {
-          ctx.ui.notify?.(usage, "warning");
-          return;
+          toolArgs = targetHub ? { hub: targetHub } : {};
         }
       }
       try {
@@ -286,6 +318,8 @@ export default function citoBridge(pi: BridgeAPI): void {
         if (tool === "cito_listen") {
           activeBadge ??= `🔔 ${String(payload.listener_id ?? "cito")}`;
           ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
+        } else if (targetHub) {
+          ctx.ui.notify?.(`Cito stopped listening on ${targetHub}`, "info");
         } else {
           activeBadge = undefined;
           ctx.ui.notify?.("Cito stopped listening", "info");

@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CitoService } from "../../src/mcp/service.js";
+import { discoverAllAvailableSessions } from "../../src/adapters/index.js";
 import { registrationSchema } from "../../src/mcp/state.js";
 import { encode } from "../../src/mcp/receiver.js";
 import { loadConfig, toCanonicalListenerId } from "../../src/shared/index.js";
@@ -271,4 +272,87 @@ test("CitoService populates my_remote_listeners and evaluates query_directory ac
   await f.service.handleUiAction({ op: "query_directory", query: "", scope: "mine", harness: "all" });
   expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_aliceremote2"]);
   await f.service.handleUiAction({ op: "close_directory" });
+});
+
+test("multi-hub candidate retention (listening_hubs) and atomic switch_hub migration with failure rollback", async () => {
+  const base = await fixture(); cleanups.push(() => base.close());
+  const configPath = join(base.stateDir, "multi-hub.json");
+  await writeFile(configPath, JSON.stringify({
+    default_hub: "default",
+    hubs: {
+      default: { natsUrl: base.broker.url, authMode: "none", user: "alice" },
+      work: { natsUrl: base.broker.url, authMode: "none", user: "bob" },
+    },
+  }));
+  const config = loadConfig({ ...base.env, CITO_CONFIG_PATH: configPath });
+  const service = await CitoService.create(config, base.serviceOptions); cleanups.push(() => service.close());
+  await service.startUi();
+  const states = vi.spyOn(service.ui!, "state");
+
+  // Legacy hub-less activeListeners rows exclude matching candidate even in multi-hub config
+  const legacyDiscovered = await discoverAllAvailableSessions(config, [{ harness: "pi", session_id: "pi-session-1" }]);
+  expect(legacyDiscovered).toEqual([]);
+
+  // Enroll on default hub via listen_session with explicit hub & scope
+  await service.handleUiAction({
+    op: "listen_session",
+    harness: "pi",
+    session_id: "pi-session-1",
+    endpoint_pid: base.pi.meta.pi_pid,
+    cwd: base.stateDir,
+    title: "Multi-Hub Session",
+    hub: "default",
+    scope: "workspace",
+  });
+  await waitFor(() => states.mock.lastCall?.[2]?.[0]?.listening_hubs?.includes("default") === true);
+  expect(states.mock.lastCall?.[1]).toMatchObject([
+    { hub: "default", harness: "pi", session_id: "pi-session-1", scope: "workspace", about: "Multi-Hub Session" },
+  ]);
+  expect(states.mock.lastCall?.[2]).toMatchObject([
+    { harness: "pi", session_id: "pi-session-1", listening_hubs: ["default"] },
+  ]);
+
+  const defaultListenerId = states.mock.lastCall![1]![0]!.listener_id;
+  // Set custom tag via cito_listen to verify switch_hub inherits about, scope, and tag
+  await call(service, "cito_listen", { hub: "default", about: "Tagged Session", scope: "workspace", tag: "v9tag" }, base.pi.meta);
+
+  // Failure rollback: disconnect work hub so enrollment on work fails; default hub listener must remain active!
+  await service.handleUiAction({ op: "hub_action", hub: "work", action: "disconnect" });
+  await service.handleUiAction({ op: "switch_hub", from_hub: "default", to_hub: "work", listener_id: defaultListenerId });
+  expect(service.slots.get("work")!.error).toContain("Hub 'work' is manually disconnected");
+  expect(service.state.listener(defaultListenerId, "default")?.status).toBe("ACTIVE");
+  expect(service.receivers.get(`default:${defaultListenerId}`)?.abort.signal.aborted).toBe(false);
+
+  // Reconnect work hub and switch_hub from default -> work atomically
+  await service.handleUiAction({ op: "hub_action", hub: "work", action: "reconnect" });
+  await service.handleUiAction({ op: "switch_hub", from_hub: "default", to_hub: "work", listener_id: defaultListenerId });
+  expect(service.state.listener(defaultListenerId, "default")?.status).toBe("UNLISTENED");
+  await waitFor(() => states.mock.lastCall?.[2]?.[0]?.listening_hubs?.[0] === "work");
+  const workListenerId = states.mock.lastCall![1]![0]!.listener_id;
+  expect(service.state.listener(workListenerId, "work")).toMatchObject({
+    status: "ACTIVE",
+    about: "Tagged Session",
+    scope: "workspace",
+    tag: "v9tag",
+  });
+  expect(states.mock.lastCall?.[1]).toMatchObject([{ hub: "work", listener_id: workListenerId, scope: "workspace", about: "Tagged Session" }]);
+
+  // Enrolling on default as well (so both hubs are active) excludes the candidate from available
+  await service.handleUiAction({
+    op: "listen_session",
+    harness: "pi",
+    session_id: "pi-session-1",
+    endpoint_pid: base.pi.meta.pi_pid,
+    cwd: base.stateDir,
+    title: "Tagged Session",
+    hub: "default",
+  });
+  expect(states.mock.lastCall?.[2]).toEqual([]);
+
+  // switch_hub when to_hub is already active skips duplicate listen() and unlistens from_hub
+  const listenSpy = vi.spyOn(service as unknown as { listen: (...args: unknown[]) => Promise<unknown> }, "listen");
+  await service.handleUiAction({ op: "switch_hub", from_hub: "work", to_hub: "default", listener_id: workListenerId });
+  expect(listenSpy).not.toHaveBeenCalled();
+  expect(service.state.listener(workListenerId, "work")?.status).toBe("UNLISTENED");
+  expect(service.state.listener(defaultListenerId, "default")?.status).toBe("ACTIVE");
 });

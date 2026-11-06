@@ -11,6 +11,7 @@ export interface AvailableSessionSummary {
   branch?: string | null;
   endpoint_pid?: number;
   updated_at_ms?: number;
+  listening_hubs?: string[];
 }
 export interface CachedSessionQuery { harness?: string; sessionId?: string; endpointPid?: number }
 export interface CallerDetectionContext {
