@@ -3282,3 +3282,79 @@ phases:
     - tests/mcp/http.test.ts
     - tests/shared/shared.test.ts
     agent: senior-engineer
+  - id: v11.acceptance-and-hygiene-gate
+    name: 'V11 acceptance, specification conformance, and iterative code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Terminal Phase `v11` and project acceptance decision (`PASS` or `FAIL`) with\
+      \ `[REQUIRES_SKILL: code-hygiene]` and `[GATE_MODE: ITERATIVE_CONVERGENCE]`,\
+      \ verifying that `npm run typecheck && npm run compile && npm test` passes 100%,\
+      \ mechanically verifying zero Chinese characters in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, `deploy/`, zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`, `tests/`, zero case-insensitive\
+      \ `'claude'` matches in `src/` and `tests/`, zero non-Node built-in imports\
+      \ in `src/pi-extension/cito-bridge.ts`, and zero harness references (`codex|pi|x-codex-turn-metadata`)\
+      \ in `src/mcp/` except `src/mcp/cli.ts` delegating `--codex` resolution to `src/adapters/codex.ts`,\
+      \ and running iterative `code-hygiene` convergence until `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`.\n- **Boundary:** Owner `code-reviewer`\
+      \ (mapped to `gate-reviewer` / `pathway-auditor` + `structural-auditor` in the\
+      \ Larva roster, routing any admitted repair batch to `senior-engineer` before\
+      \ Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not directly mutate repository files, Plan state,\
+      \ or external host directories.\n- **Admit:**\n  - Included phase and terminal\
+      \ outcomes: Phase `v11` (`v11.versioning-governance-and-daemon-handover`) bound\
+      \ to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n  -\
+      \ Consumed evidence and checks:\n    1. `npm run typecheck && npm run compile\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Mechanical language, neutral-naming,\
+      \ Claude-removal, standalone-extension, and adapter-purity verification:\n \
+      \      - Zero Chinese characters (`[\\p{Script=Han}]`) in `src/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `docs/` (excluding policy rule line in `docs/DESIGN.md`), `README.md`,\
+      \ `AGENTS.md`, `deploy/`, and `tests/`.\n       - Zero case-insensitive matches\
+      \ for `claude` in `src/` and `tests/`.\n       - Zero relative or external npm\
+      \ imports in `src/pi-extension/cito-bridge.ts` (only `node:*` built-in imports).\n\
+      \       - Zero references to `codex`, `pi`, or `x-codex-turn-metadata` in `src/mcp/`\
+      \ except `src/mcp/cli.ts` delegating `--codex` CLI resolution to `src/adapters/codex.ts`.\n\
+      \    3. Conformance with `AGENTS.md` (\"Versioning, Compatibility & Release\
+      \ Governance\") and `docs/DESIGN.md` §5.3:\n       - `package.json` and `package-lock.json`\
+      \ set `\"version\": \"0.10.0\"`, `src/shared/index.ts` exports `CITO_VERSION\
+      \ = \"0.10.0\"`, and `tests/shared/shared.test.ts` verifies `CITO_VERSION ===\
+      \ packageJson.version`.\n       - `src/mcp/server.ts` passes `version: CITO_VERSION`\
+      \ in `createMcpServer`, returns `{ ok: true, pid: process.pid, stateDir: config.stateDir,\
+      \ version: CITO_VERSION }` from `GET /health`, and returns `version?: string`\
+      \ from `daemonHealth`.\n       - `src/mcp/cli.ts` supports `cito --version`\
+      \ and `cito -v` (printing `cito v${CITO_VERSION}\\n` to `stdout` and exiting\
+      \ `0` without starting `cito-daemon`) and automatically replaces a running stale\
+      \ daemon (`health.version !== CITO_VERSION`) in `ensureDaemon(config)` via `SIGTERM`\
+      \ + poll + respawn until `(await daemonHealth(config))?.version === CITO_VERSION`.\n\
+      \       - `tests/mcp/http.test.ts` verifies `/health` `version: CITO_VERSION`,\
+      \ `cito --version` / `-v`, and automatic stale-daemon replacement on version\
+      \ mismatch.\n    4. Iterative `[REQUIRES_SKILL: code-hygiene]` (`[GATE_MODE:\
+      \ ITERATIVE_CONVERGENCE]`) audit-and-fix convergence across all 5 lenses reaching\
+      \ `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n- **Recovery:**\
+      \ If any check fails or any actionable `code-hygiene` finding is admitted, record\
+      \ the concrete file/line counterexamples and route a cohesive writable repair\
+      \ to `senior-engineer` before re-running this gate in Delta mode until `Completeness:\
+      \ CLEAN` and `Simplicity: ZERO_NEW_ISSUES` are achieved."
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    evidence_template: 'Gate verdict (PASS/FAIL), test output (npm run typecheck &&
+      npm run compile && npm test), mechanical regex verification (0 Chinese chars,
+      0 forbidden names, 0 case-insensitive ''claude'' matches in src/ and tests/,
+      0 non-Node imports in cito-bridge.ts, 0 non-cli harness refs in src/mcp/), and
+      [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE convergence summary.'
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - package.json
+    - package-lock.json
+    - src/shared/index.ts
+    - src/mcp/server.ts
+    - src/mcp/cli.ts
+    - tests/mcp/http.test.ts
+    - tests/shared/shared.test.ts
+    depends_on:
+    - v11.versioning-governance-and-daemon-handover
+    agent: code-reviewer
