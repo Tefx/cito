@@ -2564,7 +2564,7 @@ phases:
 - id: v9
   name: Cito V9 Multi-Hub Session Attachment, Atomic Hub Migration, Target Hub Selector,
     Pi /cito --hub Support, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run build && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -2762,7 +2762,7 @@ phases:
   - id: v9.acceptance-and-hygiene-gate
     name: 'V9 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v9` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -2840,3 +2840,46 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-06T03:24:06.488244Z'
+    done_at: '2026-11-06T03:36:16.431671+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v9-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:454914a0b91b8301e5beb8e193e7c601a11cc86f).
+
+      Test output (npm run typecheck && npm run build && npm test): exit 0 (27 test
+      files, 216 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Case-insensitive ''claude'' matches in src/ and tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V9-1-MULTI-HUB-CANDIDATE-RETENTION-LISTENING-HUBS: PROVEN (src/adapters/types.ts
+      & src/ui/index.ts AvailableSessionSummary listening_hubs, src/adapters/index.ts
+      discoverAllAvailableSessions & src/mcp/service.ts pushUiState).
+
+      - V9-2-UI-PROTOCOL-AND-ATOMIC-SWITCH-HUB-MIGRATION: PROVEN (src/ui/index.ts
+      validAction switch_hub & listen_session, src/mcp/service.ts switchMutex atomic
+      enroll-before-unlisten with toSlot.error failure rollback preserving from_hub).
+
+      - V9-3-ZONE-1-SWITCH-HUB-PILL-AND-ZONE-3-TARGET-HUB-SELECTOR: PROVEN (src/macos/cito-ui.swift
+      Zone 1 switch_hub:<scoped_id> pill & Zone 3 target_hub:<hub> selector pills
+      + visibleAvailable filtering + available_empty_target + stable menuActions 0..9).
+
+      - V9-4-PI-CITO-SLASH-COMMAND-HUB-FLAG-SUPPORT: PROVEN (src/pi-extension/cito-bridge.ts
+      /cito --hub <hub> / --hub=<hub> parsing, completions, and multi-hub activeBadge
+      preservation).
+
+      - V9-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
+      structural-auditor 01a1aedd-4ded-76bd-ad17-19f713e35a37 and uiux-auditor 01a1aedd-4d9a-7109-a7ee-098425a295de
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
