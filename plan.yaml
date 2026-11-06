@@ -3474,3 +3474,115 @@ phases:
     src/shared/index.ts, and pass the iterative code-hygiene gate.'
   depends_on:
   - v11
+  steps:
+  - id: v12.claude-adapter-hardening-and-v0-11-0-release
+    name: 'Implement V12 Claude Code adapter hardening, exact hook batch acknowledgment,
+      UI & architecture symmetry, and v0.11.0 release [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ src/shared/index.ts\n    - src/adapters/claude.ts\n    - src/adapters/claude-channel.ts\n\
+      \    - src/adapters/codex.ts\n    - src/adapters/git.ts\n    - src/adapters/index.ts\n\
+      \    - src/claude-hook/cli.ts\n    - src/mcp/service.ts\n    - src/mcp/cli.ts\n\
+      \    - src/macos/cito-ui.swift\n    - bin/loader.js\n    - bin/cito-mcp\n  \
+      \  - bin/cito-auth-callout\n    - bin/cito-claude-hook\n    - tests/**\n  blocked_paths:\n\
+      \    - plan.yaml\n```\n\n- **Deliver:**\n  - Implement and verify `docs/DESIGN.md`\
+      \ §§1.2, 2.1, 4.2, 4.3, 5.2, 5.3, 6.1, 6.2 and `AGENTS.md`:\n    1. **UI Enrollment\
+      \ & Hub-Switch Metadata Fix (`src/adapters/claude.ts`)**:\n       - In `claudeSessionClaim(meta,\
+      \ headers)`, only treat `meta.expected_session_id` (when `meta.expected_harness\
+      \ === \"claude\"`) as an explicit non-socket claim when no socket PID (`endpoint_pid`,\
+      \ `caller_pid`, `pi_pid`) is present in `meta` (so UI `listen_session` and `switch_hub`,\
+      \ which pass both `endpoint_pid` and `expected_session_id`, resolve via the\
+      \ socket bridge and `verifyExpectedIdentity` instead of throwing `INVALID_INPUT:\
+      \ Conflicting caller metadata`). Explicit `claudeSessionId` / `claude_session_id`\
+      \ / `x-claude-session-id` combined with a PID still throws `INVALID_INPUT`.\n\
+      \    2. **Stable First-Turn Session Identity, Alias Draining & Badge Cleanup\
+      \ (`src/adapters/claude-channel.ts`, `src/adapters/claude.ts`, `src/claude-hook/cli.ts`)**:\n\
+      \       - In `startClaudeChannelBridge`, when the bridge initially binds as\
+      \ `claude-<endpoint>` before any transcript exists in the workspace and the\
+      \ first transcript `<u1>.jsonl` appears, keep reporting `claude-<endpoint>`\
+      \ (so first-turn transcript creation never triggers a false `SESSION_MISMATCH`\
+      \ revocation) and write an alias `${stateDir}/claude/aliases/<u1>` -> `claude-<endpoint>`;\
+      \ only transition to `<u2>` when a second distinct transcript `<u2> !== <u1>`\
+      \ appears (`/clear`).\n       - Track all session IDs for which the bridge wrote\
+      \ a badge file and remove all of them on `close()`.\n       - In `drainClaudeWakes(config,\
+      \ session)`, also drain any aliased `claude-<endpoint>` queue recorded in `${stateDir}/claude/aliases/${session}`,\
+      \ and read staging files without failing on aggregate >4 MiB backlog size.\n\
+      \       - In `resolveClaudeSessionTitle`, preserve a previously cached title\
+      \ when `start > 0` and the file grew without a newer `custom-title` in the tail\
+      \ window.\n       - In `src/claude-hook/cli.ts`, honor `process.env.CLAUDE_SESSION_ID`\
+      \ between `input.session_id` and `resolveClaudeSessionId(cwd, config)`.\n  \
+      \  3. **Exact Drained-Batch Acknowledgment & Non-Blocking Channel Hint (`src/mcp/service.ts`,\
+      \ `src/claude-hook/cli.ts`, `src/adapters/claude-channel.ts`)**:\n       - In\
+      \ `CitoService.inbox()` (`src/mcp/service.ts`), allow `ack_ids` entries to match\
+      \ `(signal_id = ? OR batch_id = ?)` so passing `batch_id`s in `ack_ids` with\
+      \ `ack_all: false` acknowledges every signal in those exact drained batches\
+      \ (without touching newly arrived `RECEIVED` signals) and refreshes the session\
+      \ badge.\n       - In `src/claude-hook/cli.ts`, when `wakes.length > 0`, best-effort\
+      \ strip any trailing ` (\\d+)` unread count from `${stateDir}/claude/badges/<session>`\
+      \ (and any aliased session badge) and send a bounded (`AbortSignal.timeout(500)`)\
+      \ `POST http://127.0.0.1:${config.daemonPort}/mcp` calling `cito_inbox` with\
+      \ `{ ack_all: false, ack_ids: wakes.map(w => w.batch_id) }` and `_meta: { claudeSessionId:\
+      \ ackSession, cwd }` (ignoring network errors so offline/unit-test hook runs\
+      \ still emit the hook JSON cleanly).\n       - In `src/adapters/claude-channel.ts`,\
+      \ send `notifications/claude/channel` non-blockingly (`void transport.send(...).catch(()\
+      \ => {})`) so stdout backpressure never blocks the socket control plane.\n \
+      \   4. **UI Symmetry, `src/mcp/` Boundary & Consolidation (`src/macos/cito-ui.swift`,\
+      \ `src/mcp/cli.ts`, `src/adapters/git.ts`, `bin/loader.js`)**:\n       - In\
+      \ `src/macos/cito-ui.swift`: rank `\"claude\"` (`2`) after `\"pi\"` (`0`) and\
+      \ `\"codex\"` (`1`) and before custom (`3`) in `orderedHarnesses`; render `\"\
+      Claude · \\(items.count) open\"` for `\"claude\"` in `groupTitle`; and add `(\"\
+      dir_harness:claude\", \"Claude\", 364, 62)` to `DirectoryPanel` `harnessPills`.\n\
+      \       - Export `startOptionalStdioChannel(config, stdio)` from `src/adapters/claude-channel.ts`\
+      \ (re-exported from `src/adapters/index.ts`) and call it from `src/mcp/cli.ts`\
+      \ so `src/mcp/` has zero `claude` references.\n       - Consolidate `resolveExplicitCaller`\
+      \ in `src/adapters/git.ts` (used by `claude.ts` and `codex.ts`) and `runEntrypoint`\
+      \ in `bin/loader.js` (used by `bin/cito-mcp`, `bin/cito-auth-callout`, and `bin/cito-claude-hook`),\
+      \ and include `bin/cito-claude-hook` in `tests/auth-callout/cli.test.ts` packaging\
+      \ tests.\n    5. **Bump Version to `0.11.0`**:\n       - Update `package.json`,\
+      \ `package-lock.json`, and `CITO_VERSION` in `src/shared/index.ts` to `\"0.11.0\"\
+      `.\n- **Boundary:** Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito`\
+      \ (`package.json`, `package-lock.json`, `src/shared/index.ts`, `src/adapters/`,\
+      \ `src/claude-hook/cli.ts`, `src/mcp/service.ts`, `src/mcp/cli.ts`, `src/macos/cito-ui.swift`,\
+      \ `bin/`, `tests/`). Must enforce English-only UI/UX/code/docs (0 Chinese chars\
+      \ in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`), 0 company/environment-specific\
+      \ names, 100% standalone `src/pi-extension/cito-bridge.ts` (0 non-Node built-in\
+      \ imports), and harness-agnostic `src/mcp/` (0 harness references in `src/mcp/`\
+      \ except `src/mcp/cli.ts` delegating `--codex` resolution to `src/adapters/codex.ts`).\
+      \ Must not mutate external repositories (`/Users/tefx/dotfiles`, `tela`) or\
+      \ live user `~/.cito` / `~/.codex` / `~/.claude` state.\n- **Admit:** Completed\
+      \ Phase `v11`, `docs/DESIGN.md` (§§1.2, 2.1, 4.2, 4.3, 5.2, 5.3, 6.1, 6.2),\
+      \ and `AGENTS.md`. Verified by `npm run typecheck && npm run compile && npm\
+      \ test` exiting `0`. Consumed by `v12.acceptance-and-hygiene-gate`.\n- **Recovery:**\
+      \ Fix any failing typecheck, compilation, Swift build, or unit/E2E test in place\
+      \ within the isolated worktree and clean up any temporary test directories,\
+      \ sockets, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run compile && npm test
+    evidence_template: Commands run (npm run typecheck && npm run compile && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 non-Node imports in
+      cito-bridge.ts, 0 non-cli harness refs in src/mcp/), and verified docs/DESIGN.md
+      §§1.2, 2.1, 4.2, 4.3, 5.2, 5.3, 6.1, 6.2 & AGENTS.md deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - package.json
+    - package-lock.json
+    - src/shared/index.ts
+    - src/adapters/claude.ts
+    - src/adapters/claude-channel.ts
+    - src/adapters/codex.ts
+    - src/adapters/git.ts
+    - src/adapters/index.ts
+    - src/claude-hook/cli.ts
+    - src/mcp/service.ts
+    - src/mcp/cli.ts
+    - src/macos/cito-ui.swift
+    - bin/cito-mcp
+    - bin/cito-auth-callout
+    - bin/cito-claude-hook
+    - tests/adapters/claude.test.ts
+    - tests/adapters/claude-channel.test.ts
+    - tests/claude-hook/cli.test.ts
+    - tests/auth-callout/cli.test.ts
+    - tests/e2e/lifecycle.test.ts
+    agent: senior-engineer
