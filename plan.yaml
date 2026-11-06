@@ -4034,7 +4034,7 @@ phases:
   name: Cito V14 Full-Scan Remediation (Directory Full-Field Parity, Snapshot Mutation
     Coalescing, Dockerfile Loader, Claude Title/Recency, NSTableView Selection Sync,
     Symmetric-Difference Witnesses, and v0.11.2 Release)
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -4233,7 +4233,7 @@ phases:
   - id: v14.acceptance-and-hygiene-gate
     name: 'V14 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v14` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -4322,3 +4322,42 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-06T17:47:43.549782Z'
+    done_at: '2026-11-06T17:50:49.918643+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v14-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:f292e9a00314d71757f6715733a3c7794120c335).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (30 test
+      files, 241 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Direct claude or pi identifiers in src/mcp/: 0 matches
+
+      Requirement results:
+
+      - V14-1-DIRECTORY-FULL-FIELD-PARITY-AND-SNAPSHOT-COALESCING: PROVEN (src/mcp/service.ts
+      collectMyRemoteAndOnlineCount, collectDirectoryEntries, evaluateDirectoryQuery
+      over full IndexedRegistration before DTO truncation & <128 KiB bounding, HubDirectoryIndex
+      pendingMutations coalescing & recordKvEntry filtering).
+
+      - V14-2-DOCKERFILE-CLAUDE-TITLE-RECENCY-AND-CLI-SUPPORT: PROVEN (deploy/nats/Dockerfile
+      copies bin/loader.js, src/adapters/claude-channel.ts post-/clear title & updated_at_ms
+      recency, src/adapters/git.ts hasExplicitPid, src/adapters/codex.ts codexThreadId
+      trimming & PID guard, src/adapters/index.ts + src/mcp/cli.ts --claude CLI support).
+
+      - V14-3-UI-SELECTION-LIFECYCLE-FENCING-AND-V0-11-2: PROVEN (src/macos/cito-ui.swift
+      tableViewSelectionDidChange, src/mcp/service.ts + receiver.ts 3-map receiver
+      cleanup & slot.connectedBroker(), src/ui/index.ts UiBridge.close() exit/close/error
+      settlement, src/pi-extension/cito-bridge.ts /cito session-switch fence, symmetric-difference
+      witnesses in tests/ui/lifecycle.test.ts and tests/mcp/ui.test.ts, streamlined
+      README.md, and CITO_VERSION = ''0.11.2''; fresh-context structural-auditor 01a1b1f3-acfb-7569-a568-f0394b1bdc4c
+      and uiux-auditor 01a1b1f3-acae-75a7-823b-4a68ca72e194 certified Completeness:
+      CLEAN | Simplicity: ZERO_NEW_ISSUES).'
