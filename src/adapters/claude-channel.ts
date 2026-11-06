@@ -6,7 +6,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { CitoConfig } from "../shared/index.js";
 import {
   CLAUDE_HARNESS, appendClaudeWake, resolveClaudeSessionId, resolveClaudeSessionTitle,
-  validateClaudeSessionId, writeClaudeBadge, writeClaudeSessionAlias,
+  resolveClaudeTranscriptMtimeMs, validateClaudeSessionId, writeClaudeBadge, writeClaudeSessionAlias,
 } from "./claude.js";
 import { bridgeSocketPath, requestBridge } from "./pi.js";
 
@@ -45,32 +45,46 @@ export async function startClaudeChannelBridge(config: CitoConfig,
   const fallbackId = `claude-${endpoint}`;
   let useFallbackAlias = !env.CLAUDE_SESSION_ID?.trim() && (await resolveClaudeSessionId(cwd, config)) === undefined;
   let firstTranscript: string | undefined;
+  let lastSessionId: string | undefined;
   let queue = Promise.resolve(), owned = false, closed = false, lastActiveMs = Date.now();
+  const noteSession = (nextId: string): string => {
+    if (lastSessionId !== undefined && nextId !== lastSessionId) {
+      lastActiveMs = Date.now();
+    }
+    lastSessionId = nextId;
+    return nextId;
+  };
   // Re-resolved per request: /clear starts a new transcript, which must read as a switched session,
   // while first-turn transcript creation preserves an initial claude-<endpoint> listener via alias.
   const sessionId = async (): Promise<string> => {
     const explicit = env.CLAUDE_SESSION_ID?.trim();
-    if (explicit) return validateClaudeSessionId(explicit);
+    if (explicit) return noteSession(validateClaudeSessionId(explicit));
     const resolved = await resolveClaudeSessionId(cwd, config);
-    if (!resolved) return fallbackId;
+    if (!resolved) return noteSession(fallbackId);
     if (useFallbackAlias) {
       if (firstTranscript === undefined || firstTranscript === resolved) {
+        if (firstTranscript === undefined) lastActiveMs = Date.now();
         firstTranscript = resolved;
         await writeClaudeSessionAlias(config, resolved, fallbackId);
-        return fallbackId;
+        return noteSession(fallbackId);
       }
       useFallbackAlias = false;
     }
-    return resolved;
+    return noteSession(resolved);
   };
   const handle = async (request: Record<string, unknown>): Promise<object> => {
     if (closed) return { ok: false, error: "BRIDGE_CLOSED" };
     const current = await sessionId();
     if (request.op === "identify") {
+      const aliasActive = useFallbackAlias && firstTranscript !== undefined;
+      const transcriptId = aliasActive ? firstTranscript! : current;
       // The transcript title is what the user named this session; the workspace name is the fallback.
-      const name = await resolveClaudeSessionTitle(cwd, firstTranscript ?? current, config).catch(() => undefined);
+      const [name, transcriptMtimeMs] = await Promise.all([
+        resolveClaudeSessionTitle(cwd, transcriptId, config).catch(() => undefined),
+        resolveClaudeTranscriptMtimeMs(cwd, transcriptId, config).catch(() => 0),
+      ]);
       return { ok: true, endpoint_pid: endpoint, session_id: current,
-        session_name: name ?? basename(cwd), cwd, updated_at_ms: lastActiveMs };
+        session_name: name ?? basename(cwd), cwd, updated_at_ms: Math.max(lastActiveMs, transcriptMtimeMs) };
     }
     if (request.session_id !== current) return { ok: false, error: "SESSION_MISMATCH" };
     if (request.op === "status") {

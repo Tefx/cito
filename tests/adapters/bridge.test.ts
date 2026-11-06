@@ -224,6 +224,17 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
       await command!.handler("", ctx);
       expect(notify).toHaveBeenLastCalledWith("Cito stopped listening", "info");
       expect(status).toHaveBeenLastCalledWith("cito", undefined);
+
+      // Session-switch fence: if sessionId switches while /cito on is awaiting callMcpTool, ignore late completion
+      const origCall = f.service.call.bind(f.service);
+      vi.spyOn(f.service, "call").mockImplementationOnce(async (...args) => {
+        currentId = "switched-mid-rpc";
+        await emit("session_tree");
+        return origCall(...args);
+      });
+      notify.mockClear();
+      await command!.handler("on Late listen", ctx);
+      expect(notify).not.toHaveBeenCalled();
     } finally {
       await http.close();
       await f.close();

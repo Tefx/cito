@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { resolveExplicitCaller } from "./git.js";
+import { hasExplicitPid, resolveExplicitCaller } from "./git.js";
 import { SocketBridgeAdapter } from "./pi.js";
 import type { Caller, CallerDetectionContext } from "./types.js";
 
@@ -13,7 +13,6 @@ const TRANSCRIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // Session identifiers become file names: keep them to one path segment with no traversal.
 const QUEUE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DRAIN_SUFFIX = ".draining-";
-const PID_KEYS = ["endpoint_pid", "caller_pid", "pi_pid"];
 
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 export function validateClaudeSessionId(value: unknown): string {
@@ -90,11 +89,19 @@ export async function resolveClaudeSessionTitle(cwd: string, sessionId: string,
   titleCache.set(path, { size: info.size, mtimeMs: info.mtimeMs, title });
   return title;
 }
+export async function resolveClaudeTranscriptMtimeMs(cwd: string, sessionId: string,
+  config: ClaudeConfig = loadConfig()): Promise<number> {
+  if (!TRANSCRIPT_ID.test(sessionId)) return 0;
+  try {
+    const info = await stat(join(claudeProjectDir(cwd, config), `${sessionId}.jsonl`));
+    return info.isFile() && Number.isFinite(info.mtimeMs) ? Math.round(info.mtimeMs) : 0;
+  } catch { return 0; }
+}
 /** Explicit session claims from tool metadata or an HTTP header, with the same conflict rules as Codex threads. */
 export function claudeSessionClaim(meta: Record<string, unknown> = {},
   headers?: Record<string, string | string[] | undefined>): string | undefined {
   const header = headers?.["x-claude-session-id"];
-  const hasPid = PID_KEYS.some(key => meta[key] !== undefined);
+  const hasPid = hasExplicitPid(meta);
   const candidates = [meta.claudeSessionId, meta.claude_session_id,
     !hasPid && meta.expected_harness === CLAUDE_HARNESS ? meta.expected_session_id : undefined,
     ...(Array.isArray(header) ? header : header === undefined ? [] : [header])];
@@ -219,7 +226,7 @@ export class ClaudeCodeAdapter extends SocketBridgeAdapter {
   async detectExplicitCaller(ctx: CallerDetectionContext, _config: CitoConfig): Promise<Caller | null> {
     const session = claudeSessionClaim(ctx.meta, ctx.headers);
     if (!session) return null;
-    if (PID_KEYS.some(key => ctx.meta[key] !== undefined)) {
+    if (hasExplicitPid(ctx.meta)) {
       throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
     }
     return resolveExplicitCaller(CLAUDE_HARNESS, session, ctx);

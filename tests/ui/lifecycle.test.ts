@@ -512,6 +512,15 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect(afterUp.directory_selected_id).toBe(myRemote[0]!.scoped_id);
     expect(flatten(afterUp.directory_items ?? []).find(n => n.id === "copy_dir:" + teamPeer.scoped_id)).toMatchObject({ green: false, hovered: false });
 
+    // Mouse row selection via tableViewSelectionDidChange syncs directorySelectedIndex and Return copy
+    send({ op: "test_control", id: "dir_peer:" + teamPeer.scoped_id });
+    const afterRowSelect = await inspect();
+    expect(afterRowSelect.directory_selected_id).toBe(teamPeer.scoped_id);
+    send({ op: "test_directory_key", key: "return" });
+    expect((await inspect()).clipboard).toBe(teamPeer.scoped_id);
+    send({ op: "test_control", id: "dir_peer:" + myRemote[0]!.scoped_id });
+    expect((await inspect()).directory_selected_id).toBe(myRemote[0]!.scoped_id);
+
     // Facet pills and search query hooks
     expect(dirNodes.find(n => n.id === "dir_harness:claude")).toMatchObject({ text: "Claude", x: 364, width: 62 });
     send({ op: "test_control", id: "dir_scope:mine" });
@@ -611,5 +620,29 @@ test("V9 validAction validation, Zone 1 switch_hub:<scoped_id> pill, and Zone 3 
     expect(personalSnap.items.find(n => n.id === "available_empty_target")).toMatchObject({ width: 380, height: 28 });
     expect(personalNodes.map(n => n.text)).toContain("All sessions listening on personal");
     expect(personalNodes.find(n => n.id === "candidate:pi:pi-1")).toBeUndefined();
+
+    // Symmetric-difference witness: same (harness, session_id) listening on both personal and work
+    // produces 2 listener cards (listeners.count === 2) while uniqueSessionCount === 1
+    const workListener = {
+      ...listener,
+      hub: "work",
+      listener_id: "c_workabcdefgh",
+      public_id: "repo-workabcdefgh",
+      scoped_id: "work:repo-workabcdefgh",
+    };
+    bridge.state(twoHubs, [listener, workListener], []);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=2 listeners=2"));
+    const dualSnap = await inspect(), dualNodes = flatten(dualSnap.items);
+    expect(dualSnap.count).toBe(1);
+    expect(dualSnap.button_title).toBe(" 1");
+    expect(dualNodes.find(n => n.id === "header_subtitle")?.text).toBe("1 listening");
+    expect(dualNodes.find(n => n.id === "session:" + listener.scoped_id)).toBeDefined();
+    expect(dualNodes.find(n => n.id === "session:" + workListener.scoped_id)).toBeDefined();
   } finally { await bridge.close(); }
+
+  // UiBridge.close() settles promptly when the child emits error (e.g. non-existent binary)
+  const errDiagnostics: string[] = [];
+  const errBridge = new UiBridge(root, { binary: join(root, "nonexistent-cito-ui"), diagnostic: l => errDiagnostics.push(l) });
+  await errBridge.start();
+  await expect(errBridge.close()).resolves.toBeUndefined();
 }, 15000);
