@@ -6,6 +6,7 @@ import { readFile, stat, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fixture, call, payload, waitFor, codexDesktop } from "../mcp/support.js";
 import { toCanonicalListenerId } from "../../src/shared/index.js";
+import { peekClaudeWakes } from "../../src/adapters/index.js";
 import { CitoService } from "../../src/mcp/service.js";
 import { startHttpServer } from "../../src/mcp/server.js";
 
@@ -185,6 +186,31 @@ test("PENDING_PUBLISH recovery reuses exact signal ID and JetStream dedup sequen
   expect(f.service.state.listener(toCanonicalListenerId(id))!.persisted_seq).toBe(1);
   expect(f.service.state.signals("SELECT * FROM local_signals")).toHaveLength(1);
 }, 10_000);
+
+test("cito-mcp stdio advertises the Claude channel, binds the hosting session and queues a wake for the hook", async () => {
+  const f = await setup(false);
+  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
+  const client = new Client({ name: "stdio-claude-e2e", version: "1" });
+  const session = `claude-${process.pid}`;
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve("bin/cito-mcp")],
+      env: { PATH: process.env.PATH!, ...f.env, CITO_DAEMON_PORT: String(http.port), CITO_CLAUDE_CHANNEL: "1" },
+      stderr: "pipe",
+    }));
+    expect(client.getServerCapabilities()?.experimental).toMatchObject({ "claude/channel": {} });
+    // The MCP server is a child of the harness, so the daemon binds the session through its parent PID.
+    const enrolled = payload(await client.callTool({ name: "cito_listen", arguments: { about: "claude code session" } }) as { content: { text: string }[] });
+    expect(enrolled).toMatchObject({ status: "listening", harness: "claude", session_id: session });
+    await call(f.service, "cito_send", { to: String(enrolled.listener_id), message: "ship the adapter" });
+    await waitFor(async () => (await peekClaudeWakes(f.config, session)).length > 0, 10_000);
+    expect((await peekClaudeWakes(f.config, session))[0]!.content).toContain("ship the adapter");
+  } finally {
+    await client.close().catch(() => {});
+    await http.close();
+  }
+}, 30_000);
 
 test("plain cito-mcp stdio forwarding discovers parent Pi bridge and exits cleanly on SIGINT and SIGTERM", async () => {
   const f = await setup(true);

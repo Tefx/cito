@@ -105,6 +105,7 @@ func harnessVisual(_ harness: String) -> (symbol: String, tint: NSColor, name: S
     switch harness {
     case "pi": return ("terminal.fill", .systemIndigo, "Pi")
     case "codex": return ("sparkles", .systemTeal, "Codex")
+    case "claude": return ("cpu.fill", .systemOrange, "Claude")
     default: return ("bolt.horizontal.fill", .systemBlue, harness.capitalized)
     }
 }

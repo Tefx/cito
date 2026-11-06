@@ -1,6 +1,6 @@
 # Cito
 
-Cito is a notification bus for opted-in coding-agent conversations across users, machines, harnesses, and NATS hubs. One per-user `cito daemon` owns a state directory, all hub connections and receivers, and the persistent macOS `cito-ui` companion. It serves Streamable HTTP MCP at `http://127.0.0.1:4290/mcp` and health at `/health`. Direct HTTP clients need no per-conversation Cito subprocess; `cito-mcp` remains a small stdio auto-forwarder for clients that need stdio. Pi Coding Agent and Codex Desktop ship with working drivers. Other CLI/IDE harnesses can use the socket bridge protocol or register an adapter.
+Cito is a notification bus for opted-in coding-agent conversations across users, machines, harnesses, and NATS hubs. One per-user `cito daemon` owns a state directory, all hub connections and receivers, and the persistent macOS `cito-ui` companion. It serves Streamable HTTP MCP at `http://127.0.0.1:4290/mcp` and health at `/health`. Direct HTTP clients need no per-conversation Cito subprocess; `cito-mcp` remains a small stdio auto-forwarder for clients that need stdio. Pi Coding Agent, Codex Desktop and Claude Code ship with working drivers. Other CLI/IDE harnesses can use the socket bridge protocol or register an adapter.
 
 ## Daemon architecture and startup
 
@@ -18,7 +18,7 @@ The stdio entrypoint checks matching `/health` (`version: CITO_VERSION`), sends 
 
 For automatic login startup, configure a user LaunchAgent with absolute `ProgramArguments` (`/absolute/path/to/cito/bin/cito-mcp`, `daemon`), `RunAtLoad: true`, and `KeepAlive: { SuccessfulExit: false }`. Put `CITO_STATE_DIR` and other daemon environment overrides in that agent. Cito does not install or modify LaunchAgents. Menu Quit exits 0 and stays stopped with this policy; crashes restart. A subsequent stdio client can auto-start it again.
 
-The dependency graph is `shared → adapters / ui → mcp`. MCP supports `2026-07-28` alongside existing `2025-*` clients. The MCP layer passes generic caller context (metadata, headers and OS-attributed PID) into registered adapters; only `CodexDesktopAdapter.detectExplicitCaller` extracts and merges host-specific thread headers. Conflicting explicit bridge PID and thread claims fail before enrollment. `src/ui/` depends only on shared types and Node built-ins; Swift owns Menu Bar Extra and HUD rendering, with no SQLite access. Daemon-local `KeyedMutex` critical sections replace every legacy file lock.
+The dependency graph is `shared → adapters / ui → mcp`. MCP supports `2026-07-28` alongside existing `2025-*` clients. The MCP layer passes generic caller context (metadata, headers and OS-attributed PID) into registered adapters; only `CodexDesktopAdapter.detectExplicitCaller` and `ClaudeCodeAdapter.detectExplicitCaller` extract host-specific session headers. Conflicting explicit bridge PID and thread claims fail before enrollment. `src/ui/` depends only on shared types and Node built-ins; Swift owns Menu Bar Extra and HUD rendering, with no SQLite access. Daemon-local `KeyedMutex` critical sections replace every legacy file lock.
 
 ## Build and test
 
@@ -33,7 +33,7 @@ npm test
 npm test -- tests/mcp/ tests/e2e/
 ```
 
-`bin/cito-mcp` and `bin/cito-auth-callout` prefer compiled JavaScript under `dist/` when present and fall back to running `src/**/*.ts` directly on Node's native TypeScript runtime, independently of the caller's working directory. `npm run compile` emits JavaScript and type declarations under `dist/`.
+`bin/cito-mcp`, `bin/cito-auth-callout` and `bin/cito-claude-hook` prefer compiled JavaScript under `dist/` when present and fall back to running `src/**/*.ts` directly on Node's native TypeScript runtime, independently of the caller's working directory. `npm run compile` emits JavaScript and type declarations under `dist/`.
 
 Tests use the installed official `nats-server` **2.14.0**, temporary SQLite databases, real Unix sockets, a local OIDC/JWKS provider, and executable Desktop protocol fixtures. macOS tests compile and run the real Swift companion headlessly, including JSON-line framing, menu actions, HUD auto-hide, click behavior, EOF and crash/respawn replay. The installed-Pi loader test uses Pi 1.5.0 when available. The complete V4 acceptance suite requires macOS and Swift. All test state and child processes are isolated and cleaned up. Tests require no Docker, live OIDC account, or running Desktop app. Visible HUD presentation, installed `ChatGPT.app` compatibility, live OIDC providers, and production TLS/deployment require operator verification.
 
@@ -143,6 +143,45 @@ Call `cito_listen({about: "Review service changes"})` from the conversation. Enr
 A clean queue exit plus successful wake confirms delivery and auto-acknowledges the batch. A SIGTERM queue timeout has an unknown insertion result: Cito records the queue milestone and proceeds to the wake URL without repeating queue insertion. Failed wake attempts or uncertain insertion produce `delivered_unconfirmed`; these signals stay unread in `cito_inbox()`. Exhausted queue failures stay readable with `held_reason: "driver_unavailable"`.
 
 `cito_inbox()` drains up to 50 unread signals by default. Use `cito_inbox({ack_all: false})` to peek. Inbox and unlisten support archived or missing threads via retained local session metadata. The native HUD opens `codex://threads/<id>` when clicked; it never reads or writes SQLite.
+
+## Claude Code (`claude`)
+
+Claude Code has no queue CLI and no wake URL scheme, so a wake is a durable queue plus a hook that drains it at the next turn boundary. The integration is two pieces, both optional on their own:
+
+1. **`cito-mcp` as a stdio MCP server inside Claude Code**, with `CITO_CLAUDE_CHANNEL=1`. It binds `${CITO_STATE_DIR}/sockets/claude-pid-<claude-pid>.sock`, advertises `experimental: {"claude/channel": {}}` on the initialize result, and owns the session's wake queue.
+2. **`bin/cito-claude-hook` on the `Stop`, `SessionStart` and `UserPromptSubmit` hooks.** `Stop` is the only boundary that can restart an idle turn, so it is the one that actually wakes a finished session.
+
+```json
+{
+  "mcpServers": {
+    "cito": {
+      "command": "/absolute/path/to/cito/bin/cito-mcp",
+      "args": [],
+      "env": { "CITO_CLAUDE_CHANNEL": "1", "CITO_STATE_DIR": "/Users/you/.cito" }
+    }
+  }
+}
+```
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/cito/bin/cito-claude-hook" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/cito/bin/cito-claude-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/absolute/path/to/cito/bin/cito-claude-hook" }] }]
+  }
+}
+```
+
+The channel is **opt-in only**: without `CITO_CLAUDE_CHANNEL=1` the stdio forwarder behaves exactly as before and binds no second bridge inside an unrelated harness.
+
+Identity needs no metadata. The MCP server is a child of Claude Code, so the daemon's parent-PID walk finds the bridge and `cito_listen({about: "Review service changes"})` enrolls directly. The session identifier is `CLAUDE_SESSION_ID` when the host exports it, otherwise the newest transcript under `CITO_CLAUDE_HOME/projects/<slugged-cwd>/<session>.jsonl`, otherwise `claude-<claude-pid>`. It is re-resolved per request, so `/clear` reads as a switched session instead of a silently redirected one.
+
+Direct Streamable HTTP clients that have no Cito child process claim a session explicitly with `_meta.claudeSessionId` (aliases: `claude_session_id`, HTTP header `x-claude-session-id`). Conflicting claims, or a session claim combined with a top-level bridge PID, return `INVALID_INPUT`. A claimed session resolves its workspace from `_meta.cwd`, the HTTP client's OS working directory, retained session cwd, then the daemon's cwd, with Git metadata enrichment. A transcript on disk outlives the process that wrote it, so liveness stays with the socket bridge and a missing transcript never closes a listener.
+
+On notification the driver appends the frozen wake card to `${CITO_STATE_DIR}/claude/wakes/<session>.jsonl` with `fsync`, deduplicating by batch ID, and returns `delivered_unconfirmed`: the queue write is durable, but only the hook proves the model saw the card, so the signal stays unread in `cito_inbox()`. The hook drains the queue atomically — rename-then-read, so an append that races a drain recreates the queue instead of losing a card, and a drain that died before unlinking leaves a staging file for the next run to recover. It then returns `{"decision": "block", "reason": "<cards>"}` on `Stop`, or `additionalContext` on `SessionStart` / `UserPromptSubmit`. Events that cannot carry text back into the turn never drain the queue, and any hook failure reports on stderr and stays neutral rather than breaking the session.
+
+Badges are files, not IPC: `cito` writes `🔔 <slug> (<unread>)` to `${CITO_STATE_DIR}/claude/badges/<session>` and removes it with the session, so an optional `statusLine` command can render it. Install only the MCP server and cards still queue and still arrive through `cito_inbox()`; install only the hook and nothing is ever queued to drain.
 
 ## macOS Menu Bar Extra (`cito-ui`)
 
@@ -271,10 +310,6 @@ For hosts that only confirm queue/channel submission, register `new SocketBridge
 
 For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`, then call `registerAdapter(customAdapter)` from `src/adapters/index.ts` in your in-process entrypoint. Implement `probe`, `deliver`, and optional `updateBadge`; delivery returns `delivered`, `delivered_unconfirmed`, `driver_unavailable`, or `session_switched`. Use `ctx.runEffect` for each external effect so retries preserve cancellation and ownership fencing. Only return `delivered` after confirmed host insertion. Use `CitoService.create(config?, options?)`, `service.call(name, args, meta)`, and `await service.close()`; `createMcpServer(service)` supplies SDK handlers and `startHttpServer(config, service)` exposes them over loopback HTTP. An optional `detectExplicitCaller(ctx, config)` hook can resolve non-socket identity using generic context; multiple explicit adapter claims or a concurrent bridge PID claim return `INVALID_INPUT`. Socket-backed harnesses use the existing identity discovery protocol.
 
-### Claude Code (Proposed Design Suggestion Only — Not Yet Implemented)
-
-**Claude Code integration is a Proposed Design Suggestion Only — Not Yet Implemented.** See [DESIGN.md §6](docs/DESIGN.md#6-proposed-design-for-claude-code-integration-design-suggestion-only-not-yet-implemented) for the architectural design suggestion. No Claude Code adapter registration, CLI flag, or UI code is implemented in `src/`.
-
 ## Environment
 
 | Variable | Default / requirement |
@@ -292,6 +327,8 @@ For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`,
 | `CITO_HOST_NAME` | OS hostname, at most 128 printable ASCII characters. |
 | `CITO_CODEX_HOME` | `~/.codex`; reads only explicitly identified threads. |
 | `CITO_CODEX_BIN` | `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`. |
+| `CITO_CLAUDE_HOME` | `~/.claude`; reads only session transcript names under `projects/`. |
+| `CITO_CLAUDE_CHANNEL` | Unset/`0`; `1` makes `cito-mcp` stdio bind the Claude Code wake channel. Opt-in only. |
 | `CITO_OPEN_BIN` | `/usr/bin/open`; configurable Codex wake executable. |
 | `CITO_AUTH_CALLOUT_ISSUER_SEED` | Responder only: required `SA...` Account signing seed. |
 | `CITO_AUTH_CALLOUT_PASSWORD` | Responder/bootstrap only: exempt service password. |
@@ -299,4 +336,4 @@ For non-socket drivers, implement `HarnessAdapter` from `src/adapters/types.ts`,
 
 OIDC verifies signatures before caching tokens and the offline principal (`0600`). Online connections verify cached tokens again. Per-hub rejected-token recovery rechecks under its in-memory mutex, refreshes silently, and falls back to S256 loopback PKCE only for missing refresh credentials or HTTP 400/401. Refresh network/5xx failures return `AUTH_UNAVAILABLE` without opening a browser. Lock wait and login share a 45-second deadline. Broker reconnect authorization failures defer login until the next online tool call.
 
-Cito installs no LaunchAgent automatically and uses NATS for cross-host delivery. The local HTTP endpoint exposes MCP only; keep it on loopback. See [DESIGN.md](docs/DESIGN.md) for the V8 architecture specification and the unimplemented Claude Code design suggestion.
+Cito installs no LaunchAgent automatically and uses NATS for cross-host delivery. The local HTTP endpoint exposes MCP only; keep it on loopback. See [DESIGN.md](docs/DESIGN.md) for the architecture specification, including the Claude Code wake channel in §6.

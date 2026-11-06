@@ -7,16 +7,14 @@
 1. **Multiple NATS Hubs** (e.g., a personal Tailscale no-auth hub `personal` and a team OIDC hub `work` simultaneously),
 2. **Users** (e.g., `alice`, `bob`, scaling to $U = 50\dots 500+$ team members),
 3. **Hosts / Machines** (e.g., `macbook-work`, `macbook-personal`),
-4. **Extensible Agent Harnesses** (shipped in code: **Pi Coding Agent** and **ChatGPT / Codex Desktop App**; open extensible adapter interface for future harnesses, with **Claude Code** documented strictly as a design suggestion in **Section 6**), and
+4. **Extensible Agent Harnesses** (shipped in code: **Pi Coding Agent**, **ChatGPT / Codex Desktop App** and **Claude Code** (**Section 6**); open extensible adapter interface for further harnesses), and
 5. **Concurrent Conversations** within the same repository or working directory (scaling to $N = 100\dots 2,000+$ online agents across a network).
 
-### 1.2 Language, Neutral Naming & Zero Half-Baked Code Policy
+### 1.2 Language, Neutral Naming & Complete-Integration Policy
 - **English-Only UI/UX, Code, and Documentation**: All user-facing UI/UX surfaces (menu bar labels, buttons, tooltips, HUD banners, directory panel, in-chat wake cards, status badges), error messages, source comments, and repository documentation (`README.md`, `docs/**`, `deploy/**`) MUST be written in English.
 - **Zero Company- or Environment-Specific Names**: No internal company, hub, identity-provider, project, or colleague names (such as `rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`) may appear anywhere in source code, UI, configuration defaults, tests, or documentation. All examples and tests use neutral generic names (`personal`, `work`, `cloud`, `alice`, `bob`, `acme/service`, `https://id.example.com`).
-- **Zero Half-Baked Claude Code Implementation in Source**: Claude Code integration is a **Proposed Design Suggestion Only — Not Yet Implemented** (Section 6). Source files (`src/**`) and test files (`tests/**`) MUST NOT contain half-implemented `claude` adapters, `enableClaudeChannel` config flags, `CITO_CLAUDE_CHANNEL` environment branches, or `"claude"` UI icon special cases:
-  - Delete `src/adapters/claude-channel.ts` and `tests/adapters/claude-channel.test.ts`;
-  - Delete `tests/e2e/claude-channel.test.ts` after migrating its generic transport-independent regression checks (600-message burst pagination, 256 KiB batch byte-ceiling splitting, 70 KB oversized sender title handling, and plain `cito-mcp` stdio forwarding/shutdown) into `tests/mcp/dispatch.test.ts` / `tests/e2e/lifecycle.test.ts` under `pi`;
-  - Remove `registerAdapter(new SocketBridgeAdapter("claude", ...))` from `src/adapters/index.ts`, `enableClaudeChannel` / `CITO_CLAUDE_CHANNEL` from `src/shared/config.ts` and `src/mcp/cli.ts`, `case "claude":` from `src/macos/cito-ui.swift`, the channel config test from `tests/shared/multi-hub.test.ts`, and replace `"claude"` with `"custom"` in `tests/adapters/pi.test.ts` and `tests/ui/lifecycle.test.ts`.
+- **No Half-Baked Harness Integration in Source**: A harness named in Section 1.1 MUST ship complete: a registered adapter, the host half that binds its endpoint, the delivery effect that actually reaches the model, and tests that exercise the whole path. A harness that cannot meet that bar stays out of `src/**` and `tests/**` entirely and is documented as a design suggestion instead. For Claude Code (Section 6) the complete set is `src/adapters/claude.ts`, `src/adapters/claude-channel.ts`, `src/claude-hook/cli.ts`, `bin/cito-claude-hook`, `registerAdapter(new ClaudeCodeAdapter())` in `src/adapters/index.ts`, `claudeHome` / `enableClaudeChannel` in `src/shared/config.ts`, the channel start in `src/mcp/cli.ts`, `case "claude":` in `src/macos/cito-ui.swift`, and `tests/adapters/claude.test.ts`, `tests/adapters/claude-channel.test.ts`, `tests/claude-hook/cli.test.ts` plus the stdio channel case in `tests/e2e/lifecycle.test.ts`.
+- **Opt-In Host Channels**: A host channel that binds a second bridge socket from inside another process (Section 6) MUST be explicitly opt-in (`CITO_CLAUDE_CHANNEL=1`). Auto-detection from host environment variables is forbidden: it would bind an unrelated harness's endpoint and silently capture its caller binding.
 
 ---
 
@@ -29,7 +27,8 @@
 - **Protocol Version Negotiation (`src/mcp/server.ts`)**:
   - Registers `'2026-07-28'` in `SUPPORTED_PROTOCOL_VERSIONS` alongside `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`, and `2024-10-07`.
 - **Default Registered Adapters (`src/adapters/index.ts`)**:
-  - Registers only `new CodexDesktopAdapter()` and `new SocketBridgeAdapter("pi")` at startup, while `getAdapter(harness)` dynamically instantiates `new SocketBridgeAdapter(harness)` for any valid custom harness ID matching `^[a-z][a-z0-9_-]{0,31}$`.
+  - Registers `new CodexDesktopAdapter()`, `new ClaudeCodeAdapter()` and `new SocketBridgeAdapter("pi")` at startup, while `getAdapter(harness)` dynamically instantiates `new SocketBridgeAdapter(harness)` for any valid custom harness ID matching `^[a-z][a-z0-9_-]{0,31}$`.
+  - Per-harness candidate ordering in `discoverAllAvailableSessions` ranks `pi` $\to$ `codex` $\to$ `claude` $\to$ custom harnesses alphabetically.
 
 ### 2.2 Scalable NATS KV Discovery (`HubDirectoryIndex` in `src/mcp/service.ts`)
 To scale `cito_find` and UI discovery to $U = 500+$ users and $N = 2,000+$ online agents without $O(K)$ sequential `broker.kv.get(key)` round-trips or $O(U \cdot N)$ continuous heartbeat broadcast fanout to idle desktops:
@@ -262,6 +261,7 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
    - `tsconfig.json` enables `"erasableSyntaxOnly": true`, and all classes in `src/` use explicit field declarations and constructor assignments instead of TypeScript parameter properties (`constructor(readonly ...)`), allowing Node.js (`^22.13.0 || ^24.0.0 || >=26.0.0`) to execute `src/**/*.ts` directly via built-in TypeScript type-stripping.
    - `bin/cito-mcp` and `bin/cito-auth-callout` resolve `../dist/src/.../cli.js` first when present; when `dist/` is absent, they register a built-in `node:module.register` hook that maps relative `.js` specifiers (`./*.js`, `../*.js`) to `.ts` on `ERR_MODULE_NOT_FOUND` and import `../src/mcp/cli.ts` / `../src/auth-callout/cli.ts` directly without `tsx`.
    - `"tsx"` is kept only in `"devDependencies"` (never in `"dependencies"`), eliminating `esbuild` and `fsevents` install scripts from production and global installs.
+   - `bin/cito-claude-hook` (Section 6) is a third entrypoint under the same rule and the same `"bin"` map; it resolves `../dist/src/claude-hook/cli.js` first and must never print anything but a hook result object on stdout.
 
 ### 5.3 Versioning, `/health` Handshake & Automatic Stale-Daemon Handover (`src/shared/index.ts`, `src/mcp/server.ts`, `src/mcp/cli.ts`)
 1. **Single Source of Truth (`CITO_VERSION`)**:
@@ -277,11 +277,32 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
 
 ---
 
-## 6. Proposed Design for Claude Code Integration (Design Suggestion Only — Not Yet Implemented)
+## 6. Claude Code Integration (`claude`)
 
-> **Status Notice (Proposed Design Suggestion Only — Not Yet Implemented)**: This section records the architectural design suggestion for future Claude Code integration. No Claude Code-specific adapter registration, CLI flag, or UI code is implemented in `src/`.
+Claude Code exposes no queue CLI and no wake URL scheme, so the delivery effect cannot be a pair of process invocations the way `codex queue` + `codex://threads/wake/<id>` is (Section 3.2). The only surface that can restart an idle Claude Code turn is a **hook**, which runs out-of-band from the MCP server. Delivery is therefore split into a durable queue write the daemon can retry and fence like any other effect, and an injection performed later by the hook at the next turn boundary.
 
-1. **Session Identity & Transport Topology**:
-   - Claude Code sessions can connect either to `cito-daemon`'s stateless Streamable HTTP endpoint (`http://127.0.0.1:4290/mcp`) for pull-based `cito_inbox()` workflows, or through a future local socket bridge (`claude-pid-<pid>.sock`) implementing the standard `SocketBridgeAdapter` protocol (`identify`, `deliver`, `status`).
-2. **Dual-Mode Notification Delivery (Channel Push + Turn-Start Inbox Drain)**:
-   - Future integration can combine MCP channel notifications with turn-start `cito_inbox()` draining while reusing `SocketBridgeAdapter` without changing `src/mcp/` core logic.
+### 6.1 Session Identity & Transport Topology
+- **Host half (`startClaudeChannelBridge` in `src/adapters/claude-channel.ts`)**: started by `src/mcp/cli.ts` in stdio mode when `config.enableClaudeChannel` (`CITO_CLAUDE_CHANNEL=1`, Section 1.2). It binds `${stateDir}/sockets/claude-pid-${process.ppid}.sock` (`0700` directory, `0600` socket) and answers the standard socket bridge protocol (`identify`, `deliver`, `status`), so `ClaudeCodeAdapter extends SocketBridgeAdapter` inherits candidate discovery, probing and badge updates without a second protocol. A failed bind is logged and the MCP forwarder keeps working.
+- **Implicit binding**: the MCP server is a child of Claude Code, so `resolveCaller`'s parent-PID walk reaches `claude-pid-<claude-pid>.sock` within depth 5 and `cito_listen` needs no caller metadata.
+- **Session identifier**, re-resolved on every request so `/clear` reads as `switched` rather than silently redirecting a listener:
+  1. `CLAUDE_SESSION_ID` when the host exports it;
+  2. the newest `${claudeHome}/projects/<slug>/<uuid>.jsonl`, where `<slug>` is the absolute cwd with every non-alphanumeric character replaced by a hyphen, by mtime (`CITO_CLAUDE_HOME`, default `~/.claude`);
+  3. `claude-<endpoint_pid>`.
+  Identifiers become queue file names and are constrained to `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`.
+- **Explicit claims (`ClaudeCodeAdapter.detectExplicitCaller`)** for direct Streamable HTTP callers with no Cito child process: `_meta.claudeSessionId`, `_meta.claude_session_id`, the `x-claude-session-id` HTTP header, and `expected_session_id` when `expected_harness === "claude"`. Multiple distinct claims, or a claim combined with a top-level bridge PID (`endpoint_pid` / `caller_pid` / `pi_pid`), return `INVALID_INPUT`. Workspace resolution is `_meta.cwd` $\to$ the HTTP client's OS working directory $\to$ retained session cwd $\to$ the daemon's cwd, with Git metadata enrichment.
+- **No disk-derived closure**: a transcript outlives the process that wrote it, so a missing or stale transcript MUST NOT produce `closed_definitive`. Liveness belongs to the socket bridge and the endpoint PID alone.
+- **Capability advertisement**: `forward()` adds `experimental: { "claude/channel": {} }` to the initialize result only; every other JSON-RPC message passes through unchanged.
+- **UI**: `harnessVisual` in `src/macos/cito-ui.swift` maps `"claude"` to `("cpu.fill", .systemOrange, "Claude")`.
+
+### 6.2 Two-Phase Delivery (Durable Queue Write + Hook Injection)
+1. **Queue write (synchronous, fenced, retriable)**: `SocketBridgeAdapter.deliver` sends `{op: "deliver", session_id, batch_id, wake, content}`; the bridge appends `{batch_id, content, wake, created_at_ms}` to `${stateDir}/claude/wakes/<session>.jsonl` (`0600`) and `fsync`s **before** replying, because the hook may only run minutes later. Batches are deduplicated over the last 200 `batch_id`s. The adapter is constructed with `confirmDelivery: false`, so a queued card yields `delivered_unconfirmed`: it stays unacknowledged and `cito_inbox()` remains the fallback.
+2. **Injection (`bin/cito-claude-hook`, `src/claude-hook/cli.ts`)**: reads the hook payload on stdin and emits exactly one JSON object on stdout.
+   - `Stop` $\to$ `{"decision": "block", "reason": "<cards joined by a blank line>"}` — the only output that restarts a finished turn.
+   - `SessionStart` / `UserPromptSubmit` $\to$ `{"hookSpecificOutput": {"hookEventName": "<event>", "additionalContext": "<cards>"}}`.
+   - Any other event emits `{}` and MUST NOT drain the queue.
+3. **Atomic drain**: `rename(queue, queue + ".draining-" + randomUUID())`, then read every `*.draining-*` staging file for that session in mtime order, deduplicate by `batch_id`, and unlink. An appender racing a drain recreates the queue instead of losing a card, and a drain that died before unlinking leaves its staging file for the next run to recover. A torn trailing line is skipped, never replayed.
+4. **Neutral failure**: any hook error writes to stderr and still emits `{}` — a notification bus must never break the user's session. A card lost after its drain remains an unacknowledged signal in SQLite and reappears through `cito_inbox()`.
+5. **Badge**: `updateBadge` writes `🔔 <slug> (<unread>)` to `${stateDir}/claude/badges/<session>` (`0600`) and removes it when the badge clears or the bridge closes, so an optional `statusLine` command can render it. Badges are never pushed into the transcript.
+
+### 6.3 Operator-Owned Host Configuration
+Cito installs no hooks and never edits Claude Code settings, matching its LaunchAgent policy. The operator adds `cito-mcp` with `CITO_CLAUDE_CHANNEL=1` to `mcpServers` and `bin/cito-claude-hook` to the `Stop`, `SessionStart` and `UserPromptSubmit` hooks; `README.md` carries the exact configuration. Each half degrades alone: with only the MCP server, cards queue and arrive through `cito_inbox()`; with only the hook, nothing is ever queued to drain.

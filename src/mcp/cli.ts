@@ -5,6 +5,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { CITO_VERSION, loadConfig, type CitoConfig } from "../shared/index.js";
+import { startClaudeChannelBridge } from "../adapters/claude-channel.js";
 import { readCodexThreadOptional, resolveCodexThreadId } from "../adapters/codex.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
@@ -202,16 +203,21 @@ export async function main(): Promise<void> {
   const stdio = new StdioServerTransport();
   const http = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${config.daemonPort}/mcp`));
   const report = (error: unknown) => { console.error(error); process.exitCode = 1; };
+  // An unbindable wake channel must never keep the MCP server itself from forwarding.
+  const channel = config.enableClaudeChannel
+    ? await startClaudeChannelBridge(config, stdio).catch(error => { console.error(error); return undefined; })
+    : undefined;
   let stopped = false, stopping: Promise<void> | undefined;
   const stop = () => stopping ??= (async () => {
     stopped = true;
     process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
     process.stdin.removeListener("end", onSignal);
+    await channel?.close();
     await http.close(); await stdio.close();
     process.stdout.destroy();
   })();
   const onSignal = () => { void stop().catch(report); };
-  http.onmessage = message => { if (!stopped) void stdio.send(message).catch(report); };
+  http.onmessage = message => { if (!stopped) void stdio.send(channel ? channel.forward(message) : message).catch(report); };
   stdio.onmessage = message => { if (stopped) return; void http.send(message).catch(error => {
     if ("id" in message) void stdio.send({ jsonrpc: "2.0", id: message.id!, error: { code: -32603, message: String(error) } }).catch(report);
     else report(error);

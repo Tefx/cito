@@ -11,7 +11,8 @@
   "bin": {
     "cito": "bin/cito-mcp",
     "cito-mcp": "bin/cito-mcp",
-    "cito-auth-callout": "bin/cito-auth-callout"
+    "cito-auth-callout": "bin/cito-auth-callout",
+    "cito-claude-hook": "bin/cito-claude-hook"
   },
   "pi": {
     "extensions": [

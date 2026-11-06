@@ -121,6 +121,12 @@ describe("configuration and machine identity", () => {
     expect(loadConfig({ CITO_CODEX_BIN: "/tmp/custom-codex" }).codexBin).toBe("/tmp/custom-codex");
     expect(config.stateDir).toBe(join(process.env.HOME!, ".cito"));
     expect(config.codexHome).toBe(join(process.env.HOME!, ".codex"));
+    expect(config.claudeHome).toBe(join(process.env.HOME!, ".claude"));
+    expect(loadConfig({ CITO_CLAUDE_HOME: "/tmp/custom-claude" }).claudeHome).toBe("/tmp/custom-claude");
+    // The Claude wake channel binds a second bridge socket, so it stays strictly opt-in.
+    expect(config.enableClaudeChannel).toBe(false);
+    expect(loadConfig({ CITO_CLAUDE_CHANNEL: "1" }).enableClaudeChannel).toBe(true);
+    expect(loadConfig({ CITO_CLAUDE_CHANNEL: "0" }).enableClaudeChannel).toBe(false);
     expect(loadConfig({ CITO_NATS_URL: "wss://nats.example/ws" }).natsUrl).toBe("wss://nats.example/ws");
     expect(loadConfig({ CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "http://127.0.0.1:9999/", CITO_OIDC_CLIENT_ID: "cito" }).oidcIssuer).toBe("http://127.0.0.1:9999");
     for (const env of [
@@ -128,7 +134,7 @@ describe("configuration and machine identity", () => {
       { CITO_AUTH_MODE: "oidc" }, { CITO_OIDC_ISSUER: "https://issuer" },
       { CITO_OIDC_ISSUER: "http://remote", CITO_OIDC_CLIENT_ID: "cito" },
       { CITO_OIDC_ISSUER: "https://issuer?bad", CITO_OIDC_CLIENT_ID: "cito" },
-      { CITO_STATE_DIR: "" },
+      { CITO_STATE_DIR: "" }, { CITO_CLAUDE_HOME: " " },
     ]) expect(() => loadConfig(env)).toThrow();
   });
   it("exposes a validated CITO_USER and passes it to canonical local identity", () => {
