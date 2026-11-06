@@ -43,6 +43,53 @@ export async function resolveClaudeSessionId(cwd: string, config: ClaudeConfig =
   }
   return newest?.id;
 }
+/**
+ * Claude Code names a session with `custom-title` records appended to its transcript, so the newest
+ * one is the title the user sees. Transcripts reach hundreds of megabytes, and `identify` answers
+ * under a sub-second budget, so only the tail is read: a session titled once and never again since
+ * falls back to the workspace name rather than making discovery pay for the whole file.
+ */
+const TITLE_TAIL_BYTES = 128 * 1024;
+const TITLE_MAX_CHARS = 200;
+const TITLE_CACHE_ENTRIES = 32;
+const titleCache = new Map<string, { size: number; mtimeMs: number; title: string | undefined }>();
+export async function resolveClaudeSessionTitle(cwd: string, sessionId: string,
+  config: ClaudeConfig = loadConfig()): Promise<string | undefined> {
+  if (!TRANSCRIPT_ID.test(sessionId)) return undefined;
+  const path = join(claudeProjectDir(cwd, config), `${sessionId}.jsonl`);
+  let info;
+  try { info = await stat(path); } catch { return undefined; }
+  if (!info.isFile()) return undefined;
+  const cached = titleCache.get(path);
+  if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return cached.title;
+  const start = Math.max(0, info.size - TITLE_TAIL_BYTES);
+  let text: string;
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(Math.min(info.size, TITLE_TAIL_BYTES));
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
+    text = buffer.subarray(0, bytesRead).toString("utf8");
+  } finally { await file.close(); }
+  const lines = text.split("\n");
+  // A non-zero start almost certainly lands mid-line, and a partial line is not parseable JSON.
+  if (start > 0) lines.shift();
+  let title: string | undefined;
+  for (let i = lines.length - 1; i >= 0 && title === undefined; i--) {
+    const line = lines[i]!;
+    if (!line.includes('"custom-title"')) continue;
+    try {
+      const record: unknown = JSON.parse(line);
+      if (typeof record !== "object" || record === null) continue;
+      const row = record as Record<string, unknown>;
+      if (row.type !== "custom-title" || !nonempty(row.customTitle)) continue;
+      const cleaned = row.customTitle.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+      if (cleaned) title = [...cleaned].slice(0, TITLE_MAX_CHARS).join("");
+    } catch { /* A truncated or malformed record is not a title. */ }
+  }
+  if (titleCache.size >= TITLE_CACHE_ENTRIES) titleCache.delete(titleCache.keys().next().value!);
+  titleCache.set(path, { size: info.size, mtimeMs: info.mtimeMs, title });
+  return title;
+}
 /** Explicit session claims from tool metadata or an HTTP header, with the same conflict rules as Codex threads. */
 export function claudeSessionClaim(meta: Record<string, unknown> = {},
   headers?: Record<string, string | string[] | undefined>): string | undefined {

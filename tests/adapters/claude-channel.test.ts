@@ -47,6 +47,17 @@ test("the bridge identifies its hosting session, queues one card per batch and r
   await expect(requestBridge(path, { op: "sabotage", session_id: SESSION }, 2000)).rejects.toMatchObject({ code: "PI_BRIDGE_UNAVAILABLE" });
   expect(await peekClaudeWakes(config, SESSION)).toHaveLength(2);
 });
+test("identify reports the title the user gave the session, not the workspace folder", async () => {
+  const { f, config } = await bridge({ transcript: SESSION });
+  const path = join(claudeProjectDir(f.root, config), SESSION + ".jsonl");
+  await writeFile(path, JSON.stringify({ type: "custom-title", customTitle: "Claude adapter review" }) + "\n");
+  expect(await identifyBridge("claude", process.pid, config)).toMatchObject({
+    session_id: SESSION, session_name: "Claude adapter review", cwd: f.root,
+  });
+  // A transcript that carries no title leaves discovery with the workspace name it had before.
+  await writeFile(path, '{"type":"user"}\n');
+  expect((await identifyBridge("claude", process.pid, config)).session_name).toBe(basename(f.root));
+});
 test("an explicit session id wins over the transcript scan and a workspace with no transcript still binds", async () => {
   const explicit = await bridge({ transcript: SESSION, env: { CLAUDE_SESSION_ID: "env-session" } });
   expect(await explicit.channel.sessionId()).toBe("env-session");

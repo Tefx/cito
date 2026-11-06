@@ -4,7 +4,7 @@ import { createServer, type Socket } from "node:net";
 import { basename, dirname } from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { CitoConfig } from "../shared/index.js";
-import { CLAUDE_HARNESS, appendClaudeWake, resolveClaudeSessionId, validateClaudeSessionId, writeClaudeBadge } from "./claude.js";
+import { CLAUDE_HARNESS, appendClaudeWake, resolveClaudeSessionId, resolveClaudeSessionTitle, validateClaudeSessionId, writeClaudeBadge } from "./claude.js";
 import { bridgeSocketPath, requestBridge } from "./pi.js";
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -50,8 +50,10 @@ export async function startClaudeChannelBridge(config: CitoConfig,
     if (closed) return { ok: false, error: "BRIDGE_CLOSED" };
     const current = await sessionId();
     if (request.op === "identify") {
+      // The transcript title is what the user named this session; the workspace name is the fallback.
+      const name = await resolveClaudeSessionTitle(cwd, current, config).catch(() => undefined);
       return { ok: true, endpoint_pid: endpoint, session_id: current,
-        session_name: basename(cwd), cwd, updated_at_ms: lastActiveMs };
+        session_name: name ?? basename(cwd), cwd, updated_at_ms: lastActiveMs };
     }
     if (request.session_id !== current) return { ok: false, error: "SESSION_MISMATCH" };
     if (request.op === "status") {

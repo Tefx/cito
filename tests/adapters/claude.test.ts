@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from "vitest";
-import { mkdir, readFile, rename, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isolatedState, unixServer } from "./support.js";
 import { loadConfig, type CitoConfig } from "../../src/shared/index.js";
 import {
   ADAPTER_REGISTRY, ClaudeCodeAdapter, appendClaudeWake, claudeBadgePath, claudeProjectDir, claudeSessionClaim,
   claudeWakeQueuePath, drainClaudeWakes, getAdapter, peekClaudeWakes, resolveCaller, resolveClaudeSessionId,
-  validateClaudeSessionId, writeClaudeBadge,
+  resolveClaudeSessionTitle, validateClaudeSessionId, writeClaudeBadge,
 } from "../../src/adapters/index.js";
 import type { DeliverContext } from "../../src/adapters/types.js";
 import type { ListenerRow } from "../../src/mcp/state.js";
@@ -40,6 +40,42 @@ test("the newest transcript names the running session and unrelated files never 
   expect(await resolveClaudeSessionId(f.root, config)).toBe(SESSION);
   await transcript(f.claudeHome, f.root, OLDER, 1_900_000_000_000);
   expect(await resolveClaudeSessionId(f.root, config)).toBe(OLDER);
+});
+test("the newest custom-title names the session, and an untitled or unreadable transcript has none", async () => {
+  const f = await isolatedState(); cleanups.push(() => f.cleanup());
+  const config = loadConfig(f.env);
+  const dir = claudeProjectDir(f.root, config);
+  await mkdir(dir, { recursive: true });
+  const write = async (id: string, body: string) => { await writeFile(join(dir, id + ".jsonl"), body); };
+  const record = (title: string) => JSON.stringify({ type: "custom-title", customTitle: title });
+  // The last record wins, unrelated and malformed lines are skipped, and control characters are flattened.
+  await write(SESSION, [
+    record("First name"), '{"type":"user"}', "{not json",
+    JSON.stringify({ type: "custom-title" }), JSON.stringify({ type: "custom-title", customTitle: "   " }),
+    record("Review\u0007 the\tadapter"), '{"type":"assistant"}', "",
+  ].join("\n"));
+  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Review  the adapter");
+  await write(OLDER, '{"type":"user"}\n');
+  expect(await resolveClaudeSessionTitle(f.root, OLDER, config)).toBeUndefined();
+  expect(await resolveClaudeSessionTitle(f.root, "66666666-6666-6666-6666-666666666666", config)).toBeUndefined();
+  // A session id that is not a transcript name must never be turned into a path.
+  expect(await resolveClaudeSessionTitle(f.root, "claude-123", config)).toBeUndefined();
+  await write(SESSION, record("x".repeat(500)));
+  expect((await resolveClaudeSessionTitle(f.root, SESSION, config))!).toHaveLength(200);
+});
+test("only the transcript tail is read, so a title older than the window yields the workspace fallback", async () => {
+  const f = await isolatedState(); cleanups.push(() => f.cleanup());
+  const config = loadConfig(f.env);
+  const dir = claudeProjectDir(f.root, config);
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, SESSION + ".jsonl");
+  const filler = JSON.stringify({ type: "assistant", text: "y".repeat(4000) }) + "\n";
+  await writeFile(path, JSON.stringify({ type: "custom-title", customTitle: "Ancient" }) + "\n" + filler.repeat(50));
+  expect((await stat(path)).size).toBeGreaterThan(128 * 1024);
+  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBeUndefined();
+  // Appending a fresh title both lands inside the window and invalidates the cached miss.
+  await appendFile(path, JSON.stringify({ type: "custom-title", customTitle: "Current" }) + "\n");
+  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Current");
 });
 test("explicit session claims accept one identifier and reject conflicts or unsafe names", () => {
   expect(claudeSessionClaim({})).toBeUndefined();
