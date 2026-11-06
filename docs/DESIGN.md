@@ -1,4 +1,4 @@
-# Cito Architecture & Protocol Specification (V8 — Ego-Centric Menu Bar Control Plane, Spotlight Network Directory & Scalable NATS KV Discovery)
+# Cito Architecture & Protocol Specification (V9 — Multi-Hub Session Attachment, Atomic Hub Migration, Ego-Centric Menu Bar Control Plane & Spotlight Network Directory)
 
 ## 1. Purpose, Scope, and Non-Goals
 
@@ -154,6 +154,10 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
    - Left: **`Cito`** (`13pt .bold`) + dynamic subtitle (`"1 listening"`, `"1 listening · 2 remote"`, `"Idle · 2 remote"`, or `"Idle"`). Compute `subWidth = ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8`, set subtitle width to `subWidth`, and place `hubStrip` at `x = max(138, 54 + subWidth), width = 368 - max(138, 54 + subWidth)` so the subtitle is never clipped.
 2. **Zone 1 — Active on This Mac (`listeners`)**:
    - `360 × 58/72 pt` rounded cards (`id = "session:\(listener.scoped_id)"`), with radius `10`, `labelColor` fill at `0.07`, and border at `0.11`. Path/branch text uses `secondaryLabelColor`. Capped inside `active_scroll` (`260pt` `FlippedView` `NSScrollView`) when `listeners.count > 4`.
+   - **Multi-Hub Card Switch Pill (`switch_hub:<scoped_id>`, rendered only when `hubs.count > 1`)**:
+     - When `hubs.count <= 1`, no hub switch pill is rendered, keeping `actionWidth` (`114pt` when `can_jump` else `88pt`) and `scope:<scoped_id>` origin (`x = 236` when `can_jump` else `x = 262`) unchanged.
+     - When `hubs.count > 1`, `title` displays `listener.title` (without a static `" · \(listener.hub)"` suffix), and an interactive `MenuControl` pill (`id = "switch_hub:\(listener.scoped_id)"`, `style = .neutral`, `height = 22 pt`, `radius = 6 pt`, `width = min(76, max(46, ceil(measureTextWidth(listener.hub, font: btnFont)) + 22))`) is placed `4 pt` to the left of `scope:\(listener.scoped_id)`. The pill contains a `6 × 6 pt` status dot (`x: 7, y: 8, radius: 3`) reflecting that hub's connection status and `listener.hub` text starting at `x: 16`. `actionWidth` includes `hubPillWidth + 4` so `title` width (`350 - 54 - actionWidth - 6`) never overlaps the right-aligned controls.
+     - Clicking `switch_hub:<scoped_id>` selects the next target hub in `hubs` ring order (`(currentIndex + 1) % hubs.count`, preferring connected hubs where the same `(harness, session_id)` is not already listening, falling back to the next hub with `name != listener.hub`), sets `pendingMutation = true`, and emits `["op": "switch_hub", "from_hub": listener.hub, "to_hub": nextHub, "listener_id": listener.listener_id]`.
    - When `listeners.isEmpty && !available.isEmpty`, renders the `380 × 34 pt` compact strip (`id = "empty"`, `"No active listeners — click + Listen below"`).
 3. **Zone 2 — My Other Hosts (`my_remote_listeners`, shown when `!myRemote.isEmpty`)**:
    - Contains only active registrations from connected hubs where `reg.principal_id === principal.principal_id && reg.host_id !== this.hostId`.
@@ -163,10 +167,20 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
      - Right (`NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20)`): `MenuControl(short, ..., leadingSymbol: "doc.on.doc")` (`id = "copy_remote:\(peer.scoped_id)"`), copying `peer.scoped_id` with `"✓ Copied"` feedback.
      - Center (`NSRect(x: 36, y: 8, width: 368 - copyWidth - 44, height: 18)`): `"\(cleanHost) · \(peer.title)" + (branchSuffix)` (`12pt .regular`, `.labelColor`, `toolTip = "\(peer.scoped_id) — \(peer.about)"`).
      - Capped inside `my_remote_scroll` (`102pt` = 3 rows) when `myRemote.count > 3`.
-4. **Zone 3 — Available Sessions with Collapsible Harness Groups (`!available.isEmpty`)**:
-   - **Section Header (`380 × 24 pt`, `id = "available_header"`)**: `1pt` divider + `"AVAILABLE SESSIONS"` (`10pt .semibold`).
+4. **Zone 3 — Available Sessions with Per-Hub Target Selector & Collapsible Harness Groups (`!available.isEmpty`)**:
+   - **Multi-Hub Candidate Retention (`listening_hubs`)**:
+     - `AvailableSessionSummary` (`src/adapters/types.ts`, re-exported from `src/ui/index.ts`) includes optional `listening_hubs?: string[]`.
+     - Both `discoverAllAvailableSessions` (`src/adapters/index.ts`) and `CitoService.pushUiState()` (`src/mcp/service.ts`) compute `listening_hubs` for each local candidate session from matching active listeners (`r.harness === c.harness && (r.session_id === c.session_id || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid))`). A candidate is excluded only when it matches an active listener without a `hub` field (legacy unit-test callers) or when `listening_hubs` covers all configured hubs (`Object.keys(config.hubs)` / `this.slots.size`).
+   - **Section Header (`380 × 24 pt`, `id = "available_header"`)**:
+     - Top `1pt` divider (`NSRect(x: 12, y: 21, width: 356, height: 1)`) + `"AVAILABLE SESSIONS"` (`10pt .semibold`, `width: 220` when `hubs.count <= 1`, `width: 124` when `hubs.count > 1`).
+     - **Target Hub Selector Pills (`target_hub:<hub>`, rendered when `hubs.count > 1`)**:
+       - `Companion` tracks `selectedTargetHub: String = ""`, with `effectiveTargetHub` resolving `selectedTargetHub` if present in `hubs`, else the first connected hub with at least one unmounted candidate (`!($0.listening_hubs ?? []).contains(hub.name)`), else the first connected hub or `hubs.first?.name ?? ""`.
+       - Right side of `available_header` hosts a horizontal `NSScrollView` (`NSRect(x: 140, y: 2, width: 228, height: 18)`, `drawsBackground = false`, hidden scrollers) containing `18 pt`-tall (`radius: 9`) `MenuControl` pills (`id = "target_hub:\(hub.name)"`, `style = hub.name == effectiveTargetHub ? .prominent : .neutral`). Clicking a pill sets `selectedTargetHub = hub.name` and calls `rebuild()`.
+   - **Per-Target-Hub Candidate Filtering**:
+     - Candidates displayed under Zone 3 are filtered by `visibleAvailable = available.filter { !($0.listening_hubs ?? []).contains(effectiveTargetHub) }`.
+     - When `!available.isEmpty && visibleAvailable.isEmpty` (all discovered local sessions are already listening on `effectiveTargetHub`, while another configured hub still has unmounted sessions), `available_header` remains visible and a compact `380 × 28 pt` status row (`id = "available_empty_target"`, `"All sessions listening on \(effectiveTargetHub)"`) is rendered below it so the user can switch `target_hub:<hub>`.
    - **Collapsible Harness Group Header (`380 × 28 pt`, `id = "group:\(harness)"`)**:
-     - Partition `available` by `harness` in deterministic order (`"pi"`, `"codex"`, then any other harness alphabetically).
+     - Partition `visibleAvailable` by `harness` in deterministic order (`"pi"`, `"codex"`, then any other harness alphabetically).
      - Interactive `MenuControl` (`id = "toggle_group:\(harness)"`, `NSRect(x: 8, y: 2, width: 364, height: 24)`, `radius: 6`):
        - Disclosure chevron (`x: 6, y: 7, width: 10, height: 10`): `collapsedGroups.contains(harness) ? "chevron.right" : "chevron.down"`.
        - Filled harness icon badge (`18 × 18 pt` at `x: 20, y: 3, radius: 5`, tint fill at `0.88`, white border at `0.18`, white icon): `"terminal.fill"` (`.systemIndigo`) for `pi`, `"sparkles"` (`.systemTeal`) for `codex`, `"bolt.horizontal.fill"` (`.systemBlue`) for others.
@@ -174,7 +188,7 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
        - Clicking toggles `collapsedGroups` membership for `harness` and calls `rebuild()` in-place.
    - **Icon-Free Candidate Rows (`380 × 36 pt`, `id = "candidate:\(c.harness):\(c.session_id)"`, shown when `!collapsedGroups.contains(harness)`)**:
      - Text label (`NSRect(x: 24, y: 9, width: 274, height: 18)`): `"\(c.title) · \(shortCwd)\(branchSuffix)"` (`12pt .regular`, `.byTruncatingMiddle`, `toolTip = "\(c.title) — \(c.cwd)"`).
-     - Right button (`NSRect(x: 304, y: 7, width: 64, height: 22)`): `MenuControl("Listen", ..., leadingSymbol: "plus")` (`id = "listen:\(c.harness):\(c.session_id)"`).
+     - Right button (`NSRect(x: 304, y: 7, width: 64, height: 22)`): `MenuControl("Listen", ..., leadingSymbol: "plus")` (`id = "listen:\(c.harness):\(c.session_id)"`). When `hubs.count > 1 && !effectiveTargetHub.isEmpty`, clicking emits `"hub": effectiveTargetHub` in the `listen_session` action payload; when `hubs.count <= 1`, `"hub"` is omitted for single-hub backward compatibility.
      - **Scroll Container ID Rule**: When `items.count > 4` within an expanded group, host its candidate rows inside an `NSScrollView` (`width: 380, height: 144 pt`, `FlippedView` document height `items.count * 36 pt`) with `id = groupedCandidates.count == 1 ? "available_scroll" : "available_scroll:\(harness)"` (preserving `"available_scroll"` when a single group is present and disambiguating `"available_scroll:\(harness)"` when multiple groups exist).
 5. **Zone 4 — Network Directory Launcher Row (`380 × 34 pt`, `id = "directory_row"`, rendered when `!hubs.isEmpty`)**:
    - Top `1pt` hairline divider (`x: 12, y: 32, width: 356`).
@@ -182,7 +196,7 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
      - Label: `"Search Network Directory…"` (`11.5pt .medium`) + right-aligned count badge (when `directoryOnlineCount > 0`): `"\(directoryOnlineCount) online"` (`11pt .regular`, `.secondaryLabelColor`).
      - Clicking calls `cardMenu.cancelTracking()`, opens `DirectoryPanel` (`openDirectoryPanel()`), and emits `["op": "query_directory", "query": directoryQuery, "scope": directoryScopeFilter, "harness": directoryHarnessFilter]`.
 6. **`menuActions` Index Stability**:
-   - Do **NOT** append `toggle_my_remote`, `copy_remote:*`, `toggle_group:*`, or `open_directory` to `menuActions` (they are invoked via `test_control` by `id`). Only existing listener/footer/hub actions (`0..9`) plus `candidateActions` (appended after `quit`) are registered in `menuActions`.
+   - Do **NOT** append `switch_hub:*`, `target_hub:*`, `toggle_my_remote`, `copy_remote:*`, `toggle_group:*`, or `open_directory` to `menuActions` (they are invoked via `test_control` by `id`). Only existing listener/footer/hub actions (`0..9`) plus `candidateActions` (appended after `quit`) are registered in `menuActions`.
 
 ---
 
@@ -221,7 +235,8 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
 1. **`UiBridge` & `DaemonToUiMessage` (`src/ui/index.ts`)**:
    - `UiBridge.state(hubs, listeners, available = [], myRemoteListeners = [], directoryOnlineCount = 0)` defaults optional parameters so existing 2- or 3-argument callers in `tests/ui/lifecycle.test.ts` remain 100% compatible.
    - `UiBridge.directory(peers: UiRemotePeerSummary[], matchedCount = peers.length, onlineCount = peers.length)` sends `{ op: "directory", peers, matched_count: matchedCount, online_count: onlineCount }` and caches the latest directory frame for replay on child restart.
-   - `validAction()` accepts `{ op: "open_directory" }`, `{ op: "close_directory" }`, and `{ op: "query_directory", query?: string, scope?: "all" | "mine", harness?: string }` before the `a.hub` check.
+   - `validAction()` accepts `{ op: "open_directory" }`, `{ op: "close_directory" }`, `{ op: "query_directory", query?: string, scope?: "all" | "mine", harness?: string }`, and `{ op: "switch_hub", from_hub: string, to_hub: string, listener_id: string }` (validating `from_hub` and `to_hub` with `hubNameSchema`, requiring `from_hub !== to_hub`, and validating `listener_id` with `canonicalListenerIdSchema`) before the generic `a.hub` check. `listen_session` additionally accepts optional `hub?: string` (`hubNameSchema`) and `scope?: "self" | "workspace"`.
+   - `CitoService.handleUiAction` handles `switch_hub` inside a dedicated per-session `switchMutex` (`${harness}:${session_id}`): it verifies the source listener is still live in `liveActiveRows()`, checks whether the target hub already has a live listener for that session in `liveActiveRows()`, otherwise enrolls on `to_hub` via `this.listen(...)` inheriting `about`, `scope`, and `tag`, and only calls `unlistenById(from_hub, row.listener_id)` after `to_hub` enrollment succeeds. If `to_hub` enrollment fails, it records the error on `toSlot.error` and preserves the `from_hub` listener intact.
 2. **Headless Inspection & Control Hooks (`src/macos/cito-ui.swift`)**:
    - `test_control` searches `cardMenu.items` first, and if not found, searches `directoryPanel?.contentView` (including visible `NSTableView` row views).
    - Headless command `{"op": "test_directory_query", "query": "..."}` updates `directorySearchField.stringValue`, triggers filtering, and emits `query_directory`.
@@ -233,7 +248,7 @@ Controls use four Apple HIG-oriented styles with distinct contrast and action hi
 ## 5. Direct Session Control Commands (`Pi /cito` & CLI `cito listen` / `cito unlisten`)
 
 - **Pi Slash Command (`/cito` in `src/pi-extension/cito-bridge.ts`)**:
-  - Standalone zero-dependency extension registering `/cito` (`["on", "team", "off"]` completions, no-arg toggle via `activeBadge`, `/cito on [about...]`, `/cito team [about...]`, `/cito off`), calling stateless `POST http://127.0.0.1:${port}/mcp` with `_meta: { endpoint_pid: process.pid }`.
+  - Standalone zero-dependency extension registering `/cito` (`["on", "team", "off"]` and `--hub ` completions, `Usage: /cito [on [--hub <hub>] [about...] | team [--hub <hub>] [about...] | off [--hub <hub>]]`, no-arg toggle via `activeBadge`, `/cito on [--hub <hub> | --hub=<hub>] [about...]`, `/cito team [--hub <hub> | --hub=<hub>] [about...]`, `/cito off [--hub <hub> | --hub=<hub>]`), calling stateless `POST http://127.0.0.1:${port}/mcp` with `_meta: { endpoint_pid: process.pid }`. When `--hub <hub>` is passed to `/cito off`, `activeBadge` is not blindly cleared after the RPC returns so the daemon's synchronous socket `status` update for any remaining active hubs remains authoritative, and the notification states `Cito stopped listening on <hub>`.
 - **CLI Direct Control (`cito listen` & `cito unlisten` in `src/mcp/cli.ts`)**:
   - Supports `cito listen` and `cito unlisten` for terminal/SSH and `--codex[=<thread_id>]`.
 
