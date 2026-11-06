@@ -4034,7 +4034,7 @@ phases:
   name: Cito V14 Full-Scan Remediation (Directory Full-Field Parity, Snapshot Mutation
     Coalescing, Dockerfile Loader, Claude Title/Recency, NSTableView Selection Sync,
     Symmetric-Difference Witnesses, and v0.11.2 Release)
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -4104,7 +4104,7 @@ phases:
       mutation coalescing, Dockerfile loader, Claude title/recency, NSTableView selection
       sync, symmetric-difference witnesses, and v0.11.2 release) [REQUIRES_SKILL:
       code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - deploy/nats/Dockerfile\n    - src/shared/**\n    - src/adapters/**\n\
@@ -4212,6 +4212,8 @@ phases:
     - tests/mcp/ui.test.ts
     - tests/shared/shared.test.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-06T17:08:29.478617Z'
   - id: v14.acceptance-and-hygiene-gate
     name: 'V14 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
