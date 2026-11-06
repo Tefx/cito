@@ -4364,7 +4364,7 @@ phases:
 - id: v15
   name: Cito V15 Prebuilt Apple Silicon (arm64) Menu Bar Companion Binary, Quarantine-Free
     Installation, swiftc Fallback, and v0.11.3 Release
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, bin/cito-ui-darwin-arm64 is tracked and verified as a valid ad-hoc-signed
     arm64 Mach-O executable installed in < 200ms without invoking /usr/bin/swiftc
@@ -4496,7 +4496,7 @@ phases:
   - id: v15.acceptance-and-hygiene-gate
     name: 'V15 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v15` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -4563,3 +4563,39 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-06T18:43:47.523660Z'
+    done_at: '2026-11-06T18:47:46.549271+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v15-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:7c310615f1006054434c0ce4b18f6ba0c01980c8).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (30 test
+      files, 242 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Direct claude or pi identifiers in src/mcp/: 0 matches
+
+      Requirement results:
+
+      - V15-1-PREBUILT-ARM64-COMPANION-BINARY: PROVEN (package.json:38 compile script
+      builds bin/cito-ui-darwin-arm64 with -O -target arm64-apple-macos13.0, strip
+      -x, and codesign -s - --force; tracked in Git mode 100755, 383,120 bytes).
+
+      - V15-2-QUARANTINE-FREE-INSTALL-AND-SWIFTC-FALLBACK: PROVEN (src/ui/index.ts:73-112
+      installs bin/cito-ui-darwin-arm64 via fresh temporary inode write + atomic rename
+      in <200ms without invoking /usr/bin/swiftc, includes 5000ms git checkout skew
+      tolerance, and falls back to /usr/bin/swiftc on custom or newer source; verified
+      in tests/ui/lifecycle.test.ts:651-694 and tests/auth-callout/cli.test.ts:120-121,191).
+
+      - V15-3-VERSION-0-11-3-AND-CODE-HYGIENE: PROVEN (package.json, package-lock.json,
+      src/shared/index.ts CITO_VERSION, tests/shared/shared.test.ts, and README.md
+      synchronized at ''0.11.3''; fresh-context structural-auditor 01a1b227-9fd0-7647-bc13-3c499a670b56
+      and uiux-auditor 01a1b227-a023-770c-822c-7ff421ab9f6c verified #1 CLOSED and
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
