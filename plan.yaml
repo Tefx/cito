@@ -3425,3 +3425,52 @@ phases:
       - V11-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-PURITY: PROVEN (Round 1 fresh-context
       structural-auditor 01a1b00b-dd1e-7703-a13e-97655b98c494 and uiux-auditor 01a1b00b-dcc7-73c1-8397-2a023c854462
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v12
+  name: Cito V12 Claude Code Adapter Hardening, Exact Hook Batch Acknowledgment, UI
+    & Architecture Symmetry, and v0.11.0 Release
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
+    or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
+    mingchen) exist in src/, docs/, README.md, AGENTS.md, deploy/, or tests/, zero
+    non-Node built-in imports exist in src/pi-extension/cito-bridge.ts, zero harness
+    references exist in src/mcp/ except src/mcp/cli.ts delegating --codex resolution
+    to src/adapters/codex.ts, all docs/DESIGN.md §§1.2, 2.1, 4.2, 4.3, 5.2, 5.3, 6.1,
+    6.2 and AGENTS.md requirements are verified, and [REQUIRES_SKILL: code-hygiene]
+    with [GATE_MODE: ITERATIVE_CONVERGENCE] converges to Completeness: CLEAN and Simplicity:
+    ZERO_NEW_ISSUES.'
+  context: 'Implement and verify Cito V12 Claude Code Adapter Hardening, Exact Hook
+    Batch Acknowledgment, UI & Architecture Symmetry, and v0.11.0 Release per docs/DESIGN.md
+    §§1.2, 2.1, 4.2, 4.3, 5.2, 5.3, 6.1, 6.2 and AGENTS.md: (1) in claudeSessionClaim(meta,
+    headers) (src/adapters/claude.ts), only treat meta.expected_session_id (when meta.expected_harness
+    === "claude") as an explicit non-socket claim when no socket PID (endpoint_pid,
+    caller_pid, pi_pid) is present in meta so UI listen_session and switch_hub resolve
+    via the socket bridge and verifyExpectedIdentity instead of throwing INVALID_INPUT:
+    Conflicting caller metadata (while explicit claudeSessionId / claude_session_id
+    / x-claude-session-id combined with a PID still throws INVALID_INPUT); (2) in
+    startClaudeChannelBridge (src/adapters/claude-channel.ts), keep reporting claude-<endpoint>
+    when the bridge initially bound before any transcript existed and the first transcript
+    <u1>.jsonl appears, writing ${stateDir}/claude/aliases/<u1> -> claude-<endpoint>
+    and only transitioning to <u2> when a second distinct transcript <u2> !== <u1>
+    appears (/clear), track all badge session IDs and remove all on close(), drain
+    aliased claude-<endpoint> queues in drainClaudeWakes(config, session) without
+    failing on >4 MiB aggregate staging backlog, preserve cached titles in resolveClaudeSessionTitle
+    when start > 0 and no newer custom-title appears in the tail window, and honor
+    process.env.CLAUDE_SESSION_ID in src/claude-hook/cli.ts between input.session_id
+    and resolveClaudeSessionId(cwd, config); (3) in CitoService.inbox() (src/mcp/service.ts),
+    match ack_ids against (signal_id = ? OR batch_id = ?) so passing batch_ids in
+    ack_ids with ack_all: false acknowledges exact drained batches without touching
+    newly arrived RECEIVED signals and refreshes the session badge, update src/claude-hook/cli.ts
+    to best-effort strip trailing unread counts from session/alias badges and send
+    a bounded (AbortSignal.timeout(500)) POST /mcp cito_inbox batch acknowledgment
+    when wakes.length > 0, and send notifications/claude/channel non-blockingly in
+    src/adapters/claude-channel.ts; (4) update src/macos/cito-ui.swift (orderedHarnesses,
+    groupTitle, and DirectoryPanel harnessPills for "claude"), export startOptionalStdioChannel(config,
+    stdio) from src/adapters/claude-channel.ts (re-exported from src/adapters/index.ts)
+    and call it from src/mcp/cli.ts so src/mcp/ has zero claude references, consolidate
+    resolveExplicitCaller in src/adapters/git.ts and runEntrypoint in bin/loader.js,
+    and include bin/cito-claude-hook in tests/auth-callout/cli.test.ts; and (5) bump
+    version to 0.11.0 across package.json, package-lock.json, and CITO_VERSION in
+    src/shared/index.ts, and pass the iterative code-hygiene gate.'
+  depends_on:
+  - v11
