@@ -5,6 +5,6 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY tsconfig.json ./
 COPY src/shared ./src/shared
 COPY src/auth-callout ./src/auth-callout
-COPY bin/cito-auth-callout ./bin/cito-auth-callout
+COPY bin/cito-auth-callout bin/loader.js ./bin/
 USER node
 ENTRYPOINT ["node", "bin/cito-auth-callout"]

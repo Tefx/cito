@@ -16,6 +16,7 @@ export interface ReceiverOptions {
   onSessionSwitched?: (harness: string, sessionId: string) => Promise<void>;
   onDirectoryUpsert?: (hub: string, id: string, value: Registration, revision: number) => void;
   onDirectoryRemove?: (hub: string, id: string) => void;
+  onReceiverStopped?: (hub: string, id: string, receiver: Receiver) => void;
 }
 class DispatchStopped extends Error {}
 export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -134,6 +135,8 @@ export class Receiver {
       this.state.run(`UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'fenced_before_dispatch'
         WHERE hub = ? AND listener_id = ? AND binding_generation <= ? AND state IN ('RECEIVED','DISPATCHING')`, this.hub, this.id, this.generation);
     });
+    this.options.onDirectoryRemove?.(this.hub, this.id);
+    this.options.onReceiverStopped?.(this.hub, this.id, this);
     this.track(this.badge());
   }
   private async receive(msg: JsMsg): Promise<void> {
@@ -274,6 +277,7 @@ export class Receiver {
           AND binding_generation <= ? AND state IN ('RECEIVED','DISPATCHING')`, reason, this.hub, this.id, this.generation);
       });
       this.options.onDirectoryRemove?.(this.hub, this.id);
+      this.options.onReceiverStopped?.(this.hub, this.id, this);
       await this.badge().catch(error => this.log(error));
       const entry = await this.broker.kv.get(this.id);
       if (entry) {

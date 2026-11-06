@@ -3,10 +3,10 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
-import { ClaudeCodeAdapter } from "./claude.js";
-import { CodexDesktopAdapter } from "./codex.js";
+import { ClaudeCodeAdapter, resolveClaudeSessionId, validateClaudeSessionId } from "./claude.js";
+import { CodexDesktopAdapter, readCodexThreadOptional, resolveCodexThreadId } from "./codex.js";
 import { SocketBridgeAdapter, identifyBridge } from "./pi.js";
-import { gitMetadata } from "./git.js";
+import { PID_KEYS, gitMetadata } from "./git.js";
 import type { AvailableSessionSummary, Caller, CallerDetectionContext, CallerInput, HarnessAdapter } from "./types.js";
 export * from "./claude.js";
 export * from "./claude-channel.js";
@@ -45,24 +45,7 @@ export async function discoverAllAvailableSessions(
     [...ADAPTER_REGISTRY.values()].map(adapter => adapter.discoverAvailableSessions?.(config, signal) ?? Promise.resolve([])),
   );
   const raw = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
-  const totalHubs = Math.max(1, Object.keys(config.hubs).length);
-  const seen = new Set<string>();
-  const filtered = raw.flatMap(c => {
-    const matching = activeListeners.filter(r =>
-      r.harness === c.harness && (
-        r.session_id === c.session_id
-        || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)
-      ),
-    );
-    if (matching.some(r => r.hub === undefined)) return [];
-    const hubs = [...new Set(matching.map(r => r.hub!))];
-    if (hubs.length >= totalHubs) return [];
-    const key = `${c.harness}:${c.session_id}`;
-    if (seen.has(key)) return [];
-    seen.add(key);
-    const { listening_hubs: _, ...rest } = c;
-    return [hubs.length ? { ...rest, listening_hubs: hubs } : rest];
-  });
+  const filtered = filterAvailableSessions(raw, activeListeners, Object.keys(config.hubs).length);
   const byHarness = new Map<string, AvailableSessionSummary[]>();
   for (const c of filtered) {
     let list = byHarness.get(c.harness);
@@ -85,6 +68,96 @@ export async function discoverAllAvailableSessions(
   }
   return result;
 }
+export function filterAvailableSessions(
+  candidates: readonly AvailableSessionSummary[],
+  activeListeners: readonly { harness: string; session_id: string; endpoint_pid?: number | null; hub?: string }[],
+  totalHubs: number,
+): AvailableSessionSummary[] {
+  const hubCount = Math.max(1, totalHubs);
+  const seen = new Set<string>();
+  return candidates.flatMap(c => {
+    const matching = activeListeners.filter(r =>
+      r.harness === c.harness && (
+        r.session_id === c.session_id
+        || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)
+      ),
+    );
+    if (matching.some(r => r.hub === undefined)) return [];
+    const hubs = [...new Set(matching.map(r => r.hub!))];
+    if (hubs.length >= hubCount) return [];
+    const key = `${c.harness}:${c.session_id}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const { listening_hubs: _, ...rest } = c;
+    return [hubs.length ? { ...rest, listening_hubs: hubs } : rest];
+  });
+}
+export interface AdapterCliSelection {
+  harness: "codex" | "claude";
+  explicitId?: string;
+}
+const CLI_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function matchAdapterCliFlag(
+  cmd: "listen" | "unlisten",
+  argv: readonly string[],
+  index: number,
+  config: CitoConfig,
+): { selection: AdapterCliSelection; nextIndex: number } | undefined {
+  const arg = argv[index]!;
+  for (const harness of ["codex", "claude"] as const) {
+    const flag = `--${harness}`;
+    if (arg !== flag && !arg.startsWith(flag + "=")) continue;
+    if (arg.startsWith(flag + "=")) {
+      const val = arg.slice(flag.length + 1).trim();
+      if (!val) throw new Error(`Missing value for ${flag}`);
+      return { selection: { harness, explicitId: harness === "claude" ? validateClaudeSessionId(val) : val }, nextIndex: index };
+    }
+    const next = argv[index + 1];
+    if (next !== undefined && !next.startsWith("-")) {
+      if (harness === "codex") {
+        if (cmd === "unlisten" || CLI_UUID_RE.test(next) || readCodexThreadOptional(next, config).status !== "unavailable") {
+          return { selection: { harness, explicitId: next.trim() }, nextIndex: index + 1 };
+        }
+      } else {
+        if (cmd === "unlisten" || CLI_UUID_RE.test(next) || /^claude-[1-9][0-9]*$/i.test(next)) {
+          return { selection: { harness, explicitId: validateClaudeSessionId(next) }, nextIndex: index + 1 };
+        }
+      }
+    }
+    return { selection: { harness }, nextIndex: index };
+  }
+  return undefined;
+}
+export async function resolveAdapterCliMeta(
+  cmd: "listen" | "unlisten",
+  selection: AdapterCliSelection | undefined,
+  cwd: string,
+  config: CitoConfig,
+): Promise<Record<string, unknown>> {
+  if (!selection) return { caller_pid: process.ppid };
+  if (selection.harness === "codex") {
+    return {
+      codexThreadId: selection.explicitId ?? resolveCodexThreadId(cwd, config, { allowArchived: cmd === "unlisten" }),
+      cwd,
+    };
+  }
+  let sessionId = selection.explicitId;
+  if (!sessionId) {
+    const envId = process.env.CLAUDE_SESSION_ID?.trim();
+    if (envId) sessionId = validateClaudeSessionId(envId);
+  }
+  if (!sessionId) {
+    const live = await getAdapter("claude")?.discoverAvailableSessions?.(config);
+    sessionId = live?.find(s => s.cwd === cwd)?.session_id;
+  }
+  if (!sessionId) {
+    sessionId = await resolveClaudeSessionId(cwd, config);
+  }
+  if (!sessionId) {
+    throw new CitoError("BINDING_REQUIRED", "Claude session metadata is required");
+  }
+  return { claudeSessionId: sessionId, cwd };
+}
 function verifyExpectedIdentity(caller: Caller, meta: Record<string, unknown>): Caller {
   if ((typeof meta.expected_harness === "string" && meta.expected_harness && caller.harness !== meta.expected_harness)
     || (typeof meta.expected_session_id === "string" && meta.expected_session_id && caller.session_id !== meta.expected_session_id)) {
@@ -97,9 +170,8 @@ export type ResolveCallerOptions = Pick<CallerDetectionContext, "requireOpen" | 
 export function callerBindingError(message: string): CitoError {
   return new CitoError("PI_BRIDGE_UNAVAILABLE", message);
 }
-const pidKeys = ["endpoint_pid", "pi_pid", "caller_pid"];
 function explicitPid(meta: Record<string, unknown>): number | undefined {
-  const values = pidKeys.filter(key => meta[key] !== undefined).map(key => meta[key]);
+  const values = PID_KEYS.filter(key => meta[key] !== undefined).map(key => meta[key]);
   if (values.some(v => typeof v !== "number" || !Number.isSafeInteger(v) || v <= 0)) {
     throw callerBindingError("Invalid endpoint PID");
   }
@@ -113,7 +185,7 @@ export function extractCallerPidRoots(meta: Record<string, unknown> = {}): numbe
     if (!value || typeof value !== "object" || seen.has(value)) return;
     seen.add(value);
     for (const [key, child] of Object.entries(value)) {
-      if ([...pidKeys, "parent_pid"].includes(key) && typeof child === "number" && Number.isSafeInteger(child) && child > 0) roots.add(child);
+      if ([...PID_KEYS, "parent_pid"].includes(key) && typeof child === "number" && Number.isSafeInteger(child) && child > 0) roots.add(child);
       else if (child && typeof child === "object") walk(child);
     }
   };

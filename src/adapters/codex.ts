@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { normalizeRepo, resolveExplicitCaller, type RepoMetadata } from "./git.js";
+import { hasExplicitPid, normalizeRepo, resolveExplicitCaller, type RepoMetadata } from "./git.js";
 import type { ListenerRow } from "../shared/state-types.js";
 import type { AvailableSessionSummary, Caller, CallerDetectionContext, HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
 
@@ -18,9 +18,9 @@ function nonempty(value: unknown): value is string { return typeof value === "st
 export function codexThreadId(meta: Record<string, unknown> = {}): string {
   let turn = meta["x-codex-turn-metadata"];
   if (typeof turn === "string") { try { turn = JSON.parse(turn); } catch { turn = undefined; } }
-  const expectedCodex = meta.expected_harness === "codex" ? meta.expected_session_id : undefined;
+  const expectedCodex = !hasExplicitPid(meta) && meta.expected_harness === "codex" ? meta.expected_session_id : undefined;
   const candidates = [...(record(turn) ? [turn.thread_id, turn.session_id] : []), meta["openai/threadId"], meta.codexThreadId, expectedCodex];
-  const ids = [...new Set(candidates.filter(nonempty))];
+  const ids = [...new Set(candidates.filter(nonempty).map(value => value.trim()))];
   if (ids.length > 1) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
   const id = ids[0];
   if (!id) throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
@@ -160,7 +160,7 @@ export class CodexDesktopAdapter implements HarnessAdapter {
       thread = claim(meta);
     }
     if (!thread) return null;
-    if (["endpoint_pid", "caller_pid", "pi_pid"].some(key => meta[key] !== undefined)) {
+    if (hasExplicitPid(meta)) {
       throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
     }
     const row = readCodexThreadOptional(thread, config);

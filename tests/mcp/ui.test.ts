@@ -267,19 +267,113 @@ test("CitoService populates my_remote_listeners and evaluates query_directory ac
   expect(directories.mock.lastCall?.[0]?.slice(0, 2).every(p => p.is_self_principal)).toBe(true);
   expect(directories.mock.lastCall?.[0]?.[2]?.listener_id).toBe("c_bobworkspace");
 
-  // Prefix token filtering: @bob repo:billing host:studio is:codex #bobwork
-  await f.service.handleUiAction({ op: "query_directory", query: "@bob repo:billing host:studio is:codex #bobwork", scope: "all", harness: "all" });
-  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_bobworkspace"]);
-  expect(directories.mock.lastCall?.[1]).toBe(1);
-  expect(directories.mock.lastCall?.[2]).toBe(3);
+  // Seed a near-miss peer (has "bob", "billing", "studio", "codex", "bobwork" in non-matching fields, plus >300-char about)
+  const longAboutPrefix = "padding_segment_".repeat(20); // 320 chars
+  const longAboutFull = `${longAboutPrefix} deep_tail_keyword_450 bob billing studio codex bobwork`;
+  expect(longAboutFull.indexOf("deep_tail_keyword_450")).toBeGreaterThan(300);
+  const nearMissReg = {
+    ...aliceRemoteReg,
+    listener_id: "c_carolnearmis",
+    public_id: "analytics-carolnearmis",
+    tag: "analytics",
+    principal_id: "none#carol",
+    owner_user: "carol",
+    host_id: "33333333-3333-4333-8333-333333333333",
+    host_name: "carol-laptop",
+    harness: "claude",
+    session_id: "carol-s1",
+    cwd: "/Users/carol/analytics",
+    repo: "acme/analytics",
+    branch: "main",
+    title: "Carol bob studio codex mention",
+    about: longAboutFull,
+    scope: "workspace" as const,
+  };
+  await broker.kv.create(nearMissReg.listener_id, encode(nearMissReg));
+  slot.directoryIndex.clear();
+
+  // Independent prefix token witnesses: each prefix filter rejects nearMissReg even though the token appears in its title/about
+  for (const prefixQuery of ["@bob", "user:bob", "repo:billing", "host:studio", "is:codex", "#bobwork"]) {
+    await f.service.handleUiAction({ op: "query_directory", query: prefixQuery, scope: "all", harness: "all" });
+    expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_bobworkspace"]);
+    expect(directories.mock.lastCall?.[1]).toBe(1);
+    expect(directories.mock.lastCall?.[2]).toBe(4);
+  }
+
+  // Full-field search parity for >300-char about: both cito_find and query_directory match chars 301-500 while UI DTO truncates about to 300
+  const findLong = await call(f.service, "cito_find", { query: "deep_tail_keyword_450" });
+  expect(findLong.listeners.map((l: { listener_id: string }) => toCanonicalListenerId(l.listener_id))).toEqual(["c_carolnearmis"]);
+  await f.service.handleUiAction({ op: "query_directory", query: "deep_tail_keyword_450", scope: "all", harness: "all" });
+  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_carolnearmis"]);
+  expect(directories.mock.lastCall?.[0]?.[0]?.about).toHaveLength(300);
+  expect(directories.mock.lastCall?.[0]?.[0]?.cwd).toBe("/Users/carol/analytics");
 
   // Scope facet "mine" restricts to self principal across both local and remote hosts
   await f.service.handleUiAction({ op: "query_directory", query: "", scope: "mine", harness: "all" });
   expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toHaveLength(2);
   expect(new Set(directories.mock.lastCall?.[0]?.map(p => p.listener_id))).toEqual(new Set([localId, "c_aliceremote2"]));
   expect(directories.mock.lastCall?.[1]).toBe(2);
-  expect(directories.mock.lastCall?.[2]).toBe(3);
+  expect(directories.mock.lastCall?.[2]).toBe(4);
   await f.service.handleUiAction({ op: "close_directory" });
+});
+
+test("HubDirectoryIndex.syncSnapshot preserves in-flight local upsert/remove mutations and skips UNLISTENED KV records", async () => {
+  const f = await setup();
+  const slot = f.service.slots.get("default")!;
+  const broker = await slot.network();
+  const principal = await slot.identity();
+  const baseReg = {
+    schema_version: 1 as const,
+    listener_id: "c_staleactive2",
+    public_id: "stale-staleactive2",
+    tag: "stale",
+    principal_id: principal.principal_id,
+    owner_user: principal.owner_user,
+    host_id: "11111111-1111-4111-8111-111111111111",
+    host_name: "alice-mini",
+    harness: "pi",
+    session_id: "s-stale",
+    cwd: "/tmp/stale",
+    repo: "acme/cito",
+    branch: "main",
+    title: "Stale Active",
+    about: "Will be removed locally while snapshot is in flight",
+    scope: "self" as const,
+    state: "ACTIVE" as const,
+    binding_generation: 1,
+    owner_token: "11111111-1111-4111-8111-222222222222",
+    lease_ttl_seconds: 60 as const,
+  };
+  const unlistenedReg = {
+    ...baseReg,
+    listener_id: "c_unlistened23",
+    public_id: "unlistened-unlistened23",
+    state: "UNLISTENED" as const,
+  };
+  await broker.kv.create(baseReg.listener_id, encode(baseReg));
+  await broker.kv.create(unlistenedReg.listener_id, encode(unlistenedReg));
+  slot.directoryIndex.clear();
+
+  const origWatch = broker.kv.watch.bind(broker.kv);
+  const localUpsertReg = {
+    ...baseReg,
+    listener_id: "c_localupsert2",
+    public_id: "local-localupsert2",
+    title: "In-Flight Local Upsert",
+  };
+  vi.spyOn(broker.kv, "watch").mockImplementationOnce(async (...args) => {
+    const iter = await origWatch(...args);
+    // Mutate local index while watchSnapshot is in flight: remove c_staleactive2 and upsert c_localupsert2
+    slot.directoryIndex.remove(baseReg.listener_id);
+    slot.directoryIndex.upsert(localUpsertReg.listener_id, localUpsertReg, 99);
+    return iter;
+  });
+
+  const active = await slot.directoryIndex.read(broker, principal);
+  const ids = active.map(item => item.value.listener_id);
+  expect(ids).toContain(localUpsertReg.listener_id);
+  expect(ids).not.toContain(baseReg.listener_id);
+  expect(ids).not.toContain(unlistenedReg.listener_id);
 });
 
 test("multi-hub candidate retention (listening_hubs) and atomic switch_hub migration with failure rollback", async () => {

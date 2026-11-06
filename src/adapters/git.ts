@@ -4,6 +4,10 @@ import { promisify } from "node:util";
 import type { Caller, CallerDetectionContext } from "./types.js";
 
 const exec = promisify(execFile);
+export const PID_KEYS = ["endpoint_pid", "caller_pid", "pi_pid"] as const;
+export function hasExplicitPid(meta: Record<string, unknown>): boolean {
+  return PID_KEYS.some(key => meta[key] !== undefined);
+}
 
 /** Normalize remote paths without changing their display case. */
 export function normalizeRepo(origin: string | null | undefined): string | null {

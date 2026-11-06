@@ -384,7 +384,7 @@ struct RemotePeer: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
     let user: String, host_id: String, host_name: String, harness: String
     let title: String, about: String, scope: String, last_seen_at: String
-    let repo: String?, branch: String?
+    let cwd: String?, repo: String?, branch: String?
     let is_self_principal: Bool?
 }
 struct Frame: Decodable {
@@ -437,6 +437,11 @@ final class DirectoryPeerCellView: NSTableCellView {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = (isSelectedRow ? NSColor.controlAccentColor.withAlphaComponent(0.22) : NSColor.clear).cgColor
         }
+    }
+    func setSelected(_ selected: Bool) {
+        guard isSelectedRow != selected else { return }
+        isSelectedRow = selected
+        applySelectionColor()
     }
     override func updateLayer() { applySelectionColor() }
     override func viewDidChangeEffectiveAppearance() {
@@ -677,6 +682,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if let rootView = directoryPanel?.contentView, let control = findControl(in: rootView, id: id) {
                     _ = control.accessibilityPerformPress()
                     return
+                }
+                if id.hasPrefix("dir_peer:"), let table = directoryTableView {
+                    let scopedId = String(id.dropFirst("dir_peer:".count))
+                    if let row = directoryFilteredPeers.firstIndex(where: { $0.scoped_id == scopedId }) {
+                        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    }
                 }
                 return
             }
@@ -1437,7 +1448,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let idTok = String(tok.dropFirst())
                 if !peer.public_id.lowercased().contains(idTok) && !peer.scoped_id.lowercased().contains(idTok) && !peer.listener_id.lowercased().contains(idTok) { return false }
             } else {
-                let hay = [peer.title, peer.about, peer.repo ?? "", peer.branch ?? "", peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
+                let hay = [peer.title, peer.about, peer.cwd ?? "", peer.repo ?? "", peer.branch ?? "", peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
                     .joined(separator: " ").lowercased()
                 if !hay.contains(tok) { return false }
             }
@@ -1527,6 +1538,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             ?? DirectoryPeerCellView(frame: NSRect(x: 0, y: 0, width: 560, height: 52))
         cell.configure(with: directoryFilteredPeers[row], selected: row == directorySelectedIndex)
         return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let table = notification.object as? NSTableView, table === directoryTableView else { return }
+        let row = table.selectedRow
+        guard directoryFilteredPeers.indices.contains(row) else { return }
+        directorySelectedIndex = row
+        for r in 0..<table.numberOfRows {
+            if let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false) as? DirectoryPeerCellView {
+                cell.setSelected(r == row)
+            }
+        }
+        table.layoutSubtreeIfNeeded()
     }
 
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.

@@ -21,8 +21,13 @@ describe("non-intrusive Codex metadata and wake effects", () => {
   }
   it.each([
     { "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId }) },
-    { "x-codex-turn-metadata": { session_id: threadId } }, { "openai/threadId": threadId }, { codexThreadId: threadId },
+    { "x-codex-turn-metadata": { session_id: threadId } }, { "openai/threadId": " " + threadId + " " }, { codexThreadId: threadId },
+    { expected_harness: "codex", expected_session_id: threadId },
   ])("extracts explicit thread claim %j", meta => { expect(codexThreadId(meta)).toBe(threadId); });
+  it("guards expected_session_id when an explicit socket PID is present", () => {
+    expect(() => codexThreadId({ expected_harness: "codex", expected_session_id: threadId, endpoint_pid: process.pid }))
+      .toThrow(expect.objectContaining({ code: "BINDING_REQUIRED" }));
+  });
   it("validates all explicit claims before state access", async () => {
     const config = loadConfig(state.env);
     for (const meta of [ { codexThreadId: "a", "openai/threadId": "b" }, { codexThreadId: "a", pi_pid: 123 }, { endpoint_pid: 1, caller_pid: 2 } ]) {

@@ -10,7 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { startHttpServer, parseClientPid, httpMetadata, daemonHealth } from "../../src/mcp/server.js";
 import { LocalState } from "../../src/mcp/state.js";
 import { CITO_VERSION, loadConfig } from "../../src/shared/index.js";
-import type { CallerInput } from "../../src/adapters/index.js";
+import { claudeProjectDir, type CallerInput } from "../../src/adapters/index.js";
 import { fixture, waitFor, freePort } from "./support.js";
 
 const exec = promisify(execFile);
@@ -140,10 +140,24 @@ test("CLI listen and unlisten support socket-bridge parent discovery, --codex au
       .toMatch(/^Listening as cdx-[a-z0-9]+ \(self\): Explicit equals\n$/);
     expect((await cli(["unlisten", "--codex", codexUuid])).stdout).toBe("Unlistened (1 removed)\n");
 
-    // 3. Error exits on invalid flags / arguments.
+    // 3. Claude mode: --claude auto-resolution from transcript dir, --claude=<id>, and --claude <uuid>.
+    const claudeUuid = "11111111-2222-4333-8444-555555555555";
+    const claudeDir = claudeProjectDir(realRoot, loadConfig(env));
+    await mkdir(claudeDir, { recursive: true });
+    await writeFile(join(claudeDir, claudeUuid + ".jsonl"), "{}\n");
+    const claudeAuto = await cli(["listen", "--claude", "--tag=cld", "Claude", "task"]);
+    expect(claudeAuto.stdout).toMatch(/^Listening as cld-[a-z0-9]+ \(self\): Claude task\n$/);
+    expect(captured.at(-1)).toMatchObject({ meta: { claudeSessionId: claudeUuid, cwd: realRoot } });
+    expect((await cli(["unlisten", "--claude", claudeUuid])).stdout).toBe("Unlistened (1 removed)\n");
+    expect((await cli(["listen", `--claude=${claudeUuid}`, "Explicit", "Claude"])).stdout)
+      .toMatch(/^Listening as cld-[a-z0-9]+ \(self\): Explicit Claude\n$/);
+    expect((await cli(["unlisten", "--claude"])).stdout).toBe("Unlistened (1 removed)\n");
+
+    // 4. Error exits on invalid flags / arguments.
     for (const badArgs of [
       ["listen", "--scope", "self", "--team"],
       ["listen", "--scope", "invalid"],
+      ["listen", "--codex", "--claude"],
       ["listen", "--unknown-flag"],
       ["unlisten", "unexpected-positional"],
     ]) {

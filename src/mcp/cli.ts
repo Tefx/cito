@@ -5,8 +5,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { CITO_VERSION, loadConfig, type CitoConfig } from "../shared/index.js";
-import { startOptionalStdioChannel } from "../adapters/index.js";
-import { readCodexThreadOptional, resolveCodexThreadId } from "../adapters/codex.js";
+import { matchAdapterCliFlag, resolveAdapterCliMeta, startOptionalStdioChannel, type AdapterCliSelection } from "../adapters/index.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
 import { startHttpServer, daemonHealth } from "./server.js";
@@ -84,7 +83,6 @@ async function ensureDaemon(config: CitoConfig): Promise<void> {
   while (performance.now() < deadline) { if ((await daemonHealth(config))?.version === CITO_VERSION) return; await delay(50); }
   throw new Error(`Daemon did not become healthy on 127.0.0.1:${config.daemonPort} for ${config.stateDir} within 5000ms`);
 }
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_unlisten",
   args: Record<string, unknown>, meta: Record<string, unknown>): Promise<Record<string, unknown>> {
   await ensureDaemon(config);
@@ -124,7 +122,7 @@ async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_un
 async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], config: CitoConfig): Promise<void> {
   try {
     let explicitScope: "self" | "workspace" | undefined;
-    let team = false, hub: string | undefined, tag: string | undefined, useCodex = false, explicitCodexId: string | undefined;
+    let team = false, hub: string | undefined, tag: string | undefined, adapterSelection: AdapterCliSelection | undefined;
     const positionals: string[] = [], cwd = process.cwd();
     const readValue = (arg: string, index: number, flag: string): [string, number] => {
       if (arg.startsWith(flag + "=")) {
@@ -138,23 +136,15 @@ async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], conf
     };
     for (let i = 0; i < argv.length; i++) {
       const arg = argv[i]!;
-      if (arg === "--hub" || arg.startsWith("--hub=")) {
-        [hub, i] = readValue(arg, i, "--hub");
-      } else if (arg === "--codex" || arg.startsWith("--codex=")) {
-        useCodex = true;
-        if (arg.startsWith("--codex=")) {
-          const val = arg.slice("--codex=".length).trim();
-          if (!val) throw new Error("Missing value for --codex");
-          explicitCodexId = val;
-        } else {
-          const next = argv[i + 1];
-          if (next !== undefined && !next.startsWith("-")) {
-            if (cmd === "unlisten" || UUID_RE.test(next) || readCodexThreadOptional(next, config).status !== "unavailable") {
-              explicitCodexId = next;
-              i++;
-            }
-          }
+      const matchedAdapter = matchAdapterCliFlag(cmd, argv, i, config);
+      if (matchedAdapter) {
+        if (adapterSelection && adapterSelection.harness !== matchedAdapter.selection.harness) {
+          throw new Error("Conflicting harness flags");
         }
+        adapterSelection = matchedAdapter.selection;
+        i = matchedAdapter.nextIndex;
+      } else if (arg === "--hub" || arg.startsWith("--hub=")) {
+        [hub, i] = readValue(arg, i, "--hub");
       } else if (cmd === "listen" && arg === "--team") {
         team = true;
       } else if (cmd === "listen" && (arg === "--scope" || arg.startsWith("--scope="))) {
@@ -173,9 +163,7 @@ async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], conf
     }
     if (cmd === "unlisten" && positionals.length > 0) throw new Error(`Unexpected argument: ${positionals[0]}`);
     if (team && explicitScope === "self") throw new Error("Conflicting --scope self and --team");
-    const meta: Record<string, unknown> = useCodex
-      ? { codexThreadId: explicitCodexId ?? resolveCodexThreadId(cwd, config, { allowArchived: cmd === "unlisten" }), cwd }
-      : { caller_pid: process.ppid };
+    const meta = await resolveAdapterCliMeta(cmd, adapterSelection, cwd, config);
     if (cmd === "listen") {
       const about = positionals.join(" ").trim() || basename(cwd) || "CLI session";
       const scope = team ? "workspace" : (explicitScope ?? "self");

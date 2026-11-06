@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "vitest";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { isolatedState, unixServer } from "./support.js";
@@ -76,11 +76,21 @@ test("an explicit session id wins over the transcript scan, first-turn transcrip
     op: "deliver", session_id: fallback, batch_id: "first-turn-batch", wake: true, content: "🔔 Cito · first turn",
   }, 2000)).resolves.toMatchObject({ delivered: true });
   expect((await drainClaudeWakes(bare.config, SESSION)).map(w => w.batch_id)).toEqual(["first-turn-batch"]);
-  // A second distinct transcript (/clear) switches the session_id and rejects the old fallback binding.
+  await writeFile(join(dir, SESSION + ".jsonl"), JSON.stringify({ type: "custom-title", customTitle: "First Turn Title" }) + "\n");
+  expect((await identifyBridge("claude", pid, bare.config)).session_name).toBe("First Turn Title");
+  // A second distinct transcript (/clear) switches the session_id, resets title to the new transcript, and rejects the old fallback binding.
   const second = "22222222-3333-4444-5555-666666666666";
   await new Promise(resolve => setTimeout(resolve, 15));
-  await writeFile(join(dir, second + ".jsonl"), "{}\n");
+  const futureMtimeMs = Date.now() + 120_000;
+  await writeFile(join(dir, second + ".jsonl"), JSON.stringify({ type: "custom-title", customTitle: "Second Turn Title" }) + "\n");
+  await utimes(join(dir, second + ".jsonl"), futureMtimeMs / 1000, futureMtimeMs / 1000);
   expect(await bare.channel.sessionId()).toBe(second);
+  const afterClearIdentity = await identifyBridge("claude", pid, bare.config);
+  expect(afterClearIdentity).toMatchObject({
+    session_id: second,
+    session_name: "Second Turn Title",
+  });
+  expect(Number(afterClearIdentity.updated_at_ms)).toBeGreaterThanOrEqual(futureMtimeMs - 1000);
   await expect(requestBridge(bare.channel.socketPath, {
     op: "deliver", session_id: fallback, batch_id: "after-clear", wake: true, content: "stale",
   }, 2000)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { Events, ErrorCode, type KvEntry, type QueuedIterator } from "nats";
 import { UiBridge, type UiOptions, type UiRemotePeerSummary, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { discoverAllAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
+import { discoverAllAvailableSessions, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
@@ -42,6 +42,7 @@ export class HubDirectoryIndex {
   lastSyncMonoMs = 0;
   directoryGen = 0;
   inflight?: Promise<void>;
+  private pendingMutations?: Map<string, { op: "upsert"; item: IndexedRegistration } | { op: "remove" }>;
   private static readonly TTL_MS = 5_000;
 
   constructor(hub: string) {
@@ -59,6 +60,7 @@ export class HubDirectoryIndex {
     this.anchorMonoMs = 0;
     this.lastSyncMonoMs = 0;
     this.inflight = undefined;
+    this.pendingMutations = undefined;
   }
 
   currentBrokerMs(): number {
@@ -69,22 +71,44 @@ export class HubDirectoryIndex {
 
   upsert(key: string, value: Registration, revision: number, createdMs?: number): void {
     if (value.state !== "ACTIVE") {
-      this.entries.delete(key);
+      this.remove(key);
       return;
     }
     const tsMs = createdMs ?? this.currentBrokerMs();
-    this.entries.set(key, {
+    const item: IndexedRegistration = {
       hub: this.hub,
       value,
       revision,
       createdIso: new Date(tsMs).toISOString(),
       createdMs: tsMs,
       haystack: buildHaystack(value),
-    });
+    };
+    this.entries.set(key, item);
+    this.pendingMutations?.set(key, { op: "upsert", item });
   }
 
   remove(key: string): void {
     this.entries.delete(key);
+    this.pendingMutations?.set(key, { op: "remove" });
+  }
+
+  private recordKvEntry(target: Map<string, IndexedRegistration>, key: string, entry: KvEntry): void {
+    try {
+      const value = registrationSchema.parse(entry.json());
+      if (value.state !== "ACTIVE") {
+        target.delete(key);
+        return;
+      }
+      const createdMs = entry.created.getTime();
+      target.set(key, {
+        hub: this.hub,
+        value,
+        revision: entry.revision,
+        createdIso: entry.created.toISOString(),
+        createdMs,
+        haystack: buildHaystack(value),
+      });
+    } catch { /* Skip malformed records. */ }
   }
 
   async ensureFresh(broker: Broker): Promise<void> {
@@ -96,33 +120,56 @@ export class HubDirectoryIndex {
 
   async syncSnapshot(broker: Broker): Promise<void> {
     const gen = this.directoryGen;
-    const sampleMonoMs = performance.now();
-    const info = await broker.jsm.streams.info("KV_cito_listeners");
-    if (!info.ts || !Number.isFinite(Date.parse(info.ts))) {
-      throw new Error("NATS >= 2.10 with broker StreamInfo.ts is required");
-    }
-    const brokerTs = info.ts;
-    const targetSeq = info.state.last_seq;
-    if (info.state.messages === 0) {
+    const mutations = new Map<string, { op: "upsert"; item: IndexedRegistration } | { op: "remove" }>();
+    this.pendingMutations = mutations;
+    const applyMutations = (target: Map<string, IndexedRegistration>) => {
+      for (const [key, mutation] of mutations) {
+        if (mutation.op === "remove") {
+          target.delete(key);
+        } else {
+          const existing = target.get(key);
+          if (!existing || mutation.item.revision >= existing.revision) {
+            target.set(key, mutation.item);
+          }
+        }
+      }
+    };
+    try {
+      const sampleMonoMs = performance.now();
+      const info = await broker.jsm.streams.info("KV_cito_listeners");
+      if (!info.ts || !Number.isFinite(Date.parse(info.ts))) {
+        throw new Error("NATS >= 2.10 with broker StreamInfo.ts is required");
+      }
+      const brokerTs = info.ts;
+      const targetSeq = info.state.last_seq;
+      if (info.state.messages === 0) {
+        if (gen === this.directoryGen) {
+          const empty = new Map<string, IndexedRegistration>();
+          applyMutations(empty);
+          this.entries = empty;
+          this.anchorBrokerMs = Date.parse(brokerTs);
+          this.anchorMonoMs = sampleMonoMs;
+          this.lastSyncMonoMs = performance.now();
+        }
+        return;
+      }
+      let next: Map<string, IndexedRegistration>;
+      try {
+        next = await this.watchSnapshot(broker, targetSeq);
+      } catch {
+        next = await this.boundedPointGetSnapshot(broker);
+      }
       if (gen === this.directoryGen) {
-        this.entries = new Map();
+        applyMutations(next);
+        this.entries = next;
         this.anchorBrokerMs = Date.parse(brokerTs);
         this.anchorMonoMs = sampleMonoMs;
         this.lastSyncMonoMs = performance.now();
       }
-      return;
-    }
-    let next: Map<string, IndexedRegistration>;
-    try {
-      next = await this.watchSnapshot(broker, targetSeq);
-    } catch {
-      next = await this.boundedPointGetSnapshot(broker);
-    }
-    if (gen === this.directoryGen) {
-      this.entries = next;
-      this.anchorBrokerMs = Date.parse(brokerTs);
-      this.anchorMonoMs = sampleMonoMs;
-      this.lastSyncMonoMs = performance.now();
+    } finally {
+      if (this.pendingMutations === mutations) {
+        this.pendingMutations = undefined;
+      }
     }
   }
 
@@ -159,18 +206,7 @@ export class HubDirectoryIndex {
         for await (const entry of watch) {
           if (timedOut) throw new CitoError("NATS_UNAVAILABLE", "KV watch snapshot timed out");
           if (entry.operation === "PUT") {
-            try {
-              const value = registrationSchema.parse(entry.json());
-              const createdMs = entry.created.getTime();
-              next.set(entry.key, {
-                hub: this.hub,
-                value,
-                revision: entry.revision,
-                createdIso: entry.created.toISOString(),
-                createdMs,
-                haystack: buildHaystack(value),
-              });
-            } catch { /* Skip malformed records. */ }
+            this.recordKvEntry(next, entry.key, entry);
           } else if (entry.operation === "DEL" || entry.operation === "PURGE") {
             next.delete(entry.key);
           }
@@ -223,18 +259,7 @@ export class HubDirectoryIndex {
             const entry = await broker.kv.get(key);
             if (timedOut) throw new CitoError("NATS_UNAVAILABLE", "KV point-get fallback timed out");
             if (!entry || entry.operation !== "PUT") continue;
-            try {
-              const value = registrationSchema.parse(entry.json());
-              const createdMs = entry.created.getTime();
-              next.set(key, {
-                hub: this.hub,
-                value,
-                revision: entry.revision,
-                createdIso: entry.created.toISOString(),
-                createdMs,
-                haystack: buildHaystack(value),
-              });
-            } catch { /* Skip malformed records. */ }
+            this.recordKvEntry(next, key, entry);
           }
         }));
         return next;
@@ -436,12 +461,6 @@ export class HubSlot {
       await this.brokerPromise?.catch(() => {});
       if (this.closing) throw new CitoError("NATS_UNAVAILABLE", "Service is closing");
       this.manuallyDisconnected = false; this.connectionAbort = new AbortController();
-      if (forceLogin && this.login) {
-        this.directoryIndex.clear();
-        this.restoreRetry?.abort(); this.cancel();
-        const prev = this.broker; this.broker = undefined;
-        await prev?.nc.close();
-      }
       await this.network({ interactive, forceLogin });
     });
   }
@@ -561,7 +580,7 @@ export class CitoService {
     });
   }
   async refreshAvailableSessions(): Promise<void> {
-    if (this.closing) return;
+    if (this.closing || !this.ui) return;
     const gen = ++this.discoveryGen;
     try {
       const discovered = await discoverAllAvailableSessions(this.config, this.liveActiveRows(), this.shuttingDown.signal);
@@ -587,6 +606,7 @@ export class CitoService {
       harness: v.harness,
       title: trunc(v.title, 200),
       about: trunc(v.about, 300),
+      cwd: trunc(v.cwd, 300),
       repo: v.repo,
       branch: v.branch,
       scope: v.scope,
@@ -594,63 +614,83 @@ export class CitoService {
       is_self_principal: slot.principal ? v.principal_id === slot.principal.principal_id : false,
     };
   }
-  private collectNetworkPeers(): { myRemote: UiRemotePeerSummary[]; allPeers: UiRemotePeerSummary[] } {
+  private collectMyRemoteAndOnlineCount(): { myRemote: UiRemotePeerSummary[]; onlineCount: number } {
     const myRemoteItems: { slot: HubSlot; item: IndexedRegistration }[] = [];
-    const allPeerItems: { slot: HubSlot; item: IndexedRegistration }[] = [];
+    let onlineCount = 0;
     for (const slot of this.slots.values()) {
       if (slot.status !== "connected" || slot.manuallyDisconnected || !slot.principal) continue;
       for (const item of slot.directoryIndex.readCached(slot.principal)) {
+        onlineCount += 1;
         const isSelfPrincipal = item.value.principal_id === slot.principal.principal_id;
-        const isLocalSelfHost = isSelfPrincipal && item.value.host_id === this.hostId;
-        if (isSelfPrincipal && !isLocalSelfHost) myRemoteItems.push({ slot, item });
-        allPeerItems.push({ slot, item });
+        if (isSelfPrincipal && item.value.host_id !== this.hostId) {
+          myRemoteItems.push({ slot, item });
+        }
       }
     }
-    const sortByRev = (a: { slot: HubSlot; item: IndexedRegistration }, b: { slot: HubSlot; item: IndexedRegistration }) =>
-      b.item.revision - a.item.revision || a.slot.name.localeCompare(b.slot.name) || a.item.value.listener_id.localeCompare(b.item.value.listener_id);
-    myRemoteItems.sort(sortByRev);
-    allPeerItems.sort(sortByRev);
+    myRemoteItems.sort((a, b) =>
+      b.item.revision - a.item.revision
+      || a.slot.name.localeCompare(b.slot.name)
+      || a.item.value.listener_id.localeCompare(b.item.value.listener_id),
+    );
     return {
       myRemote: myRemoteItems.map(({ slot, item }) => this.toRemotePeerSummary(slot, item)),
-      allPeers: allPeerItems.map(({ slot, item }) => this.toRemotePeerSummary(slot, item)),
+      onlineCount,
     };
   }
+  private collectDirectoryEntries(): { slot: HubSlot; item: IndexedRegistration; isSelfPrincipal: boolean; publicId: string; scopedId: string }[] {
+    const entries: { slot: HubSlot; item: IndexedRegistration; isSelfPrincipal: boolean; publicId: string; scopedId: string }[] = [];
+    for (const slot of this.slots.values()) {
+      if (slot.status !== "connected" || slot.manuallyDisconnected || !slot.principal) continue;
+      for (const item of slot.directoryIndex.readCached(slot.principal)) {
+        const publicId = displayId(item.value);
+        entries.push({
+          slot,
+          item,
+          isSelfPrincipal: item.value.principal_id === slot.principal.principal_id,
+          publicId,
+          scopedId: this.scoped(slot.name, publicId),
+        });
+      }
+    }
+    return entries;
+  }
   private evaluateDirectoryQuery(
-    allPeers: UiRemotePeerSummary[],
+    allEntries: { slot: HubSlot; item: IndexedRegistration; isSelfPrincipal: boolean; publicId: string; scopedId: string }[],
     query = this.directoryQuery,
     scope: "all" | "mine" = this.directoryScope,
     harness = this.directoryHarness,
-  ): UiRemotePeerSummary[] {
+  ): { slot: HubSlot; item: IndexedRegistration; isSelfPrincipal: boolean; publicId: string; scopedId: string }[] {
     const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const matched = allPeers.filter(peer => {
-      if (scope === "mine" && !peer.is_self_principal) return false;
-      if (harness && harness !== "all" && peer.harness !== harness) return false;
+    const matched = allEntries.filter(entry => {
+      const v = entry.item.value;
+      if (scope === "mine" && !entry.isSelfPrincipal) return false;
+      if (harness && harness !== "all" && v.harness !== harness) return false;
       for (const tok of tokens) {
         if (tok.startsWith("@") && tok.length > 1) {
-          if (!lower(peer.user).includes(tok.slice(1))) return false;
+          if (!lower(v.owner_user).includes(tok.slice(1))) return false;
         } else if (tok.startsWith("user:") && tok.length > 5) {
-          if (!lower(peer.user).includes(tok.slice(5))) return false;
+          if (!lower(v.owner_user).includes(tok.slice(5))) return false;
         } else if (tok.startsWith("repo:") && tok.length > 5) {
-          if (!lower(peer.repo).includes(tok.slice(5))) return false;
+          if (!lower(v.repo).includes(tok.slice(5))) return false;
         } else if (tok.startsWith("host:") && tok.length > 5) {
           const h = tok.slice(5);
-          if (!lower(peer.host_name).includes(h) && !lower(peer.host_id).includes(h)) return false;
+          if (!lower(v.host_name).includes(h) && !lower(v.host_id).includes(h)) return false;
         } else if (tok.startsWith("is:") && tok.length > 3) {
-          if (lower(peer.harness) !== tok.slice(3)) return false;
+          if (lower(v.harness) !== tok.slice(3)) return false;
         } else if (tok.startsWith("#") && tok.length > 1) {
           const idTok = tok.slice(1);
-          if (!lower(peer.public_id).includes(idTok) && !lower(peer.scoped_id).includes(idTok) && !lower(peer.listener_id).includes(idTok)) return false;
+          if (!lower(entry.publicId).includes(idTok) && !lower(entry.scopedId).includes(idTok) && !lower(v.listener_id).includes(idTok)) return false;
         } else {
-          const hay = [peer.title, peer.about, peer.repo, peer.branch, peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
-            .map(lower).join(" ");
+          const hay = [entry.item.haystack, lower(v.cwd), lower(v.host_id), lower(v.harness), lower(entry.publicId), lower(entry.scopedId), lower(v.listener_id)].join(" ");
           if (!hay.includes(tok)) return false;
         }
       }
       return true;
     });
-    const matchRank = (peer: UiRemotePeerSummary): number => {
+    const matchRank = (entry: { item: IndexedRegistration }): number => {
       if (!tokens.length) return 0;
-      const fields = [lower(peer.title), lower(peer.user), lower(peer.repo)];
+      const v = entry.item.value;
+      const fields = [lower(v.title), lower(v.owner_user), lower(v.repo)];
       let score = 0;
       for (const tok of tokens) {
         const clean = tok.replace(/^(@|user:|repo:|host:|is:|#)/, "");
@@ -661,10 +701,10 @@ export class CitoService {
       return score;
     };
     matched.sort((a, b) =>
-      Number(Boolean(b.is_self_principal)) - Number(Boolean(a.is_self_principal))
+      Number(b.isSelfPrincipal) - Number(a.isSelfPrincipal)
       || matchRank(b) - matchRank(a)
-      || b.last_seen_at.localeCompare(a.last_seen_at)
-      || a.scoped_id.localeCompare(b.scoped_id),
+      || b.item.createdIso.localeCompare(a.item.createdIso)
+      || a.scopedId.localeCompare(b.scopedId),
     );
     return matched;
   }
@@ -678,9 +718,17 @@ export class CitoService {
   }
   pushUiDirectory(): void {
     if (this.closing || !this.ui) return;
-    const { allPeers } = this.collectNetworkPeers();
-    const matched = this.evaluateDirectoryQuery(allPeers);
-    this.ui.directory(matched.slice(0, 100), matched.length, allPeers.length);
+    const allEntries = this.collectDirectoryEntries();
+    const matched = this.evaluateDirectoryQuery(allEntries);
+    const peers: UiRemotePeerSummary[] = [];
+    for (const entry of matched.slice(0, 100)) {
+      peers.push(this.toRemotePeerSummary(entry.slot, entry.item));
+      if (Buffer.byteLength(JSON.stringify({ op: "directory", peers, matched_count: matched.length, online_count: allEntries.length }) + "\n", "utf8") >= 128 * 1024) {
+        peers.pop();
+        break;
+      }
+    }
+    this.ui.directory(peers, matched.length, allEntries.length);
   }
   pushUiState(): void {
     if (this.closing) return;
@@ -690,22 +738,9 @@ export class CitoService {
     const listeners = activeRows.map(row => ({ hub: row.hub, listener_id: row.listener_id, public_id: displayId(row), scoped_id: this.scoped(row.hub, displayId(row)),
       harness: row.harness, session_id: row.session_id, title: row.title, about: row.about, cwd: row.cwd, repo: row.repo, branch: row.branch, scope: row.scope,
       can_jump: getAdapter(row.harness)?.canJump === true }));
-    const totalHubs = Math.max(1, this.slots.size);
-    const available = this.availableSessions.flatMap(c => {
-      const matching = activeRows.filter(r =>
-        r.harness === c.harness && (
-          r.session_id === c.session_id
-          || (c.endpoint_pid !== undefined && r.endpoint_pid != null && r.endpoint_pid === c.endpoint_pid)
-        ),
-      );
-      if (matching.some(r => r.hub === undefined)) return [];
-      const activeHubs = [...new Set(matching.map(r => r.hub))];
-      if (activeHubs.length >= totalHubs) return [];
-      const { listening_hubs: _, ...rest } = c;
-      return [activeHubs.length ? { ...rest, listening_hubs: activeHubs } : rest];
-    });
-    const { myRemote, allPeers } = this.collectNetworkPeers();
-    this.ui?.state(hubs, listeners, available, myRemote, allPeers.length);
+    const available = filterAvailableSessions(this.availableSessions, activeRows, this.slots.size);
+    const { myRemote, onlineCount } = this.collectMyRemoteAndOnlineCount();
+    this.ui?.state(hubs, listeners, available, myRemote, onlineCount);
     if (this.directoryOpen) this.pushUiDirectory();
   }
   async handleUiAction(action: UiToDaemonAction): Promise<void> {
@@ -805,6 +840,7 @@ export class CitoService {
           if (action.action === "disconnect") {
             await slot.disconnect();
             await Promise.allSettled([...slot.receivers.values()].map(receiver => receiver.badge()));
+            void this.refreshAvailableSessions();
           }
           else {
             await slot.reconnect(action.action === "login", { forceLogin: action.action === "login" });
@@ -882,6 +918,16 @@ export class CitoService {
       onSessionSwitched: (harness, sessionId) => this.revokeSession(harness, sessionId),
       onDirectoryUpsert: (hub, id, value, revision) => { this.upsertDirectoryEntry(hub, id, value, revision); this.pushUiState(); },
       onDirectoryRemove: (hub, id) => { this.removeDirectoryEntry(hub, id); this.pushUiState(); },
+      onReceiverStopped: (hub, id, receiver) => {
+        const key = `${hub}:${id}`;
+        if (this.receivers.get(key) === receiver) {
+          this.receivers.delete(key);
+          this.state.liveReceivers.delete(key);
+          this.slots.get(hub)?.receivers.delete(id);
+        }
+        this.pushUiState();
+        void this.refreshAvailableSessions();
+      },
     };
   }
   private log(error: unknown) { (this.options.diagnostic ?? console.error)(String(error)); }
@@ -910,7 +956,15 @@ export class CitoService {
         this.state.recordOfflineGap(id, await brokerNow(broker.jsm), entry!.created, hub);
         restored = new Receiver(this.state, this.config, broker, local, this.receiverOptions());
         this.installReceiver(key, restored);
-        if (!await restored.start()) { await restored.stop(); if (this.receivers.get(key) === restored) this.receivers.delete(key); restored = undefined; }
+        if (!await restored.start()) {
+          await restored.stop();
+          if (this.receivers.get(key) === restored) {
+            this.receivers.delete(key);
+            this.state.liveReceivers.delete(key);
+            slot.receivers.delete(id);
+          }
+          restored = undefined;
+        }
         else await restored.badge().catch(error => this.log(error));
       });
       this.pushUiState();
@@ -1202,7 +1256,15 @@ export class CitoService {
   private async revokeSession(harness: string, sessionId: string): Promise<void> {
     const rows = this.state.db.prepare("SELECT * FROM local_listeners WHERE harness = ? AND session_id = ? AND status = 'ACTIVE'").all(harness, sessionId) as unknown as ListenerRow[];
     // Fence every local binding before any potentially failing remote update.
-    for (const row of rows) this.receivers.get(`${row.hub}:${row.listener_id}`)?.cancel();
+    const cancelled: { key: string; hub: string; id: string; receiver: Receiver }[] = [];
+    for (const row of rows) {
+      const key = `${row.hub}:${row.listener_id}`;
+      const receiver = this.receivers.get(key);
+      if (receiver) {
+        receiver.cancel();
+        cancelled.push({ key, hub: row.hub, id: row.listener_id, receiver });
+      }
+    }
     this.state.transaction(() => {
       for (const row of rows) {
         this.removeDirectoryEntry(row.hub, row.listener_id);
@@ -1210,9 +1272,17 @@ export class CitoService {
         this.state.run("UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'session_switched' WHERE hub = ? AND listener_id = ? AND state IN ('RECEIVED','DISPATCHING')", row.hub, row.listener_id);
       }
     });
+    for (const { key, hub, id, receiver } of cancelled) {
+      if (this.receivers.get(key) === receiver) {
+        this.receivers.delete(key);
+        this.state.liveReceivers.delete(key);
+        this.slots.get(hub)?.receivers.delete(id);
+      }
+      this.retire(receiver);
+    }
     await Promise.allSettled(rows.map(async row => {
-      const broker = await this.slot(row.hub).network(), entry = await broker.kv.get(row.listener_id);
-      if (!entry) return;
+      const broker = this.slot(row.hub).connectedBroker(), entry = await broker?.kv.get(row.listener_id);
+      if (!entry || !broker) return;
       const value = registrationSchema.parse(entry.json());
       if (value.owner_token === row.owner_token && value.binding_generation === row.binding_generation) await broker.kv.update(row.listener_id,
         encode({ ...value, state: "UNLISTENED", binding_generation: row.binding_generation + 1 }), entry.revision);

@@ -32,6 +32,7 @@ export interface UiRemotePeerSummary {
   harness: string;
   title: string;
   about: string;
+  cwd?: string;
   repo: string | null;
   branch?: string | null;
   scope: "self" | "workspace";
@@ -196,7 +197,14 @@ export class UiBridge {
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
   }
   directory(peers: UiRemotePeerSummary[], matchedCount = peers.length, onlineCount = peers.length): void {
-    this.directorySnapshot = { op: "directory", peers, matched_count: matchedCount, online_count: onlineCount };
+    const bounded = [...peers];
+    while (
+      bounded.length > 0 &&
+      Buffer.byteLength(JSON.stringify({ op: "directory", peers: bounded, matched_count: matchedCount, online_count: onlineCount }) + "\n", "utf8") >= 128 * 1024
+    ) {
+      bounded.pop();
+    }
+    this.directorySnapshot = { op: "directory", peers: bounded, matched_count: matchedCount, online_count: onlineCount };
     this.directoryPending = true;
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
   }
@@ -211,9 +219,27 @@ export class UiBridge {
   async close(): Promise<void> {
     this.stopped = true; clearTimeout(this.restart);
     const child = this.child; if (!child) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      this.child = undefined;
+      return;
+    }
     await new Promise<void>(resolve => {
-      const timeout = setTimeout(() => child.kill("SIGKILL"), 2000);
-      child.once("exit", () => { clearTimeout(timeout); resolve(); }); child.stdin.end();
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        child.removeListener("exit", done);
+        child.removeListener("close", done);
+        child.removeListener("error", done);
+        resolve();
+      };
+      const timeout = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
+      timeout.unref?.();
+      child.once("exit", done);
+      child.once("close", done);
+      child.once("error", done);
+      child.stdin.end();
     });
   }
 }

@@ -313,8 +313,10 @@ export default function citoBridge(pi: BridgeAPI): void {
           toolArgs = targetHub ? { hub: targetHub } : {};
         }
       }
+      const commandSessionId = sessionId;
       try {
         const payload = await callMcpTool(tool, toolArgs);
+        if (sessionId !== commandSessionId) return;
         if (tool === "cito_listen") {
           activeBadge ??= `🔔 ${String(payload.listener_id ?? "cito")}`;
           ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
@@ -325,6 +327,7 @@ export default function citoBridge(pi: BridgeAPI): void {
           ctx.ui.notify?.("Cito stopped listening", "info");
         }
       } catch (error) {
+        if (sessionId !== commandSessionId) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
     },
