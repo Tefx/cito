@@ -3,10 +3,13 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
+import { ClaudeCodeAdapter } from "./claude.js";
 import { CodexDesktopAdapter } from "./codex.js";
 import { SocketBridgeAdapter, identifyBridge } from "./pi.js";
 import { gitMetadata } from "./git.js";
 import type { AvailableSessionSummary, Caller, CallerDetectionContext, CallerInput, HarnessAdapter } from "./types.js";
+export * from "./claude.js";
+export * from "./claude-channel.js";
 export * from "./codex.js";
 export * from "./git.js";
 export * from "./pi.js";
@@ -19,6 +22,7 @@ export function registerAdapter(adapter: HarnessAdapter): void {
   ADAPTER_REGISTRY.set(adapter.id, adapter);
 }
 registerAdapter(new CodexDesktopAdapter());
+registerAdapter(new ClaudeCodeAdapter());
 registerAdapter(new SocketBridgeAdapter("pi"));
 export function getAdapter(harness: string): HarnessAdapter | undefined {
   if (!harnessIdSchema.safeParse(harness).success) return;
@@ -65,7 +69,7 @@ export async function discoverAllAvailableSessions(
     if (!list) { list = []; byHarness.set(c.harness, list); }
     list.push(c);
   }
-  const rank = (h: string) => h === "pi" ? 0 : h === "codex" ? 1 : 2;
+  const rank = (h: string) => h === "pi" ? 0 : h === "codex" ? 1 : h === "claude" ? 2 : 3;
   const harnesses = [...byHarness.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   const result: AvailableSessionSummary[] = [];
   for (const harness of harnesses) {
