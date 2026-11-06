@@ -3829,3 +3829,69 @@ phases:
     and README.md Quick Start examples, and pass the iterative code-hygiene gate.'
   depends_on:
   - v12
+  steps:
+  - id: v13.directory-local-peer-inclusion-and-v0-11-1
+    name: 'Implement V13 Network Directory local-host peer inclusion, domain-partition
+      test coverage, and v0.11.1 release [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - src/shared/index.ts\n    - src/mcp/service.ts\n    - tests/mcp/ui.test.ts\n\
+      \    - tests/shared/shared.test.ts\n  blocked_paths:\n    - plan.yaml\n```\n\
+      \n- **Deliver:**\n  - Implement and verify `docs/DESIGN.md` §4.3 and `AGENTS.md`:\n\
+      \    1. **Local-Host Peer Inclusion in `collectNetworkPeers()` (`src/mcp/service.ts`)**:\n\
+      \       - In `CitoService.collectNetworkPeers()`, apply `!isLocalSelfHost` (`if\
+      \ (isSelfPrincipal && !isLocalSelfHost) myRemoteItems.push({ slot, item })`)\
+      \ only when populating `myRemoteItems` (for Menu Bar Zone 2 `MY OTHER HOSTS`),\
+      \ and always push every visible active registration (`allPeerItems.push({ slot,\
+      \ item })`—including local-host sessions on `this.hostId`, remote self-principal\
+      \ sessions, and `workspace`-scoped team peers) into `allPeerItems` (`Search\
+      \ Network Directory…` and `directory_online_count`), matching `cito_find` visibility.\n\
+      \    2. **Domain-Partition Test Coverage (`tests/mcp/ui.test.ts`)**:\n     \
+      \  - In `tests/mcp/ui.test.ts` (`\"CitoService populates my_remote_listeners\
+      \ and evaluates query_directory across HubDirectoryIndex with prefix tokens\
+      \ and facets\"`), enroll a real local session on `f.service` (`this.hostId`)\
+      \ alongside the remote self-principal session (`c_aliceremote2`) and remote\
+      \ team `workspace` session (`c_bobworkspace`), and assert that:\n         1.\
+      \ `my_remote_listeners` (`states.mock.lastCall?.[3]`) contains ONLY the remote\
+      \ self-principal session (`c_aliceremote2`) and excludes the local session on\
+      \ `this.hostId`;\n         2. `directory_online_count` (`states.mock.lastCall?.[4]`)\
+      \ and `open_directory` (`scope: \"all\"`) include all `3` sessions (local self-host,\
+      \ remote self-host, and remote team peer);\n         3. `query_directory` with\
+      \ `scope: \"mine\"` includes both the local self-host session and the remote\
+      \ self-host session (`2` sessions).\n    3. **Bump Version to `0.11.1` (`PATCH`\
+      \ Increment per `AGENTS.md`)**:\n       - Update `package.json`, `package-lock.json`,\
+      \ and `CITO_VERSION` in `src/shared/index.ts` (along with the version synchronization\
+      \ assertion in `tests/shared/shared.test.ts` and `\"0.11.0\"` -> `\"0.11.1\"\
+      ` in `README.md` Quick Start examples) to `\"0.11.1\"`.\n- **Boundary:** Owner\
+      \ `senior-engineer`; modifies `/Users/tefx/Projects/cito` (`package.json`, `package-lock.json`,\
+      \ `README.md`, `src/shared/index.ts`, `src/mcp/service.ts`, `tests/mcp/ui.test.ts`,\
+      \ `tests/shared/shared.test.ts`). Must enforce English-only UI/UX/code/docs\
+      \ (0 Chinese chars in `src/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`),\
+      \ 0 company/environment-specific names, 100% standalone `src/pi-extension/cito-bridge.ts`\
+      \ (0 non-Node built-in imports), and harness-agnostic `src/mcp/` (0 harness\
+      \ references in `src/mcp/` except `src/mcp/cli.ts` delegating `--codex` resolution\
+      \ to `src/adapters/codex.ts`). Must not mutate external repositories (`/Users/tefx/dotfiles`,\
+      \ `tela`) or live user `~/.cito` / `~/.codex` / `~/.claude` state.\n- **Admit:**\
+      \ Completed Phase `v12`, `docs/DESIGN.md` (§4.3), and `AGENTS.md`. Verified\
+      \ by `npm run typecheck && npm run compile && npm test` exiting `0`. Consumed\
+      \ by `v13.acceptance-and-hygiene-gate`.\n- **Recovery:** Fix any failing typecheck,\
+      \ compilation, Swift build, or unit/E2E test in place within the isolated worktree\
+      \ and clean up any temporary test directories, sockets, HTTP servers, or child\
+      \ processes."
+    verification: npm run typecheck && npm run compile && npm test
+    evidence_template: Commands run (npm run typecheck && npm run compile && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 non-Node imports in
+      cito-bridge.ts, 0 non-cli harness refs in src/mcp/), and verified docs/DESIGN.md
+      §4.3 & AGENTS.md deliverables
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - src/mcp/service.ts
+    - tests/mcp/ui.test.ts
+    - package.json
+    - package-lock.json
+    - src/shared/index.ts
+    - tests/shared/shared.test.ts
+    - README.md
+    agent: senior-engineer
