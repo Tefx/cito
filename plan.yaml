@@ -2886,7 +2886,7 @@ phases:
 - id: v10
   name: Cito V10 Zero-Script Git/Global npm Packaging, Native Node TypeScript Entrypoint,
     erasableSyntaxOnly Compliance, and Hygiene Gate
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -3034,7 +3034,7 @@ phases:
   - id: v10.acceptance-and-hygiene-gate
     name: 'V10 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v10` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -3120,3 +3120,49 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-06T05:55:53.904326Z'
+    done_at: '2026-11-06T06:00:20.738286+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v10-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:e58569fe99c5507cda72d51061079bec700c18e6).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (27 test
+      files, 217 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Case-insensitive ''claude'' matches in src/ and tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V10-1-ZERO-SCRIPT-GIT-AND-GLOBAL-NPM-PACKAGING: PROVEN (package.json files=[''bin'',
+      ''dist/src'', ''src'', ''README.md''], scripts compile & prepublishOnly with
+      0 pacote git-prep trigger keys, tsx in devDependencies only, package-lock.json
+      updated).
+
+      - V10-2-ERASABLE-SYNTAX-ONLY-AND-EXPLICIT-CLASS-FIELDS: PROVEN (tsconfig.json
+      erasableSyntaxOnly=true and all 10 parameter-property constructors in src/shared/errors.ts,
+      src/adapters/pi.ts, src/ui/index.ts, src/mcp/oidc.ts, src/auth-callout/oidc.ts,
+      src/mcp/state.ts, src/mcp/receiver.ts, and src/mcp/service.ts replaced with
+      explicit fields).
+
+      - V10-3-NATIVE-NODE-TYPESCRIPT-ENTRYPOINT-LOADER: PROVEN (bin/cito-mcp and bin/cito-auth-callout
+      register built-in node:module.register resolve+load hook using stripTypeScriptTypes
+      when dist/ is absent).
+
+      - V10-4-README-UPDATE-AND-PACKAGING-BEHAVIORAL-TESTS: PROVEN (README.md updated
+      to npm run compile and tests/auth-callout/cli.test.ts verifies package.json
+      contract + end-to-end git+file:// global npm install without dist/).
+
+      - V10-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 fresh-context
+      structural-auditor 01a1af67-74d9-71a1-8c21-6c5aa3569369 and uiux-auditor 01a1af67-7535-7444-8052-dc93885dde21
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
