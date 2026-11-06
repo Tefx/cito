@@ -2921,3 +2921,91 @@ phases:
     directly without dist/; and pass the iterative code-hygiene gate.'
   depends_on:
   - v9
+  steps:
+  - id: v10.npm-packaging-and-native-ts-entrypoint
+    name: 'Implement V10 zero-script npm packaging, tsconfig erasableSyntaxOnly compliance,
+      native Node TypeScript entrypoints, README update, and packaging tests [REQUIRES_SKILL:
+      code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ tsconfig.json\n    - bin/cito-mcp\n    - bin/cito-auth-callout\n    - src/shared/errors.ts\n\
+      \    - src/adapters/pi.ts\n    - src/ui/index.ts\n    - src/mcp/oidc.ts\n  \
+      \  - src/auth-callout/oidc.ts\n    - src/mcp/state.ts\n    - src/mcp/receiver.ts\n\
+      \    - src/mcp/service.ts\n    - README.md\n    - tests/auth-callout/cli.test.ts\n\
+      \  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n  - Implement and\
+      \ verify Cito V10 Zero-Script Git/Global npm Packaging, Native Node TypeScript\
+      \ Entrypoint, and `erasableSyntaxOnly` Compliance per `docs/DESIGN.md` §5.2:\n\
+      \    1. **Zero-Script Git & Global `npm install` `package.json` Contract (`package.json`,\
+      \ `package-lock.json`, `docs/DESIGN.md` §5.2.1)**:\n       - Set `\"files\"\
+      : [\"bin\", \"dist/src\", \"src\", \"README.md\"]` in `package.json`.\n    \
+      \   - Replace `\"build\"` and `\"prepare\"` in `package.json` `scripts` with\
+      \ `\"compile\": \"rm -rf dist && tsc\"` and `\"prepublishOnly\": \"npm run typecheck\
+      \ && npm run compile\"` (preserving `\"typecheck\": \"tsc --noEmit\"` and `\"\
+      test\": \"vitest run --dir tests\"`), ensuring none of `pacote/lib/git.js`'s\
+      \ 6 trigger keys (`prepare`, `build`, `prepack`, `preinstall`, `install`, `postinstall`)\
+      \ exist in `scripts`.\n       - Move `\"tsx\"` from `\"dependencies\"` to `\"\
+      devDependencies\"` and regenerate `package-lock.json`.\n    2. **`\"erasableSyntaxOnly\"\
+      : true` & Explicit Class Fields (`tsconfig.json`, `src/**/*.ts`, `docs/DESIGN.md`\
+      \ §5.2.2)**:\n       - Enable `\"erasableSyntaxOnly\": true` in `tsconfig.json`.\n\
+      \       - Replace all 10 TypeScript parameter property constructors (`constructor(readonly\
+      \ ...)` / `constructor(private readonly ...)`) in `src/shared/errors.ts`, `src/adapters/pi.ts`,\
+      \ `src/ui/index.ts`, `src/mcp/oidc.ts`, `src/auth-callout/oidc.ts`, `src/mcp/state.ts`,\
+      \ `src/mcp/receiver.ts`, and `src/mcp/service.ts` with explicit field declarations\
+      \ and constructor assignments.\n    3. **Native Node TypeScript Entrypoints\
+      \ (`bin/cito-mcp`, `bin/cito-auth-callout`, `docs/DESIGN.md` §5.2.2)**:\n  \
+      \     - Update `bin/cito-mcp` and `bin/cito-auth-callout` so they resolve `../dist/src/mcp/cli.js`\
+      \ / `../dist/src/auth-callout/cli.js` first when present; when `dist/` is absent,\
+      \ register a built-in `node:module.register` hook mapping relative `.js` imports\
+      \ (`./*.js`, `../*.js`) to `.ts` on `ERR_MODULE_NOT_FOUND` and import `../src/mcp/cli.ts`\
+      \ / `../src/auth-callout/cli.ts` directly on Node's built-in TypeScript runtime\
+      \ without `tsx`.\n    4. **Documentation & Behavioral Packaging Verification\
+      \ (`README.md`, `tests/auth-callout/cli.test.ts`)**:\n       - Update `README.md`\
+      \ (`npm run build` -> `npm run compile`).\n       - Add behavioral packaging\
+      \ verification in `tests/auth-callout/cli.test.ts` verifying:\n         - (a)\
+      \ `package.json` `files` includes `\"src\"`, `scripts` contains none of `prepare|build|prepack|preinstall|install|postinstall`,\
+      \ and `dependencies` excludes `tsx`; and\n         - (b) `npm install -g --prefix\
+      \ <tmp> \"git+file://<repo>\"` succeeds and the installed `<tmp>/bin/cito` and\
+      \ `<tmp>/bin/cito-auth-callout` execute directly without `dist/`.\n- **Boundary:**\
+      \ Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito` (`package.json`,\
+      \ `package-lock.json`, `tsconfig.json`, `bin/cito-mcp`, `bin/cito-auth-callout`,\
+      \ `src/shared/errors.ts`, `src/adapters/pi.ts`, `src/ui/index.ts`, `src/mcp/oidc.ts`,\
+      \ `src/auth-callout/oidc.ts`, `src/mcp/state.ts`, `src/mcp/receiver.ts`, `src/mcp/service.ts`,\
+      \ `README.md`, `tests/auth-callout/cli.test.ts`). Must enforce English-only\
+      \ UI/UX/code/docs (0 Chinese chars in `src/`, `docs/`, `README.md`, `AGENTS.md`,\
+      \ `deploy/`), 0 company/environment-specific names, 0 case-insensitive `'claude'`\
+      \ matches in `src/` and `tests/`, 100% standalone `src/pi-extension/cito-bridge.ts`\
+      \ (0 non-Node built-in imports), and harness-agnostic `src/mcp/` (0 references\
+      \ to `pi`, `codex`, or `x-codex-turn-metadata` in `src/mcp/` except `src/mcp/cli.ts`\
+      \ delegating `--codex` resolution to `src/adapters/codex.ts`). Must not mutate\
+      \ external repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito`\
+      \ / `~/.codex` state.\n- **Admit:** Completed Phase `v9`, `docs/DESIGN.md` (§5.2),\
+      \ `AGENTS.md`, and `README.md`. Verified by `npm run typecheck && npm run compile\
+      \ && npm test` exiting `0`. Consumed by `v10.acceptance-and-hygiene-gate`.\n\
+      - **Recovery:** Fix any failing typecheck (`erasableSyntaxOnly`), compilation,\
+      \ or unit/packaging/E2E test in place within the isolated worktree and clean\
+      \ up any temporary test directories (`<tmp>`) or child processes."
+    verification: npm run typecheck && npm run compile && npm test
+    evidence_template: Commands run (npm run typecheck && npm run compile && npm test),
+      mechanical checks (0 Chinese chars, 0 forbidden names, 0 case-insensitive 'claude'
+      matches in src/ and tests/, 0 non-Node imports in cito-bridge.ts, 0 non-cli
+      harness refs in src/mcp/), and verified docs/DESIGN.md §5.2 deliverables.
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - package-lock.json
+    - tsconfig.json
+    - bin/cito-mcp
+    - bin/cito-auth-callout
+    - src/shared/errors.ts
+    - src/adapters/pi.ts
+    - src/ui/index.ts
+    - src/mcp/oidc.ts
+    - src/auth-callout/oidc.ts
+    - src/mcp/state.ts
+    - src/mcp/receiver.ts
+    - src/mcp/service.ts
+    - tests/auth-callout/cli.test.ts
+    agent: senior-engineer
