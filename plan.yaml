@@ -3428,7 +3428,7 @@ phases:
 - id: v12
   name: Cito V12 Claude Code Adapter Hardening, Exact Hook Batch Acknowledgment, UI
     & Architecture Symmetry, and v0.11.0 Release
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero Chinese characters exist in src/, docs/, README.md, AGENTS.md,
     or deploy/, zero company/environment-specific names (rda, casdoor, rcatwin, keppel,
@@ -3613,7 +3613,7 @@ phases:
   - id: v12.acceptance-and-hygiene-gate
     name: 'V12 acceptance, specification conformance, and iterative code-hygiene gate
       [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Terminal Phase `v12` and project acceptance decision (`PASS` or `FAIL`) with\
@@ -3709,6 +3709,52 @@ phases:
     agent: code-reviewer
     claimed_by: code-reviewer
     claimed_at: '2026-11-06T11:24:21.510836Z'
+    done_at: '2026-11-06T11:29:00.601915+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v12-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:003a21b92b49579c0b3d21f3f9414825960d3509).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (30 test
+      files, 238 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, docs/, README.md, AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, docs/ (excluding policy
+      rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in src/pi-extension/cito-bridge.ts: 0 matches
+
+      - Harness references in src/mcp/ (excluding src/mcp/cli.ts delegating --codex
+      to src/adapters/codex.ts): 0 matches
+
+      Requirement results:
+
+      - V12-1-CLAUDE-SESSION-CLAIM-PID-DISAMBIGUATION: PROVEN (src/adapters/claude.ts
+      claudeSessionClaim defers expected_session_id when a socket PID is present,
+      tests/adapters/claude.test.ts).
+
+      - V12-2-FIRST-TURN-SESSION-STABILITY-AND-ALIAS-DRAINING: PROVEN (src/adapters/claude-channel.ts
+      first-turn claude-<pid> stability + aliases/<u1> + badgedSessions cleanup on
+      close, src/adapters/claude.ts drainClaudeWakes/peekClaudeWakes alias merging
+      & >4 MiB staging support + cached title retention, src/claude-hook/cli.ts CLAUDE_SESSION_ID
+      fallback).
+
+      - V12-3-EXACT-BATCH-ACKNOWLEDGMENT-AND-NONBLOCKING-CHANNEL: PROVEN (src/mcp/service.ts
+      inbox ack_ids matching signal_id OR batch_id, src/claude-hook/cli.ts badge unread
+      count stripping + bounded POST /mcp cito_inbox batch acknowledgment, src/adapters/claude-channel.ts
+      non-blocking notifications/claude/channel).
+
+      - V12-4-UI-SYMMETRY-MCP-BOUNDARY-CONSOLIDATION-AND-V0-11-0: PROVEN (src/macos/cito-ui.swift
+      orderedHarnesses/groupTitle/DirectoryPanel for ''claude'', startOptionalStdioChannel
+      in src/adapters/claude-channel.ts, resolveExplicitCaller in src/adapters/git.ts,
+      runEntrypoint in bin/loader.js, README.md Quick Start, CITO_VERSION = ''0.11.0'').
+
+      - V12-5-CODE-HYGIENE-ITERATIVE-CONVERGENCE-AND-TESTS: PROVEN (Round 1 S1 & Round
+      2 R2-1 closed; Round 2 fresh-context structural-auditor 01a1b08a-42cb-74a3-bf6a-831598f7cd82
+      and uiux-auditor 01a1b08a-4277-778d-ac44-9bec484ec874 certified Completeness:
+      CLEAN | Simplicity: ZERO_NEW_ISSUES).'
   - id: v12.fix-e2e-claude-unbatched-signal-race
     name: Hold dispatcher lease for sig_unbatched_new in tests/e2e/lifecycle.test.ts
     status: done
