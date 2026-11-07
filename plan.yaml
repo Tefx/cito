@@ -5938,6 +5938,7 @@ phases:
     - src/setup/index.ts
     - src/macos/cito-ui.swift
     - tests/setup/setup.test.ts
+    agent: senior-engineer
   - id: v20.gate
     name: 'V20 Stage 4 (v0.16.0) acceptance, AppIcon.icns & Cito.app bundle, calm
       4-section homepage restraint, /cito/ subpath HTTP serving & code-hygiene gate
