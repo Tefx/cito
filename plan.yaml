@@ -6126,3 +6126,111 @@ phases:
   status: locked
   depends_on:
   - v20
+  steps:
+  - id: v21.impl
+    name: 'Implement Stage 5 (v0.17.0) Core/Hub/UI Node.js Removal, Native Harness
+      Plugin Manifests, First-Launch Consent, Surgical Disconnect/Uninstall & Homebrew/Cito.app
+      Distribution [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "Implement Stage 5 (v0.17.0) per docs/DESIGN.md (§8) and docs/ROADMAP.md\
+      \ (Stage 5):\n1. Complete Core/Hub/UI Node.js runtime removal: bin/cito (crates/cito-native)\
+      \ and bin/cito-ui (src/macos/cito-ui.swift) execute daemon, hub, mcp-stdio,\
+      \ hook, setup (--disable <id>, --uninstall [--purge-data]), listen, unlisten,\
+      \ find, send, and inbox natively with zero Node.js dependency in Cito.app/Contents/MacOS/Cito,\
+      \ ~/.cito/bin/*, com.tefx.cito.daemon.plist, and packaging/homebrew/cito.rb\
+      \ (zero depends_on \"node\"). Keep crates/cito-native/src/ and src/macos/cito-ui.swift\
+      \ 100% free of hardcoded agent/channel names (0 matches for pi|codex|claude|telegram|slack|teams|discord|feishu),\
+      \ driving all plugins via <dir>/plugin.json (and optional external command or\
+      \ on-demand node index.ts/index.js).\n2. Upgrade Pi, Codex, and Claude Code\
+      \ plugin integration per official docs:\n   - Pi (plugins/pi/cito-bridge.ts\
+      \ & plugins/pi/index.ts): call pi.registerMcpServer?.(\"cito\", { command, args:\
+      \ [] }) in try/catch on load; Set Up installs ~/.pi/agent/extensions/cito-bridge.ts\
+      \ (and mcp/global.mcp.json fallback) and cleans legacy \"npm:@tefx/cito\" from\
+      \ settings.json; Disconnect removes extensions/cito-bridge.ts, mcpServers.cito,\
+      \ and \"npm:@tefx/cito\".\n   - Codex (plugins/codex/): ship .agents/plugins/marketplace.json\
+      \ + plugins/codex/.codex-plugin/plugin.json + plugins/codex/.mcp.json; surgical\
+      \ Set Up & Disconnect of [mcp_servers.cito] in ~/.codex/config.toml preserving\
+      \ comments.\n   - Claude Code (plugins/claude/): ship plugins/claude/.claude-plugin/plugin.json\
+      \ + plugins/claude/.mcp.json + plugins/claude/hooks/hooks.json; surgical Set\
+      \ Up & Disconnect of mcpServers.cito and cito-claude-hook in ~/.claude/settings.json\
+      \ preserving custom hooks.\n3. Implement First-Launch Explicit Consent (opening\
+      \ SettingsPanel on Agent Apps tab when no app is configured and CITO_UI_HEADLESS\
+      \ !== \"1\", never silently mutating user files on startup), per-app [ Disconnect\
+      \ ] (remove_app:<id> -> setup_remove_app), and global [ Remove All Integrations…\
+      \ ] (open_uninstall_confirm -> uninstall_purge_data checkbox \"Also delete ~/.cito\
+      \ local data & hub settings\" -> confirm_uninstall_all -> setup_uninstall_all).\n\
+      4. Ship packaging/homebrew/cito.rb (zero depends_on \"node\", resolveStablePackageRoot\
+      \ mapping /Cellar/<name>/<ver>/ to /opt/<name>/), .github/workflows/release.yml\
+      \ (conditional Developer ID --options runtime --timestamp + notarytool + stapler\
+      \ when APPLE_SIGNING_IDENTITY is set, ad-hoc otherwise), root MIT LICENSE, update\
+      \ README.md and site/ to present only 1. Homebrew (brew install tefx/tap/cito)\
+      \ and 2. Download Cito.app, bump CITO_VERSION / package.json / Cargo.toml /\
+      \ cito.rb to \"0.17.0\", and add tests/setup/distribution.test.ts (including\
+      \ Clean-Room PATH=\"/usr/bin:/bin:/usr/sbin:/sbin\" zero-Node E2E tests).\n"
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/main.rs
+    - src/setup/index.ts
+    - src/macos/cito-ui.swift
+    - plugins/pi/cito-bridge.ts
+  - id: v21.hygiene
+    name: 'Deep Iterative Code-Hygiene Audit & Fix Across Full Repository (Rust, Swift,
+      Plugins, Site, Docs & Tests) [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: 'Load /Users/tefx/.pi/agent/skills/code-hygiene/SKILL.md and execute
+      a deep, multi-round iterative code-hygiene audit and fix cycle across the entire
+      repository (crates/cito-native/, src/, plugins/, site/, docs/, packaging/, .github/workflows/,
+      and tests/) until converging to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES:
+
+      1. Lens 1 (Completeness & Wiring): Verify every UI control in cito-ui.swift,
+      every RPC/CLI route, every plugin manifest field, and every site/ link is wired
+      end-to-end with zero dead stubs or unwired options.
+
+      2. Lens 2 & 3 (Simplicity, Dead Code & Duplication Trim): Remove any dead code,
+      unused helpers, stale compatibility shims, or duplicate logic across Rust, Swift,
+      TypeScript, and site scripts.
+
+      3. Lens 4 (Interface Orthogonality & Zero Hardcoding): Verify 0 hardcoded agent
+      or channel names in crates/cito-native/src/, src/, and src/macos/cito-ui.swift,
+      and 0 internal company/host names across the entire repo.
+
+      4. Lens 5 (Test Authenticity): Audit all tests (including tests/setup/distribution.test.ts
+      and tests/site/site.test.ts) to ensure every test exercises real behavior with
+      discriminating assertions.
+
+      '
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - AGENTS.md
+    depends_on:
+    - v21.impl
+  - id: v21.gate
+    name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
+      & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: 'Independent final verification gate for Stage 5 (v0.17.0):
+
+      1. Run npm run typecheck && npm run compile && npm test and verify 100% pass
+      rate.
+
+      2. Verify Clean-Room Zero-Node execution (PATH="/usr/bin:/bin:/usr/sbin:/sbin",
+      CITO_NODE_BIN="") of Cito.app/Contents/MacOS/Cito, cito hub, cito setup, and
+      cito-mcp.
+
+      3. Verify /usr/bin/ruby -c packaging/homebrew/cito.rb, zero depends_on "node"
+      in cito.rb, root MIT LICENSE, and CITO_VERSION === "0.17.0".
+
+      4. Verify 0 hardcoded agent/channel names in core/UI and 0 forbidden internal
+      identifiers across the entire repository.
+
+      '
+    verification: npm run typecheck && npm run compile && npm test && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    depends_on:
+    - v21.hygiene
