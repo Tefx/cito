@@ -4928,7 +4928,7 @@ phases:
     name: 'Implement Stage 1 (v0.13.0) NATS-Free Native HubEngine (local:// & cito
       hub HTTP/SSE Server), Control-Plane Guidance Without Hard Caps & cito setup
       CLI [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - AGENTS.md\n    - docs/**\n    - bin/**\n    - deploy/**\n\
@@ -5051,6 +5051,24 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T12:28:04.943816Z'
+    done_at: '2026-11-07T13:19:25.116865+00:00'
+    evidence: "Artifact:\n- Commit: a27eea2067d2cfda3786b55e27ebdda8f13dd282 (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run: npm run\
+      \ typecheck && npm run compile && npm test -> exit 0 (31 test files, 247 tests\
+      \ passed, 0 failed, 0 skipped)\n- Mechanical checks:\n  - Zero NATS dependencies\
+      \ in package.json (only @modelcontextprotocol/sdk, jose, and zod in dependencies)\n\
+      \  - Zero hardcoded 'pi', 'codex', or 'claude' branches/strings in src/ and\
+      \ src/macos/cito-ui.swift\n  - Zero non-Node built-in imports in plugins/pi/cito-bridge.ts\n\
+      \  - [\\p{Script=Han}] in src/, plugins/, docs/, README.md, AGENTS.md, deploy/:\
+      \ 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/, plugins/,\
+      \ docs/ (excluding policy rule line in docs/DESIGN.md:15), README.md, deploy/,\
+      \ tests/: 0 matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n\
+      \  - Fresh-context structural-auditor (01a1b622-63b3-73f7-8d3f-e8650464cc6a)\
+      \ and uiux-auditor (01a1b622-635f-7397-9c05-40c262f07db0) audited a27eea2 across\
+      \ all 5 lenses and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md (V17 §§1–5), docs/ROADMAP.md (Stage 1 v0.13.0),\
+      \ and AGENTS.md"
   - id: v17.gate
     name: 'V17 Stage 1 (v0.13.0) acceptance, NATS-free HubEngine, RLS, cito setup,
       harness-agnostic core & code-hygiene gate [REQUIRES_SKILL: code-hygiene]'
