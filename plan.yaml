@@ -6016,3 +6016,4 @@ phases:
     - tests/setup/setup.test.ts
     depends_on:
     - v20.impl
+    agent: verifier
