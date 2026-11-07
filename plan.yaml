@@ -4880,3 +4880,255 @@ phases:
       facet bar, rebuilt bin/cito-ui-darwin-arm64, CITO_VERSION = ''0.12.0''; Round
       2 structural-auditor 01a1b5ab-ad87-71b3-9530-e3711d528ce4 and uiux-auditor 01a1b5ab-ade4-7717-8d83-a227d13c2e08
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v17
+  name: 'V17 Stage 1 (`v0.13.0`): NATS-Free Native `HubEngine` (`local://` In-Process
+    & `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Caps & `cito
+    setup` CLI'
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero NATS dependencies exist in package.json (only @modelcontextprotocol/sdk,
+    jose, and zod in dependencies), bin/cito-auth-callout and src/auth-callout/{cli,config,responder}.ts
+    are removed while src/auth-callout/oidc.ts (OidcVerifier) is retained, zero hardcoded
+    "pi", "codex", or "claude" harness branches/strings exist in src/ or src/macos/cito-ui.swift,
+    in-process local:// default hub ("local") and remote HTTP/SSE cito hub (authMode:
+    "none" | "token" | "oidc" with OIDC Row-Level Security and audit log) pass all
+    unit/E2E tests, cito_send.message and signalSchema.message accept 1..65,536 codepoints
+    (>500 chars) while about enforces 1..500 codepoints, cito setup configures ~/.cito/config.json
+    and installed harnesses via plugin setup descriptors with idempotency and backup
+    invariants, bin/cito-ui-darwin-arm64 is rebuilt and ad-hoc signed, CITO_VERSION
+    and package.json version equal "0.13.0", and [REQUIRES_SKILL: code-hygiene] verification
+    passes with zero open issues.'
+  context: 'Implement and verify Stage 1 (v0.13.0) per docs/DESIGN.md (V17 §§1–5)
+    and docs/ROADMAP.md (Stage 1 §§1.1–1.3): (1) remove all 5 NATS packages (nats,
+    nats.ws, @nats-io/jwt, nkeys.js, @eplightning/nats-server) from package.json and
+    remove bin/cito-auth-callout and src/auth-callout/{cli,config,responder}.ts while
+    retaining src/auth-callout/oidc.ts (OidcVerifier); (2) implement src/hub/ (HubEngine
+    in src/hub/engine.ts backed by node:sqlite + EventEmitter with bucket-wide monotonic
+    revision, OIDC Row-Level Security { forbidden_scope: true }, and audit log; startHubServer
+    in src/hub/server.ts over HTTP /v1/rpc + SSE /v1/events; connectLocalHub & connectRemoteHub
+    in src/hub/client.ts satisfying the Broker seam; cito hub CLI in src/hub/cli.ts;
+    and single-container deploy/hub/ replacing deploy/nats/); (3) update src/shared/validation.ts
+    and src/mcp/state.ts (sanitizeSignalMessage 1..65,536 codepoints on sendInputSchema.message
+    and signalSchema.message; sanitizeMessage 1..500 on about) and update MCP tool
+    descriptions in src/mcp/server.ts with the control-plane recommendation without
+    hard policy caps; (4) update src/shared/config.ts (authMode: "none" | "token"
+    | "oidc", enabled: boolean, defaultScope, zero-config local:// hub), src/shared/identity.ts
+    (isSingleDefaultHub accepting "local"), src/mcp/service.ts (rebind scope preservation,
+    switch_hub OIDC privacy reset), src/ui/index.ts, and src/macos/cito-ui.swift (auth_mode:
+    "token" support, hiding scope: toggle on local with baseActionWidth = canJump
+    ? 48 : 22), and rebuild bin/cito-ui-darwin-arm64; and (5) implement src/setup/index.ts
+    (inspectSetup, previewSetup, applySetup intercepted before loadConfig() in src/mcp/cli.ts)
+    and adapter.setup (HarnessSetupDescriptor) in plugins/{codex,pi,claude}/index.ts,
+    bump CITO_VERSION and package.json version to "0.13.0", and complete all §5 test
+    migrations and new tests/setup/setup.test.ts checks.'
+  depends_on:
+  - v16
+  steps:
+  - id: v17.impl
+    name: 'Implement Stage 1 (v0.13.0) NATS-Free Native HubEngine (local:// & cito
+      hub HTTP/SSE Server), Control-Plane Guidance Without Hard Caps & cito setup
+      CLI [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - AGENTS.md\n    - docs/**\n    - bin/**\n    - deploy/**\n\
+      \    - src/**\n    - plugins/**\n    - tests/**\n  blocked_paths:\n    - plan.yaml\n\
+      ```\n\n- **Deliver:**\n  - Implement Stage 1 (`v0.13.0`) across `package.json`,\
+      \ `src/shared/`, `src/hub/`, `src/adapters/`, `src/setup/`, `src/mcp/`, `src/ui/`,\
+      \ `src/macos/cito-ui.swift`, `plugins/{pi,codex,claude}/`, `deploy/`, and `tests/**`\
+      \ per `docs/DESIGN.md` (V17 §§1–5) and `docs/ROADMAP.md` (Stage 1 §§1.1–1.3),\
+      \ including:\n    1. **NATS Removal & Package Cleanup (`package.json`, `bin/`,\
+      \ `src/auth-callout/`, `deploy/`)**:\n       - Remove all 5 NATS packages (`nats`,\
+      \ `nats.ws`, `@nats-io/jwt`, `nkeys.js`, `@eplightning/nats-server`) from `package.json`\
+      \ (leaving only `@modelcontextprotocol/sdk`, `jose`, and `zod` in `\"dependencies\"\
+      `).\n       - Remove `bin/cito-auth-callout` and `src/auth-callout/{cli,config,responder}.ts`\
+      \ while retaining `src/auth-callout/oidc.ts` (`OidcVerifier` and `fetchDiscovery`,\
+      \ re-exported from `src/hub/index.ts`), and replace `deploy/nats/` with single-container\
+      \ `deploy/hub/` (`Dockerfile`, `docker-compose.yml`).\n    2. **Unified `HubEngine`,\
+      \ HTTP/SSE `HubServer`, `Broker` Client & `cito hub` CLI (`src/hub/`)**:\n \
+      \      - Implement `HubEngine` in `src/hub/engine.ts` backed by `node:sqlite`\
+      \ (`DatabaseSync` in WAL mode or `:memory:`) + `EventEmitter` with bucket-wide\
+      \ monotonic `revision` (`hub_meta.kv_seq`), OIDC Row-Level Security (`{ forbidden_scope:\
+      \ true }` on private active `self`-scoped `kv_get`, filtering `self`-scoped\
+      \ rows in `kv_keys`/`kv_snapshot`/SSE `\"kv\"`, rejecting cross-principal writes/publishes\
+      \ with `403 PERMISSIONS_VIOLATION` or `403 FORBIDDEN_TARGET_SCOPE`), subject\
+      \ guard (`cito.signal.*` and `cito.ack.*`), and `hub_audit_log` + optional `CITO_HUB_AUDIT_LOG`\
+      \ JSONL append.\n       - Implement `startHubServer` in `src/hub/server.ts`\
+      \ over HTTP `POST /v1/rpc` + SSE `GET /v1/events` supporting `authMode: \"none\"\
+      \ | \"token\" | \"oidc\"`.\n       - Implement `connectLocalHub` & `connectRemoteHub`\
+      \ in `src/hub/client.ts` (and NATS-free `connectNats`, `provisionNats`, `isJsApiError`\
+      \ adapters in `src/shared/`) satisfying the `Broker` seam and all 5 wire/timing\
+      \ invariants (SSE `:ok\\n\\n` readiness + `stream_info` handshake before resolving,\
+      \ inflight `nc.publish` tracking + `nc.flush()`, CAS conflict error code `10071`,\
+      \ `QueuedIterator.stop()` queue draining + empty-snapshot `initializedFn()`,\
+      \ and consumer replay/live SSE `seq` deduplication with JS `number` `timestampNanos`).\n\
+      \       - Implement `cito hub` CLI subcommand in `src/hub/cli.ts` (`--port`,\
+      \ `--bind`, `--auth none|token|oidc`, `--token`, `--issuer`, `--client-id`,\
+      \ `--data-dir` + env fallbacks, validation, startup onboarding banner, and clean\
+      \ `SIGINT`/`SIGTERM` shutdown).\n    3. **Mechanism, Not Policy (`src/shared/validation.ts`,\
+      \ `src/mcp/state.ts`, `src/mcp/server.ts`)**:\n       - Export `sanitizeSignalMessage`\
+      \ (`1..65,536` Unicode codepoints) in `src/shared/validation.ts` and apply it\
+      \ to both `sendInputSchema.message` (`src/shared/validation.ts`) and `signalSchema.message`\
+      \ (`src/mcp/state.ts`), while keeping `sanitizeMessage` (`1..500` codepoints)\
+      \ on `listenInputSchema.about` and `registrationSchema.about`.\n       - Update\
+      \ `cito_send` and `cito_listen` MCP tool descriptions in `src/mcp/server.ts`\
+      \ with the control-plane recommendation without hard message-length policy caps.\n\
+      \    4. **Orthogonal Hub Config, Scope Rules & macOS UI (`src/shared/config.ts`,\
+      \ `src/shared/identity.ts`, `src/mcp/service.ts`, `src/ui/index.ts`, `src/macos/cito-ui.swift`,\
+      \ `bin/cito-ui-darwin-arm64`)**:\n       - Update `src/shared/config.ts` (`authMode:\
+      \ \"none\" | \"token\" | \"oidc\"`, `token?: string`, `enabled: boolean`, `defaultScope?:\
+      \ \"self\" | \"workspace\"`, `validateNatsUrl` accepting `\"local://\"` / `\"\
+      http://\"` / `\"https://\"` / `\"nats://\"` / `\"ws://\"` / `\"wss://\"`, and\
+      \ zero-config `\"local\"` hub defaulting to `natsUrl: \"local://\"`, `defaultScope:\
+      \ \"workspace\"` when no `CITO_HUB_URL`/`CITO_NATS_URL` env is set).\n     \
+      \  - Update `src/shared/identity.ts` so `isSingleDefaultHub(config)` accepts\
+      \ both `\"default\"` and `\"local\"`.\n       - Update `src/mcp/service.ts`\
+      \ to filter disabled hubs (`enabled !== false`), preserve existing `row.scope`\
+      \ on `listen` rebind when `input.scope` is omitted, apply `defaultScope` in\
+      \ `listen_session` when `action.scope` is omitted, and enforce fail-closed `scope:\
+      \ \"self\"` reset in `switch_hub` when migrating from a non-OIDC hub to an OIDC\
+      \ hub.\n       - Update `src/ui/index.ts` and `src/macos/cito-ui.swift` (`auth_mode:\
+      \ \"none\" | \"token\" | \"oidc\"` validation and hiding the `scope:` pill on\
+      \ `local` when `auth_mode == \"none\"` with `baseActionWidth = canJump ? 48\
+      \ : 22`), and rebuild + ad-hoc sign `bin/cito-ui-darwin-arm64`.\n    5. **`cito\
+      \ setup` CLI Engine, Plugin Setup Descriptors, Version `0.13.0` & §5 Test Migrations\
+      \ (`src/setup/index.ts`, `src/mcp/cli.ts`, `src/adapters/types.ts`, `plugins/{codex,pi,claude}/index.ts`,\
+      \ `tests/**`)**:\n       - Implement `inspectSetup`, `previewSetup`, and `applySetup`\
+      \ in `src/setup/index.ts` (intercepted before `loadConfig()` in `src/mcp/cli.ts`)\
+      \ and `adapter.setup` (`HarnessSetupDescriptor`) in `plugins/{codex,pi,claude}/index.ts`\
+      \ keeping `src/setup/index.ts` 100% free of harness-specific logic/paths.\n\
+      \       - Bump `CITO_VERSION` in `src/shared/index.ts` and `\"version\"` in\
+      \ `package.json` / `package-lock.json` to `\"0.13.0\"`.\n       - Replace `tests/shared/nats-server.ts`\
+      \ with in-process `startHubServer` (`startNats` compatibility alias), complete\
+      \ all `docs/DESIGN.md` §5 test migrations (`tests/shared/shared.test.ts`, `tests/shared/multi-hub.test.ts`,\
+      \ `tests/mcp/server.test.ts`, `tests/auth-callout/cli.test.ts`, `tests/auth-callout/responder.test.ts`,\
+      \ `tests/shared/nats.test.ts`, `tests/e2e/oidc.test.ts`), add `tests/setup/setup.test.ts`,\
+      \ and run `[REQUIRES_SKILL: code-hygiene]` self-audit.\n- **Boundary:** Owner\
+      \ `senior-engineer`; modifies `/Users/tefx/Projects/cito`. Must enforce zero\
+      \ NATS packages in `package.json`, zero hardcoded `\"pi\"`, `\"codex\"`, or\
+      \ `\"claude\"` strings in `src/` and `src/macos/cito-ui.swift`, zero non-Node\
+      \ built-in imports in `plugins/pi/cito-bridge.ts`, zero Chinese characters in\
+      \ `src/`, `plugins/`, `docs/`, `README.md`, `AGENTS.md`, `deploy/`, and zero\
+      \ company/environment-specific names (`rda`, `casdoor`, `rcatwin`, `keppel`,\
+      \ `mingchen`). Must not mutate external repositories or live user `~/.cito`\
+      \ / `~/.codex` / `~/.pi` / `~/.claude` state during tests.\n- **Admit:** Completed\
+      \ Phase `v16`, `docs/DESIGN.md` (V17 §§1–5), `docs/ROADMAP.md` (Stage 1), `AGENTS.md`,\
+      \ and `README.md`. Verified by `npm run typecheck && npm run compile && npm\
+      \ test` exiting `0` and `[REQUIRES_SKILL: code-hygiene]` check. Consumed by\
+      \ `v17.gate`.\n- **Recovery:** Fix any failing typecheck, SQLite/SSE race, Swift\
+      \ compilation, Mach-O signature, or unit/E2E test in place within the isolated\
+      \ worktree and clean up any temporary test directories, sockets, HTTP servers,\
+      \ or child processes.\n"
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - src/shared/config.ts
+    - src/shared/identity.ts
+    - src/shared/validation.ts
+    - src/shared/index.ts
+    - src/auth-callout/oidc.ts
+    - src/adapters/types.ts
+    - src/mcp/cli.ts
+    - src/mcp/server.ts
+    - src/mcp/service.ts
+    - src/mcp/state.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - plugins/codex/index.ts
+    - plugins/pi/index.ts
+    - plugins/claude/index.ts
+    - tests/shared/nats-server.ts
+    - tests/shared/shared.test.ts
+    - tests/shared/multi-hub.test.ts
+    - tests/mcp/server.test.ts
+    - tests/auth-callout/cli.test.ts
+    - tests/auth-callout/responder.test.ts
+    - tests/e2e/oidc.test.ts
+    agent: senior-engineer
+  - id: v17.gate
+    name: 'V17 Stage 1 (v0.13.0) acceptance, NATS-free HubEngine, RLS, cito setup,
+      harness-agnostic core & code-hygiene gate [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Independent terminal Phase `v17` (Stage 1 `v0.13.0`) acceptance decision (`PASS`\
+      \ or `FAIL`) with `[REQUIRES_SKILL: code-hygiene]`, running `npm run typecheck\
+      \ && npm run compile && npm test`, verifying zero NATS dependencies in `package.json`,\
+      \ zero hardcoded harness references (`\"pi\"`, `\"codex\"`, `\"claude\"`) in\
+      \ `src/` and `src/macos/cito-ui.swift`, verifying `local://`, `cito hub` (`none`/`token`/`oidc`\
+      \ + Row-Level Security), `cito setup`, uncapped `cito_send.message` (`>500`\
+      \ codepoints up to `65,536`), rebuilt `bin/cito-ui-darwin-arm64`, and `CITO_VERSION\
+      \ === \"0.13.0\"`.\n- **Boundary:** Owner `verifier` (routing any admitted repair\
+      \ batch to `senior-engineer` before Delta re-verification); gate step itself\
+      \ is read-only (`repo_change_policy: no_repo_change`) and does not mutate repository\
+      \ files, Plan state, or external host directories.\n- **Admit:**\n  - Included\
+      \ phase and terminal outcomes: Phase `v17` (`v17.impl`) bound to the immutable\
+      \ integrated Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence\
+      \ and checks:\n    1. `npm run typecheck && npm run compile && npm test` passes\
+      \ 100% with zero skipped or failing tests and clean working tree (`git status\
+      \ --short`).\n    2. NATS-free & harness-agnostic architecture verification\
+      \ (`docs/DESIGN.md` §§1.2, 2.1–2.2, 3.1–3.2, 4.1–4.2):\n       - Zero NATS packages\
+      \ in `package.json` (`\"dependencies\"` contains only `@modelcontextprotocol/sdk`,\
+      \ `jose`, and `zod`), and `bin/cito-auth-callout` and `src/auth-callout/{cli,config,responder}.ts`\
+      \ are absent while `src/auth-callout/oidc.ts` (`OidcVerifier`) remains.\n  \
+      \     - Zero hardcoded `\"pi\"`, `\"codex\"`, or `\"claude\"` branches, config\
+      \ fields, CLI flag names, setup paths, or visual lookup tables in `src/shared/`,\
+      \ `src/hub/`, `src/adapters/`, `src/setup/`, `src/mcp/`, `src/ui/`, or `src/macos/cito-ui.swift`.\n\
+      \       - `local://` in-process hub (default `\"local\"` with `defaultScope:\
+      \ \"workspace\"`) and `cito hub` HTTP/SSE server (`none`, `token`, and `oidc`\
+      \ with Row-Level Security `{ forbidden_scope: true }` and `FORBIDDEN_TARGET_SCOPE`)\
+      \ pass unit and E2E verification.\n       - `cito_send.message` and `signalSchema.message`\
+      \ accept messages `>500` codepoints (up to `65,536`) end-to-end while `listenInputSchema.about`\
+      \ and `registrationSchema.about` enforce `1..500` codepoints.\n       - `cito\
+      \ setup` (`inspectSetup`, `previewSetup`, `applySetup`) and plugin `adapter.setup`\
+      \ descriptors pass idempotency, comment-preservation, conflict detection, `--force`,\
+      \ `--enable claude`, and `.bak.<timestamp>` backup verification in `tests/setup/setup.test.ts`.\n\
+      \       - `bin/cito-ui-darwin-arm64` is rebuilt and ad-hoc signed from `src/macos/cito-ui.swift`\
+      \ (with `auth_mode: \"token\"` support and `local` scope-toggle hiding).\n \
+      \   3. Version & hygiene verification (`docs/DESIGN.md` §§1.2, 5):\n       -\
+      \ `CITO_VERSION` in `src/shared/index.ts` and `\"version\"` in `package.json`\
+      \ / `package-lock.json` equal `\"0.13.0\"`.\n       - Zero Chinese characters\
+      \ (`[\\p{Script=Han}]`) in `src/`, `plugins/`, `docs/`, `README.md`, `AGENTS.md`,\
+      \ and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `plugins/`, `docs/` (excluding policy rule line in `docs/DESIGN.md`),\
+      \ `README.md`, `AGENTS.md`, `deploy/`, and `tests/`.\n       - `[REQUIRES_SKILL:\
+      \ code-hygiene]` audit passes with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable finding is admitted, record\
+      \ concrete file/line counterexamples and route one cohesive writable repair\
+      \ to `senior-engineer` before re-running this gate in Delta mode.\n"
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - src/shared/config.ts
+    - src/shared/identity.ts
+    - src/shared/validation.ts
+    - src/shared/index.ts
+    - src/auth-callout/oidc.ts
+    - src/adapters/types.ts
+    - src/mcp/cli.ts
+    - src/mcp/server.ts
+    - src/mcp/service.ts
+    - src/mcp/state.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - plugins/codex/index.ts
+    - plugins/pi/index.ts
+    - plugins/claude/index.ts
+    - tests/shared/nats-server.ts
+    - tests/shared/shared.test.ts
+    - tests/shared/multi-hub.test.ts
+    - tests/mcp/server.test.ts
+    - tests/auth-callout/cli.test.ts
+    - tests/auth-callout/responder.test.ts
+    - tests/e2e/oidc.test.ts
+    depends_on:
+    - v17.impl
+    agent: verifier
