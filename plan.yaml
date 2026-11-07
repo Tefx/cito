@@ -5407,7 +5407,7 @@ phases:
     name: 'V18 Stage 2 (v0.14.0) acceptance, cito-native Rust binary, Surface 3 SettingsPanel,
       in-process LAN hub sharing, < 5 MB Cito.app & code-hygiene gate [REQUIRES_SKILL:
       code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v18` (Stage 2 `v0.14.0`) acceptance decision (`PASS`\
@@ -5483,3 +5483,5 @@ phases:
     depends_on:
     - v18.impl
     agent: verifier
+    claimed_by: verifier
+    claimed_at: '2026-11-07T15:15:36.126270Z'
