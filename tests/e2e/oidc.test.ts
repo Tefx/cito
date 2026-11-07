@@ -1,24 +1,15 @@
 import { expect, test } from "vitest";
-import { createAccount } from "nkeys.js";
-import { resolve } from "node:path";
-import { startNats } from "../shared/nats-server.js";
+import { startHubServer, OidcVerifier } from "../../src/hub/index.js";
 import { startOidc, signingKey, browser } from "../auth-callout/oidc-fixture.js";
 import { fixture, call, payload } from "../mcp/support.js";
-import { loadAuthCalloutConfig } from "../../src/auth-callout/config.js";
-import { startAuthCallout } from "../../src/auth-callout/responder.js";
-import { OidcVerifier } from "../../src/auth-callout/oidc.js";
 import { OidcLogin } from "../../src/mcp/oidc.js";
 import { toCanonicalListenerId } from "../../src/shared/index.js";
 import { CitoService } from "../../src/mcp/service.js";
 
-test("OIDC auth-callout + MCP enforces private/workspace scopes and works offline with verified cached identity", async () => {
-  const key = await signingKey("ES256", "e2e"), oidc = await startOidc([key.jwk]), account = createAccount();
-  const broker = await startNats({ configFile: resolve("deploy/nats/nats-server.oidc.conf") }, {
-    CITO_AUTH_CALLOUT_PASSWORD: "test-password", CITO_AUTH_CALLOUT_ISSUER: account.getPublicKey() });
+test("OIDC HubServer + MCP enforces private/workspace scopes and works offline with verified cached identity", async () => {
+  const key = await signingKey("ES256", "e2e"), oidc = await startOidc([key.jwk]);
+  const broker = await startHubServer({ authMode: "oidc", oidcIssuer: oidc.issuer, oidcClientId: "cito" });
   const env = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" };
-  const config = loadAuthCalloutConfig({ ...env, CITO_NATS_URL: broker.url, ...broker.env,
-    CITO_AUTH_CALLOUT_PASSWORD: "test-password", CITO_AUTH_CALLOUT_ISSUER_SEED: new TextDecoder().decode(account.getSeed()) });
-  const callout = await startAuthCallout(config);
   const alice = await fixture({ broker, env, service: { browserOpener: browser } });
   const bob = await fixture({ broker, pi: false, env, service: { browserOpener: browser } });
   try {
@@ -31,26 +22,25 @@ test("OIDC auth-callout + MCP enforces private/workspace scopes and works offlin
     await call(alice.service, "cito_listen", { about: "OIDC shared", scope: "workspace" }, alice.pi.meta);
     expect((await call(bob.service, "cito_find")).listeners).toMatchObject([{ listener_id: id, user: "alice" }]);
     expect(await call(bob.service, "cito_send", { to: id, message: "peer notification" })).toMatchObject({ status: "wake_accepted", held_reason: null });
-    await callout.stop(); await broker.stop(); await oidc.stop();
+    await broker.stop(); await oidc.stop();
     const inbox = await call(alice.service, "cito_inbox", { ack_all: true }, alice.pi.meta);
     expect(inbox).toMatchObject({ acknowledged_count: 1, signals: [{ message: "peer notification", from: { user: "bob" } }] });
   } finally {
-    await bob.close(); await alice.close(); await callout.stop(); await broker.stop();
-    // stopOidc's server close is not idempotent, so tolerate the already-stopped case.
+    await bob.close(); await alice.close(); await broker.stop();
     await oidc.stop().catch(error => { if (error.code !== "ERR_SERVER_NOT_RUNNING") throw error; });
-    config.issuer.clear(); account.clear();
   }
 }, 20_000);
 
 test("send authorizes and publishes as the identity authenticated after rejected-token recovery", async () => {
-  const key = await signingKey("ES256", "send-identity"), oidc = await startOidc([key.jwk]), account = createAccount();
-  const broker = await startNats({ configFile: resolve("deploy/nats/nats-server.oidc.conf") }, {
-    CITO_AUTH_CALLOUT_PASSWORD: "test-password", CITO_AUTH_CALLOUT_ISSUER: account.getPublicKey() });
+  const key = await signingKey("ES256", "send-identity"), oidc = await startOidc([key.jwk]);
+  // The sender accepts its cached token locally; the HubServer rejects it at its later clock.
+  const broker = await startHubServer({
+    authMode: "oidc",
+    oidcIssuer: oidc.issuer,
+    oidcClientId: "cito",
+    verifier: new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => Date.now() + 240_000 }),
+  });
   const env = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" };
-  const config = loadAuthCalloutConfig({ ...env, CITO_NATS_URL: broker.url, ...broker.env,
-    CITO_AUTH_CALLOUT_PASSWORD: "test-password", CITO_AUTH_CALLOUT_ISSUER_SEED: new TextDecoder().decode(account.getSeed()) });
-  // The sender accepts its cached token locally; the real callout rejects it at its later clock.
-  const callout = await startAuthCallout(config, { verifier: new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => Date.now() + 240_000 }) });
   const alice = await fixture({ broker, env, service: { browserOpener: browser } });
   const sender = await fixture({ broker, pi: false, env, service: { browserOpener: browser } });
   try {
@@ -71,20 +61,20 @@ test("send authorizes and publishes as the identity authenticated after rejected
     expect(wire.from).toMatchObject({ principal_id: oidc.issuer + "#user-2", user: "bob" });
     expect(wire.sender_endpoint_key).toBe(oidc.issuer + "#user-2|" + sender.service.hostId + "|unbound|default");
   } finally {
-    await sender.close(); await alice.close(); await callout.stop(); await broker.stop(); await oidc.stop();
-    config.issuer.clear(); account.clear();
+    await sender.close(); await alice.close(); await broker.stop(); await oidc.stop();
   }
 }, 20_000);
 
 test("actual broker rejection of a locally unexpired token triggers one refresh; waiters reuse it", async () => {
-  const key = await signingKey("ES256", "rejection"), oidc = await startOidc([key.jwk]), account = createAccount();
-  const broker = await startNats({ configFile: resolve("deploy/nats/nats-server.oidc.conf") }, {
-    CITO_AUTH_CALLOUT_PASSWORD: "test-password", CITO_AUTH_CALLOUT_ISSUER: account.getPublicKey() });
+  const key = await signingKey("ES256", "rejection"), oidc = await startOidc([key.jwk]);
+  // Server clock skew creates a real JWT rejection without mocking the connection or verifier.
+  const broker = await startHubServer({
+    authMode: "oidc",
+    oidcIssuer: oidc.issuer,
+    oidcClientId: "cito",
+    verifier: new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => Date.now() + 240_000 }),
+  });
   const env = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" };
-  const config = loadAuthCalloutConfig({ ...env, CITO_NATS_URL: broker.url, ...broker.env,
-    CITO_AUTH_CALLOUT_PASSWORD: "test-password", CITO_AUTH_CALLOUT_ISSUER_SEED: new TextDecoder().decode(account.getSeed()) });
-  // Server clock skew creates a real JWT rejection without mocking the NATS connection or callout.
-  const callout = await startAuthCallout(config, { verifier: new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => Date.now() + 240_000 }) });
   const f = await fixture({ broker, pi: false, env, service: { browserOpener: browser } });
   let second: CitoService | undefined;
   try {
@@ -99,7 +89,6 @@ test("actual broker rejection of a locally unexpired token triggers one refresh;
     expect(oidc.state.refreshRequests).toBe(1);
     expect(oidc.state.authorizationRequests).toBe(1);
   } finally {
-    await second?.close(); await f.close(); await callout.stop(); await broker.stop(); await oidc.stop();
-    config.issuer.clear(); account.clear();
+    await second?.close(); await f.close(); await broker.stop(); await oidc.stop();
   }
 }, 20_000);

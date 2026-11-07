@@ -1,0 +1,22 @@
+services:
+  cito-hub:
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+    restart: unless-stopped
+    environment:
+      CITO_HUB_PORT: "4291"
+      CITO_HUB_BIND: "0.0.0.0"
+      CITO_HUB_DATA_DIR: "/data"
+      CITO_AUTH_MODE: ${CITO_AUTH_MODE:-none}
+      CITO_HUB_TOKEN: ${CITO_HUB_TOKEN:-}
+      CITO_OIDC_ISSUER: ${CITO_OIDC_ISSUER:-}
+      CITO_OIDC_CLIENT_ID: ${CITO_OIDC_CLIENT_ID:-}
+      CITO_HUB_AUDIT_LOG: ${CITO_HUB_AUDIT_LOG:-}
+    ports:
+      - "127.0.0.1:4291:4291"
+    volumes:
+      - cito-hub-data:/data
+
+volumes:
+  cito-hub-data:

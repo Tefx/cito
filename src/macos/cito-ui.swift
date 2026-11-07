@@ -791,7 +791,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.op == "state", let h = frame.hubs, let l = frame.listeners,
-           h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "oidc"].contains($0.auth_mode) }),
+           h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "token", "oidc"].contains($0.auth_mode) }),
            l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
             let a = frame.available ?? []
             let r = frame.my_remote_listeners ?? []
@@ -929,7 +929,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var pillX: CGFloat = stripWidth
         for hub in hubs.reversed() {
             let color = statusColor(hub.status)
-            let isSingleDefault = hubs.count == 1 && hub.name == "default"
+            let isSingleDefault = hubs.count == 1 && (hub.name == "default" || hub.name == "local")
             let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
             let title: String
             if isCompactIcon {
@@ -1000,8 +1000,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34),
                 radius: 8, iconInset: 8, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
+            let listenerHub = hubs.first(where: { $0.name == listener.hub })
+            let showScopeToggle = !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
             let hubPillWidth = min(76, max(46, ceil(measureTextWidth(listener.hub, font: btnFont)) + 22))
-            let baseActionWidth: CGFloat = canJump ? 114 : 88
+            let baseActionWidth: CGFloat = showScopeToggle ? (canJump ? 114 : 88) : (canJump ? 48 : 22)
             let actionWidth: CGFloat = hubs.count > 1 ? baseActionWidth + hubPillWidth + 4 : baseActionWidth
             let title = textLabel(listener.title,
                 NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
@@ -1053,24 +1055,28 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 card.addSubview(hubPill)
             }
             var x: CGFloat = scopeX
-            var scope = listener.scope
-            let toggle = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
-                leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
-            toggle.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
-            let scopeColor = { [weak toggle] in
-                toggle?.style = scope == "workspace" ? .prominent : .neutral
+            var toggle: MenuControl? = nil
+            if showScopeToggle {
+                var scope = listener.scope
+                let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
+                    leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
+                scopeBtn.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
+                let scopeColor = { [weak scopeBtn] in
+                    scopeBtn?.style = scope == "workspace" ? .prominent : .neutral
+                }
+                scopeColor()
+                scopeBtn.pressed = { [weak self, weak scopeBtn] in
+                    guard let self = self else { return }
+                    self.pendingMutation = true
+                    scope = scope == "self" ? "workspace" : "self"
+                    scopeBtn?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
+                    scopeBtn?.label.stringValue = scope == "self" ? "Self" : "Team"
+                    scopeBtn?.setAccessibilityLabel(scopeBtn?.label.stringValue); scopeColor()
+                    self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
+                }
+                card.addSubview(scopeBtn); x += 66
+                toggle = scopeBtn
             }
-            scopeColor()
-            toggle.pressed = { [weak self, weak toggle] in
-                guard let self = self else { return }
-                self.pendingMutation = true
-                scope = scope == "self" ? "workspace" : "self"
-                toggle?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
-                toggle?.label.stringValue = scope == "self" ? "Self" : "Team"
-                toggle?.setAccessibilityLabel(toggle?.label.stringValue); scopeColor()
-                self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
-            }
-            card.addSubview(toggle); x += 66
             if let jumpUrl = jumpUrl {
                 let jumpLabel = (listener.jump_label?.isEmpty == false ? listener.jump_label! : "Open in \(visual.name)")
                 let open = MenuControl(jumpLabel, frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "arrow.up.forward.app")
@@ -1079,7 +1085,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 open.pressed = run; register(run); card.addSubview(open); x += 26
             }
             register { [weak copy] in copy?.pressed?() }
-            register { [weak toggle] in toggle?.pressed?() }
+            if let toggle = toggle {
+                register { [weak toggle] in toggle?.pressed?() }
+            }
             let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
             stop.toolTip = "Stop listening"; stop.style = .destructiveHover
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")

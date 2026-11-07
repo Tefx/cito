@@ -13,7 +13,38 @@ export interface OidcVerifierOptions {
 }
 export type VerifiedOidcClaims = JWTPayload & { iss: string; sub: string; exp: number };
 
-/** Shared by the callout and local MCP identity verification; no disk token/key cache. */
+export interface OidcDiscoveryDocument {
+  issuer?: string;
+  jwks_uri: string;
+  token_endpoint?: string;
+  authorization_endpoint?: string;
+  scopes_supported?: string[];
+  [key: string]: unknown;
+}
+
+export async function fetchDiscovery(
+  rawIssuer: string,
+  options: { fetch?: typeof globalThis.fetch; signal?: AbortSignal } = {},
+): Promise<OidcDiscoveryDocument> {
+  const issuer = normalizeIssuer(validateHttpUrl(rawIssuer, "OIDC issuer"));
+  const fetchFn = options.fetch ?? globalThis.fetch;
+  const response = await fetchFn(issuer + "/.well-known/openid-configuration", {
+    signal: AbortSignal.any([AbortSignal.timeout(5000), ...(options.signal ? [options.signal] : [])]),
+    redirect: "error",
+  });
+  if (!response.ok) throw new Error("OIDC HTTP status " + response.status);
+  const discovery: unknown = await response.json();
+  if (typeof discovery !== "object" || !discovery || !("jwks_uri" in discovery) || typeof discovery.jwks_uri !== "string") {
+    throw new Error("OIDC discovery has no jwks_uri");
+  }
+  if ("issuer" in discovery && discovery.issuer !== issuer) {
+    throw new Error("OIDC discovery issuer mismatch");
+  }
+  validateHttpUrl(discovery.jwks_uri, "jwks_uri");
+  return discovery as OidcDiscoveryDocument;
+}
+
+/** Shared by the hub server and local MCP identity verification; no disk token/key cache. */
 export class OidcVerifier {
   private readonly options: OidcVerifierOptions;
   private readonly issuer: string;
@@ -42,10 +73,7 @@ export class OidcVerifier {
     this.refreshAt = this.now();
     this.refreshing = (async () => {
       try {
-        const discovery = await this.json(this.issuer + "/.well-known/openid-configuration", signal);
-        if (typeof discovery !== "object" || !discovery || !("jwks_uri" in discovery)
-          || typeof discovery.jwks_uri !== "string") throw new Error("OIDC discovery has no jwks_uri");
-        if ("issuer" in discovery && discovery.issuer !== this.issuer) throw new Error("OIDC discovery issuer mismatch");
+        const discovery = await fetchDiscovery(this.issuer, { fetch: this.fetch, signal });
         const uri = validateHttpUrl(discovery.jwks_uri, "jwks_uri");
         const jwks = await this.json(uri, signal);
         if (typeof jwks !== "object" || !jwks || !("keys" in jwks) || !Array.isArray(jwks.keys)

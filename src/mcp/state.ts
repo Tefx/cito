@@ -3,7 +3,7 @@ import { chmod, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { CitoError, brokerAgeMs, RETENTION_MS, harnessIdSchema, canonicalListenerIdSchema,
-  unscopedListenerIdSchema, sanitizeMessage } from "../shared/index.js";
+  unscopedListenerIdSchema, sanitizeSignalMessage } from "../shared/index.js";
 import type { ListenerRow, SignalRow } from "../shared/state-types.js";
 export type { ListenerRow, SignalRow, SentRow } from "../shared/state-types.js";
 
@@ -22,7 +22,7 @@ export const signalSchema = z.object({
   from: z.object({ principal_id: z.string().min(1), user: z.string(), host_id: z.string(), host_name: z.string(),
     harness: harnessIdSchema.nullable(), listener_id: unscopedListenerIdSchema.nullable().default(null),
     title: z.string().default(""), about: z.string().nullable().default(null) }),
-  message: z.string().transform(sanitizeMessage), in_reply_to: z.string().nullable(),
+  message: z.string().transform(sanitizeSignalMessage), in_reply_to: z.string().nullable(),
 });
 export type Signal = z.infer<typeof signalSchema>;
 

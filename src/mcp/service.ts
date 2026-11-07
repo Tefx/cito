@@ -3,11 +3,10 @@ import { watch, type FSWatcher } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
-import { Events, ErrorCode, type KvEntry, type QueuedIterator } from "nats";
 import { UiBridge, type UiOptions, type UiRemotePeerSummary, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverAllAvailableSessions, ensurePluginsLoaded, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
-import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
+import { Events, NatsErrorCode, type KvEntry, type QueuedIterator, KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
   listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema,
@@ -351,15 +350,28 @@ export class HubSlot {
         }
       }
       this.rejectedHash = undefined;
-      const connect = () => connectNats({ servers: this.config.natsUrl, token: token?.id_token,
-        name: "cito-mcp-" + this.name, timeout: 10_000, maxReconnectAttempts: -1 });
+      const connect = () => connectNats({
+        servers: this.config.natsUrl,
+        token: token?.id_token ?? this.config.token,
+        user: this.config.user,
+        stateDir: this.config.stateDir,
+        name: "cito-mcp-" + this.name,
+        timeout: 10_000,
+        maxReconnectAttempts: -1,
+      });
       let nc;
       try { nc = await connect(); }
       catch (cause) {
         if (this.login && /authorization|authentication/i.test(String(cause))) {
           token = await this.login.recover(token?.token_sha256 ?? null, interactive, signal);
           try { nc = await connect(); } catch (cause) { throw new CitoError("UNAUTHORIZED", "NATS rejected refreshed OIDC token", { cause }); }
-        } else throw new CitoError("NATS_UNAVAILABLE", "Cannot connect to NATS", { cause });
+        } else if (this.config.authMode === "token" && /authorization|authentication/i.test(String(cause))) {
+          throw new CitoError("UNAUTHORIZED", "Hub rejected bearer token", { cause });
+        } else if (cause instanceof CitoError) {
+          throw cause;
+        } else {
+          throw new CitoError("NATS_UNAVAILABLE", "Cannot connect to NATS", { cause });
+        }
       }
       try {
         signal.throwIfAborted();
@@ -411,7 +423,7 @@ export class HubSlot {
     if (!("stop" in statuses) || typeof statuses.stop !== "function") throw new Error("Unsupported NATS status iterator");
     const stop = statuses.stop.bind(statuses);
     const current = () => !this.closing && !this.manuallyDisconnected && this.broker === broker;
-    const authError = (code: unknown) => [ErrorCode.AuthorizationViolation, ErrorCode.AuthenticationExpired, ErrorCode.PermissionsViolation].includes(code as ErrorCode);
+    const authError = (code: unknown) => [NatsErrorCode.AuthorizationViolation, NatsErrorCode.AuthenticationExpired, NatsErrorCode.PermissionsViolation].includes(code as NatsErrorCode);
     let terminalAuth: Error | undefined;
     void broker.nc.closed().then(error => {
       if (current()) {
@@ -505,8 +517,10 @@ export class CitoService {
     this.config = config; this.state = state; this.hostId = hostId; this.options = options;
     CitoService.liveServices.add(this);
     for (const [name, hub] of Object.entries(config.hubs)) {
+      if (hub.enabled === false) continue;
       // Optional authentication settings belong to this hub, never the mirrored default.
-      const slotConfig = { ...config, ...hub, oidcIssuer: hub.oidcIssuer, oidcClientId: hub.oidcClientId,
+      const slotConfig = { ...config, ...hub, token: hub.token, defaultScope: hub.defaultScope, enabled: hub.enabled,
+        oidcIssuer: hub.oidcIssuer, oidcClientId: hub.oidcClientId,
         oidcScopes: hub.oidcScopes, oidcRedirectPort: hub.oidcRedirectPort };
       this.slots.set(name, new HubSlot(name, slotConfig, options,
         broker => this.restoreReceivers(name, broker), () => {
@@ -776,7 +790,7 @@ export class CitoService {
           try {
             await this.listen({
               about,
-              scope: action.scope ?? "self",
+              ...(action.scope ? { scope: action.scope } : {}),
               ...(action.hub ? { hub: action.hub } : {}),
             }, {
               meta: {
@@ -803,11 +817,15 @@ export class CitoService {
               r => r.hub === action.to_hub && r.harness === current.harness && r.session_id === current.session_id,
             );
             if (!alreadyActive) {
+              const fromSlot = this.slots.get(action.from_hub);
+              const migratedScope = toSlot.config.authMode === "oidc" && fromSlot?.config.authMode !== "oidc"
+                ? "self"
+                : current.scope;
               try {
                 await this.listen(
                   {
                     about: current.about,
-                    scope: current.scope,
+                    scope: migratedScope,
                     ...(current.tag ? { tag: current.tag } : {}),
                     hub: action.to_hub,
                   },
@@ -906,10 +924,22 @@ export class CitoService {
     return new CitoService(config, state ?? await LocalState.open(config.stateDir), hostId, options);
   }
   private slot(hub?: string): HubSlot {
+    if (this.slots.size === 0) throw new CitoError("NATS_UNAVAILABLE", "No enabled hubs configured");
     const name = parseScopedId("_", this.config, hub).hub;
-    return this.slots.get(name)!;
+    const slot = this.slots.get(name);
+    if (!slot) {
+      if (Object.hasOwn(this.config.hubs, name)) {
+        throw new CitoError("NATS_UNAVAILABLE", `Hub '${name}' is disabled`);
+      }
+      throw new CitoError("INVALID_INPUT", `Unknown hub: ${name}`);
+    }
+    return slot;
   }
-  private targetSlots(hub?: string): HubSlot[] { return hub ? [this.slot(hub)] : [...this.slots.values()]; }
+  private targetSlots(hub?: string): HubSlot[] {
+    if (hub) return [this.slot(hub)];
+    if (this.slots.size === 0) throw new CitoError("NATS_UNAVAILABLE", "No enabled hubs configured");
+    return [...this.slots.values()];
+  }
   private scoped(hub: string, id: string): string { return formatScopedId(hub, id, this.config); }
   private receiverOptions(): ReceiverOptions {
     return {
@@ -1037,8 +1067,11 @@ export class CitoService {
       }
     };
     try {
-      const existing = await broker.kv.get(id); checkCollision(existing && registrationSchema.parse(existing.json()));
+      const existing = await broker.kv.get(id), existingRemote = existing && registrationSchema.parse(existing.json());
+      checkCollision(existingRemote);
       const local = this.state.listener(id, hub); checkCollision(local);
+      const defaultScope = slot.config.defaultScope ?? (slot.config.natsUrl === "local://" ? "workspace" : "self");
+      const initialScope = input.scope ?? local?.scope ?? existingRemote?.scope ?? defaultScope;
       const tag = normalizedTag ?? local?.tag ?? null, publicId = publicListenerId(listenerSlug({ ...caller, tag }), id);
       previous = this.receivers.get(key); previous?.cancel(); rebinding = true;
       this.state.run(`INSERT INTO local_listeners (hub, listener_id, principal_id, owner_user, host_id, host_name, harness,
@@ -1046,7 +1079,7 @@ export class CitoService {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REBINDING')
         ON CONFLICT(hub, listener_id) DO UPDATE SET status = 'REBINDING'`, hub, id, principal.principal_id,
         principal.owner_user, this.hostId, this.config.hostName, caller.harness, caller.session_id, caller.endpoint_pid ?? null,
-        caller.cwd, caller.repo, caller.branch, caller.title, input.about, input.scope ?? "self", tag, publicId);
+        caller.cwd, caller.repo, caller.branch, caller.title, input.about, initialScope, tag, publicId);
       const owner = randomUUID();
       for (let attempt = 0; attempt < 3; attempt++) {
         const entry = await broker.kv.get(id), row = this.state.listener(id, hub)!, remote = entry && registrationSchema.parse(entry.json());
@@ -1161,7 +1194,7 @@ export class CitoService {
     const caller = await this.optionalCaller(meta);
     const broker = await slot.network(), identity = await slot.identity();
     const from = this.sender(caller, identity, hub);
-    const entry = await broker.kv.get(canonicalTo), now = await brokerNow(broker.jsm);
+    const entry = await broker.kv.get(canonicalTo, { checkForbiddenScope: true }), now = await brokerNow(broker.jsm);
     if (!entry) throw new CitoError("LISTENER_NOT_FOUND", "Target listener does not exist");
     const target = registrationSchema.parse(entry.json()), lease = evaluateLease(target.state, now, entry.created);
     if (lease === "UNLISTENED") throw new CitoError("LISTENER_NOT_FOUND", "Target listener was revoked");

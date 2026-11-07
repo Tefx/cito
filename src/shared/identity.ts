@@ -8,7 +8,11 @@ import type { CitoConfig } from "./config.js";
 export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 export function isSingleDefaultHub(config: CitoConfig): boolean {
-  return Object.keys(config.hubs).length === 1 && config.defaultHub === "default";
+  const enabledNames = Object.entries(config.hubs)
+    .filter(([, h]) => h.enabled !== false)
+    .map(([name]) => name);
+  const names = enabledNames.length > 0 ? enabledNames : Object.keys(config.hubs);
+  return names.length === 1 && (config.defaultHub === "default" || config.defaultHub === "local");
 }
 export function formatScopedId(hub: string, id: string, config: CitoConfig): string {
   return isSingleDefaultHub(config) ? id : `${hub}:${id}`;

@@ -165,7 +165,7 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 | `cito_listen({ about, tag?, hub?, scope? })` | Enroll the current session on the default or specified `hub` (`scope`: `"self"` default or `"workspace"`). |
 | `cito_unlisten({ hub? })` | Revoke listening for the current session on one `hub` or all active hubs. |
 | `cito_find({ query?, hub?, user?, host?, harness?, repo?, limit? })` | Search active visible sessions across connected hubs (`limit` default `20`, max `50`). |
-| `cito_send({ to, hub?, message, in_reply_to?, idempotency_key? })` | Send a notification (`1..500` characters) to a target listener ID (`<hub>:<id>` or `<id>`). |
+| `cito_send({ to, hub?, message, in_reply_to?, idempotency_key? })` | Send a notification (`1..65,536` Unicode codepoints; no hard 500-character policy cap) to a target listener ID (`<hub>:<id>` or `<id>`). |
 | `cito_inbox({ hub?, ack_ids?, ack_all? })` | Read and acknowledge unread signals (`ack_all` defaults to `true` when `ack_ids` is omitted; `false` when peeking or passing specific signal/batch `ack_ids`). |
 
 ---
@@ -204,7 +204,7 @@ Cito ships three built-in plugins (`pi` [Stable], `codex` [Stable], `claude` [Ex
 
 ## Server Deployment & Architecture
 
-- **NATS & OIDC Broker Deployment**: See **[`deploy/nats/README.md`](deploy/nats/README.md)** for Docker Compose, native `nats-server` + `cito-auth-callout` setup, OIDC JWKS verification, NKeys account seeds, and XKey encryption.
+- **Hub Server Deployment (`cito hub`)**: See **[`deploy/hub/README.md`](deploy/hub/README.md)** for standalone CLI and single-container Docker Compose deployment across `none`, `token`, and `oidc` authentication modes.
 - **Architecture, Protocol & Custom Harness SDK**: See **[`docs/DESIGN.md`](docs/DESIGN.md)** for module boundaries, `HubDirectoryIndex` NATS KV discovery, two-surface AppKit UI specifications, wire schemas, and custom `SocketBridgeAdapter` / `HarnessAdapter` integration.
 
 ---

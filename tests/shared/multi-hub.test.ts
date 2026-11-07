@@ -36,20 +36,28 @@ test("single named hub selects itself; multiple hubs require a valid default; ex
   const f = await configFile({ hubs: { personal } });
   expect(loadConfig(f.env).defaultHub).toBe("personal");
   for (const value of [{ hubs: {} }, { hubs: { Bad: personal } }, { hubs: { personal, work } }, { default_hub: "absent", hubs: { personal } },
-    { hubs: { work: { ...work, oidcClientId: undefined } } }, { hubs: { personal: { natsUrl: "https://bad" } } }]) {
+    { hubs: { work: { ...work, oidcClientId: undefined } } }, { hubs: { personal: { natsUrl: "ftp://bad" } } }]) {
     await writeFile(f.path, JSON.stringify(value)); expect(() => loadConfig(f.env)).toThrow();
   }
   await writeFile(f.path, "invalid json"); expect(() => loadConfig(f.env)).toThrow();
   expect(() => loadConfig({ ...f.env, CITO_CONFIG_PATH: join(f.root, "missing") })).toThrow();
 });
-test("absent config synthesizes single default hub from environment with symmetric unprefixed output", async () => {
+test("absent config synthesizes single default hub from environment or zero-config local hub with symmetric unprefixed output", async () => {
   const f = await configFile({}); await rm(f.path);
-  const config = loadConfig({ ...f.env, CITO_NATS_URL: "nats://localhost:4444", CITO_AUTH_MODE: "none" });
+  const config = loadConfig({ ...f.env, CITO_NATS_URL: "http://127.0.0.1:4222", CITO_AUTH_MODE: "none" });
   expect(config.hubs.default).toMatchObject({ natsUrl: config.natsUrl, authMode: "none", user: "test" });
   expect(isSingleDefaultHub(config)).toBe(true);
   expect(formatScopedId("default", "sig_one", config)).toBe("sig_one");
   expect(parseScopedId("default:sig_one", config)).toEqual({ hub: "default", id: "sig_one" });
   expect(parseScopedId("sig_one", config)).toEqual({ hub: "default", id: "sig_one" });
+
+  const localCfg = loadConfig({});
+  expect(localCfg.defaultHub).toBe("local");
+  expect(localCfg.hubs.local).toMatchObject({ natsUrl: "local://", authMode: "none", defaultScope: "workspace", enabled: true });
+  expect(isSingleDefaultHub(localCfg)).toBe(true);
+  expect(formatScopedId("local", "sig_one", localCfg)).toBe("sig_one");
+  expect(parseScopedId("local:sig_one", localCfg)).toEqual({ hub: "local", id: "sig_one" });
+  expect(parseScopedId("sig_one", localCfg)).toEqual({ hub: "local", id: "sig_one" });
 });
 test("named and multi-hub IDs roundtrip and reject unknown or conflicting scopes", async () => {
   const f = await configFile({ default_hub: "personal", hubs: { personal, work } }), config = loadConfig(f.env);

@@ -14,10 +14,10 @@ if (!SUPPORTED_PROTOCOL_VERSIONS.includes("2026-07-28")) SUPPORTED_PROTOCOL_VERS
 
 // Derive the advertised schema from the same validation contract used by service calls.
 const descriptors = [
-  ["cito_listen", "Enroll this session to receive notifications.", listenInputSchema],
+  ["cito_listen", "Enroll this session to receive notifications. Cito works best as a lightweight control plane (waking sessions, status handoffs, and coordinating work) paired with shared files, Git branches, or external channels for extended multi-turn collaboration.", listenInputSchema],
   ["cito_unlisten", "Revoke this session on one hub or every active hub.", unlistenInputSchema],
   ["cito_find", "Find active opted-in sessions across configured hubs. Caller binding is optional.", findInputSchema],
-  ["cito_send", "Notify an exact listener, optionally prefixed with its hub. Caller binding is optional.", sendInputSchema],
+  ["cito_send", "Notify an exact listener, optionally prefixed with its hub. Caller binding is optional. Cito is recommended primarily as a lightweight control plane (waking sessions, status handoffs, and coordinating work) while pairing with shared files or external channels for extended multi-turn discussions, though full messages without a hard 500-character policy cap (up to 65,536 codepoints) are supported when direct delivery is simpler.", sendInputSchema],
   ["cito_inbox", "Read and drain this session's local inbox by default, including offline. Set ack_all:false to peek.", inboxInputSchema],
 ] as const;
 export const tools: Tool[] = descriptors.map(([name, description, schema]) => ({

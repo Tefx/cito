@@ -5,8 +5,15 @@ import { basename, dirname, join } from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { CitoError, expandHomeDir, loadConfig, type CitoConfig } from "../../src/shared/index.js";
 import { hasExplicitPid, resolveExplicitCaller } from "../../src/adapters/git.js";
-import { SocketBridgeAdapter } from "../../src/adapters/socket-bridge.js";
-import type { Caller, CallerDetectionContext, HarnessCliDescriptor, PluginManifest, StdioChannelBridge } from "../../src/adapters/types.js";
+import { SocketBridgeAdapter, mutateConfigFile } from "../../src/adapters/socket-bridge.js";
+import type {
+  Caller,
+  CallerDetectionContext,
+  HarnessCliDescriptor,
+  HarnessSetupDescriptor,
+  PluginManifest,
+  StdioChannelBridge,
+} from "../../src/adapters/types.js";
 import { startClaudeChannelBridge, type ClaudeChannelOptions } from "./channel.js";
 export * from "./channel.js";
 
@@ -50,7 +57,7 @@ export function loadClaudeConfig(config: ClaudeConfigInput = loadConfig()): Clau
     ? config.enableClaudeChannel
     : ["1", "true", "yes"].includes((env.CITO_CLAUDE_CHANNEL ?? "").trim().toLowerCase());
   return {
-    claudeHome: expandHomeDir(rawHome, "CITO_CLAUDE_HOME"),
+    claudeHome: expandHomeDir(rawHome, "CITO_CLAUDE_HOME", env.HOME),
     enableClaudeChannel,
   };
 }
@@ -255,7 +262,159 @@ export async function writeClaudeBadge(config: QueueConfig, sessionId: string, b
   await writeFile(path, badge + "\n", { mode: 0o600 });
 }
 
+const CLAUDE_HOOK_EVENTS = ["Stop", "SessionStart", "UserPromptSubmit"] as const;
+
+function hasClaudeHookCommand(entries: unknown[]): boolean {
+  return entries.some(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const hooks = (entry as { hooks?: unknown }).hooks;
+    if (!Array.isArray(hooks)) return false;
+    return hooks.some(
+      h =>
+        h &&
+        typeof h === "object" &&
+        !Array.isArray(h) &&
+        (h as { type?: unknown }).type === "command" &&
+        (h as { command?: unknown }).command === "cito-claude-hook",
+    );
+  });
+}
+
+function transformClaudeSettingsJson(
+  existing: string | undefined,
+  force: boolean,
+): {
+  status: "created" | "updated" | "unchanged" | "conflict";
+  nextContent?: string;
+  detail: string;
+} {
+  const desiredMcp = {
+    command: "cito-mcp",
+    args: [] as string[],
+    env: { CITO_CLAUDE_CHANNEL: "1" },
+  };
+  const hookItem = {
+    hooks: [{ type: "command", command: "cito-claude-hook" }],
+  };
+
+  if (existing === undefined) {
+    const initial = {
+      mcpServers: { cito: desiredMcp },
+      hooks: {
+        Stop: [hookItem],
+        SessionStart: [hookItem],
+        UserPromptSubmit: [hookItem],
+      },
+    };
+    return {
+      status: "created",
+      nextContent: JSON.stringify(initial, null, 2) + "\n",
+      detail: "Created Claude Code settings.json with cito-mcp and hooks",
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = existing.trim() ? JSON.parse(existing) : {};
+  } catch {
+    throw new Error("Invalid JSON in Claude settings.json");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Expected JSON object in Claude settings.json");
+  }
+
+  const obj = { ...(parsed as Record<string, unknown>) };
+  const mcpServers =
+    obj.mcpServers && typeof obj.mcpServers === "object" && !Array.isArray(obj.mcpServers)
+      ? { ...(obj.mcpServers as Record<string, unknown>) }
+      : {};
+  const existingCito = mcpServers.cito as { command?: unknown; args?: unknown; env?: Record<string, unknown> } | undefined;
+  let mcpAlreadyOk = false;
+  if (existingCito && typeof existingCito === "object" && !Array.isArray(existingCito)) {
+    if (existingCito.command !== undefined && existingCito.command !== "cito-mcp" && !force) {
+      return {
+        status: "conflict",
+        detail: "Conflicting mcpServers.cito command in Claude settings.json; pass --force to replace",
+      };
+    }
+    mcpAlreadyOk =
+      existingCito.command === "cito-mcp" &&
+      Array.isArray(existingCito.args) &&
+      existingCito.args.length === 0 &&
+      existingCito.env?.CITO_CLAUDE_CHANNEL === "1";
+  }
+
+  const hooksObj =
+    obj.hooks && typeof obj.hooks === "object" && !Array.isArray(obj.hooks)
+      ? { ...(obj.hooks as Record<string, unknown>) }
+      : {};
+  let hooksAlreadyOk = true;
+  for (const eventName of CLAUDE_HOOK_EVENTS) {
+    const currentList = Array.isArray(hooksObj[eventName]) ? [...(hooksObj[eventName] as unknown[])] : [];
+    if (!hasClaudeHookCommand(currentList)) {
+      hooksAlreadyOk = false;
+      currentList.push(hookItem);
+    }
+    hooksObj[eventName] = currentList;
+  }
+
+  if (mcpAlreadyOk && hooksAlreadyOk) {
+    return {
+      status: "unchanged",
+      detail: "Claude Code settings.json already configured",
+    };
+  }
+
+  mcpServers.cito = desiredMcp;
+  obj.mcpServers = mcpServers;
+  obj.hooks = hooksObj;
+
+  return {
+    status: "updated",
+    nextContent: JSON.stringify(obj, null, 2) + "\n",
+    detail: "Updated Claude Code settings.json with cito-mcp and hooks",
+  };
+}
+
 export class ClaudeCodeAdapter extends SocketBridgeAdapter {
+  override readonly setup: HarnessSetupDescriptor = {
+    inspect: async (env: NodeJS.ProcessEnv) => {
+      const claudeHome = expandHomeDir(env.CITO_CLAUDE_HOME ?? "~/.claude", "CITO_CLAUDE_HOME", env.HOME);
+      const settingsPath = join(claudeHome, "settings.json");
+      const installed = existsSync(claudeHome) || existsSync(settingsPath);
+      let configured = false;
+      if (existsSync(settingsPath)) {
+        try {
+          configured = transformClaudeSettingsJson(readFileSync(settingsPath, "utf8"), false).status === "unchanged";
+        } catch {}
+      }
+      return { installed, configured, paths: [settingsPath] };
+    },
+    plan: async (env: NodeJS.ProcessEnv, options: { force?: boolean }) => {
+      const claudeHome = expandHomeDir(env.CITO_CLAUDE_HOME ?? "~/.claude", "CITO_CLAUDE_HOME", env.HOME);
+      const settingsPath = join(claudeHome, "settings.json");
+      return [
+        await mutateConfigFile({
+          target: CLAUDE_HARNESS,
+          path: settingsPath,
+          dryRun: true,
+          transform: content => transformClaudeSettingsJson(content, Boolean(options.force)),
+        }),
+      ];
+    },
+    apply: async (env: NodeJS.ProcessEnv, options: { force?: boolean }) => {
+      const claudeHome = expandHomeDir(env.CITO_CLAUDE_HOME ?? "~/.claude", "CITO_CLAUDE_HOME", env.HOME);
+      const settingsPath = join(claudeHome, "settings.json");
+      return [
+        await mutateConfigFile({
+          target: CLAUDE_HARNESS,
+          path: settingsPath,
+          dryRun: false,
+          transform: content => transformClaudeSettingsJson(content, Boolean(options.force)),
+        }),
+      ];
+    },
+  };
   override readonly cli: HarnessCliDescriptor = {
     consumesNextArg: (cmd, nextArg) => {
       if (cmd !== "unlisten" && !TRANSCRIPT_ID.test(nextArg) && !/^claude-[1-9][0-9]*$/i.test(nextArg)) {

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type JsMsg, type NatsConnection,
-  type QueuedIterator, type KvEntry } from "nats";
 import type { BannerPayload } from "../ui/index.js";
 import { getAdapter, formatWakeCard, type DeliverContext } from "../adapters/index.js";
-import { listenMutex, sessionMutex, brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
-  type CitoConfig, type provisionNats } from "../shared/index.js";
+import {
+  AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type JsMsg, type NatsConnection,
+  type QueuedIterator, type KvEntry,
+  listenMutex, sessionMutex, brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
+  type CitoConfig, type provisionNats,
+} from "../shared/index.js";
 import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type Registration, type SignalRow } from "./state.js";
 
 export type Broker = Awaited<ReturnType<typeof provisionNats>> & { nc: NatsConnection };

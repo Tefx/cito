@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat, readFile, writeFile, chmod } from "node:fs/promises"
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
-  CITO_VERSION, listenerId, localPrincipal, oidcPrincipal, senderEndpointKey, sanitizeMessage, escapeWakeCard,
+  CITO_VERSION, listenerId, localPrincipal, oidcPrincipal, senderEndpointKey, sanitizeMessage, sanitizeSignalMessage, escapeWakeCard,
   ERROR_RETRYABLE, errorResult, successResult, CitoError, expandHomeDir, loadConfig, getHostId,
   evaluateLease, brokerAgeMs, localExpirationMs, parseInput, listenInputSchema,
   sendInputSchema, findInputSchema, validateHarness,
@@ -82,6 +82,10 @@ describe("input and MCP envelopes", () => {
   it("validates public tool input, defaults and V1 harnesses", () => {
     expect(parseInput(listenInputSchema, { about: " x " })).toEqual({ about: "x" });
     expect(parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "😀".repeat(500) }).message).toBe("😀".repeat(500));
+    expect(parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "😀".repeat(2000) }).message).toBe("😀".repeat(2000));
+    expect(sanitizeSignalMessage("x".repeat(65_536))).toHaveLength(65_536);
+    expect(() => sanitizeSignalMessage("x".repeat(65_537))).toThrow(CitoError);
+    expect(() => parseInput(listenInputSchema, { about: "😀".repeat(501) })).toThrow(CitoError);
     expect(() => parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "x", wake: true })).toThrow(CitoError);
     expect(parseInput(findInputSchema, {})).toEqual({ limit: 20 });
     expect(validateHarness("cursor")).toBe("cursor");
@@ -108,16 +112,17 @@ describe("input and MCP envelopes", () => {
 });
 
 describe("configuration and machine identity", () => {
-  it("keeps CITO_VERSION synchronized with package.json version (0.12.0)", async () => {
+  it("keeps CITO_VERSION synchronized with package.json version (0.13.0)", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
-    expect(CITO_VERSION).toBe("0.12.0");
+    expect(CITO_VERSION).toBe("0.13.0");
     expect(CITO_VERSION).toBe(pkg.version);
   });
   it("loads defaults and validates OIDC, pluginDirs, expandHomeDir, and plugin configuration", () => {
     const envObj: NodeJS.ProcessEnv = {};
     const config = loadConfig(envObj);
     expect(config.env).toBe(envObj);
-    expect(config.natsUrl).toBe("nats://127.0.0.1:4222");
+    expect(config.natsUrl).toBe("local://");
+    expect(config.defaultHub).toBe("local");
     expect(config.authMode).toBe("none");
     expect(config.user).toBe(userInfo().username);
     expect(config.stateDir).toBe(join(process.env.HOME!, ".cito"));
@@ -140,7 +145,7 @@ describe("configuration and machine identity", () => {
     expect(loadConfig({ CITO_NATS_URL: "wss://nats.example/ws" }).natsUrl).toBe("wss://nats.example/ws");
     expect(loadConfig({ CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "http://127.0.0.1:9999/", CITO_OIDC_CLIENT_ID: "cito" }).oidcIssuer).toBe("http://127.0.0.1:9999");
     for (const env of [
-      { CITO_AUTH_MODE: "bad" }, { CITO_NATS_URL: "https://host" }, { CITO_NATS_URL: "nats://host:999999" },
+      { CITO_AUTH_MODE: "bad" }, { CITO_NATS_URL: "ftp://host" }, { CITO_NATS_URL: "nats://host:999999" },
       { CITO_AUTH_MODE: "oidc" }, { CITO_OIDC_ISSUER: "https://issuer" },
       { CITO_OIDC_ISSUER: "http://remote", CITO_OIDC_CLIENT_ID: "cito" },
       { CITO_OIDC_ISSUER: "https://issuer?bad", CITO_OIDC_CLIENT_ID: "cito" },

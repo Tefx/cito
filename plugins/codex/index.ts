@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { CitoError, expandHomeDir, loadConfig, type CitoConfig } from "../../src/shared/index.js";
 import type { ListenerRow } from "../../src/shared/state-types.js";
 import { hasExplicitPid, normalizeRepo, resolveExplicitCaller, type RepoMetadata } from "../../src/adapters/git.js";
+import { mutateConfigFile } from "../../src/adapters/socket-bridge.js";
 import type {
   AvailableSessionSummary,
   Caller,
@@ -14,6 +15,7 @@ import type {
   DeliverOutcome,
   HarnessAdapter,
   HarnessCliDescriptor,
+  HarnessSetupDescriptor,
   PluginManifest,
   ProbeOutcome,
 } from "../../src/adapters/types.js";
@@ -65,7 +67,7 @@ export function loadCodexConfig(config: CodexConfigInput = loadConfig()): CodexP
     ? config.codexDesktopRunning
     : undefined;
   return {
-    codexHome: expandHomeDir(rawHome, "CITO_CODEX_HOME"),
+    codexHome: expandHomeDir(rawHome, "CITO_CODEX_HOME", env.HOME),
     codexBin: rawBin,
     ...(desktopRunning ? { codexDesktopRunning: desktopRunning } : {}),
   };
@@ -164,10 +166,193 @@ export async function queueCodexWake(threadId: string, card: string, options: Co
   await exec(options.codexBin ?? loadCodexConfig().codexBin, ["queue", "--resume", "--thread", threadId, "--message", card],
     { timeout: 10_000, signal: options.signal, env: options.env ?? process.env });
 }
+function stripTomlComment(line: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (ch === "\\" && inDouble) {
+      i++;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+    } else if (ch === "#" && !inSingle && !inDouble) {
+      return line.slice(0, i);
+    }
+  }
+  if (inSingle || inDouble) {
+    throw new Error("Invalid TOML syntax: unclosed string literal in config.toml");
+  }
+  return line;
+}
+
+const CODEX_CITO_TOML_BLOCK = '[mcp_servers.cito]\ncommand = "cito-mcp"\nargs = []\n';
+
+function transformCodexToml(
+  existing: string | undefined,
+  force: boolean,
+): { status: "created" | "updated" | "unchanged" | "conflict"; nextContent?: string; detail: string } {
+  if (existing === undefined) {
+    return {
+      status: "created",
+      nextContent: CODEX_CITO_TOML_BLOCK,
+      detail: "Created Codex MCP configuration",
+    };
+  }
+  const lines = existing.split(/\r?\n/);
+  let citoSectionStart = -1;
+  let citoSectionLastKv = -1;
+  let inCitoSection = false;
+  let citoCommand: string | undefined;
+  let hasDottedCito = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = stripTomlComment(lines[i]!).trim();
+    if (!stripped) continue;
+    if (stripped.startsWith("[")) {
+      if (!stripped.endsWith("]")) {
+        throw new Error(`Invalid TOML table header at line ${i + 1}`);
+      }
+      const headerInner = stripped.replace(/^\[+|\]+$/g, "").trim();
+      if (!headerInner) {
+        throw new Error(`Empty TOML table header at line ${i + 1}`);
+      }
+      const normalizedHeader = headerInner.replace(/["']/g, "").replace(/\s+/g, "");
+      if (normalizedHeader === "mcp_servers.cito") {
+        citoSectionStart = i;
+        citoSectionLastKv = i;
+        inCitoSection = true;
+      } else {
+        inCitoSection = false;
+      }
+      continue;
+    }
+    const eqIdx = stripped.indexOf("=");
+    if (eqIdx <= 0) {
+      throw new Error(`Invalid TOML key-value at line ${i + 1}`);
+    }
+    const key = stripped.slice(0, eqIdx).trim().replace(/["']/g, "");
+    const rawVal = stripped.slice(eqIdx + 1).trim();
+    if (inCitoSection) {
+      citoSectionLastKv = i;
+      if (key === "command") {
+        const m = /^["'](.*)["']$/.exec(rawVal);
+        citoCommand = m ? m[1] : rawVal;
+      }
+    } else if (key.startsWith("mcp_servers.cito.")) {
+      hasDottedCito = true;
+      if (key === "mcp_servers.cito.command") {
+        const m = /^["'](.*)["']$/.exec(rawVal);
+        citoCommand = m ? m[1] : rawVal;
+      }
+    }
+  }
+
+  if (citoSectionStart < 0 && !hasDottedCito) {
+    if (!existing.trim()) {
+      return {
+        status: "updated",
+        nextContent: CODEX_CITO_TOML_BLOCK,
+        detail: "Added [mcp_servers.cito] to config.toml",
+      };
+    }
+    const prefix = existing.endsWith("\n") ? existing : existing + "\n";
+    return {
+      status: "updated",
+      nextContent: prefix + CODEX_CITO_TOML_BLOCK,
+      detail: "Appended [mcp_servers.cito] to config.toml",
+    };
+  }
+
+  if (citoCommand === "cito-mcp") {
+    return {
+      status: "unchanged",
+      detail: "Codex MCP configuration already up to date",
+    };
+  }
+
+  if (!force) {
+    return {
+      status: "conflict",
+      detail: "Conflicting [mcp_servers.cito] command in config.toml; pass --force to replace",
+    };
+  }
+
+  if (citoSectionStart >= 0) {
+    const before = lines.slice(0, citoSectionStart);
+    const after = lines.slice(citoSectionLastKv + 1);
+    const replaced = [...before, '[mcp_servers.cito]', 'command = "cito-mcp"', "args = []", ...after].join("\n");
+    const nextContent = replaced.endsWith("\n") ? replaced : replaced + "\n";
+    return {
+      status: "updated",
+      nextContent,
+      detail: "Replaced [mcp_servers.cito] in config.toml",
+    };
+  }
+
+  const kept = lines.filter(line => {
+    const stripped = stripTomlComment(line).trim();
+    if (!stripped || stripped.startsWith("[")) return true;
+    const eq = stripped.indexOf("=");
+    if (eq <= 0) return true;
+    const key = stripped.slice(0, eq).trim().replace(/["']/g, "");
+    return !key.startsWith("mcp_servers.cito.");
+  });
+  const base = kept.join("\n");
+  const prefix = base.endsWith("\n") ? base : base + "\n";
+  return {
+    status: "updated",
+    nextContent: prefix + CODEX_CITO_TOML_BLOCK,
+    detail: "Replaced mcp_servers.cito in config.toml",
+  };
+}
+
 export class CodexDesktopAdapter implements HarnessAdapter {
   readonly id = "codex";
   readonly manifest: PluginManifest;
   readonly canJump = true;
+  readonly setup: HarnessSetupDescriptor = {
+    inspect: async (env: NodeJS.ProcessEnv) => {
+      const codexHome = expandHomeDir(env.CITO_CODEX_HOME ?? "~/.codex", "CITO_CODEX_HOME", env.HOME);
+      const configPath = join(codexHome, "config.toml");
+      const installed = existsSync(codexHome) || existsSync(configPath);
+      let configured = false;
+      if (existsSync(configPath)) {
+        try {
+          const outcome = transformCodexToml(readFileSync(configPath, "utf8"), false);
+          configured = outcome.status === "unchanged";
+        } catch {}
+      }
+      return { installed, configured, paths: [configPath] };
+    },
+    plan: async (env: NodeJS.ProcessEnv, options: { force?: boolean }) => {
+      const codexHome = expandHomeDir(env.CITO_CODEX_HOME ?? "~/.codex", "CITO_CODEX_HOME", env.HOME);
+      const configPath = join(codexHome, "config.toml");
+      return [
+        await mutateConfigFile({
+          target: "codex",
+          path: configPath,
+          dryRun: true,
+          transform: content => transformCodexToml(content, Boolean(options.force)),
+        }),
+      ];
+    },
+    apply: async (env: NodeJS.ProcessEnv, options: { force?: boolean }) => {
+      const codexHome = expandHomeDir(env.CITO_CODEX_HOME ?? "~/.codex", "CITO_CODEX_HOME", env.HOME);
+      const configPath = join(codexHome, "config.toml");
+      return [
+        await mutateConfigFile({
+          target: "codex",
+          path: configPath,
+          dryRun: false,
+          transform: content => transformCodexToml(content, Boolean(options.force)),
+        }),
+      ];
+    },
+  };
   readonly cli: HarnessCliDescriptor = {
     consumesNextArg: (cmd, nextArg, config) =>
       cmd === "unlisten" || CLI_UUID_RE.test(nextArg) || readCodexThreadOptional(nextArg, config).status !== "unavailable",

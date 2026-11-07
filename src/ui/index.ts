@@ -75,7 +75,7 @@ export interface UiHubSummary {
   name: string;
   status: "connected" | "connecting" | "auth_required" | "disconnected";
   user: string | null;
-  auth_mode: "none" | "oidc";
+  auth_mode: "none" | "token" | "oidc";
   error: string | null;
 }
 export interface UiListenerSummary {

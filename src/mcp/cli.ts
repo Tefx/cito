@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { CITO_VERSION, loadConfig, type CitoConfig } from "../shared/index.js";
 import { ADAPTER_REGISTRY, ensurePluginsLoaded, matchAdapterCliFlag, rejectedPluginIds, resolveAdapterCliMeta, startOptionalStdioChannel, type AdapterCliSelection } from "../adapters/index.js";
+import { runHubCli } from "../hub/cli.js";
+import { runSetupCli } from "../setup/index.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
 import { startHttpServer, daemonHealth } from "./server.js";
@@ -209,6 +211,8 @@ async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], conf
 export async function main(): Promise<void> {
   const cmd = process.argv[2];
   if (cmd === "--version" || cmd === "-v") { process.stdout.write(`cito v${CITO_VERSION}\n`); return; }
+  if (cmd === "hub") { await runHubCli(process.argv.slice(3)); return; }
+  if (cmd === "setup") { await runSetupCli(process.argv.slice(3)); return; }
   const config = loadConfig();
   if (cmd === "daemon") { await runDaemon(config); return; }
   if (cmd === "listen" || cmd === "unlisten") { await runDirectCommand(cmd, process.argv.slice(3), config); return; }
