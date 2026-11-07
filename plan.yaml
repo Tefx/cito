@@ -5886,7 +5886,7 @@ phases:
     name: 'Implement Stage 4 (v0.16.0) Brand & Icon System (AppIcon.icns), Calm 4-Section
       Product Website (site/), OpenAI Images 2.6 Artwork, Technical Docs (site/docs/)
       & GitHub Pages Workflow [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - docs/DESIGN.md\n    - docs/ROADMAP.md\n    - crates/cito-native/**\n\
@@ -6013,6 +6013,32 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T20:38:45.128358Z'
+    done_at: '2026-11-07T21:13:12.420985+00:00'
+    evidence: "Artifact:\n- Commit: e792ed47a55df5c9aa723fd32c602e3ace52c8da (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run: npm run\
+      \ typecheck && npm run compile && npm test -> exit 0 (32 test files, 254 tests\
+      \ passed, 0 failed, 0 skipped)\n- Mechanical & storage checks:\n  - bin/AppIcon.icns\
+      \ (369,292 bytes, valid icns magic header, 20 KB < size < 500 KB) bundled into\
+      \ Cito.app/Contents/Resources/AppIcon.icns before codesign with CFBundleIconFile/CFBundleIconName\
+      \ = AppIcon (Cito.app < 5 MB)\n  - site/ served under /cito/ returns HTTP 200\
+      \ with zero 404s across /cito/, /cito/docs/{guide,plugins,architecture}.html,\
+      \ and all linked assets; site/CNAME absent; site/.nojekyll and .github/workflows/pages.yml\
+      \ present\n  - site/index.html, site/docs/guide.html, and README.md present\
+      \ only the 2 official installation channels (brew install tefx/tap/cito and\
+      \ Download Cito.app, 0 npm install or && cito setup)\n  - Zero banned implementation\
+      \ tokens/dimensions/buzzwords on site/index.html\n  - crates/cito-native/target\
+      \ removed after compilation\n  - Zero hardcoded 'pi', 'codex', 'claude', 'telegram',\
+      \ 'webhook', 'slack', 'teams', 'email', 'discord', or 'feishu' strings in src/\n\
+      \  - Zero jumpUrlTemplate / expandJumpUrl / openJumpUrl in src/ plugins/\n \
+      \ - [\\p{Script=Han}] in src/, plugins/, crates/, docs/, site/, README.md, AGENTS.md,\
+      \ deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/,\
+      \ plugins/, crates/, docs/, site/, README.md, AGENTS.md, deploy/, tests/: 0\
+      \ matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n  - Fresh-context\
+      \ structural-auditor (01a1b7d4-6f5c-70f0-a4ca-d8aa46902a96) and uiux-auditor\
+      \ (01a1b7d4-6f12-75f4-8b02-0b56e11e81b6) audited e792ed4 across all 5 lenses\
+      \ and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\nSpec link:\n\
+      - docs/DESIGN.md (§7), docs/ROADMAP.md (Stage 4 v0.16.0), and AGENTS.md"
   - id: v20.gate
     name: 'V20 Stage 4 (v0.16.0) acceptance, AppIcon.icns & Cito.app bundle, calm
       4-section homepage restraint, /cito/ subpath HTTP serving & code-hygiene gate
