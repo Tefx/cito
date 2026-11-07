@@ -4572,7 +4572,7 @@ phases:
 - id: v16
   name: V16 Unified Plugin Architecture, Built-in Plugin Extraction (plugins/{pi,codex,claude}),
     Out-of-Tree ~/.cito/plugins/<id>/ & Data-Driven macOS UI (v0.12.0)
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, zero hardcoded "pi", "codex", or "claude" harness branches/strings
     exist in src/ or src/macos/cito-ui.swift, built-in plugins (plugins/{pi,codex,claude}/)
@@ -4776,7 +4776,7 @@ phases:
   - id: v16.gate
     name: 'V16 Stage 0 (v0.12.0) acceptance, harness-agnostic core & UI audit, external
       plugin verification, and code-hygiene gate [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v16` (Stage 0 `v0.12.0`) acceptance decision (`PASS`\
@@ -4841,3 +4841,42 @@ phases:
     agent: verifier
     claimed_by: verifier
     claimed_at: '2026-11-07T11:14:36.422376Z'
+    done_at: '2026-11-07T11:20:44.919647+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v16-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:f28022e2032438475eb6690a787d57a9d0384673).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (30 test
+      files, 246 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex verification:
+
+      - [\p{Script=Han}] in src/, plugins/, docs/, README.md, AGENTS.md, deploy/:
+      0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, plugins/, docs/ (excluding
+      policy rule line in docs/DESIGN.md:15), README.md, deploy/, tests/: 0 matches
+
+      - Hardcoded ''pi'', ''codex'', or ''claude'' branches/strings in src/ and src/macos/cito-ui.swift:
+      0 matches
+
+      - Non-node imports in plugins/pi/cito-bridge.ts: 0 matches
+
+      Requirement results:
+
+      - V16-1-HARNESS-AGNOSTIC-CORE-PLUGIN-SDK-AND-LOADER: PROVEN (src/shared/config.ts
+      decoupled with env, pluginDirs, plugins, expandHomeDir; src/adapters/socket-bridge.ts,
+      types.ts, git.ts, index.ts export @tefx/cito/plugin-sdk; bin/loader.js resolves
+      @tefx/cito/plugin-sdk and .ts stripping in both source and dist/ modes).
+
+      - V16-2-BUILTIN-AND-EXTERNAL-PLUGINS-WITH-FOUR-INVARIANTS: PROVEN (bundled plugins
+      extracted to plugins/{pi,codex,claude}/ and registered via plugins/index.ts;
+      external ~/.cito/plugins/<id>/ loader and all 4 conflict/timeout/rejection invariants
+      verified in tests/adapters/extensible.test.ts and tests/auth-callout/cli.test.ts).
+
+      - V16-3-DATA-DRIVEN-MACOS-UI-V0-12-0-AND-CODE-HYGIENE: PROVEN (src/ui/index.ts
+      and src/macos/cito-ui.swift 100% data-driven via UiHarnessMetadata[] and harnesses.json,
+      expandJumpUrl safe scheme validation, horizontal NSScrollView overflow on >544pt
+      facet bar, rebuilt bin/cito-ui-darwin-arm64, CITO_VERSION = ''0.12.0''; Round
+      2 structural-auditor 01a1b5ab-ad87-71b3-9530-e3711d528ce4 and uiux-auditor 01a1b5ab-ade4-7717-8d83-a227d13c2e08
+      certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
