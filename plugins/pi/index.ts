@@ -4,7 +4,7 @@ import type { PluginManifest } from "../../src/adapters/types.js";
 
 const localManifestUrl = new URL("./plugin.json", import.meta.url);
 const rootManifestUrl = new URL("../../../plugins/pi/plugin.json", import.meta.url);
-export const piManifest: PluginManifest = JSON.parse(
+const piManifest: PluginManifest = JSON.parse(
   readFileSync(existsSync(localManifestUrl) ? localManifestUrl : rootManifestUrl, "utf8"),
 ) as PluginManifest;
 

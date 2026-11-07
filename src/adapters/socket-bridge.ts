@@ -80,6 +80,18 @@ export async function identifyBridge(
   return { ...record, endpoint_pid: pid, session_id: record.session_id, session_name: record.session_name, cwd: record.cwd };
 }
 
+export function defaultCliDescriptor(harnessId: string): HarnessCliDescriptor {
+  return {
+    consumesNextArg: (_cmd, nextArg) => Boolean(nextArg.trim()) && !nextArg.startsWith("-"),
+    resolveMeta: (_cmd, explicitId, cwd) => ({
+      caller_pid: process.ppid,
+      expected_harness: harnessId,
+      ...(explicitId ? { expected_session_id: explicitId } : {}),
+      cwd,
+    }),
+  };
+}
+
 export interface SocketBridgeOptions {
   confirmDelivery?: boolean;
   manifest?: PluginManifest;
@@ -103,15 +115,7 @@ export class SocketBridgeAdapter implements HarnessAdapter {
     this.pidKeys = options.pidKeys;
     if (options.pidKeys) registerPidKeys(options.pidKeys);
     this.canJump = options.canJump ?? Boolean(options.manifest?.jumpUrlTemplate);
-    this.cli = options.cli ?? (options.manifest?.cliFlag ? {
-      consumesNextArg: (_cmd, nextArg) => Boolean(nextArg.trim()) && !nextArg.startsWith("-"),
-      resolveMeta: (_cmd, explicitId, cwd) => ({
-        caller_pid: process.ppid,
-        expected_harness: this.id,
-        ...(explicitId ? { expected_session_id: explicitId } : {}),
-        cwd,
-      }),
-    } : undefined);
+    this.cli = options.cli ?? (options.manifest?.cliFlag ? defaultCliDescriptor(this.id) : undefined);
   }
   async discoverAvailableSessions(config: CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]> {
     const socketsDir = join(config.stateDir, "sockets");

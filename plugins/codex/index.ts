@@ -24,7 +24,7 @@ const DEFAULT_CODEX_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex-cl
 
 const localManifestUrl = new URL("./plugin.json", import.meta.url);
 const rootManifestUrl = new URL("../../../plugins/codex/plugin.json", import.meta.url);
-export const codexManifest: PluginManifest = JSON.parse(
+const codexManifest: PluginManifest = JSON.parse(
   readFileSync(existsSync(localManifestUrl) ? localManifestUrl : rootManifestUrl, "utf8"),
 ) as PluginManifest;
 

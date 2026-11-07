@@ -12,7 +12,7 @@ export * from "./channel.js";
 
 const localManifestUrl = new URL("./plugin.json", import.meta.url);
 const rootManifestUrl = new URL("../../../plugins/claude/plugin.json", import.meta.url);
-export const claudeManifest: PluginManifest = JSON.parse(
+const claudeManifest: PluginManifest = JSON.parse(
   readFileSync(existsSync(localManifestUrl) ? localManifestUrl : rootManifestUrl, "utf8"),
 ) as PluginManifest;
 

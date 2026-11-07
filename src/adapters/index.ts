@@ -10,7 +10,7 @@ import { z } from "zod";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
 import { BUILTIN_PLUGINS } from "../../plugins/index.js";
 import { BASE_PID_KEYS, getAllPidKeys, gitMetadata, hasExplicitPid, registerPidKeys, resetPidKeys } from "./git.js";
-import { SocketBridgeAdapter, identifyBridge } from "./socket-bridge.js";
+import { SocketBridgeAdapter, defaultCliDescriptor, identifyBridge } from "./socket-bridge.js";
 import type {
   AdapterTier,
   AdapterTint,
@@ -19,7 +19,6 @@ import type {
   CallerDetectionContext,
   CallerInput,
   HarnessAdapter,
-  HarnessCliDescriptor,
   PluginFactory,
   PluginManifest,
   StdioChannelBridge,
@@ -34,10 +33,10 @@ export * from "./wake-card.js";
 export { expandJumpUrl, isSafeJumpUrl } from "../ui/index.js";
 export { CitoError } from "../shared/index.js";
 
-export const ADAPTER_TIERS = ["stable", "experimental", "custom"] as const satisfies readonly AdapterTier[];
-export const ADAPTER_TINTS = ["indigo", "teal", "orange", "blue", "purple", "green", "pink", "gray"] as const satisfies readonly AdapterTint[];
+const ADAPTER_TIERS = ["stable", "experimental", "custom"] as const satisfies readonly AdapterTier[];
+const ADAPTER_TINTS = ["indigo", "teal", "orange", "blue", "purple", "green", "pink", "gray"] as const satisfies readonly AdapterTint[];
 
-export const pluginManifestSchema = z.object({
+const pluginManifestSchema = z.object({
   id: harnessIdSchema,
   displayName: z.string().trim().min(1).max(64).refine(v => !/[\x00-\x1f\x7f]/.test(v)),
   tier: z.enum(ADAPTER_TIERS).optional(),
@@ -183,10 +182,6 @@ export async function loadPlugins(
       if (!entry.isDirectory()) continue;
       const dirName = entry.name;
       const pluginDir = join(rootDir, dirName);
-      if (autoInstantiatedIds.has(dirName)) {
-        autoInstantiatedIds.delete(dirName);
-        ADAPTER_REGISTRY.delete(dirName);
-      }
       const manifestPath = join(pluginDir, "plugin.json");
       let rawJson: unknown;
       try {
@@ -270,16 +265,7 @@ export async function loadPlugins(
             Object.defineProperty(adapter, "canJump", { value: true, enumerable: true, configurable: true });
           }
           if (manifest.cliFlag && !adapter.cli) {
-            const defaultCli: HarnessCliDescriptor = {
-              consumesNextArg: (_cmd, nextArg) => Boolean(nextArg.trim()) && !nextArg.startsWith("-"),
-              resolveMeta: (_cmd, explicitId, cwd) => ({
-                caller_pid: process.ppid,
-                expected_harness: manifest.id,
-                ...(explicitId ? { expected_session_id: explicitId } : {}),
-                cwd,
-              }),
-            };
-            Object.defineProperty(adapter, "cli", { value: defaultCli, enumerable: true, configurable: true });
+            Object.defineProperty(adapter, "cli", { value: defaultCliDescriptor(manifest.id), enumerable: true, configurable: true });
           }
           if (adapter.pidKeys) registerPidKeys(adapter.pidKeys);
           ADAPTER_REGISTRY.set(manifest.id, adapter);
@@ -308,7 +294,7 @@ export async function ensurePluginsLoaded(config: CitoConfig = loadConfig()): Pr
   await loadPlugins(config);
 }
 
-export function getHarnessOrder(harness: string): number {
+function getHarnessOrder(harness: string): number {
   return BUILTIN_ORDER.get(harness) ?? BUILTIN_PLUGINS.length;
 }
 
@@ -479,15 +465,8 @@ export async function resolveAdapterCliMeta(
   if (!adapter || rejectedPluginIds.has(selection.harness)) {
     throw new CitoError("UNSUPPORTED_HARNESS", `Unknown harness: ${selection.harness}`);
   }
-  if (adapter.cli) {
-    return await adapter.cli.resolveMeta(cmd, selection.explicitId, cwd, config);
-  }
-  return {
-    caller_pid: process.ppid,
-    expected_harness: adapter.id,
-    ...(selection.explicitId ? { expected_session_id: selection.explicitId } : {}),
-    cwd,
-  };
+  const cli = adapter.cli ?? defaultCliDescriptor(adapter.id);
+  return await cli.resolveMeta(cmd, selection.explicitId, cwd, config);
 }
 
 export async function startOptionalStdioChannel(
