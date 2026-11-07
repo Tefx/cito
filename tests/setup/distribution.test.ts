@@ -347,7 +347,9 @@ describe("Stage 5 (v0.17.0): Zero-Node Core/Hub/UI, Native Plugin Manifests, Fir
     child.stdin.write(JSON.stringify({ op: "test_control", id: "remove_app:codex" }) + "\n");
     await waitFor(() => actions.some(a => a.op === "setup_remove_app" && a.harness === "codex"));
 
-    // Open uninstall confirmation, toggle purge_data checkbox, and confirm uninstall
+    // Open uninstall confirmation, cancel via cancel_uninstall_all, then re-open, toggle purge_data checkbox, and confirm uninstall
+    child.stdin.write(JSON.stringify({ op: "test_control", id: "open_uninstall_confirm" }) + "\n");
+    child.stdin.write(JSON.stringify({ op: "test_control", id: "cancel_uninstall_all" }) + "\n");
     child.stdin.write(JSON.stringify({ op: "test_control", id: "open_uninstall_confirm" }) + "\n");
     child.stdin.write(JSON.stringify({ op: "test_control", id: "uninstall_purge_data" }) + "\n");
     child.stdin.write(JSON.stringify({ op: "test_control", id: "confirm_uninstall_all" }) + "\n");
@@ -418,6 +420,24 @@ describe("Stage 5 (v0.17.0): Zero-Node Core/Hub/UI, Native Plugin Manifests, Fir
     expect(existsSync(join(piDir, "extensions/cito-bridge.ts"))).toBe(true);
     expect(existsSync(join(codexDir, "config.toml"))).toBe(true);
     expect(existsSync(join(claudeDir, "settings.json"))).toBe(true);
+
+    // Dotted-key mcp_servers.cito.* replacement with --force preserves surrounding TOML content
+    await writeFile(
+      join(codexDir, "config.toml"),
+      '# Dotted user comment\nmodel = "gpt-5"\nmcp_servers.cito.command = "legacy-cito"\n',
+      "utf8",
+    );
+    const forceDotted = spawnSync(citoShim, ["setup", "--force", "--json"], {
+      env: cleanRoomEnv,
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    expect(forceDotted.status).toBe(0);
+    const dottedAfterForce = await readFile(join(codexDir, "config.toml"), "utf8");
+    expect(dottedAfterForce).toContain("# Dotted user comment");
+    expect(dottedAfterForce).toContain('model = "gpt-5"');
+    expect(dottedAfterForce).not.toContain("legacy-cito");
+    expect(dottedAfterForce).toContain('[mcp_servers.cito]\ncommand = "cito-mcp"');
 
     const setupDisableCodex = spawnSync(citoShim, ["setup", "--disable", "codex", "--json"], {
       env: cleanRoomEnv,

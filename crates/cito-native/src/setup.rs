@@ -422,9 +422,34 @@ fn transform_toml_apply(existing: Option<&str>, force: bool) -> Result<(String, 
         ));
     }
 
+    let kept: Vec<&str> = lines
+        .into_iter()
+        .filter(|line| {
+            let Ok(s) = strip_toml_comment(line) else { return true };
+            let trimmed = s.trim();
+            if trimmed.is_empty() || trimmed.starts_with('[') {
+                return true;
+            }
+            if let Some(eq) = trimmed.find('=') {
+                let k: String = trimmed[..eq]
+                    .trim()
+                    .chars()
+                    .filter(|c| !matches!(c, '"' | '\''))
+                    .collect();
+                return !k.starts_with("mcp_servers.cito.");
+            }
+            true
+        })
+        .collect();
+    let base = kept.join("\n");
+    let prefix = if base.is_empty() || base.ends_with('\n') {
+        base
+    } else {
+        format!("{base}\n")
+    };
     Ok((
         "updated".to_string(),
-        Some(BLOCK.to_string()),
+        Some(format!("{prefix}{BLOCK}")),
         "Replaced mcp_servers.cito in config.toml".to_string(),
     ))
 }

@@ -213,12 +213,14 @@ describe("Stage 4 (v0.16.0): Brand assets, calm 4-section homepage, technical do
       expect(indexHtml).not.toMatch(pattern);
     }
 
-    // Official installation channels only (Homebrew + Cito.app; zero npm install or && cito setup)
+    // Official installation channels only (Homebrew + Cito.app; zero npm install or && cito setup) & First-Launch Explicit Consent copy
     for (const doc of [indexHtml, guideHtml, readmeMd]) {
       expect(doc).toContain("brew install tefx/tap/cito");
       expect(doc).toContain("Cito.app");
       expect(doc).not.toMatch(/npm\s+install/i);
       expect(doc).not.toMatch(/&&\s*cito\s+setup/i);
+      expect(doc).not.toContain("Auto-configures detected coding harnesses");
+      expect(doc).not.toContain("automatically bootstraps your local hub and detected coding harnesses");
     }
 
     // README adaptive <picture> header

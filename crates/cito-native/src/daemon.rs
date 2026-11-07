@@ -454,15 +454,52 @@ fn handle_tool_call(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            let user_filter = args
+                .get("user")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_ascii_lowercase());
+            let host_filter = args
+                .get("host")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_ascii_lowercase());
+            let harness_filter = args.get("harness").and_then(|v| v.as_str());
+            let repo_filter = args
+                .get("repo")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_ascii_lowercase());
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 50) as usize)
+                .unwrap_or(20);
             let list: Vec<Value> = state
                 .listeners
                 .values()
                 .filter(|l| {
+                    if let Some(ref u) = user_filter {
+                        if l.user.to_ascii_lowercase() != *u {
+                            return false;
+                        }
+                    }
+                    if let Some(ref h) = host_filter {
+                        if !l.host_name.to_ascii_lowercase().contains(h) && h != "local" {
+                            return false;
+                        }
+                    }
+                    if let Some(hr) = harness_filter {
+                        if l.harness != hr {
+                            return false;
+                        }
+                    }
+                    if repo_filter.is_some() {
+                        return false;
+                    }
                     query.is_empty()
                         || l.about.to_ascii_lowercase().contains(&query)
                         || l.title.to_ascii_lowercase().contains(&query)
                         || l.public_id.to_ascii_lowercase().contains(&query)
                 })
+                .take(limit)
                 .map(|l| {
                     json!({
                         "hub": l.hub,
@@ -1039,6 +1076,11 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
 
         if cmd == "find" {
             let mut hub: Option<String> = None;
+            let mut user: Option<String> = None;
+            let mut host: Option<String> = None;
+            let mut harness: Option<String> = None;
+            let mut repo: Option<String> = None;
+            let mut limit: Option<u64> = None;
             let mut query_parts: Vec<String> = Vec::new();
             let mut i = 0;
             while i < args.len() {
@@ -1046,6 +1088,26 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
                 if a == "--hub" || a.starts_with("--hub=") {
                     let (v, ni) = read_val(a, i, "--hub")?;
                     hub = Some(v);
+                    i = ni;
+                } else if a == "--user" || a == "-u" || a.starts_with("--user=") {
+                    let (v, ni) = read_val(a, i, if a == "-u" { "-u" } else { "--user" })?;
+                    user = Some(v);
+                    i = ni;
+                } else if a == "--host" || a.starts_with("--host=") {
+                    let (v, ni) = read_val(a, i, "--host")?;
+                    host = Some(v);
+                    i = ni;
+                } else if a == "--harness" || a.starts_with("--harness=") {
+                    let (v, ni) = read_val(a, i, "--harness")?;
+                    harness = Some(v);
+                    i = ni;
+                } else if a == "--repo" || a.starts_with("--repo=") {
+                    let (v, ni) = read_val(a, i, "--repo")?;
+                    repo = Some(v);
+                    i = ni;
+                } else if a == "--limit" || a.starts_with("--limit=") {
+                    let (v, ni) = read_val(a, i, "--limit")?;
+                    limit = v.parse::<u64>().ok();
                     i = ni;
                 } else if a == "--query" || a == "-q" || a.starts_with("--query=") {
                     let (v, ni) = read_val(a, i, if a == "-q" { "-q" } else { "--query" })?;
@@ -1064,6 +1126,21 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
             if let Some(h) = hub {
                 tool_args.insert("hub".to_string(), json!(h));
             }
+            if let Some(u) = user {
+                tool_args.insert("user".to_string(), json!(u));
+            }
+            if let Some(ho) = host {
+                tool_args.insert("host".to_string(), json!(ho));
+            }
+            if let Some(hr) = harness {
+                tool_args.insert("harness".to_string(), json!(hr));
+            }
+            if let Some(rp) = repo {
+                tool_args.insert("repo".to_string(), json!(rp));
+            }
+            if let Some(lim) = limit {
+                tool_args.insert("limit".to_string(), json!(lim));
+            }
             let payload = call_daemon_tool(
                 config,
                 "cito_find",
@@ -1077,14 +1154,34 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
         if cmd == "inbox" {
             let mut hub: Option<String> = None;
             let mut ack_all: Option<bool> = None;
-            for a in args {
+            let mut ack_ids: Vec<String> = Vec::new();
+            let mut selected_harness: Option<String> = None;
+            let mut selected_session: Option<String> = None;
+            let mut i = 0;
+            while i < args.len() {
+                let a = &args[i];
                 if a == "--peek" || a == "--no-ack" {
                     ack_all = Some(false);
                 } else if a == "--ack-all" {
                     ack_all = Some(true);
-                } else if let Some(h) = a.strip_prefix("--hub=") {
-                    hub = Some(h.to_string());
+                } else if a == "--hub" || a.starts_with("--hub=") {
+                    let (v, ni) = read_val(a, i, "--hub")?;
+                    hub = Some(v);
+                    i = ni;
+                } else if a == "--ack" || a.starts_with("--ack=") {
+                    let (v, ni) = read_val(a, i, "--ack")?;
+                    ack_ids.push(v);
+                    i = ni;
+                } else if a == "--harness" || a.starts_with("--harness=") {
+                    let (v, ni) = read_val(a, i, "--harness")?;
+                    selected_harness = Some(v);
+                    i = ni;
+                } else if a == "--session" || a.starts_with("--session=") {
+                    let (v, ni) = read_val(a, i, "--session")?;
+                    selected_session = Some(v);
+                    i = ni;
                 }
+                i += 1;
             }
             let mut tool_args = Map::new();
             if let Some(h) = hub {
@@ -1093,12 +1190,26 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
             if let Some(a) = ack_all {
                 tool_args.insert("ack_all".to_string(), json!(a));
             }
-            let ppid = unsafe { libc::getppid() as u32 };
+            if !ack_ids.is_empty() {
+                tool_args.insert("ack_ids".to_string(), json!(ack_ids));
+            }
+            let cwd = env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .to_string_lossy()
+                .to_string();
+            let meta = resolve_cli_meta(
+                "listen",
+                selected_harness.as_deref(),
+                selected_session.as_deref(),
+                &cwd,
+                config,
+                plugins,
+            )?;
             let payload = call_daemon_tool(
                 config,
                 "cito_inbox",
                 Value::Object(tool_args),
-                json!({ "caller_pid": ppid }),
+                meta,
             )?;
             println!("{}", serde_json::to_string_pretty(&payload).unwrap());
             return Ok(());
@@ -1322,8 +1433,10 @@ fn resolve_cli_meta(
             let rows = query_sqlite_threads(&home_dir.join(db_rel));
             let allow_archived = cmd == "unlisten";
             let matched = rows
-                .into_iter()
-                .find(|r| r.cwd == cwd && (allow_archived || !r.archived));
+                .iter()
+                .find(|r| r.cwd == cwd && (allow_archived || !r.archived))
+                .or_else(|| rows.iter().find(|r| !r.archived))
+                .or_else(|| if allow_archived { rows.first() } else { None });
             let Some(row) = matched else {
                 return Err(format!("{} thread metadata is required", plugin.display_name));
             };

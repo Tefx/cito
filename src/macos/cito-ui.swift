@@ -863,8 +863,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func findControl(in view: NSView, id: String) -> MenuControl? {
         guard !view.isHidden else { return nil }
         let rawId = view.identifier?.rawValue
-        if (rawId == id || (id == "cancel_uninstall_all" && rawId == "cancel_uninstall_confirm")),
-           let control = view as? MenuControl { return control }
+        if rawId == id, let control = view as? MenuControl { return control }
         if let table = view as? NSTableView {
             let count = min(table.numberOfRows, 100)
             for r in 0..<count {
@@ -2240,7 +2239,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             confirmBox.addSubview(purgeCheckbox)
 
             let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 244, y: 8, width: 80, height: 24), radius: 6)
-            cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_confirm")
+            cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_all")
             cancelUninstallBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.uninstallConfirmOpen = false
