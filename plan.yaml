@@ -6119,3 +6119,10 @@ phases:
     agent: verifier
     claimed_by: verifier
     claimed_at: '2026-11-07T21:13:12.884663Z'
+- id: v21
+  name: 'V21 Stage 5 (v0.17.0): Core/Hub/UI Node.js Removal, Native Harness Plugin
+    Manifests, First-Launch Consent, Surgical Disconnect/Uninstall, Homebrew/Cito.app
+    Distribution & Deep Code-Hygiene Audit'
+  status: locked
+  depends_on:
+  - v20
