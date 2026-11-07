@@ -24,10 +24,10 @@ Install globally so `cito`, `cito-mcp`, and `cito-claude-hook` are on your `PATH
 ```sh
 npm install -g @tefx/cito
 # Or install directly from an annotated GitHub release tag:
-npm install -g github:Tefx/cito#v0.11.3
+npm install -g github:Tefx/cito#v0.12.0
 
 cito --version
-# -> cito v0.11.3
+# -> cito v0.12.0
 ```
 
 *(To upgrade later, run `npm install -g @tefx/cito@latest`; the running background daemon will be replaced automatically on the next command.)*
@@ -77,7 +77,7 @@ args = []
 1. Install the standalone bridge extension (enables live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command) by adding `"npm:@tefx/cito"` to `packages` in `~/.pi/agent/settings.json`, or by copying the single zero-dependency file into `~/.pi/agent/extensions/`:
    ```sh
    mkdir -p ~/.pi/agent/extensions
-   curl -fsSL https://raw.githubusercontent.com/Tefx/cito/v0.11.3/src/pi-extension/cito-bridge.ts \
+   curl -fsSL https://raw.githubusercontent.com/Tefx/cito/main/plugins/pi/cito-bridge.ts \
      -o ~/.pi/agent/extensions/cito-bridge.ts
    ```
 2. Register the MCP server in `~/.pi/agent/mcp/global.mcp.json` (or `pi.mcp.json`):
@@ -130,8 +130,8 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
      - `/cito off [--hub <hub>]` (stop listening on one or all hubs)
    - **Terminal CLI**:
      ```sh
-     cito listen [--team] [--hub <hub>] [--tag <tag>] [--codex[=<thread_id>]] [--claude[=<session_id>]] [about...]
-     cito unlisten [--hub <hub>] [--codex[=<thread_id>]] [--claude[=<session_id>]]
+     cito listen [--team] [--hub <hub>] [--tag <tag>] [--harness <id> [--session <sid>]] [--codex[=<thread_id>]] [--claude[=<session_id>]] [about...]
+     cito unlisten [--hub <hub>] [--harness <id> [--session <sid>]] [--codex[=<thread_id>]] [--claude[=<session_id>]]
      ```
 3. **Discover & Message Agents**:
    - **Spotlight Directory**: Click **`Search Network Directory…`** in the menu bar dropdown, filter by `All` / `My Hosts` or harness (`Pi`, `Codex`, `Claude`), search with `@user`, `repo:`, `host:`, `is:`, or `#id`, and press `Return` to copy the target's scoped ID (e.g. `work:billing-api-abcd1234efgh`).
@@ -163,6 +163,23 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 | `CITO_CODEX_HOME` / `CITO_CLAUDE_HOME` | `~/.codex` / `~/.claude` (local session metadata directories). |
 
 **Optional Login LaunchAgent**: `cito-mcp` automatically starts `cito-daemon` on demand. If you want the menu bar icon running immediately at macOS login before any agent starts, configure a user LaunchAgent with `ProgramArguments: ["/usr/local/bin/cito-mcp", "daemon"]`, `RunAtLoad: true`, and `KeepAlive: { SuccessfulExit: false }`.
+
+---
+
+## Custom Harness Plugins (`~/.cito/plugins/`)
+
+Cito ships three built-in plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]). To integrate another coding agent or IDE without modifying Cito, create `~/.cito/plugins/<id>/plugin.json` (and an optional `index.ts` or `index.js` implementing `HarnessAdapter` from `@tefx/cito/plugin-sdk`):
+
+```json
+{
+  "id": "cursor",
+  "displayName": "Cursor",
+  "sfSymbol": "cursorarrow.rays",
+  "tint": "purple",
+  "jumpUrlTemplate": "cursor://file/{cwd}",
+  "cliFlag": true
+}
+```
 
 ---
 
