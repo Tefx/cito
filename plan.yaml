@@ -6306,7 +6306,7 @@ phases:
   - id: v21.gate
     name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
       & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: 'Independent final verification gate for Stage 5 (v0.17.0):
 
       1. Run npm run typecheck && npm run compile && npm test and verify 100% pass
@@ -6331,3 +6331,5 @@ phases:
     depends_on:
     - v21.hygiene
     agent: verifier
+    claimed_by: verifier
+    claimed_at: '2026-11-07T22:52:31.487824Z'
