@@ -6187,7 +6187,7 @@ phases:
     name: 'Implement Stage 5 (v0.17.0) Core/Hub/UI Node.js Removal, Native Harness
       Plugin Manifests, First-Launch Consent, Surgical Disconnect/Uninstall & Homebrew/Cito.app
       Distribution [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "Implement Stage 5 (v0.17.0) per docs/DESIGN.md (§8) and docs/ROADMAP.md\
       \ (Stage 5):\n1. Complete Core/Hub/UI Node.js runtime removal: bin/cito (crates/cito-native)\
       \ and bin/cito-ui (src/macos/cito-ui.swift) execute daemon, hub, mcp-stdio,\
@@ -6234,6 +6234,21 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T21:20:51.762011Z'
+    done_at: '2026-11-07T22:35:20.385156+00:00'
+    evidence: "Artifact:\n- Commit: c369081b7612809826cf446eb45598a6aaad4052 (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run: npm run\
+      \ typecheck && npm run compile && npm test && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ -> exit 0 (33 test files, 260 tests passed, 0 failed, 0 skipped; Syntax OK)\n\
+      - Clean-Room Zero-Node E2E tests (tests/setup/distribution.test.ts): PATH='/usr/bin:/bin:/usr/sbin:/sbin',\
+      \ CITO_NODE_BIN='' verified for Cito.app/Contents/MacOS/Cito, cito hub, cito\
+      \ setup, cito-mcp, and cito-claude-hook\n- Mechanical & storage checks:\n  -\
+      \ crates/cito-native/target removed after compilation\n  - Zero hardcoded agent\
+      \ or channel names in crates/cito-native/src/, src/, and src/macos/cito-ui.swift\n\
+      \  - Zero jumpUrlTemplate / expandJumpUrl / openJumpUrl in src/ plugins/\n \
+      \ - [\\p{Script=Han}] across repository: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b across repository: 0 matches\n\nSpec link:\n- docs/DESIGN.md (§8), docs/ROADMAP.md\
+      \ (Stage 5 v0.17.0), and AGENTS.md"
   - id: v21.hygiene
     name: 'Deep Iterative Code-Hygiene Audit & Fix Across Full Repository (Rust, Swift,
       Plugins, Site, Docs & Tests) [REQUIRES_SKILL: code-hygiene]'
