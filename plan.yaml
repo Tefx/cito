@@ -5243,7 +5243,7 @@ phases:
     name: 'Implement Stage 2 (v0.14.0) Rust Hot-Path Multi-Call Binary (cito-native),
       Surface 3 AppKit Settings Window, In-Process LAN Hub Sharing (:4291) & < 5 MB
       Cito.app Bundle [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - AGENTS.md\n    - docs/**\n    - crates/cito-native/**\n \
@@ -5382,6 +5382,27 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T14:20:41.102438Z'
+    done_at: '2026-11-07T15:15:35.717984+00:00'
+    evidence: "Artifact:\n- Commit: 3a38c7f19725ccdb8fa5b60361b9be5d9b65884a (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run: npm run\
+      \ typecheck && npm run compile && npm test -> exit 0 (31 test files, 253 tests\
+      \ passed, 0 failed, 0 skipped)\n- Mechanical & storage checks:\n  - crates/cito-native/target\
+      \ removed after compilation\n  - bin/cito-native-darwin-arm64 (391,680 bytes\
+      \ < 1.5 MB, stripped & ad-hoc signed) and bin/cito-ui-darwin-arm64 (438,944\
+      \ bytes, stripped & ad-hoc signed) tracked in Git\n  - Zero NATS dependencies\
+      \ in package.json (only @modelcontextprotocol/sdk, jose, and zod in dependencies)\n\
+      \  - Zero hardcoded 'pi', 'codex', or 'claude' branches/strings in src/ and\
+      \ src/macos/cito-ui.swift\n  - Zero non-Node built-in imports in plugins/pi/cito-bridge.ts\n\
+      \  - [\\p{Script=Han}] in src/, plugins/, crates/, docs/, README.md, AGENTS.md,\
+      \ deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/,\
+      \ plugins/, crates/, docs/ (excluding policy rule line in docs/DESIGN.md:15),\
+      \ README.md, deploy/, tests/: 0 matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n\
+      \  - Fresh-context structural-auditor (01a1b68d-5e87-7555-8f18-f6116e608b9e)\
+      \ and uiux-auditor (01a1b68d-5e31-77b6-961b-a79fd14cc4e1) audited 3a38c7f across\
+      \ all 5 lenses and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md (V18 §§1–5), docs/ROADMAP.md (Stage 2 v0.14.0),\
+      \ and AGENTS.md"
   - id: v18.gate
     name: 'V18 Stage 2 (v0.14.0) acceptance, cito-native Rust binary, Surface 3 SettingsPanel,
       in-process LAN hub sharing, < 5 MB Cito.app & code-hygiene gate [REQUIRES_SKILL:
