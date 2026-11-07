@@ -24,10 +24,10 @@ Install globally so `cito`, `cito-mcp`, and `cito-claude-hook` are on your `PATH
 ```sh
 npm install -g @tefx/cito
 # Or install directly from an annotated GitHub release tag:
-npm install -g github:Tefx/cito#v0.13.0
+npm install -g github:Tefx/cito#v0.14.0
 
 cito --version
-# -> cito v0.13.0
+# -> cito v0.14.0
 ```
 
 *(To upgrade later, run `npm install -g @tefx/cito@latest`; the running background daemon will be replaced automatically on the next command.)*
