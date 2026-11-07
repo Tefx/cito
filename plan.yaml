@@ -6175,6 +6175,7 @@ phases:
     - src/setup/index.ts
     - src/macos/cito-ui.swift
     - plugins/pi/cito-bridge.ts
+    agent: senior-engineer
   - id: v21.hygiene
     name: 'Deep Iterative Code-Hygiene Audit & Fix Across Full Repository (Rust, Swift,
       Plugins, Site, Docs & Tests) [REQUIRES_SKILL: code-hygiene]'
