@@ -6179,7 +6179,7 @@ phases:
   name: 'V21 Stage 5 (v0.17.0): Core/Hub/UI Node.js Removal, Native Harness Plugin
     Manifests, First-Launch Consent, Surgical Disconnect/Uninstall, Homebrew/Cito.app
     Distribution & Deep Code-Hygiene Audit'
-  status: in_progress
+  status: done
   depends_on:
   - v20
   steps:
@@ -6306,7 +6306,7 @@ phases:
   - id: v21.gate
     name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
       & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: 'Independent final verification gate for Stage 5 (v0.17.0):
 
       1. Run npm run typecheck && npm run compile && npm test and verify 100% pass
@@ -6333,3 +6333,59 @@ phases:
     agent: verifier
     claimed_by: verifier
     claimed_at: '2026-11-07T22:52:31.487824Z'
+    done_at: '2026-11-07T22:57:08.962492+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v21-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:77734b7a44d323647961b8b34061f461672858c5).
+
+      Test output (npm run typecheck && npm run compile && npm test && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb): exit 0 (33 test files, 258 tests passed, 0 failed,
+      0 skipped; Syntax OK).
+
+      Mechanical regex & storage verification:
+
+      - package.json dependencies: [''@modelcontextprotocol/sdk'', ''jose'', ''zod'']
+      (0 NATS packages)
+
+      - crates/cito-native/target: absent (false)
+
+      - packaging/homebrew/cito.rb: Syntax OK, version ''0.17.0'', 0 depends_on ''node''
+
+      - LICENSE and .github/workflows/release.yml: present (true)
+
+      - grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/ src/: 0 matches
+
+      - grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl'' src/ plugins/ crates/:
+      0 matches
+
+      - [\p{Script=Han}] in src/, plugins/, crates/, docs/, site/, packaging/, README.md,
+      AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, plugins/, crates/, docs/,
+      site/, packaging/, README.md, AGENTS.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in plugins/pi/cito-bridge.ts: 0 matches
+
+      Requirement results:
+
+      - V21-1-CORE-HUB-UI-ZERO-NODE-EXECUTION: PROVEN (crates/cito-native/src/{main,plugins,setup,hub,daemon}.rs
+      compiled to 636,608-byte bin/cito-native-darwin-arm64 executing daemon, hub,
+      mcp-stdio, hook, setup, listen, unlisten, find, send, and inbox with zero Node.js
+      dependency; verified by Clean-Room PATH=''/usr/bin:/bin:/usr/sbin:/sbin'' CITO_NODE_BIN=''''
+      E2E tests in tests/setup/distribution.test.ts).
+
+      - V21-2-NATIVE-HARNESS-MANIFESTS-CONSENT-AND-SURGICAL-DISCONNECT: PROVEN (plugins/pi/cito-bridge.ts
+      pi.registerMcpServer?.(''cito'', ...) + extensions/cito-bridge.ts + legacy ''npm:@tefx/cito''
+      cleanup, .agents/plugins/marketplace.json + plugins/codex/.codex-plugin/plugin.json
+      + plugins/codex/.mcp.json + surgical [mcp_servers.cito] & dotted-key preservation,
+      plugins/claude/.claude-plugin/plugin.json + plugins/claude/.mcp.json + plugins/claude/hooks/hooks.json
+      + surgical mcpServers.cito & cito-claude-hook removal, First-Launch Explicit
+      Consent, per-app remove_app:<id> Disconnect, and global open_uninstall_confirm
+      -> uninstall_purge_data -> confirm_uninstall_all / cancel_uninstall_all).
+
+      - V21-3-HOMEBREW-DISTRIBUTION-V0-17-0-AND-FULL-REPO-CODE-HYGIENE: PROVEN (packaging/homebrew/cito.rb
+      without depends_on ''node'', resolveStablePackageRoot /Cellar/<name>/<ver> ->
+      /opt/<name>, .github/workflows/release.yml, root MIT LICENSE, CITO_VERSION =
+      ''0.17.0'', and Round 2 full-repository code-hygiene convergence Completeness:
+      CLEAN | Simplicity: ZERO_NEW_ISSUES).'
