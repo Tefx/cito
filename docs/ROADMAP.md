@@ -2,8 +2,8 @@
 
 Cito's evolution from `v0.11.3` to `v1.0.0` is organized into **five stages (`Stage 0` through `Stage 4`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
-- **Stage 1 (`v0.13.0`)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
-- **Stage 2 (`v0.14.0`)**: Native macOS Application Packaging (`Cito.app`), Visual Settings Window & Homebrew Distribution
+- **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
+- **Stage 2 (`v0.14.0`)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
 - **Stage 3 (`v0.15.0`)**: Self-Diagnostics (`cito doctor`), Auto-Healing & End-to-End Verification (`cito ping`)
 - **Stage 4 (`v1.0.0`)**: Notification Activity Feed, Human Quick-Reply & Production Hardening
 
@@ -81,13 +81,18 @@ Completed in Phase `v16` (`1f46ab2`, tag `v0.12.0`).
 
 ---
 
-## Stage 2 (`v0.14.0`): Native macOS Application Packaging (`Cito.app`), Visual Settings Window & Homebrew Distribution
+## Stage 2 (`v0.14.0`): Rust Hot-Path Binary (`cito-native`), Surface 3 AppKit `Settings…` Window, In-Process LAN Hub Sharing & `< 5 MB` `Cito.app`
 
-1. **First-Class `Cito.app` Bundle & Menu Bar Lifecycle**:
-   - Package `cito-ui`, `cito-daemon`, and bundled `plugins/` into a standard macOS `.app` bundle (`LSUIElement = true`) with `SMAppService` / LaunchAgent login item registration.
-2. **Native AppKit `Settings…` Window (`⌘,`)**:
-   - **Hubs Tab**: Add, edit, enable/disable, test, and sign in to hubs visually.
-   - **Harnesses & Plugins Tab**: View detected harnesses (`Stable`, `Experimental`, `Custom`) and run one-click `Configure` (calling `applySetup`).
+1. **Targeted Rust Hot-Path Multi-Call Binary (`crates/cito-native` $\to$ `bin/cito-native-darwin-arm64`)**:
+   - Eliminates $O(N)$ V8 heap multiplication on per-session `cito-mcp` stdio proxies (`~1.5 MB` RSS vs `~65 MB`) and cuts per-turn `cito-claude-hook` startup latency from `~70 ms` to **`< 2 ms`**, while keeping the singleton `cito-daemon` on the 247-test verified `CitoService` + `HubEngine` + `@tefx/cito/plugin-sdk` core.
+2. **Surface 3: Native AppKit `Settings…` (`⌘,`) 2-Tab Window (`src/macos/cito-ui.swift`)**:
+   - **Tab 1 (`Agent Apps`)**: Uses user-friendly `"Agent Apps"` terminology; lists detected apps (`ChatGPT / Codex`, `Pi`, `Claude [Experimental]`, custom plugins) with 1-click **`Set Up`** buttons calling `applySetup`.
+   - **Tab 2 (`Hubs & Network`)**:
+     - **Top Hero Card (`Share Hub on Local Network`)**: 1-click toggle starting an in-process `:4291` token-protected `HubServer` sharing `getLocalHubEngine(stateDir)` + **`Copy 1-Click Join Code`** button;
+     - **Bottom Section (`Connected Hubs`)**: **`✨ Paste from Invite`** button (Universal Clipboard auto-pairing across Macs), inline **`+ Add Hub…`** form, per-hub `Enabled/Disabled` toggle, OIDC `Sign In…`, and hot-reload without restarting `cito-daemon`.
+   - **Persistent Footer**: **`Start Cito at Login`** toggle (`~/Library/LaunchAgents/com.tefx.cito.daemon.plist`).
+3. **`< 5 MB` `Cito.app` Bundle & `~/.cito/bin/{cito,cito-mcp,cito-claude-hook}` Shims**:
+   - `buildMacAppBundle` (`cito setup --build-app`) packages `Cito.app` (`LSUIElement = true`) and installs self-contained `~/.cito/bin/` shims that resolve Node and `bin/cito-native-darwin-arm64` without relying on GUI LaunchServices `PATH`.
 
 ---
 

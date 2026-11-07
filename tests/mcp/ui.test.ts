@@ -1,12 +1,14 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CitoService } from "../../src/mcp/service.js";
 import { discoverAllAvailableSessions } from "../../src/adapters/index.js";
+import { startHubServer } from "../../src/hub/index.js";
 import { registrationSchema } from "../../src/mcp/state.js";
 import { encode } from "../../src/mcp/receiver.js";
 import { loadConfig, toCanonicalListenerId } from "../../src/shared/index.js";
-import { fixture, call, waitFor, freePort } from "./support.js";
+import { fixture, call, waitFor, freePort, piBridge } from "./support.js";
 import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -457,4 +459,116 @@ test("multi-hub candidate retention (listening_hubs) and atomic switch_hub migra
   expect(listenSpy).not.toHaveBeenCalled();
   expect(service.state.listener(workListenerId, "work")?.status).toBe("UNLISTENED");
   expect(service.state.listener(defaultListenerId, "default")?.status).toBe("ACTIVE");
+});
+
+test("in-process set_host_hub shares getLocalHubEngine(stateDir) over HTTP/SSE, and setup_save_hub / setup_toggle_hub / setup_remove_hub hot-reload slots live", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cito-settings-ipc-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const env: NodeJS.ProcessEnv = {
+    HOME: root,
+    CITO_STATE_DIR: join(root, ".cito"),
+    CITO_CODEX_HOME: join(root, ".codex"),
+    CITO_PI_HOME: join(root, ".pi/agent"),
+    CITO_CLAUDE_HOME: join(root, ".claude"),
+    CITO_USER: "alice",
+  };
+  await mkdir(join(root, ".pi/agent"), { recursive: true });
+  const cfg = loadConfig(env);
+  const pi = await piBridge(cfg.stateDir);
+  cleanups.push(() => pi.stop());
+  const service = await CitoService.create(cfg);
+  cleanups.push(() => service.close());
+
+  // Enroll a session on the in-process "local" hub
+  const enrolled = await call(service, "cito_listen", { about: "Shared local session", tag: "lan-share" }, pi.meta);
+  expect(enrolled.hub).toBe("local");
+
+  // 1. Enable in-process host_hub on an ephemeral port (port: 0)
+  await service.handleUiAction({ op: "set_host_hub", enabled: true, port: 0 });
+  const settingsAfterHost = await service.refreshSettingsState();
+  expect(settingsAfterHost.host_hub.enabled).toBe(true);
+  expect(settingsAfterHost.host_hub.running).toBe(true);
+  expect(settingsAfterHost.host_hub.port).toBeGreaterThan(0);
+  expect(settingsAfterHost.host_hub.token).toMatch(/^[0-9a-f]{64}$/);
+  expect(settingsAfterHost.host_hub.invite_command).toContain(`--token ${settingsAfterHost.host_hub.token}`);
+
+  // A second peer service connecting over HTTP with the generated token sees the exact same local listener and can message it!
+  const peerRoot = await mkdtemp(join(tmpdir(), "cito-lan-peer-"));
+  cleanups.push(() => rm(peerRoot, { recursive: true, force: true }));
+  const peerCfg = loadConfig({
+    HOME: peerRoot,
+    CITO_STATE_DIR: join(peerRoot, ".cito"),
+    CITO_HUB: "lan",
+    CITO_HUB_URL: `http://127.0.0.1:${settingsAfterHost.host_hub.port}`,
+    CITO_AUTH_MODE: "token",
+    CITO_HUB_TOKEN: settingsAfterHost.host_hub.token,
+    CITO_USER: "bob",
+  });
+  const peerService = await CitoService.create(peerCfg);
+  cleanups.push(() => peerService.close());
+
+  const foundOnLan = await call(peerService, "cito_find", { query: "Shared local session" });
+  expect(foundOnLan.listeners).toMatchObject([
+    {
+      hub: "lan",
+      listener_id: `lan:${enrolled.listener_id}`,
+      about: "Shared local session",
+    },
+  ]);
+
+  const sentFromLan = await call(peerService, "cito_send", {
+    to: enrolled.listener_id,
+    message: "Hello over in-process LAN hub!",
+  });
+  expect(sentFromLan.status).toBe("wake_accepted");
+  const canonId = toCanonicalListenerId(enrolled.listener_id);
+  await service.receivers.get(`local:${canonId}`)!.dispatch();
+  await waitFor(() => pi.messages.length === 1);
+  expect(pi.messages[0]!.content).toContain("Hello over in-process LAN hub!");
+
+  // Toggling host_hub off stops the HTTP server in < 100ms while preserving the local listener
+  const t0 = performance.now();
+  await service.handleUiAction({ op: "set_host_hub", enabled: false });
+  expect(performance.now() - t0).toBeLessThan(100);
+  expect((await service.refreshSettingsState()).host_hub).toMatchObject({ enabled: false, running: false });
+  expect(service.state.listener(canonId, "local")?.status).toBe("ACTIVE");
+
+  // 2. Dynamic hub hot-reload: setup_save_hub adds & connects a new hub slot without restarting daemon
+  const remoteHub = await startHubServer({ authMode: "token", token: "remote-tok-123" });
+  cleanups.push(() => remoteHub.stop());
+
+  await service.handleUiAction({
+    op: "setup_save_hub",
+    name: "tailnet",
+    url: remoteHub.url,
+    auth_mode: "token",
+    token: "remote-tok-123",
+    set_default: true,
+  });
+  expect(service.slots.has("tailnet")).toBe(true);
+  expect(service.slots.get("tailnet")?.status).toBe("connected");
+  expect(service.config.defaultHub).toBe("tailnet");
+
+  // setup_toggle_hub disables tailnet and removes its live slot
+  await service.handleUiAction({ op: "setup_toggle_hub", hub: "tailnet", enabled: false });
+  expect(service.slots.has("tailnet")).toBe(false);
+  expect((await service.refreshSettingsState()).hubs.find(h => h.name === "tailnet")?.enabled).toBe(false);
+
+  // setup_toggle_hub re-enables tailnet and reconnects its slot
+  await service.handleUiAction({ op: "setup_toggle_hub", hub: "tailnet", enabled: true });
+  expect(service.slots.get("tailnet")?.status).toBe("connected");
+
+  // setup_remove_hub removes tailnet completely from config and slots
+  await service.handleUiAction({ op: "setup_remove_hub", hub: "tailnet" });
+  expect(service.slots.has("tailnet")).toBe(false);
+  expect((await service.refreshSettingsState()).hubs.find(h => h.name === "tailnet")).toBeUndefined();
+
+  // 3. setup_apply configures Pi and set_launch_at_login toggles LaunchAgent
+  await service.handleUiAction({ op: "setup_apply", harness: "pi" });
+  expect((await service.refreshSettingsState()).apps.find(a => a.id === "pi")?.configured).toBe(true);
+
+  await service.handleUiAction({ op: "set_launch_at_login", enabled: true });
+  expect((await service.refreshSettingsState()).launch_at_login).toBe(true);
+  await service.handleUiAction({ op: "set_launch_at_login", enabled: false });
+  expect((await service.refreshSettingsState()).launch_at_login).toBe(false);
 });
