@@ -6252,7 +6252,7 @@ phases:
   - id: v21.hygiene
     name: 'Deep Iterative Code-Hygiene Audit & Fix Across Full Repository (Rust, Swift,
       Plugins, Site, Docs & Tests) [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: 'Load /Users/tefx/.pi/agent/skills/code-hygiene/SKILL.md and execute
       a deep, multi-round iterative code-hygiene audit and fix cycle across the entire
       repository (crates/cito-native/, src/, plugins/, site/, docs/, packaging/, .github/workflows/,
@@ -6282,6 +6282,8 @@ phases:
     depends_on:
     - v21.impl
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-07T22:35:20.875318Z'
   - id: v21.gate
     name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
       & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
