@@ -17,7 +17,7 @@
 
 ### 1.2 Language, Neutral Naming & Zero-Hardcoding Guardrails
 - **English-Only UI/UX, Code, and Documentation**: All user-facing UI/UX surfaces, error messages, source comments, and repository documentation (`README.md`, `docs/**`, `deploy/**`) MUST be written in English.
-- **Zero Company- or Environment-Specific Names**: No internal company, hub, identity-provider, project, or colleague names (`rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`) may appear anywhere in source code, UI, configuration defaults, tests, or documentation.
+- **Zero Company- or Environment-Specific Names**: No internal company, hub, identity-provider, project, or colleague names may appear anywhere in source code, UI, configuration defaults, tests, or documentation; use vendor-neutral generic examples (`personal`, `work`, `cloud`, `alice`, `bob`, `acme/service`, `https://id.example.com`).
 - **Zero Concrete Agent or Channel Strings in Core (`src/` & `src/macos/cito-ui.swift`)**:
   - Core modules (`src/shared/`, `src/hub/`, `src/mcp/`, `src/setup/`, `src/ui/`, `src/adapters/`, `src/macos/cito-ui.swift`) MUST NOT contain hardcoded branches, identifiers, or UI labels for any specific Agent App (`pi`, `codex`, `claude`) OR any specific external Human Channel (`telegram`, `webhook`, `slack`, `teams`, `email`, `feishu`, `discord`).
   - Mechanical gate: `grep -rnE -i '\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b' src/` MUST return `0` matches!
@@ -33,7 +33,7 @@
    - Owns the `Node ↔ Channels (1..K)` registry (`hub_kv`), signal stream (`hub_signals`), channel delivery ledger (`hub_channel_deliveries`), plugin service state (`hub_plugin_services`), pairing codes (`hub_pairing_codes`), and audit log (`hub_audit_log`).
 2. **`AgentChannelHost` (`src/adapters/`, `src/mcp/receiver.ts`)**:
    - Bridges local `kind: "agent"` sessions (`plugins/{pi,codex,claude}`) to the Hub via `HubClient`.
-3. **`HumanChannelHost` (`src/hub/human-channels.ts` / `src/adapters/`)**:
+3. **`HumanChannelHost` (`src/hub/engine.ts` / `src/adapters/`)**:
    - Bridges `kind: "human"` channels (built-in desktop `cito-ui` and `plugins/telegram`) to the user's `Human Node` on the Hub via `HubClient`.
 
 ### 2.2 Physical Co-Location Across Deployment Modes
@@ -41,7 +41,6 @@
   - `cito-daemon` runs `HubEngine` + `AgentChannelHost` + `HumanChannelHost` in-process; all configuration and interaction are unified in `cito-ui`.
 - **Standalone Hub Mode (`cito hub` on Server / Docker)**:
   - `cito hub` runs `HubEngine` + `HumanChannelHost` in the same single process/container by default (so cloud channels like `plugins/telegram` stay online 24/7 and share 1 Hub bot token across the team without `409 Conflict`).
-  - Also supports `cito channel run --hub <url>` as a standalone CLI escape hatch connecting over HTTP/SSE.
 
 ---
 

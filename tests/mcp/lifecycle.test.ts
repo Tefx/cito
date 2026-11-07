@@ -307,9 +307,22 @@ test("Stage 3 symmetric Node: @self and @username resolution, multi-channel atta
   const sentFromBob = await call(bobMac.service, "cito_send", { to: "@alice", message: "Hey Alice from Bob" }, bobMac.pi.meta);
   expect(sentFromBob.to).toBe(enrollA.listener_id);
 
+  await macB.service.startUi();
+  const macBStates = vi.spyOn(macB.service.ui!, "state");
   await macB.service.unlistenById("default", aliceHumanId);
   expect(macB.service.state.listener(aliceHumanId)?.status).toBe("UNLISTENED");
   expect(macA.service.state.listener(aliceHumanId)?.status).toBe("ACTIVE");
+  expect(macBStates.mock.lastCall?.[2]).toEqual(
+    expect.arrayContaining([expect.objectContaining({ harness: "human", session_id: "default", title: "@alice (Me)" })]),
+  );
+  await macB.service.handleUiAction({
+    op: "listen_session",
+    harness: "human",
+    session_id: "default",
+    title: "@alice (Me)",
+  });
+  expect(macB.service.state.listener(aliceHumanId)?.status).toBe("ACTIVE");
+  await macB.service.unlistenById("default", aliceHumanId);
 
   // Unknown @username fails with LISTENER_NOT_FOUND; ambiguous @username across distinct principals fails with INVALID_INPUT
   expect(payload(await bobMac.service.call("cito_send", { to: "@nonexistent_user", message: "hi" }))).toMatchObject({

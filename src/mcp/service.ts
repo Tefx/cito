@@ -1089,7 +1089,13 @@ export class CitoService {
         ...(channels ? { channels } : {}),
       };
     });
-    const available = filterAvailableSessions(this.availableSessions, activeRows, this.slots.size);
+    const humanRow = this.state.db
+      .prepare("SELECT session_id, title, cwd FROM local_listeners WHERE harness = 'human' ORDER BY binding_generation DESC LIMIT 1")
+      .get() as { session_id: string; title: string; cwd: string } | undefined;
+    const candidatePool = humanRow
+      ? [{ harness: "human", session_id: humanRow.session_id, title: humanRow.title, cwd: humanRow.cwd }, ...this.availableSessions]
+      : this.availableSessions;
+    const available = filterAvailableSessions(candidatePool, activeRows, this.slots.size);
     const { myRemote, onlineCount } = this.collectMyRemoteAndOnlineCount();
     const { activity, unreadCount } = this.collectActivityAndUnread();
     if (this.settingsState) {

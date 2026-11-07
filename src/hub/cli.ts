@@ -1,4 +1,5 @@
-import { expandHomeDir, validateHttpUrl, type HubAuthMode } from "../shared/config.js";
+import { ensurePluginsLoaded } from "../adapters/index.js";
+import { expandHomeDir, loadConfig, validateHttpUrl, type HubAuthMode } from "../shared/config.js";
 import { normalizeIssuer } from "../shared/identity.js";
 import { startHubServer, type HubServerOptions } from "./server.js";
 
@@ -122,6 +123,9 @@ export async function runHubCli(
   }
 
   try {
+    try {
+      await ensurePluginsLoaded(loadConfig(env));
+    } catch { /* Standalone hub without local config.json falls back to default stateDir plugins. */ }
     const server = await startHubServer({
       ...config,
       onError: err => {

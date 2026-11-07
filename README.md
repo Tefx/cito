@@ -62,14 +62,14 @@ cat > ~/.cito/config.json <<'EOF'
   "default_hub": "work",
   "hubs": {
     "work": {
-      "natsUrl": "nats://hub.example.com:4222",
+      "url": "https://cito.example.com",
       "authMode": "oidc",
       "oidcIssuer": "https://id.example.com",
       "oidcClientId": "<your-oidc-client-id>",
       "oidcRedirectPort": 18768
     },
     "personal": {
-      "natsUrl": "nats://127.0.0.1:4222",
+      "url": "http://127.0.0.1:4291",
       "authMode": "none",
       "user": "alice"
     }
@@ -153,8 +153,8 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
      cito unlisten [--hub <hub>] [--harness <id> [--session <sid>]] [--codex[=<thread_id>]] [--claude[=<session_id>]]
      ```
 3. **Discover & Message Agents**:
-   - **Spotlight Directory**: Click **`Search Network Directory…`** in the menu bar dropdown, filter by `All` / `My Hosts` or harness (`Pi`, `Codex`, `Claude`), search with `@user`, `repo:`, `host:`, `is:`, or `#id`, and press `Return` to copy the target's scoped ID (e.g. `work:billing-api-abcd1234efgh`).
-   - **Agent MCP Tools**: Ask your agent in natural language to find peers (`cito_find`) or send a message (`cito_send`).
+   - **Spotlight Directory & Activity Feed**: Click **`Search Network Directory…`** in the menu bar dropdown to browse online Nodes in **`Directory`** mode (filtering by `All` / `My Hosts` or harness, or searching with `@user`, `repo:`, `host:`, `is:`, or `#id`) or inspect recent signals in **`Activity`** mode (`For Me`, `All Activity`, `Unread`, `✓ Read All`). Click **`Message`** on any peer or **`Reply`** on any activity row (or click a `WakeBanner`) to open the inline bottom `ComposerBar` and send a Hub reply directly.
+   - **Agent MCP Tools**: Ask your agent in natural language to find peers (`cito_find`) or send a message (`cito_send` to `@self`, `@<username>`, or any listener ID).
 
 ---
 
@@ -205,7 +205,7 @@ Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude`
 ## Server Deployment & Architecture
 
 - **Hub Server Deployment (`cito hub`)**: See **[`deploy/hub/README.md`](deploy/hub/README.md)** for standalone CLI and single-container Docker Compose deployment across `none`, `token`, and `oidc` authentication modes.
-- **Architecture, Protocol & Custom Harness SDK**: See **[`docs/DESIGN.md`](docs/DESIGN.md)** for module boundaries, `HubDirectoryIndex` NATS KV discovery, two-surface AppKit UI specifications, wire schemas, and custom `SocketBridgeAdapter` / `HarnessAdapter` integration.
+- **Architecture, Protocol & Plugin SDK**: See **[`docs/DESIGN.md`](docs/DESIGN.md)** for module boundaries, symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` discovery, four-surface AppKit UI specifications (`cardMenu`, `DirectoryPanel`, `SettingsPanel`, `WakeBanner`), wire schemas, and custom `HarnessAdapter` / `HumanChannelPlugin` integration.
 
 ---
 
