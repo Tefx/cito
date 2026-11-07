@@ -6208,6 +6208,7 @@ phases:
     - AGENTS.md
     depends_on:
     - v21.impl
+    agent: senior-engineer
   - id: v21.gate
     name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
       & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
