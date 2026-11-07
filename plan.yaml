@@ -5878,7 +5878,7 @@ phases:
 - id: v20
   name: 'V20 Stage 4 (v0.16.0): Brand & Icon System (AppIcon.icns), Calm 4-Section
     Product Website (site/), OpenAI Images 2.6 Artwork & GitHub Pages (https://tefx.github.io/cito/)'
-  status: pending
+  status: in_progress
   depends_on:
   - v19
   steps:
@@ -5886,7 +5886,7 @@ phases:
     name: 'Implement Stage 4 (v0.16.0) Brand & Icon System (AppIcon.icns), Calm 4-Section
       Product Website (site/), OpenAI Images 2.6 Artwork, Technical Docs (site/docs/)
       & GitHub Pages Workflow [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - docs/DESIGN.md\n    - docs/ROADMAP.md\n    - crates/cito-native/**\n\
@@ -6011,6 +6011,8 @@ phases:
     - src/macos/cito-ui.swift
     - tests/setup/setup.test.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-07T20:38:45.128358Z'
   - id: v20.gate
     name: 'V20 Stage 4 (v0.16.0) acceptance, AppIcon.icns & Cito.app bundle, calm
       4-section homepage restraint, /cito/ subpath HTTP serving & code-hygiene gate
