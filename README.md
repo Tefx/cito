@@ -1,6 +1,6 @@
 # Cito
 
-Cito is a cross-harness, cross-machine, multi-hub notification and wake bus for coding agents on macOS. It connects **Pi Coding Agent**, **ChatGPT / Codex Desktop (`ChatGPT.app`)**, and **Claude Code** across personal and team NATS JetStream hubs, with a local background daemon (`127.0.0.1:4290`) and a native macOS Menu Bar control plane (`cito-ui`).
+Cito is a cross-harness, cross-machine, multi-hub notification and wake bus for coding agents on macOS. It connects **Pi Coding Agent**, **ChatGPT / Codex Desktop (`ChatGPT.app`)**, and **Claude Code** across a built-in zero-config **`local`** hub (`local://` in-process inside `cito-daemon`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted mesh, `token` for pre-shared key, and `oidc` for team identity providers), with a native macOS Menu Bar control plane (`cito-ui`).
 
 ### Key Capabilities
 - **Multi-Harness Wake & Delivery**: Wakes idle sessions or queues follow-ups across Pi Coding Agent, Codex Desktop, and Claude Code.
@@ -24,17 +24,36 @@ Install globally so `cito`, `cito-mcp`, and `cito-claude-hook` are on your `PATH
 ```sh
 npm install -g @tefx/cito
 # Or install directly from an annotated GitHub release tag:
-npm install -g github:Tefx/cito#v0.12.0
+npm install -g github:Tefx/cito#v0.13.0
 
 cito --version
-# -> cito v0.12.0
+# -> cito v0.13.0
 ```
 
 *(To upgrade later, run `npm install -g @tefx/cito@latest`; the running background daemon will be replaced automatically on the next command.)*
 
-### 2. Configure Hubs (`~/.cito/config.json`)
+### 2. One-Command Setup (`cito setup`) or Manual Configuration
 
-Create `~/.cito/config.json` with your team OIDC hub and optional personal hub:
+Out of the box (without `~/.cito/config.json`), Cito automatically runs an in-process **`local`** hub so sessions on the same Mac can discover and wake each other immediately.
+
+To configure your installed agent harnesses (`Pi`, `Codex`, and optionally experimental `Claude`) and/or join a remote hub in one command:
+
+```sh
+# Inspect detected harnesses and hubs:
+cito setup --status
+
+# Configure local harnesses (Pi & Codex) for standalone single-Mac use:
+cito setup
+
+# Or join a Tailscale multi-Mac hub (auth: none) or team OIDC hub:
+cito setup --hub tailnet --url http://my-mac.tailnet.ts.net:4291
+cito setup --hub team --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id <your-client-id> --default
+
+# Enable experimental Claude Code integration:
+cito setup --enable claude
+```
+
+You can also create or edit `~/.cito/config.json` manually:
 
 ```sh
 mkdir -p ~/.cito && chmod 700 ~/.cito
