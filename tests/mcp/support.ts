@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:net";
 import { DatabaseSync } from "node:sqlite";
-import bridge, { type BridgeAPI, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
+import bridge, { type BridgeAPI, type BridgeContext } from "../../plugins/pi/cito-bridge.js";
 import { ensureUiCompiled } from "../../src/ui/index.js";
 import { CitoService, type ServiceOptions } from "../../src/mcp/service.js";
 import { loadConfig } from "../../src/shared/index.js";
@@ -66,7 +66,7 @@ export async function fixture(options: { broker?: TestNats; user?: string; servi
   const uiBinary = await bannerBinary();
   const diagnostics: string[] = [];
   const config = loadConfig(env);
-  config.codexDesktopRunning = async () => true;
+  config.plugins = { ...config.plugins, codex: { ...config.plugins?.codex, codexDesktopRunning: async () => true } };
   const serviceOptions: ServiceOptions = { diagnostic: text => diagnostics.push(text),
     ui: { binary: uiBinary, env: { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120" }, diagnostic: text => {
       if (text.startsWith("cito-ui: display ")) bannerDisplays.push(JSON.parse(text.slice("cito-ui: display ".length)));
@@ -97,15 +97,18 @@ export async function codexDesktop(f: Awaited<ReturnType<typeof fixture>>) {
   db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, archived INTEGER, git_branch TEXT, git_origin_url TEXT)");
   db.prepare("INSERT INTO threads VALUES (?, ?, 'Codex receiver', 0, 'main', 'git@github.com:Owner/Repo.git')").run(thread, f.root);
   let live = true;
-  f.config.codexDesktopRunning = async () => live;
   const log = join(f.root, "commands");
   const queue = join(f.root, "codex"), opener = join(f.root, "open");
   // Avoid the codexHome directory itself as executable path.
   const queueBin = queue + "-cli";
   const script = (label: string) => `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, JSON.stringify([${JSON.stringify(label)}, ...process.argv.slice(2)])+'\\n');\n`;
   await writeFile(queueBin, script("queue"), { mode: 0o700 }); await writeFile(opener, script("open"), { mode: 0o700 });
-  f.config.codexBin = queueBin; f.config.openBin = opener;
-  return { thread, meta: { "x-codex-turn-metadata": JSON.stringify({ thread_id: thread }) }, log, db,
+  f.config.plugins = {
+    ...f.config.plugins,
+    codex: { ...f.config.plugins?.codex, codexDesktopRunning: async () => live, codexBin: queueBin },
+  };
+  f.config.openBin = opener;
+  return { thread, meta: { "x-codex-turn-metadata": JSON.stringify({ thread_id: thread }) }, log, db, codexBin: queueBin,
     setLive(value: boolean) { live = value; },
     async close() { db.close(); } };
 }

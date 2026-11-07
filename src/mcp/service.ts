@@ -6,7 +6,7 @@ import { z } from "zod";
 import { Events, ErrorCode, type KvEntry, type QueuedIterator } from "nats";
 import { UiBridge, type UiOptions, type UiRemotePeerSummary, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
-import { discoverAllAvailableSessions, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
+import { discoverAllAvailableSessions, ensurePluginsLoaded, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
@@ -901,6 +901,7 @@ export class CitoService {
     });
   }
   static async create(config = loadConfig(), options: ServiceOptions = {}, state?: LocalState): Promise<CitoService> {
+    await ensurePluginsLoaded(config);
     const hostId = await getHostId({ stateDir: config.stateDir });
     return new CitoService(config, state ?? await LocalState.open(config.stateDir), hostId, options);
   }

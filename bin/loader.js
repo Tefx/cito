@@ -3,11 +3,16 @@ import { existsSync } from "node:fs";
 import { register } from "node:module";
 import { fileURLToPath } from "node:url";
 
-const tsExtensionHook = `import { readFile } from "node:fs/promises";
+function makeLoaderHookSource(sdkUrl) {
+  return `import { readFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { fileURLToPath } from "node:url";
 process.emitWarning = () => {};
+const SDK_URL = ${JSON.stringify(sdkUrl)};
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "@tefx/cito/plugin-sdk") {
+    return { url: SDK_URL, shortCircuit: true };
+  }
   try {
     return await nextResolve(specifier, context);
   } catch (error) {
@@ -18,8 +23,9 @@ export async function resolve(specifier, context, nextResolve) {
   }
 }
 export async function load(url, context, nextLoad) {
-  if (url.endsWith(".ts")) {
-    const source = await readFile(fileURLToPath(url), "utf8");
+  const cleanUrl = url.split("?")[0];
+  if (cleanUrl.endsWith(".ts")) {
+    const source = await readFile(fileURLToPath(cleanUrl), "utf8");
     return {
       format: "module",
       shortCircuit: true,
@@ -28,27 +34,29 @@ export async function load(url, context, nextLoad) {
   }
   return nextLoad(url, context);
 }`;
+}
 
 let hookRegistered = false;
 
 export async function runEntrypoint(distRelPath, srcRelPath) {
   const distEntry = new URL(distRelPath, import.meta.url);
   const srcEntry = new URL(srcRelPath, import.meta.url);
-  if (existsSync(fileURLToPath(distEntry))) {
-    const { main } = await import(distEntry.href);
-    await main();
-    return;
-  }
-  if (!hookRegistered) {
+  const useDist = existsSync(fileURLToPath(distEntry));
+  if (!hookRegistered && !globalThis.__citoPluginHookRegistered) {
     hookRegistered = true;
+    globalThis.__citoPluginHookRegistered = true;
     const origEmitWarning = process.emitWarning;
     process.emitWarning = (warning, ...args) => {
       const msg = typeof warning === "string" ? warning : warning?.message ?? "";
       if (msg.includes("stripTypeScriptTypes") || msg.includes("module.register()")) return;
       return origEmitWarning.call(process, warning, ...args);
     };
-    register(`data:text/javascript,${encodeURIComponent(tsExtensionHook)}`, import.meta.url);
+    const sdkUrl = new URL(
+      useDist ? "../dist/src/adapters/index.js" : "../src/adapters/index.ts",
+      import.meta.url,
+    ).href;
+    register(`data:text/javascript,${encodeURIComponent(makeLoaderHookSource(sdkUrl))}`, import.meta.url);
   }
-  const { main } = await import(srcEntry.href);
+  const { main } = await import(useDist ? distEntry.href : srcEntry.href);
   await main();
 }

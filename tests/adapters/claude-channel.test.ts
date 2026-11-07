@@ -105,7 +105,7 @@ test("status writes badges across session switches, non-blocking notifications n
   const channel = (await startOptionalStdioChannel(config, { send: () => new Promise<void>(() => {}) },
     { endpointPid: process.pid, cwd: f.root, env: {} }))!;
   cleanups.push(() => channel.close());
-  expect(await startOptionalStdioChannel({ ...config, enableClaudeChannel: false }, { send: async () => {} })).toBeUndefined();
+  expect(await startOptionalStdioChannel({ ...config, plugins: { claude: { enableClaudeChannel: false } } }, { send: async () => {} })).toBeUndefined();
   const path = bridgeSocketPath(config.stateDir, "claude", process.pid);
   await expect(requestBridge(path, { op: "deliver", session_id: SESSION, batch_id: "nonblocking", wake: true, content: "card" }, 500))
     .resolves.toMatchObject({ delivered: true });

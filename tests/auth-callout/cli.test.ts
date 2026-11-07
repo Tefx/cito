@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAccount, createOperator, createUser } from "nkeys.js";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "nats";
@@ -113,7 +113,7 @@ describe("public cito-auth-callout executable", () => {
   });
   it("enforces zero-script git packaging contract and executes native TypeScript entrypoints without dist/", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
-    expect(pkg.files).toEqual(["bin", "dist/src", "src", "README.md"]);
+    expect(pkg.files).toEqual(["bin", "dist/src", "dist/plugins", "src", "plugins", "README.md"]);
     for (const forbidden of ["prepare", "build", "prepack", "preinstall", "install", "postinstall"]) {
       expect(pkg.scripts?.[forbidden]).toBeUndefined();
     }
@@ -125,11 +125,29 @@ describe("public cito-auth-callout executable", () => {
     const directory = await mkdtemp(join(tmpdir(), "cito-pkg-"));
     try {
       const sandbox = join(directory, "sandbox");
-      for (const item of ["package.json", "bin", "src"]) {
+      for (const item of ["package.json", "bin", "src", "plugins"]) {
         await cp(resolve(item), join(sandbox, item), { recursive: true });
       }
       await symlink(resolve("node_modules"), join(sandbox, "node_modules"), "dir");
       expect(existsSync(join(sandbox, "dist"))).toBe(false);
+
+      const sandboxEnv = isolatedEnv(directory);
+      const cursorPluginDir = join(sandboxEnv.CITO_STATE_DIR!, "plugins/cursor");
+      await mkdir(cursorPluginDir, { recursive: true });
+      await writeFile(
+        join(cursorPluginDir, "plugin.json"),
+        JSON.stringify({ id: "cursor", displayName: "Cursor", sfSymbol: "cursorarrow.rays", tint: "purple", cliFlag: true }),
+      );
+      await writeFile(
+        join(cursorPluginDir, "index.ts"),
+        `import { CitoError, SocketBridgeAdapter, type PluginManifest } from "@tefx/cito/plugin-sdk";
+export default (manifest: PluginManifest) => new SocketBridgeAdapter(manifest.id, {
+  manifest,
+  cli: {
+    resolveMeta: () => { throw new CitoError("BINDING_REQUIRED", "Cursor custom plugin executed via @tefx/cito/plugin-sdk"); },
+  },
+});\n`,
+      );
 
       const mcpSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-mcp"), "listen", "--unknown-flag"], {
         cwd: directory,
@@ -153,7 +171,7 @@ describe("public cito-auth-callout executable", () => {
 
       const hookSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-claude-hook")], {
         cwd: directory,
-        env: isolatedEnv(directory),
+        env: sandboxEnv,
         input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
         encoding: "utf8",
         timeout: 5000,
@@ -161,10 +179,33 @@ describe("public cito-auth-callout executable", () => {
       expect(hookSandbox.error).toBeUndefined();
       expect(hookSandbox.status).toBe(0);
       expect(hookSandbox.stdout).toBe("{}\n");
+      expect(hookSandbox.stderr).toBe("");
+
+      const cursorSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-mcp"), "listen", "--cursor"], {
+        cwd: directory,
+        env: sandboxEnv,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      expect(cursorSandbox.error).toBeUndefined();
+      expect(cursorSandbox.status).toBe(1);
+      expect(cursorSandbox.stderr).toContain("Cursor custom plugin executed via @tefx/cito/plugin-sdk");
+
+      if (existsSync(resolve("dist/src/mcp/cli.js"))) {
+        const cursorDist = spawnSync(process.execPath, [resolve("bin/cito-mcp"), "listen", "--harness", "cursor"], {
+          cwd: directory,
+          env: sandboxEnv,
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        expect(cursorDist.error).toBeUndefined();
+        expect(cursorDist.status).toBe(1);
+        expect(cursorDist.stderr).toContain("Cursor custom plugin executed via @tefx/cito/plugin-sdk");
+      }
 
       const repo = join(directory, "repo");
       const prefix = join(directory, "prefix");
-      for (const item of ["package.json", "package-lock.json", "tsconfig.json", "README.md", "bin", "src"]) {
+      for (const item of ["package.json", "package-lock.json", "tsconfig.json", "README.md", "bin", "src", "plugins"]) {
         await cp(resolve(item), join(repo, item), { recursive: true });
       }
       for (const args of [
@@ -230,6 +271,7 @@ describe("public cito-auth-callout executable", () => {
       expect(installedHook.error).toBeUndefined();
       expect(installedHook.status).toBe(0);
       expect(installedHook.stdout).toBe("{}\n");
+      expect(installedHook.stderr).toBe("");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

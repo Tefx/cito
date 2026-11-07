@@ -45,7 +45,7 @@ test("recovery retries immutable existing batch before new received rows", async
 test("acknowledgement during queue submission survives completion and suppresses the separate open effect", async () => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   const marker = join(f.root, "queue-entered"), release = join(f.root, "release");
-  await queueScript(f.config.codexBin, `import { writeFileSync, existsSync } from 'node:fs';
+  await queueScript(desktop.codexBin, `import { writeFileSync, existsSync } from 'node:fs';
 writeFileSync(${JSON.stringify(marker)}, 'queued');
 const timer = setInterval(() => { if (existsSync(${JSON.stringify(release)})) { clearInterval(timer); } }, 10);
 `);
@@ -67,7 +67,7 @@ const timer = setInterval(() => { if (existsSync(${JSON.stringify(release)})) { 
 test.each(["unlisten", "fence"])("%s aborts an in-flight Codex queue and prevents open -g", async action => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   const marker = join(f.root, "queue-entered");
-  await queueScript(f.config.codexBin, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'entered'); setInterval(() => {}, 1000);`);
+  await queueScript(desktop.codexBin, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'entered'); setInterval(() => {}, 1000);`);
   const { listener_id: publicId } = await call(f.service, "cito_listen", { about: action }, desktop.meta);
   const id = toCanonicalListenerId(publicId);
   const sent = await call(f.service, "cito_send", { to: id, message: "abort" });
@@ -91,7 +91,7 @@ test.each(["unlisten", "fence"])("%s aborts an in-flight Codex queue and prevent
 test("three definite Codex pre-insertion failures store passive and never invoke open", async () => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
   const attempts = join(f.root, "attempts");
-  await queueScript(f.config.codexBin, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(attempts)}, 'attempt\\n'); process.exit(2);`);
+  await queueScript(desktop.codexBin, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(attempts)}, 'attempt\\n'); process.exit(2);`);
   const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "failure" }, desktop.meta);
   const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "driver fails" });
@@ -130,7 +130,7 @@ test("Pi socket failures retry the exact batch three times; session mismatch rev
 
 test("Codex 10-second queue timeout records unknown insertion and still submits exactly one open", async () => {
   const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  await queueScript(f.config.codexBin, "setInterval(() => {}, 1000);");
+  await queueScript(desktop.codexBin, "setInterval(() => {}, 1000);");
   const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "timeout" }, desktop.meta);
   const id = toCanonicalListenerId(publicId);
   await call(f.service, "cito_send", { to: id, message: "unknown insertion" });

@@ -4,10 +4,11 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
   CITO_VERSION, listenerId, localPrincipal, oidcPrincipal, senderEndpointKey, sanitizeMessage, escapeWakeCard,
-  ERROR_RETRYABLE, errorResult, successResult, CitoError, loadConfig, getHostId,
+  ERROR_RETRYABLE, errorResult, successResult, CitoError, expandHomeDir, loadConfig, getHostId,
   evaluateLease, brokerAgeMs, localExpirationMs, parseInput, listenInputSchema,
   sendInputSchema, findInputSchema, validateHarness,
 } from "../../src/shared/index.js";
+import { loadClaudeConfig, loadCodexConfig } from "../../src/adapters/index.js";
 
 describe("keyless identity", () => {
   const key = { principal_id: "local", host_id: "host", harness: "pi" as const, session_id: "session" };
@@ -107,26 +108,35 @@ describe("input and MCP envelopes", () => {
 });
 
 describe("configuration and machine identity", () => {
-  it("keeps CITO_VERSION synchronized with package.json version (0.11.3)", async () => {
+  it("keeps CITO_VERSION synchronized with package.json version (0.12.0)", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
-    expect(CITO_VERSION).toBe("0.11.3");
+    expect(CITO_VERSION).toBe("0.12.0");
     expect(CITO_VERSION).toBe(pkg.version);
   });
-  it("loads defaults and validates OIDC and URL configuration", () => {
-    const config = loadConfig({});
+  it("loads defaults and validates OIDC, pluginDirs, expandHomeDir, and plugin configuration", () => {
+    const envObj: NodeJS.ProcessEnv = {};
+    const config = loadConfig(envObj);
+    expect(config.env).toBe(envObj);
     expect(config.natsUrl).toBe("nats://127.0.0.1:4222");
     expect(config.authMode).toBe("none");
-    expect(config.codexBin).toBe("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
     expect(config.user).toBe(userInfo().username);
-    expect(loadConfig({ CITO_CODEX_BIN: "/tmp/custom-codex" }).codexBin).toBe("/tmp/custom-codex");
     expect(config.stateDir).toBe(join(process.env.HOME!, ".cito"));
-    expect(config.codexHome).toBe(join(process.env.HOME!, ".codex"));
-    expect(config.claudeHome).toBe(join(process.env.HOME!, ".claude"));
-    expect(loadConfig({ CITO_CLAUDE_HOME: "/tmp/custom-claude" }).claudeHome).toBe("/tmp/custom-claude");
+    expect(config.pluginDirs).toContain(join(process.env.HOME!, ".cito", "plugins"));
+    expect(loadConfig({ CITO_PLUGIN_PATH: "~/my-plugins:/tmp/extra-plugins" }).pluginDirs).toEqual(
+      expect.arrayContaining([join(process.env.HOME!, "my-plugins"), "/tmp/extra-plugins"]),
+    );
+    expect(expandHomeDir("~")).toBe(process.env.HOME!);
+    expect(expandHomeDir("~/sub")).toBe(join(process.env.HOME!, "sub"));
+    expect(() => expandHomeDir("   ", "CUSTOM_DIR")).toThrow("CUSTOM_DIR must not be empty");
+    expect(loadCodexConfig(config).codexBin).toBe("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+    expect(loadCodexConfig(loadConfig({ CITO_CODEX_BIN: "/tmp/custom-codex" })).codexBin).toBe("/tmp/custom-codex");
+    expect(loadCodexConfig(config).codexHome).toBe(join(process.env.HOME!, ".codex"));
+    expect(loadClaudeConfig(config).claudeHome).toBe(join(process.env.HOME!, ".claude"));
+    expect(loadClaudeConfig(loadConfig({ CITO_CLAUDE_HOME: "/tmp/custom-claude" })).claudeHome).toBe("/tmp/custom-claude");
     // The Claude wake channel binds a second bridge socket, so it stays strictly opt-in.
-    expect(config.enableClaudeChannel).toBe(false);
-    expect(loadConfig({ CITO_CLAUDE_CHANNEL: "1" }).enableClaudeChannel).toBe(true);
-    expect(loadConfig({ CITO_CLAUDE_CHANNEL: "0" }).enableClaudeChannel).toBe(false);
+    expect(loadClaudeConfig(config).enableClaudeChannel).toBe(false);
+    expect(loadClaudeConfig(loadConfig({ CITO_CLAUDE_CHANNEL: "1" })).enableClaudeChannel).toBe(true);
+    expect(loadClaudeConfig(loadConfig({ CITO_CLAUDE_CHANNEL: "0" })).enableClaudeChannel).toBe(false);
     expect(loadConfig({ CITO_NATS_URL: "wss://nats.example/ws" }).natsUrl).toBe("wss://nats.example/ws");
     expect(loadConfig({ CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "http://127.0.0.1:9999/", CITO_OIDC_CLIENT_ID: "cito" }).oidcIssuer).toBe("http://127.0.0.1:9999");
     for (const env of [

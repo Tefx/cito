@@ -5,7 +5,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { CITO_VERSION, loadConfig, type CitoConfig } from "../shared/index.js";
-import { matchAdapterCliFlag, resolveAdapterCliMeta, startOptionalStdioChannel, type AdapterCliSelection } from "../adapters/index.js";
+import { ADAPTER_REGISTRY, ensurePluginsLoaded, matchAdapterCliFlag, rejectedPluginIds, resolveAdapterCliMeta, startOptionalStdioChannel, type AdapterCliSelection } from "../adapters/index.js";
 import { CitoService } from "./service.js";
 import { LocalState } from "./state.js";
 import { startHttpServer, daemonHealth } from "./server.js";
@@ -121,8 +121,10 @@ async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_un
 }
 async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], config: CitoConfig): Promise<void> {
   try {
+    await ensurePluginsLoaded(config);
     let explicitScope: "self" | "workspace" | undefined;
-    let team = false, hub: string | undefined, tag: string | undefined, adapterSelection: AdapterCliSelection | undefined;
+    let team = false, hub: string | undefined, tag: string | undefined;
+    let selectedHarness: string | undefined, selectedSession: string | undefined;
     const positionals: string[] = [], cwd = process.cwd();
     const readValue = (arg: string, index: number, flag: string): [string, number] => {
       if (arg.startsWith(flag + "=")) {
@@ -138,11 +140,27 @@ async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], conf
       const arg = argv[i]!;
       const matchedAdapter = matchAdapterCliFlag(cmd, argv, i, config);
       if (matchedAdapter) {
-        if (adapterSelection && adapterSelection.harness !== matchedAdapter.selection.harness) {
+        if (selectedHarness && selectedHarness !== matchedAdapter.selection.harness) {
           throw new Error("Conflicting harness flags");
         }
-        adapterSelection = matchedAdapter.selection;
+        selectedHarness = matchedAdapter.selection.harness;
+        if (matchedAdapter.selection.explicitId !== undefined) {
+          if (selectedSession !== undefined && selectedSession !== matchedAdapter.selection.explicitId) {
+            throw new Error("Conflicting session flags");
+          }
+          selectedSession = matchedAdapter.selection.explicitId;
+        }
         i = matchedAdapter.nextIndex;
+      } else if (arg === "--harness" || arg.startsWith("--harness=")) {
+        let val: string;
+        [val, i] = readValue(arg, i, "--harness");
+        if (selectedHarness && selectedHarness !== val) throw new Error("Conflicting harness flags");
+        selectedHarness = val;
+      } else if (arg === "--session" || arg.startsWith("--session=")) {
+        let val: string;
+        [val, i] = readValue(arg, i, "--session");
+        if (selectedSession !== undefined && selectedSession !== val) throw new Error("Conflicting session flags");
+        selectedSession = val;
       } else if (arg === "--hub" || arg.startsWith("--hub=")) {
         [hub, i] = readValue(arg, i, "--hub");
       } else if (cmd === "listen" && arg === "--team") {
@@ -163,6 +181,13 @@ async function runDirectCommand(cmd: "listen" | "unlisten", argv: string[], conf
     }
     if (cmd === "unlisten" && positionals.length > 0) throw new Error(`Unexpected argument: ${positionals[0]}`);
     if (team && explicitScope === "self") throw new Error("Conflicting --scope self and --team");
+    if (selectedSession !== undefined && !selectedHarness) throw new Error("--session requires --harness");
+    if (selectedHarness !== undefined && (rejectedPluginIds.has(selectedHarness) || !ADAPTER_REGISTRY.has(selectedHarness))) {
+      throw new Error(`Unknown harness: ${selectedHarness}`);
+    }
+    const adapterSelection: AdapterCliSelection | undefined = selectedHarness
+      ? { harness: selectedHarness, ...(selectedSession !== undefined ? { explicitId: selectedSession } : {}) }
+      : undefined;
     const meta = await resolveAdapterCliMeta(cmd, adapterSelection, cwd, config);
     if (cmd === "listen") {
       const about = positionals.join(" ").trim() || basename(cwd) || "CLI session";
