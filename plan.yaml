@@ -5204,7 +5204,7 @@ phases:
   name: 'V18 Stage 2 (`v0.14.0`): Rust Hot-Path Multi-Call Binary (`cito-native`),
     Surface 3 AppKit `Settings…` Window, In-Process LAN Hub Sharing (`:4291`) & `<
     5 MB` `Cito.app` Bundle'
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, bin/cito-native-darwin-arm64 (< 1.5 MB stripped & ad-hoc signed)
     executes claude-hook (< 2 ms empty-queue fast path) and mcp-stdio with CITO_ENDPOINT_PID
@@ -5407,7 +5407,7 @@ phases:
     name: 'V18 Stage 2 (v0.14.0) acceptance, cito-native Rust binary, Surface 3 SettingsPanel,
       in-process LAN hub sharing, < 5 MB Cito.app & code-hygiene gate [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v18` (Stage 2 `v0.14.0`) acceptance decision (`PASS`\
@@ -5485,3 +5485,48 @@ phases:
     agent: verifier
     claimed_by: verifier
     claimed_at: '2026-11-07T15:15:36.126270Z'
+    done_at: '2026-11-07T15:20:54.256827+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v18-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:1db04d45176d7a920caf8e60a84eb43720c2e80e).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (31 test
+      files, 250 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex & storage verification:
+
+      - package.json dependencies: [''@modelcontextprotocol/sdk'', ''jose'', ''zod'']
+      (0 NATS packages)
+
+      - crates/cito-native/target: absent (false)
+
+      - [\p{Script=Han}] in src/, plugins/, crates/, docs/, README.md, AGENTS.md,
+      deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, plugins/, crates/, docs/
+      (excluding policy rule line in docs/DESIGN.md:15), README.md, deploy/, tests/:
+      0 matches
+
+      - Hardcoded ''pi'', ''codex'', or ''claude'' branches/strings in src/ and src/macos/cito-ui.swift:
+      0 matches
+
+      - Non-node imports in plugins/pi/cito-bridge.ts: 0 matches
+
+      Requirement results:
+
+      - V18-1-RUST-CITO-NATIVE-MULTI-CALL-BINARY-AND-FALLBACK: PROVEN (crates/cito-native/src/main.rs
+      compiled to 436,880-byte stripped ad-hoc signed bin/cito-native-darwin-arm64
+      executing claude-hook <2ms fast path & mcp-stdio with CITO_ENDPOINT_PID socket
+      bridge and seamless JS fallback in bin/cito-claude-hook and bin/cito-mcp).
+
+      - V18-2-IN-PROCESS-LAN-HUB-SHIMS-LAUNCHAGENT-AND-CITO-APP: PROVEN (src/shared/config.ts
+      HostHubConfig, src/mcp/service.ts syncHostHub sharing getLocalHubEngine(stateDir)
+      on :4291 + live reloadHubSlotsFromConfig, src/setup/index.ts ensureCliShims,
+      inspectLaunchAtLogin/setLaunchAtLogin, and buildMacAppBundle <5 MB Cito.app).
+
+      - V18-3-SURFACE-3-SETTINGS-PANEL-V0-14-0-AND-CODE-HYGIENE: PROVEN (src/macos/cito-ui.swift
+      Surface 3 SettingsPanel 520x460pt KeyPanel with Agent Apps & Hubs & Network
+      tabs + Surface 1 open_settings preserving actions === 10, rebuilt bin/cito-ui-darwin-arm64,
+      CITO_VERSION = ''0.14.0''; fresh-context structural-auditor 01a1b68d-5e87-7555-8f18-f6116e608b9e
+      and uiux-auditor 01a1b68d-5e31-77b6-961b-a79fd14cc4e1 certified Completeness:
+      CLEAN | Simplicity: ZERO_NEW_ISSUES).'
