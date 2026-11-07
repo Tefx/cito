@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createConnection } from "node:net";
 import { stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import citoBridge, { type BridgeAPI, type BridgeCommandOptions, type BridgeContext } from "../../src/pi-extension/cito-bridge.js";
+import citoBridge, { type BridgeAPI, type BridgeCommandOptions, type BridgeContext } from "../../plugins/pi/cito-bridge.js";
 import { bridgeSocketPath, identifyBridge, requestBridge, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
 import { startHttpServer } from "../../src/mcp/server.js";
 import { loadConfig } from "../../src/shared/index.js";

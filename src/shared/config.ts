@@ -1,8 +1,9 @@
 import { hostname, homedir, userInfo } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { mkdir, open, readFile, chmod } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { normalizeIssuer } from "./identity.js";
 import { CitoError } from "./errors.js";
@@ -21,22 +22,26 @@ export interface HubConfig {
 export interface CitoConfig extends Omit<HubConfig, "name"> {
   stateDir: string;
   daemonPort: number;
-  /** Deterministic desktop liveness injection for embedders and tests. */
-  codexDesktopRunning?: (signal: AbortSignal) => Promise<boolean>;
-  codexHome: string;
-  codexBin: string;
-  claudeHome: string;
-  /** Opt-in only: an auto-detected channel would bind a second bridge inside unrelated harnesses. */
-  enableClaudeChannel: boolean;
   openBin: string;
   hostName: string;
   defaultHub: string;
   hubs: Record<string, HubConfig>;
+  env: NodeJS.ProcessEnv;
+  pluginDirs: string[];
+  plugins?: Record<string, Record<string, unknown>>;
 }
-function directory(value: string): string {
+export function expandHomeDir(value: string, name?: string): string {
+  if (!value.trim()) throw new Error((name ?? "Path") + " must not be empty");
   const expanded = value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
   return isAbsolute(expanded) ? expanded : resolve(expanded);
 }
+const directPluginsDir = fileURLToPath(new URL("../../plugins", import.meta.url));
+const rootPluginsDir = fileURLToPath(new URL("../../../plugins", import.meta.url));
+const builtinPluginsDir = existsSync(join(directPluginsDir, "index.ts"))
+  ? directPluginsDir
+  : existsSync(join(rootPluginsDir, "index.ts"))
+  ? rootPluginsDir
+  : directPluginsDir;
 export function validateHttpUrl(value: string, name: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error(name + " must be an HTTPS URL"); }
@@ -76,22 +81,33 @@ function port(value: number, name: string): number {
   return value;
 }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
-  for (const key of ["CITO_STATE_DIR", "CITO_CODEX_HOME", "CITO_CODEX_BIN", "CITO_CLAUDE_HOME", "CITO_OPEN_BIN", "CITO_CONFIG_PATH"] as const) {
-    if (env[key] !== undefined && !env[key]?.trim()) throw new Error(key + " must not be empty");
+  for (const [key, value] of Object.entries(env)) {
+    if (/^CITO_(?:STATE_DIR|CONFIG_PATH|OPEN_BIN|[A-Z0-9_]+_(?:HOME|BIN))$/.test(key) && value !== undefined && !value.trim()) {
+      throw new Error(key + " must not be empty");
+    }
   }
-  const stateDir = directory(env.CITO_STATE_DIR ?? "~/.cito");
+  const stateDir = expandHomeDir(env.CITO_STATE_DIR ?? "~/.cito", "CITO_STATE_DIR");
   const oidcRedirectPort = env.CITO_OIDC_REDIRECT_PORT === undefined ? undefined : port(Number(env.CITO_OIDC_REDIRECT_PORT), "CITO_OIDC_REDIRECT_PORT");
   const path = env.CITO_CONFIG_PATH ?? join(stateDir, "config.json");
   const entrySchema = z.object({ natsUrl: z.string(), authMode: z.enum(["none", "oidc"]).default("none"),
     user: z.string().default(env.CITO_USER ?? userInfo().username), oidcIssuer: z.string().optional(),
     oidcClientId: z.string().optional(), oidcScopes: z.array(z.string().min(1)).optional(),
     oidcRedirectPort: z.number().int().min(1).max(65535).optional(), redirect_port: z.number().int().min(1).max(65535).optional() });
-  let json: { hubs: Record<string, z.infer<typeof entrySchema>>; default_hub?: string; daemonPort?: number } | undefined;
+  let json: {
+    hubs: Record<string, z.infer<typeof entrySchema>>;
+    default_hub?: string;
+    daemonPort?: number;
+    plugins?: Record<string, Record<string, unknown>>;
+  } | undefined;
   if ((env === process.env || env.CITO_STATE_DIR !== undefined || env.CITO_CONFIG_PATH !== undefined)
     && (env.CITO_CONFIG_PATH !== undefined || existsSync(path))) {
     try {
-      json = z.object({ hubs: z.record(hubNameSchema, entrySchema).refine(v => Object.keys(v).length > 0),
-        default_hub: hubNameSchema.optional(), daemonPort: z.number().int().min(1).max(65535).optional() }).parse(JSON.parse(readFileSync(path, "utf8")));
+      json = z.object({
+        hubs: z.record(hubNameSchema, entrySchema).refine(v => Object.keys(v).length > 0),
+        default_hub: hubNameSchema.optional(),
+        daemonPort: z.number().int().min(1).max(65535).optional(),
+        plugins: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+      }).parse(JSON.parse(readFileSync(path, "utf8")));
     } catch (cause) { throw new CitoError("INVALID_INPUT", "Cannot load hub configuration: " + path, { cause }); }
   }
   const hubs: Record<string, HubConfig> = Object.create(null);
@@ -108,16 +124,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
   if (env.CITO_NATS_URL !== undefined && env.CITO_CONFIG_PATH === undefined) {
     hubs[defaultHub] = validateHub({ ...hubs[defaultHub]!, natsUrl: env.CITO_NATS_URL });
   }
+  const extraPluginDirs = env.CITO_PLUGIN_PATH
+    ? env.CITO_PLUGIN_PATH.split(delimiter).map(s => s.trim()).filter(Boolean).map(p => expandHomeDir(p, "CITO_PLUGIN_PATH"))
+    : [];
+  const pluginDirs = [builtinPluginsDir, join(stateDir, "plugins"), ...extraPluginDirs];
   const { name: _name, ...mirror } = hubs[defaultHub]!;
   return {
-    ...mirror, hubs, defaultHub, stateDir,
+    ...mirror,
+    hubs,
+    defaultHub,
+    stateDir,
     daemonPort: port(env.CITO_DAEMON_PORT === undefined ? json?.daemonPort ?? 4290 : Number(env.CITO_DAEMON_PORT), "CITO_DAEMON_PORT"),
-    codexHome: directory(env.CITO_CODEX_HOME ?? "~/.codex"),
-    codexBin: env.CITO_CODEX_BIN ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-    claudeHome: directory(env.CITO_CLAUDE_HOME ?? "~/.claude"),
-    enableClaudeChannel: ["1", "true", "yes"].includes((env.CITO_CLAUDE_CHANNEL ?? "").trim().toLowerCase()),
     openBin: env.CITO_OPEN_BIN ?? "/usr/bin/open",
     hostName: (env.CITO_HOST_NAME ?? hostname()).replace(/[^\x20-\x7e]/g, "").slice(0, 128),
+    env,
+    pluginDirs,
+    ...(json?.plugins ? { plugins: json.plugins } : {}),
   };
 }
 

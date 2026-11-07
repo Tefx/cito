@@ -23,7 +23,7 @@ it.skipIf(!hostAvailable)("loads a standalone file through Pi 1.5.0 and verifies
   const state = await isolatedState();
   try {
     const standalone = join(state.root, "bridge.ts");
-    await copyFile(fileURLToPath(new URL("../../src/pi-extension/cito-bridge.ts", import.meta.url)), standalone);
+    await copyFile(fileURLToPath(new URL("../../plugins/pi/cito-bridge.ts", import.meta.url)), standalone);
     for (const stop of ["shutdown", "exit"]) {
       const child = fork(fileURLToPath(new URL("fixtures/pi-runtime.mjs", import.meta.url)), [host, standalone, f.root],
         { env: { ...f.env, CITO_DAEMON_PORT: String(http.port), PI_CODING_AGENT_DIR: join(state.root, "pi-agent") }, silent: true });

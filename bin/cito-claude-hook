@@ -2,7 +2,7 @@
 import { runEntrypoint } from "./loader.js";
 
 try {
-  await runEntrypoint("../dist/src/claude-hook/cli.js", "../src/claude-hook/cli.ts");
+  await runEntrypoint("../dist/plugins/claude/hook-cli.js", "../plugins/claude/hook-cli.ts");
 } catch (error) {
   process.stderr.write("cito-claude-hook: " + (error instanceof Error ? error.message : String(error)) + "\n");
   process.stdout.write("{}\n");

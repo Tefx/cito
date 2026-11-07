@@ -103,11 +103,11 @@ describe("non-intrusive Codex metadata and wake effects", () => {
   it("probe archives definitively; unavailable metadata uses desktop process liveness", async () => {
     const config = loadConfig(state.env), adapter = new CodexDesktopAdapter(), signal = new AbortController().signal;
     const row = { session_id: threadId } as ListenerRow;
-    config.codexDesktopRunning = async () => true;
+    config.plugins = { codex: { codexDesktopRunning: async () => true } };
     expect(await adapter.probe(row, config, signal)).toEqual({ status: "alive" });
-    config.codexDesktopRunning = async () => false;
+    config.plugins = { codex: { codexDesktopRunning: async () => false } };
     expect(await adapter.probe(row, config, signal)).toEqual({ status: "closed_definitive" });
-    const db = database(1); config.codexDesktopRunning = async () => { throw new Error("must not probe process"); };
+    const db = database(1); config.plugins = { codex: { codexDesktopRunning: async () => { throw new Error("must not probe process"); } } };
     try { expect(await adapter.probe(row, config, signal)).toEqual({ status: "closed_definitive" }); } finally { db.close(); }
   });
   it("executes queue --resume and silent deeplink with literal argv and CODEX_HOME", async () => {
@@ -176,10 +176,10 @@ describe("non-intrusive Codex metadata and wake effects", () => {
           );
         }
         // Returns [] when Codex Desktop is not running
-        config.codexDesktopRunning = async () => false;
+        config.plugins = { codex: { codexDesktopRunning: async () => false } };
         expect(await adapter.discoverAvailableSessions(config)).toEqual([]);
         // Returns up to 8 most recent non-archived user threads when Desktop is running
-        config.codexDesktopRunning = async () => true;
+        config.plugins = { codex: { codexDesktopRunning: async () => true } };
         const codexOnly = await adapter.discoverAvailableSessions(config);
         expect(codexOnly).toHaveLength(8);
         expect(codexOnly[0]).toMatchObject({ harness: "codex", session_id: "codex-u-10", title: "Fallback Title 10", branch: "feat/v7" });

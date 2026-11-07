@@ -1,0 +1,7 @@
+{
+  "id": "pi",
+  "displayName": "Pi",
+  "tier": "stable",
+  "sfSymbol": "terminal.fill",
+  "tint": "indigo"
+}

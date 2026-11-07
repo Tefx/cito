@@ -1,12 +1,31 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { hasExplicitPid, resolveExplicitCaller } from "./git.js";
-import { SocketBridgeAdapter } from "./pi.js";
-import type { Caller, CallerDetectionContext } from "./types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { CitoError, expandHomeDir, loadConfig, type CitoConfig } from "../../src/shared/index.js";
+import { hasExplicitPid, resolveExplicitCaller } from "../../src/adapters/git.js";
+import { SocketBridgeAdapter } from "../../src/adapters/socket-bridge.js";
+import type { Caller, CallerDetectionContext, HarnessCliDescriptor, PluginManifest, StdioChannelBridge } from "../../src/adapters/types.js";
+import { startClaudeChannelBridge, type ClaudeChannelOptions } from "./channel.js";
+export * from "./channel.js";
 
-type ClaudeConfig = Pick<CitoConfig, "claudeHome">;
+const localManifestUrl = new URL("./plugin.json", import.meta.url);
+const rootManifestUrl = new URL("../../../plugins/claude/plugin.json", import.meta.url);
+export const claudeManifest: PluginManifest = JSON.parse(
+  readFileSync(existsSync(localManifestUrl) ? localManifestUrl : rootManifestUrl, "utf8"),
+) as PluginManifest;
+
+export interface ClaudePluginConfig {
+  claudeHome: string;
+  enableClaudeChannel: boolean;
+}
+export interface ClaudeConfigInput {
+  env?: NodeJS.ProcessEnv;
+  plugins?: Record<string, Record<string, unknown>>;
+  claudeHome?: string;
+  enableClaudeChannel?: boolean;
+}
 type QueueConfig = Pick<CitoConfig, "stateDir">;
 export const CLAUDE_HARNESS = "claude";
 const TRANSCRIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -14,17 +33,39 @@ const TRANSCRIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const QUEUE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DRAIN_SUFFIX = ".draining-";
 
+export function loadClaudeConfig(config: ClaudeConfigInput = loadConfig()): ClaudePluginConfig {
+  const pluginCfg = (config.plugins?.claude ?? {}) as {
+    claudeHome?: unknown;
+    enableClaudeChannel?: unknown;
+  };
+  const env = config.env ?? process.env;
+  const rawHome = typeof pluginCfg.claudeHome === "string"
+    ? pluginCfg.claudeHome
+    : typeof config.claudeHome === "string"
+    ? config.claudeHome
+    : env.CITO_CLAUDE_HOME ?? "~/.claude";
+  const enableClaudeChannel = typeof pluginCfg.enableClaudeChannel === "boolean"
+    ? pluginCfg.enableClaudeChannel
+    : typeof config.enableClaudeChannel === "boolean"
+    ? config.enableClaudeChannel
+    : ["1", "true", "yes"].includes((env.CITO_CLAUDE_CHANNEL ?? "").trim().toLowerCase());
+  return {
+    claudeHome: expandHomeDir(rawHome, "CITO_CLAUDE_HOME"),
+    enableClaudeChannel,
+  };
+}
+
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
 export function validateClaudeSessionId(value: unknown): string {
   if (!nonempty(value) || !QUEUE_ID.test(value.trim())) throw new CitoError("INVALID_INPUT", "Invalid Claude session identifier");
   return value.trim();
 }
 /** Claude Code slugs the absolute workspace path into one transcript directory per workspace. */
-export function claudeProjectDir(cwd: string, config: ClaudeConfig = loadConfig()): string {
-  return join(config.claudeHome, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+export function claudeProjectDir(cwd: string, config: ClaudeConfigInput = loadConfig()): string {
+  return join(loadClaudeConfig(config).claudeHome, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
 }
 /** The transcript Claude Code appends to names the session it is running; /clear starts a new one. */
-export async function resolveClaudeSessionId(cwd: string, config: ClaudeConfig = loadConfig()): Promise<string | undefined> {
+export async function resolveClaudeSessionId(cwd: string, config: ClaudeConfigInput = loadConfig()): Promise<string | undefined> {
   const dir = claudeProjectDir(cwd, config);
   let names: string[];
   try { names = await readdir(dir); } catch { return undefined; }
@@ -50,7 +91,7 @@ const TITLE_MAX_CHARS = 200;
 const TITLE_CACHE_ENTRIES = 32;
 const titleCache = new Map<string, { size: number; mtimeMs: number; title: string | undefined }>();
 export async function resolveClaudeSessionTitle(cwd: string, sessionId: string,
-  config: ClaudeConfig = loadConfig()): Promise<string | undefined> {
+  config: ClaudeConfigInput = loadConfig()): Promise<string | undefined> {
   if (!TRANSCRIPT_ID.test(sessionId)) return undefined;
   const path = join(claudeProjectDir(cwd, config), `${sessionId}.jsonl`);
   let info;
@@ -90,7 +131,7 @@ export async function resolveClaudeSessionTitle(cwd: string, sessionId: string,
   return title;
 }
 export async function resolveClaudeTranscriptMtimeMs(cwd: string, sessionId: string,
-  config: ClaudeConfig = loadConfig()): Promise<number> {
+  config: ClaudeConfigInput = loadConfig()): Promise<number> {
   if (!TRANSCRIPT_ID.test(sessionId)) return 0;
   try {
     const info = await stat(join(claudeProjectDir(cwd, config), `${sessionId}.jsonl`));
@@ -215,9 +256,45 @@ export async function writeClaudeBadge(config: QueueConfig, sessionId: string, b
 }
 
 export class ClaudeCodeAdapter extends SocketBridgeAdapter {
-  constructor() {
+  override readonly cli: HarnessCliDescriptor = {
+    consumesNextArg: (cmd, nextArg) => {
+      if (cmd !== "unlisten" && !TRANSCRIPT_ID.test(nextArg) && !/^claude-[1-9][0-9]*$/i.test(nextArg)) {
+        return false;
+      }
+      validateClaudeSessionId(nextArg);
+      return true;
+    },
+    resolveMeta: async (_cmd, explicitId, cwd, config) => {
+      let sessionId = explicitId ? validateClaudeSessionId(explicitId) : undefined;
+      if (!sessionId) {
+        const envId = (config.env?.CLAUDE_SESSION_ID ?? process.env.CLAUDE_SESSION_ID)?.trim();
+        if (envId) sessionId = validateClaudeSessionId(envId);
+      }
+      if (!sessionId) {
+        const live = await this.discoverAvailableSessions(config);
+        sessionId = live.find(s => s.cwd === cwd)?.session_id;
+      }
+      if (!sessionId) {
+        sessionId = await resolveClaudeSessionId(cwd, config);
+      }
+      if (!sessionId) {
+        throw new CitoError("BINDING_REQUIRED", "Claude session metadata is required");
+      }
+      return { claudeSessionId: sessionId, cwd };
+    },
+  };
+
+  constructor(manifest: PluginManifest = claudeManifest) {
     // A queued card only reaches the model at the next hook boundary, so it is never proof of a read.
-    super(CLAUDE_HARNESS, { confirmDelivery: false });
+    super(CLAUDE_HARNESS, { confirmDelivery: false, manifest });
+  }
+  async startStdioChannel(
+    config: CitoConfig,
+    transport: { send(message: JSONRPCMessage): Promise<void> },
+    options: ClaudeChannelOptions = {},
+  ): Promise<StdioChannelBridge | undefined> {
+    if (!loadClaudeConfig(config).enableClaudeChannel) return undefined;
+    return startClaudeChannelBridge(config, transport, options);
   }
   /**
    * Session liveness stays with the socket bridge: a transcript on disk outlives the process that
@@ -232,3 +309,6 @@ export class ClaudeCodeAdapter extends SocketBridgeAdapter {
     return resolveExplicitCaller(CLAUDE_HARNESS, session, ctx);
   }
 }
+
+export const claudeAdapter = new ClaudeCodeAdapter(claudeManifest);
+export default (manifest: PluginManifest) => new ClaudeCodeAdapter(manifest);

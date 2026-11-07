@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat, utimes, writeFile, readFile } from "node:fs/promises
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ensureUiCompiled, UiBridge, validAction, type BannerPayload, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
+import { ensureUiCompiled, expandJumpUrl, isSafeJumpUrl, UiBridge, validAction, type BannerPayload, type UiHarnessMetadata, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
 import { KeyedMutex } from "../../src/shared/index.js";
 import { waitFor } from "../mcp/support.js";
 
@@ -430,7 +430,7 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     // Zone 3: Collapsible harness groups + disambiguated scroll IDs + icon-free candidate rows at x: 24
     expect(nodes.find(n => n.id === "toggle_group:pi")).toMatchObject({ text: "Pi · 5 open", symbol: "chevron.down" });
     expect(nodes.find(n => n.id === "toggle_group:codex")).toMatchObject({ text: "Codex · 5 recent", symbol: "chevron.down" });
-    expect(nodes.find(n => n.id === "toggle_group:claude")).toMatchObject({ text: "Claude · 1 open", symbol: "chevron.down" });
+    expect(nodes.find(n => n.id === "toggle_group:claude")).toMatchObject({ text: "Claude · 1 open", symbol: "chevron.down", tooltip: "Claude (Experimental)" });
     const groupOrder = snap.items.filter(n => n.id.startsWith("group:")).map(n => n.id);
     expect(groupOrder).toEqual(["group:pi", "group:codex", "group:claude"]);
     expect(snap.items.find(n => n.id === "available_scroll:pi")).toMatchObject({ width: 380, height: 144 });
@@ -523,6 +523,8 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect((await inspect()).directory_selected_id).toBe(myRemote[0]!.scoped_id);
 
     // Facet pills and search query hooks
+    expect(dirNodes.find(n => n.id === "dir_harness:pi")).toMatchObject({ text: "Pi", x: 256, width: 42 });
+    expect(dirNodes.find(n => n.id === "dir_harness:codex")).toMatchObject({ text: "Codex", x: 302, width: 58 });
     expect(dirNodes.find(n => n.id === "dir_harness:claude")).toMatchObject({ text: "Claude", x: 364, width: 62 });
     send({ op: "test_control", id: "dir_scope:mine" });
     await waitFor(() => actions.length === 2);
@@ -692,3 +694,111 @@ test("prebuilt bin/cito-ui-darwin-arm64 is an ad-hoc-signed arm64 Mach-O install
     await rm(freshStateDir, { recursive: true, force: true });
   }
 }, 60000);
+
+test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui renders custom plugin badges, group headers, jump URLs, and horizontal facet scroll overflow", async () => {
+  expect(expandJumpUrl("codex://threads/{session_id}", { session_id: "thread 1/2" })).toBe("codex://threads/thread%201%2F2");
+  expect(expandJumpUrl("cursor://file/{cwd}", { session_id: "s1", cwd: "/Users/alice/my repo" })).toBe("cursor://file/Users/alice/my%20repo");
+  expect(expandJumpUrl("cursor://file/{cwd}", { session_id: "s1" })).toBeNull();
+  for (const unsafe of [
+    "javascript:alert(1)",
+    "JAVASCRIPT:alert({session_id})",
+    "file:///etc/passwd",
+    "data:text/html,<script>alert(1)</script>",
+    "http://example.com/{session_id}",
+    "https://example.com/{session_id}",
+    "not a url",
+  ]) {
+    expect(isSafeJumpUrl(unsafe)).toBe(false);
+    expect(expandJumpUrl(unsafe, { session_id: "s1", cwd: "/tmp" })).toBeNull();
+  }
+
+  const log = join(root, "custom-opened"), opener = join(root, "custom-open.cjs");
+  await writeFile(opener, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(log)}, process.argv[2]+'\\n');`, { mode: 0o700 });
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, {
+    binary,
+    env: { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120", CITO_BANNER_URL_OPENER: opener },
+    diagnostic: line => diagnostics.push(line),
+    onAction: action => { actions.push(action); },
+  });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+  try {
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+    const customHarnesses: UiHarnessMetadata[] = [
+      { id: "pi", display_name: "Pi", sf_symbol: "terminal.fill", tint: "indigo", tier: "stable", order: 0, jump_url_template: null },
+      { id: "codex", display_name: "Codex", sf_symbol: "sparkles", tint: "teal", tier: "stable", order: 1, jump_url_template: "codex://threads/{session_id}" },
+      { id: "claude", display_name: "Claude", sf_symbol: "cpu.fill", tint: "orange", tier: "experimental", order: 2, jump_url_template: null },
+      { id: "cursor", display_name: "Cursor", sf_symbol: "cursorarrow.rays", tint: "purple", tier: "custom", order: 3, jump_url_template: "cursor://file/{cwd}" },
+    ];
+    const cursorListener: UiListenerSummary = {
+      hub: "personal",
+      listener_id: "c_cursor234567",
+      public_id: "cursor-cursor234567",
+      scoped_id: "personal:cursor-cursor234567",
+      harness: "cursor",
+      session_id: "cur-1",
+      title: "Cursor Workspace",
+      cwd: "/tmp/cursor-proj",
+      repo: "acme/service",
+      scope: "self",
+      can_jump: true,
+    };
+    const candidates = [
+      { harness: "zed", session_id: "zed-1", title: "Zed Session", cwd: "/tmp/zed" },
+      { harness: "cursor", session_id: "cur-2", title: "Cursor Recent", cwd: "/tmp/cur2" },
+    ];
+    bridge.state(hubs, [cursorListener], candidates, [], 5, customHarnesses);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1 available=2"));
+    const snap = await inspect(), nodes = flatten(snap.items);
+
+    // Custom listener card jump button uses "Open in Cursor" and opens cursor://file/tmp/cursor-proj
+    const openBtn = nodes.find(n => n.id === "open:" + cursorListener.scoped_id)!;
+    expect(openBtn).toMatchObject({ tooltip: "Open in Cursor", symbol: "arrow.up.forward.app" });
+    send({ op: "test_control", id: "open:" + cursorListener.scoped_id });
+    await waitFor(async () => {
+      try { return (await readFile(log, "utf8")).includes("cursor://file/tmp/cursor-proj"); } catch { return false; }
+    });
+
+    // Zone 3: cursor has jump_url_template -> "Cursor · 1 recent", zed has neither -> "Zed · 1 available"
+    expect(nodes.find(n => n.id === "toggle_group:cursor")).toMatchObject({ text: "Cursor · 1 recent" });
+    expect(nodes.find(n => n.id === "toggle_group:zed")).toMatchObject({ text: "Zed · 1 available" });
+
+    // Surface 2: single custom plugin pill at x: 430 (no overflow yet), then overflow > 544pt hosts pills in directory_harness_scroll
+    send({ op: "test_control", id: "open_directory" });
+    await waitFor(() => actions.length === 1);
+    const dirSnap1 = await inspect(), dirNodes1 = flatten(dirSnap1.directory_items ?? []);
+    expect(dirNodes1.find(n => n.id === "dir_harness:cursor")).toMatchObject({ text: "Cursor", x: 430 });
+    expect(dirNodes1.find(n => n.id === "directory_harness_scroll")).toBeUndefined();
+
+    // Add more custom plugins so total width exceeds 544pt -> hosted in horizontal NSScrollView
+    const manyHarnesses: UiHarnessMetadata[] = [
+      ...customHarnesses,
+      { id: "windsurf", display_name: "Windsurf", sf_symbol: "wind", tint: "green", tier: "custom", order: 3, jump_url_template: null },
+      { id: "zed", display_name: "Zed Editor", sf_symbol: "bolt.horizontal.fill", tint: "blue", tier: "custom", order: 3, jump_url_template: null },
+    ];
+    bridge.state(hubs, [cursorListener], candidates, [], 5, manyHarnesses);
+    await waitFor(async () => flatten((await inspect()).directory_items ?? []).some(n => n.id === "directory_harness_scroll"));
+    const dirSnap2 = await inspect(), dirNodes2 = flatten(dirSnap2.directory_items ?? []);
+    expect(dirNodes2.find(n => n.id === "directory_harness_scroll")).toMatchObject({ x: 256, width: 288, height: 22 });
+    expect(dirNodes2.find(n => n.id === "dir_harness:windsurf")?.text).toBe("Windsurf");
+    expect(dirNodes2.find(n => n.id === "dir_harness:zed")?.text).toBe("Zed Editor");
+
+    // Custom banner with target_cwd expands jump_url -> "Open in Cursor ↗", while missing target_cwd omits jump
+    bridge.banner({ ...payload, target_harness: "cursor", target_session_id: "cur-1", target_cwd: "/tmp/banner-proj" });
+    await waitFor(() => diagnostics.some(l => l.includes('"action_label":"Open in Cursor ↗"')));
+    send({ op: "test_click" });
+    await waitFor(async () => (await readFile(log, "utf8")).includes("cursor://file/tmp/banner-proj"));
+
+    bridge.banner({ ...payload, target_harness: "cursor", target_session_id: "cur-2" });
+    await waitFor(() => diagnostics.some(l => l.includes('"action_label":"cursor session · Click to dismiss"')));
+  } finally {
+    await bridge.close();
+  }
+}, 20000);

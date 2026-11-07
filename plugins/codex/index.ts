@@ -1,14 +1,76 @@
 import { execFile } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
-import { CitoError, loadConfig, type CitoConfig } from "../shared/index.js";
-import { hasExplicitPid, normalizeRepo, resolveExplicitCaller, type RepoMetadata } from "./git.js";
-import type { ListenerRow } from "../shared/state-types.js";
-import type { AvailableSessionSummary, Caller, CallerDetectionContext, HarnessAdapter, ProbeOutcome, DeliverContext, DeliverOutcome } from "./types.js";
+import { CitoError, expandHomeDir, loadConfig, type CitoConfig } from "../../src/shared/index.js";
+import type { ListenerRow } from "../../src/shared/state-types.js";
+import { hasExplicitPid, normalizeRepo, resolveExplicitCaller, type RepoMetadata } from "../../src/adapters/git.js";
+import type {
+  AvailableSessionSummary,
+  Caller,
+  CallerDetectionContext,
+  DeliverContext,
+  DeliverOutcome,
+  HarnessAdapter,
+  HarnessCliDescriptor,
+  PluginManifest,
+  ProbeOutcome,
+} from "../../src/adapters/types.js";
 
 const exec = promisify(execFile);
-type CodexConfig = Pick<CitoConfig, "codexHome">;
+const CLI_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEFAULT_CODEX_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
+
+const localManifestUrl = new URL("./plugin.json", import.meta.url);
+const rootManifestUrl = new URL("../../../plugins/codex/plugin.json", import.meta.url);
+export const codexManifest: PluginManifest = JSON.parse(
+  readFileSync(existsSync(localManifestUrl) ? localManifestUrl : rootManifestUrl, "utf8"),
+) as PluginManifest;
+
+export interface CodexPluginConfig {
+  codexHome: string;
+  codexBin: string;
+  codexDesktopRunning?: (signal: AbortSignal) => Promise<boolean>;
+}
+export interface CodexConfigInput {
+  env?: NodeJS.ProcessEnv;
+  plugins?: Record<string, Record<string, unknown>>;
+  codexHome?: string;
+  codexBin?: string;
+  codexDesktopRunning?: (signal: AbortSignal) => Promise<boolean>;
+}
+
+export function loadCodexConfig(config: CodexConfigInput = loadConfig()): CodexPluginConfig {
+  const pluginCfg = (config.plugins?.codex ?? {}) as {
+    codexHome?: unknown;
+    codexBin?: unknown;
+    codexDesktopRunning?: unknown;
+  };
+  const env = config.env ?? process.env;
+  const rawHome = typeof pluginCfg.codexHome === "string"
+    ? pluginCfg.codexHome
+    : typeof config.codexHome === "string"
+    ? config.codexHome
+    : env.CITO_CODEX_HOME ?? "~/.codex";
+  const rawBin = typeof pluginCfg.codexBin === "string"
+    ? pluginCfg.codexBin
+    : typeof config.codexBin === "string"
+    ? config.codexBin
+    : env.CITO_CODEX_BIN ?? DEFAULT_CODEX_BIN;
+  if (!rawBin.trim()) throw new Error("CITO_CODEX_BIN must not be empty");
+  const desktopRunning = typeof pluginCfg.codexDesktopRunning === "function"
+    ? pluginCfg.codexDesktopRunning as (signal: AbortSignal) => Promise<boolean>
+    : typeof config.codexDesktopRunning === "function"
+    ? config.codexDesktopRunning
+    : undefined;
+  return {
+    codexHome: expandHomeDir(rawHome, "CITO_CODEX_HOME"),
+    codexBin: rawBin,
+    ...(desktopRunning ? { codexDesktopRunning: desktopRunning } : {}),
+  };
+}
+
 export interface CodexCaller extends RepoMetadata { harness: "codex"; session_id: string; cwd: string }
 export interface CodexDriverOptions { codexBin?: string; openBin?: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
 function record(value: unknown): value is Record<string, unknown> {
@@ -30,7 +92,7 @@ export function codexThreadId(meta: Record<string, unknown> = {}): string {
 function userThreadFilters(cols: Set<string>): string[] {
   const filters: string[] = [];
   if (cols.has("thread_source")) filters.push("COALESCE(thread_source, 'user') = 'user'");
-  if (cols.has("source")) filters.push('COALESCE(source, \'\') NOT LIKE \'{"subagent":%\'');
+  if (cols.has("source")) filters.push("COALESCE(source, '') NOT LIKE '{\"subagent\":%'");
   return filters;
 }
 function threadOrderBy(cols: Set<string>): string {
@@ -41,10 +103,11 @@ function threadOrderBy(cols: Set<string>): string {
   ].join(", ");
 }
 
-export function resolveCodexThreadId(cwd: string, config: CodexConfig = loadConfig(), options: { allowArchived?: boolean } = {}): string {
+export function resolveCodexThreadId(cwd: string, config: CodexConfigInput = loadConfig(), options: { allowArchived?: boolean } = {}): string {
+  const codexCfg = loadCodexConfig(config);
   let db: DatabaseSync | undefined;
   try {
-    db = new DatabaseSync(join(config.codexHome, "state_5.sqlite"), { readOnly: true });
+    db = new DatabaseSync(join(codexCfg.codexHome, "state_5.sqlite"), { readOnly: true });
     db.exec("PRAGMA busy_timeout = 1000");
     const columns = db.prepare("PRAGMA table_info(threads)").all() as { name?: unknown }[];
     if (!columns.length) throw new CitoError("BINDING_REQUIRED", "Codex thread metadata is required");
@@ -74,10 +137,11 @@ export function resolveCodexThreadId(cwd: string, config: CodexConfig = loadConf
 
 export type OptionalCodexThread = { status: "archived" } | { status: "unavailable" } | ({ status: "found" } & CodexCaller);
 /** Optional metadata: missing rows/schema and busy databases never prove closure. */
-export function readCodexThreadOptional(threadId: string, config: CodexConfig = loadConfig()): OptionalCodexThread {
+export function readCodexThreadOptional(threadId: string, config: CodexConfigInput = loadConfig()): OptionalCodexThread {
+  const codexCfg = loadCodexConfig(config);
   let db: DatabaseSync | undefined;
   try {
-    db = new DatabaseSync(join(config.codexHome, "state_5.sqlite"), { readOnly: true });
+    db = new DatabaseSync(join(codexCfg.codexHome, "state_5.sqlite"), { readOnly: true });
     db.exec("PRAGMA busy_timeout = 100");
     const row = db.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
     if (!row || row.archived === undefined) return { status: "unavailable" };
@@ -97,19 +161,34 @@ export async function codexDesktopRunning(signal?: AbortSignal): Promise<boolean
 /** The caller owns authorization and the listener lock around EACH separate effect. No retries here. */
 export async function queueCodexWake(threadId: string, card: string, options: CodexDriverOptions = {}): Promise<void> {
   options.signal?.throwIfAborted();
-  await exec(options.codexBin ?? loadConfig().codexBin, ["queue", "--resume", "--thread", threadId, "--message", card],
+  await exec(options.codexBin ?? loadCodexConfig().codexBin, ["queue", "--resume", "--thread", threadId, "--message", card],
     { timeout: 10_000, signal: options.signal, env: options.env ?? process.env });
 }
 export class CodexDesktopAdapter implements HarnessAdapter {
   readonly id = "codex";
+  readonly manifest: PluginManifest;
   readonly canJump = true;
+  readonly cli: HarnessCliDescriptor = {
+    consumesNextArg: (cmd, nextArg, config) =>
+      cmd === "unlisten" || CLI_UUID_RE.test(nextArg) || readCodexThreadOptional(nextArg, config).status !== "unavailable",
+    resolveMeta: (cmd, explicitId, cwd, config) => ({
+      codexThreadId: explicitId ?? resolveCodexThreadId(cwd, config, { allowArchived: cmd === "unlisten" }),
+      cwd,
+    }),
+  };
+
+  constructor(manifest: PluginManifest = codexManifest) {
+    this.manifest = manifest;
+  }
+
   async discoverAvailableSessions(config: CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]> {
+    const codexCfg = loadCodexConfig(config);
     try {
-      if (!await (config.codexDesktopRunning ?? codexDesktopRunning)(signal ?? new AbortController().signal)) return [];
+      if (!await (codexCfg.codexDesktopRunning ?? codexDesktopRunning)(signal ?? new AbortController().signal)) return [];
     } catch { return []; }
     let db: DatabaseSync | undefined;
     try {
-      db = new DatabaseSync(join(config.codexHome, "state_5.sqlite"), { readOnly: true });
+      db = new DatabaseSync(join(codexCfg.codexHome, "state_5.sqlite"), { readOnly: true });
       db.exec("PRAGMA busy_timeout = 100");
       const columns = db.prepare("PRAGMA table_info(threads)").all() as { name?: unknown }[];
       const cols = new Set(columns.flatMap(col => typeof col.name === "string" ? [col.name] : []));
@@ -169,20 +248,22 @@ export class CodexDesktopAdapter implements HarnessAdapter {
     return resolveExplicitCaller(this.id, thread, { ...ctx, meta });
   }
   async probe(row: ListenerRow, config: CitoConfig, signal: AbortSignal): Promise<ProbeOutcome> {
+    const codexCfg = loadCodexConfig(config);
     try {
       if (readCodexThreadOptional(row.session_id, config).status === "archived") return { status: "closed_definitive" };
-      return { status: await (config.codexDesktopRunning ?? codexDesktopRunning)(signal) ? "alive" : "closed_definitive" };
+      return { status: await (codexCfg.codexDesktopRunning ?? codexDesktopRunning)(signal) ? "alive" : "closed_definitive" };
     } catch (error) {
       return { status: "transient_error", error };
     }
   }
   async deliver(row: ListenerRow, ctx: DeliverContext): Promise<DeliverOutcome> {
+    const codexCfg = loadCodexConfig(ctx.config);
     // A recovered queue-written batch has no durable proof of a clean queue exit.
     let cleanQueueExit = false;
     if (!ctx.queueWritten) {
       const queued = await ctx.runEffect(async () => {
-        await queueCodexWake(row.session_id, ctx.card, { codexBin: ctx.config.codexBin,
-          signal: ctx.signal, env: { ...process.env, CODEX_HOME: ctx.config.codexHome } });
+        await queueCodexWake(row.session_id, ctx.card, { codexBin: codexCfg.codexBin,
+          signal: ctx.signal, env: { ...process.env, CODEX_HOME: codexCfg.codexHome } });
         cleanQueueExit = true;
       }, { attempts: 3, pause: [1000, 2000], onSigtermTimeout: () => { cleanQueueExit = false; } });
       if (!queued) return "driver_unavailable";
@@ -198,3 +279,6 @@ export async function triggerCodexWake(threadId: string, options: CodexDriverOpt
   await exec(options.openBin ?? "/usr/bin/open", ["-g", "codex://threads/wake/" + threadId],
     { timeout: 3000, signal: options.signal });
 }
+
+export const codexAdapter = new CodexDesktopAdapter(codexManifest);
+export default (manifest: PluginManifest) => new CodexDesktopAdapter(manifest);

@@ -1,0 +1,8 @@
+{
+  "id": "claude",
+  "displayName": "Claude",
+  "tier": "experimental",
+  "sfSymbol": "cpu.fill",
+  "tint": "orange",
+  "cliFlag": true
+}

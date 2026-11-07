@@ -1,48 +1,393 @@
 import { execFile } from "node:child_process";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { register } from "node:module";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
-import { ClaudeCodeAdapter, resolveClaudeSessionId, validateClaudeSessionId } from "./claude.js";
-import { CodexDesktopAdapter, readCodexThreadOptional, resolveCodexThreadId } from "./codex.js";
-import { SocketBridgeAdapter, identifyBridge } from "./pi.js";
-import { PID_KEYS, gitMetadata } from "./git.js";
-import type { AvailableSessionSummary, Caller, CallerDetectionContext, CallerInput, HarnessAdapter } from "./types.js";
-export * from "./claude.js";
-export * from "./claude-channel.js";
-export * from "./codex.js";
+import { BUILTIN_PLUGINS } from "../../plugins/index.js";
+import { BASE_PID_KEYS, getAllPidKeys, gitMetadata, hasExplicitPid, registerPidKeys, resetPidKeys } from "./git.js";
+import { SocketBridgeAdapter, identifyBridge } from "./socket-bridge.js";
+import type {
+  AdapterTier,
+  AdapterTint,
+  AvailableSessionSummary,
+  Caller,
+  CallerDetectionContext,
+  CallerInput,
+  HarnessAdapter,
+  HarnessCliDescriptor,
+  PluginFactory,
+  PluginManifest,
+  StdioChannelBridge,
+  UiHarnessMetadata,
+} from "./types.js";
+
+export * from "../../plugins/index.js";
 export * from "./git.js";
-export * from "./pi.js";
+export * from "./socket-bridge.js";
 export * from "./types.js";
 export * from "./wake-card.js";
+export { expandJumpUrl, isSafeJumpUrl } from "../ui/index.js";
+export { CitoError } from "../shared/index.js";
+
+export const ADAPTER_TIERS = ["stable", "experimental", "custom"] as const satisfies readonly AdapterTier[];
+export const ADAPTER_TINTS = ["indigo", "teal", "orange", "blue", "purple", "green", "pink", "gray"] as const satisfies readonly AdapterTint[];
+
+export const pluginManifestSchema = z.object({
+  id: harnessIdSchema,
+  displayName: z.string().trim().min(1).max(64).refine(v => !/[\x00-\x1f\x7f]/.test(v)),
+  tier: z.enum(ADAPTER_TIERS).optional(),
+  sfSymbol: z.string().trim().min(1).max(64).optional(),
+  tint: z.enum(ADAPTER_TINTS).optional(),
+  jumpUrlTemplate: z.string().trim().min(1).max(512).optional(),
+  cliFlag: z.boolean().optional(),
+}).strict();
+
+export const RESERVED_CLI_FLAGS = new Set([
+  "hub", "team", "scope", "tag", "harness", "session", "help", "version", "setup",
+]);
+
+export const BUILTIN_PLUGIN_IDS = new Set<string>(BUILTIN_PLUGINS.map(p => p.id));
+const BUILTIN_ORDER = new Map<string, number>(BUILTIN_PLUGINS.map((p, index) => [p.id, index]));
+
+const directBuiltinDir = resolve(fileURLToPath(new URL("../../plugins", import.meta.url)));
+const distBuiltinDir = resolve(fileURLToPath(new URL("../../../plugins", import.meta.url)));
 
 export const ADAPTER_REGISTRY = new Map<string, HarnessAdapter>();
-export function registerAdapter(adapter: HarnessAdapter): void {
-  if (!harnessIdSchema.safeParse(adapter.id).success) throw new CitoError("UNSUPPORTED_HARNESS", "Invalid adapter id");
+export const rejectedPluginIds = new Set<string>();
+const externalPluginIds = new Set<string>();
+const autoInstantiatedIds = new Set<string>();
+
+export function registerAdapter(adapter: HarnessAdapter, options?: { allowOverride?: boolean }): void {
+  if (!harnessIdSchema.safeParse(adapter.id).success) {
+    throw new CitoError("UNSUPPORTED_HARNESS", "Invalid adapter id");
+  }
+  if (BUILTIN_PLUGIN_IDS.has(adapter.id) && ADAPTER_REGISTRY.has(adapter.id) && !options?.allowOverride) {
+    throw new CitoError("INVALID_INPUT", `Cannot override reserved built-in plugin '${adapter.id}'`);
+  }
+  if (adapter.pidKeys) registerPidKeys(adapter.pidKeys);
+  rejectedPluginIds.delete(adapter.id);
+  autoInstantiatedIds.delete(adapter.id);
   ADAPTER_REGISTRY.set(adapter.id, adapter);
 }
-registerAdapter(new CodexDesktopAdapter());
-registerAdapter(new ClaudeCodeAdapter());
-registerAdapter(new SocketBridgeAdapter("pi"));
+
+for (const plugin of BUILTIN_PLUGINS) {
+  registerAdapter(plugin, { allowOverride: true });
+}
+
+function ensurePluginLoaderHook(): void {
+  const g = globalThis as { __citoPluginHookRegistered?: boolean };
+  if (g.__citoPluginHookRegistered) return;
+  g.__citoPluginHookRegistered = true;
+  const origEmitWarning = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    const msg = typeof warning === "string" ? warning : warning?.message ?? "";
+    if (msg.includes("stripTypeScriptTypes") || msg.includes("module.register()")) return;
+    return (origEmitWarning as (...a: unknown[]) => void).call(process, warning, ...args);
+  }) as typeof process.emitWarning;
+  const selfUrl = import.meta.url.startsWith("file://") ? import.meta.url : pathToFileURL(import.meta.url).href;
+  const hookSource = `import { readFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
+import { fileURLToPath } from "node:url";
+process.emitWarning = () => {};
+const SDK_URL = ${JSON.stringify(selfUrl)};
+export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "@tefx/cito/plugin-sdk") {
+    return { url: SDK_URL, shortCircuit: true };
+  }
+  try {
+    return await nextResolve(specifier, context);
+  } catch (error) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND" && /^\\.\\.?\\/.*\\.js$/.test(specifier)) {
+      return nextResolve(specifier.slice(0, -3) + ".ts", context);
+    }
+    throw error;
+  }
+}
+export async function load(url, context, nextLoad) {
+  const cleanUrl = url.split("?")[0];
+  if (cleanUrl.endsWith(".ts")) {
+    const source = await readFile(fileURLToPath(cleanUrl), "utf8");
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: stripTypeScriptTypes(source, { mode: "strip", sourceUrl: cleanUrl }),
+    };
+  }
+  return nextLoad(url, context);
+}`;
+  register(`data:text/javascript,${encodeURIComponent(hookSource)}`, selfUrl);
+}
+
+let lastPluginFingerprint = "";
+
+async function computePluginFingerprint(pluginDirs: readonly string[]): Promise<string> {
+  const parts: string[] = [];
+  for (const rawDir of pluginDirs) {
+    const dir = resolve(rawDir);
+    if (dir === directBuiltinDir || dir === distBuiltinDir) continue;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      parts.push(`${dir}:missing`);
+      continue;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const sub = join(dir, entry.name);
+      const mStat = await stat(join(sub, "plugin.json")).catch(() => undefined);
+      const jStat = await stat(join(sub, "index.js")).catch(() => undefined);
+      const tStat = await stat(join(sub, "index.ts")).catch(() => undefined);
+      parts.push(`${sub}:${mStat?.mtimeMs ?? -1}:${jStat?.mtimeMs ?? -1}:${tStat?.mtimeMs ?? -1}`);
+    }
+  }
+  return parts.join("|");
+}
+
+export async function loadPlugins(
+  config: CitoConfig = loadConfig(),
+  options?: { diagnostic?: (message: string) => void },
+): Promise<void> {
+  const report = options?.diagnostic ?? ((msg: string) => { process.stderr.write(`cito-plugin: ${msg}\n`); });
+  for (const id of externalPluginIds) {
+    ADAPTER_REGISTRY.delete(id);
+  }
+  externalPluginIds.clear();
+  for (const id of autoInstantiatedIds) {
+    ADAPTER_REGISTRY.delete(id);
+  }
+  autoInstantiatedIds.clear();
+  rejectedPluginIds.clear();
+  resetPidKeys([...ADAPTER_REGISTRY.values()].flatMap(a => a.pidKeys ?? []));
+
+  const seenExternal = new Set<string>();
+  const pluginDirs = config.pluginDirs ?? [join(config.stateDir, "plugins")];
+  for (const rawRoot of pluginDirs) {
+    const rootDir = resolve(rawRoot);
+    if (rootDir === directBuiltinDir || rootDir === distBuiltinDir) continue;
+    let entries;
+    try {
+      entries = await readdir(rootDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dirName = entry.name;
+      const pluginDir = join(rootDir, dirName);
+      if (autoInstantiatedIds.has(dirName)) {
+        autoInstantiatedIds.delete(dirName);
+        ADAPTER_REGISTRY.delete(dirName);
+      }
+      const manifestPath = join(pluginDir, "plugin.json");
+      let rawJson: unknown;
+      try {
+        rawJson = JSON.parse(await readFile(manifestPath, "utf8"));
+      } catch (error) {
+        if (!BUILTIN_PLUGIN_IDS.has(dirName)) rejectedPluginIds.add(dirName);
+        report(`Invalid or missing plugin.json in ${pluginDir}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      const parsed = pluginManifestSchema.safeParse(rawJson);
+      if (!parsed.success) {
+        if (!BUILTIN_PLUGIN_IDS.has(dirName)) rejectedPluginIds.add(dirName);
+        if (rawJson && typeof rawJson === "object" && "id" in rawJson && typeof (rawJson as { id?: unknown }).id === "string") {
+          const rawId = (rawJson as { id: string }).id;
+          if (!BUILTIN_PLUGIN_IDS.has(rawId)) rejectedPluginIds.add(rawId);
+        }
+        report(`Invalid plugin manifest in ${manifestPath}: ${parsed.error.message}`);
+        continue;
+      }
+      const rawManifest = parsed.data;
+      if (rawManifest.id !== dirName) {
+        if (!BUILTIN_PLUGIN_IDS.has(dirName)) rejectedPluginIds.add(dirName);
+        if (!BUILTIN_PLUGIN_IDS.has(rawManifest.id)) rejectedPluginIds.add(rawManifest.id);
+        report(`Plugin id '${rawManifest.id}' in ${manifestPath} does not match directory name '${dirName}'`);
+        continue;
+      }
+      if (BUILTIN_PLUGIN_IDS.has(rawManifest.id)) {
+        report(`External plugin in ${pluginDir} cannot override reserved built-in plugin '${rawManifest.id}'`);
+        continue;
+      }
+      if (seenExternal.has(rawManifest.id)) {
+        report(`Duplicate external plugin '${rawManifest.id}' in ${pluginDir}; keeping earlier registration`);
+        continue;
+      }
+      let cliFlag = rawManifest.cliFlag ?? false;
+      if (cliFlag && RESERVED_CLI_FLAGS.has(rawManifest.id)) {
+        report(`Plugin '${rawManifest.id}' cannot register reserved CLI flag '--${rawManifest.id}'`);
+        cliFlag = false;
+      }
+      const manifest: PluginManifest = {
+        ...rawManifest,
+        tier: "custom",
+        cliFlag,
+      };
+      const jsPath = join(pluginDir, "index.js");
+      const tsPath = join(pluginDir, "index.ts");
+      const entryPath = existsSync(jsPath) ? jsPath : existsSync(tsPath) ? tsPath : undefined;
+      if (entryPath) {
+        try {
+          ensurePluginLoaderHook();
+          const st = await stat(entryPath);
+          let mod: { default?: PluginFactory };
+          try {
+            mod = await import(`${pathToFileURL(entryPath).href}?mtime=${Math.round(st.mtimeMs)}`) as { default?: PluginFactory };
+          } catch (importErr) {
+            if (!String(importErr).includes("@tefx/cito/plugin-sdk")) throw importErr;
+            const sdkPath = fileURLToPath(new URL("./index.js", import.meta.url));
+            const rawSrc = await readFile(entryPath, "utf8");
+            const rewritten = rawSrc.replace(/(['"])@tefx\/cito\/plugin-sdk\1/g, JSON.stringify(sdkPath));
+            const tempEntry = join(pluginDir, `.cito-entry-${process.pid}-${Date.now()}${entryPath.endsWith(".ts") ? ".ts" : ".js"}`);
+            await writeFile(tempEntry, rewritten, "utf8");
+            try {
+              mod = await import(pathToFileURL(tempEntry).href) as { default?: PluginFactory };
+            } finally {
+              await rm(tempEntry, { force: true });
+            }
+          }
+          const exported = mod.default;
+          const adapter = typeof exported === "function" ? await exported(manifest) : exported;
+          if (
+            !adapter ||
+            typeof adapter !== "object" ||
+            adapter.id !== manifest.id ||
+            typeof adapter.probe !== "function" ||
+            typeof adapter.deliver !== "function"
+          ) {
+            throw new Error(`Entry module must default-export a HarnessAdapter with id '${manifest.id}'`);
+          }
+          Object.defineProperty(adapter, "manifest", { value: manifest, enumerable: true, configurable: true });
+          if (manifest.jumpUrlTemplate && adapter.canJump === undefined) {
+            Object.defineProperty(adapter, "canJump", { value: true, enumerable: true, configurable: true });
+          }
+          if (manifest.cliFlag && !adapter.cli) {
+            const defaultCli: HarnessCliDescriptor = {
+              consumesNextArg: (_cmd, nextArg) => Boolean(nextArg.trim()) && !nextArg.startsWith("-"),
+              resolveMeta: (_cmd, explicitId, cwd) => ({
+                caller_pid: process.ppid,
+                expected_harness: manifest.id,
+                ...(explicitId ? { expected_session_id: explicitId } : {}),
+                cwd,
+              }),
+            };
+            Object.defineProperty(adapter, "cli", { value: defaultCli, enumerable: true, configurable: true });
+          }
+          if (adapter.pidKeys) registerPidKeys(adapter.pidKeys);
+          ADAPTER_REGISTRY.set(manifest.id, adapter);
+          externalPluginIds.add(manifest.id);
+          seenExternal.add(manifest.id);
+        } catch (error) {
+          rejectedPluginIds.add(manifest.id);
+          ADAPTER_REGISTRY.delete(manifest.id);
+          report(`Failed to load plugin '${manifest.id}' from ${entryPath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        const adapter = new SocketBridgeAdapter(manifest.id, { manifest });
+        ADAPTER_REGISTRY.set(manifest.id, adapter);
+        externalPluginIds.add(manifest.id);
+        seenExternal.add(manifest.id);
+      }
+    }
+  }
+  lastPluginFingerprint = await computePluginFingerprint(pluginDirs);
+}
+
+export async function ensurePluginsLoaded(config: CitoConfig = loadConfig()): Promise<void> {
+  const pluginDirs = config.pluginDirs ?? [join(config.stateDir, "plugins")];
+  const fp = await computePluginFingerprint(pluginDirs);
+  if (fp === lastPluginFingerprint) return;
+  await loadPlugins(config);
+}
+
+export function getHarnessOrder(harness: string): number {
+  return BUILTIN_ORDER.get(harness) ?? BUILTIN_PLUGINS.length;
+}
+
+export function getUiHarnessMetadata(): UiHarnessMetadata[] {
+  const items: UiHarnessMetadata[] = [];
+  for (const adapter of ADAPTER_REGISTRY.values()) {
+    if (rejectedPluginIds.has(adapter.id)) continue;
+    const m = adapter.manifest;
+    items.push({
+      id: adapter.id,
+      display_name: m?.displayName ?? (adapter.id.charAt(0).toUpperCase() + adapter.id.slice(1)),
+      sf_symbol: m?.sfSymbol ?? "bolt.horizontal.fill",
+      tint: m?.tint ?? "blue",
+      tier: BUILTIN_PLUGIN_IDS.has(adapter.id) ? (m?.tier ?? "stable") : "custom",
+      order: getHarnessOrder(adapter.id),
+      jump_url_template: m?.jumpUrlTemplate ?? null,
+    });
+  }
+  items.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+  return items;
+}
+
 export function getAdapter(harness: string): HarnessAdapter | undefined {
-  if (!harnessIdSchema.safeParse(harness).success) return;
-  if (!ADAPTER_REGISTRY.has(harness)) registerAdapter(new SocketBridgeAdapter(harness));
+  if (!harnessIdSchema.safeParse(harness).success || rejectedPluginIds.has(harness)) return;
+  if (!ADAPTER_REGISTRY.has(harness)) {
+    const fallback = new SocketBridgeAdapter(harness, {
+      manifest: {
+        id: harness,
+        displayName: harness.charAt(0).toUpperCase() + harness.slice(1),
+        tier: "custom",
+        sfSymbol: "bolt.horizontal.fill",
+        tint: "blue",
+      },
+    });
+    ADAPTER_REGISTRY.set(harness, fallback);
+    autoInstantiatedIds.add(harness);
+  }
   return ADAPTER_REGISTRY.get(harness);
 }
+
+async function discoverAdapterSessions(
+  adapter: HarnessAdapter,
+  config: CitoConfig,
+  signal?: AbortSignal,
+): Promise<AvailableSessionSummary[]> {
+  if (!adapter.discoverAvailableSessions) return [];
+  const timeoutSignal = AbortSignal.timeout(1500);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      adapter.discoverAvailableSessions(config, combinedSignal),
+      new Promise<AvailableSessionSummary[]>(resolve => {
+        timer = setTimeout(() => resolve([]), 1500);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function discoverAllAvailableSessions(
   config: CitoConfig = loadConfig(),
   activeListeners: readonly { harness: string; session_id: string; endpoint_pid?: number | null; hub?: string }[] = [],
   signal?: AbortSignal,
 ): Promise<AvailableSessionSummary[]> {
+  await ensurePluginsLoaded(config);
   try {
     const names = await readdir(join(config.stateDir, "sockets"));
     for (const name of names) {
       const match = /^([a-z][a-z0-9_-]{0,31})-pid-[1-9][0-9]*\.sock$/.exec(name);
-      if (match) getAdapter(match[1]!);
+      if (match && !rejectedPluginIds.has(match[1]!)) getAdapter(match[1]!);
     }
   } catch { /* Missing sockets dir is normal. */ }
   const settled = await Promise.allSettled(
-    [...ADAPTER_REGISTRY.values()].map(adapter => adapter.discoverAvailableSessions?.(config, signal) ?? Promise.resolve([])),
+    [...ADAPTER_REGISTRY.values()].map(adapter => discoverAdapterSessions(adapter, config, signal)),
   );
   const raw = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
   const filtered = filterAvailableSessions(raw, activeListeners, Object.keys(config.hubs).length);
@@ -52,8 +397,7 @@ export async function discoverAllAvailableSessions(
     if (!list) { list = []; byHarness.set(c.harness, list); }
     list.push(c);
   }
-  const rank = (h: string) => h === "pi" ? 0 : h === "codex" ? 1 : h === "claude" ? 2 : 3;
-  const harnesses = [...byHarness.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  const harnesses = [...byHarness.keys()].sort((a, b) => getHarnessOrder(a) - getHarnessOrder(b) || a.localeCompare(b));
   const result: AvailableSessionSummary[] = [];
   for (const harness of harnesses) {
     const group = byHarness.get(harness)!;
@@ -61,13 +405,12 @@ export async function discoverAllAvailableSessions(
       group.sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0) || (b.endpoint_pid ?? 0) - (a.endpoint_pid ?? 0));
     }
     for (const item of group.slice(0, 8)) {
-      if (result.length >= 16) break;
       result.push(item);
     }
-    if (result.length >= 16) break;
   }
   return result;
 }
+
 export function filterAvailableSessions(
   candidates: readonly AvailableSessionSummary[],
   activeListeners: readonly { harness: string; session_id: string; endpoint_pid?: number | null; hub?: string }[],
@@ -92,11 +435,12 @@ export function filterAvailableSessions(
     return [hubs.length ? { ...rest, listening_hubs: hubs } : rest];
   });
 }
+
 export interface AdapterCliSelection {
-  harness: "codex" | "claude";
+  harness: string;
   explicitId?: string;
 }
-const CLI_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function matchAdapterCliFlag(
   cmd: "listen" | "unlisten",
   argv: readonly string[],
@@ -104,30 +448,26 @@ export function matchAdapterCliFlag(
   config: CitoConfig,
 ): { selection: AdapterCliSelection; nextIndex: number } | undefined {
   const arg = argv[index]!;
-  for (const harness of ["codex", "claude"] as const) {
-    const flag = `--${harness}`;
+  for (const adapter of ADAPTER_REGISTRY.values()) {
+    if (rejectedPluginIds.has(adapter.id)) continue;
+    if (!adapter.manifest?.cliFlag || RESERVED_CLI_FLAGS.has(adapter.id)) continue;
+    const flag = `--${adapter.id}`;
     if (arg !== flag && !arg.startsWith(flag + "=")) continue;
     if (arg.startsWith(flag + "=")) {
       const val = arg.slice(flag.length + 1).trim();
       if (!val) throw new Error(`Missing value for ${flag}`);
-      return { selection: { harness, explicitId: harness === "claude" ? validateClaudeSessionId(val) : val }, nextIndex: index };
+      if (adapter.cli?.consumesNextArg) adapter.cli.consumesNextArg(cmd, val, config);
+      return { selection: { harness: adapter.id, explicitId: val }, nextIndex: index };
     }
     const next = argv[index + 1];
-    if (next !== undefined && !next.startsWith("-")) {
-      if (harness === "codex") {
-        if (cmd === "unlisten" || CLI_UUID_RE.test(next) || readCodexThreadOptional(next, config).status !== "unavailable") {
-          return { selection: { harness, explicitId: next.trim() }, nextIndex: index + 1 };
-        }
-      } else {
-        if (cmd === "unlisten" || CLI_UUID_RE.test(next) || /^claude-[1-9][0-9]*$/i.test(next)) {
-          return { selection: { harness, explicitId: validateClaudeSessionId(next) }, nextIndex: index + 1 };
-        }
-      }
+    if (next !== undefined && !next.startsWith("-") && adapter.cli?.consumesNextArg?.(cmd, next, config)) {
+      return { selection: { harness: adapter.id, explicitId: next.trim() }, nextIndex: index + 1 };
     }
-    return { selection: { harness }, nextIndex: index };
+    return { selection: { harness: adapter.id }, nextIndex: index };
   }
   return undefined;
 }
+
 export async function resolveAdapterCliMeta(
   cmd: "listen" | "unlisten",
   selection: AdapterCliSelection | undefined,
@@ -135,29 +475,45 @@ export async function resolveAdapterCliMeta(
   config: CitoConfig,
 ): Promise<Record<string, unknown>> {
   if (!selection) return { caller_pid: process.ppid };
-  if (selection.harness === "codex") {
-    return {
-      codexThreadId: selection.explicitId ?? resolveCodexThreadId(cwd, config, { allowArchived: cmd === "unlisten" }),
-      cwd,
-    };
+  const adapter = ADAPTER_REGISTRY.get(selection.harness);
+  if (!adapter || rejectedPluginIds.has(selection.harness)) {
+    throw new CitoError("UNSUPPORTED_HARNESS", `Unknown harness: ${selection.harness}`);
   }
-  let sessionId = selection.explicitId;
-  if (!sessionId) {
-    const envId = process.env.CLAUDE_SESSION_ID?.trim();
-    if (envId) sessionId = validateClaudeSessionId(envId);
+  if (adapter.cli) {
+    return await adapter.cli.resolveMeta(cmd, selection.explicitId, cwd, config);
   }
-  if (!sessionId) {
-    const live = await getAdapter("claude")?.discoverAvailableSessions?.(config);
-    sessionId = live?.find(s => s.cwd === cwd)?.session_id;
-  }
-  if (!sessionId) {
-    sessionId = await resolveClaudeSessionId(cwd, config);
-  }
-  if (!sessionId) {
-    throw new CitoError("BINDING_REQUIRED", "Claude session metadata is required");
-  }
-  return { claudeSessionId: sessionId, cwd };
+  return {
+    caller_pid: process.ppid,
+    expected_harness: adapter.id,
+    ...(selection.explicitId ? { expected_session_id: selection.explicitId } : {}),
+    cwd,
+  };
 }
+
+export async function startOptionalStdioChannel(
+  config: CitoConfig,
+  transport: { send(message: JSONRPCMessage): Promise<void> },
+  options: { endpointPid?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<StdioChannelBridge | undefined> {
+  await ensurePluginsLoaded(config);
+  const active: StdioChannelBridge[] = [];
+  for (const adapter of ADAPTER_REGISTRY.values()) {
+    if (!adapter.startStdioChannel) continue;
+    try {
+      const bridge = await adapter.startStdioChannel(config, transport, options);
+      if (bridge) active.push(bridge);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  if (active.length > 1) {
+    console.error("Multiple stdio channels activated in the same process; closing all stdio channels");
+    await Promise.allSettled(active.map(b => b.close()));
+    return undefined;
+  }
+  return active[0];
+}
+
 function verifyExpectedIdentity(caller: Caller, meta: Record<string, unknown>): Caller {
   if ((typeof meta.expected_harness === "string" && meta.expected_harness && caller.harness !== meta.expected_harness)
     || (typeof meta.expected_session_id === "string" && meta.expected_session_id && caller.session_id !== meta.expected_session_id)) {
@@ -171,7 +527,8 @@ export function callerBindingError(message: string): CitoError {
   return new CitoError("PI_BRIDGE_UNAVAILABLE", message);
 }
 function explicitPid(meta: Record<string, unknown>): number | undefined {
-  const values = PID_KEYS.filter(key => meta[key] !== undefined).map(key => meta[key]);
+  const pidKeys = getAllPidKeys();
+  const values = pidKeys.filter(key => meta[key] !== undefined).map(key => meta[key]);
   if (values.some(v => typeof v !== "number" || !Number.isSafeInteger(v) || v <= 0)) {
     throw callerBindingError("Invalid endpoint PID");
   }
@@ -180,12 +537,13 @@ function explicitPid(meta: Record<string, unknown>): number | undefined {
 }
 export function extractCallerPidRoots(meta: Record<string, unknown> = {}): number[] {
   const pid = explicitPid(meta); if (pid !== undefined) return [pid];
+  const pidKeys = getAllPidKeys();
   const roots = new Set<number>(), seen = new Set<object>();
   const walk = (value: unknown) => {
     if (!value || typeof value !== "object" || seen.has(value)) return;
     seen.add(value);
     for (const [key, child] of Object.entries(value)) {
-      if ([...PID_KEYS, "parent_pid"].includes(key) && typeof child === "number" && Number.isSafeInteger(child) && child > 0) roots.add(child);
+      if ([...pidKeys, "parent_pid"].includes(key) && typeof child === "number" && Number.isSafeInteger(child) && child > 0) roots.add(child);
       else if (child && typeof child === "object") walk(child);
     }
   };
@@ -194,9 +552,33 @@ export function extractCallerPidRoots(meta: Record<string, unknown> = {}): numbe
   if (typeof meta.http_client_pid === "number" && Number.isSafeInteger(meta.http_client_pid) && meta.http_client_pid > 0) return [meta.http_client_pid];
   return meta.http_transport === true ? [] : [process.ppid];
 }
+
+async function detectCallerWithDeadline(
+  adapter: HarnessAdapter,
+  ctx: CallerDetectionContext,
+  config: CitoConfig,
+): Promise<Caller | null> {
+  if (!adapter.detectExplicitCaller) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      adapter.detectExplicitCaller(ctx, config),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new CitoError("PI_BRIDGE_UNAVAILABLE", `Plugin '${adapter.id}' caller detection timed out`));
+        }, 1500);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const exec = promisify(execFile);
 /** Resolve explicit adapter claims before implicit discovery or service effects. */
 export async function resolveCaller(input: CallerInput = {}, config: CitoConfig = loadConfig(), options: ResolveCallerOptions = {}): Promise<Caller> {
+  await ensurePluginsLoaded(config);
   // Direct embedders may still pass legacy metadata. HTTP callers always supply an envelope.
   const ctx: CallerDetectionContext = input.meta && typeof input.meta === "object" && !Array.isArray(input.meta)
     ? { ...input as CallerDetectionContext, ...options }
@@ -206,7 +588,7 @@ export async function resolveCaller(input: CallerInput = {}, config: CitoConfig 
   const pid = explicitPid(meta);
   let explicit: Caller | undefined;
   for (const adapter of ADAPTER_REGISTRY.values()) {
-    const caller = await adapter.detectExplicitCaller?.(ctx, config);
+    const caller = await detectCallerWithDeadline(adapter, ctx, config);
     if (!caller) continue;
     if (pid !== undefined || explicit) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");
     explicit = caller;
@@ -220,9 +602,13 @@ export async function resolveCaller(input: CallerInput = {}, config: CitoConfig 
       try { names = await readdir(join(config.stateDir, "sockets")); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const pattern = new RegExp(`^([a-z][a-z0-9_-]{0,31})-pid-${ancestor}\\.sock$`);
-      const harnesses = names.flatMap(name => { const match = pattern.exec(name); return match ? [match[1]!] : []; });
+      const harnesses = names.flatMap(name => {
+        const match = pattern.exec(name);
+        return match && !rejectedPluginIds.has(match[1]!) ? [match[1]!] : [];
+      });
       const expectedHarness = typeof meta.expected_harness === "string" ? meta.expected_harness : undefined;
       harnesses.sort((a, b) => Number(b === expectedHarness) - Number(a === expectedHarness)
+        || getHarnessOrder(a) - getHarnessOrder(b)
         || Number(ADAPTER_REGISTRY.get(b) instanceof SocketBridgeAdapter) - Number(ADAPTER_REGISTRY.get(a) instanceof SocketBridgeAdapter)
         || a.localeCompare(b));
       for (const harness of harnesses) {

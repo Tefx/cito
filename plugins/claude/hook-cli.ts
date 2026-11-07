@@ -1,9 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { loadConfig, type CitoConfig } from "../shared/index.js";
+import { loadConfig, type CitoConfig } from "../../src/shared/index.js";
 import {
-  claudeBadgePath, drainClaudeWakes, readClaudeSessionAlias, resolveClaudeSessionId,
-  validateClaudeSessionId, writeClaudeBadge,
-} from "../adapters/claude.js";
+  claudeBadgePath,
+  drainClaudeWakes,
+  readClaudeSessionAlias,
+  resolveClaudeSessionId,
+  validateClaudeSessionId,
+  writeClaudeBadge,
+} from "./index.js";
 
 /** Only events that can carry text back into the turn may drain the queue; others must leave it intact. */
 const INJECTABLE = new Set(["Stop", "SessionStart", "UserPromptSubmit"]);

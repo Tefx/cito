@@ -4,9 +4,27 @@ import { promisify } from "node:util";
 import type { Caller, CallerDetectionContext } from "./types.js";
 
 const exec = promisify(execFile);
-export const PID_KEYS = ["endpoint_pid", "caller_pid", "pi_pid"] as const;
+export const BASE_PID_KEYS = ["endpoint_pid", "caller_pid"] as const;
+const registeredPidKeys = new Set<string>(BASE_PID_KEYS);
+
+export function registerPidKeys(keys: readonly string[] = []): void {
+  for (const key of keys) {
+    if (key.trim()) registeredPidKeys.add(key.trim());
+  }
+}
+
+export function resetPidKeys(extraKeys: readonly string[] = []): void {
+  registeredPidKeys.clear();
+  for (const key of BASE_PID_KEYS) registeredPidKeys.add(key);
+  registerPidKeys(extraKeys);
+}
+
+export function getAllPidKeys(): string[] {
+  return [...registeredPidKeys];
+}
+
 export function hasExplicitPid(meta: Record<string, unknown>): boolean {
-  return PID_KEYS.some(key => meta[key] !== undefined);
+  return getAllPidKeys().some(key => meta[key] !== undefined);
 }
 
 /** Normalize remote paths without changing their display case. */

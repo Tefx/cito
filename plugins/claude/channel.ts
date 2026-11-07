@@ -3,23 +3,24 @@ import { chmod, mkdir, unlink } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { basename, dirname } from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import type { CitoConfig } from "../shared/index.js";
+import type { CitoConfig } from "../../src/shared/index.js";
+import { bridgeSocketPath, requestBridge } from "../../src/adapters/socket-bridge.js";
+import type { StdioChannelBridge } from "../../src/adapters/types.js";
 import {
-  CLAUDE_HARNESS, appendClaudeWake, resolveClaudeSessionId, resolveClaudeSessionTitle,
-  resolveClaudeTranscriptMtimeMs, validateClaudeSessionId, writeClaudeBadge, writeClaudeSessionAlias,
-} from "./claude.js";
-import { bridgeSocketPath, requestBridge } from "./pi.js";
+  CLAUDE_HARNESS,
+  appendClaudeWake,
+  resolveClaudeSessionId,
+  resolveClaudeSessionTitle,
+  resolveClaudeTranscriptMtimeMs,
+  validateClaudeSessionId,
+  writeClaudeBadge,
+  writeClaudeSessionAlias,
+} from "./index.js";
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_TRACKED_BATCHES = 200;
 
-export interface ClaudeChannelBridge {
-  readonly socketPath: string;
-  sessionId(): Promise<string>;
-  /** Only the initialize result gains the channel capability; tool results pass through unchanged. */
-  forward(message: JSONRPCMessage): JSONRPCMessage;
-  close(): Promise<void>;
-}
+export type ClaudeChannelBridge = StdioChannelBridge;
 export interface ClaudeChannelOptions {
   endpointPid?: number;
   cwd?: string;
@@ -178,14 +179,4 @@ export async function startClaudeChannelBridge(config: CitoConfig,
       })();
     },
   };
-}
-
-export async function startOptionalStdioChannel(config: CitoConfig,
-  transport: { send(message: JSONRPCMessage): Promise<void> },
-  options: ClaudeChannelOptions = {}): Promise<ClaudeChannelBridge | undefined> {
-  if (!config.enableClaudeChannel) return undefined;
-  return startClaudeChannelBridge(config, transport, options).catch(error => {
-    console.error(error);
-    return undefined;
-  });
 }

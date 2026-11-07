@@ -101,17 +101,103 @@ func shortPublicId(_ raw: String) -> String {
     let cleanSlug = slug.count > 18 ? String(slug.prefix(8)) + "…" + String(slug.suffix(7)) : slug
     return "\(cleanSlug)#\(fp4)"
 }
-func harnessVisual(_ harness: String) -> (symbol: String, tint: NSColor, name: String) {
-    switch harness {
-    case "pi": return ("terminal.fill", .systemIndigo, "Pi")
-    case "codex": return ("sparkles", .systemTeal, "Codex")
-    case "claude": return ("cpu.fill", .systemOrange, "Claude")
-    default: return ("bolt.horizontal.fill", .systemBlue, harness.capitalized)
+struct HarnessMeta: Decodable, Equatable {
+    let id: String
+    let display_name: String
+    let sf_symbol: String
+    let tint: String
+    let tier: String
+    let order: Int
+    let jump_url_template: String?
+}
+struct HarnessVisual {
+    let id: String
+    let name: String
+    let symbol: String
+    let tint: NSColor
+    let tier: String
+    let order: Int
+    let jumpUrlTemplate: String?
+}
+func tintColor(_ name: String) -> NSColor {
+    switch name.lowercased() {
+    case "indigo": return .systemIndigo
+    case "teal": return .systemTeal
+    case "orange": return .systemOrange
+    case "blue": return .systemBlue
+    case "purple": return .systemPurple
+    case "green": return .systemGreen
+    case "pink": return .systemPink
+    case "gray": return .systemGray
+    default: return .systemBlue
     }
 }
+func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -> HarnessVisual {
+    if let meta = harnesses[harness] {
+        return HarnessVisual(
+            id: meta.id,
+            name: meta.display_name,
+            symbol: meta.sf_symbol,
+            tint: tintColor(meta.tint),
+            tier: meta.tier,
+            order: meta.order,
+            jumpUrlTemplate: meta.jump_url_template
+        )
+    }
+    return HarnessVisual(
+        id: harness,
+        name: harness.capitalized,
+        symbol: "bolt.horizontal.fill",
+        tint: .systemBlue,
+        tier: "custom",
+        order: 3,
+        jumpUrlTemplate: nil
+    )
+}
+func isSafeJumpUrl(_ raw: String?) -> Bool {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return false }
+    if raw.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7F }) { return false }
+    guard let colon = raw.firstIndex(of: ":") else { return false }
+    let scheme = String(raw[..<colon]).lowercased()
+    let forbidden: Set<String> = ["javascript", "file", "data", "http", "https", "vbscript", "about", "blob"]
+    if forbidden.contains(scheme) { return false }
+    guard let url = URL(string: raw), let parsedScheme = url.scheme?.lowercased(), !forbidden.contains(parsedScheme) else {
+        return false
+    }
+    return true
+}
+func expandJumpUrl(template: String?, sessionId: String, cwd: String? = nil) -> String? {
+    guard let template = template?.trimmingCharacters(in: .whitespacesAndNewlines), !template.isEmpty else { return nil }
+    if template.contains("{session_id}") && sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+    if template.contains("{cwd}") {
+        guard let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty else { return nil }
+    }
+    var allowed = CharacterSet.urlPathAllowed
+    allowed.remove(charactersIn: "/?#[]")
+    guard let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+    var expanded = template.replacingOccurrences(of: "{session_id}", with: encodedSession)
+    if let cwd = cwd {
+        let pathEncoded = cwd.split(separator: "/", omittingEmptySubsequences: false)
+            .map { String($0).addingPercentEncoding(withAllowedCharacters: allowed) ?? String($0) }
+            .joined(separator: "/")
+        let queryEncoded = cwd.addingPercentEncoding(withAllowedCharacters: allowed) ?? cwd
+        expanded = expanded.replacingOccurrences(of: "/{cwd}", with: pathEncoded.hasPrefix("/") ? pathEncoded : "/" + pathEncoded)
+        expanded = expanded.replacingOccurrences(of: "{cwd}", with: queryEncoded)
+    }
+    return isSafeJumpUrl(expanded) ? expanded : nil
+}
+func loadStartupHarnesses() -> [HarnessMeta] {
+    let execUrl = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+    let fileUrl = execUrl.deletingLastPathComponent().appendingPathComponent("harnesses.json")
+    guard let data = try? Data(contentsOf: fileUrl),
+          let items = try? JSONDecoder().decode([HarnessMeta].self, from: data) else {
+        return []
+    }
+    return items
+}
 
-func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harness: String) -> SurfaceView {
-    let visual = harnessVisual(harness)
+func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harness: String, harnesses: [String: HarnessMeta]) -> SurfaceView {
+    let visual = resolveHarnessVisual(harness, harnesses: harnesses)
     let badge = roundedView(frame, radius: radius, color: visual.tint.withAppearanceAlpha(0.88),
         border: .white.withAlphaComponent(0.18))
     let icon = NSImageView(frame: badge.bounds.insetBy(dx: iconInset, dy: iconInset))
@@ -315,6 +401,9 @@ struct Payload: Decodable {
     let message: String
     let effective_wake: Bool
     let count: Int?
+    let target_cwd: String?
+    let jump_url: String?
+    let jump_label: String?
 
     var subtitle: String {
         (effective_wake ? "" : "[Passive] ") + "\(from_user)@\(from_host) · \(from_title)"
@@ -323,9 +412,6 @@ struct Payload: Decodable {
         let cleanHost = from_host.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
         let title = from_title.trimmingCharacters(in: .whitespacesAndNewlines)
         return (effective_wake ? "" : "[Passive] ") + "\(from_user)@\(cleanHost.isEmpty ? from_host : cleanHost)" + (title.isEmpty ? "" : " · \(title)")
-    }
-    var actionLabel: String {
-        target_harness == "codex" ? "Open in Codex ↗" : "\(target_harness) session · Click to dismiss"
     }
     var displayMessage: String {
         message.replacingOccurrences(of: "\\s*\\n+\\s*", with: "  ", options: .regularExpression)
@@ -374,6 +460,8 @@ struct Listener: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String, scope: String
     let about: String?, repo: String?, branch: String?
     let can_jump: Bool
+    let jump_url: String?
+    let jump_label: String?
 }
 struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
@@ -394,6 +482,7 @@ struct Frame: Decodable {
     let available: [Candidate]?
     let my_remote_listeners: [RemotePeer]?
     let directory_online_count: Int?
+    let harnesses: [HarnessMeta]?
     let peers: [RemotePeer]?
     let matched_count: Int?
     let online_count: Int?
@@ -449,12 +538,12 @@ final class DirectoryPeerCellView: NSTableCellView {
         applySelectionColor()
     }
 
-    func configure(with peer: RemotePeer, selected: Bool) {
+    func configure(with peer: RemotePeer, selected: Bool, harnesses: [String: HarnessMeta]) {
         inspectionId = "dir_peer:\(peer.scoped_id)"
         isSelectedRow = selected
         frame = NSRect(x: 0, y: 0, width: 560, height: 52)
         applySelectionColor()
-        let visual = harnessVisual(peer.harness)
+        let visual = resolveHarnessVisual(peer.harness, harnesses: harnesses)
         badgeView.fillColor = visual.tint.withAppearanceAlpha(0.88)
         badgeView.strokeColor = .white.withAlphaComponent(0.18)
         badgeIcon.image = NSImage(systemSymbolName: visual.symbol, accessibilityDescription: visual.name)
@@ -534,6 +623,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var listeners: [Listener] = []
     var available: [Candidate] = []
     var myRemote: [RemotePeer] = []
+    var harnesses: [HarnessMeta] = loadStartupHarnesses()
+    var harnessMap: [String: HarnessMeta] { Dictionary(uniqueKeysWithValues: harnesses.map { ($0.id, $0) }) }
     var selectedTargetHub: String = ""
     var myRemoteCollapsed = false
     var collapsedGroups = Set<String>()
@@ -564,6 +655,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var directorySearchField: NSSearchField?
     var directoryTableView: NSTableView?
     var directorySummaryLabel: NSTextField?
+    var directoryFacetBar: NSView?
+    var directoryDynamicHarnessViews: [NSView] = []
+    var lastDirectoryFacetSignature = ""
     var directoryFacetControls: [String: MenuControl] = [:]
     var hasRenderedState = false
     var pendingMutation = false
@@ -702,7 +796,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let a = frame.available ?? []
             let r = frame.my_remote_listeners ?? []
             let onlineCount = frame.directory_online_count ?? max(directoryOnlineCount, r.count)
-            if hasRenderedState && !pendingMutation && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
+            let nextHarnesses = frame.harnesses ?? harnesses
+            let harnessesChanged = nextHarnesses != harnesses
+            if harnessesChanged { harnesses = nextHarnesses }
+            if hasRenderedState && !pendingMutation && !harnessesChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
                 let count = uniqueSessionCount
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
                 statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
@@ -713,11 +810,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
                 hasRenderedState = true; pendingMutation = false
                 rebuild()
+                if directoryPanel != nil {
+                    rebuildDirectoryFacetBar()
+                    if harnessesChanged { directoryTableView?.reloadData() }
+                }
             }
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
         } else if frame.op == "directory", let peers = frame.peers {
             directoryAllPeers = peers
             directoryOnlineCount = frame.online_count ?? peers.count
+            rebuildDirectoryFacetBar()
             applyDirectoryFilter(fromDaemonFrame: true, daemonMatchedCount: frame.matched_count)
             if hasRenderedState { rebuild() }
             if headless { diagnostic("directory peers=\(peers.count) matched=\(directoryMatchedCount) online=\(directoryOnlineCount)") }
@@ -878,7 +980,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         var activeRows: [(id: String, view: NSView)] = []
         let home = NSHomeDirectory()
+        let map = harnessMap
         for listener in listeners {
+            let visual = resolveHarnessVisual(listener.harness, harnesses: map)
+            let jumpUrl: String? = listener.can_jump
+                ? (isSafeJumpUrl(listener.jump_url) ? listener.jump_url : expandJumpUrl(template: visual.jumpUrlTemplate, sessionId: listener.session_id, cwd: listener.cwd))
+                : nil
+            let canJump = jumpUrl != nil
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let hasDistinctAbout = !aboutText.isEmpty && aboutText.caseInsensitiveCompare(listener.title.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
@@ -890,10 +998,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             row.addSubview(card)
             activeRows.append((id: "session:\(listener.scoped_id)", view: row))
             let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34),
-                radius: 8, iconInset: 8, harness: listener.harness)
+                radius: 8, iconInset: 8, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
             let hubPillWidth = min(76, max(46, ceil(measureTextWidth(listener.hub, font: btnFont)) + 22))
-            let baseActionWidth: CGFloat = listener.can_jump ? 114 : 88
+            let baseActionWidth: CGFloat = canJump ? 114 : 88
             let actionWidth: CGFloat = hubs.count > 1 ? baseActionWidth + hubPillWidth + 4 : baseActionWidth
             let title = textLabel(listener.title,
                 NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
@@ -963,10 +1071,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
             }
             card.addSubview(toggle); x += 66
-            if listener.can_jump {
-                let open = MenuControl("Open in Codex", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "arrow.up.forward.app")
-                open.toolTip = "Open in Codex"; open.identifier = NSUserInterfaceItemIdentifier("open:\(listener.scoped_id)")
-                let run = { [weak menu] in self.openCodex(listener.session_id); menu?.cancelTracking() }
+            if let jumpUrl = jumpUrl {
+                let jumpLabel = (listener.jump_label?.isEmpty == false ? listener.jump_label! : "Open in \(visual.name)")
+                let open = MenuControl(jumpLabel, frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "arrow.up.forward.app")
+                open.toolTip = jumpLabel; open.identifier = NSUserInterfaceItemIdentifier("open:\(listener.scoped_id)")
+                let run = { [weak self, weak menu] in self?.openJumpUrl(jumpUrl); menu?.cancelTracking() }
                 open.pressed = run; register(run); card.addSubview(open); x += 26
             }
             register { [weak copy] in copy?.pressed?() }
@@ -1133,22 +1242,29 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             var groupsByHarness: [String: [Candidate]] = [:]
             for c in visibleAvailable { groupsByHarness[c.harness, default: []].append(c) }
             let orderedHarnesses = groupsByHarness.keys.sorted { a, b in
-                let rankA = a == "pi" ? 0 : a == "codex" ? 1 : a == "claude" ? 2 : 3
-                let rankB = b == "pi" ? 0 : b == "codex" ? 1 : b == "claude" ? 2 : 3
-                return rankA != rankB ? rankA < rankB : a < b
+                let va = resolveHarnessVisual(a, harnesses: map)
+                let vb = resolveHarnessVisual(b, harnesses: map)
+                return va.order != vb.order ? va.order < vb.order : a < b
             }
             let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
             for (harness, items) in groupedCandidates {
                 let isCollapsed = collapsedGroups.contains(harness)
-                let groupTitle: String
-                switch harness {
-                case "pi", "claude": groupTitle = "\(harnessVisual(harness).name) · \(items.count) open"
-                case "codex": groupTitle = "Codex · \(items.count) recent"
-                default: groupTitle = "\(harness.capitalized) · \(items.count) available"
+                let visual = resolveHarnessVisual(harness, harnesses: map)
+                let noun: String
+                if items.contains(where: { $0.endpoint_pid != nil }) {
+                    noun = "open"
+                } else if visual.jumpUrlTemplate != nil {
+                    noun = "recent"
+                } else {
+                    noun = "available"
                 }
+                let groupTitle = "\(visual.name) · \(items.count) \(noun)"
                 let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
                 let groupControl = MenuControl(groupTitle, frame: NSRect(x: 8, y: 2, width: 364, height: 24), radius: 6)
                 groupControl.identifier = NSUserInterfaceItemIdentifier("toggle_group:\(harness)")
+                if visual.tier == "experimental" {
+                    groupControl.toolTip = "\(visual.name) (Experimental)"
+                }
                 groupControl.style = .subtleHeader
                 groupControl.symbolName = isCollapsed ? "chevron.right" : "chevron.down"
                 let chev = NSImageView(frame: NSRect(x: 6, y: 7, width: 10, height: 10))
@@ -1157,7 +1273,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 groupControl.addSubview(chev)
                 groupControl.accessorySymbolView = chev
                 let badge = makeHarnessBadge(NSRect(x: 20, y: 3, width: 18, height: 18),
-                    radius: 5, iconInset: 3, harness: harness)
+                    radius: 5, iconInset: 3, harness: harness, harnesses: map)
                 groupControl.addSubview(badge)
                 groupControl.label.frame = NSRect(x: 44, y: 4, width: 310, height: 16)
                 groupControl.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
@@ -1331,29 +1447,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             facetBar.addSubview(pill)
             directoryFacetControls[id] = pill
         }
-        let harnessPills: [(String, String, CGFloat, CGFloat)] = [
-            ("dir_harness:all", "All Harnesses", 154, 98),
-            ("dir_harness:pi", "Pi", 256, 42),
-            ("dir_harness:codex", "Codex", 302, 58),
-            ("dir_harness:claude", "Claude", 364, 62)
-        ]
-        for (id, title, x, w) in harnessPills {
-            let pill = MenuControl(title, frame: NSRect(x: x, y: 5, width: w, height: 22), radius: 11)
-            pill.identifier = NSUserInterfaceItemIdentifier(id)
-            pill.label.font = .systemFont(ofSize: 11, weight: .medium)
-            let harnessVal = String(id.dropFirst("dir_harness:".count))
-            pill.pressed = { [weak self] in
-                guard let self = self else { return }
-                self.directoryHarnessFilter = harnessVal
-                self.updateDirectoryFacetStyles()
-                self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
-                self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
-            }
-            facetBar.addSubview(pill)
-            directoryFacetControls[id] = pill
+        let allHarnessesPill = MenuControl("All Harnesses", frame: NSRect(x: 154, y: 5, width: 98, height: 22), radius: 11)
+        allHarnessesPill.identifier = NSUserInterfaceItemIdentifier("dir_harness:all")
+        allHarnessesPill.label.font = .systemFont(ofSize: 11, weight: .medium)
+        allHarnessesPill.pressed = { [weak self] in
+            guard let self = self else { return }
+            self.directoryHarnessFilter = "all"
+            self.rebuildDirectoryFacetBar()
+            self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+            self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
         }
+        facetBar.addSubview(allHarnessesPill)
+        directoryFacetControls["dir_harness:all"] = allHarnessesPill
         facetBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
+        directoryFacetBar = facetBar
         root.addSubview(facetBar)
+        rebuildDirectoryFacetBar()
 
         // Virtualized Result List (560 × 334 pt, y: 28)
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 28, width: 560, height: 334))
@@ -1395,6 +1504,89 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
         window.contentView = root
         directoryPanel = window
+        updateDirectoryFacetStyles()
+    }
+
+    func rebuildDirectoryFacetBar() {
+        guard let facetBar = directoryFacetBar else { return }
+        let map = harnessMap
+        var unionHarnesses = Set<String>(harnesses.map { $0.id })
+        for peer in directoryAllPeers where !peer.harness.isEmpty { unionHarnesses.insert(peer.harness) }
+        if directoryHarnessFilter != "all" && !directoryHarnessFilter.isEmpty {
+            unionHarnesses.insert(directoryHarnessFilter)
+        }
+        let ordered = unionHarnesses.sorted { a, b in
+            let va = resolveHarnessVisual(a, harnesses: map)
+            let vb = resolveHarnessVisual(b, harnesses: map)
+            return va.order != vb.order ? va.order < vb.order : a < b
+        }
+        let signature = ordered.map { h in "\(h):\(resolveHarnessVisual(h, harnesses: map).name)" }.joined(separator: "|")
+        if signature == lastDirectoryFacetSignature {
+            updateDirectoryFacetStyles()
+            return
+        }
+        lastDirectoryFacetSignature = signature
+        for v in directoryDynamicHarnessViews { v.removeFromSuperview() }
+        directoryDynamicHarnessViews.removeAll()
+        for key in directoryFacetControls.keys where key.hasPrefix("dir_harness:") && key != "dir_harness:all" {
+            directoryFacetControls.removeValue(forKey: key)
+        }
+
+        let pillFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        var layout: [(id: String, harness: String, title: String, x: CGFloat, width: CGFloat)] = []
+        var curX: CGFloat = 256
+        for h in ordered {
+            let visual = resolveHarnessVisual(h, harnesses: map)
+            let w = max(42, ceil(measureTextWidth(visual.name, font: pillFont)) + 20)
+            layout.append((id: "dir_harness:\(h)", harness: h, title: visual.name, x: curX, width: w))
+            curX += w + 4
+        }
+        let totalEnd = layout.last.map { $0.x + $0.width } ?? 256
+        if totalEnd <= 544 {
+            for item in layout {
+                let pill = MenuControl(item.title, frame: NSRect(x: item.x, y: 5, width: item.width, height: 22), radius: 11)
+                pill.identifier = NSUserInterfaceItemIdentifier(item.id)
+                pill.label.font = pillFont
+                let harnessVal = item.harness
+                pill.pressed = { [weak self] in
+                    guard let self = self else { return }
+                    self.directoryHarnessFilter = harnessVal
+                    self.rebuildDirectoryFacetBar()
+                    self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                    self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
+                }
+                facetBar.addSubview(pill)
+                directoryDynamicHarnessViews.append(pill)
+                directoryFacetControls[item.id] = pill
+            }
+        } else {
+            let scrollWidth: CGFloat = 288
+            let scroll = NSScrollView(frame: NSRect(x: 256, y: 5, width: scrollWidth, height: 22))
+            scroll.identifier = NSUserInterfaceItemIdentifier("directory_harness_scroll")
+            scroll.drawsBackground = false
+            scroll.hasHorizontalScroller = true
+            scroll.hasVerticalScroller = false
+            scroll.autohidesScrollers = true
+            let doc = NSView(frame: NSRect(x: 0, y: 0, width: totalEnd - 256, height: 22))
+            for item in layout {
+                let pill = MenuControl(item.title, frame: NSRect(x: item.x - 256, y: 0, width: item.width, height: 22), radius: 11)
+                pill.identifier = NSUserInterfaceItemIdentifier(item.id)
+                pill.label.font = pillFont
+                let harnessVal = item.harness
+                pill.pressed = { [weak self] in
+                    guard let self = self else { return }
+                    self.directoryHarnessFilter = harnessVal
+                    self.rebuildDirectoryFacetBar()
+                    self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
+                    self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
+                }
+                doc.addSubview(pill)
+                directoryFacetControls[item.id] = pill
+            }
+            scroll.documentView = doc
+            facetBar.addSubview(scroll)
+            directoryDynamicHarnessViews.append(scroll)
+        }
         updateDirectoryFacetStyles()
     }
 
@@ -1536,7 +1728,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let id = NSUserInterfaceItemIdentifier("DirectoryPeerCell")
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? DirectoryPeerCellView)
             ?? DirectoryPeerCellView(frame: NSRect(x: 0, y: 0, width: 560, height: 52))
-        cell.configure(with: directoryFilteredPeers[row], selected: row == directorySelectedIndex)
+        cell.configure(with: directoryFilteredPeers[row], selected: row == directorySelectedIndex, harnesses: harnessMap)
         return cell
     }
 
@@ -1639,15 +1831,30 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             "button_digit_widths": font.map { font in ["11111111", "88888888"].map { ($0 as NSString).size(withAttributes: [.font: font]).width } } ?? []]
         diagnostic("menu " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
     }
+    func resolvedJumpUrl(for value: Payload) -> String? {
+        if isSafeJumpUrl(value.jump_url) { return value.jump_url }
+        let visual = resolveHarnessVisual(value.target_harness, harnesses: harnessMap)
+        return expandJumpUrl(template: visual.jumpUrlTemplate, sessionId: value.target_session_id, cwd: value.target_cwd)
+    }
+    func actionLabel(for value: Payload) -> String {
+        let visual = resolveHarnessVisual(value.target_harness, harnesses: harnessMap)
+        if resolvedJumpUrl(for: value) != nil {
+            if let label = value.jump_label, !label.isEmpty { return label }
+            return "Open in \(visual.name) ↗"
+        }
+        return "\(value.target_harness) session · Click to dismiss"
+    }
     func hide(clicked: Bool) {
         timer?.cancel()
-        if clicked, visible, let value = payload, value.target_harness == "codex" { openCodex(value.target_session_id) }
+        if clicked, visible, let value = payload, let url = resolvedJumpUrl(for: value) { openJumpUrl(url) }
         visible = false; panel?.orderOut(nil)
         if headless { diagnostic(clicked ? "banner clicked" : "banner hidden") }
     }
     func show(_ value: Payload) {
         let title = "Cito · \(value.target_title)" + (displayedCount > 1 ? " (\(displayedCount))" : "")
         let semanticLabel = (value.effective_wake ? "Notification" : "Passive") + (displayedCount > 1 ? " · ×\(displayedCount)" : "")
+        let actionText = actionLabel(for: value)
+        let hasJump = resolvedJumpUrl(for: value) != nil
         visible = true
         if headless {
             // Diagnostics expose the actual presentation model, without adding
@@ -1655,7 +1862,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             diagnostic("display " + String(data: try! JSONSerialization.data(withJSONObject: [
                 "pid": getpid(), "title": title, "subtitle": value.subtitle, "message": value.message,
                 "displayed_count": displayedCount, "display_subtitle": value.displaySubtitle,
-                "display_message": value.displayMessage, "semantic_label": semanticLabel, "action_label": value.actionLabel
+                "display_message": value.displayMessage, "semantic_label": semanticLabel, "action_label": actionText
             ], options: [.sortedKeys]), encoding: .utf8)!)
             return
         }
@@ -1737,8 +1944,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         labels[0].stringValue = "Cito" + (value.target_title.isEmpty ? "" : " · \(value.target_title)")
         labels[1].stringValue = value.displaySubtitle
         labels[2].stringValue = value.displayMessage
-        labels[3].stringValue = value.actionLabel
-        labels[3].textColor = value.target_harness == "codex" ? .systemBlue : .tertiaryLabelColor
+        labels[3].stringValue = actionText
+        labels[3].textColor = hasJump ? .systemBlue : .tertiaryLabelColor
         labels[4].stringValue = semanticLabel
         labels[4].textColor = color
         labels[4].layer?.backgroundColor = color.withAlphaComponent(0.14).cgColor
@@ -1761,11 +1968,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         panel?.orderFrontRegardless() // Never makeKey, activate, or change first responder.
     }
 
-    func openCodex(_ session: String) {
-        var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/?#[]")
-        guard let encoded = session.addingPercentEncoding(withAllowedCharacters: allowed) else { return }
-        let url = "codex://threads/\(encoded)"
+    func openJumpUrl(_ url: String) {
+        guard isSafeJumpUrl(url) else { return }
         if let opener = ProcessInfo.processInfo.environment["CITO_BANNER_URL_OPENER"], !opener.isEmpty {
             let child = Process()
             child.executableURL = URL(fileURLWithPath: opener)
