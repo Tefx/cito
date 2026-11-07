@@ -85,7 +85,7 @@ async function ensureDaemon(config: CitoConfig): Promise<void> {
   while (performance.now() < deadline) { if ((await daemonHealth(config))?.version === CITO_VERSION) return; await delay(50); }
   throw new Error(`Daemon did not become healthy on 127.0.0.1:${config.daemonPort} for ${config.stateDir} within 5000ms`);
 }
-async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_unlisten" | "cito_send",
+async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_unlisten" | "cito_send" | "cito_find" | "cito_inbox",
   args: Record<string, unknown>, meta: Record<string, unknown>): Promise<Record<string, unknown>> {
   await ensureDaemon(config);
   const res = await fetch(`http://127.0.0.1:${config.daemonPort}/mcp`, {
@@ -245,6 +245,84 @@ export async function main(): Promise<void> {
         ...(replyTo ? { in_reply_to: replyTo } : {}),
       }, { http_transport: true });
       process.stdout.write(`Sent ${String(payload.signal_id)} (${String(payload.status)}) to ${String(payload.to)}\n`);
+    } catch (error) {
+      process.stderr.write((error instanceof Error ? error.message : String(error)) + "\n");
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (cmd === "find") {
+    const argv = process.argv.slice(3);
+    let hub: string | undefined, user: string | undefined, host: string | undefined, harness: string | undefined, repo: string | undefined, limit: number | undefined;
+    const queryParts: string[] = [];
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i]!;
+      if (a === "--hub") { hub = argv[++i]; }
+      else if (a.startsWith("--hub=")) { hub = a.slice(6); }
+      else if (a === "--user") { user = argv[++i]; }
+      else if (a.startsWith("--user=")) { user = a.slice(7); }
+      else if (a === "--host") { host = argv[++i]; }
+      else if (a.startsWith("--host=")) { host = a.slice(7); }
+      else if (a === "--harness") { harness = argv[++i]; }
+      else if (a.startsWith("--harness=")) { harness = a.slice(10); }
+      else if (a === "--repo") { repo = argv[++i]; }
+      else if (a.startsWith("--repo=")) { repo = a.slice(7); }
+      else if (a === "--limit") { limit = Number(argv[++i]); }
+      else if (a.startsWith("--limit=")) { limit = Number(a.slice(8)); }
+      else if (a === "--query" || a === "-q") { if (argv[i + 1] !== undefined) queryParts.push(argv[++i]!); }
+      else if (a.startsWith("--query=")) { queryParts.push(a.slice(8)); }
+      else { queryParts.push(a); }
+    }
+    try {
+      const query = queryParts.join(" ").trim();
+      const payload = await callDaemonTool(config, "cito_find", {
+        ...(query ? { query } : {}),
+        ...(hub ? { hub } : {}),
+        ...(user ? { user } : {}),
+        ...(host ? { host } : {}),
+        ...(harness ? { harness } : {}),
+        ...(repo ? { repo } : {}),
+        ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+      }, { http_transport: true });
+      process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    } catch (error) {
+      process.stderr.write((error instanceof Error ? error.message : String(error)) + "\n");
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (cmd === "inbox") {
+    const argv = process.argv.slice(3);
+    let hub: string | undefined, ackAll: boolean | undefined;
+    const ackIds: string[] = [];
+    let selectedHarness: string | undefined, selectedSession: string | undefined;
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i]!;
+      if (a === "--hub") { hub = argv[++i]; }
+      else if (a.startsWith("--hub=")) { hub = a.slice(6); }
+      else if (a === "--peek" || a === "--no-ack") { ackAll = false; }
+      else if (a === "--ack-all") { ackAll = true; }
+      else if (a === "--ack") { if (argv[i + 1] !== undefined) ackIds.push(argv[++i]!); }
+      else if (a.startsWith("--ack=")) { ackIds.push(a.slice(6)); }
+      else if (a === "--harness") { selectedHarness = argv[++i]; }
+      else if (a.startsWith("--harness=")) { selectedHarness = a.slice(10); }
+      else if (a === "--session") { selectedSession = argv[++i]; }
+      else if (a.startsWith("--session=")) { selectedSession = a.slice(10); }
+    }
+    try {
+      await ensurePluginsLoaded(config);
+      const adapterSelection: AdapterCliSelection | undefined = selectedHarness
+        ? { harness: selectedHarness, ...(selectedSession !== undefined ? { explicitId: selectedSession } : {}) }
+        : undefined;
+      const meta = selectedHarness
+        ? await resolveAdapterCliMeta("listen", adapterSelection, process.cwd(), config)
+        : { caller_pid: process.ppid };
+      const payload = await callDaemonTool(config, "cito_inbox", {
+        ...(hub ? { hub } : {}),
+        ...(ackAll !== undefined ? { ack_all: ackAll } : {}),
+        ...(ackIds.length > 0 ? { ack_ids: ackIds } : {}),
+      }, meta);
+      process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
     } catch (error) {
       process.stderr.write((error instanceof Error ? error.message : String(error)) + "\n");
       process.exitCode = 1;

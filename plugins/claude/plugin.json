@@ -1,8 +1,26 @@
 {
   "id": "claude",
+  "kind": "agent",
   "displayName": "Claude",
   "tier": "experimental",
   "sfSymbol": "cpu.fill",
   "tint": "orange",
-  "cliFlag": true
+  "cliFlag": true,
+  "protocol": "transcript-hook",
+  "native": {
+    "homeEnv": "CITO_CLAUDE_HOME",
+    "defaultHome": "~/.claude",
+    "channelEnv": "CITO_CLAUDE_CHANNEL",
+    "sessionEnv": "CLAUDE_SESSION_ID",
+    "configHomeKey": "claudeHome",
+    "configChannelKey": "enableClaudeChannel",
+    "metaKey": "claudeSessionId",
+    "altMetaKey": "claude_session_id",
+    "headerKey": "x-claude-session-id",
+    "hookCommand": "cito-claude-hook",
+    "settingsRelPath": "settings.json",
+    "rootConfigRelPath": "../.claude.json",
+    "channelCapability": "claude/channel",
+    "channelNotificationMethod": "notifications/claude/channel"
+  }
 }

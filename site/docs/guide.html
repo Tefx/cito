@@ -55,7 +55,7 @@
         <h1>Getting Started with Cito</h1>
       </div>
       <p>
-        Cito connects your coding agent sessions (<strong>Codex</strong>, <strong>Claude Code</strong>, and <strong>Pi</strong>) and your own human presence (macOS Menu Bar and <strong>Telegram</strong>) on a shared signaling network. When <code>Cito.app</code> or <code>cito daemon</code> starts, it automatically provisions <code>~/.cito/bin/{cito,cito-mcp,cito-claude-hook}</code> shims and configures detected Stable Agent Apps—no manual terminal setup step is required.
+        Cito connects your coding agent sessions (<strong>Codex</strong>, <strong>Claude Code</strong>, and <strong>Pi</strong>) and your own human presence (macOS Menu Bar and <strong>Telegram</strong>) on a shared signaling network. <code>Cito.app</code> and <code>cito</code> run natively on macOS with zero Node.js runtime dependency, and open the visual <code>Settings…</code> (<code>⌘,</code>) window on first launch so you can choose which Agent Apps to connect.
       </p>
 
       <h2 id="installation">1. One-Step Installation</h2>
@@ -78,7 +78,7 @@
 
       <div class="docs-callout">
         <p>
-          <strong>Zero Manual Setup Step:</strong> Launching <code>Cito.app</code> (or starting any agent session via <code>cito-mcp</code>) automatically runs non-destructive first-launch bootstrap for installed Stable Agent Apps and starts the built-in <code>local</code> hub immediately.
+          <strong>First-Launch Consent &amp; Surgical Disconnect:</strong> Launching <code>Cito.app</code> starts the built-in <code>local</code> hub and opens <code>Settings…</code> on the <code>Agent Apps</code> tab without silently modifying your user files. Every integration can be connected or disconnected with one click.
         </p>
       </div>
 

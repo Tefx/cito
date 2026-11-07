@@ -310,6 +310,79 @@ function transformCodexToml(
   };
 }
 
+function removeCodexToml(
+  existing: string | undefined,
+): { status: "created" | "updated" | "unchanged" | "conflict"; nextContent?: string; detail: string } {
+  if (existing === undefined) {
+    return {
+      status: "unchanged",
+      detail: "Codex config.toml does not exist",
+    };
+  }
+  const lines = existing.split(/\r?\n/);
+  let citoSectionStart = -1;
+  let citoSectionLastKv = -1;
+  let inCitoSection = false;
+  let hasDottedCito = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = stripTomlComment(lines[i]!).trim();
+    if (!stripped) continue;
+    if (stripped.startsWith("[")) {
+      const headerInner = stripped.replace(/^\[+|\]+$/g, "").trim();
+      const normalizedHeader = headerInner.replace(/["']/g, "").replace(/\s+/g, "");
+      if (normalizedHeader === "mcp_servers.cito") {
+        citoSectionStart = i;
+        citoSectionLastKv = i;
+        inCitoSection = true;
+      } else {
+        inCitoSection = false;
+      }
+      continue;
+    }
+    const eqIdx = stripped.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const key = stripped.slice(0, eqIdx).trim().replace(/["']/g, "");
+    if (inCitoSection) {
+      citoSectionLastKv = i;
+    } else if (key.startsWith("mcp_servers.cito.")) {
+      hasDottedCito = true;
+    }
+  }
+
+  if (citoSectionStart < 0 && !hasDottedCito) {
+    return {
+      status: "unchanged",
+      detail: "Codex config.toml has no [mcp_servers.cito] section",
+    };
+  }
+
+  let nextLines = lines;
+  if (citoSectionStart >= 0) {
+    nextLines = [...lines.slice(0, citoSectionStart), ...lines.slice(citoSectionLastKv + 1)];
+  }
+  if (hasDottedCito) {
+    nextLines = nextLines.filter(line => {
+      const stripped = stripTomlComment(line).trim();
+      if (!stripped || stripped.startsWith("[")) return true;
+      const eq = stripped.indexOf("=");
+      if (eq <= 0) return true;
+      const key = stripped.slice(0, eq).trim().replace(/["']/g, "");
+      return !key.startsWith("mcp_servers.cito.");
+    });
+  }
+  while (nextLines.length > 0 && nextLines.at(-1) === "") {
+    nextLines.pop();
+  }
+  const joined = nextLines.join("\n");
+  const nextContent = joined ? joined + "\n" : "";
+  return {
+    status: "updated",
+    nextContent,
+    detail: "Removed [mcp_servers.cito] from config.toml",
+  };
+}
+
 export class CodexDesktopAdapter implements HarnessAdapter {
   readonly id = "codex";
   readonly manifest: PluginManifest;
@@ -348,6 +421,18 @@ export class CodexDesktopAdapter implements HarnessAdapter {
           path: configPath,
           dryRun: false,
           transform: content => transformCodexToml(content, Boolean(options.force)),
+        }),
+      ];
+    },
+    remove: async (env: NodeJS.ProcessEnv) => {
+      const codexHome = expandHomeDir(env.CITO_CODEX_HOME ?? "~/.codex", "CITO_CODEX_HOME", env.HOME);
+      const configPath = join(codexHome, "config.toml");
+      return [
+        await mutateConfigFile({
+          target: "codex",
+          path: configPath,
+          dryRun: false,
+          transform: content => removeCodexToml(content),
         }),
       ];
     },

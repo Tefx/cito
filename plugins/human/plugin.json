@@ -4,5 +4,6 @@
   "displayName": "Human",
   "tier": "stable",
   "sfSymbol": "person.crop.circle.fill",
-  "tint": "green"
+  "tint": "green",
+  "protocol": "desktop-ui"
 }

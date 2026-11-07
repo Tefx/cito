@@ -5,6 +5,7 @@
   "tier": "stable",
   "sfSymbol": "paperplane.fill",
   "tint": "blue",
+  "protocol": "http-bot-poll",
   "fields": [
     {
       "key": "botToken",

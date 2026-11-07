@@ -1,0 +1,7 @@
+{
+  "name": "cito",
+  "version": "0.17.0",
+  "description": "Cross-harness notification and wake bridge for Claude Code",
+  "mcpServers": "../.mcp.json",
+  "hooks": "../hooks/hooks.json"
+}

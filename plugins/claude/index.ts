@@ -376,6 +376,100 @@ function transformClaudeSettingsJson(
   };
 }
 
+function isClaudeHookCmd(h: unknown): boolean {
+  if (!h || typeof h !== "object" || Array.isArray(h)) return false;
+  const rec = h as { type?: unknown; command?: unknown };
+  return rec.type === "command" && typeof rec.command === "string" && (rec.command === "cito-claude-hook" || rec.command.endsWith("/cito-claude-hook"));
+}
+
+function removeClaudeSettingsJson(
+  existing: string | undefined,
+): {
+  status: "created" | "updated" | "unchanged" | "conflict";
+  nextContent?: string;
+  detail: string;
+} {
+  if (existing === undefined) {
+    return {
+      status: "unchanged",
+      detail: "Claude settings.json does not exist",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = existing.trim() ? JSON.parse(existing) : {};
+  } catch {
+    throw new Error("Invalid JSON in Claude settings.json");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Expected JSON object in Claude settings.json");
+  }
+  const obj = { ...(parsed as Record<string, unknown>) };
+  let changed = false;
+
+  if (obj.mcpServers && typeof obj.mcpServers === "object" && !Array.isArray(obj.mcpServers)) {
+    const mcpServers = { ...(obj.mcpServers as Record<string, unknown>) };
+    if ("cito" in mcpServers) {
+      delete mcpServers.cito;
+      changed = true;
+      if (Object.keys(mcpServers).length > 0) {
+        obj.mcpServers = mcpServers;
+      } else {
+        delete obj.mcpServers;
+      }
+    }
+  }
+
+  if (obj.hooks && typeof obj.hooks === "object" && !Array.isArray(obj.hooks)) {
+    const hooksObj = { ...(obj.hooks as Record<string, unknown>) };
+    for (const [eventName, rawList] of Object.entries(hooksObj)) {
+      if (!Array.isArray(rawList)) continue;
+      const nextGroups: unknown[] = [];
+      for (const entry of rawList) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          nextGroups.push(entry);
+          continue;
+        }
+        const group = { ...(entry as Record<string, unknown>) };
+        if (Array.isArray(group.hooks)) {
+          const filteredHooks = group.hooks.filter(h => !isClaudeHookCmd(h));
+          if (filteredHooks.length !== group.hooks.length) {
+            changed = true;
+          }
+          if (filteredHooks.length > 0) {
+            group.hooks = filteredHooks;
+            nextGroups.push(group);
+          }
+        } else {
+          nextGroups.push(group);
+        }
+      }
+      if (nextGroups.length > 0) {
+        hooksObj[eventName] = nextGroups;
+      } else {
+        delete hooksObj[eventName];
+      }
+    }
+    if (Object.keys(hooksObj).length > 0) {
+      obj.hooks = hooksObj;
+    } else {
+      delete obj.hooks;
+    }
+  }
+
+  if (!changed) {
+    return {
+      status: "unchanged",
+      detail: "Claude settings.json has no Cito entries",
+    };
+  }
+  return {
+    status: "updated",
+    nextContent: JSON.stringify(obj, null, 2) + "\n",
+    detail: "Removed Cito mcpServers and hooks from Claude settings.json",
+  };
+}
+
 export class ClaudeCodeAdapter extends SocketBridgeAdapter {
   override readonly setup: HarnessSetupDescriptor = {
     inspect: async (env: NodeJS.ProcessEnv) => {
@@ -413,6 +507,30 @@ export class ClaudeCodeAdapter extends SocketBridgeAdapter {
           transform: content => transformClaudeSettingsJson(content, Boolean(options.force)),
         }),
       ];
+    },
+    remove: async (env: NodeJS.ProcessEnv) => {
+      const claudeHome = expandHomeDir(env.CITO_CLAUDE_HOME ?? "~/.claude", "CITO_CLAUDE_HOME", env.HOME);
+      const settingsPath = join(claudeHome, "settings.json");
+      const rootClaudeJson = join(dirname(claudeHome), ".claude.json");
+      const actions = [
+        await mutateConfigFile({
+          target: CLAUDE_HARNESS,
+          path: settingsPath,
+          dryRun: false,
+          transform: content => removeClaudeSettingsJson(content),
+        }),
+      ];
+      if (existsSync(rootClaudeJson)) {
+        actions.push(
+          await mutateConfigFile({
+            target: CLAUDE_HARNESS,
+            path: rootClaudeJson,
+            dryRun: false,
+            transform: content => removeClaudeSettingsJson(content),
+          }),
+        );
+      }
+      return actions;
     },
   };
   override readonly cli: HarnessCliDescriptor = {

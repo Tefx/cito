@@ -806,6 +806,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var addHubClientId = ""
     var settingsFieldControls: [String: NSTextField] = [:]
     var channelFieldDrafts: [String: String] = [:]
+    var uninstallConfirmOpen = false
+    var uninstallPurgeData = false
+    var hasCheckedFirstLaunchOnboarding = false
     var clipboardString = ""
     var hasRenderedState = false
     var pendingMutation = false
@@ -859,7 +862,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func findControl(in view: NSView, id: String) -> MenuControl? {
         guard !view.isHidden else { return nil }
-        if view.identifier?.rawValue == id, let control = view as? MenuControl { return control }
+        let rawId = view.identifier?.rawValue
+        if (rawId == id || (id == "cancel_uninstall_all" && rawId == "cancel_uninstall_confirm")),
+           let control = view as? MenuControl { return control }
         if let table = view as? NSTableView {
             let count = min(table.numberOfRows, 100)
             for r in 0..<count {
@@ -1033,6 +1038,23 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 if settingsPanel != nil {
                     rebuildSettingsPanel()
+                }
+            }
+            if !hasCheckedFirstLaunchOnboarding, let s = settings, !s.apps.isEmpty {
+                hasCheckedFirstLaunchOnboarding = true
+                let forceOnboard = ProcessInfo.processInfo.environment["CITO_FORCE_ONBOARDING"] == "1"
+                if (!headless || forceOnboard) && !s.apps.contains(where: { $0.configured }) {
+                    let rawStateDir = ProcessInfo.processInfo.environment["CITO_STATE_DIR"] ?? (NSHomeDirectory() + "/.cito")
+                    let expandedStateDir = rawStateDir.hasPrefix("~/")
+                        ? (NSHomeDirectory() + "/" + String(rawStateDir.dropFirst(2)))
+                        : (rawStateDir == "~" ? NSHomeDirectory() : rawStateDir)
+                    let markerPath = expandedStateDir + "/onboarding-shown"
+                    if !FileManager.default.fileExists(atPath: markerPath) {
+                        try? FileManager.default.createDirectory(atPath: expandedStateDir, withIntermediateDirectories: true)
+                        try? "1\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
+                        settingsActiveTab = "apps"
+                        openSettingsPanel()
+                    }
                 }
             }
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
@@ -1825,19 +1847,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 expPill.addSubview(expLabel)
                 card.addSubview(expPill)
             }
-            let detail = textLabel(app.detail, NSRect(x: 50, y: 11, width: 250, height: 15), size: 11, color: .secondaryLabelColor)
+            let detailWidth: CGFloat = app.configured ? 176 : 250
+            let detail = textLabel(app.detail, NSRect(x: 50, y: 11, width: detailWidth, height: 15), size: 11, color: .secondaryLabelColor)
             if !app.paths.isEmpty { detail.toolTip = app.paths.joined(separator: ", ") }
             card.addSubview(detail)
 
             let statusText = app.configured ? "● Connected" : "○ Not Set Up"
-            let statusLabel = textLabel(statusText, NSRect(x: 306, y: 21, width: 88, height: 16),
+            let statusFrame = app.configured ? NSRect(x: 230, y: 21, width: 82, height: 16) : NSRect(x: 306, y: 21, width: 88, height: 16)
+            let statusLabel = textLabel(statusText, statusFrame,
                 size: 11, weight: .medium, color: app.configured ? .systemGreen : .secondaryLabelColor)
             statusLabel.alignment = .right
             statusLabel.identifier = NSUserInterfaceItemIdentifier("settings_app_status:\(app.id)")
             card.addSubview(statusLabel)
 
             let btnTitle = app.configured ? "Re-check" : "Set Up"
-            let btn = MenuControl(btnTitle, frame: NSRect(x: 402, y: 17, width: 66, height: 24), radius: 6)
+            let btnFrame = app.configured ? NSRect(x: 318, y: 17, width: 68, height: 24) : NSRect(x: 402, y: 17, width: 66, height: 24)
+            let btn = MenuControl(btnTitle, frame: btnFrame, radius: 6)
             btn.identifier = NSUserInterfaceItemIdentifier("setup_app:\(app.id)")
             btn.style = app.configured ? .neutral : .prominent
             let appId = app.id
@@ -1845,6 +1870,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self?.emit(["op": "setup_apply", "harness": appId])
             }
             card.addSubview(btn)
+
+            if app.configured {
+                let removeBtn = MenuControl("Disconnect", frame: NSRect(x: 392, y: 17, width: 76, height: 24), radius: 6)
+                removeBtn.identifier = NSUserInterfaceItemIdentifier("remove_app:\(app.id)")
+                removeBtn.style = .destructiveHover
+                removeBtn.pressed = { [weak self] in
+                    self?.emit(["op": "setup_remove_app", "harness": appId])
+                }
+                card.addSubview(removeBtn)
+            }
             appsView.addSubview(card)
         }
         root.addSubview(appsView)
@@ -2175,7 +2210,59 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self?.emit(["op": "set_launch_at_login", "enabled": !launchAtLogin])
         }
         footerBar.addSubview(loginBtn)
+
+        let uninstallBtn = MenuControl("Remove All Integrations…", frame: NSRect(x: 316, y: 10, width: 184, height: 24), radius: 6)
+        uninstallBtn.identifier = NSUserInterfaceItemIdentifier("open_uninstall_confirm")
+        uninstallBtn.style = .destructiveHover
+        uninstallBtn.pressed = { [weak self] in
+            guard let self = self else { return }
+            self.uninstallConfirmOpen = true
+            self.uninstallPurgeData = false
+            self.rebuildSettingsPanel()
+        }
+        footerBar.addSubview(uninstallBtn)
         root.addSubview(footerBar)
+
+        if uninstallConfirmOpen {
+            let confirmBox = roundedView(NSRect(x: 20, y: 48, width: 480, height: 68), radius: 10,
+                color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: .systemRed.withAppearanceAlpha(0.35))
+            confirmBox.identifier = NSUserInterfaceItemIdentifier("uninstall_confirm_box")
+
+            let purgeCheckbox = MenuControl("Also delete ~/.cito local data & hub settings",
+                frame: NSRect(x: 12, y: 36, width: 320, height: 22),
+                leadingSymbol: uninstallPurgeData ? "checkmark.square.fill" : "square", radius: 6)
+            purgeCheckbox.identifier = NSUserInterfaceItemIdentifier("uninstall_purge_data")
+            purgeCheckbox.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.uninstallPurgeData.toggle()
+                self.rebuildSettingsPanel()
+            }
+            confirmBox.addSubview(purgeCheckbox)
+
+            let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 244, y: 8, width: 80, height: 24), radius: 6)
+            cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_confirm")
+            cancelUninstallBtn.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.uninstallConfirmOpen = false
+                self.uninstallPurgeData = false
+                self.rebuildSettingsPanel()
+            }
+            confirmBox.addSubview(cancelUninstallBtn)
+
+            let confirmUninstallBtn = MenuControl("Confirm Uninstall", frame: NSRect(x: 332, y: 8, width: 136, height: 24), radius: 6)
+            confirmUninstallBtn.identifier = NSUserInterfaceItemIdentifier("confirm_uninstall_all")
+            confirmUninstallBtn.style = .destructiveHover
+            confirmUninstallBtn.pressed = { [weak self] in
+                guard let self = self else { return }
+                let purge = self.uninstallPurgeData
+                self.uninstallConfirmOpen = false
+                self.uninstallPurgeData = false
+                self.emit(["op": "setup_uninstall_all", "purge_data": purge])
+                self.rebuildSettingsPanel()
+            }
+            confirmBox.addSubview(confirmUninstallBtn)
+            root.addSubview(confirmBox)
+        }
 
         window.contentView = root
     }

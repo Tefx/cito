@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { discoverAllAvailableSessions, ensurePluginsLoaded, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { getLocalHubEngine } from "../hub/client.js";
 import { startHubServer, type HubServer } from "../hub/server.js";
-import { applySetup, ensureCliShims, inspectSetup, setLaunchAtLogin } from "../setup/index.js";
+import { applySetup, ensureCliShims, inspectSetup, removeSetup, setLaunchAtLogin, uninstallSetup } from "../setup/index.js";
 import { Events, NatsErrorCode, type KvEntry, type QueuedIterator, KeyedMutex, listenMutex, CitoError, brokerNow, evaluateNodeLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, humanNodeKey, isHumanNode, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256, validateHarness,
@@ -1154,6 +1154,30 @@ export class CitoService {
             force: action.force ?? true,
           });
           await this.refreshSettingsState();
+          break;
+        }
+        case "setup_remove_app": {
+          const harness = validateHarness(action.harness);
+          const rows = this.state.db
+            .prepare("SELECT hub, listener_id FROM local_listeners WHERE harness = ? AND status IN ('ACTIVE','REBINDING')")
+            .all(harness) as { hub: string; listener_id: string }[];
+          for (const r of rows) {
+            await this.unlistenById(String(r.hub), String(r.listener_id)).catch(() => {});
+          }
+          await removeSetup({ env: this.config.env, harnesses: [harness] });
+          await this.refreshSettingsState();
+          void this.refreshAvailableSessions();
+          break;
+        }
+        case "setup_uninstall_all": {
+          await uninstallSetup({
+            env: this.config.env,
+            purgeData: Boolean(action.purge_data),
+            unlistenAll: () => this.unlistenAll(),
+          });
+          if (!action.purge_data) {
+            await this.refreshSettingsState().catch(() => {});
+          }
           break;
         }
         case "set_host_hub": {

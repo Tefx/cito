@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cito": {
+      "command": "cito-mcp",
+      "args": [],
+      "env": {
+        "CITO_CLAUDE_CHANNEL": "1"
+      }
+    }
+  }
+}
