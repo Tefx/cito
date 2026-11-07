@@ -5072,7 +5072,7 @@ phases:
   - id: v17.gate
     name: 'V17 Stage 1 (v0.13.0) acceptance, NATS-free HubEngine, RLS, cito setup,
       harness-agnostic core & code-hygiene gate [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v17` (Stage 1 `v0.13.0`) acceptance decision (`PASS`\
@@ -5152,3 +5152,5 @@ phases:
     depends_on:
     - v17.impl
     agent: verifier
+    claimed_by: verifier
+    claimed_at: '2026-11-07T13:19:25.511206Z'
