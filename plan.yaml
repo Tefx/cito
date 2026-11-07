@@ -5200,3 +5200,263 @@ phases:
       CITO_VERSION = ''0.13.0''; fresh-context structural-auditor 01a1b622-63b3-73f7-8d3f-e8650464cc6a
       and uiux-auditor 01a1b622-635f-7397-9c05-40c262f07db0 certified Completeness:
       CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v18
+  name: 'V18 Stage 2 (`v0.14.0`): Rust Hot-Path Multi-Call Binary (`cito-native`),
+    Surface 3 AppKit `Settings…` Window, In-Process LAN Hub Sharing (`:4291`) & `<
+    5 MB` `Cito.app` Bundle'
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, bin/cito-native-darwin-arm64 (< 1.5 MB stripped & ad-hoc signed)
+    executes claude-hook (< 2 ms empty-queue fast path) and mcp-stdio with CITO_ENDPOINT_PID
+    support and seamless JS fallback, crates/cito-native/target is removed after compilation,
+    Surface 3 AppKit SettingsPanel (520 x 460 pt KeyPanel with Agent Apps & Hubs &
+    Network tabs, Share Hub on Local Network, Copy 1-Click Join Code, Paste from Invite,
+    Add Hub, and Start Cito at Login) and Surface 1 open_settings (preserving actions
+    === 10) pass headless AppKit verification, in-process :4291 host_hub shares getLocalHubEngine(stateDir)
+    with live HubSlot hot-reload, buildMacAppBundle produces < 5 MB Cito.app and ~/.cito/bin/
+    shims, zero hardcoded harness references exist in src/ and src/macos/cito-ui.swift,
+    CITO_VERSION and package.json version equal "0.14.0", and [REQUIRES_SKILL: code-hygiene]
+    verification passes with zero open issues.'
+  context: 'Implement and verify Stage 2 (v0.14.0) per docs/DESIGN.md (V18 §§1–5)
+    and docs/ROADMAP.md (Stage 2): (1) self-contained Rust multi-call binary crates/cito-native
+    compiled to bin/cito-native-darwin-arm64 (claude-hook and mcp-stdio modes with
+    CITO_ENDPOINT_PID support, < 2 ms fast exit on empty wake queue, and seamless
+    fallback in bin/cito-claude-hook and bin/cito-mcp when bin/cito-native-darwin-arm64
+    is absent or CITO_DISABLE_NATIVE=1); (2) in-process LAN Hub Sharing (host_hub
+    on :4291 in CitoConfig and CitoService sharing getLocalHubEngine(this.config.stateDir)
+    via startHubServer without a second process), ensureCliShims (${stateDir}/bin/{cito,cito-mcp,cito-claude-hook}),
+    setLaunchAtLogin (${HOME}/Library/LaunchAgents/com.tefx.cito.daemon.plist), buildMacAppBundle
+    (< 5 MB Cito.app and cito setup --build-app), and the Settings UiToDaemonAction
+    operations (open_settings, close_settings, setup_apply, set_host_hub, set_launch_at_login,
+    setup_save_hub, setup_toggle_hub, setup_remove_hub) with live CitoService.slots
+    hot-reload; and (3) Surface 3 SettingsPanel (520 x 460 pt KeyPanel in src/macos/cito-ui.swift)
+    with 2 tabs (Agent Apps and Hubs & Network) and persistent Start Cito at Login
+    footer, open_settings in Surface 1 footer without register(...) so actions ===
+    10 is preserved, headless test hooks, CITO_VERSION and package.json version bumped
+    to "0.14.0", compiled bin/cito-ui-darwin-arm64 and bin/cito-native-darwin-arm64
+    (cleaning crates/cito-native/target), and all §5 test migrations and new Stage
+    2 tests.'
+  depends_on:
+  - v17
+  steps:
+  - id: v18.impl
+    name: 'Implement Stage 2 (v0.14.0) Rust Hot-Path Multi-Call Binary (cito-native),
+      Surface 3 AppKit Settings Window, In-Process LAN Hub Sharing (:4291) & < 5 MB
+      Cito.app Bundle [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - AGENTS.md\n    - docs/**\n    - crates/cito-native/**\n \
+      \   - bin/**\n    - src/shared/config.ts\n    - src/shared/index.ts\n    - src/setup/index.ts\n\
+      \    - src/ui/index.ts\n    - src/mcp/cli.ts\n    - src/mcp/service.ts\n   \
+      \ - src/macos/cito-ui.swift\n    - tests/**\n  blocked_paths:\n    - plan.yaml\n\
+      ```\n\n- **Deliver:**\n  - Implement Stage 2 (`v0.14.0`) across `crates/cito-native/`,\
+      \ `bin/cito-mcp`, `bin/cito-claude-hook`, `src/shared/config.ts`, `src/shared/index.ts`,\
+      \ `src/setup/index.ts`, `src/ui/index.ts`, `src/mcp/cli.ts`, `src/mcp/service.ts`,\
+      \ `src/macos/cito-ui.swift`, `package.json`, and `tests/**` per `docs/DESIGN.md`\
+      \ (V18 §§1–5) and `docs/ROADMAP.md` (Stage 2), including:\n    1. **Self-Contained\
+      \ Rust Hot-Path Multi-Call Binary (`crates/cito-native` -> `bin/cito-native-darwin-arm64`,\
+      \ `bin/cito-claude-hook`, `bin/cito-mcp`)**:\n       - Implement `crates/cito-native`\
+      \ (`Cargo.toml`, `src/main.rs`) supporting two modes compiled to `< 1.5 MB`\
+      \ stripped ad-hoc signed `bin/cito-native-darwin-arm64`:\n         - `claude-hook`\
+      \ (`cito-native claude-hook` or `argv[0]` ending in `cito-claude-hook`): reads\
+      \ hook JSON from `stdin` (`session_id`, `hook_event_name`, `cwd`), fast-exits\
+      \ `{}\\n` in `< 2 ms` when `hook_event_name` is not `\"Stop\" | \"SessionStart\"\
+      \ | \"UserPromptSubmit\"` or when no wake file exists in `${stateDir}/claude/wakes/`,\
+      \ resolves session ID (`input.session_id` -> `CLAUDE_SESSION_ID` -> newest `<uuid>.jsonl`\
+      \ in `${claudeHome}/projects/<slug>/`) and any alias in `${stateDir}/claude/aliases/<session>`,\
+      \ atomically renames `${stateDir}/claude/wakes/<session>.jsonl` to `.draining-<uuid>`,\
+      \ parses/sorts/deduplicates wake batches, clears unread count in `${stateDir}/claude/badges/<session>`,\
+      \ sends a best-effort `500ms`-timeout `cito_inbox` ack `POST` to `http://127.0.0.1:${daemonPort}/mcp`,\
+      \ and writes the exact hook JSON response (`decision: \"block\"` on `Stop` when\
+      \ `wake === true`, or `hookSpecificOutput.additionalContext`) to `stdout`.\n\
+      \         - `mcp-stdio` (`cito-native mcp-stdio`): probes `GET http://127.0.0.1:${daemonPort}/health`\
+      \ (spawning `<sibling-cito-mcp> daemon` detached via `CITO_NODE_BIN` / `node`\
+      \ and polling `/health` up to `5,000 ms` when unreachable or `version !== CITO_VERSION`),\
+      \ binds `${stateDir}/sockets/claude-pid-${endpointPid}.sock` (`0600` socket\
+      \ inside `0700` directory, using `CITO_ENDPOINT_PID` or `ppid`) when `CITO_CLAUDE_CHANNEL=1`\
+      \ (`true`/`yes` or `plugins.claude.enableClaudeChannel` in `config.json`) to\
+      \ answer `identify` (with `resolveClaudeSessionId` and 128 KiB tail `custom-title`\
+      \ scan), `status`, and `deliver` (`fsync` wake queue append + `notifications/claude/channel`\
+      \ stdout notification), and relays newline-delimited JSON-RPC requests from\
+      \ `stdin` to `POST http://127.0.0.1:${daemonPort}/mcp` (passing `_meta.endpoint_pid\
+      \ = endpointPid`) and responses back to `stdout`.\n       - Update `bin/cito-claude-hook`\
+      \ and `bin/cito-mcp` (0 args) so that on `darwin`/`arm64` when `bin/cito-native-darwin-arm64`\
+      \ exists and `CITO_DISABLE_NATIVE !== \"1\"`, they spawn `bin/cito-native-darwin-arm64`\
+      \ with `CITO_ENDPOINT_PID: process.env.CITO_ENDPOINT_PID ?? String(process.ppid)`,\
+      \ and seamlessly fall back to `bin/loader.js` (`plugins/claude/hook-cli.ts`\
+      \ / `src/mcp/cli.ts`) when `bin/cito-native-darwin-arm64` is absent or `CITO_DISABLE_NATIVE\
+      \ === \"1\"`.\n    2. **In-Process LAN Hub Sharing (`host_hub` on `:4291`),\
+      \ CLI Shims, LaunchAgent, `< 5 MB` `Cito.app` Bundle & Settings IPC (`src/shared/config.ts`,\
+      \ `src/setup/index.ts`, `src/ui/index.ts`, `src/mcp/cli.ts`, `src/mcp/service.ts`)**:\n\
+      \       - Add optional `hostHub?: { enabled: boolean; port: number; token: string\
+      \ }` to `CitoConfig` in `src/shared/config.ts` (parsed from `\"host_hub\"` or\
+      \ `\"hostHub\"`, default `port: 4291`).\n       - Implement in-process `host_hub`\
+      \ sharing in `CitoService` (`src/mcp/service.ts`): when enabled, start `startHubServer({\
+      \ bind: \"0.0.0.0\", port: hostHub.port, authMode: \"token\", token: hostHub.token,\
+      \ engine: getLocalHubEngine(this.config.stateDir) })` sharing the exact same\
+      \ in-process `HubEngine` without spawning a second process, resolve primary\
+      \ LAN/Tailscale hostname/IP for `endpoint_url` (`http://${lanHost}:${port}`)\
+      \ and `invite_command` (`cito setup --hub ${hostSlug} --url http://${lanHost}:${port}\
+      \ --auth token --token ${token} --default`), and toggle cleanly in `< 100 ms`\
+      \ without dropping existing `local` listeners.\n       - Implement `ensureCliShims(config)`\
+      \ (`${stateDir}/bin/{cito,cito-mcp,cito-claude-hook}` `0755` executable shims\
+      \ invoked on `applySetup()` and `CitoService.create()`), `setLaunchAtLogin`\
+      \ / `inspectLaunchAtLogin` (`${HOME}/Library/LaunchAgents/com.tefx.cito.daemon.plist`,\
+      \ respecting `env.HOME` in tests, plus `cito setup --login-item` / `--no-login-item`),\
+      \ and `buildMacAppBundle` (`cito setup --build-app [destDir]`, generating `<\
+      \ 5 MB` ad-hoc signed `Cito.app` with `LSUIElement = true`, `Contents/MacOS/Cito`,\
+      \ and `Contents/Helpers/{cito-ui,cito-native}`).\n       - Extend `DaemonToUiMessage`\
+      \ (`op: \"state\"`) and `UiBridge.state(...)` (optional 7th parameter `settings?:\
+      \ UiSettingsState`) in `src/ui/index.ts`, and implement the Settings `UiToDaemonAction`\
+      \ operations in `src/ui/index.ts` and `src/mcp/service.ts` (`open_settings`,\
+      \ `close_settings`, `setup_apply`, `set_host_hub`, `set_launch_at_login`, `setup_save_hub`,\
+      \ `setup_toggle_hub`, `setup_remove_hub`) with live `CitoService.slots` hot-reload\
+      \ without restarting the daemon.\n    3. **Surface 3 AppKit `SettingsPanel`\
+      \ (`520 x 460 pt` `KeyPanel`), Packaging, Version `0.14.0` & §5 Test Suite (`src/macos/cito-ui.swift`,\
+      \ `package.json`, `tests/**`)**:\n       - Implement Surface 3 `SettingsPanel`\
+      \ (`id: \"settings_panel\"`, `520 x 460 pt` `KeyPanel` in `src/macos/cito-ui.swift`)\
+      \ with `close_settings` (`x: 484, y: 12, w: 24, h: 24`) and `Escape` close,\
+      \ top segmented tab bar (`settings_header`, `settings_tab:apps` `\"Agent Apps\"\
+      `, `settings_tab:hubs` `\"Hubs & Network\"`), Tab 1 `settings_apps_tab` (`\"\
+      CONNECTED AGENT APPS\"`, `settings_app:<id>`, `settings_app_status:<id>`, `setup_app:<id>`\
+      \ `\"Set Up\"` / `\"Re-check\"`), Tab 2 `settings_hubs_tab` (`host_hub_card`\
+      \ `\"Share Hub on Local Network\"`, `toggle_host_hub`, `host_hub_endpoint`,\
+      \ `copy_hub_invite` `\"Copy 1-Click Join Code\"`, `\"CONNECTED HUBS\"`, `paste_hub_invite`\
+      \ `\"✨ Paste from Invite\"`, `open_add_hub` `\"+ Add Hub…\"`, hub rows `settings_hub:<name>`\
+      \ with `toggle_hub:<name>`, `login_hub:<name>`, `remove_hub:<name>`, and inline\
+      \ `add_hub_form` with `settings_hub_name`, `settings_hub_url`, `settings_hub_auth:{none,token,oidc}`,\
+      \ `settings_hub_token`, `settings_hub_issuer`, `settings_hub_client_id`, `cancel_add_hub`,\
+      \ `submit_add_hub`), persistent footer (`settings_footer` with `settings_launch_at_login`\
+      \ `\"Start Cito at Login\"`), and Surface 1 `footer` `open_settings` button\
+      \ at `NSRect(x: 168, y: 6, width: 88, height: 24)` **without** `register(...)`\
+      \ so `initial.actions === 10` and `test_action` indices `2..9` remain unchanged.\n\
+      \       - Implement headless inspection and test hooks in `src/macos/cito-ui.swift`\
+      \ (`frame.settings != settings` in `receive(_:)`, `settings_open`/`settings_tab`/`settings_launch_at_login`/`settings_items`\
+      \ in `inspectMenu()`, `!view.isHidden` guard in `findControl(in:id:)`, `MenuControl.clearHoverWhere`\
+      \ preserving `settingsPanel`, and `test_settings_input`, `test_clipboard`, `test_settings_key`\
+      \ ops).\n       - Bump `CITO_VERSION` in `src/shared/index.ts` and `\"version\"\
+      ` in `package.json` / `package-lock.json` to `\"0.14.0\"`, update `package.json`\
+      \ `\"scripts.compile\"` to build/strip/codesign both `bin/cito-ui-darwin-arm64`\
+      \ and `bin/cito-native-darwin-arm64` and remove `crates/cito-native/target`,\
+      \ complete all `docs/DESIGN.md` §5 test updates and new Stage 2 tests (`tests/shared/shared.test.ts`,\
+      \ `tests/auth-callout/cli.test.ts`, `tests/ui/lifecycle.test.ts`, `tests/setup/setup.test.ts`,\
+      \ `tests/mcp/ui.test.ts`), and run `[REQUIRES_SKILL: code-hygiene]` self-audit.\n\
+      - **Boundary:** Owner `senior-engineer`; modifies `/Users/tefx/Projects/cito`.\
+      \ Must enforce zero leftover `crates/cito-native/target` after `npm run compile`,\
+      \ zero NATS packages in `package.json`, zero hardcoded `\"pi\"`, `\"codex\"\
+      `, or `\"claude\"` strings in `src/` and `src/macos/cito-ui.swift`, zero Chinese\
+      \ characters in `src/`, `plugins/`, `crates/`, `docs/`, `README.md`, `AGENTS.md`,\
+      \ `deploy/`, and zero company/environment-specific names (`rda`, `casdoor`,\
+      \ `rcatwin`, `keppel`, `mingchen`). Must not mutate external repositories or\
+      \ live user `~/.cito` / `~/Library/LaunchAgents` state during tests.\n- **Admit:**\
+      \ Completed Phase `v17`, `docs/DESIGN.md` (V18 §§1–5), `docs/ROADMAP.md` (Stage\
+      \ 2), `AGENTS.md`, and `README.md`. Verified by `npm run typecheck && npm run\
+      \ compile && npm test` exiting `0` and `[REQUIRES_SKILL: code-hygiene]` check.\
+      \ Consumed by `v18.gate`.\n- **Recovery:** Fix any failing typecheck, Rust/Swift\
+      \ compilation, Mach-O signature, IPC/socket race, or unit/E2E test in place\
+      \ within the isolated worktree, ensure `crates/cito-native/target` is removed\
+      \ after staging `bin/cito-native-darwin-arm64`, and clean up any temporary test\
+      \ directories, sockets, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - bin/cito-mcp
+    - bin/cito-claude-hook
+    - src/shared/config.ts
+    - src/shared/index.ts
+    - src/setup/index.ts
+    - src/ui/index.ts
+    - src/mcp/cli.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - tests/shared/shared.test.ts
+    - tests/auth-callout/cli.test.ts
+    - tests/setup/setup.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/ui/lifecycle.test.ts
+    agent: senior-engineer
+  - id: v18.gate
+    name: 'V18 Stage 2 (v0.14.0) acceptance, cito-native Rust binary, Surface 3 SettingsPanel,
+      in-process LAN hub sharing, < 5 MB Cito.app & code-hygiene gate [REQUIRES_SKILL:
+      code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Independent terminal Phase `v18` (Stage 2 `v0.14.0`) acceptance decision (`PASS`\
+      \ or `FAIL`) with `[REQUIRES_SKILL: code-hygiene]`, running `npm run typecheck\
+      \ && npm run compile && npm test`, verifying `bin/cito-native-darwin-arm64`\
+      \ execution (`claude-hook` and `mcp-stdio` modes + fallback when absent or `CITO_DISABLE_NATIVE=1`),\
+      \ Surface 3 `SettingsPanel` AppKit tests (`open_settings` preserving `actions\
+      \ === 10`, `Agent Apps` and `Hubs & Network` tabs, `Share Hub on Local Network`,\
+      \ `Copy 1-Click Join Code`, `✨ Paste from Invite`, `+ Add Hub…`, and `Start\
+      \ Cito at Login`), in-process `:4291` `host_hub` sharing `getLocalHubEngine`,\
+      \ `< 5 MB` `Cito.app` bundle generation and `~/.cito/bin/` shims, zero leftover\
+      \ `crates/cito-native/target` directory, zero hardcoded harness references (`\"\
+      pi\"`, `\"codex\"`, `\"claude\"`) in `src/` and `src/macos/cito-ui.swift`, and\
+      \ `CITO_VERSION === \"0.14.0\"`.\n- **Boundary:** Owner `verifier` (routing\
+      \ any admitted repair batch to `senior-engineer` before Delta re-verification);\
+      \ gate step itself is read-only (`repo_change_policy: no_repo_change`) and does\
+      \ not mutate repository files, Plan state, or external host directories.\n-\
+      \ **Admit:**\n  - Included phase and terminal outcomes: Phase `v18` (`v18.impl`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run compile\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Stage 2 architecture & runtime verification\
+      \ (`docs/DESIGN.md` §§2–5, `docs/ROADMAP.md` Stage 2):\n       - `bin/cito-native-darwin-arm64`\
+      \ (`< 1.5 MB` stripped, ad-hoc signed) executes `claude-hook` (`< 2 ms` empty-queue\
+      \ fast path, wake batch drain + ack) and `mcp-stdio` (health probe, `CITO_ENDPOINT_PID`\
+      \ socket bridge, JSON-RPC relay), with seamless fallback in `bin/cito-claude-hook`\
+      \ and `bin/cito-mcp` when absent or `CITO_DISABLE_NATIVE=1`.\n       - `crates/cito-native/target`\
+      \ does not exist after `npm run compile` (storage hygiene invariant).\n    \
+      \   - In-process `host_hub` (`:4291` `startHubServer` sharing `getLocalHubEngine(stateDir)`),\
+      \ live `CitoService.slots` hot-reload (`setup_save_hub`, `setup_toggle_hub`,\
+      \ `setup_remove_hub`), `ensureCliShims` (`${stateDir}/bin/{cito,cito-mcp,cito-claude-hook}`),\
+      \ `setLaunchAtLogin` (`com.tefx.cito.daemon.plist`), and `buildMacAppBundle`\
+      \ (`< 5 MB` `Cito.app`) pass unit and integration verification.\n       - Surface\
+      \ 1 (`open_settings` in `footer` at `x: 168, y: 6, width: 88, height: 24` with\
+      \ `initial.actions === 10` preserved), Surface 2 (`DirectoryPanel` facet coordinates\
+      \ preserved), and Surface 3 (`SettingsPanel` `520 x 460 pt` `KeyPanel` with\
+      \ `Agent Apps` & `Hubs & Network` tabs and headless hooks) pass all AppKit lifecycle\
+      \ tests in `tests/ui/lifecycle.test.ts`.\n    3. Version, harness-agnostic core\
+      \ & hygiene verification (`docs/DESIGN.md` §§1.2, 5):\n       - `CITO_VERSION`\
+      \ in `src/shared/index.ts` and `\"version\"` in `package.json` / `package-lock.json`\
+      \ equal `\"0.14.0\"`.\n       - Zero hardcoded `\"pi\"`, `\"codex\"`, or `\"\
+      claude\"` branches, config fields, CLI flag names, setup paths, or visual lookup\
+      \ tables in `src/` and `src/macos/cito-ui.swift`.\n       - Zero Chinese characters\
+      \ (`[\\p{Script=Han}]`) in `src/`, `plugins/`, `crates/`, `docs/`, `README.md`,\
+      \ `AGENTS.md`, and `deploy/`.\n       - Zero case-insensitive matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ in `src/`, `plugins/`, `crates/`, `docs/` (excluding policy rule line in `docs/DESIGN.md`),\
+      \ `README.md`, `AGENTS.md`, `deploy/`, and `tests/`.\n       - `[REQUIRES_SKILL:\
+      \ code-hygiene]` audit passes with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable finding is admitted, record\
+      \ concrete file/line counterexamples and route one cohesive writable repair\
+      \ to `senior-engineer` before re-running this gate in Delta mode."
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - bin/cito-mcp
+    - bin/cito-claude-hook
+    - src/shared/config.ts
+    - src/shared/index.ts
+    - src/setup/index.ts
+    - src/ui/index.ts
+    - src/mcp/cli.ts
+    - src/mcp/service.ts
+    - src/macos/cito-ui.swift
+    - tests/shared/shared.test.ts
+    - tests/auth-callout/cli.test.ts
+    - tests/setup/setup.test.ts
+    - tests/mcp/ui.test.ts
+    - tests/ui/lifecycle.test.ts
+    depends_on:
+    - v18.impl
+    agent: verifier
