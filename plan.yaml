@@ -5809,3 +5809,209 @@ phases:
   status: locked
   depends_on:
   - v19
+  steps:
+  - id: v20.impl
+    name: 'Implement Stage 4 (v0.16.0) Brand & Icon System (AppIcon.icns), Calm 4-Section
+      Product Website (site/), OpenAI Images 2.6 Artwork, Technical Docs (site/docs/)
+      & GitHub Pages Workflow [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - docs/DESIGN.md\n    - docs/ROADMAP.md\n    - crates/cito-native/**\n\
+      \    - bin/**\n    - src/shared/**\n    - src/setup/**\n    - site/**\n    -\
+      \ .github/workflows/pages.yml\n    - tests/site/**\n    - tests/setup/**\n \
+      \ blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n  - Implement Stage\
+      \ 4 (`v0.16.0`) per `docs/DESIGN.md` §7 and `docs/ROADMAP.md` (Stage 4):\n \
+      \   1. **Unified Brand System & macOS `AppIcon.icns` (`bin/AppIcon.icns`, `src/setup/index.ts`,\
+      \ `site/assets/brand/`, `README.md`, `docs/DESIGN.md` §7.1)**:\n       - Generate\
+      \ all 10 standard `.iconset` slices (`icon_16x16.png`, `icon_16x16@2x.png`,\
+      \ `icon_32x32.png`, `icon_32x32@2x.png`, `icon_128x128.png`, `icon_128x128@2x.png`,\
+      \ `icon_256x256.png`, `icon_256x256@2x.png`, `icon_512x512.png`, `icon_512x512@2x.png`)\
+      \ from `/tmp/cito-preview-art/app-icon-master.png` (`1024 × 1024` OpenAI Images\
+      \ 2.6 master squircle) and compile `bin/AppIcon.icns` via `/usr/bin/iconutil\
+      \ -c icns -o bin/AppIcon.icns` (`20 KB < size < 500 KB`).\n       - Update `buildMacAppBundle`\
+      \ in `src/setup/index.ts` to create `Contents/Resources`, copy `join(pkgRoot,\
+      \ \"bin\", \"AppIcon.icns\")` to `join(resourcesDir, \"AppIcon.icns\")` **before**\
+      \ running `/usr/bin/codesign -s - --force --deep`, and include `<key>CFBundleIconFile</key><string>AppIcon</string>`\
+      \ and `<key>CFBundleIconName</key><string>AppIcon</string>` in `Contents/Info.plist`,\
+      \ keeping total `Cito.app` size `< 5 MB`.\n       - Create `site/assets/brand/cito-mark.svg`,\
+      \ `site/assets/brand/cito-logo-dark.svg`, `site/assets/brand/cito-logo-light.svg`,\
+      \ `site/favicon.svg`, and `site/apple-touch-icon.png` matching the exact geometry\
+      \ of `makeCitoStatusIcon` in `src/macos/cito-ui.swift` (`18 × 18` coordinate\
+      \ grid, center `(8, 9)`, open C-arc `r = 5.50` `#F3F4F6`, central node core\
+      \ `r = 1.65` `#F59E0B`, outbound wake wave `r = 7.75` `#F59E0B`).\n       -\
+      \ Update the top header of `README.md` with an adaptive `<picture>` lockup (`site/assets/brand/cito-logo-dark.svg`\
+      \ / `site/assets/brand/cito-logo-light.svg`), links to `https://tefx.github.io/cito/`\
+      \ and its `/docs/` pages, and update installation instructions in `README.md`\
+      \ so only the two official installation methods (**1. Homebrew `brew install\
+      \ tefx/tap/cito`** and **2. Download `Cito.app`**) are presented (never recommending\
+      \ `npm install` or requiring `&& cito setup`).\n    2. **Pre-Verified OpenAI\
+      \ Images 2.6 Artwork & Social Card (`site/assets/art/`, `site/assets/og-card.png`,\
+      \ `site/assets/IMAGEGEN_PROMPTS.md`, `docs/DESIGN.md` §7.2.2)**:\n       - Copy\
+      \ `/tmp/cito-preview-art/{hero-stage.png,moment-cross-harness.png,moment-human-network.png,app-icon-master.png}`\
+      \ into `site/assets/art/`.\n       - Generate `site/assets/og-card.png` (`1200\
+      \ × 630`) and document exact generation prompts and parameters in `site/assets/IMAGEGEN_PROMPTS.md`.\n\
+      \    3. **Calm, Spacious 4-Section Product Homepage & GitHub Pages Subpath Bundle\
+      \ (`site/index.html`, `site/styles/`, `site/scripts/hero-preview.js`, `site/.nojekyll`,\
+      \ `.github/workflows/pages.yml`, `docs/DESIGN.md` §§7.2.1, 7.3)**:\n       -\
+      \ Build `site/index.html`, `site/styles/` (`tokens.css`, `main.css`), and `site/scripts/hero-preview.js`\
+      \ with 4 spacious sections (`>= 50%` calm negative space):\n         - **Section\
+      \ 1 (Hero)**: Headline *\"Where your agents talk—with you, and each other.\"\
+      *, 2-sentence lead, strictly the two official installation actions (**1. Primary\
+      \ 1-click copy command pill `brew install tefx/tap/cito`** and **2. Secondary\
+      \ button `Download Cito.app for macOS`**, never recommending `npm install` or\
+      \ requiring `&& cito setup`), and the interactive 2-scene Hero Stage framed\
+      \ over `./assets/art/hero-stage.png` (`[ ⚡ Agent → Agent ]` and `[ \U0001F4AC\
+      \ Agent ↔ You ]`).\n         - **Section 2 (Three Everyday Moments)**: (1) *Stop\
+      \ playing courier between your agents* (`./assets/art/moment-cross-harness.png`),\
+      \ (2) *You are a node on the same network* (`./assets/art/moment-human-network.png`),\
+      \ and (3) *From one Mac to your whole team*.\n         - **Section 3 (Built\
+      \ for Your Favorite Harnesses)**: Clean showcase of `Codex`, `Claude Code`,\
+      \ `Pi`, and `Telegram` linking to `./docs/guide.html` and `./docs/plugins.html`.\n\
+      \         - **Section 4 (Ready in Under a Minute)**: Closing `brew install tefx/tap/cito`\
+      \ + `Download Cito.app for macOS` CTA and minimal footer.\n       - Enforce\
+      \ strict homepage restraint on `site/index.html`: zero pixel/point dimensions\
+      \ (`380pt`, `560×440pt`, `px`), zero port numbers (`:4290`, `:4291`), zero SQLite/cursor/table\
+      \ names (`consumer_ack`, `signal_claim_dispatch`, `hub_channel_deliveries`,\
+      \ `SQLite`, `WAL`), zero AppKit class names (`NSMenu`, `KeyPanel`), zero banned\
+      \ AI-slop buzzwords (`seamless`, `empower`, `supercharge`, `next-generation`,\
+      \ `reimagined`, `game-changer`, `synergy`), zero `Not X, but Y` contrastive\
+      \ templates, and zero `npm install` / `&& cito setup` user commands.\n     \
+      \  - Enforce GitHub Pages subpath rules (`https://tefx.github.io/cito/`): do\
+      \ **not** create `site/CNAME`, add `site/.nojekyll`, use relative paths (`./...`)\
+      \ for all DOM links/stylesheets/scripts/images on `site/index.html` (and `../...`\
+      \ / `./...` on `site/docs/*.html`) while keeping full `https://tefx.github.io/cito/...`\
+      \ URLs on `<link rel=\"canonical\">`, `<meta property=\"og:url\">`, and `<meta\
+      \ property=\"og:image\">`, and create `.github/workflows/pages.yml` (`actions/upload-pages-artifact@v3`\
+      \ + `actions/deploy-pages@v4`).\n    4. **Technical Documentation Pages, Automated\
+      \ Subpath/Bundle Verification & Version `0.16.0` Bump (`site/docs/`, `tests/site/site.test.ts`,\
+      \ `tests/setup/setup.test.ts`, `docs/DESIGN.md` §§7.2.3, 7.3)**:\n       - Build\
+      \ `site/docs/guide.html` (1-step installation via **1. Homebrew `brew install\
+      \ tefx/tap/cito`** or **2. Download `Cito.app`** with no `npm install` recommendation\
+      \ and no manual `cito setup` required, Visual `Settings…` `⌘,` walkthrough,\
+      \ 1-click Telegram pairing, and LAN/Team Hub setup), `site/docs/plugins.html`\
+      \ (`@tefx/cito/plugin-sdk` authoring guide for `kind: \"agent\"` `HarnessAdapter`\
+      \ and `kind: \"human\"` `HumanChannelPlugin` with `scope: \"hub\" | \"user\"\
+      ` fields and 6-char pairing), and `site/docs/architecture.html` (`Node (Human\
+      \ | Agent) ↔ Hub ↔ Channels (1..K)` protocol, `@self` / `@<username>` addressing,\
+      \ multi-channel read sync, and the 5 MCP tools).\n       - Add `tests/site/site.test.ts`\
+      \ serving `site/` under `/cito/` on an ephemeral local HTTP server and asserting\
+      \ HTTP `200` on `/cito/`, `/cito/docs/{guide,plugins,architecture}.html`, and\
+      \ every linked local stylesheet/script/image/favicon, asserting zero root-absolute\
+      \ `href=\"/...\"` or `src=\"/...\"` attributes, asserting zero `site/CNAME`,\
+      \ asserting zero banned implementation tokens/buzzwords on `site/index.html`,\
+      \ and asserting `site/index.html`, `site/docs/guide.html`, and `README.md` present\
+      \ `brew install tefx/tap/cito` and `Cito.app` without `npm install` or `&& cito\
+      \ setup`.\n       - Extend `tests/setup/setup.test.ts` to verify `bin/AppIcon.icns`\
+      \ (`icns` magic header, `20 KB < size < 500 KB`), `Cito.app/Contents/Resources/AppIcon.icns`,\
+      \ `CFBundleIconFile` / `CFBundleIconName` in `Contents/Info.plist`, and `Cito.app\
+      \ < 5 MB`.\n       - Bump `CITO_VERSION` (`src/shared/index.ts`), `package.json`\
+      \ / `package-lock.json`, and `crates/cito-native/Cargo.toml` to `\"0.16.0\"\
+      `, run `npm run typecheck && npm run compile && npm test` (removing `crates/cito-native/target`),\
+      \ and run `[REQUIRES_SKILL: code-hygiene]` self-audit.\n- **Boundary:** Owner\
+      \ `frontend-engineer` (with `senior-engineer` escalation authority if needed);\
+      \ modifies `/Users/tefx/Projects/cito`. Must preserve `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' src/` returning `0` matches, `grep -rn 'jumpUrlTemplate\\|expandJumpUrl\\\
+      |openJumpUrl' src/ plugins/` returning `0` matches, zero leftover `crates/cito-native/target`\
+      \ after `npm run compile`, zero Chinese characters in `src/`, `plugins/`, `crates/`,\
+      \ `docs/`, `site/`, `README.md`, `AGENTS.md`, `deploy/`, and zero company/environment-specific\
+      \ names (`rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`). Must not create\
+      \ `site/CNAME` or mutate external repositories or live user `~/.cito` / `~/Library/LaunchAgents`\
+      \ state during tests.\n- **Admit:** Completed Phase `v19` (`v19.gate`), `docs/DESIGN.md`\
+      \ (§7), `docs/ROADMAP.md` (Stage 4), `README.md`, `AGENTS.md`, and pre-verified\
+      \ OpenAI Images 2.6 master assets in `/tmp/cito-preview-art/`. Verified by `npm\
+      \ run typecheck && npm run compile && npm test` exiting `0` and `[REQUIRES_SKILL:\
+      \ code-hygiene]` check. Consumed by `v20.gate`.\n- **Recovery:** Fix any broken\
+      \ relative path, missing asset, homepage restraint leak, icon compilation or\
+      \ `Cito.app` bundle signature issue, or failing unit/site/E2E test in place\
+      \ within the isolated worktree, ensure `crates/cito-native/target` is removed\
+      \ after compilation, and clean up any temporary iconset or test directories."
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - README.md
+    - AGENTS.md
+    - package.json
+    - crates/cito-native/Cargo.toml
+    - src/shared/index.ts
+    - src/setup/index.ts
+    - src/macos/cito-ui.swift
+    - tests/setup/setup.test.ts
+  - id: v20.gate
+    name: 'V20 Stage 4 (v0.16.0) acceptance, AppIcon.icns & Cito.app bundle, calm
+      4-section homepage restraint, /cito/ subpath HTTP serving & code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Independent terminal Phase `v20` (Stage 4 `v0.16.0`) acceptance decision (`PASS`\
+      \ or `FAIL`) with `[REQUIRES_SKILL: code-hygiene]`, running `npm run typecheck\
+      \ && npm run compile && npm test`, verifying `bin/AppIcon.icns` and `Cito.app/Contents/Resources/AppIcon.icns`,\
+      \ verifying `/cito/` subpath HTTP serving with zero 404s across `site/index.html`,\
+      \ `site/docs/{guide,plugins,architecture}.html`, and all linked assets, verifying\
+      \ `site/index.html`, `site/docs/guide.html`, and `README.md` present only the\
+      \ two official installation methods (`brew install tefx/tap/cito` and Download\
+      \ `Cito.app` with zero `npm install` or `&& cito setup`), verifying zero banned\
+      \ implementation jargon/dimensions/buzzwords on `site/index.html`, and verifying\
+      \ `CITO_VERSION === \"0.16.0\"`.\n- **Boundary:** Owner `verifier` (routing\
+      \ any admitted repair batch to `frontend-engineer` or `senior-engineer` before\
+      \ Delta re-verification); gate step itself is read-only (`repo_change_policy:\
+      \ no_repo_change`) and does not mutate repository files, Plan state, or external\
+      \ host directories.\n- **Admit:**\n  - Included phase and terminal outcomes:\
+      \ Phase `v20` (`v20.impl`) bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Cross-phase prerequisite: Phase `v19` (`v19.gate`).\n  - Consumed evidence\
+      \ and checks:\n    1. `npm run typecheck && npm run compile && npm test` passes\
+      \ 100% with zero skipped or failing tests and clean working tree (`git status\
+      \ --short`).\n    2. Brand & macOS `AppIcon.icns` verification (`docs/DESIGN.md`\
+      \ §7.1):\n       - `bin/AppIcon.icns` exists with valid `icns` header and `20\
+      \ KB < size < 500 KB`.\n       - `buildMacAppBundle` produces `Cito.app/Contents/Resources/AppIcon.icns`\
+      \ and sets `CFBundleIconFile` / `CFBundleIconName` to `AppIcon` in `Contents/Info.plist`\
+      \ before `codesign`, with total `Cito.app` size `< 5 MB`.\n       - `site/assets/brand/{cito-mark,cito-logo-dark,cito-logo-light}.svg`,\
+      \ `site/favicon.svg`, `site/apple-touch-icon.png`, and `README.md` `<picture>`\
+      \ header match the canonical transceiver geometry.\n    3. Calm 4-section homepage,\
+      \ OpenAI Images 2.6 artwork, technical docs, official installation methods &\
+      \ `/cito/` subpath verification (`docs/DESIGN.md` §§7.2–7.3):\n       - `site/assets/art/{hero-stage,moment-cross-harness,moment-human-network,app-icon-master}.png`,\
+      \ `site/assets/og-card.png` (`1200 × 630`), and `site/assets/IMAGEGEN_PROMPTS.md`\
+      \ exist and are non-empty.\n       - Serving `site/` under `/cito/` returns\
+      \ HTTP `200` with zero 404s for `/cito/`, `/cito/docs/{guide,plugins,architecture}.html`,\
+      \ and every linked stylesheet, script, SVG, and PNG asset.\n       - `site/CNAME`\
+      \ does not exist, `site/.nojekyll` and `.github/workflows/pages.yml` exist,\
+      \ and zero internal DOM links/assets use root-absolute `href=\"/...\"` or `src=\"\
+      /...\"`.\n       - `site/index.html`, `site/docs/guide.html`, and `README.md`\
+      \ present only the two official installation methods (**1. Homebrew `brew install\
+      \ tefx/tap/cito`** and **2. Download `Cito.app`**), with zero `npm install`\
+      \ or `&& cito setup` user onboarding commands.\n       - `site/index.html` contains\
+      \ zero banned implementation tokens/dimensions (`380pt`, `560×440pt`, `px`,\
+      \ `:4290`, `:4291`, `consumer_ack`, `signal_claim_dispatch`, `hub_channel_deliveries`,\
+      \ `SQLite`, `WAL`, `NSMenu`, `KeyPanel`) and zero banned AI-slop buzzwords (`seamless`,\
+      \ `empower`, `supercharge`, `next-generation`, `reimagined`, `game-changer`,\
+      \ `synergy`).\n    4. Version, mechanical & hygiene verification:\n       -\
+      \ `CITO_VERSION` in `src/shared/index.ts`, `\"version\"` in `package.json` /\
+      \ `package-lock.json`, and `version` in `crates/cito-native/Cargo.toml` equal\
+      \ `\"0.16.0\"`, and `crates/cito-native/target` is absent after `npm run compile`.\n\
+      \       - `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' src/` returns `0` matches, and `grep -rn 'jumpUrlTemplate\\|expandJumpUrl\\\
+      |openJumpUrl' src/ plugins/` returns `0` matches.\n       - Zero Chinese characters\
+      \ (`[\\p{Script=Han}]`) across `src/`, `plugins/`, `crates/`, `docs/`, `site/`,\
+      \ `README.md`, `AGENTS.md`, and `deploy/`, and zero matches for `rda|casdoor|rcatwin|keppel|mingchen`\
+      \ (excluding policy rule line in `docs/DESIGN.md`).\n       - `[REQUIRES_SKILL:\
+      \ code-hygiene]` audit passes with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      - **Recovery:** If any check fails or any actionable finding is admitted, record\
+      \ concrete file/line counterexamples and route one cohesive writable repair\
+      \ to `frontend-engineer` (or `senior-engineer`) before re-running this gate\
+      \ in Delta mode."
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - README.md
+    - AGENTS.md
+    - package.json
+    - crates/cito-native/Cargo.toml
+    - src/shared/index.ts
+    - src/setup/index.ts
+    - src/macos/cito-ui.swift
+    - tests/setup/setup.test.ts
+    depends_on:
+    - v20.impl
