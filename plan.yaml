@@ -5878,7 +5878,7 @@ phases:
 - id: v20
   name: 'V20 Stage 4 (v0.16.0): Brand & Icon System (AppIcon.icns), Calm 4-Section
     Product Website (site/), OpenAI Images 2.6 Artwork & GitHub Pages (https://tefx.github.io/cito/)'
-  status: in_progress
+  status: done
   depends_on:
   - v19
   steps:
@@ -6043,7 +6043,7 @@ phases:
     name: 'V20 Stage 4 (v0.16.0) acceptance, AppIcon.icns & Cito.app bundle, calm
       4-section homepage restraint, /cito/ subpath HTTP serving & code-hygiene gate
       [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v20` (Stage 4 `v0.16.0`) acceptance decision (`PASS`\
@@ -6119,11 +6119,67 @@ phases:
     agent: verifier
     claimed_by: verifier
     claimed_at: '2026-11-07T21:13:12.884663Z'
+    done_at: '2026-11-07T21:17:24.127030+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v20-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:83c518cb64302a40cf5902607bfee935a48556df).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (32 test
+      files, 254 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex & storage verification:
+
+      - package.json dependencies: [''@modelcontextprotocol/sdk'', ''jose'', ''zod'']
+      (0 NATS packages)
+
+      - crates/cito-native/target: absent (false)
+
+      - bin/AppIcon.icns: 369,292 bytes, valid ''icns'' header (20 KB < size < 500
+      KB), bundled into Cito.app/Contents/Resources/AppIcon.icns before codesign with
+      CFBundleIconFile/CFBundleIconName = AppIcon (Cito.app < 5 MB)
+
+      - site/CNAME: absent (false); site/.nojekyll and .github/workflows/pages.yml:
+      present (true)
+
+      - grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      src/: 0 matches
+
+      - grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl'' src/ plugins/: 0
+      matches
+
+      - [\p{Script=Han}] in src/, plugins/, crates/, docs/, site/, README.md, AGENTS.md,
+      deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, plugins/, crates/, docs/,
+      site/, README.md, AGENTS.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in plugins/pi/cito-bridge.ts: 0 matches
+
+      Requirement results:
+
+      - V20-1-BRAND-SYSTEM-AND-MACOS-APPICON-ICNS: PROVEN (bin/AppIcon.icns 369,292
+      bytes with all 10 .iconset slices from app-icon-master.png, buildMacAppBundle
+      copying AppIcon.icns into Cito.app/Contents/Resources/AppIcon.icns before codesign
+      with CFBundleIconFile/CFBundleIconName=AppIcon and Cito.app < 5 MB, site/assets/brand/{cito-mark,cito-logo-dark,cito-logo-light}.svg
+      + site/favicon.svg + site/apple-touch-icon.png, and README.md <picture> header
+      + 2 official install methods).
+
+      - V20-2-CALM-4-SECTION-HOMEPAGE-ARTWORK-DOCS-AND-PAGES-SUBPATH: PROVEN (site/index.html
+      4-section calm layout with 0 banned tokens/dimensions/buzzwords, site/assets/art/*.png
+      + site/assets/og-card.png 1200x630 + site/assets/IMAGEGEN_PROMPTS.md, site/docs/{guide,plugins,architecture}.html,
+      ephemeral /cito/ subpath HTTP 200 across all pages & assets with 0 root-absolute
+      href/src, and .github/workflows/pages.yml without site/CNAME).
+
+      - V20-3-V0-16-0-MECHANICAL-PURITY-AND-CODE-HYGIENE: PROVEN (CITO_VERSION, package.json,
+      package-lock.json, and crates/cito-native/Cargo.toml synchronized to ''0.16.0'';
+      fresh-context structural-auditor 01a1b7d4-6f5c-70f0-a4ca-d8aa46902a96 and uiux-auditor
+      01a1b7d4-6f12-75f4-8b02-0b56e11e81b6 certified Completeness: CLEAN | Simplicity:
+      ZERO_NEW_ISSUES).'
 - id: v21
   name: 'V21 Stage 5 (v0.17.0): Core/Hub/UI Node.js Removal, Native Harness Plugin
     Manifests, First-Launch Consent, Surgical Disconnect/Uninstall, Homebrew/Cito.app
     Distribution & Deep Code-Hygiene Audit'
-  status: locked
+  status: pending
   depends_on:
   - v20
   steps:
