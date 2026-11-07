@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { inspectSetup, previewSetup, applySetup } from "../../src/setup/index.js";
+import { inspectSetup, previewSetup, applySetup, ensureCliShims, inspectLaunchAtLogin, setLaunchAtLogin, buildMacAppBundle } from "../../src/setup/index.js";
 import { CitoService } from "../../src/mcp/service.js";
 import { loadConfig, toCanonicalListenerId } from "../../src/shared/index.js";
 import { ensureUiCompiled, UiBridge, type UiListenerSummary } from "../../src/ui/index.js";
@@ -372,4 +372,77 @@ describe("cito setup engine and plugin setup descriptors", () => {
       await waitFor(() => diagnostics.filter(l => l === "cito-ui: state hubs=1 listeners=1").length === 2);
     }
   }, 20_000);
+
+  it("installs executable ~/.cito/bin shims, manages LaunchAgent plist (--login-item / --no-login-item), and builds a < 5 MB Cito.app bundle", async () => {
+    const { root, env } = await makeTempHome();
+    const bin = resolve("bin/cito-mcp");
+
+    // 1. ensureCliShims writes executable 0755 shims into ~/.cito/bin/{cito,cito-mcp,cito-claude-hook}
+    const shims = await ensureCliShims({ env });
+    expect(shims.paths).toHaveLength(3);
+    for (const shimPath of shims.paths) {
+      expect((await stat(shimPath)).mode & 0o777).toBe(0o755);
+    }
+
+    const hookShimRes = spawnSync(join(shims.binDir, "cito-claude-hook"), [], {
+      env: { ...process.env, ...env },
+      input: JSON.stringify({ hook_event_name: "Stop", cwd: root }),
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    expect(hookShimRes.status).toBe(0);
+    expect(hookShimRes.stdout).toBe("{}\n");
+
+    const citoVerRes = spawnSync(join(shims.binDir, "cito"), ["--version"], {
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    expect(citoVerRes.status).toBe(0);
+    expect(citoVerRes.stdout).toBe("cito v0.14.0\n");
+
+    // 2. LaunchAgent management via API and CLI (--login-item / --no-login-item)
+    expect((await inspectLaunchAtLogin({ env })).enabled).toBe(false);
+    const enabledLogin = await setLaunchAtLogin(true, { env });
+    expect(enabledLogin.enabled).toBe(true);
+    expect(enabledLogin.plistPath).toBe(join(root, "Library/LaunchAgents/com.tefx.cito.daemon.plist"));
+    const plistContent = await readFile(enabledLogin.plistPath, "utf8");
+    expect(plistContent).toContain("com.tefx.cito.daemon");
+    expect(plistContent).toContain("<key>RunAtLoad</key>");
+    expect((await inspectLaunchAtLogin({ env })).enabled).toBe(true);
+
+    const disableCli = spawnSync(
+      process.execPath,
+      [bin, "setup", "--no-login-item", "--json"],
+      { env: { ...process.env, ...env }, encoding: "utf8", timeout: 5000 },
+    );
+    expect(disableCli.status).toBe(0);
+    expect((await inspectLaunchAtLogin({ env })).enabled).toBe(false);
+
+    // 3. buildMacAppBundle (--build-app) creates < 5 MB Cito.app with Info.plist, MacOS/Cito, and Helpers
+    const appDir = join(root, "Apps");
+    const buildCli = spawnSync(
+      process.execPath,
+      [bin, "setup", "--build-app", appDir, "--json"],
+      { env: { ...process.env, ...env }, encoding: "utf8", timeout: 30_000 },
+    );
+    expect(buildCli.status).toBe(0);
+    const built = JSON.parse(buildCli.stdout) as { appPath: string; bytes: number };
+    expect(built.appPath).toBe(join(appDir, "Cito.app"));
+    expect(built.bytes).toBeGreaterThan(100_000);
+    expect(built.bytes).toBeLessThan(5 * 1024 * 1024);
+
+    const infoPlist = await readFile(join(built.appPath, "Contents/Info.plist"), "utf8");
+    expect(infoPlist).toContain("one.tefx.cito");
+    expect(infoPlist).toContain("<key>LSUIElement</key>\n  <true/>");
+    expect((await stat(join(built.appPath, "Contents/MacOS/Cito"))).mode & 0o777).toBe(0o755);
+    expect((await stat(join(built.appPath, "Contents/Helpers/cito-ui"))).mode & 0o777).toBe(0o755);
+    if (process.platform === "darwin" && process.arch === "arm64") {
+      expect((await stat(join(built.appPath, "Contents/Helpers/cito-native"))).mode & 0o777).toBe(0o755);
+    }
+
+    const directBuilt = await buildMacAppBundle({ env });
+    expect(directBuilt.appPath).toBe(join(root, ".cito/Applications/Cito.app"));
+    expect(directBuilt.bytes).toBeLessThan(5 * 1024 * 1024);
+  }, 30_000);
 });

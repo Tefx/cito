@@ -4,8 +4,8 @@ import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "no
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
-import { KeyedMutex, hubNameSchema, canonicalListenerIdSchema } from "../shared/index.js";
-import { getUiHarnessMetadata, type AvailableSessionSummary, type UiHarnessMetadata } from "../adapters/index.js";
+import { KeyedMutex, hubNameSchema, canonicalListenerIdSchema, harnessIdSchema, type HubAuthMode } from "../shared/index.js";
+import { getUiHarnessMetadata, type AdapterTier, type AvailableSessionSummary, type UiHarnessMetadata } from "../adapters/index.js";
 export type { AvailableSessionSummary, UiHarnessMetadata } from "../adapters/index.js";
 
 const UNSAFE_JUMP_SCHEMES = new Set([
@@ -114,6 +114,41 @@ export interface UiRemotePeerSummary {
   last_seen_at: string;
   is_self_principal?: boolean;
 }
+export interface UiAppSetupSummary {
+  id: string;
+  display_name: string;
+  tier: AdapterTier;
+  installed: boolean;
+  configured: boolean;
+  status: "ready" | "not_configured" | "conflict";
+  detail: string;
+  paths: string[];
+}
+export interface UiHostHubSummary {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  endpoint_url: string;
+  token: string;
+  invite_command: string;
+  error: string | null;
+}
+export interface UiHubConfigSummary {
+  name: string;
+  url: string;
+  auth_mode: HubAuthMode;
+  enabled: boolean;
+  is_default: boolean;
+  status: "connected" | "connecting" | "auth_required" | "disconnected";
+  user: string | null;
+  error: string | null;
+}
+export interface UiSettingsState {
+  apps: UiAppSetupSummary[];
+  hubs: UiHubConfigSummary[];
+  host_hub: UiHostHubSummary;
+  launch_at_login: boolean;
+}
 export type DaemonToUiMessage =
   | {
       op: "state";
@@ -123,6 +158,7 @@ export type DaemonToUiMessage =
       my_remote_listeners?: UiRemotePeerSummary[];
       directory_online_count?: number;
       harnesses?: UiHarnessMetadata[];
+      settings?: UiSettingsState;
     }
   | {
       op: "directory";
@@ -140,6 +176,14 @@ export type UiToDaemonAction = { op: "unlisten"; hub: string; listener_id: strin
   | { op: "open_directory" }
   | { op: "close_directory" }
   | { op: "query_directory"; query?: string; scope?: "all" | "mine"; harness?: string }
+  | { op: "open_settings" }
+  | { op: "close_settings" }
+  | { op: "setup_apply"; harness: string; force?: boolean }
+  | { op: "set_host_hub"; enabled: boolean; port?: number; reset_token?: boolean }
+  | { op: "set_launch_at_login"; enabled: boolean }
+  | { op: "setup_save_hub"; name: string; url: string; auth_mode: HubAuthMode; token?: string; issuer?: string; client_id?: string; set_default?: boolean }
+  | { op: "setup_toggle_hub"; hub: string; enabled: boolean }
+  | { op: "setup_remove_hub"; hub: string }
   | { op: "quit" };
 export interface UiOptions {
   env?: NodeJS.ProcessEnv;
@@ -195,7 +239,47 @@ export async function ensureUiCompiled(stateDir: string, source?: string): Promi
 export function validAction(value: unknown): value is UiToDaemonAction {
   if (!value || typeof value !== "object") return false;
   const a = value as Record<string, unknown>;
-  if (a.op === "quit" || a.op === "unlisten_all" || a.op === "refresh_available" || a.op === "open_directory" || a.op === "close_directory") return true;
+  if (
+    a.op === "quit" ||
+    a.op === "unlisten_all" ||
+    a.op === "refresh_available" ||
+    a.op === "open_directory" ||
+    a.op === "close_directory" ||
+    a.op === "open_settings" ||
+    a.op === "close_settings"
+  ) {
+    return true;
+  }
+  if (a.op === "setup_apply") {
+    if (!harnessIdSchema.safeParse(a.harness).success) return false;
+    if (a.force !== undefined && typeof a.force !== "boolean") return false;
+    return true;
+  }
+  if (a.op === "set_host_hub") {
+    if (typeof a.enabled !== "boolean") return false;
+    if (a.port !== undefined && (typeof a.port !== "number" || !Number.isInteger(a.port) || a.port < 0 || a.port > 65535)) return false;
+    if (a.reset_token !== undefined && typeof a.reset_token !== "boolean") return false;
+    return true;
+  }
+  if (a.op === "set_launch_at_login") {
+    return typeof a.enabled === "boolean";
+  }
+  if (a.op === "setup_save_hub") {
+    if (!hubNameSchema.safeParse(a.name).success) return false;
+    if (typeof a.url !== "string" || !a.url.trim()) return false;
+    if (a.auth_mode !== "none" && a.auth_mode !== "token" && a.auth_mode !== "oidc") return false;
+    if (a.token !== undefined && typeof a.token !== "string") return false;
+    if (a.issuer !== undefined && typeof a.issuer !== "string") return false;
+    if (a.client_id !== undefined && typeof a.client_id !== "string") return false;
+    if (a.set_default !== undefined && typeof a.set_default !== "boolean") return false;
+    return true;
+  }
+  if (a.op === "setup_toggle_hub") {
+    return hubNameSchema.safeParse(a.hub).success && typeof a.enabled === "boolean";
+  }
+  if (a.op === "setup_remove_hub") {
+    return hubNameSchema.safeParse(a.hub).success && a.hub !== "local";
+  }
   if (a.op === "query_directory") {
     if (a.query !== undefined && typeof a.query !== "string") return false;
     if (a.scope !== undefined && a.scope !== "all" && a.scope !== "mine") return false;
@@ -297,6 +381,7 @@ export class UiBridge {
     myRemoteListeners: UiRemotePeerSummary[] = [],
     directoryOnlineCount = 0,
     harnesses?: UiHarnessMetadata[],
+    settings?: UiSettingsState,
   ): void {
     const resolvedHarnesses = harnesses ?? getUiHarnessMetadata();
     const byHarness = new Map(resolvedHarnesses.map(h => [h.id, h]));
@@ -313,6 +398,7 @@ export class UiBridge {
         ...(jumpUrl ? { jump_url: jumpUrl, ...(jumpLabel ? { jump_label: jumpLabel } : {}) } : { jump_url: null, jump_label: null }),
       };
     });
+    const nextSettings = settings ?? this.snapshot.settings;
     this.snapshot = {
       op: "state",
       hubs,
@@ -321,6 +407,7 @@ export class UiBridge {
       my_remote_listeners: myRemoteListeners,
       directory_online_count: directoryOnlineCount,
       harnesses: resolvedHarnesses,
+      ...(nextSettings ? { settings: nextSettings } : {}),
     };
     this.pending = true;
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }

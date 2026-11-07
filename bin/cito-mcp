@@ -1,9 +1,46 @@
 #!/usr/bin/env node
-import { runEntrypoint } from "./loader.js";
+import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-try {
-  await runEntrypoint("../dist/src/mcp/cli.js", "../src/mcp/cli.ts");
-} catch (error) {
-  process.stderr.write("cito-mcp: " + (error instanceof Error ? error.message : String(error)) + "\n");
-  process.exitCode = 1;
+const nativeBin = fileURLToPath(new URL("./cito-native-darwin-arm64", import.meta.url));
+if (
+  process.argv.length <= 2 &&
+  process.platform === "darwin" &&
+  process.arch === "arm64" &&
+  process.env.CITO_DISABLE_NATIVE !== "1" &&
+  existsSync(nativeBin)
+) {
+  const child = spawn(nativeBin, ["mcp-stdio"], {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      CITO_ENDPOINT_PID: process.env.CITO_ENDPOINT_PID ?? String(process.ppid),
+      CITO_NODE_BIN: process.env.CITO_NODE_BIN ?? process.execPath,
+    },
+  });
+  const forwardSignal = (sig) => {
+    try {
+      child.kill(sig);
+    } catch {}
+  };
+  process.on("SIGINT", () => forwardSignal("SIGINT"));
+  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      process.exit(0);
+    }
+    process.exit(code ?? 0);
+  });
+  child.on("error", () => {
+    process.exit(1);
+  });
+} else {
+  const { runEntrypoint } = await import("./loader.js");
+  try {
+    await runEntrypoint("../dist/src/mcp/cli.js", "../src/mcp/cli.ts");
+  } catch (error) {
+    process.stderr.write("cito-mcp: " + (error instanceof Error ? error.message : String(error)) + "\n");
+    process.exitCode = 1;
+  }
 }

@@ -129,7 +129,7 @@ describe("cito hub CLI and zero-script packaging contract", () => {
       expect(pkg.scripts?.[forbidden]).toBeUndefined();
     }
     expect(Object.keys(pkg.scripts ?? {})).toEqual(["test", "typecheck", "compile", "prepublishOnly"]);
-    expect(pkg.scripts?.compile).toBe("rm -rf dist && tsc && if [ \"$(uname -s)-$(uname -m)\" = \"Darwin-arm64\" ]; then swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64 && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64; fi");
+    expect(pkg.scripts?.compile).toBe("rm -rf dist && tsc && if [ \"$(uname -s)-$(uname -m)\" = \"Darwin-arm64\" ]; then swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64 && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64 && cargo build --release --manifest-path crates/cito-native/Cargo.toml && cp crates/cito-native/target/release/cito-native bin/cito-native-darwin-arm64 && strip -x bin/cito-native-darwin-arm64 && codesign -s - --force bin/cito-native-darwin-arm64 && rm -rf crates/cito-native/target; fi");
     expect(pkg.scripts?.prepublishOnly).toBe("npm run typecheck && npm run compile");
     expect(pkg.dependencies?.tsx).toBeUndefined();
     expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["@modelcontextprotocol/sdk", "jose", "zod"]);
@@ -243,6 +243,30 @@ export default (manifest: PluginManifest) => new SocketBridgeAdapter(manifest.id
       const installedPkgRoot = await realpath(join(prefix, "lib/node_modules/@tefx/cito"));
       expect(existsSync(join(installedPkgRoot, "dist"))).toBe(false);
       expect(existsSync(join(installedPkgRoot, "bin/cito-ui-darwin-arm64"))).toBe(true);
+      if (process.platform === "darwin" && process.arch === "arm64") {
+        const nativeBinPath = join(installedPkgRoot, "bin/cito-native-darwin-arm64");
+        expect(existsSync(nativeBinPath)).toBe(true);
+        // Warm macOS AMFI/syspolicyd CDHash cache on first execution of copied binary
+        spawnSync(nativeBinPath, ["claude-hook"], {
+          cwd: directory,
+          env: isolatedEnv(directory),
+          input: "{}",
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        const t0 = performance.now();
+        const nativeFastHook = spawnSync(nativeBinPath, ["claude-hook"], {
+          cwd: directory,
+          env: isolatedEnv(directory),
+          input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        const elapsedMs = performance.now() - t0;
+        expect(nativeFastHook.status).toBe(0);
+        expect(nativeFastHook.stdout).toBe("{}\n");
+        expect(elapsedMs).toBeLessThan(15);
+      }
       for (const [binName, targetRel] of [
         ["cito", "bin/cito-mcp"],
         ["cito-mcp", "bin/cito-mcp"],

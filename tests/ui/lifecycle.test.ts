@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat, utimes, writeFile, readFile } from "node:fs/promises
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ensureUiCompiled, expandJumpUrl, isSafeJumpUrl, UiBridge, validAction, type BannerPayload, type UiHarnessMetadata, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
+import { ensureUiCompiled, expandJumpUrl, isSafeJumpUrl, UiBridge, validAction, type BannerPayload, type UiHarnessMetadata, type UiSettingsState, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
 import { KeyedMutex } from "../../src/shared/index.js";
 import { waitFor } from "../mcp/support.js";
 
@@ -62,7 +62,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
 });
 
 interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; hovered?: boolean; reuse_identifier?: string; background?: number[]; border?: number[]; border_width?: number; foreground?: number[]; tint?: number[]; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
-interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
+interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; settings_open?: boolean; settings_tab?: string; settings_launch_at_login?: boolean; settings_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
 test("real AppKit card views expose template icon, 380pt control-center geometry, state-driven hub drawers, and SF Symbol controls", async () => {
@@ -802,3 +802,240 @@ test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui ren
     await bridge.close();
   }
 }, 20000);
+
+test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-click Set Up, LAN Hub Sharing, Paste from Invite, inline Add Hub form, Launch at Login, and Escape close", async () => {
+  expect(validAction({ op: "open_settings" })).toBe(true);
+  expect(validAction({ op: "close_settings" })).toBe(true);
+  expect(validAction({ op: "setup_apply", harness: "pi" })).toBe(true);
+  expect(validAction({ op: "setup_apply", harness: "BAD HARNESS" })).toBe(false);
+  expect(validAction({ op: "set_host_hub", enabled: true, port: 4291 })).toBe(true);
+  expect(validAction({ op: "set_launch_at_login", enabled: true })).toBe(true);
+  expect(validAction({ op: "setup_save_hub", name: "tailnet", url: "http://127.0.0.1:4291", auth_mode: "token", token: "tok1" })).toBe(true);
+  expect(validAction({ op: "setup_toggle_hub", hub: "local", enabled: false })).toBe(true);
+  expect(validAction({ op: "setup_remove_hub", hub: "tailnet" })).toBe(true);
+  expect(validAction({ op: "setup_remove_hub", hub: "local" })).toBe(false);
+
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, {
+    binary,
+    env: { CITO_UI_HEADLESS: "1" },
+    diagnostic: line => diagnostics.push(line),
+    onAction: action => { actions.push(action); },
+  });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+
+  try {
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+
+    const settings1: UiSettingsState = {
+      apps: [
+        {
+          id: "pi",
+          display_name: "Pi",
+          tier: "stable",
+          installed: true,
+          configured: false,
+          status: "not_configured",
+          detail: "Installed on this Mac · Click Set Up to connect",
+          paths: ["/tmp/.pi/agent/settings.json"],
+        },
+        {
+          id: "codex",
+          display_name: "Codex",
+          tier: "stable",
+          installed: true,
+          configured: true,
+          status: "ready",
+          detail: "Connected and ready for Cito notifications",
+          paths: ["/tmp/.codex/config.toml"],
+        },
+        {
+          id: "claude",
+          display_name: "Claude",
+          tier: "experimental",
+          installed: true,
+          configured: false,
+          status: "not_configured",
+          detail: "Installed on this Mac · Click Set Up to connect",
+          paths: ["/tmp/.claude/settings.json"],
+        },
+      ],
+      hubs: [
+        {
+          name: "local",
+          url: "local://",
+          auth_mode: "none",
+          enabled: true,
+          is_default: true,
+          status: "connected",
+          user: "alice",
+          error: null,
+        },
+        {
+          name: "tailnet",
+          url: "http://100.64.0.10:4291",
+          auth_mode: "token",
+          enabled: true,
+          is_default: false,
+          status: "connected",
+          user: "alice",
+          error: null,
+        },
+      ],
+      host_hub: {
+        enabled: false,
+        running: false,
+        port: 4291,
+        endpoint_url: "http://192.168.1.20:4291",
+        token: "secret-lan-token-123",
+        invite_command: "cito setup --hub alice-mac --url http://192.168.1.20:4291 --auth token --token secret-lan-token-123 --default",
+        error: null,
+      },
+      launch_at_login: false,
+    };
+
+    bridge.state(hubs, [listener], [], [], 1, undefined, settings1);
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1"));
+
+    const menuSnap = await inspect();
+    const menuNodes = flatten(menuSnap.items);
+    expect(menuSnap.actions).toBe(10);
+    expect(menuNodes.find(n => n.id === "open_settings")).toMatchObject({
+      text: "Settings…",
+      symbol: "gearshape",
+      x: 168,
+      y: 6,
+      width: 88,
+      height: 24,
+    });
+
+    // Click Settings… button in footer -> opens Surface 3 SettingsPanel (520x460pt) on Agent Apps tab
+    send({ op: "test_control", id: "open_settings" });
+    await waitFor(() => actions.some(a => a.op === "open_settings"));
+    const openSnap = await inspect();
+    expect(openSnap).toMatchObject({
+      settings_open: true,
+      settings_tab: "apps",
+      settings_launch_at_login: false,
+    });
+    const settingsNodes1 = flatten(openSnap.settings_items ?? []);
+    expect(settingsNodes1.find(n => n.id === "settings_panel")).toMatchObject({ width: 520, height: 460 });
+    expect(settingsNodes1.find(n => n.id === "settings_tab:apps")).toMatchObject({
+      text: "Agent Apps",
+      symbol: "square.grid.2x2",
+      x: 132,
+      y: 12,
+      width: 126,
+      height: 24,
+    });
+    expect(settingsNodes1.find(n => n.id === "settings_tab:hubs")).toMatchObject({
+      text: "Hubs & Network",
+      symbol: "network",
+      x: 262,
+      y: 12,
+      width: 128,
+      height: 24,
+    });
+    expect(settingsNodes1.find(n => n.id === "settings_app_status:pi")?.text).toBe("○ Not Set Up");
+    expect(settingsNodes1.find(n => n.id === "setup_app:pi")?.text).toBe("Set Up");
+    expect(settingsNodes1.find(n => n.id === "settings_app_status:codex")?.text).toBe("● Connected");
+    expect(settingsNodes1.find(n => n.id === "setup_app:codex")?.text).toBe("Re-check");
+    expect(settingsNodes1.find(n => n.id === "settings_app_tier:claude")).toBeDefined();
+
+    // Click Set Up on Pi -> emits setup_apply
+    send({ op: "test_control", id: "setup_app:pi" });
+    await waitFor(() => actions.some(a => a.op === "setup_apply" && a.harness === "pi"));
+
+    // Switch to Hubs & Network tab
+    send({ op: "test_control", id: "settings_tab:hubs" });
+    const hubsTabSnap = await inspect();
+    expect(hubsTabSnap.settings_tab).toBe("hubs");
+    const hubsNodes = flatten(hubsTabSnap.settings_items ?? []);
+    expect(hubsNodes.find(n => n.id === "host_hub_card")).toMatchObject({ x: 20, y: 232, width: 480, height: 124 });
+    expect(hubsNodes.find(n => n.id === "toggle_host_hub")?.text).toBe("Off");
+    expect(hubsNodes.find(n => n.id === "host_hub_endpoint")?.text).toBe("http://192.168.1.20:4291");
+
+    // Toggle Share Hub on Local Network -> emits set_host_hub
+    send({ op: "test_control", id: "toggle_host_hub" });
+    await waitFor(() => actions.some(a => a.op === "set_host_hub" && a.enabled === true));
+
+    // Update settings state (even with unchanged hubs/listeners, receive(_:) rebuilds settingsPanel because frame.settings != settings)
+    const settings2: UiSettingsState = {
+      ...settings1,
+      host_hub: { ...settings1.host_hub, enabled: true, running: true },
+      launch_at_login: true,
+    };
+    bridge.state(hubs, [listener], [], [], 1, undefined, settings2);
+    await waitFor(async () => flatten((await inspect()).settings_items ?? []).find(n => n.id === "toggle_host_hub")?.text === "● Sharing");
+
+    // Copy 1-Click Join Code -> copies invite_command to clipboard and shows ✓ Copied
+    send({ op: "test_control", id: "copy_hub_invite" });
+    const afterCopy = await inspect();
+    expect(afterCopy.clipboard).toBe(settings1.host_hub.invite_command);
+    expect(flatten(afterCopy.settings_items ?? []).find(n => n.id === "copy_hub_invite")).toMatchObject({
+      text: "✓ Copied",
+      green: true,
+    });
+
+    // Paste from Invite -> parses invite command from clipboard and emits setup_save_hub
+    send({
+      op: "test_clipboard",
+      text: "cito setup --hub studio-mac --url http://100.64.0.99:4291 --auth token --token lan-token-xyz --default",
+    });
+    send({ op: "test_control", id: "paste_hub_invite" });
+    await waitFor(() =>
+      actions.some(
+        a =>
+          a.op === "setup_save_hub" &&
+          a.name === "studio-mac" &&
+          a.url === "http://100.64.0.99:4291" &&
+          a.auth_mode === "token" &&
+          a.token === "lan-token-xyz",
+      ),
+    );
+
+    // Inline + Add Hub… form with test_settings_input and submit_add_hub
+    send({ op: "test_control", id: "open_add_hub" });
+    const formSnap = await inspect();
+    expect(flatten(formSnap.settings_items ?? []).find(n => n.id === "add_hub_form")).toBeDefined();
+    send({ op: "test_control", id: "settings_hub_auth:oidc" });
+    send({ op: "test_settings_input", id: "settings_hub_name", value: "team" });
+    send({ op: "test_settings_input", id: "settings_hub_url", value: "https://hub.example.com" });
+    send({ op: "test_settings_input", id: "settings_hub_issuer", value: "https://id.example.com" });
+    send({ op: "test_settings_input", id: "settings_hub_client_id", value: "cito-client" });
+    send({ op: "test_control", id: "submit_add_hub" });
+    await waitFor(() =>
+      actions.some(
+        a =>
+          a.op === "setup_save_hub" &&
+          a.name === "team" &&
+          a.url === "https://hub.example.com" &&
+          a.auth_mode === "oidc" &&
+          a.issuer === "https://id.example.com" &&
+          a.client_id === "cito-client",
+      ),
+    );
+
+    // Toggle hub enabled & remove non-local hub & toggle Launch at Login
+    send({ op: "test_control", id: "toggle_hub:local" });
+    await waitFor(() => actions.some(a => a.op === "setup_toggle_hub" && a.hub === "local" && a.enabled === false));
+    send({ op: "test_control", id: "remove_hub:tailnet" });
+    await waitFor(() => actions.some(a => a.op === "setup_remove_hub" && a.hub === "tailnet"));
+    send({ op: "test_control", id: "settings_launch_at_login" });
+    await waitFor(() => actions.some(a => a.op === "set_launch_at_login" && a.enabled === false));
+
+    // Escape closes SettingsPanel and emits close_settings
+    send({ op: "test_settings_key", key: "escape" });
+    await waitFor(() => actions.some(a => a.op === "close_settings"));
+    expect((await inspect()).settings_open).toBe(false);
+  } finally {
+    await bridge.close();
+  }
+}, 25000);

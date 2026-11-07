@@ -11,6 +11,12 @@ import { hubNameSchema } from "./validation.js";
 
 export type HubAuthMode = "none" | "token" | "oidc";
 
+export interface HostHubConfig {
+  enabled: boolean;
+  port: number;
+  token: string;
+}
+
 export interface HubConfig {
   name: string;
   natsUrl: string;
@@ -34,6 +40,7 @@ export interface CitoConfig extends Omit<HubConfig, "name"> {
   env: NodeJS.ProcessEnv;
   pluginDirs: string[];
   plugins?: Record<string, Record<string, unknown>>;
+  hostHub?: HostHubConfig;
 }
 export function expandHomeDir(value: string, name?: string, baseHome?: string): string {
   if (!value.trim()) throw new Error((name ?? "Path") + " must not be empty");
@@ -140,11 +147,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     defaultScope: z.enum(["self", "workspace"]).optional(),
     default_scope: z.enum(["self", "workspace"]).optional(),
   }).refine(v => Boolean(v.url || v.natsUrl || v.nats_url), { message: "Hub url or natsUrl is required" });
+  const hostHubSchema = z.object({
+    enabled: z.boolean().optional(),
+    port: z.number().int().min(0).max(65535).optional(),
+    token: z.string().optional(),
+  });
   let json: {
     hubs: Record<string, z.infer<typeof entrySchema>>;
     default_hub?: string;
     daemonPort?: number;
     plugins?: Record<string, Record<string, unknown>>;
+    host_hub?: z.infer<typeof hostHubSchema>;
+    hostHub?: z.infer<typeof hostHubSchema>;
   } | undefined;
   if ((env === process.env || env.CITO_STATE_DIR !== undefined || env.CITO_CONFIG_PATH !== undefined)
     && (env.CITO_CONFIG_PATH !== undefined || existsSync(path))) {
@@ -154,6 +168,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
         default_hub: hubNameSchema.optional(),
         daemonPort: z.number().int().min(1).max(65535).optional(),
         plugins: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+        host_hub: hostHubSchema.optional(),
+        hostHub: hostHubSchema.optional(),
       }).parse(JSON.parse(readFileSync(path, "utf8")));
     } catch (cause) { throw new CitoError("INVALID_INPUT", "Cannot load hub configuration: " + path, { cause }); }
   }
@@ -228,6 +244,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     ? env.CITO_PLUGIN_PATH.split(delimiter).map(s => s.trim()).filter(Boolean).map(p => expandHomeDir(p, "CITO_PLUGIN_PATH", env.HOME))
     : [];
   const pluginDirs = [builtinPluginsDir, join(stateDir, "plugins"), ...extraPluginDirs];
+  const rawHostHub = json?.host_hub ?? json?.hostHub;
+  const hostHub: HostHubConfig | undefined = rawHostHub
+    ? {
+        enabled: rawHostHub.enabled === true,
+        port: rawHostHub.port ?? 4291,
+        token: rawHostHub.token?.trim() ?? "",
+      }
+    : undefined;
   const { name: _name, ...mirror } = hubs[defaultHub]!;
   return {
     ...mirror,
@@ -240,6 +264,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     env,
     pluginDirs,
     ...(json?.plugins ? { plugins: json.plugins } : {}),
+    ...(hostHub ? { hostHub } : {}),
   };
 }
 

@@ -1,16 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { networkInterfaces } from "node:os";
 import { basename, join } from "node:path";
 import { z } from "zod";
-import { UiBridge, type UiOptions, type UiRemotePeerSummary, type UiToDaemonAction } from "../ui/index.js";
+import { UiBridge, type UiAppSetupSummary, type UiHostHubSummary, type UiHubConfigSummary, type UiOptions, type UiRemotePeerSummary, type UiSettingsState, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverAllAvailableSessions, ensurePluginsLoaded, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
+import { getLocalHubEngine } from "../hub/client.js";
+import { startHubServer, type HubServer } from "../hub/server.js";
+import { applySetup, ensureCliShims, inspectSetup, setLaunchAtLogin } from "../setup/index.js";
 import { Events, NatsErrorCode, type KvEntry, type QueuedIterator, KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
   localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
-  senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256,
+  senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256, validateHarness,
   listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema,
-  type CitoConfig, type Principal } from "../shared/index.js";
+  type CitoConfig, type HubConfig, type Principal } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, type ListenerRow, type Registration, type SentRow, type SignalRow } from "./state.js";
 import { OidcLogin, type BrowserOpener } from "./oidc.js";
 import { Receiver, encode, refreshSessionBadge, type Broker, type ReceiverOptions } from "./receiver.js";
@@ -483,6 +487,36 @@ export class HubSlot {
   }
 }
 
+function resolveLanHost(config: CitoConfig): string {
+  try {
+    const nets = networkInterfaces();
+    let tailscaleIp: string | undefined;
+    let lanIp: string | undefined;
+    for (const entries of Object.values(nets)) {
+      for (const info of entries ?? []) {
+        if (info.internal || info.family !== "IPv4") continue;
+        const ip = info.address;
+        if (ip.startsWith("100.")) {
+          tailscaleIp ??= ip;
+        } else if (ip.startsWith("192.168.") || ip.startsWith("10.") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) {
+          lanIp ??= ip;
+        } else {
+          lanIp ??= ip;
+        }
+      }
+    }
+    if (tailscaleIp) return tailscaleIp;
+    if (lanIp) return lanIp;
+  } catch { /* Fall back to hostname. */ }
+  const cleanHost = config.hostName.trim();
+  return cleanHost || "127.0.0.1";
+}
+
+function resolveHostSlug(config: CitoConfig): string {
+  const base = config.hostName.replace(/\.local$/i, "");
+  return normalizeSlug(base) || "lan";
+}
+
 /** One shared SQLite database, lazily connected independent HubSlots. */
 export class CitoService {
   private static readonly liveServices = new Set<CitoService>();
@@ -495,6 +529,12 @@ export class CitoService {
   private directoryQuery = "";
   private directoryScope: "all" | "mine" = "all";
   private directoryHarness = "all";
+  private settingsOpen = false;
+  private settingsState?: UiSettingsState;
+  private hostHubServer?: HubServer;
+  private hostHubPort?: number;
+  private hostHubToken?: string;
+  private hostHubError: string | null = null;
   private socketWatcher?: FSWatcher;
   private socketWatchTimer?: ReturnType<typeof setTimeout>;
   readonly slots = new Map<string, HubSlot>();
@@ -513,20 +553,41 @@ export class CitoService {
     const task = receiver.stop().catch(error => this.log(error)); this.retirements.add(task);
     void task.finally(() => this.retirements.delete(task));
   }
+  private makeSlot(name: string, hub: HubConfig): HubSlot {
+    const slotConfig: CitoConfig = {
+      ...this.config,
+      ...hub,
+      token: hub.token,
+      defaultScope: hub.defaultScope,
+      enabled: hub.enabled,
+      oidcIssuer: hub.oidcIssuer,
+      oidcClientId: hub.oidcClientId,
+      oidcScopes: hub.oidcScopes,
+      oidcRedirectPort: hub.oidcRedirectPort,
+    };
+    return new HubSlot(
+      name,
+      slotConfig,
+      this.options,
+      broker => this.restoreReceivers(name, broker),
+      () => {
+        this.slots.get(name)?.directoryIndex.clear();
+        for (const receiver of this.receivers.values()) {
+          if (receiver.hub === name) {
+            receiver.cancel();
+            void receiver.badge().catch(error => this.log(error));
+          }
+        }
+      },
+      () => this.pushUiState(),
+    );
+  }
   private constructor(config: CitoConfig, state: LocalState, hostId: string, options: ServiceOptions) {
     this.config = config; this.state = state; this.hostId = hostId; this.options = options;
     CitoService.liveServices.add(this);
     for (const [name, hub] of Object.entries(config.hubs)) {
       if (hub.enabled === false) continue;
-      // Optional authentication settings belong to this hub, never the mirrored default.
-      const slotConfig = { ...config, ...hub, token: hub.token, defaultScope: hub.defaultScope, enabled: hub.enabled,
-        oidcIssuer: hub.oidcIssuer, oidcClientId: hub.oidcClientId,
-        oidcScopes: hub.oidcScopes, oidcRedirectPort: hub.oidcRedirectPort };
-      this.slots.set(name, new HubSlot(name, slotConfig, options,
-        broker => this.restoreReceivers(name, broker), () => {
-          this.slots.get(name)?.directoryIndex.clear();
-          for (const receiver of this.receivers.values()) if (receiver.hub === name) { receiver.cancel(); void receiver.badge().catch(error => this.log(error)); }
-        }, () => this.pushUiState()));
+      this.slots.set(name, this.makeSlot(name, hub));
     }
   }
   private upsertDirectoryEntry(hub: string, id: string, value: Registration, revision: number): void {
@@ -577,9 +638,166 @@ export class CitoService {
         } catch { /* Optional watcher. */ }
       }
       this.ui ??= new UiBridge(this.config.stateDir, { ...this.options.ui, onAction: action => this.handleUiAction(action) });
+      await this.refreshSettingsState().catch(() => {});
       await this.ui.start(); this.pushUiState();
       void this.refreshAvailableSessions();
     })();
+  }
+  async syncHostHub(): Promise<void> {
+    const hostHub = this.config.hostHub;
+    if (!hostHub?.enabled) {
+      if (this.hostHubServer) {
+        const prev = this.hostHubServer;
+        this.hostHubServer = undefined;
+        this.hostHubPort = undefined;
+        this.hostHubToken = undefined;
+        await prev.close().catch(() => {});
+      }
+      this.hostHubError = null;
+      return;
+    }
+
+    let token = hostHub.token.trim();
+    const requestedPort = hostHub.port ?? 4291;
+    if (!token) {
+      await applySetup({
+        env: this.config.env,
+        hostHub: { enabled: true, port: requestedPort, resetToken: true },
+      });
+      const reloaded = loadConfig(this.config.env);
+      this.config.hostHub = reloaded.hostHub;
+      token = reloaded.hostHub?.token ?? "";
+    }
+
+    if (
+      this.hostHubServer &&
+      this.hostHubToken === token &&
+      (requestedPort === 0 || this.hostHubPort === requestedPort)
+    ) {
+      return;
+    }
+
+    if (this.hostHubServer) {
+      const prev = this.hostHubServer;
+      this.hostHubServer = undefined;
+      await prev.close().catch(() => {});
+    }
+
+    try {
+      const srv = await startHubServer({
+        bind: "0.0.0.0",
+        port: requestedPort,
+        authMode: "token",
+        token,
+        engine: getLocalHubEngine(this.config.stateDir),
+      });
+      this.hostHubServer = srv;
+      this.hostHubPort = srv.port;
+      this.hostHubToken = token;
+      this.hostHubError = null;
+    } catch (error) {
+      this.hostHubError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  async refreshSettingsState(): Promise<UiSettingsState> {
+    const inspection = await inspectSetup({ env: this.config.env });
+    const apps: UiAppSetupSummary[] = inspection.harnesses.map(h => ({
+      id: h.id,
+      display_name: h.displayName,
+      tier: h.tier,
+      installed: h.installed,
+      configured: h.configured,
+      status: h.configured ? "ready" : "not_configured",
+      detail: h.configured
+        ? "Connected and ready for Cito notifications"
+        : h.installed
+        ? "Installed on this Mac · Click Set Up to connect"
+        : "Not detected yet · Click Set Up to pre-configure",
+      paths: h.paths,
+    }));
+
+    const hubs: UiHubConfigSummary[] = Object.entries(inspection.hubs).map(([name, h]) => {
+      const slot = this.slots.get(name);
+      return {
+        name,
+        url: h.url,
+        auth_mode: h.authMode,
+        enabled: h.enabled,
+        is_default: name === inspection.defaultHub,
+        status: slot ? slot.status : "disconnected",
+        user: slot?.principal?.owner_user ?? null,
+        error: slot?.error ?? null,
+      };
+    });
+
+    const hostCfg = this.config.hostHub ?? inspection.hostHub;
+    const effectivePort = this.hostHubPort ?? hostCfg.port ?? 4291;
+    const lanHost = resolveLanHost(this.config);
+    const hostSlug = resolveHostSlug(this.config);
+    const endpointUrl = `http://${lanHost}:${effectivePort}`;
+    const token = hostCfg.token || "";
+    const inviteCommand = token
+      ? `cito setup --hub ${hostSlug} --url ${endpointUrl} --auth token --token ${token} --default`
+      : `cito setup --hub ${hostSlug} --url ${endpointUrl} --default`;
+
+    const host_hub: UiHostHubSummary = {
+      enabled: hostCfg.enabled,
+      running: Boolean(this.hostHubServer),
+      port: effectivePort,
+      endpoint_url: endpointUrl,
+      token,
+      invite_command: inviteCommand,
+      error: this.hostHubError,
+    };
+
+    const nextSettings: UiSettingsState = {
+      apps,
+      hubs,
+      host_hub,
+      launch_at_login: inspection.launchAtLogin,
+    };
+    this.settingsState = nextSettings;
+    return nextSettings;
+  }
+  async reloadHubSlotsFromConfig(): Promise<void> {
+    const reloaded = loadConfig(this.config.env);
+    (this.config as { hubs: Record<string, HubConfig>; defaultHub: string }).hubs = reloaded.hubs;
+    (this.config as { hubs: Record<string, HubConfig>; defaultHub: string }).defaultHub = reloaded.defaultHub;
+    this.config.hostHub = reloaded.hostHub;
+
+    for (const [name, existingSlot] of [...this.slots.entries()]) {
+      const nextHub = reloaded.hubs[name];
+      if (!nextHub || nextHub.enabled === false) {
+        const activeRows = this.state.db
+          .prepare("SELECT listener_id FROM local_listeners WHERE hub = ? AND status IN ('ACTIVE','REBINDING')")
+          .all(name) as { listener_id: string }[];
+        for (const r of activeRows) {
+          await this.unlistenById(name, String(r.listener_id)).catch(() => {});
+        }
+        await existingSlot.close().catch(() => {});
+        this.slots.delete(name);
+      } else if (
+        existingSlot.config.natsUrl !== nextHub.natsUrl ||
+        existingSlot.config.authMode !== nextHub.authMode ||
+        existingSlot.config.token !== nextHub.token ||
+        existingSlot.config.oidcIssuer !== nextHub.oidcIssuer ||
+        existingSlot.config.oidcClientId !== nextHub.oidcClientId
+      ) {
+        await existingSlot.close().catch(() => {});
+        const replacement = this.makeSlot(name, nextHub);
+        this.slots.set(name, replacement);
+        await replacement.network({ interactive: false }).catch(() => {});
+      }
+    }
+
+    for (const [name, nextHub] of Object.entries(reloaded.hubs)) {
+      if (nextHub.enabled === false || this.slots.has(name)) continue;
+      const added = this.makeSlot(name, nextHub);
+      this.slots.set(name, added);
+      await added.network({ interactive: false }).catch(() => {});
+    }
+
+    await this.syncConnectedDirectories().catch(() => {});
   }
   async connectBackground(): Promise<void> {
     await Promise.allSettled([...this.slots.values()].map(slot => slot.network({ interactive: false })));
@@ -754,7 +972,23 @@ export class CitoService {
       can_jump: getAdapter(row.harness)?.canJump === true }));
     const available = filterAvailableSessions(this.availableSessions, activeRows, this.slots.size);
     const { myRemote, onlineCount } = this.collectMyRemoteAndOnlineCount();
-    this.ui?.state(hubs, listeners, available, myRemote, onlineCount);
+    if (this.settingsState) {
+      this.settingsState = {
+        ...this.settingsState,
+        hubs: this.settingsState.hubs.map(h => {
+          const slot = this.slots.get(h.name);
+          return slot
+            ? {
+                ...h,
+                status: slot.status,
+                user: slot.principal?.owner_user ?? null,
+                error: slot.error,
+              }
+            : { ...h, status: "disconnected", user: null, error: null };
+        }),
+      };
+    }
+    this.ui?.state(hubs, listeners, available, myRemote, onlineCount, undefined, this.settingsState);
     if (this.directoryOpen) this.pushUiDirectory();
   }
   async handleUiAction(action: UiToDaemonAction): Promise<void> {
@@ -774,6 +1008,83 @@ export class CitoService {
         }
         case "close_directory": {
           this.directoryOpen = false;
+          break;
+        }
+        case "open_settings": {
+          this.settingsOpen = true;
+          await this.refreshSettingsState();
+          break;
+        }
+        case "close_settings": {
+          this.settingsOpen = false;
+          break;
+        }
+        case "setup_apply": {
+          const harness = validateHarness(action.harness);
+          await applySetup({
+            env: this.config.env,
+            enableHarnesses: [harness],
+            force: action.force ?? true,
+          });
+          await this.refreshSettingsState();
+          break;
+        }
+        case "set_host_hub": {
+          await applySetup({
+            env: this.config.env,
+            hostHub: {
+              enabled: action.enabled,
+              ...(action.port !== undefined ? { port: action.port } : {}),
+              ...(action.reset_token !== undefined ? { resetToken: action.reset_token } : {}),
+            },
+          });
+          const reloaded = loadConfig(this.config.env);
+          this.config.hostHub = reloaded.hostHub;
+          await this.syncHostHub();
+          await this.refreshSettingsState();
+          break;
+        }
+        case "set_launch_at_login": {
+          await setLaunchAtLogin(action.enabled, { env: this.config.env });
+          await this.refreshSettingsState();
+          break;
+        }
+        case "setup_save_hub": {
+          await applySetup({
+            env: this.config.env,
+            hub: {
+              name: action.name,
+              url: action.url,
+              authMode: action.auth_mode,
+              ...(action.token !== undefined ? { token: action.token } : {}),
+              ...(action.issuer !== undefined ? { oidcIssuer: action.issuer } : {}),
+              ...(action.client_id !== undefined ? { oidcClientId: action.client_id } : {}),
+              ...(action.set_default !== undefined ? { setDefault: action.set_default } : {}),
+            },
+          });
+          await this.reloadHubSlotsFromConfig();
+          await this.refreshSettingsState();
+          void this.refreshAvailableSessions();
+          break;
+        }
+        case "setup_toggle_hub": {
+          await applySetup({
+            env: this.config.env,
+            ...(action.enabled ? { enableHubs: [action.hub] } : { disableHubs: [action.hub] }),
+          });
+          await this.reloadHubSlotsFromConfig();
+          await this.refreshSettingsState();
+          void this.refreshAvailableSessions();
+          break;
+        }
+        case "setup_remove_hub": {
+          await applySetup({
+            env: this.config.env,
+            removeHubs: [action.hub],
+          });
+          await this.reloadHubSlotsFromConfig();
+          await this.refreshSettingsState();
+          void this.refreshAvailableSessions();
           break;
         }
         case "query_directory": {
@@ -920,8 +1231,14 @@ export class CitoService {
   }
   static async create(config = loadConfig(), options: ServiceOptions = {}, state?: LocalState): Promise<CitoService> {
     await ensurePluginsLoaded(config);
+    await ensureCliShims({ stateDir: config.stateDir, env: config.env }).catch(() => {});
     const hostId = await getHostId({ stateDir: config.stateDir });
-    return new CitoService(config, state ?? await LocalState.open(config.stateDir), hostId, options);
+    const service = new CitoService(config, state ?? await LocalState.open(config.stateDir), hostId, options);
+    if (config.hostHub?.enabled) {
+      await service.syncHostHub();
+    }
+    await service.refreshSettingsState().catch(() => {});
+    return service;
   }
   private slot(hub?: string): HubSlot {
     if (this.slots.size === 0) throw new CitoError("NATS_UNAVAILABLE", "No enabled hubs configured");
@@ -1334,6 +1651,8 @@ export class CitoService {
     this.socketWatcher = undefined;
     // Mark the bridge stopped before waiting for a cold compilation to finish.
     const uiClosing = this.ui?.close();
+    const hostHubClosing = this.hostHubServer?.close().catch(() => {});
+    this.hostHubServer = undefined;
     const closingKeys = new Set(this.receivers.keys()), receivers = [...this.receivers.values()];
     for (const receiver of receivers) receiver.cancel();
     const slotsClosing = Promise.allSettled([...this.slots.values()].map(slot => slot.close()));
@@ -1347,6 +1666,7 @@ export class CitoService {
     }
     for (const row of sessions.values()) await refreshSessionBadge(this.state, this.config, row.harness, row.session_id, { closingKeys }).catch(error => this.log(error));
     this.receivers.clear(); this.state.liveReceivers.clear(); await slotsClosing;
+    await hostHubClosing;
     await uiClosing; await this.uiStarting?.catch(error => this.log(error)); this.state.close();
   }
 }
