@@ -6252,7 +6252,7 @@ phases:
   - id: v21.hygiene
     name: 'Deep Iterative Code-Hygiene Audit & Fix Across Full Repository (Rust, Swift,
       Plugins, Site, Docs & Tests) [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: 'Load /Users/tefx/.pi/agent/skills/code-hygiene/SKILL.md and execute
       a deep, multi-round iterative code-hygiene audit and fix cycle across the entire
       repository (crates/cito-native/, src/, plugins/, site/, docs/, packaging/, .github/workflows/,
@@ -6284,6 +6284,25 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T22:35:20.875318Z'
+    done_at: '2026-11-07T22:52:31.018413+00:00'
+    evidence: "Artifact:\n- Commits: 135d3cfd15447f86e46f0e939095e720a794c4c3 and\
+      \ 54a8fb0325f5630ad5bef8f83481a9e500c238a5 (fast-forwarded onto main)\n\nVerification:\n\
+      - Run: npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb -> exit 0 (33 test files, 258 tests passed, 0 failed,\
+      \ 0 skipped; Syntax OK)\n- [REQUIRES_SKILL: code-hygiene] Full-Repository Iterative\
+      \ Convergence:\n  - Round 1: structural-auditor (01a1b829-d5a7-7507-87ac-5714a71fae4d)\
+      \ and uiux-auditor (01a1b829-d553-7149-b3ba-dfb69acc55a1) audited the full repository\
+      \ across all 5 lenses, identifying 3 dead-code/unused-import trims (read_json_map\
+      \ in crates/cito-native/src/setup.rs, hub_name_for_remove in crates/cito-native/src/daemon.rs,\
+      \ parseArgs import in plugins/pi/cito-bridge.ts) and 4 wiring/completeness/consolidation\
+      \ items (dotted-key TOML --force preservation in setup.rs, native cito inbox\
+      \ / cito find / sqlite-cli thread fallback parity in daemon.rs, first-launch\
+      \ explicit consent copy in site/index.html & site/docs/guide.html, and cancel_uninstall_all\
+      \ control ID consolidation in src/macos/cito-ui.swift).\n  - Round 2: All 7\
+      \ findings resolved in 54a8fb0325f5630ad5bef8f83481a9e500c238a5 with discriminating\
+      \ behavioral tests added in tests/setup/distribution.test.ts and tests/site/site.test.ts,\
+      \ converging to Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\nSpec link:\n\
+      - docs/DESIGN.md (§8), docs/ROADMAP.md (Stage 5 v0.17.0), and AGENTS.md"
   - id: v21.gate
     name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
       & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
