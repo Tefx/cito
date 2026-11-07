@@ -4,9 +4,9 @@ Cito's staged evolution from `v0.11.3` is organized into **six `0.x` stages (`St
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
-- **Stage 3 (`v0.15.0`)**: Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`, `HumanChannelPlugin` (`cito-ui` + `plugins/telegram`), `Directory | Activity` Feed & Inline Hub Reply Composer
-- **Stage 4 (`v0.16.0`)**: Project Website, Visual Architecture Showcase, Plugin SDK Authoring Guide & Onboarding Docs
-- **Stage 5 (`v0.17.0`)**: Public Distribution, Developer ID Code Signing, Apple Notarization & Release Automation
+- **Stage 3 (`v0.15.0` — Completed)**: Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`, `HumanChannelPlugin` (`cito-ui` + `plugins/telegram`), `Directory | Activity` Feed & Inline Hub Reply Composer
+- **Stage 4 (`v0.16.0`)**: Brand & Icon System (`AppIcon.icns`), Calm 4-Section Product Website & Plugin SDK Guide (`https://tefx.github.io/cito/`)
+- **Stage 5 (`v0.17.0`)**: Zero-Setup Startup Bootstrap, Homebrew & `Cito.app` Distribution, Conditional Apple Notarization & Release Automation
 
 ---
 
@@ -58,20 +58,22 @@ Completed in Phase `v18` (`2ade0a7`, tag `v0.14.0`).
 
 ---
 
-## Stage 4 (`v0.16.0`): Project Website, Visual Architecture Showcase & Plugin SDK Authoring Guide
+## Stage 4 (`v0.16.0`): Brand & Icon System (`AppIcon.icns`), Calm 4-Section Product Website & Plugin SDK Guide (`https://tefx.github.io/cito/`)
 
-1. **Official Landing Page & Visual Showcase**:
-   - Interactive showcase of the macOS AppKit surfaces (`cardMenu`, `DirectoryPanel` `Directory & Activity`, `SettingsPanel` `Agent Apps / Human Channels / Hubs`, and `WakeBanner`), `Cito.app` download + 1-line install.
-2. **Plugin SDK (`@tefx/cito/plugin-sdk`) Guide for Both Agent Apps (`kind: "agent"`) & Human Channels (`kind: "human"`)**:
-   - Step-by-step documentation for authoring custom Agent App plugins and custom Human Channel plugins (`~/.cito/plugins/<id>/`).
-3. **Self-Hosted `cito hub` & Team Onboarding Guide**:
-   - Documentation for single-Mac (`local`), cross-Mac LAN/Tailscale sharing (`Share Hub on Local Network`), and team OIDC + shared Bot deployment (`deploy/hub/`).
+1. **Unified Brand System & macOS `AppIcon.icns`**:
+   - Compile the tactile dark-graphite & warm-amber Cito transceiver icon into `bin/AppIcon.icns` (wired into `Cito.app/Contents/Resources/AppIcon.icns` via `CFBundleIconFile`), `site/assets/brand/{cito-mark,cito-logo-dark,cito-logo-light}.svg`, `site/favicon.svg`, `site/apple-touch-icon.png`, and the adaptive `<picture>` header in `README.md`.
+2. **Calm, Spacious 4-Section Homepage (`site/index.html`) & Pre-Verified Codex `image_gen` (OpenAI Images 2.6) Artwork**:
+   - Designed as a human-first Product Introduction (inspired by Things 3, Panic, and Raycast) centered on **Cross-Harness Agent-to-Agent Signaling (`Codex ⇄ Claude Code ⇄ Pi`)** and **Unified Human + Agent Network (`@you` on Mac & Telegram)**, with zero pixel/port/SQLite/opcode implementation leaks on the homepage, interactive 2-scene Hero preview (`Agent → Agent` & `Agent ↔ You`), and OpenAI Images 2.6 studio artwork (`site/assets/art/`).
+3. **Dedicated Technical Docs (`site/docs/{guide,plugins,architecture}.html`) & GitHub Pages Subpath Deployment**:
+   - Relative-path clean static bundle for `https://tefx.github.io/cito/` (no `CNAME`, `.nojekyll`, `.github/workflows/pages.yml`) with automated subpath verification in `tests/site/site.test.ts`.
 
 ---
 
-## Stage 5 (`v0.17.0`): Public Distribution, Developer ID Signing, Notarization & Release Automation
+## Stage 5 (`v0.17.0`): Zero-Setup Startup Bootstrap, Homebrew & `Cito.app` Distribution, Conditional Apple Notarization & Release Automation
 
-1. **Apple Developer ID Code Signing & Notarization**:
-   - Sign `Cito.app` (`Contents/MacOS/Cito`, `Contents/Helpers/cito-ui`, `Contents/Helpers/cito-native`) with Developer ID Application certificate and Hardened Runtime, and notarize via `xcrun notarytool` + `stapler`.
-2. **Public Distribution Channels**:
-   - GitHub Releases (`Cito-darwin-arm64.dmg` / `.zip`), Homebrew Cask/Tap formula, and automated release checks.
+1. **Zero-Setup First-Launch Bootstrap**:
+   - `Cito.app` / `cito daemon` automatically installs `~/.cito/bin/{cito,cito-mcp,cito-claude-hook}` shims and auto-configures detected Stable Agent Apps on startup, eliminating any manual `cito setup` terminal step.
+2. **Two Official Installation Channels (1. Homebrew `brew install tefx/tap/cito`, 2. Download `Cito.app`)**:
+   - Ship `packaging/homebrew/cito.rb` (with `/opt/homebrew/opt/cito` version-invariant path resolution across `brew upgrade`) and relocatable `Cito-macos-arm64.zip` via `.github/workflows/release.yml` (with conditional Developer ID Hardened Runtime signing & `xcrun notarytool` notarization when `APPLE_SIGNING_IDENTITY` is configured, and ad-hoc signing otherwise). Do not promote `npm install` as a user installation channel.
+3. **Open-Source Release Hygiene (`LICENSE` MIT & Distribution Verification Suite)**:
+   - Add `LICENSE` (MIT) and `tests/setup/distribution.test.ts` verifying Formula syntax, relocatable `Cito.app`, conditional codesign flags, and repository-wide open-source hygiene.

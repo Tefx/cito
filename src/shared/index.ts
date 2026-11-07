@@ -1,4 +1,4 @@
-export const CITO_VERSION = "0.15.0";
+export const CITO_VERSION = "0.16.0";
 export * from "./errors.js";
 export * from "./validation.js";
 export * from "./identity.js";

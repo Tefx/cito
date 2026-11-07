@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Plugin SDK Guide — Cito Documentation</title>
+  <meta name="description" content="Author custom Agent App plugins (HarnessAdapter) and Human Channel plugins (HumanChannelPlugin) with @tefx/cito/plugin-sdk." />
+  <link rel="canonical" href="https://tefx.github.io/cito/docs/plugins.html" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="Plugin SDK Guide — Cito Documentation" />
+  <meta property="og:description" content="Authoring guide for @tefx/cito/plugin-sdk: kind: agent (HarnessAdapter) and kind: human (HumanChannelPlugin with scope: hub | user fields and 6-char pairing)." />
+  <meta property="og:url" content="https://tefx.github.io/cito/docs/plugins.html" />
+  <meta property="og:image" content="https://tefx.github.io/cito/assets/og-card.png" />
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+  <link rel="stylesheet" href="../styles/tokens.css" />
+  <link rel="stylesheet" href="../styles/main.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="nav-inner">
+      <a class="brand-link" href="../index.html" aria-label="Cito Home">
+        <img class="brand-logo" src="../assets/brand/cito-logo-dark.svg" alt="Cito" />
+      </a>
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="./guide.html">Guide</a>
+        <a href="./plugins.html" aria-current="page">Plugins</a>
+        <a href="./architecture.html">Architecture</a>
+        <a class="nav-cta" href="https://github.com/Tefx/cito">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-shell">
+    <aside class="docs-sidebar" aria-label="Documentation Navigation">
+      <div class="docs-nav-group">
+        <div class="docs-nav-title">Documentation</div>
+        <a class="docs-nav-link" href="./guide.html">Getting Started Guide</a>
+        <a class="docs-nav-link" href="./plugins.html" aria-current="page">Plugin SDK Authoring</a>
+        <a class="docs-nav-link" href="./architecture.html">Architecture &amp; Protocol</a>
+      </div>
+      <div class="docs-nav-group">
+        <div class="docs-nav-title">On This Page</div>
+        <a class="docs-nav-link" href="#overview">1. Plugin Architecture</a>
+        <a class="docs-nav-link" href="#agent-plugins">2. Agent App Plugins (kind: "agent")</a>
+        <a class="docs-nav-link" href="#human-plugins">3. Human Channel Plugins (kind: "human")</a>
+        <a class="docs-nav-link" href="#two-scope-fields">4. Two-Scope Fields &amp; 6-Char Pairing</a>
+      </div>
+    </aside>
+
+    <main class="docs-content">
+      <div>
+        <span class="eyebrow">Extensibility · <code>@tefx/cito/plugin-sdk</code></span>
+        <h1>Plugin SDK Authoring Guide</h1>
+      </div>
+      <p>
+        Cito's core engine, daemon, and macOS UI contain zero hardcoded agent or messaging channel names. Every concrete coding harness (<code>plugins/pi</code>, <code>plugins/codex</code>, <code>plugins/claude</code>) and every human notification channel (<code>plugins/human</code>, <code>plugins/telegram</code>) is implemented against <code>@tefx/cito/plugin-sdk</code> and rendered dynamically from its <code>plugin.json</code> manifest.
+      </p>
+
+      <h2 id="overview">1. Plugin Discovery &amp; Directory Layout</h2>
+      <p>
+        Cito loads built-in plugins from <code>plugins/&lt;id&gt;/</code> and user-installed plugins from <code>~/.cito/plugins/&lt;id&gt;/</code> (or any directory listed in <code>CITO_PLUGIN_PATH</code>). Each plugin directory contains:
+      </p>
+      <ul>
+        <li><code>plugin.json</code> — declarative metadata, visual SF Symbol icon and tint, and optional two-scope configuration fields.</li>
+        <li><code>index.ts</code> or <code>index.js</code> — default export implementing either <code>HarnessAdapter</code> (<code>kind: "agent"</code>) or <code>HumanChannelPlugin</code> (<code>kind: "human"</code>).</li>
+      </ul>
+
+      <h2 id="agent-plugins">2. Authoring an Agent App Plugin (<code>kind: "agent"</code>)</h2>
+      <p>
+        An Agent App plugin integrates a coding agent CLI or desktop IDE with Cito's session discovery, liveness probing, and wake delivery pipeline.
+      </p>
+
+      <h3>Step 1: Create <code>~/.cito/plugins/cursor/plugin.json</code></h3>
+      <pre><code>{
+  "id": "cursor",
+  "kind": "agent",
+  "displayName": "Cursor",
+  "tier": "custom",
+  "sfSymbol": "cursorarrow.rays",
+  "tint": "purple",
+  "cliFlag": true
+}</code></pre>
+
+      <h3>Step 2: Implement <code>HarnessAdapter</code> in <code>index.ts</code></h3>
+      <pre><code>import type {
+  HarnessAdapter,
+  AvailableSessionSummary,
+  ProbeOutcome,
+  DeliverOutcome,
+  DeliverContext,
+} from "@tefx/cito/plugin-sdk";
+
+const cursorAdapter: HarnessAdapter = {
+  id: "cursor",
+  pidKeys: ["cursor_pid", "caller_pid"],
+
+  async discoverAvailableSessions(config, signal): Promise&lt;AvailableSessionSummary[]&gt; {
+    // Return open local sessions so they appear under AVAILABLE SESSIONS in the menu bar UI
+    return [];
+  },
+
+  async probe(row, config, signal): Promise&lt;ProbeOutcome&gt; {
+    // Verify whether the enrolled session is still alive on this host
+    return { status: "alive" };
+  },
+
+  async deliver(row, ctx: DeliverContext): Promise&lt;DeliverOutcome&gt; {
+    // Deliver ctx.card (&lt;cito_signal&gt;...&lt;/cito_signal&gt;) to wake the target session
+    ctx.markQueueWritten();
+    return "delivered";
+  },
+};
+
+export default cursorAdapter;</code></pre>
+
+      <h2 id="human-plugins">3. Authoring a Human Channel Plugin (<code>kind: "human"</code>)</h2>
+      <p>
+        A Human Channel plugin connects a user's <code>Human Node</code> (<code>harness: "human", session_id: "default"</code>) to an external messaging surface (such as Telegram, Slack, Discord, or Webhook) with restart-idempotent delivery tracking and bidirectional reply routing.
+      </p>
+
+      <h3 id="two-scope-fields">Step 1: Declare Two-Scope Fields (<code>scope: "hub" | "user"</code>) &amp; Pairing in <code>plugin.json</code></h3>
+      <p>
+        Fields in <code>plugin.json</code> support two scopes that the macOS <code>SettingsPanel</code> (<code>Human Channels</code> tab) renders automatically:
+      </p>
+      <ul>
+        <li><code>scope: "hub"</code>: Shared Hub-wide credentials (for example, a shared team Bot Token run by <code>cito hub</code>).</li>
+        <li><code>scope: "user"</code>: Per-user recipient binding (for example, each engineer's personal <code>chatId</code> or user handle).</li>
+      </ul>
+      <pre><code>{
+  "id": "telegram",
+  "kind": "human",
+  "displayName": "Telegram",
+  "tier": "stable",
+  "sfSymbol": "paperplane.fill",
+  "tint": "blue",
+  "fields": [
+    {
+      "key": "botToken",
+      "scope": "hub",
+      "label": "Bot Token (@BotFather)",
+      "type": "secret",
+      "required": true,
+      "placeholder": "123456789:AAH..."
+    },
+    {
+      "key": "chatId",
+      "scope": "user",
+      "label": "Telegram Chat ID",
+      "type": "string",
+      "required": true,
+      "placeholder": "Paired via /start code or enter manually"
+    }
+  ],
+  "pairing": {
+    "supported": true,
+    "actionLabel": "Pair with Telegram"
+  }
+}</code></pre>
+
+      <h3>Step 2: Implement <code>HumanChannelPlugin</code> in <code>index.ts</code></h3>
+      <p>
+        When <code>pairing.supported</code> is <code>true</code>, clicking the pairing button in <code>Settings…</code> generates a 6-character Base32 code (<code>cito-xxxxxx</code>). Your background service can complete pairing via <code>ctx.completePairing(code, { userConfig })</code> and route human replies back to agents via <code>ctx.resolveReplyTarget</code> and <code>ctx.sendReplyFromHuman</code>:
+      </p>
+      <pre><code>import type {
+  HumanChannelPlugin,
+  HumanNotificationPayload,
+  HumanChannelDeliveryResult,
+  HumanChannelServiceContext,
+} from "@tefx/cito/plugin-sdk";
+
+const customHumanPlugin: HumanChannelPlugin = {
+  id: "custom-chat",
+  kind: "human",
+
+  formatPairingInstruction({ code }) {
+    return `Send "/start cito-${code}" to your bot to link your account.`;
+  },
+
+  async testConnection({ hubConfig, userConfig, owner_user }) {
+    return { ok: true, detail: `Verified channel for @${owner_user}` };
+  },
+
+  async sendNotification(
+    notification: HumanNotificationPayload,
+    { hubConfig, userConfig },
+  ): Promise&lt;HumanChannelDeliveryResult&gt; {
+    // Deliver notification.message to external channel and return externalMessageId for swipe-reply correlation
+    return {
+      delivered: true,
+      externalMessageId: `msg-${notification.seq}`,
+    };
+  },
+
+  async startService(ctx: HumanChannelServiceContext) {
+    // Optional long-polling or webhook listener that calls:
+    // 1. ctx.completePairing(code, { userConfig: { chatId } })
+    // 2. ctx.resolveReplyTarget(principalId, { replyToExternalMsgId })
+    // 3. ctx.sendReplyFromHuman(principalId, { to_listener_id, message, in_reply_to })
+    return {
+      async stop() {},
+    };
+  },
+};
+
+export default customHumanPlugin;</code></pre>
+    </main>
+  </div>
+
+  <footer class="site-footer">
+    <div>
+      <strong>Cito Documentation</strong> · <a class="text-link" href="../index.html">Back to Product Overview</a>
+    </div>
+    <div class="footer-links">
+      <a href="./guide.html">Getting Started</a>
+      <a href="./plugins.html">Plugin SDK</a>
+      <a href="./architecture.html">Architecture</a>
+      <a href="https://github.com/Tefx/cito">GitHub</a>
+    </div>
+  </footer>
+
+  <script src="../scripts/hero-preview.js"></script>
+</body>
+</html>

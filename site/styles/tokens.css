@@ -1,0 +1,46 @@
+:root {
+  /* Tactile Dark Obsidian & Warm Amber Signal Palette */
+  --bg-canvas: #0C0E12;
+  --bg-elevated: #12151C;
+  --bg-surface: #171B24;
+  --bg-surface-hover: #1E2330;
+  --bg-glass: rgba(18, 21, 28, 0.82);
+
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-amber: rgba(245, 158, 11, 0.45);
+
+  --text-primary: #F3F4F6;
+  --text-secondary: #9CA3AF;
+  --text-muted: #6B7280;
+
+  --accent-amber: #F59E0B;
+  --accent-amber-soft: rgba(245, 158, 11, 0.14);
+  --accent-amber-glow: rgba(245, 158, 11, 0.24);
+  --accent-green: #10B981;
+  --accent-teal: #14B8A6;
+  --accent-blue: #38BDF8;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* Generous Spatial Rhythm (>= 50% Negative Space) */
+  --space-xs: 0.5rem;
+  --space-sm: 0.875rem;
+  --space-md: 1.5rem;
+  --space-lg: 2.5rem;
+  --space-xl: 4.5rem;
+  --space-2xl: 7.5rem;
+  --space-3xl: 10rem;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.125rem;
+  --radius-xl: 1.5rem;
+  --radius-pill: 999rem;
+
+  --container-max: 70rem;
+  --container-narrow: 48rem;
+  --docs-max: 74rem;
+}

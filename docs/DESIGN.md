@@ -41,6 +41,7 @@
   - `cito-daemon` runs `HubEngine` + `AgentChannelHost` + `HumanChannelHost` in-process; all configuration and interaction are unified in `cito-ui`.
 - **Standalone Hub Mode (`cito hub` on Server / Docker)**:
   - `cito hub` runs `HubEngine` + `HumanChannelHost` in the same single process/container by default (so cloud channels like `plugins/telegram` stay online 24/7 and share 1 Hub bot token across the team without `409 Conflict`).
+  - Also supports `cito channel run --hub <url>` as a standalone CLI escape hatch connecting over HTTP/SSE.
 
 ---
 
@@ -174,3 +175,76 @@
    - Verify `grep -rn 'jumpUrlTemplate\|expandJumpUrl\|openJumpUrl' src/ plugins/` returns `0` matches.
    - Update `tests/ui/lifecycle.test.ts` for removed `open:<scoped_id>` (`initial.actions === 9`, `test_action` indices `1..8`, `WakeBanner` click opening `DirectoryPanel` in `"activity"` mode with `composer_target` set) and add comprehensive tests for `Directory | Activity` mode switching, inline `ComposerBar` `send_signal` & `ack_signals`, and 3-tab `SettingsPanel` (`settings_tab:channels` dynamic field rendering, pairing code flow, save, and test).
    - Add unit & integration tests for multi-channel `Node` attachment without `FENCED_INACTIVE`, `signal_claim_dispatch` single-execution guarantee, `signal_ack` cross-channel read sync & restart idempotency (`hub_channel_deliveries`), `@self` / `@<username>` resolution, and `plugins/telegram` (`sendMessage`, `getUpdates` `/start <code>` pairing, swipe reply, and implicit recent-sender reply).
+
+---
+
+## 7. Stage 4 (`v0.16.0`): Brand & Icon System (`AppIcon.icns`), Calm 4-Section Product Website (`site/`) & GitHub Pages (`https://tefx.github.io/cito/`)
+
+### 7.1 Unified Brand Mark & macOS App Icon (`bin/AppIcon.icns`, `site/assets/brand/`, `README.md`)
+1. **Canonical Geometric Brand Mark (`site/assets/brand/cito-mark.svg`, `cito-logo-dark.svg`, `cito-logo-light.svg`, `site/favicon.svg`, `site/apple-touch-icon.png`)**:
+   - Directly matches `makeCitoStatusIcon` in `src/macos/cito-ui.swift` (`18 × 18` coordinate grid, center `(8, 9)`):
+     - Open C-shaped transceiver arc: radius `5.50`, `+42°` to `-42°` (`M 12.09 5.32 A 5.50 5.50 0 1 0 12.09 12.68`, `stroke="#F3F4F6"`, `stroke-width="1.75"`, `stroke-linecap="round"`).
+     - Central node core: `cx="8" cy="9" r="1.65"` (`fill="#F59E0B"`).
+     - Outbound wake wave: radius `7.75`, `+28°` to `-28°` (`M 14.84 5.36 A 7.75 7.75 0 0 1 14.84 12.64`, `stroke="#F59E0B"`, `stroke-width="1.65"`, `stroke-linecap="round"`).
+   - `README.md` top header embeds `<picture>` switching between `site/assets/brand/cito-logo-dark.svg` and `site/assets/brand/cito-logo-light.svg` with links to `https://tefx.github.io/cito/` and its `/docs/` pages.
+2. **macOS Application Icon (`bin/AppIcon.icns` & `buildMacAppBundle` in `src/setup/index.ts`)**:
+   - Generated from the pre-verified OpenAI Images 2.6 master `/tmp/cito-preview-art/app-icon-master.png` (`1024 × 1024` master squircle with bead-blasted dark graphite anodized aluminum body, recessed instrument dial, brushed silver C-arc, and warm amber core/wave) into all 10 standard `.iconset` slices (`icon_16x16.png`..`icon_512x512@2x.png`) and compiled via `/usr/bin/iconutil -c icns -o bin/AppIcon.icns` (`20 KB < size < 500 KB`).
+   - `buildMacAppBundle` in `src/setup/index.ts`:
+     - Creates `Contents/Resources` (`mkdir(resourcesDir, { recursive: true })`);
+     - Copies `join(pkgRoot, "bin", "AppIcon.icns")` to `join(resourcesDir, "AppIcon.icns")` **before** running `codesign -s - --force --deep`;
+     - Adds `<key>CFBundleIconFile</key><string>AppIcon</string>` and `<key>CFBundleIconName</key><string>AppIcon</string>` to `Contents/Info.plist`, keeping total `Cito.app` size `< 5 MB`.
+
+### 7.2 Calm, Spacious 4-Section Product Homepage (`site/index.html`) vs. Technical Docs (`site/docs/`)
+1. **Strict Homepage Restraint & Anti-AI-Slop Rules (`site/index.html`)**:
+   - **Zero Internal Implementation Leaks on `site/index.html`**: No pixel/point dimensions (`380pt`, `560×440pt`, `px`), no port numbers (`:4290`, `:4291`), no SQLite table or cursor names (`consumer_ack`, `signal_claim_dispatch`, `hub_channel_deliveries`, `SQLite`, `WAL`), and no AppKit class names (`NSMenu`, `KeyPanel`).
+   - **Zero AI-Slop Visuals or Copy**: No purple/cyan neon radial blurs, no emoji-topped feature grids, no banned buzzwords (`seamless`, `empower`, `supercharge`, `next-generation`, `reimagined`, `game-changer`, `synergy`), and no `Not X, but Y` contrastive templates.
+   - **4 Spacious Sections with `>= 50%` Calm Negative Space**:
+     - **Section 1 (Hero)**:
+       - Headline: *"Where your agents talk—with you, and each other."*
+       - Lead (2 sentences): *"Cito connects your sessions across Codex, Claude Code, and Pi—on one Mac or across your machines—so agents can discover and wake each other directly. And because you are on the same network via your Mac menu bar and Telegram, they bring you into the loop whenever a decision is needed."*
+       - Actions (Strictly 2 installation paths — **Homebrew** first and **Download `Cito.app`** second; do **NOT** recommend `npm install` or require `&& cito setup` on the website or `README.md`):
+         1. Primary 1-click copy command pill: `brew install tefx/tap/cito`
+         2. Secondary button: `Download Cito.app for macOS`
+       - Interactive Hero Stage framed over `./assets/art/hero-stage.png` with a 2-scene switcher: **`[ ⚡ Agent → Agent ]`** (Claude Code session waking an idle Codex session) and **`[ 💬 Agent ↔ You ]`** (clicking a menu bar notification, sending a 1-line inline reply, and watching it wake the agent and mark Telegram read).
+     - **Section 2 (Three Everyday Moments)**:
+       1. *Stop playing courier between your agents* (`Codex ⇄ Claude Code ⇄ Pi` direct cross-harness discovery & wake, accompanied by `./assets/art/moment-cross-harness.png`).
+       2. *You are a node on the same network* (Read and reply from your Mac menu bar or Telegram on your phone, accompanied by `./assets/art/moment-human-network.png`).
+       3. *From one Mac to your whole team* (Zero-config on one Mac, 1-switch local network sharing, or shared team hub).
+     - **Section 3 (Built for Your Favorite Harnesses)**: Clean showcase of `Codex`, `Claude Code`, `Pi`, and `Telegram` with links to `./docs/guide.html` and `./docs/plugins.html`.
+     - **Section 4 (Ready in Under a Minute)**: `brew install tefx/tap/cito` + `Download Cito.app for macOS` and minimal footer.
+2. **Pre-Verified Codex `image_gen` (OpenAI Images 2.6) Raster Assets (`site/assets/art/`)**:
+   - Copy the 4 pre-generated OpenAI Images 2.6 assets from `/tmp/cito-preview-art/{hero-stage.png,moment-cross-harness.png,moment-human-network.png,app-icon-master.png}` into `site/assets/art/` (and generate `site/assets/og-card.png` `1200 × 630` + `site/assets/IMAGEGEN_PROMPTS.md`).
+3. **Dedicated Technical Documentation Pages (`site/docs/{guide,plugins,architecture}.html`)**:
+   - `site/docs/guide.html`: 1-step installation via **1. Homebrew (`brew install tefx/tap/cito`)** or **2. Download `Cito.app`** (no `npm install` recommendation, no manual `cito setup` required because `Cito.app` and `cito daemon` auto-bootstrap `~/.cito/bin/` and detected Stable Agent Apps on startup and provide the visual `Settings…` `⌘,` window), 1-click Telegram pairing, and LAN/Team Hub setup.
+   - `site/docs/plugins.html`: `@tefx/cito/plugin-sdk` authoring guide for both `kind: "agent"` (`HarnessAdapter`) and `kind: "human"` (`HumanChannelPlugin` with `scope: "hub" | "user"` fields and 6-char pairing).
+   - `site/docs/architecture.html`: `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` protocol, `@self` / `@<username>` addressing, multi-channel read sync, and the 5 MCP tools.
+
+### 7.3 GitHub Pages Default Subpath (`https://tefx.github.io/cito/`, No `CNAME`) & Deployment Workflow
+- **No `site/CNAME`**: Served at `https://tefx.github.io/cito/` with `site/.nojekyll`.
+- **Relative Path Rule for Subpath Compatibility**: Every DOM link, stylesheet, script, and image in `site/index.html` (`./...`) and `site/docs/*.html` (`../...` and `./...`) MUST use relative paths (zero root-absolute `href="/..."` or `src="/..."`), while `<link rel="canonical">`, `<meta property="og:url">`, and `<meta property="og:image">` use full `https://tefx.github.io/cito/...` URLs.
+- **GitHub Actions Workflow (`.github/workflows/pages.yml`)**: Deploys `./site` to GitHub Pages on push to `main` via `actions/upload-pages-artifact@v3` and `actions/deploy-pages@v4`.
+- **Verification**: Serve `site/` under a `/cito/` prefix on a local HTTP test server (`tests/site/site.test.ts`), verifying HTTP `200` on all pages and linked assets, zero banned implementation tokens on `site/index.html`, valid `bin/AppIcon.icns` in `Cito.app/Contents/Resources/AppIcon.icns`, and `CITO_VERSION === "0.16.0"`.
+
+---
+
+## 8. Stage 5 (`v0.17.0`): Zero-Setup Startup Bootstrap, Homebrew & `Cito.app` Distribution, Conditional Apple Notarization & Open-Source Release Hygiene
+
+### 8.1 Automatic First-Launch Bootstrap (Eliminating the Manual `cito setup` User Step)
+- When `Cito.app` or `cito daemon` starts (`CitoService.create()` in `src/mcp/service.ts`):
+  1. Calls `ensureCliShims(config)` to keep `${stateDir}/bin/{cito,cito-mcp,cito-claude-hook}` up to date;
+  2. Automatically runs non-destructive first-launch auto-setup for detected Stable Agent Apps (`tier === "stable"`, i.e., `codex` and `pi`, with `force: false` so existing user configs are never overwritten), while users can inspect or toggle any integration visually in `SettingsPanel` (`⌘,`).
+  3. As a result, users installing via **`brew install tefx/tap/cito`** or **`Cito.app`** never need to run `cito setup` in a terminal!
+
+### 8.2 Two Official User-Facing Distribution Channels (Homebrew First, `Cito.app` Download Second)
+1. **Priority 1 — Homebrew (`packaging/homebrew/cito.rb`)**:
+   - Installs `Cito.app` and links `cito`, `cito-mcp`, and `cito-claude-hook` into `#{bin}/` using version-invariant `/opt/homebrew/opt/cito/...` paths (`resolveStablePackageRoot()` in `src/setup/index.ts` maps `/Cellar/<name>/<version>/` to `/opt/<name>/` so `brew upgrade cito` never breaks `Cito.app` or LaunchAgent paths).
+   - Validated in automated tests via `/usr/bin/ruby -c packaging/homebrew/cito.rb` and version parity assertions (`version === CITO_VERSION`).
+2. **Priority 2 — Self-Contained `Cito.app` Archive (`Cito-macos-arm64.zip` & `.github/workflows/release.yml`)**:
+   - `buildMacAppBundle` (`src/setup/index.ts`) bundles a relocatable `Cito.app` (resolving bundled `Contents/Resources/app/bin/cito-mcp` and `/opt/homebrew/opt/cito/...` before any build-time fallback path) and strips `com.apple.quarantine` (`xattr -cr`).
+   - Supports conditional Apple Developer ID signing and notarization via `CITO_CODESIGN_IDENTITY`:
+     - When `CITO_CODESIGN_IDENTITY` (or GitHub Actions `APPLE_SIGNING_IDENTITY`) is set: signs with `--force --options runtime --timestamp --sign "$CITO_CODESIGN_IDENTITY"`, submits to `xcrun notarytool submit --wait`, and staples with `xcrun stapler staple`.
+     - When unset (default before joining Apple Developer Program): signs ad-hoc (`codesign -s - --force --deep`).
+3. **Open-Source Release Hygiene (`LICENSE`, `README.md`, `tests/setup/distribution.test.ts`)**:
+   - Add root `MIT` `LICENSE` file and `"license": "MIT"` in `package.json` (preserving `pkg.files` and `pkg.scripts` keys intact).
+   - Bump `CITO_VERSION`, `package.json`, and `crates/cito-native/Cargo.toml` to `"0.17.0"`.
+   - Verify across `README.md`, `site/index.html`, and `site/docs/guide.html` that only the two official install methods (**1. `brew install tefx/tap/cito`** and **2. Download `Cito.app`**) are presented as user installation paths, with zero `npm install` or `&& cito setup` user onboarding steps.

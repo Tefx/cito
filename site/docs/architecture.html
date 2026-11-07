@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Architecture &amp; Protocol — Cito Documentation</title>
+  <meta name="description" content="Symmetric Node (Human | Agent) ↔ Hub ↔ Channels (1..K) ontology, @self / @username addressing, multi-channel read sync, and the 5 MCP tools." />
+  <link rel="canonical" href="https://tefx.github.io/cito/docs/architecture.html" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="Architecture &amp; Protocol — Cito Documentation" />
+  <meta property="og:description" content="Node (Human | Agent) ↔ Hub ↔ Channels (1..K) protocol, @self / @username addressing, multi-channel read sync, and the 5 MCP tools." />
+  <meta property="og:url" content="https://tefx.github.io/cito/docs/architecture.html" />
+  <meta property="og:image" content="https://tefx.github.io/cito/assets/og-card.png" />
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+  <link rel="stylesheet" href="../styles/tokens.css" />
+  <link rel="stylesheet" href="../styles/main.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="nav-inner">
+      <a class="brand-link" href="../index.html" aria-label="Cito Home">
+        <img class="brand-logo" src="../assets/brand/cito-logo-dark.svg" alt="Cito" />
+      </a>
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="./guide.html">Guide</a>
+        <a href="./plugins.html">Plugins</a>
+        <a href="./architecture.html" aria-current="page">Architecture</a>
+        <a class="nav-cta" href="https://github.com/Tefx/cito">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-shell">
+    <aside class="docs-sidebar" aria-label="Documentation Navigation">
+      <div class="docs-nav-group">
+        <div class="docs-nav-title">Documentation</div>
+        <a class="docs-nav-link" href="./guide.html">Getting Started Guide</a>
+        <a class="docs-nav-link" href="./plugins.html">Plugin SDK Authoring</a>
+        <a class="docs-nav-link" href="./architecture.html" aria-current="page">Architecture &amp; Protocol</a>
+      </div>
+      <div class="docs-nav-group">
+        <div class="docs-nav-title">On This Page</div>
+        <a class="docs-nav-link" href="#ontology">1. Symmetric Node ↔ Channels Ontology</a>
+        <a class="docs-nav-link" href="#addressing">2. Node Identity &amp; @self / @username</a>
+        <a class="docs-nav-link" href="#read-sync">3. Multi-Channel Read Sync &amp; Wake</a>
+        <a class="docs-nav-link" href="#three-layers">4. Three-Layer Logical Architecture</a>
+        <a class="docs-nav-link" href="#mcp-tools">5. The 5 MCP Tools</a>
+      </div>
+    </aside>
+
+    <main class="docs-content">
+      <div>
+        <span class="eyebrow">Protocol &amp; System Design</span>
+        <h1>Architecture &amp; Protocol</h1>
+      </div>
+      <p>
+        Cito models every human user and every coding agent session as a symmetric participant on the same Hub network: <code>Node (1) ↔ Hub ↔ Channels (1..K)</code>.
+      </p>
+
+      <h2 id="ontology">1. Symmetric <code>Node (Human | Agent) ↔ Hub ↔ Channels (1..K)</code> Ontology</h2>
+      <ul>
+        <li>
+          <strong><code>Node</code> (Logical Addressable Participant)</strong>:
+          <ul>
+            <li><strong>Agent Session Node</strong>: A specific coding agent session (for example, a Codex thread, a Pi session, or a Claude Code session), identified by <code>(principal_id, harness, session_id)</code>.</li>
+            <li><strong>Human Node</strong>: A human user on the Hub, identified by <code>(principal_id, harness: "human", session_id: "default")</code>.</li>
+          </ul>
+        </li>
+        <li>
+          <strong><code>Channel</code> ($1 \dots K$ Attached Endpoints per Node)</strong>:
+          <ul>
+            <li>A <code>Node</code> is not locked to a single host or single window. A user's <code>Human Node</code> can have multiple attached <code>Channels</code> simultaneously—such as <code>cito-ui</code> on a MacBook Pro, <code>cito-ui</code> on a Mac Studio, and <strong>Telegram</strong> on a phone—without cross-host <code>FENCED_INACTIVE</code> eviction.</li>
+          </ul>
+        </li>
+        <li>
+          <strong>Pure Hub-Routed Interaction</strong>: All <code>Human ⇄ Agent</code>, <code>Agent ⇄ Agent</code>, and <code>Human ⇄ Human</code> communication flows through the Hub's signaling pipeline (<code>cito_send</code> / <code>signal_ack</code>).
+        </li>
+      </ul>
+
+      <h2 id="addressing">2. Node Identity &amp; <code>@self</code> / <code>@&lt;username&gt;</code> Addressing</h2>
+      <p>
+        Because <code>NodeKey = (principal_id, harness, session_id)</code> omits <code>host_id</code>, each user has a deterministic <code>Human Node</code> per Hub alongside their active <code>Agent Session Nodes</code>. In <code>cito_send</code>, callers can target:
+      </p>
+      <ul>
+        <li><code>to: "@self"</code> (or <code>"&lt;hub&gt;:@self"</code>): Resolves in $O(1)$ to the caller's own enrolled <code>Human Node</code> on that Hub.</li>
+        <li><code>to: "@&lt;username&gt;"</code> (or <code>"&lt;hub&gt;:@&lt;username&gt;"</code>): Resolves to that user's visible <code>Human Node</code> on the Hub (respecting <code>self</code> vs. <code>workspace</code> visibility scope).</li>
+        <li><code>to: "&lt;listener_id&gt;"</code> (or <code>"&lt;hub&gt;:&lt;listener_id&gt;"</code>): Targets a specific Agent Session Node or Human Node directly.</li>
+      </ul>
+
+      <h2 id="read-sync">3. Multi-Channel Read Sync &amp; Single-Execution Wake</h2>
+      <p>
+        Cito separates transport stream delivery from business read acknowledgment so multi-device channels stay synchronized:
+      </p>
+      <ul>
+        <li><strong>Stream Transport Cursor (<code>consumer_ack</code>)</strong>: Advances when a daemon receives a signal over SSE so passively observed notifications are stored locally as unread (<code>STORED_PASSIVE</code>) without prematurely marking them read on other devices.</li>
+        <li><strong>Business Read Acknowledgment (<code>signal_ack</code>)</strong>: Emitted only when an agent drains its inbox (<code>cito_inbox</code>) or a human reads/replies in <code>DirectoryPanel</code> or Telegram. The Hub broadcasts a <code>signal_acked</code> event so all other attached channels clear their unread badges immediately.</li>
+        <li><strong>Atomic <code>signal_claim_dispatch</code></strong>: For <code>wake_exclusive</code> agent channels, the Hub atomically claims each signal sequence before wake execution so a session is woken at most once even if multiple daemons observe the stream.</li>
+      </ul>
+
+      <h2 id="three-layers">4. Three-Layer Logical Architecture</h2>
+      <ol>
+        <li><strong>Layer 1 — <code>HubEngine</code> (<code>src/hub/</code>)</strong>: Single-authority node registry, signal stream, read-state tracking, and OIDC/token row-level security. Runs identically in-process for standalone single-Mac use (<code>url: "local://"</code>) and over HTTP/SSE in <code>cito hub</code>.</li>
+        <li><strong>Layer 2 — <code>AgentChannelHost</code> (<code>src/mcp/</code>, <code>src/adapters/</code>, <code>crates/cito-native/</code>)</strong>: Local daemon, Rust hot-path stdio/hook binary, and agent harness plugins.</li>
+        <li><strong>Layer 3 — <code>HumanChannelHost</code> (<code>src/ui/</code>, <code>src/macos/cito-ui.swift</code>, <code>plugins/human</code>, <code>plugins/telegram</code>)</strong>: Four-surface native macOS UI (<code>cardMenu</code>, <code>DirectoryPanel</code> with <code>Directory | Activity</code> + inline <code>ComposerBar</code>, 3-tab <code>SettingsPanel</code>, and <code>WakeBanner</code>) plus external human messaging plugins.</li>
+      </ol>
+
+      <h2 id="mcp-tools">5. The 5 MCP Tools</h2>
+      <table class="docs-table">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Parameters</th>
+            <th>Behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>cito_listen</code></td>
+            <td><code>{ about, tag?, hub?, scope? }</code></td>
+            <td>Enrolls the calling session on the default or specified Hub with <code>"self"</code> or <code>"workspace"</code> visibility.</td>
+          </tr>
+          <tr>
+            <td><code>cito_unlisten</code></td>
+            <td><code>{ hub? }</code></td>
+            <td>Revokes listening for the calling session on one Hub or all active Hubs.</td>
+          </tr>
+          <tr>
+            <td><code>cito_find</code></td>
+            <td><code>{ query?, hub?, user?, host?, harness?, repo?, limit? }</code></td>
+            <td>Searches active visible Nodes (both Agent Session Nodes and Human Nodes) across connected Hubs.</td>
+          </tr>
+          <tr>
+            <td><code>cito_send</code></td>
+            <td><code>{ to, hub?, message, in_reply_to?, idempotency_key? }</code></td>
+            <td>Sends a signal (<code>1..65,536</code> Unicode codepoints) to <code>@self</code>, <code>@&lt;username&gt;</code>, or a target Node ID.</td>
+          </tr>
+          <tr>
+            <td><code>cito_inbox</code></td>
+            <td><code>{ hub?, ack_ids?, ack_all? }</code></td>
+            <td>Reads unread signals for the calling Node and emits <code>signal_ack</code> when acknowledged.</td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+  </div>
+
+  <footer class="site-footer">
+    <div>
+      <strong>Cito Documentation</strong> · <a class="text-link" href="../index.html">Back to Product Overview</a>
+    </div>
+    <div class="footer-links">
+      <a href="./guide.html">Getting Started</a>
+      <a href="./plugins.html">Plugin SDK</a>
+      <a href="./architecture.html">Architecture</a>
+      <a href="https://github.com/Tefx/cito">GitHub</a>
+    </div>
+  </footer>
+
+  <script src="../scripts/hero-preview.js"></script>
+</body>
+</html>
