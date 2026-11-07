@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connect, StringCodec } from "nats";
-import { provisionNats, brokerNow, connectNats } from "../../src/shared/nats.js";
+import { connect, StringCodec, provisionNats, brokerNow, connectNats } from "../../src/shared/nats.js";
 import { startNats } from "./nats-server.js";
 
 describe("official local NATS JetStream + KV", () => {

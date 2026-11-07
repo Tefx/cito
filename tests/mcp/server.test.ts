@@ -26,7 +26,12 @@ test("SDK lists exactly five strict tools and routes _meta through real MCP requ
     expect(listed.tools.every(tool => tool.inputSchema.additionalProperties === false)).toBe(true);
     expect(listed.tools.find(tool => tool.name === "cito_listen")!.inputSchema.properties?.tag)
       .toMatchObject({ type: "string", maxLength: 64 });
-    const toSchema = listed.tools.find(tool => tool.name === "cito_send")!.inputSchema.properties?.to as { pattern: string };
+    const sendTool = listed.tools.find(tool => tool.name === "cito_send")!;
+    expect(sendTool.description).toContain("lightweight control plane");
+    expect(sendTool.description).toContain("65,536");
+    const listenTool = listed.tools.find(tool => tool.name === "cito_listen")!;
+    expect(listenTool.description).toContain("lightweight control plane");
+    const toSchema = sendTool.inputSchema.properties?.to as { pattern: string };
     expect(new RegExp(toSchema.pattern).test("mcp-receiver-pbtjxcxkgw3y")).toBe(true);
     expect(new RegExp(toSchema.pattern).test("c_pbtjxcxkgw3y")).toBe(true);
     const listened = await client.callTool({ name: "cito_listen", arguments: { about: "MCP receiver", tag: "MCP receiver" }, _meta: f.pi.meta });
@@ -65,7 +70,7 @@ test("installed stdio entrypoint initializes private local state without requiri
 });
 
 test.each([
-  { CITO_NATS_URL: "https://wrong" }, { CITO_AUTH_MODE: "broken" }, { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "" },
+  { CITO_NATS_URL: "ftp://wrong" }, { CITO_AUTH_MODE: "broken" }, { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "" },
   { CITO_USER: "bad user" },
 ])("stdio invalid configuration fails fast with exit 1 and stderr: %j", async invalid => {
   const root = await mkdtemp("/tmp/cito-stdio-invalid-");

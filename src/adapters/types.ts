@@ -26,6 +26,29 @@ export interface UiHarnessMetadata {
   jump_url_template?: string | null;
 }
 
+export interface SetupFileAction {
+  target: string;
+  path: string;
+  status: "created" | "updated" | "unchanged" | "skipped" | "conflict";
+  backupPath?: string;
+  detail: string;
+}
+
+export interface HarnessSetupInspection {
+  id: string;
+  displayName: string;
+  tier: AdapterTier;
+  installed: boolean;
+  configured: boolean;
+  paths: string[];
+}
+
+export interface HarnessSetupDescriptor {
+  inspect(env: NodeJS.ProcessEnv): Promise<{ installed: boolean; configured: boolean; paths: string[] }>;
+  plan(env: NodeJS.ProcessEnv, options: { force?: boolean }): Promise<SetupFileAction[]>;
+  apply(env: NodeJS.ProcessEnv, options: { force?: boolean }): Promise<SetupFileAction[]>;
+}
+
 export interface HarnessCliDescriptor {
   consumesNextArg?(cmd: "listen" | "unlisten", nextArg: string, config: CitoConfig): boolean;
   resolveMeta(
@@ -100,6 +123,7 @@ export interface HarnessAdapter {
   readonly pidKeys?: readonly string[];
   readonly canJump?: boolean;
   readonly cli?: HarnessCliDescriptor;
+  readonly setup?: HarnessSetupDescriptor;
   startStdioChannel?(
     config: CitoConfig,
     transport: { send(message: JSONRPCMessage): Promise<void> },

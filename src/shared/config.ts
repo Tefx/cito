@@ -9,15 +9,20 @@ import { normalizeIssuer } from "./identity.js";
 import { CitoError } from "./errors.js";
 import { hubNameSchema } from "./validation.js";
 
+export type HubAuthMode = "none" | "token" | "oidc";
+
 export interface HubConfig {
   name: string;
   natsUrl: string;
-  authMode: "none" | "oidc";
+  authMode: HubAuthMode;
+  token?: string;
   user: string;
   oidcIssuer?: string;
   oidcClientId?: string;
   oidcScopes?: string[];
   oidcRedirectPort?: number;
+  enabled: boolean;
+  defaultScope?: "self" | "workspace";
 }
 export interface CitoConfig extends Omit<HubConfig, "name"> {
   stateDir: string;
@@ -30,9 +35,10 @@ export interface CitoConfig extends Omit<HubConfig, "name"> {
   pluginDirs: string[];
   plugins?: Record<string, Record<string, unknown>>;
 }
-export function expandHomeDir(value: string, name?: string): string {
+export function expandHomeDir(value: string, name?: string, baseHome?: string): string {
   if (!value.trim()) throw new Error((name ?? "Path") + " must not be empty");
-  const expanded = value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+  const home = baseHome?.trim() || homedir();
+  const expanded = value === "~" ? home : value.startsWith("~/") ? join(home, value.slice(2)) : value;
   return isAbsolute(expanded) ? expanded : resolve(expanded);
 }
 const directPluginsDir = fileURLToPath(new URL("../../plugins", import.meta.url));
@@ -51,16 +57,27 @@ export function validateHttpUrl(value: string, name: string): string {
   }
   return value;
 }
-function validateHub(value: HubConfig): HubConfig {
-  const { natsUrl, authMode, user, oidcClientId } = value;
+export function validateNatsUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed === "local" || trimmed === "local://") return "local://";
   let url: URL;
-  try { url = new URL(natsUrl); } catch { throw new Error("CITO_NATS_URL must be a valid NATS or WebSocket URL"); }
-  if (!["nats:", "ws:", "wss:"].includes(url.protocol) || !url.hostname
+  try { url = new URL(raw); } catch { throw new Error("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL"); }
+  if (!["http:", "https:", "nats:", "ws:", "wss:"].includes(url.protocol) || !url.hostname
     || url.username || url.password || url.hash || url.search
     || (url.protocol === "nats:" && url.pathname && url.pathname !== "/")) {
-    throw new Error("CITO_NATS_URL must use nats://, ws:// or wss:// without credentials");
+    throw new Error("CITO_NATS_URL must use local://, http://, https://, nats://, ws:// or wss:// without credentials");
   }
-  if (authMode !== "none" && authMode !== "oidc") throw new Error("CITO_AUTH_MODE must be none or oidc");
+  return raw;
+}
+function validateHub(value: Omit<HubConfig, "enabled"> & { enabled?: boolean }): HubConfig {
+  const { authMode, user, oidcClientId } = value;
+  const natsUrl = validateNatsUrl(value.natsUrl);
+  if (authMode !== "none" && authMode !== "token" && authMode !== "oidc") {
+    throw new Error("CITO_AUTH_MODE must be none, token, or oidc");
+  }
+  if (authMode === "token" && !value.token?.trim()) {
+    throw new Error("CITO_HUB_TOKEN is required in token mode");
+  }
   const oidcIssuer = value.oidcIssuer === undefined ? undefined
     : normalizeIssuer(validateHttpUrl(value.oidcIssuer, "CITO_OIDC_ISSUER"));
   if (authMode === "oidc" && !oidcIssuer) throw new Error("CITO_OIDC_ISSUER is required in oidc mode");
@@ -71,10 +88,23 @@ function validateHub(value: HubConfig): HubConfig {
     throw new Error("CITO_OIDC_CLIENT_ID must be a non-empty trimmed string");
   }
   if (user.length < 1 || user.length > 64 || /[^a-zA-Z0-9._-]/.test(user)) {
-    throw new Error("CITO_USER must contain 1–64 letters, numbers, dots, underscores or hyphens");
+    throw new Error("CITO_USER must contain 1-64 letters, numbers, dots, underscores or hyphens");
   }
   if (value.oidcRedirectPort !== undefined) port(value.oidcRedirectPort, "oidcRedirectPort");
-  return { ...value, oidcIssuer };
+  const cleaned: HubConfig = {
+    name: value.name,
+    natsUrl,
+    authMode,
+    user,
+    enabled: value.enabled ?? true,
+    ...(value.token !== undefined ? { token: value.token.trim() } : {}),
+    ...(oidcIssuer !== undefined ? { oidcIssuer } : {}),
+    ...(oidcClientId !== undefined ? { oidcClientId } : {}),
+    ...(value.oidcScopes !== undefined ? { oidcScopes: value.oidcScopes } : {}),
+    ...(value.oidcRedirectPort !== undefined ? { oidcRedirectPort: value.oidcRedirectPort } : {}),
+    ...(value.defaultScope !== undefined ? { defaultScope: value.defaultScope } : {}),
+  };
+  return cleaned;
 }
 function port(value: number, name: string): number {
   if (!Number.isInteger(value) || value < 1 || value > 65535) throw new Error(name + " must be an integer in 1..65535");
@@ -86,13 +116,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
       throw new Error(key + " must not be empty");
     }
   }
-  const stateDir = expandHomeDir(env.CITO_STATE_DIR ?? "~/.cito", "CITO_STATE_DIR");
+  const stateDir = expandHomeDir(env.CITO_STATE_DIR ?? "~/.cito", "CITO_STATE_DIR", env.HOME);
   const oidcRedirectPort = env.CITO_OIDC_REDIRECT_PORT === undefined ? undefined : port(Number(env.CITO_OIDC_REDIRECT_PORT), "CITO_OIDC_REDIRECT_PORT");
   const path = env.CITO_CONFIG_PATH ?? join(stateDir, "config.json");
-  const entrySchema = z.object({ natsUrl: z.string(), authMode: z.enum(["none", "oidc"]).default("none"),
-    user: z.string().default(env.CITO_USER ?? userInfo().username), oidcIssuer: z.string().optional(),
-    oidcClientId: z.string().optional(), oidcScopes: z.array(z.string().min(1)).optional(),
-    oidcRedirectPort: z.number().int().min(1).max(65535).optional(), redirect_port: z.number().int().min(1).max(65535).optional() });
+  const entrySchema = z.object({
+    url: z.string().optional(),
+    natsUrl: z.string().optional(),
+    nats_url: z.string().optional(),
+    auth: z.enum(["none", "token", "oidc"]).optional(),
+    authMode: z.enum(["none", "token", "oidc"]).optional(),
+    auth_mode: z.enum(["none", "token", "oidc"]).optional(),
+    token: z.string().optional(),
+    user: z.string().default(env.CITO_USER ?? userInfo().username),
+    oidcIssuer: z.string().optional(),
+    oidc_issuer: z.string().optional(),
+    oidcClientId: z.string().optional(),
+    oidc_client_id: z.string().optional(),
+    oidcScopes: z.array(z.string().min(1)).optional(),
+    oidc_scopes: z.array(z.string().min(1)).optional(),
+    oidcRedirectPort: z.number().int().min(1).max(65535).optional(),
+    redirect_port: z.number().int().min(1).max(65535).optional(),
+    enabled: z.boolean().optional(),
+    defaultScope: z.enum(["self", "workspace"]).optional(),
+    default_scope: z.enum(["self", "workspace"]).optional(),
+  }).refine(v => Boolean(v.url || v.natsUrl || v.nats_url), { message: "Hub url or natsUrl is required" });
   let json: {
     hubs: Record<string, z.infer<typeof entrySchema>>;
     default_hub?: string;
@@ -111,21 +158,74 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CitoConfig {
     } catch (cause) { throw new CitoError("INVALID_INPUT", "Cannot load hub configuration: " + path, { cause }); }
   }
   const hubs: Record<string, HubConfig> = Object.create(null);
-  if (json) for (const [name, value] of Object.entries(json.hubs)) hubs[name] = validateHub({ name, ...value, oidcRedirectPort: value.oidcRedirectPort ?? value.redirect_port });
-  else hubs.default = validateHub({ name: "default", natsUrl: env.CITO_NATS_URL ?? "nats://127.0.0.1:4222",
-    authMode: (env.CITO_AUTH_MODE ?? "none") as HubConfig["authMode"], user: env.CITO_USER ?? userInfo().username,
-    oidcIssuer: env.CITO_OIDC_ISSUER, oidcClientId: env.CITO_OIDC_CLIENT_ID,
-    oidcScopes: env.CITO_OIDC_SCOPES?.split(/\s+/).filter(Boolean),
-    oidcRedirectPort });
+  const envUrl = env.CITO_HUB_URL ?? env.CITO_NATS_URL;
+  if (json) {
+    for (const [name, value] of Object.entries(json.hubs)) {
+      const resolvedUrl = (value.url ?? value.natsUrl ?? value.nats_url)!;
+      const resolvedAuth = value.auth ?? value.authMode ?? value.auth_mode ?? "none";
+      const resolvedIssuer = value.oidcIssuer ?? value.oidc_issuer;
+      const resolvedClientId = value.oidcClientId ?? value.oidc_client_id;
+      const resolvedScopes = value.oidcScopes ?? value.oidc_scopes;
+      const resolvedDefaultScope = value.defaultScope ?? value.default_scope;
+      hubs[name] = validateHub({
+        name,
+        natsUrl: resolvedUrl,
+        authMode: resolvedAuth,
+        token: value.token,
+        user: value.user,
+        oidcIssuer: resolvedIssuer,
+        oidcClientId: resolvedClientId,
+        oidcScopes: resolvedScopes,
+        oidcRedirectPort: value.oidcRedirectPort ?? value.redirect_port,
+        enabled: value.enabled ?? true,
+        ...(resolvedDefaultScope ? { defaultScope: resolvedDefaultScope } : {}),
+      });
+    }
+  } else if (envUrl !== undefined) {
+    const synName = env.CITO_HUB?.trim() || "default";
+    if (!hubNameSchema.safeParse(synName).success) {
+      throw new CitoError("INVALID_INPUT", "default_hub must be a valid hub name");
+    }
+    hubs[synName] = validateHub({
+      name: synName,
+      natsUrl: envUrl,
+      authMode: (env.CITO_AUTH_MODE ?? "none") as HubAuthMode,
+      token: env.CITO_HUB_TOKEN,
+      user: env.CITO_USER ?? userInfo().username,
+      oidcIssuer: env.CITO_OIDC_ISSUER,
+      oidcClientId: env.CITO_OIDC_CLIENT_ID,
+      oidcScopes: env.CITO_OIDC_SCOPES?.split(/\s+/).filter(Boolean),
+      oidcRedirectPort,
+      enabled: true,
+    });
+  } else {
+    const synName = env.CITO_HUB?.trim() || "local";
+    if (!hubNameSchema.safeParse(synName).success) {
+      throw new CitoError("INVALID_INPUT", "default_hub must be a valid hub name");
+    }
+    hubs[synName] = validateHub({
+      name: synName,
+      natsUrl: "local://",
+      authMode: (env.CITO_AUTH_MODE ?? "none") as HubAuthMode,
+      token: env.CITO_HUB_TOKEN,
+      user: env.CITO_USER ?? userInfo().username,
+      oidcIssuer: env.CITO_OIDC_ISSUER,
+      oidcClientId: env.CITO_OIDC_CLIENT_ID,
+      oidcScopes: env.CITO_OIDC_SCOPES?.split(/\s+/).filter(Boolean),
+      oidcRedirectPort,
+      enabled: true,
+      defaultScope: "workspace",
+    });
+  }
   const defaultHub = env.CITO_HUB?.trim() || json?.default_hub || (Object.keys(hubs).length === 1 ? Object.keys(hubs)[0] : undefined);
   if (!defaultHub || !Object.hasOwn(hubs, defaultHub)) {
     throw new CitoError("INVALID_INPUT", "default_hub must be specified and exist in configured hubs");
   }
-  if (env.CITO_NATS_URL !== undefined && env.CITO_CONFIG_PATH === undefined) {
-    hubs[defaultHub] = validateHub({ ...hubs[defaultHub]!, natsUrl: env.CITO_NATS_URL });
+  if (envUrl !== undefined && env.CITO_CONFIG_PATH === undefined) {
+    hubs[defaultHub] = validateHub({ ...hubs[defaultHub]!, natsUrl: envUrl });
   }
   const extraPluginDirs = env.CITO_PLUGIN_PATH
-    ? env.CITO_PLUGIN_PATH.split(delimiter).map(s => s.trim()).filter(Boolean).map(p => expandHomeDir(p, "CITO_PLUGIN_PATH"))
+    ? env.CITO_PLUGIN_PATH.split(delimiter).map(s => s.trim()).filter(Boolean).map(p => expandHomeDir(p, "CITO_PLUGIN_PATH", env.HOME))
     : [];
   const pluginDirs = [builtinPluginsDir, join(stateDir, "plugins"), ...extraPluginDirs];
   const { name: _name, ...mirror } = hubs[defaultHub]!;

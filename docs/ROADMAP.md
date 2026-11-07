@@ -1,91 +1,104 @@
-# Cito Product & Architecture Roadmap (Towards v1.0 Standalone Application & Turnkey Hub)
+# Cito v1.0 Product & Architecture Roadmap
 
-This document defines the staged evolution of Cito from a developer CLI/MCP package (`@tefx/cito`) to a harness-agnostic plugin architecture, a one-command self-hosted hub appliance, and a self-contained macOS application (`Cito.app`).
+Cito's evolution from `v0.11.3` to `v1.0.0` is organized into **five stages (`Stage 0` through `Stage 4`)**:
+- **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
+- **Stage 1 (`v0.13.0`)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
+- **Stage 2 (`v0.14.0`)**: Native macOS Application Packaging (`Cito.app`), Visual Settings Window & Homebrew Distribution
+- **Stage 3 (`v0.15.0`)**: Self-Diagnostics (`cito doctor`), Auto-Healing & End-to-End Verification (`cito ping`)
+- **Stage 4 (`v1.0.0`)**: Notification Activity Feed, Human Quick-Reply & Production Hardening
 
 ---
 
-## Guiding Architectural Principles
+## Architectural Guardrails (Applicable to All Stages)
 
-1. **Harness-Agnostic Core & First-Class Bundled Plugins (Eating Our Own Dogfood)**:
-   - Core (`src/shared/`, `src/mcp/`, `src/ui/`, `src/macos/cito-ui.swift`, and the Plugin Host SDK in `src/adapters/`) has **zero** hardcoded knowledge of specific harnesses.
-   - The repository ships and maintains exactly three built-in plugins under `plugins/` inside the single `@tefx/cito` package, using the **exact same Plugin Host SDK (`@tefx/cito/plugin-sdk`) and `plugin.json` + `index.ts` contract** as external user plugins:
-     - **Pi Coding Agent (`plugins/pi`)** — `tier: "stable"`
-     - **ChatGPT / Codex Desktop (`plugins/codex`)** — `tier: "stable"`
-     - **Claude Code (`plugins/claude`)** — `tier: "experimental"` (explicitly opt-in; never enabled silently)
-   - All additional coding agents, IDEs, or custom workflows live out-of-tree in `${CITO_STATE_DIR}/plugins/<id>/` (default `~/.cito/plugins/<id>/`) without modifying or recompiling Cito.
+1. **Harness-Agnostic Core (`src/` & `src/macos/cito-ui.swift`)**:
+   - Core modules (`src/shared/`, `src/hub/`, `src/mcp/`, `src/setup/`, `src/ui/`, `src/macos/cito-ui.swift`) and the Plugin Host SDK (`src/adapters/`) MUST NOT contain hardcoded branches, configuration fields, CLI flag names, or visual tables for specific agent harnesses (`pi`, `codex`, `claude`).
+   - All harness-specific discovery, caller detection, delivery, stdio channel wrapping, CLI flags, and UI presentation metadata live inside plugin directories (`plugins/pi`, `plugins/codex`, `plugins/claude`, or user-installed `${CITO_STATE_DIR}/plugins/<id>/`).
 2. **One Unified Plugin Format (`plugin.json` + Optional `index.ts` + Optional Host-Side Script)**:
    - Every plugin is a directory `<id>/` containing a flat `plugin.json` (`id`, `displayName`, optional `tier`, `sfSymbol`, `tint`, `jumpUrlTemplate`, `cliFlag`) and an optional `index.ts` (or `index.js`) default-exporting `PluginFactory` (`HarnessAdapter` or `(manifest) => HarnessAdapter`) from `@tefx/cito/plugin-sdk`.
-   - Depending on whether the target harness can be driven externally:
-     - **External-Driven Harnesses (e.g. `plugins/codex`)**: Only need `plugin.json` + `index.ts` (managed 100% by `cito-daemon`).
-     - **Host-Assisted Harnesses (e.g. `plugins/pi`, `plugins/claude`)**: Include a host-side bridge/hook script (`cito-bridge.ts`, `channel.ts` / `hook-cli.ts`) managed by the target harness, communicating with `index.ts` via the SDK's `SocketBridgeAdapter` or wake queue.
-3. **Fault Isolation & Deterministic Conflict Resolution**:
-   - Built-in plugin IDs (`pi`, `codex`, `claude`) and core CLI flag names (`hub`, `team`, `scope`, `tag`, `harness`, `session`, `help`, `version`, `setup`) are reserved.
-   - Every plugin discovery, caller-detection, probe, and delivery call is isolated with bounded timeouts (`1500ms` discovery deadline) so a hanging or failing user plugin in `~/.cito/plugins/` never stalls `cito-daemon` or built-in plugins.
-4. **Single Setup Engine & Client/Server Separation**:
-   - CLI onboarding (`cito setup`) and the native macOS Settings window share a single idempotent, backup-safe configuration engine (`src/setup/`).
-   - `Cito.app` is a pure client and local control plane; self-hosted hubs remain server/container deployments (`deploy/nats/`).
+   - Built-in plugins (`plugins/pi` [Stable], `plugins/codex` [Stable], `plugins/claude` [Experimental]) and external user plugins (`${CITO_STATE_DIR}/plugins/<id>/`, defaulting to `~/.cito/plugins/<id>/`) share the exact same format and loader contract.
+3. **Mechanism, Not Policy (Control-Plane Recommendation Without Hard Message Caps)**:
+   - MCP tool descriptions (`cito_send`, `cito_listen`) guide agents to use Cito primarily as a lightweight control plane (waking sessions, status handoffs, and coordinating work) while pairing with dedicated channels (shared files, Git branches, issue trackers, or discussion tables) for extended multi-turn discussions or large artifacts.
+   - However, Cito enforces **no hard 500-character policy cap** on `cito_send.message` (only a `65,536`-codepoint transport safety bound): when short context suffices or other channels are unavailable or have excessive overhead, users and agents may transmit full messages directly without artificial rejection.
+4. **Unified Single-Engine Hub (`HubEngine` — Zero NATS Dependency)**:
+   - Both single-Mac standalone mode (`url: "local://"`, running in-process inside `cito-daemon`) and remote shared hubs (`cito hub`, running over HTTP/SSE + SQLite WAL) execute the **exact same `HubEngine` (`src/hub/engine.ts`)**.
+   - All 5 NATS packages (`nats`, `nats.ws`, `@nats-io/jwt`, `nkeys.js`, `@eplightning/nats-server`) and the `cito-auth-callout` sidecar are removed. OIDC authentication (`auth_mode: "oidc"`) and pre-shared token authentication (`auth_mode: "token"`) are verified directly in `cito hub` HTTP/SSE handlers with Row-Level Security (`scope: "self"` sessions never leave the server for other principals).
 
 ---
 
-## Stage Overview
+## Stage 0 (`v0.12.0` — Completed): Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 
-| Stage | Focus | Primary Deliverable |
-| --- | --- | --- |
-| **Stage 0 (`v0.12.0`)** | **Unified Plugin Architecture, Built-in Extraction (`plugins/*`) & Data-Driven UI** | Zero-harness-coupling Core & `cito-ui.swift`, `plugins/{pi,codex,claude}/`, `~/.cito/plugins/<id>/` loader, flat `plugin.json` + `index.ts` standard, and `--harness <id> [--session <sid>]` CLI. |
-| **Stage 1 (`v0.13.0`)** | **Turnkey Self-Hosted Hub & `cito setup` Onboarding Engine** | One-command NATS 2.14 + `cito-auth-callout` Compose bootstrap (one-shot `cito-hub-init` key persistence, end-to-end callout readiness check, join descriptor output) and `cito setup` CLI. |
-| **Stage 2 (`v0.14.0`)** | **Standalone macOS Application (`Cito.app`) & Visual Settings UI** | Self-contained `/Applications/Cito.app` bundle (`Cito-darwin-arm64.tar.gz`), native Settings & Integrations window, `SMAppService` Login Item toggle, and confirmed `cito://join` URL handler. |
-| **Stage 3** | **Project Website & Static `/join` Trampoline** | Official landing page, visual architecture/UI showcase, custom plugin authoring guide, and client-side `/join#...` deep-link trampoline. |
-| **Stage 4 (`v1.0.0`)** | **Notification Activity Feed, Human Quick-Reply & Public Notarization** | Recent signal history + human-to-agent quick reply in `DirectoryPanel`, Apple Developer ID notarization, and automatic update checks. |
+Completed in Phase `v16` (`1f46ab2`, tag `v0.12.0`).
 
 ---
 
-## Stage 0 (`v0.12.0`): Unified Plugin Architecture, Built-in Plugin Extraction & Data-Driven UI
+## Stage 1 (`v0.13.0`): NATS-Free Native `HubEngine` (`local://` + `cito hub`), Control-Plane Guidance & `cito setup` CLI
 
-### 1. Flat `plugin.json` Manifest Contract
-```json
-{
-  "id": "codex",
-  "displayName": "Codex",
-  "tier": "stable",
-  "sfSymbol": "sparkles",
-  "tint": "teal",
-  "jumpUrlTemplate": "codex://threads/{session_id}",
-  "cliFlag": true
-}
-```
-- **Required fields (2)**:
-  - `id`: Lowercase plugin identifier matching the directory name (`^[a-z][a-z0-9_-]{0,31}$`).
-  - `displayName`: Human-readable name displayed in UI badges, group headers, facet pills, and `"Open in <displayName>"` jump actions.
-- **Optional fields (5)**:
-  - `tier`: `"stable" | "experimental" | "custom"` (defaults to `"custom"`; external user plugins are always forced to `"custom"`).
-  - `sfSymbol`: Apple SF Symbol icon name (defaults to `"bolt.horizontal.fill"`).
-  - `tint`: Semantic color token (`"indigo" | "teal" | "orange" | "blue" | "purple" | "green" | "pink" | "gray"`, defaults to `"blue"`).
-  - `jumpUrlTemplate`: Deep-link URL template with `{session_id}` / `{cwd}` placeholders (validated against safe non-`javascript:`/`file:`/`data:` schemes).
-  - `cliFlag`: Boolean (defaults to `false`); when `true` and `id` is not in `RESERVED_CLI_FLAGS`, registers `--<id>[=<session_id>]` on `cito listen` / `cito unlisten`.
-- **Automatically derived (no manifest fields needed)**:
-  - Group count noun (`"open"` when candidates report a live `endpoint_pid`, `"recent"` when `jumpUrlTemplate` is present, and `"available"` otherwise).
-  - Jump action label (`"Open in \(displayName)"` on cards, `"Open in \(displayName) ↗"` on HUD banners).
-  - Group & facet sort order (`pi` $\to$ `codex` $\to$ `claude` $\to$ custom plugins alphabetically).
+### 1.1 Orthogonal Hub Topology, Naming & Scope Rules
+1. **Orthogonal Dimensions (Topology × Auth Mode × User Alias)**:
+   - **Topology**:
+     - **In-Process Local (`url: "local://"`)**: Runs `HubEngine` directly inside `cito-daemon` (`0` child processes, `0` extra ports, `0` external binaries). When `~/.cito/config.json` is absent and no `CITO_HUB_URL` / `CITO_NATS_URL` env override is set, Cito defaults to a single built-in hub named **`"local"`** (`url: "local://"`, `authMode: "none"`, `enabled: true`).
+     - **Remote HTTP/SSE (`url: "http://..." | "https://..."`)**: Connects to a `cito hub` instance over standard HTTP + Server-Sent Events (`GET /v1/events`). Legacy `nats://` / `ws://` / `wss://` URLs and `CITO_NATS_URL` are transparently normalized to `http://` / `https://` for configuration and test compatibility.
+   - **Authentication Mode (`authMode: "none" | "token" | "oidc"`)**:
+     - `"none"`: Zero-ceremony trusted network mode (for `local://`, `127.0.0.1`, or Tailscale `100.64.0.0/10` / `*.ts.net` where WireGuard provides L3 device authentication and encryption).
+     - `"token"`: Pre-shared bearer token (`Authorization: Bearer <token>`) for non-Tailscale LAN or simple self-hosted servers without an OIDC provider.
+     - `"oidc"`: Multi-user OIDC authentication (`Authorization: Bearer <id_token>`) verified directly by `OidcVerifier` in `cito hub` with browser PKCE sign-in.
+   - **Per-Hub `enabled?: boolean` (Default `true`)**:
+     - Any hub in `config.json` can be toggled on/off via `"enabled": true | false` (or `cito setup --enable-hub <name>` / `--disable-hub <name>`) without deleting its configuration. Disabled hubs are omitted from `CitoService.slots` and UI state frames.
+2. **Scope Optimization & Cross-Hub Privacy Safety**:
+   - On `local://` (or when `hub.defaultScope === "workspace"`), `cito_listen` defaults `scope` to `"workspace"`.
+   - In `cito-ui.swift`, when a session's hub has `auth_mode != "oidc"` and `name == "local"`, the `62pt` `🔒 Self / 👥 Team` toggle pill is omitted from the card, reclaiming horizontal space for the session title.
+   - When migrating a session via `switch_hub` (`from_hub` $\to$ `to_hub`), if `to_hub` has `authMode === "oidc"` and `from_hub` has `authMode !== "oidc"`, `scope` resets to `"self"` (fail-closed privacy protection so moving a session from `local`/`tailnet` to a team OIDC hub never accidentally exposes it to the whole organization).
 
-### 2. Conflict-Resolution & Fault-Isolation Rules
-1. **Plugin ID Protection**: Built-in plugins (`pi`, `codex`, `claude`) load first and lock their IDs. Any external plugin under `~/.cito/plugins/<dir>/` whose `id` collides with a built-in ID, mismatches `<dir>`, or duplicates another plugin is skipped with a diagnostic warning.
-2. **CLI Flag Protection**: Universal CLI selection is `cito listen --harness <id> [--session <sid>]`. Shorthand `--<id>` is rejected if `<id>` collides with `RESERVED_CLI_FLAGS`.
-3. **Caller Binding Arbitration**:
-   - Bottom-up parent-PID walk (`depth = 0..5`) binds to the **closest ancestor socket** (e.g., Pi running inside a Cursor terminal binds to Pi at depth 1, not Cursor at depth 3).
-   - Simultaneous explicit claims from multiple plugins (or an explicit claim combined with `endpoint_pid`) fail with `INVALID_INPUT: Conflicting caller metadata`.
-4. **Stdio Channel & Discovery Isolation**: At most one plugin may activate a `startStdioChannel` wrapper per `cito-mcp` process; each plugin's `discoverAvailableSessions` runs under an independent `1500ms` timeout.
+### 1.2 Unified `HubEngine` & `cito hub` Server (`src/hub/`, `deploy/hub/`)
+1. **Single Authority `HubEngine` (`src/hub/engine.ts`)**:
+   - Uses `node:sqlite` (`DatabaseSync` in WAL mode when persisted to `${dataDir}/hub.sqlite`, or `:memory:`) + in-memory `EventEmitter` dispatch.
+   - Enforces **Server-Side Row-Level Security (RLS)** when `authMode === "oidc"`:
+     - Queries (`GET /v1/kv`, `GET /v1/kv/:key`, SSE watch streams) filter out any registration where `scope === "self"` and `principal_id !== caller.principal_id`.
+     - Mutations (`PUT /v1/kv/:key`) reject attempts to create or update a registration whose `principal_id !== caller.principal_id` or where the existing record belongs to a different `principal_id` (`403 PERMISSIONS_VIOLATION`).
+     - Signal publishing (`POST /v1/signals/:targetId`) verifies `signal.from.principal_id === caller.principal_id` on OIDC hubs.
+   - Built-in structured audit hook (`onAudit?: (event: HubAuditEvent) => void` and optional `CITO_HUB_AUDIT_LOG` JSONL file append) recording verified `principal_id`, `action` (`register | unlisten | send | ack`), `listener_id`, `signal_id`, and `timestamp`.
+2. **`cito hub` Subcommand & Single-Container Deployment (`deploy/hub/`)**:
+   - `cito hub [--port 4291] [--bind 127.0.0.1|0.0.0.0] [--auth none|token|oidc] [--token <token>] [--issuer <url> --client-id <id>] [--data-dir <dir>]` starts the standalone HTTP/SSE Hub server.
+   - Prints the ready-to-copy client onboarding command on startup:
+     - `auth=none`: `cito setup --hub tailnet --url http://<host>:4291`
+     - `auth=token`: `cito setup --hub tailnet --url http://<host>:4291 --auth token --token <token>`
+     - `auth=oidc`: `cito setup --hub team --url http://<host>:4291 --auth oidc --issuer <issuer> --client-id <id>`
+   - `deploy/hub/docker-compose.yml` + `deploy/hub/Dockerfile` replaces the multi-container `deploy/nats/` stack with a single `cito-hub` service.
+
+### 1.3 `cito setup` Pure CLI Configuration Engine (`src/setup/index.ts`)
+- Intercepted in `src/mcp/cli.ts` **before** `loadConfig()` so `cito setup` can create or repair `~/.cito/config.json`.
+- Exports pure programmatic functions `inspectSetup`, `previewSetup`, and `applySetup` (reused by Stage 2's native macOS Settings window).
+- Supports:
+  - `cito setup --status`: inspects `~/.cito/config.json` and detected harnesses (`pi`, `codex`, `claude`).
+  - `cito setup [--dry-run] [--hub <name> --url <url> [--auth none|token|oidc] [--token <token>] [--issuer <url> --client-id <id>] [--default]] [--enable-hub <name>] [--disable-hub <name>] [--enable <harness>]`:
+    1. Atomically updates `~/.cito/config.json` (`0600`, preserving existing hubs and `plugins` settings; when adding the first remote hub and `local` was not explicitly requested, sets `default_hub` to the new hub so single-hub UI mode is preserved unless multiple hubs are enabled).
+    2. Configures **Stable** installed harnesses by default (`codex` and `pi`), and configures **Experimental** harnesses (`claude`) only when `--enable claude` is explicitly passed:
+       - **Codex (`~/.codex/config.toml`)**: Pre-validates TOML syntax; if `[mcp_servers.cito]` is absent, appends the block at EOF (preserving 100% of user comments and formatting); if already pointing to `cito-mcp`, no-ops; if conflicting, reports an error unless `--force` is passed.
+       - **Pi (`~/.pi/agent/settings.json` + `~/.pi/agent/mcp/global.mcp.json`)**: Idempotently adds `"npm:@tefx/cito"` to `packages` in `~/.pi/agent/settings.json` and merges `mcpServers.cito` (`{ "command": "cito-mcp", "args": [] }`) in `~/.pi/agent/mcp/global.mcp.json`.
+       - **Claude Code (`~/.claude/settings.json`, only with `--enable claude`)**: Merges `mcpServers.cito` (with `CITO_CLAUDE_CHANNEL: "1"`) and deduplicates `cito-claude-hook` into `hooks.{Stop,SessionStart,UserPromptSubmit}` without overwriting other user hooks.
+    3. Creates a timestamped backup (`<file>.bak.<timestamp>`) before modifying any existing user file and writes via temp file + atomic `rename`.
 
 ---
 
-## Stage 1 (`v0.13.0`): Turnkey Self-Hosted Hub & `cito setup` Onboarding Engine
-1. **Compose Hub with One-Shot Bootstrap (`deploy/nats/`)**: Align to `nats:2.14-alpine`, add `cito-hub-init` to persist `SA...`/`SX...` NKeys and `max_control_line: 65536` on `/data`, gate readiness on end-to-end `cito-auth-callout` verification, and print the non-secret join descriptor.
-2. **Shared `src/setup/index.ts` Engine**: Route `cito setup` before `loadConfig()`, providing `inspectSetup`, `previewSetup`, and `applySetup` with timestamped backups, atomic file replacement, and comment-preserving append-only TOML updates.
+## Stage 2 (`v0.14.0`): Native macOS Application Packaging (`Cito.app`), Visual Settings Window & Homebrew Distribution
 
-## Stage 2 (`v0.14.0`): Standalone macOS Application (`Cito.app`) & Visual Settings UI
-- Native Settings window in `cito-ui.swift` (backed by `src/setup/`), `SMAppService.mainApp` Login Item toggle, confirmed `cito://join` URL handler, and self-contained `/Applications/Cito.app` bundle (`Cito-darwin-arm64.tar.gz`).
+1. **First-Class `Cito.app` Bundle & Menu Bar Lifecycle**:
+   - Package `cito-ui`, `cito-daemon`, and bundled `plugins/` into a standard macOS `.app` bundle (`LSUIElement = true`) with `SMAppService` / LaunchAgent login item registration.
+2. **Native AppKit `Settings…` Window (`⌘,`)**:
+   - **Hubs Tab**: Add, edit, enable/disable, test, and sign in to hubs visually.
+   - **Harnesses & Plugins Tab**: View detected harnesses (`Stable`, `Experimental`, `Custom`) and run one-click `Configure` (calling `applySetup`).
 
-## Stage 3: Project Website & Static `/join` Trampoline
-- Official landing page, visual UI/architecture showcase, plugin SDK guide, and static client-side `/join#...` trampoline page.
+---
 
-## Stage 4 (`v1.0.0`): Notification Activity Feed, Human Quick-Reply & Public Notarization
-- Recent notification history + inline quick-reply composer in `DirectoryPanel`, Apple Developer ID notarization, and automatic update checks.
+## Stage 3 (`v0.15.0`): Self-Diagnostics (`cito doctor`), Auto-Healing & End-to-End Verification (`cito ping`)
+
+1. **`cito doctor [--fix]`**: Structured health checks across daemon `/health`, Hub connectivity & OIDC token validity, harness MCP configs, and live sockets.
+2. **`cito ping [<target> | --self]`**: End-to-end synthetic round-trip verification (`< 2s`).
+
+---
+
+## Stage 4 (`v1.0.0`): Notification Activity Feed, Human Quick-Reply & Production Hardening
+
+1. **Recent Notifications Feed & One-Click Jump in `cito-ui`**: Display recent wake/passive signals in Surface 1 with one-click session jump and inline quick-reply (`cito_send` with `in_reply_to`).
+2. **Release Automation & `v1.0.0` Stability Contract**: Automated release pipeline publishing `@tefx/cito`, `Cito.app`, and `deploy/hub` container image.

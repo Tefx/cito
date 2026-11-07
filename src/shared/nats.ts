@@ -1,22 +1,86 @@
 import {
-  connect, DiscardPolicy, RetentionPolicy, StorageType,
-  type ConnectionOptions, type NatsConnection, type StreamConfig, type JetStreamManager,
-} from "nats";
+  AckPolicy,
+  DeliverPolicy,
+  DiscardPolicy,
+  ErrorCode,
+  Events,
+  KV_LISTENERS_STREAM,
+  LISTENERS_BUCKET,
+  RetentionPolicy,
+  SIGNALS_STREAM,
+  StorageType,
+  StringCodec,
+  createLocalNatsConnection,
+  createRemoteNatsConnection,
+  toHttpHubUrl,
+  type Broker,
+  type ConnectionOptions,
+  type Consumer,
+  type ConsumerMessages,
+  type JetStreamClient,
+  type JetStreamManager,
+  type JsMsg,
+  type KvEntry,
+  type KvView,
+  type Msg,
+  type NatsConnection,
+  type QueuedIterator,
+  type StreamConfig,
+  type Subscription,
+} from "../hub/client.js";
 import { RETENTION_MS } from "./lease.js";
 
-/** Node TCP and Node's native WebSocket use the same NATS v2 public API. */
-export async function connectNats(options: ConnectionOptions): Promise<NatsConnection> {
-  const servers = typeof options.servers === "string" ? [options.servers] : options.servers ?? [];
-  if (servers.some(server => /^wss?:/.test(server))) {
-    if (!servers.every(server => /^wss?:/.test(server))) throw new Error("Cannot mix TCP and WebSocket NATS servers");
-    const ws = await import("nats.ws");
-    return ws.connect(options);
+export {
+  AckPolicy,
+  DeliverPolicy,
+  DiscardPolicy,
+  ErrorCode as NatsErrorCode,
+  Events,
+  KV_LISTENERS_STREAM,
+  LISTENERS_BUCKET,
+  RetentionPolicy,
+  SIGNALS_STREAM,
+  StorageType,
+  StringCodec,
+  type Broker,
+  type ConnectionOptions,
+  type Consumer,
+  type ConsumerMessages,
+  type JetStreamClient,
+  type JetStreamManager,
+  type JsMsg,
+  type KvEntry,
+  type KvView,
+  type Msg,
+  type NatsConnection,
+  type QueuedIterator,
+  type StreamConfig,
+  type Subscription,
+};
+
+export async function connectNats(options: ConnectionOptions = {}): Promise<NatsConnection> {
+  const servers = typeof options.servers === "string" ? [options.servers] : options.servers ?? ["local://"];
+  if (servers.some(server => /^wss?:/.test(server)) && !servers.every(server => /^wss?:/.test(server))) {
+    throw new Error("Cannot mix TCP and WebSocket NATS servers");
   }
-  return connect(options);
+  const first = servers[0] ?? "local://";
+  const normalized = toHttpHubUrl(first);
+  if (normalized === "local://") {
+    return createLocalNatsConnection({
+      stateDir: options.stateDir,
+      user: options.user,
+    });
+  }
+  return await createRemoteNatsConnection({
+    url: normalized,
+    token: options.token,
+    user: options.user,
+    timeout: options.timeout,
+  });
 }
 
-const LISTENERS_BUCKET = "cito_listeners";
-export const SIGNALS_STREAM = "CITO_SIGNALS";
+export const connect = connectNats;
+
 const SIGNALS_STREAM_CONFIG: Partial<StreamConfig> & { name: string } = {
   name: SIGNALS_STREAM,
   subjects: ["cito.signal.*"],
@@ -28,25 +92,34 @@ const SIGNALS_STREAM_CONFIG: Partial<StreamConfig> & { name: string } = {
 };
 
 export function isJsApiError(error: unknown, code: number): boolean {
-  return typeof error === "object" && error !== null
-    && "api_error" in error && typeof error.api_error === "object" && error.api_error !== null
-    && "err_code" in error.api_error && error.api_error.err_code === code;
+  if (typeof error !== "object" || error === null) return false;
+  const e = error as { code?: unknown; api_error?: { err_code?: unknown } };
+  return e.api_error?.err_code === code || Number(e.code) === code;
 }
+
 function assertConfig(actual: StreamConfig, expected: Partial<StreamConfig>): void {
   for (const [key, value] of Object.entries(expected)) {
     const found = actual[key as keyof StreamConfig];
     if (JSON.stringify(found) !== JSON.stringify(value)) {
-      throw new Error("Incompatible NATS stream " + actual.name + ": " + key
-        + " expected " + JSON.stringify(value) + ", got " + JSON.stringify(found));
+      throw new Error(
+        "Incompatible NATS stream " +
+          actual.name +
+          ": " +
+          key +
+          " expected " +
+          JSON.stringify(value) +
+          ", got " +
+          JSON.stringify(found),
+      );
     }
   }
 }
+
 async function ensureSignals(jsm: JetStreamManager): Promise<void> {
-  try { await jsm.streams.info(SIGNALS_STREAM); }
-  catch (error) {
+  try {
+    await jsm.streams.info(SIGNALS_STREAM);
+  } catch (error) {
     if (!isJsApiError(error, 10059)) throw error;
-    // The server accepts concurrent identical stream creations. If another client
-    // wins with a different config, the final verification rejects the mismatch.
     await jsm.streams.add(SIGNALS_STREAM_CONFIG);
   }
   assertConfig((await jsm.streams.info(SIGNALS_STREAM)).config, SIGNALS_STREAM_CONFIG);
@@ -58,12 +131,16 @@ export async function provisionNats(nc: NatsConnection) {
   const jsm = await nc.jetstreamManager();
   await ensureSignals(jsm);
   const kv = await js.views.kv(LISTENERS_BUCKET, {
-    history: 1, ttl: 0, storage: StorageType.File,
+    history: 1,
+    ttl: 0,
+    storage: StorageType.File,
   });
   assertConfig((await jsm.streams.info("KV_" + LISTENERS_BUCKET)).config, {
     subjects: ["$KV.cito_listeners.>"],
-    max_msgs_per_subject: 1, max_age: 0,
-    retention: RetentionPolicy.Limits, storage: StorageType.File,
+    max_msgs_per_subject: 1,
+    max_age: 0,
+    retention: RetentionPolicy.Limits,
+    storage: StorageType.File,
   });
   return { js, jsm, kv };
 }

@@ -1,6 +1,6 @@
-import { readdir, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CitoError, loadConfig, validateHarness, type CitoConfig } from "../shared/index.js";
 import type { ListenerRow } from "../shared/state-types.js";
 import { getAllPidKeys, gitMetadata, registerPidKeys } from "./git.js";
@@ -10,8 +10,10 @@ import type {
   DeliverOutcome,
   HarnessAdapter,
   HarnessCliDescriptor,
+  HarnessSetupDescriptor,
   PluginManifest,
   ProbeOutcome,
+  SetupFileAction,
 } from "./types.js";
 
 type BridgeConfig = Pick<CitoConfig, "stateDir">;
@@ -92,11 +94,73 @@ export function defaultCliDescriptor(harnessId: string): HarnessCliDescriptor {
   };
 }
 
+export async function mutateConfigFile(options: {
+  target: string;
+  path: string;
+  dryRun: boolean;
+  mode?: number;
+  transform: (existingContent: string | undefined) => {
+    status: "created" | "updated" | "unchanged" | "conflict";
+    nextContent?: string;
+    detail: string;
+  };
+}): Promise<SetupFileAction> {
+  let existingContent: string | undefined;
+  let existingMode: number | undefined;
+  try {
+    existingContent = await readFile(options.path, "utf8");
+    const st = await stat(options.path);
+    existingMode = st.mode & 0o777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const outcome = options.transform(existingContent);
+  if (outcome.status === "unchanged" || outcome.status === "conflict") {
+    return { target: options.target, path: options.path, status: outcome.status, detail: outcome.detail };
+  }
+  if (existingContent !== undefined && outcome.nextContent === existingContent) {
+    return { target: options.target, path: options.path, status: "unchanged", detail: outcome.detail };
+  }
+  if (options.dryRun) {
+    return { target: options.target, path: options.path, status: outcome.status, detail: outcome.detail };
+  }
+
+  const dir = dirname(options.path);
+  await mkdir(dir, { recursive: true });
+  const targetMode = options.mode ?? existingMode ?? 0o600;
+  let backupPath: string | undefined;
+  if (existingContent !== undefined) {
+    backupPath = `${options.path}.bak.${Date.now()}`;
+    await writeFile(backupPath, existingContent, { encoding: "utf8", mode: targetMode });
+  }
+
+  const tempPath = `${options.path}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await writeFile(tempPath, outcome.nextContent!, { encoding: "utf8", mode: targetMode });
+    if (options.mode !== undefined) {
+      await chmod(tempPath, options.mode);
+    }
+    await rename(tempPath, options.path);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => {});
+  }
+
+  return {
+    target: options.target,
+    path: options.path,
+    status: outcome.status,
+    ...(backupPath ? { backupPath } : {}),
+    detail: outcome.detail,
+  };
+}
+
 export interface SocketBridgeOptions {
   confirmDelivery?: boolean;
   manifest?: PluginManifest;
   pidKeys?: readonly string[];
   cli?: HarnessCliDescriptor;
+  setup?: HarnessSetupDescriptor;
   canJump?: boolean;
 }
 
@@ -105,6 +169,7 @@ export class SocketBridgeAdapter implements HarnessAdapter {
   readonly manifest?: PluginManifest;
   readonly pidKeys?: readonly string[];
   readonly cli?: HarnessCliDescriptor;
+  readonly setup?: HarnessSetupDescriptor;
   readonly canJump?: boolean;
   private readonly confirmDelivery: boolean;
 
@@ -116,6 +181,7 @@ export class SocketBridgeAdapter implements HarnessAdapter {
     if (options.pidKeys) registerPidKeys(options.pidKeys);
     this.canJump = options.canJump ?? Boolean(options.manifest?.jumpUrlTemplate);
     this.cli = options.cli ?? (options.manifest?.cliFlag ? defaultCliDescriptor(this.id) : undefined);
+    this.setup = options.setup;
   }
   async discoverAvailableSessions(config: CitoConfig, signal?: AbortSignal): Promise<AvailableSessionSummary[]> {
     const socketsDir = join(config.stateDir, "sockets");

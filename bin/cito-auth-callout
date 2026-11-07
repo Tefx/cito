@@ -1,9 +1,0 @@
-#!/usr/bin/env node
-import { runEntrypoint } from "./loader.js";
-
-try {
-  await runEntrypoint("../dist/src/auth-callout/cli.js", "../src/auth-callout/cli.ts");
-} catch (error) {
-  process.stderr.write("cito-auth-callout: " + (error instanceof Error ? error.message : String(error)) + "\n");
-  process.exitCode = 1;
-}
