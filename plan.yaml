@@ -5524,7 +5524,7 @@ phases:
   name: 'V19 Stage 3 (`v0.15.0`): Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels
     (1..K)`, `HumanChannelPlugin` (`cito-ui` + `plugins/telegram`), `Directory | Activity`
     + Inline Hub Composer, Removal of `jump_url` & Full Documentation Sweep'
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
     and E2E suites, grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
     src/ returns 0 matches, grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl''
@@ -5742,7 +5742,7 @@ phases:
       HumanChannelPlugin (plugins/human & plugins/telegram), Directory | Activity
       + ComposerBar, 3-tab SettingsPanel, documentation sweep & code-hygiene gate
       [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v19` (Stage 3 `v0.15.0`) acceptance decision (`PASS`\
@@ -5825,10 +5825,60 @@ phases:
     agent: verifier
     claimed_by: verifier
     claimed_at: '2026-11-07T20:26:54.627872Z'
+    done_at: '2026-11-07T20:36:44.565738+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v19-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:97880584d7bc7ea881443c0ffce91b179670c0f7).
+
+      Test output (npm run typecheck && npm run compile && npm test): exit 0 (31 test
+      files, 251 tests passed, 0 failed, 0 skipped).
+
+      Mechanical regex & storage verification:
+
+      - package.json dependencies: [''@modelcontextprotocol/sdk'', ''jose'', ''zod'']
+      (0 NATS packages)
+
+      - crates/cito-native/target: absent (false)
+
+      - grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      src/: 0 matches
+
+      - grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl'' src/ plugins/: 0
+      matches
+
+      - [\p{Script=Han}] in src/, plugins/, crates/, docs/, README.md, AGENTS.md,
+      deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, plugins/, crates/, docs/,
+      README.md, AGENTS.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in plugins/pi/cito-bridge.ts: 0 matches
+
+      Requirement results:
+
+      - V19-1-SYMMETRIC-NODE-CHANNELS-PROTOCOL-AND-ACK-SEPARATION: PROVEN (src/shared/identity.ts
+      listenerId NodeKey=(principal_id,harness,session_id) without host_id + isHumanNode,
+      @self O(1) and @<username> resolution with ambiguity check, SELF_SEND_FORBIDDEN
+      comparing logical nodeId, multi-channel Registration.channels + evaluateNodeLease,
+      consumer_ack vs signal_ack separation + STORED_PASSIVE reconnect admission,
+      and atomic signal_claim_dispatch for wake_exclusive).
+
+      - V19-2-HUMAN-CHANNEL-PLUGINS-AND-JUMP-URL-REMOVAL: PROVEN (complete removal
+      of jumpUrlTemplate / jump_url / can_jump / open:<scoped_id> preserving initial.actions
+      === 9, built-in plugins/human/ and plugins/telegram/ with two-scope fields [botToken
+      hub, chatId user], 6-digit Base32 /start <code> pairing, swipe-to-reply, implicit
+      10-min reply, and runHubCli external plugin loading).
+
+      - V19-3-FOUR-SURFACE-UI-DOCS-SWEEP-V0-15-0-AND-CODE-HYGIENE: PROVEN (Surface
+      1 Zone 1 Human Node card + Zone 3 unlistened Human Node [ + Listen ] + Zone
+      4 smart badge, Surface 2 Directory | Activity + ComposerBar, Surface 3 3-tab
+      SettingsPanel with Human Channels & settings_hub_user, Surface 4 WakeBanner
+      -> openDirectoryForReply, full documentation sweep for v0.15.0, and Round 2
+      code-hygiene convergence Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
 - id: v20
   name: 'V20 Stage 4 (v0.16.0): Brand & Icon System (AppIcon.icns), Calm 4-Section
     Product Website (site/), OpenAI Images 2.6 Artwork & GitHub Pages (https://tefx.github.io/cito/)'
-  status: locked
+  status: pending
   depends_on:
   - v19
   steps:
