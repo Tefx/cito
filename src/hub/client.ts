@@ -166,6 +166,7 @@ export interface JsMsg {
     timestampNanos: number;
     stream: string;
     consumer: string;
+    ackedAtMs?: number | null;
   };
   json<T = unknown>(): T;
   string(): string;
@@ -257,6 +258,7 @@ export interface Subscription {
 }
 
 export interface NatsConnection {
+  rpc<T = unknown>(op: string, params?: Record<string, unknown>): Promise<T>;
   publish(subject: string, data?: Uint8Array): void;
   subscribe(
     subject: string,
@@ -553,7 +555,7 @@ function buildConnection(transport: InternalTransport, onAuthFailureRef: { fn?: 
 
   const makeJsMsg = (
     consumerName: string,
-    item: { seq: number; subject: string; created_ms: number; data_b64: string },
+    item: { seq: number; subject: string; created_ms: number; data_b64: string; acked_at_ms?: number | null },
   ): JsMsg => {
     const data = new Uint8Array(Buffer.from(item.data_b64, "base64"));
     return {
@@ -564,6 +566,7 @@ function buildConnection(transport: InternalTransport, onAuthFailureRef: { fn?: 
         timestampNanos: Number(item.created_ms) * 1_000_000,
         stream: SIGNALS_STREAM,
         consumer: consumerName,
+        ackedAtMs: item.acked_at_ms ?? null,
       },
       json<T = unknown>(): T {
         return JSON.parse(decoder.decode(data)) as T;
@@ -685,6 +688,7 @@ function buildConnection(transport: InternalTransport, onAuthFailureRef: { fn?: 
   };
 
   const nc: NatsConnection = {
+    rpc,
     publish(subject: string, data: Uint8Array = new Uint8Array()): void {
       if (isClosedFlag) return;
       const p = rpc("nc_publish", {
@@ -837,7 +841,7 @@ export function createLocalNatsConnection(options: {
     async rpc(op: string, params: Record<string, unknown> = {}): Promise<unknown> {
       await Promise.resolve();
       try {
-        return engine.handleRpc(op, params, principal);
+        return await engine.handleRpc(op, params, principal);
       } catch (error) {
         if (error instanceof HubError) {
           if (error.code === "FORBIDDEN_TARGET_SCOPE") {

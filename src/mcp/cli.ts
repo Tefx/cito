@@ -85,7 +85,7 @@ async function ensureDaemon(config: CitoConfig): Promise<void> {
   while (performance.now() < deadline) { if ((await daemonHealth(config))?.version === CITO_VERSION) return; await delay(50); }
   throw new Error(`Daemon did not become healthy on 127.0.0.1:${config.daemonPort} for ${config.stateDir} within 5000ms`);
 }
-async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_unlisten",
+async function callDaemonTool(config: CitoConfig, name: "cito_listen" | "cito_unlisten" | "cito_send",
   args: Record<string, unknown>, meta: Record<string, unknown>): Promise<Record<string, unknown>> {
   await ensureDaemon(config);
   const res = await fetch(`http://127.0.0.1:${config.daemonPort}/mcp`, {
@@ -216,6 +216,41 @@ export async function main(): Promise<void> {
   const config = loadConfig();
   if (cmd === "daemon") { await runDaemon(config); return; }
   if (cmd === "listen" || cmd === "unlisten") { await runDirectCommand(cmd, process.argv.slice(3), config); return; }
+  if (cmd === "send") {
+    const argv = process.argv.slice(3);
+    let to: string | undefined, hub: string | undefined, replyTo: string | undefined;
+    const msgParts: string[] = [];
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i]!;
+      if (a === "--to" || a === "-t") { to = argv[++i]; }
+      else if (a.startsWith("--to=")) { to = a.slice(5); }
+      else if (a === "--hub") { hub = argv[++i]; }
+      else if (a.startsWith("--hub=")) { hub = a.slice(6); }
+      else if (a === "--reply-to") { replyTo = argv[++i]; }
+      else if (a.startsWith("--reply-to=")) { replyTo = a.slice(11); }
+      else if (a === "-m" || a === "--message") { if (argv[i + 1] !== undefined) msgParts.push(argv[++i]!); }
+      else if (a.startsWith("--message=")) { msgParts.push(a.slice(10)); }
+      else { msgParts.push(a); }
+    }
+    if (!to || !msgParts.join(" ").trim()) {
+      process.stderr.write("Usage: cito send --to <target> [-m <message>] [--hub <hub>]\n");
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const payload = await callDaemonTool(config, "cito_send", {
+        to,
+        message: msgParts.join(" ").trim(),
+        ...(hub ? { hub } : {}),
+        ...(replyTo ? { in_reply_to: replyTo } : {}),
+      }, { http_transport: true });
+      process.stdout.write(`Sent ${String(payload.signal_id)} (${String(payload.status)}) to ${String(payload.to)}\n`);
+    } catch (error) {
+      process.stderr.write((error instanceof Error ? error.message : String(error)) + "\n");
+      process.exitCode = 1;
+    }
+    return;
+  }
   await ensureDaemon(config);
   const stdio = new StdioServerTransport();
   const http = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${config.daemonPort}/mcp`));

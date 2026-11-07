@@ -261,3 +261,200 @@ test("disconnected recipient returns the exact sender timeout milestone and pass
   expect(await call(sender.service, "cito_send", { to: id, message: "buffered passive" })).toMatchObject({ status: "queued_for_reconnect", held_reason: null });
   expect(f.service.state.listener(id)!.persisted_seq).toBe(0);
 }, 10_000);
+
+test("Stage 3 symmetric Node: @self and @username resolution, multi-channel attachment without FENCED_INACTIVE, signal_claim_dispatch, signal_ack sync, and plugins/telegram pairing & replies", async () => {
+  const macA = await setup();
+  const macB = await fixture({ broker: macA.broker, user: "alice" });
+  const bobMac = await fixture({ broker: macA.broker, user: "bob" });
+  cleanups.push(() => macB.close(), () => bobMac.close());
+
+  // 1. Multi-channel attachment on the same Human Node (@alice) across Mac A and Mac B without FENCED_INACTIVE
+  const enrollA = await call(
+    macA.service,
+    "cito_listen",
+    { about: "Alice Mac A", scope: "workspace", tag: "alice" },
+    { expected_harness: "human", expected_session_id: "default", title: "@alice (Me)" },
+  );
+  const enrollB = await call(
+    macB.service,
+    "cito_listen",
+    { about: "Alice Mac B", scope: "workspace", tag: "alice" },
+    { expected_harness: "human", expected_session_id: "default", title: "@alice (Me)" },
+  );
+  expect(enrollA.listener_id).toBe(enrollB.listener_id);
+  const aliceHumanId = toCanonicalListenerId(enrollA.listener_id);
+  expect(macA.service.state.listener(aliceHumanId)?.status).toBe("ACTIVE");
+  expect(macB.service.state.listener(aliceHumanId)?.status).toBe("ACTIVE");
+
+  // 2. Agent session on Mac A sends to @self (resolves O(1) to Alice's Human Node without SELF_SEND_FORBIDDEN)
+  const piListen = await call(macA.service, "cito_listen", { about: "Pi worker", scope: "workspace" }, macA.pi.meta);
+  const sentToSelf = await call(macA.service, "cito_send", { to: "@self", message: "Build finished on Pi" }, macA.pi.meta);
+  expect(sentToSelf.to).toBe(enrollA.listener_id);
+
+  await waitFor(() =>
+    macA.service.state.signals("SELECT * FROM local_signals WHERE listener_id = ?", aliceHumanId).length === 1 &&
+    macB.service.state.signals("SELECT * FROM local_signals WHERE listener_id = ?", aliceHumanId).length === 1,
+  );
+
+  // 3. Cross-channel business signal_ack: acknowledging on Mac A marks the signal read on Mac B as well
+  await macA.service.ackSignalsFromUi({ signal_ids: [sentToSelf.signal_id] });
+  await waitFor(() =>
+    macB.service.state.signals("SELECT * FROM local_signals WHERE signal_id = ?", sentToSelf.signal_id)[0]?.acknowledged_at_ms !== null,
+  );
+
+  // 4. Bob enrolls his Pi session and sends to @alice by username shorthand; unlistening Mac B leaves Mac A ACTIVE
+  await call(bobMac.service, "cito_listen", { about: "Bob Pi session", scope: "workspace" }, bobMac.pi.meta);
+  const sentFromBob = await call(bobMac.service, "cito_send", { to: "@alice", message: "Hey Alice from Bob" }, bobMac.pi.meta);
+  expect(sentFromBob.to).toBe(enrollA.listener_id);
+
+  await macB.service.unlistenById("default", aliceHumanId);
+  expect(macB.service.state.listener(aliceHumanId)?.status).toBe("UNLISTENED");
+  expect(macA.service.state.listener(aliceHumanId)?.status).toBe("ACTIVE");
+
+  // Unknown @username fails with LISTENER_NOT_FOUND; ambiguous @username across distinct principals fails with INVALID_INPUT
+  expect(payload(await bobMac.service.call("cito_send", { to: "@nonexistent_user", message: "hi" }))).toMatchObject({
+    error: { code: "LISTENER_NOT_FOUND" },
+  });
+  const broker = Reflect.get(macA.service.slots.get("default")!, "broker") as Broker;
+  const dupId = listenerId({ principal_id: "oidc#alice-dup", harness: "human", session_id: "default" });
+  await broker.kv.create(
+    dupId,
+    encode({
+      listener_id: dupId,
+      public_id: publicListenerId("alice", dupId),
+      tag: "alice",
+      principal_id: "oidc#alice-dup",
+      owner_user: "alice",
+      host_id: "host-dup",
+      host_name: "dup-mac",
+      harness: "human",
+      session_id: "default",
+      cwd: "~",
+      repo: null,
+      branch: null,
+      title: "@alice (Dup)",
+      about: "dup",
+      scope: "workspace",
+      state: "ACTIVE",
+      binding_generation: 1,
+      owner_token: randomUUID(),
+    }),
+  );
+  bobMac.service.slots.get("default")!.directoryIndex.clear();
+  expect(payload(await bobMac.service.call("cito_send", { to: "@alice", message: "ambiguous" }))).toMatchObject({
+    error: { code: "INVALID_INPUT", message: expect.stringContaining("Ambiguous @username") },
+  });
+  await broker.kv.delete(dupId);
+  bobMac.service.slots.get("default")!.directoryIndex.clear();
+
+  // 5. Atomic signal_claim_dispatch guarantees at most 1 wake_exclusive channel claims a signal batch
+  const claim1 = await broker.nc.rpc<{ claimed: boolean }>("signal_claim_dispatch", {
+    node_id: aliceHumanId,
+    signal_ids: [sentFromBob.signal_id],
+    channel_id: "host-a:pi",
+    lease_ms: 30_000,
+  });
+  const claim2 = await broker.nc.rpc<{ claimed: boolean }>("signal_claim_dispatch", {
+    node_id: aliceHumanId,
+    signal_ids: [sentFromBob.signal_id],
+    channel_id: "host-b:pi",
+    lease_ms: 30_000,
+  });
+  expect(claim1.claimed).toBe(true);
+  expect(claim2.claimed).toBe(false);
+
+  // 6. Built-in plugins/telegram: pairing (/start <code>), outbound sendMessage, restart idempotency, swipe-to-reply, and implicit recent-sender reply
+  const tgCalls: { method: string; body: Record<string, unknown> }[] = [];
+  let nextMsgId = 500;
+  let pendingUpdates: unknown[] = [];
+  const hubEngine = macA.broker.engine;
+  (hubEngine as { fetchFn?: typeof fetch }).fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const urlStr = String(input);
+    const method = urlStr.split("/").at(-1) ?? "";
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    tgCalls.push({ method, body });
+    if (method === "getMe") {
+      return new Response(JSON.stringify({ ok: true, result: { id: 1, is_bot: true, username: "cito_test_bot" } }), { status: 200 });
+    }
+    if (method === "sendMessage") {
+      nextMsgId += 1;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextMsgId } }), { status: 200 });
+    }
+    if (method === "getUpdates") {
+      const batch = pendingUpdates.splice(0);
+      return new Response(JSON.stringify({ ok: true, result: batch }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const pairStart = await broker.nc.rpc<{ code: string; instruction: string }>("human_channel_pair_start", {
+    plugin_id: "telegram",
+    hub_config: { botToken: "123456:TEST_TOKEN" },
+  });
+  expect(pairStart.code).toMatch(/^cito-[a-z2-7]{6}$/);
+  expect(pairStart.instruction).toBe(`Send "/start ${pairStart.code}" to @cito_test_bot`);
+
+  // User sends /start <code> in Telegram
+  pendingUpdates.push({
+    update_id: 10,
+    message: {
+      message_id: 1,
+      from: { id: 42, username: "alice_tg" },
+      chat: { id: 987654, type: "private" },
+      text: `/start ${pairStart.code}`,
+    },
+  });
+  const poll1 = await broker.nc.rpc<{ processed: number }>("human_channel_poll", { plugin_id: "telegram" });
+  expect(poll1.processed).toBe(1);
+  expect(tgCalls.some(c => c.method === "sendMessage" && String(c.body.text).includes("Paired with Cito as @alice"))).toBe(true);
+
+  // Outbound notification to @alice delivers to Telegram and records external_msg_id in hub_channel_deliveries
+  const tgSendBefore = tgCalls.filter(c => c.method === "sendMessage").length;
+  const bobToAlice2 = await call(bobMac.service, "cito_send", { to: "@alice", message: "Please review PR #42" }, bobMac.pi.meta);
+  await waitFor(() => tgCalls.filter(c => c.method === "sendMessage").length > tgSendBefore);
+  const deliveredMsgCall = tgCalls.filter(c => c.method === "sendMessage").at(-1)!;
+  expect(deliveredMsgCall.body).toMatchObject({
+    chat_id: "987654",
+    text: expect.stringContaining("Please review PR #42"),
+  });
+  const deliveredExternalMsgId = nextMsgId;
+
+  // Replay / restart idempotency: replaying pending deliveries never re-sends an already-delivered signal
+  const countAfterFirstDeliver = tgCalls.filter(c => c.method === "sendMessage").length;
+  await hubEngine.replayPendingHumanDeliveries();
+  expect(tgCalls.filter(c => c.method === "sendMessage").length).toBe(countAfterFirstDeliver);
+
+  // Swipe-to-reply in Telegram routes back to Bob's Pi session and acknowledges bobToAlice2
+  pendingUpdates.push({
+    update_id: 11,
+    message: {
+      message_id: 2,
+      from: { id: 42, username: "alice_tg" },
+      chat: { id: 987654, type: "private" },
+      text: "LGTM via swipe reply!",
+      reply_to_message: { message_id: deliveredExternalMsgId },
+    },
+  });
+  await broker.nc.rpc("human_channel_poll", { plugin_id: "telegram" });
+  await waitFor(() =>
+    bobMac.service.state.signals("SELECT * FROM local_signals").some(s => s.message === "LGTM via swipe reply!"),
+  );
+
+  // Implicit recent-sender reply within 10 minutes (without reply_to_message) routes to the latest sender and echoes confirmation
+  await call(macA.service, "cito_send", { to: "@self", message: "Pi question for Alice" }, macA.pi.meta);
+  await waitFor(() => tgCalls.some(c => c.method === "sendMessage" && String(c.body.text).includes("Pi question for Alice")));
+  pendingUpdates.push({
+    update_id: 12,
+    message: {
+      message_id: 3,
+      from: { id: 42, username: "alice_tg" },
+      chat: { id: 987654, type: "private" },
+      text: "Implicit reply to Pi!",
+    },
+  });
+  await broker.nc.rpc("human_channel_poll", { plugin_id: "telegram" });
+  await waitFor(() =>
+    macA.service.state.signals("SELECT * FROM local_signals").some(s => s.message === "Implicit reply to Pi!"),
+  );
+  expect(tgCalls.some(c => c.method === "sendMessage" && String(c.body.text).includes("↩ Replied to"))).toBe(true);
+}, 20_000);

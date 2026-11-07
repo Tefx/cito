@@ -31,6 +31,7 @@ export const hubNameSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/);
 export const canonicalListenerIdSchema = z.string().regex(/^c_[a-z2-7]{12}$/);
 export const unscopedListenerIdSchema = z.string().regex(/^(?:c_[a-z2-7]{12}|[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12})$/);
 export const listenerIdSchema = z.string().regex(/^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_[a-z2-7]{12}|[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12})$/);
+export const sendTargetSchema = z.string().regex(/^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_[a-z2-7]{12}|[a-z0-9]+(?:-[a-z0-9]+)*-[a-z2-7]{12}|@[a-zA-Z0-9._-]{1,64})$/);
 const textSchema = z.string().transform((value, ctx) => {
   try { return sanitizeMessage(value); }
   catch { ctx.addIssue({ code: "custom", message: "Expected 1-500 sanitized Unicode codepoints" }); return z.NEVER; }
@@ -50,7 +51,7 @@ export const findInputSchema = z.object({
   limit: z.number().int().min(1).max(50).default(20),
 }).strict();
 export const sendInputSchema = z.object({
-  to: listenerIdSchema, hub: hubNameSchema.optional(), message: signalTextSchema,
+  to: sendTargetSchema, hub: hubNameSchema.optional(), message: signalTextSchema,
   in_reply_to: z.string().min(1).max(161).optional(), idempotency_key: z.string().min(1).max(128).optional(),
 }).strict();
 export const inboxInputSchema = z.object({

@@ -35,6 +35,7 @@ export interface SetupHubInput {
   url: string;
   authMode?: HubAuthMode;
   token?: string;
+  user?: string;
   oidcIssuer?: string;
   oidcClientId?: string;
   defaultScope?: "self" | "workspace";
@@ -66,6 +67,7 @@ export interface SetupHubSummary {
   natsUrl: string;
   authMode: HubAuthMode;
   token?: string;
+  user?: string;
   oidcIssuer?: string;
   oidcClientId?: string;
   enabled: boolean;
@@ -471,6 +473,10 @@ function validateHubInput(hub: SetupHubInput): {
     }
     oidcClientId = hub.oidcClientId.trim();
   }
+  const cleanUser = hub.user?.trim();
+  if (cleanUser !== undefined && cleanUser.length > 0 && (cleanUser.length > 64 || /[^a-zA-Z0-9._-]/.test(cleanUser))) {
+    throw new Error("Hub user must contain 1-64 letters, numbers, dots, underscores or hyphens");
+  }
   const defaultScope = hub.defaultScope ?? (url === "local://" ? "workspace" : "self");
   return {
     name: nameRes.data,
@@ -479,6 +485,7 @@ function validateHubInput(hub: SetupHubInput): {
       natsUrl: url,
       authMode,
       ...(hub.token ? { token: hub.token.trim() } : {}),
+      ...(cleanUser ? { user: cleanUser } : {}),
       ...(oidcIssuer ? { oidcIssuer } : {}),
       ...(oidcClientId ? { oidcClientId } : {}),
       enabled: true,
@@ -503,6 +510,7 @@ export async function inspectSetup(options: { env?: NodeJS.ProcessEnv } = {}): P
       natsUrl: url,
       authMode,
       ...(typeof h.token === "string" ? { token: h.token } : {}),
+      ...(typeof h.user === "string" ? { user: h.user } : {}),
       ...(typeof h.oidcIssuer === "string" ? { oidcIssuer: h.oidcIssuer } : {}),
       ...(typeof h.oidcClientId === "string" ? { oidcClientId: h.oidcClientId } : {}),
       enabled: h.enabled !== false,

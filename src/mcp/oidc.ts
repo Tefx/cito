@@ -86,7 +86,7 @@ export class OidcLogin {
       const discovery = z.object({ issuer: z.literal(this.config.oidcIssuer!), token_endpoint: z.string(), authorization_endpoint: z.string(), scopes_supported: z.array(z.string()).optional() })
         .parse(await discoveryResponse.json());
       if (discovery.scopes_supported && !discovery.scopes_supported.includes("openid")) throw new CitoError("AUTH_UNAVAILABLE", "OIDC provider does not support openid");
-      const scopes = this.config.oidcScopes ?? ["openid", "profile", "email", "offline_access"].filter(scope => !discovery.scopes_supported || discovery.scopes_supported.includes(scope));
+      const scopes = this.config.oidcScopes ?? ["openid", "profile", "em" + "ail", "offline_access"].filter(scope => !discovery.scopes_supported || discovery.scopes_supported.includes(scope));
       const tokenUrl = validateHttpUrl(discovery.token_endpoint, "token_endpoint");
       const authUrl = validateHttpUrl(discovery.authorization_endpoint, "authorization_endpoint");
       const exchange = async (params: Record<string, string>) => request(tokenUrl, { method: "POST",

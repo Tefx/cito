@@ -342,7 +342,6 @@ describe("cito setup engine and plugin setup descriptors", () => {
         cwd: "/tmp",
         repo: null,
         scope: "workspace",
-        can_jump: true,
       };
       bridge.state(
         [{ name: "local", status: "connected", user: "alice", auth_mode: "none", error: null }],
@@ -359,9 +358,9 @@ describe("cito setup engine and plugin setup descriptors", () => {
         nodes.flatMap(n => [n, ...flatten(n.children ?? [])]);
       const allNodes = flatten(snap.items);
 
-      // scope:local-dev-abcdefghijkl is omitted on local (auth_mode: "none"), while open: is at x=302 and stop: is at x=328
+      // scope:local-dev-abcdefghijkl and open: are omitted on local (auth_mode: "none"), while stop: is at x=328
       expect(allNodes.find(n => n.id === "scope:" + localListener.scoped_id)).toBeUndefined();
-      expect(allNodes.find(n => n.id === "open:" + localListener.scoped_id)?.x).toBe(302);
+      expect(allNodes.find(n => n.id === "open:" + localListener.scoped_id)).toBeUndefined();
       expect(allNodes.find(n => n.id === "stop:" + localListener.scoped_id)?.x).toBe(328);
 
       // Token-authenticated hub state frame is accepted and rendered by cito-ui
@@ -399,7 +398,7 @@ describe("cito setup engine and plugin setup descriptors", () => {
       timeout: 5000,
     });
     expect(citoVerRes.status).toBe(0);
-    expect(citoVerRes.stdout).toBe("cito v0.14.0\n");
+    expect(citoVerRes.stdout).toBe("cito v0.15.0\n");
 
     // 2. LaunchAgent management via API and CLI (--login-item / --no-login-item)
     expect((await inspectLaunchAtLogin({ env })).enabled).toBe(false);

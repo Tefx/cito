@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat, utimes, writeFile, readFile } from "node:fs/promises
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ensureUiCompiled, expandJumpUrl, isSafeJumpUrl, UiBridge, validAction, type BannerPayload, type UiHarnessMetadata, type UiSettingsState, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
+import { ensureUiCompiled, UiBridge, validAction, type BannerPayload, type UiActivityItem, type UiHarnessMetadata, type UiSettingsState, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
 import { KeyedMutex } from "../../src/shared/index.js";
 import { waitFor } from "../mcp/support.js";
 
@@ -11,9 +11,9 @@ let root: string, binary: string;
 beforeAll(async () => { root = await mkdtemp("/tmp/cito-ui-test-"); binary = await ensureUiCompiled(root); }, 120000);
 afterAll(async () => { await rm(root, { recursive: true, force: true }); });
 const listener: UiListenerSummary = { hub: "personal", listener_id: "c_abcdefghijkl", public_id: "repo-abcdefghijkl", scoped_id: "personal:repo-abcdefghijkl",
-  harness: "codex", session_id: "thread-1", title: "café conversation", cwd: "/tmp", repo: null, scope: "self", can_jump: true };
+  harness: "codex", session_id: "thread-1", title: "café conversation", cwd: "/tmp", repo: null, scope: "self" };
 const hubs = [{ name: "personal", status: "connected" as const, user: "alice", auth_mode: "oidc" as const, error: null }];
-const payload: BannerPayload = { target_harness: "codex", target_session_id: "thread-1", target_title: "café conversation", from_user: "alice", from_host: "host", from_title: "sender", message: "hello café", effective_wake: true };
+const payload: BannerPayload = { target_harness: "codex", target_session_id: "thread-1", target_title: "café conversation", from_user: "alice", from_host: "host", from_title: "sender", message: "hello café", effective_wake: true, signal_id: "personal:sig_1", hub: "personal", from_scoped_id: "personal:sender-abcdefgh2345" };
 function childOf(bridge: UiBridge) { return Reflect.get(bridge, "child") as ChildProcessWithoutNullStreams | undefined; }
 
 test("KeyedMutex serializes same-key async/sync work, releases failures and permits unrelated keys", async () => {
@@ -28,10 +28,8 @@ test("KeyedMutex serializes same-key async/sync work, releases failures and perm
   expect(Reflect.get(mutex, "tails").size).toBe(0);
 });
 
-test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actions, hides banners without exiting, and exits on EOF", async () => {
-  const log = join(root, "opened"), opener = join(root, "open.cjs");
-  await writeFile(opener, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(log)}, process.argv[2]+'\\n');`, { mode: 0o700 });
-  const child = spawn(binary, [], { stdio: "pipe", env: { ...process.env, CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120", CITO_BANNER_URL_OPENER: opener } });
+test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actions, opens DirectoryPanel on banner click, and exits on EOF", async () => {
+  const child = spawn(binary, [], { stdio: "pipe", env: { ...process.env, CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120" } });
   let stderr = "", stdout = ""; child.stderr.on("data", c => { stderr += c; }); child.stdout.on("data", c => { stdout += c; });
   const exited = new Promise<number | null>(resolve => child.once("exit", resolve));
   const send = (data: unknown) => child.stdin.write(JSON.stringify(data) + "\n");
@@ -45,11 +43,12 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
     await waitFor(() => stderr.includes("banner hidden")); expect(child.exitCode).toBeNull();
     send({ op: "banner", payload }); await waitFor(() => stderr.split("display ").length === 3);
     child.kill("SIGUSR1");
-    await waitFor(async () => { try { return (await readFile(log, "utf8")).includes("codex://threads/thread-1"); } catch { return false; } });
+    await waitFor(() => stderr.includes("banner clicked"));
     expect(child.exitCode).toBeNull();
-    for (const index of [2, 3, 4, 5, 6, 7, 8, 9]) send({ op: "test_action", index });
-    await waitFor(() => stdout.trim().split("\n").length === 8);
+    for (const index of [1, 2, 3, 4, 5, 6, 7, 8]) send({ op: "test_action", index });
+    await waitFor(() => stdout.trim().split("\n").length === 9);
     expect(stdout.trim().split("\n").map(line => JSON.parse(line))).toEqual([
+      { op: "open_directory", mode: "activity" },
       { op: "set_scope", hub: "personal", listener_id: listener.listener_id, scope: "workspace" },
       { op: "unlisten", hub: "personal", listener_id: listener.listener_id },
       { op: "unlisten", hub: "personal", listener_id: listener.listener_id }, { op: "unlisten_all" },
@@ -62,7 +61,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
 });
 
 interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; hovered?: boolean; reuse_identifier?: string; background?: number[]; border?: number[]; border_width?: number; foreground?: number[]; tint?: number[]; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
-interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; settings_open?: boolean; settings_tab?: string; settings_launch_at_login?: boolean; settings_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
+interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_mode?: string; activity_filter?: string; unread_count?: number; composer_open?: boolean; composer_target?: string; composer_reply_signal_id?: string; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; settings_open?: boolean; settings_tab?: string; settings_launch_at_login?: boolean; settings_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
 test("real AppKit card views expose template icon, 380pt control-center geometry, state-driven hub drawers, and SF Symbol controls", async () => {
@@ -89,7 +88,7 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
     bridge.state(hubs, [listener]);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1"));
     const initial = await inspect(), nodes = flatten(initial.items);
-    expect(initial).toMatchObject({ actions: 10, count: 1, icon_template: true, icon_width: 18, icon_height: 18 });
+    expect(initial).toMatchObject({ actions: 9, count: 1, icon_template: true, icon_width: 18, icon_height: 18 });
     expect(initial).toMatchObject({ button_title: " 1", button_image_position: 7, button_font_size: 12 });
     expect(initial.button_font_weight).toBeCloseTo(0.3, 2);
     expect(initial.button_font_features).toContainEqual({ type: 6, selector: 0 });
@@ -159,7 +158,7 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
     expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(false);
     send({ op: "test_control", id: "hub:personal" });
     expect((await inspect()).items.find(node => node.id === "drawer:personal")?.hidden).toBe(true);
-    expect(nodes.find(node => node.id === "scope:" + listener.scoped_id)).toMatchObject({ text: "Self", symbol: "lock.fill", x: 236, y: 30, width: 62, height: 22 });
+    expect(nodes.find(node => node.id === "scope:" + listener.scoped_id)).toMatchObject({ text: "Self", symbol: "lock.fill", x: 262, y: 30, width: 62, height: 22 });
     send({ op: "test_control", id: "scope:" + listener.scoped_id });
     const teamToggle = flatten((await inspect()).items).find(node => node.id === "scope:" + listener.scoped_id)!;
     expect(teamToggle).toMatchObject({ text: "Team", symbol: "person.2.fill", foreground: [1, 1, 1, 1] });
@@ -189,7 +188,7 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
     // Single-default-hub mode eliminates literal "default" and renders compact 44x22pt icon pill when connected (none)
     const richListener: UiListenerSummary = {
       ...listener, hub: "default", public_id: "superlongrepositoryslugname-f8k2abcdefgh",
-      scoped_id: "superlongrepositoryslugname-f8k2abcdefgh", harness: "pi", can_jump: false,
+      scoped_id: "superlongrepositoryslugname-f8k2abcdefgh", harness: "pi",
       about: "Primary workspace orchestrator session", branch: "main",
     };
     bridge.state([{ name: "default", status: "connected", user: "alice", auth_mode: "none", error: null }],
@@ -230,7 +229,7 @@ test("real AppKit card views expose template icon, 380pt control-center geometry
   } finally { await bridge.close(); }
 }, 15000);
 
-test("HUD presents English wake/passive counts and harness-specific click labels", async () => {
+test("HUD presents English wake/passive counts and Hub reply click label", async () => {
   const diagnostics: string[] = [];
   const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line) });
   try {
@@ -238,11 +237,11 @@ test("HUD presents English wake/passive counts and harness-specific click labels
     bridge.banner({ ...payload, count: 2 });
     await waitFor(() => diagnostics.some(line => line.includes('"semantic_label":"Notification · ×2"')));
     const wake = JSON.parse(diagnostics.find(line => line.startsWith("cito-ui: display "))!.slice("cito-ui: display ".length));
-    expect(wake.action_label).toBe("Open in Codex ↗");
+    expect(wake.action_label).toBe("Click to reply in Cito ↩");
     bridge.banner({ ...payload, target_harness: "custom", effective_wake: false });
     await waitFor(() => diagnostics.some(line => line.includes('"semantic_label":"Passive"')));
     const passive = JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: display ")).at(-1)!.slice("cito-ui: display ".length));
-    expect(passive).toMatchObject({ action_label: "custom session · Click to dismiss", subtitle: "[Passive] alice@host · sender", display_subtitle: "[Passive] alice@host · sender" });
+    expect(passive).toMatchObject({ action_label: "Click to reply in Cito ↩", subtitle: "[Passive] alice@host · sender", display_subtitle: "[Passive] alice@host · sender" });
   } finally { await bridge.close(); }
 });
 
@@ -695,29 +694,11 @@ test("prebuilt bin/cito-ui-darwin-arm64 is an ad-hoc-signed arm64 Mach-O install
   }
 }, 60000);
 
-test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui renders custom plugin badges, group headers, jump URLs, and horizontal facet scroll overflow", async () => {
-  expect(expandJumpUrl("codex://threads/{session_id}", { session_id: "thread 1/2" })).toBe("codex://threads/thread%201%2F2");
-  expect(expandJumpUrl("cursor://file/{cwd}", { session_id: "s1", cwd: "/Users/alice/my repo" })).toBe("cursor://file/Users/alice/my%20repo");
-  expect(expandJumpUrl("cursor://file/{cwd}", { session_id: "s1" })).toBeNull();
-  for (const unsafe of [
-    "javascript:alert(1)",
-    "JAVASCRIPT:alert({session_id})",
-    "file:///etc/passwd",
-    "data:text/html,<script>alert(1)</script>",
-    "http://example.com/{session_id}",
-    "https://example.com/{session_id}",
-    "not a url",
-  ]) {
-    expect(isSafeJumpUrl(unsafe)).toBe(false);
-    expect(expandJumpUrl(unsafe, { session_id: "s1", cwd: "/tmp" })).toBeNull();
-  }
-
-  const log = join(root, "custom-opened"), opener = join(root, "custom-open.cjs");
-  await writeFile(opener, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(log)}, process.argv[2]+'\\n');`, { mode: 0o700 });
+test("cito-ui renders custom plugin badges, group headers, horizontal facet scroll overflow, and WakeBanner click opens DirectoryPanel in Activity mode with ComposerBar", async () => {
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, {
     binary,
-    env: { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120", CITO_BANNER_URL_OPENER: opener },
+    env: { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "120" },
     diagnostic: line => diagnostics.push(line),
     onAction: action => { actions.push(action); },
   });
@@ -732,10 +713,10 @@ test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui ren
     await bridge.start();
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
     const customHarnesses: UiHarnessMetadata[] = [
-      { id: "pi", display_name: "Pi", sf_symbol: "terminal.fill", tint: "indigo", tier: "stable", order: 0, jump_url_template: null },
-      { id: "codex", display_name: "Codex", sf_symbol: "sparkles", tint: "teal", tier: "stable", order: 1, jump_url_template: "codex://threads/{session_id}" },
-      { id: "claude", display_name: "Claude", sf_symbol: "cpu.fill", tint: "orange", tier: "experimental", order: 2, jump_url_template: null },
-      { id: "cursor", display_name: "Cursor", sf_symbol: "cursorarrow.rays", tint: "purple", tier: "custom", order: 3, jump_url_template: "cursor://file/{cwd}" },
+      { id: "pi", display_name: "Pi", sf_symbol: "terminal.fill", tint: "indigo", tier: "stable", order: 0 },
+      { id: "codex", display_name: "Codex", sf_symbol: "sparkles", tint: "teal", tier: "stable", order: 1 },
+      { id: "claude", display_name: "Claude", sf_symbol: "cpu.fill", tint: "orange", tier: "experimental", order: 2 },
+      { id: "cursor", display_name: "Cursor", sf_symbol: "cursorarrow.rays", tint: "purple", tier: "custom", order: 3 },
     ];
     const cursorListener: UiListenerSummary = {
       hub: "personal",
@@ -748,7 +729,6 @@ test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui ren
       cwd: "/tmp/cursor-proj",
       repo: "acme/service",
       scope: "self",
-      can_jump: true,
     };
     const candidates = [
       { harness: "zed", session_id: "zed-1", title: "Zed Session", cwd: "/tmp/zed" },
@@ -758,16 +738,11 @@ test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui ren
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1 available=2"));
     const snap = await inspect(), nodes = flatten(snap.items);
 
-    // Custom listener card jump button uses "Open in Cursor" and opens cursor://file/tmp/cursor-proj
-    const openBtn = nodes.find(n => n.id === "open:" + cursorListener.scoped_id)!;
-    expect(openBtn).toMatchObject({ tooltip: "Open in Cursor", symbol: "arrow.up.forward.app" });
-    send({ op: "test_control", id: "open:" + cursorListener.scoped_id });
-    await waitFor(async () => {
-      try { return (await readFile(log, "utf8")).includes("cursor://file/tmp/cursor-proj"); } catch { return false; }
-    });
+    // open:<scoped_id> jump button is completely absent
+    expect(nodes.find(n => n.id === "open:" + cursorListener.scoped_id)).toBeUndefined();
 
-    // Zone 3: cursor has jump_url_template -> "Cursor · 1 recent", zed has neither -> "Zed · 1 available"
-    expect(nodes.find(n => n.id === "toggle_group:cursor")).toMatchObject({ text: "Cursor · 1 recent" });
+    // Zone 3: custom plugins without endpoint_pid show "available"
+    expect(nodes.find(n => n.id === "toggle_group:cursor")).toMatchObject({ text: "Cursor · 1 available" });
     expect(nodes.find(n => n.id === "toggle_group:zed")).toMatchObject({ text: "Zed · 1 available" });
 
     // Surface 2: single custom plugin pill at x: 430 (no overflow yet), then overflow > 544pt hosts pills in directory_harness_scroll
@@ -780,8 +755,8 @@ test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui ren
     // Add more custom plugins so total width exceeds 544pt -> hosted in horizontal NSScrollView
     const manyHarnesses: UiHarnessMetadata[] = [
       ...customHarnesses,
-      { id: "windsurf", display_name: "Windsurf", sf_symbol: "wind", tint: "green", tier: "custom", order: 3, jump_url_template: null },
-      { id: "zed", display_name: "Zed Editor", sf_symbol: "bolt.horizontal.fill", tint: "blue", tier: "custom", order: 3, jump_url_template: null },
+      { id: "windsurf", display_name: "Windsurf", sf_symbol: "wind", tint: "green", tier: "custom", order: 3 },
+      { id: "zed", display_name: "Zed Editor", sf_symbol: "bolt.horizontal.fill", tint: "blue", tier: "custom", order: 3 },
     ];
     bridge.state(hubs, [cursorListener], candidates, [], 5, manyHarnesses);
     await waitFor(async () => flatten((await inspect()).directory_items ?? []).some(n => n.id === "directory_harness_scroll"));
@@ -790,14 +765,19 @@ test("expandJumpUrl validates schemes, URL-encodes placeholders, and cito-ui ren
     expect(dirNodes2.find(n => n.id === "dir_harness:windsurf")?.text).toBe("Windsurf");
     expect(dirNodes2.find(n => n.id === "dir_harness:zed")?.text).toBe("Zed Editor");
 
-    // Custom banner with target_cwd expands jump_url -> "Open in Cursor ↗", while missing target_cwd omits jump
-    bridge.banner({ ...payload, target_harness: "cursor", target_session_id: "cur-1", target_cwd: "/tmp/banner-proj" });
-    await waitFor(() => diagnostics.some(l => l.includes('"action_label":"Open in Cursor ↗"')));
+    // Clicking WakeBanner opens DirectoryPanel in "activity" mode with composer_target set to payload.from_scoped_id
+    bridge.banner({ ...payload, target_harness: "cursor", target_session_id: "cur-1", signal_id: "personal:sig_banner_99", from_scoped_id: "personal:bob-abcdefgh2345" });
+    await waitFor(() => diagnostics.some(l => l.includes('"action_label":"Click to reply in Cito ↩"')));
     send({ op: "test_click" });
-    await waitFor(async () => (await readFile(log, "utf8")).includes("cursor://file/tmp/banner-proj"));
-
-    bridge.banner({ ...payload, target_harness: "cursor", target_session_id: "cur-2" });
-    await waitFor(() => diagnostics.some(l => l.includes('"action_label":"cursor session · Click to dismiss"')));
+    await waitFor(() => actions.some(a => a.op === "open_directory" && a.mode === "activity"));
+    const afterBannerClick = await inspect();
+    expect(afterBannerClick).toMatchObject({
+      directory_open: true,
+      directory_mode: "activity",
+      composer_open: true,
+      composer_target: "personal:bob-abcdefgh2345",
+      composer_reply_signal_id: "personal:sig_banner_99",
+    });
   } finally {
     await bridge.close();
   }
@@ -906,7 +886,7 @@ test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-clic
 
     const menuSnap = await inspect();
     const menuNodes = flatten(menuSnap.items);
-    expect(menuSnap.actions).toBe(10);
+    expect(menuSnap.actions).toBe(9);
     expect(menuNodes.find(n => n.id === "open_settings")).toMatchObject({
       text: "Settings…",
       symbol: "gearshape",
@@ -930,17 +910,25 @@ test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-clic
     expect(settingsNodes1.find(n => n.id === "settings_tab:apps")).toMatchObject({
       text: "Agent Apps",
       symbol: "square.grid.2x2",
-      x: 132,
+      x: 58,
       y: 12,
-      width: 126,
+      width: 118,
+      height: 24,
+    });
+    expect(settingsNodes1.find(n => n.id === "settings_tab:channels")).toMatchObject({
+      text: "Human Channels",
+      symbol: "bubble.left.and.bubble.right",
+      x: 182,
+      y: 12,
+      width: 148,
       height: 24,
     });
     expect(settingsNodes1.find(n => n.id === "settings_tab:hubs")).toMatchObject({
       text: "Hubs & Network",
       symbol: "network",
-      x: 262,
+      x: 336,
       y: 12,
-      width: 128,
+      width: 126,
       height: 24,
     });
     expect(settingsNodes1.find(n => n.id === "settings_app_status:pi")?.text).toBe("○ Not Set Up");
@@ -1035,6 +1023,236 @@ test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-clic
     send({ op: "test_settings_key", key: "escape" });
     await waitFor(() => actions.some(a => a.op === "close_settings"));
     expect((await inspect()).settings_open).toBe(false);
+  } finally {
+    await bridge.close();
+  }
+}, 25000);
+
+test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signal & ack_signals, and 3-tab SettingsPanel Human Channels", async () => {
+  expect(validAction({ op: "send_signal", hub: "personal", to: "@alice", message: "hello", in_reply_to: "sig_1" })).toBe(true);
+  expect(validAction({ op: "send_signal", to: "BAD TARGET", message: "hello" })).toBe(false);
+  expect(validAction({ op: "ack_signals", hub: "personal", signal_ids: ["sig_1"], ack_all: true })).toBe(true);
+  expect(validAction({ op: "set_desktop_banner", enabled: false })).toBe(true);
+  expect(validAction({ op: "channel_save", channel_id: "telegram", values: { botToken: "123:abc", chatId: "999" } })).toBe(true);
+  expect(validAction({ op: "channel_test", channel_id: "telegram", values: { chatId: "999" } })).toBe(true);
+  expect(validAction({ op: "channel_pair", channel_id: "telegram" })).toBe(true);
+  expect(validAction({ op: "setup_save_hub", name: "lan", url: "http://127.0.0.1:4291", auth_mode: "none", user: "alice" })).toBe(true);
+
+  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
+  const bridge = new UiBridge(root, {
+    binary,
+    env: { CITO_UI_HEADLESS: "1" },
+    diagnostic: line => diagnostics.push(line),
+    onAction: action => { actions.push(action); },
+  });
+  const send = (value: object) => childOf(bridge)!.stdin.write(JSON.stringify(value) + "\n");
+  const inspect = async (): Promise<MenuSnapshot> => {
+    const before = diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length;
+    send({ op: "test_inspect" });
+    await waitFor(() => diagnostics.filter(line => line.startsWith("cito-ui: menu ")).length > before);
+    return JSON.parse(diagnostics.filter(line => line.startsWith("cito-ui: menu ")).at(-1)!.slice("cito-ui: menu ".length));
+  };
+
+  try {
+    await bridge.start();
+    await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
+
+    const humanListener: UiListenerSummary = {
+      hub: "personal",
+      listener_id: "c_human2345678",
+      public_id: "alice-human2345678",
+      scoped_id: "personal:alice-human2345678",
+      harness: "human",
+      session_id: "default",
+      title: "@alice (Me)",
+      cwd: "~",
+      repo: null,
+      scope: "self",
+      channels: ["MacBook-Pro", "Telegram"],
+    };
+    const peer: UiRemotePeerSummary = {
+      hub: "personal",
+      listener_id: "c_bobpeer23456",
+      public_id: "billing-bobpeer23456",
+      scoped_id: "personal:billing-bobpeer23456",
+      user: "bob",
+      host_id: "host-bob",
+      host_name: "bob-mac.local",
+      harness: "codex",
+      title: "Billing API",
+      about: "Schema work",
+      repo: "acme/billing",
+      branch: "main",
+      scope: "workspace",
+      last_seen_at: new Date().toISOString(),
+      is_self_principal: false,
+      channels: ["bob-mac"],
+    };
+    const activityItems: UiActivityItem[] = [
+      {
+        hub: "personal",
+        signal_id: "personal:sig_unread_1",
+        listener_id: humanListener.listener_id,
+        from_user: "bob",
+        from_host_name: "bob-mac",
+        from_harness: "codex",
+        from_title: "Billing API",
+        from_scoped_id: peer.scoped_id,
+        target_harness: "human",
+        target_title: "@alice (Me)",
+        target_scoped_id: humanListener.scoped_id,
+        message: "Can you approve the migration?",
+        held_reason: null,
+        in_reply_to: null,
+        created_at: new Date().toISOString(),
+        unread: true,
+        for_me: true,
+      },
+      {
+        hub: "personal",
+        signal_id: "personal:sig_other_2",
+        listener_id: listener.listener_id,
+        from_user: "alice",
+        from_host_name: "mac",
+        from_harness: "pi",
+        from_title: "Pi Worker",
+        from_scoped_id: "personal:pi-abcdefgh2345",
+        target_harness: "codex",
+        target_title: "café conversation",
+        target_scoped_id: listener.scoped_id,
+        message: "Tests passed",
+        held_reason: null,
+        in_reply_to: null,
+        created_at: new Date().toISOString(),
+        unread: false,
+        for_me: false,
+      },
+    ];
+    const settingsWithChannels: UiSettingsState = {
+      apps: [],
+      channels: [
+        {
+          id: "telegram",
+          display_name: "Telegram",
+          sf_symbol: "paperplane.fill",
+          tint: "blue",
+          enabled: true,
+          configured: false,
+          status: "hub_ready",
+          detail: "Hub Service: ● Ready · Pair or enter your account below",
+          display_label: null,
+          hub_provided: false,
+          pairing_supported: true,
+          pairing_action_label: "Pair Account…",
+          pairing_code: "cito-ab23cd",
+          pairing_instruction: 'Send "/start cito-ab23cd" to @cito_test_bot',
+          fields: [
+            { key: "botToken", scope: "hub", label: "Bot Token", type: "secret", required: true, placeholder: "123:ABC", value: "123:ABC", configured: true },
+            { key: "chatId", scope: "user", label: "Chat ID", type: "string", required: true, placeholder: "123456", value: "", configured: false },
+          ],
+        },
+      ],
+      desktop_banner_enabled: true,
+      hubs: [],
+      host_hub: {
+        enabled: false,
+        running: false,
+        port: 4291,
+        endpoint_url: "http://127.0.0.1:4291",
+        token: "",
+        invite_command: "cito setup --hub lan --url http://127.0.0.1:4291 --default",
+        error: null,
+      },
+      launch_at_login: false,
+    };
+
+    bridge.state(hubs, [listener, humanListener], [], [], 2, undefined, settingsWithChannels, 1, activityItems);
+    bridge.directory([peer], 1, 2, activityItems, 1);
+    await waitFor(() => diagnostics.some(l => l.startsWith("cito-ui: directory peers=1")));
+
+    // Surface 1: Human Node card is sorted to index 0 of Zone 1 and Zone 4 shows "🔔 1 unread · 2 online"
+    const s1 = await inspect();
+    const s1SessionIds = s1.items.filter(n => n.id.startsWith("session:")).map(n => n.id);
+    expect(s1SessionIds[0]).toBe("session:" + humanListener.scoped_id);
+    const s1Nodes = flatten(s1.items);
+    expect(s1Nodes.find(n => n.id === "directory_online_badge")?.text).toBe("🔔 1 unread · 2 online");
+
+    // Clicking open_directory when unread > 0 opens DirectoryPanel directly in "activity" mode
+    send({ op: "test_control", id: "open_directory" });
+    const actSnap = await inspect();
+    expect(actSnap).toMatchObject({
+      directory_open: true,
+      directory_mode: "activity",
+      activity_filter: "me",
+      unread_count: 1,
+    });
+    const actNodes = flatten(actSnap.directory_items ?? []);
+    expect(actNodes.find(n => n.id === "dir_mode:activity")?.text).toBe("Activity · 1");
+    expect(actNodes.find(n => n.id === "activity_row:personal:sig_unread_1")).toBeDefined();
+
+    // Filter switching: act_filter:all shows both items; act_filter:unread shows 1 item
+    send({ op: "test_control", id: "act_filter:all" });
+    expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "activity_row:personal:sig_other_2")).toBeDefined();
+    send({ op: "test_control", id: "act_filter:unread" });
+    expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "activity_row:personal:sig_other_2")).toBeUndefined();
+
+    // Clicking Reply on activity row opens ComposerBar targeting peer.scoped_id with in_reply_to
+    send({ op: "test_control", id: "reply_activity:personal:sig_unread_1" });
+    const replySnap = await inspect();
+    expect(replySnap).toMatchObject({
+      composer_open: true,
+      composer_target: peer.scoped_id,
+      composer_reply_signal_id: "personal:sig_unread_1",
+    });
+    send({ op: "test_composer_input", value: "Approved, go ahead!" });
+    send({ op: "test_control", id: "composer_send" });
+    await waitFor(() => actions.some(a => a.op === "send_signal"));
+    expect(actions.find(a => a.op === "send_signal")).toEqual({
+      op: "send_signal",
+      hub: "personal",
+      to: peer.scoped_id,
+      message: "Approved, go ahead!",
+      in_reply_to: "personal:sig_unread_1",
+    });
+
+    // Switch to Directory mode, click Message on peer row, and cancel composer
+    send({ op: "test_control", id: "dir_mode:directory" });
+    const dirModeSnap = await inspect();
+    expect(dirModeSnap.directory_mode).toBe("directory");
+    send({ op: "test_control", id: "msg_dir:" + peer.scoped_id });
+    expect((await inspect()).composer_target).toBe(peer.scoped_id);
+    send({ op: "test_control", id: "composer_cancel" });
+    expect((await inspect()).composer_open).toBe(false);
+
+    // Switch back to Activity mode and click ✓ Read All -> emits ack_signals
+    send({ op: "test_control", id: "dir_mode:activity" });
+    send({ op: "test_control", id: "activity_mark_all_read" });
+    await waitFor(() => actions.some(a => a.op === "ack_signals" && a.ack_all === true));
+
+    // Surface 3: Open SettingsPanel and switch to Tab 2 ("channels")
+    send({ op: "test_control", id: "open_settings" });
+    send({ op: "test_control", id: "settings_tab:channels" });
+    const chTabSnap = await inspect();
+    expect(chTabSnap.settings_tab).toBe("channels");
+    const chNodes = flatten(chTabSnap.settings_items ?? []);
+    expect(chNodes.find(n => n.id === "toggle_desktop_banner")?.text).toBe("● Enabled");
+    expect(chNodes.find(n => n.id === "settings_channel:telegram")).toBeDefined();
+    expect(chNodes.find(n => n.id === "pairing_instruction:telegram")?.text).toBe('Send "/start cito-ab23cd" to @cito_test_bot');
+
+    send({ op: "test_control", id: "toggle_desktop_banner" });
+    await waitFor(() => actions.some(a => a.op === "set_desktop_banner" && a.enabled === false));
+
+    send({ op: "test_settings_input", id: "channel_field:telegram:chatId", value: "777888" });
+    send({ op: "test_control", id: "pair_channel:telegram" });
+    await waitFor(() => actions.some(a => a.op === "channel_pair" && a.channel_id === "telegram"));
+    send({ op: "test_control", id: "test_channel:telegram" });
+    await waitFor(() => actions.some(a => a.op === "channel_test" && a.channel_id === "telegram"));
+    send({ op: "test_control", id: "save_channel:telegram" });
+    await waitFor(() =>
+      actions.some(
+        a => a.op === "channel_save" && a.channel_id === "telegram" && a.values.chatId === "777888",
+      ),
+    );
   } finally {
     await bridge.close();
   }

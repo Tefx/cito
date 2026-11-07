@@ -4,58 +4,11 @@ import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "no
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
-import { KeyedMutex, hubNameSchema, canonicalListenerIdSchema, harnessIdSchema, type HubAuthMode } from "../shared/index.js";
+import { KeyedMutex, hubNameSchema, canonicalListenerIdSchema, harnessIdSchema, sendTargetSchema, type HubAuthMode } from "../shared/index.js";
 import { getUiHarnessMetadata, type AdapterTier, type AvailableSessionSummary, type UiHarnessMetadata } from "../adapters/index.js";
+import type { UiChannelFieldSummary, UiChannelSetupSummary } from "../hub/engine.js";
 export type { AvailableSessionSummary, UiHarnessMetadata } from "../adapters/index.js";
-
-const UNSAFE_JUMP_SCHEMES = new Set([
-  "javascript",
-  "file",
-  "data",
-  "http",
-  "https",
-  "vbscript",
-  "about",
-  "blob",
-]);
-
-export function isSafeJumpUrl(url: string | null | undefined): boolean {
-  if (!url || typeof url !== "string") return false;
-  const trimmed = url.trim();
-  if (!trimmed || /[\x00-\x20\x7f]/.test(trimmed)) return false;
-  const match = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed);
-  if (!match) return false;
-  const scheme = match[1]!.toLowerCase();
-  if (UNSAFE_JUMP_SCHEMES.has(scheme)) return false;
-  try {
-    const parsed = new URL(trimmed);
-    const parsedScheme = parsed.protocol.slice(0, -1).toLowerCase();
-    return Boolean(parsedScheme) && !UNSAFE_JUMP_SCHEMES.has(parsedScheme);
-  } catch {
-    return false;
-  }
-}
-
-export function expandJumpUrl(
-  template: string | null | undefined,
-  params: { session_id?: string | null; cwd?: string | null },
-): string | null {
-  if (!template || typeof template !== "string") return null;
-  const trimmed = template.trim();
-  if (!trimmed) return null;
-  if (trimmed.includes("{session_id}") && (!params.session_id || !params.session_id.trim())) return null;
-  if (trimmed.includes("{cwd}") && (!params.cwd || !params.cwd.trim())) return null;
-  const encodedSession = params.session_id ? encodeURIComponent(params.session_id) : "";
-  const pathEncodedCwd = params.cwd
-    ? params.cwd.split("/").map(seg => encodeURIComponent(seg)).join("/")
-    : "";
-  const queryEncodedCwd = params.cwd ? encodeURIComponent(params.cwd) : "";
-  const expanded = trimmed
-    .replaceAll("{session_id}", encodedSession)
-    .replaceAll("/{cwd}", pathEncodedCwd.startsWith("/") ? pathEncodedCwd : "/" + pathEncodedCwd)
-    .replaceAll("{cwd}", queryEncodedCwd);
-  return isSafeJumpUrl(expanded) ? expanded : null;
-}
+export type { UiChannelFieldSummary, UiChannelSetupSummary } from "../hub/engine.js";
 
 export interface BannerPayload {
   target_harness: string;
@@ -68,8 +21,9 @@ export interface BannerPayload {
   effective_wake: boolean;
   count?: number;
   target_cwd?: string | null;
-  jump_url?: string | null;
-  jump_label?: string | null;
+  signal_id?: string | null;
+  hub?: string | null;
+  from_scoped_id?: string | null;
 }
 export interface UiHubSummary {
   name: string;
@@ -91,9 +45,7 @@ export interface UiListenerSummary {
   repo: string | null;
   branch?: string | null;
   scope: "self" | "workspace";
-  can_jump: boolean;
-  jump_url?: string | null;
-  jump_label?: string | null;
+  channels?: string[];
 }
 
 export interface UiRemotePeerSummary {
@@ -113,6 +65,26 @@ export interface UiRemotePeerSummary {
   scope: "self" | "workspace";
   last_seen_at: string;
   is_self_principal?: boolean;
+  channels?: string[];
+}
+export interface UiActivityItem {
+  hub: string;
+  signal_id: string;
+  listener_id: string;
+  from_user: string;
+  from_host_name: string;
+  from_harness: string | null;
+  from_title: string;
+  from_scoped_id: string | null;
+  target_harness: string;
+  target_title: string;
+  target_scoped_id: string;
+  message: string;
+  held_reason: string | null;
+  in_reply_to: string | null;
+  created_at: string;
+  unread: boolean;
+  for_me: boolean;
 }
 export interface UiAppSetupSummary {
   id: string;
@@ -145,6 +117,8 @@ export interface UiHubConfigSummary {
 }
 export interface UiSettingsState {
   apps: UiAppSetupSummary[];
+  channels?: UiChannelSetupSummary[];
+  desktop_banner_enabled?: boolean;
   hubs: UiHubConfigSummary[];
   host_hub: UiHostHubSummary;
   launch_at_login: boolean;
@@ -157,6 +131,8 @@ export type DaemonToUiMessage =
       available?: AvailableSessionSummary[];
       my_remote_listeners?: UiRemotePeerSummary[];
       directory_online_count?: number;
+      unread_count?: number;
+      activity?: UiActivityItem[];
       harnesses?: UiHarnessMetadata[];
       settings?: UiSettingsState;
     }
@@ -165,23 +141,33 @@ export type DaemonToUiMessage =
       peers: UiRemotePeerSummary[];
       matched_count: number;
       online_count: number;
+      activity?: UiActivityItem[];
+      unread_count?: number;
     }
   | { op: "banner"; payload: BannerPayload };
-export type UiToDaemonAction = { op: "unlisten"; hub: string; listener_id: string }
-  | { op: "unlisten_all" } | { op: "set_scope"; hub: string; listener_id: string; scope: "self" | "workspace" }
+export type UiToDaemonAction =
+  | { op: "unlisten"; hub: string; listener_id: string }
+  | { op: "unlisten_all" }
+  | { op: "set_scope"; hub: string; listener_id: string; scope: "self" | "workspace" }
   | { op: "hub_action"; hub: string; action: "login" | "reconnect" | "disconnect" }
   | { op: "refresh_available" }
   | { op: "listen_session"; harness: string; session_id: string; endpoint_pid?: number; cwd?: string; title?: string; hub?: string; scope?: "self" | "workspace" }
   | { op: "switch_hub"; from_hub: string; to_hub: string; listener_id: string }
-  | { op: "open_directory" }
+  | { op: "open_directory"; mode?: "directory" | "activity" }
   | { op: "close_directory" }
-  | { op: "query_directory"; query?: string; scope?: "all" | "mine"; harness?: string }
+  | { op: "query_directory"; query?: string; scope?: "all" | "mine"; harness?: string; mode?: "directory" | "activity"; filter?: "me" | "all" | "unread" }
+  | { op: "send_signal"; hub?: string; to: string; message: string; in_reply_to?: string | null }
+  | { op: "ack_signals"; hub?: string; signal_ids?: string[]; ack_all?: boolean }
   | { op: "open_settings" }
   | { op: "close_settings" }
   | { op: "setup_apply"; harness: string; force?: boolean }
   | { op: "set_host_hub"; enabled: boolean; port?: number; reset_token?: boolean }
   | { op: "set_launch_at_login"; enabled: boolean }
-  | { op: "setup_save_hub"; name: string; url: string; auth_mode: HubAuthMode; token?: string; issuer?: string; client_id?: string; set_default?: boolean }
+  | { op: "set_desktop_banner"; enabled: boolean }
+  | { op: "channel_save"; channel_id: string; hub?: string; enabled?: boolean; values: Record<string, string> }
+  | { op: "channel_test"; channel_id: string; hub?: string; values?: Record<string, string> }
+  | { op: "channel_pair"; channel_id: string; hub?: string; values?: Record<string, string> }
+  | { op: "setup_save_hub"; name: string; url: string; auth_mode: HubAuthMode; token?: string; issuer?: string; client_id?: string; user?: string; set_default?: boolean }
   | { op: "setup_toggle_hub"; hub: string; enabled: boolean }
   | { op: "setup_remove_hub"; hub: string }
   | { op: "quit" };
@@ -243,11 +229,14 @@ export function validAction(value: unknown): value is UiToDaemonAction {
     a.op === "quit" ||
     a.op === "unlisten_all" ||
     a.op === "refresh_available" ||
-    a.op === "open_directory" ||
     a.op === "close_directory" ||
     a.op === "open_settings" ||
     a.op === "close_settings"
   ) {
+    return true;
+  }
+  if (a.op === "open_directory") {
+    if (a.mode !== undefined && a.mode !== "directory" && a.mode !== "activity") return false;
     return true;
   }
   if (a.op === "setup_apply") {
@@ -261,8 +250,37 @@ export function validAction(value: unknown): value is UiToDaemonAction {
     if (a.reset_token !== undefined && typeof a.reset_token !== "boolean") return false;
     return true;
   }
-  if (a.op === "set_launch_at_login") {
+  if (a.op === "set_launch_at_login" || a.op === "set_desktop_banner") {
     return typeof a.enabled === "boolean";
+  }
+  if (a.op === "channel_save" || a.op === "channel_test" || a.op === "channel_pair") {
+    if (!harnessIdSchema.safeParse(a.channel_id).success) return false;
+    if (a.hub !== undefined && !hubNameSchema.safeParse(a.hub).success) return false;
+    if (a.enabled !== undefined && typeof a.enabled !== "boolean") return false;
+    if (a.values !== undefined) {
+      if (!a.values || typeof a.values !== "object" || Array.isArray(a.values)) return false;
+      for (const v of Object.values(a.values as Record<string, unknown>)) {
+        if (typeof v !== "string") return false;
+      }
+    } else if (a.op === "channel_save") {
+      return false;
+    }
+    return true;
+  }
+  if (a.op === "send_signal") {
+    if (a.hub !== undefined && !hubNameSchema.safeParse(a.hub).success) return false;
+    if (typeof a.to !== "string" || !sendTargetSchema.safeParse(a.to).success) return false;
+    if (typeof a.message !== "string" || !a.message.trim()) return false;
+    if (a.in_reply_to !== undefined && a.in_reply_to !== null && (typeof a.in_reply_to !== "string" || !a.in_reply_to.trim())) return false;
+    return true;
+  }
+  if (a.op === "ack_signals") {
+    if (a.hub !== undefined && !hubNameSchema.safeParse(a.hub).success) return false;
+    if (a.ack_all !== undefined && typeof a.ack_all !== "boolean") return false;
+    if (a.signal_ids !== undefined) {
+      if (!Array.isArray(a.signal_ids) || !a.signal_ids.every(s => typeof s === "string" && s.trim().length > 0)) return false;
+    }
+    return true;
   }
   if (a.op === "setup_save_hub") {
     if (!hubNameSchema.safeParse(a.name).success) return false;
@@ -271,6 +289,7 @@ export function validAction(value: unknown): value is UiToDaemonAction {
     if (a.token !== undefined && typeof a.token !== "string") return false;
     if (a.issuer !== undefined && typeof a.issuer !== "string") return false;
     if (a.client_id !== undefined && typeof a.client_id !== "string") return false;
+    if (a.user !== undefined && (typeof a.user !== "string" || (a.user.trim().length > 0 && !/^[a-zA-Z0-9._-]{1,64}$/.test(a.user.trim())))) return false;
     if (a.set_default !== undefined && typeof a.set_default !== "boolean") return false;
     return true;
   }
@@ -284,6 +303,8 @@ export function validAction(value: unknown): value is UiToDaemonAction {
     if (a.query !== undefined && typeof a.query !== "string") return false;
     if (a.scope !== undefined && a.scope !== "all" && a.scope !== "mine") return false;
     if (a.harness !== undefined && (typeof a.harness !== "string" || (a.harness !== "all" && !/^[a-z][a-z0-9_-]{0,31}$/.test(a.harness)))) return false;
+    if (a.mode !== undefined && a.mode !== "directory" && a.mode !== "activity") return false;
+    if (a.filter !== undefined && a.filter !== "me" && a.filter !== "all" && a.filter !== "unread") return false;
     return true;
   }
   if (a.op === "listen_session") {
@@ -319,6 +340,8 @@ export class UiBridge {
     available: [],
     my_remote_listeners: [],
     directory_online_count: 0,
+    unread_count: 0,
+    activity: [],
     harnesses: getUiHarnessMetadata(),
   };
   private directorySnapshot?: Extract<DaemonToUiMessage, { op: "directory" }>;
@@ -382,60 +405,67 @@ export class UiBridge {
     directoryOnlineCount = 0,
     harnesses?: UiHarnessMetadata[],
     settings?: UiSettingsState,
+    unreadCount = 0,
+    activity?: UiActivityItem[],
   ): void {
     const resolvedHarnesses = harnesses ?? getUiHarnessMetadata();
-    const byHarness = new Map(resolvedHarnesses.map(h => [h.id, h]));
-    const enrichedListeners = listeners.map((listener): UiListenerSummary => {
-      if (listener.can_jump === false) return listener;
-      const meta = byHarness.get(listener.harness);
-      const jumpUrl = listener.jump_url !== undefined
-        ? (isSafeJumpUrl(listener.jump_url) ? listener.jump_url : null)
-        : expandJumpUrl(meta?.jump_url_template, { session_id: listener.session_id, cwd: listener.cwd });
-      const jumpLabel = listener.jump_label ?? (jumpUrl && meta ? `Open in ${meta.display_name}` : null);
-      return {
-        ...listener,
-        can_jump: Boolean(jumpUrl),
-        ...(jumpUrl ? { jump_url: jumpUrl, ...(jumpLabel ? { jump_label: jumpLabel } : {}) } : { jump_url: null, jump_label: null }),
-      };
-    });
     const nextSettings = settings ?? this.snapshot.settings;
+    const nextActivity = activity ?? this.snapshot.activity ?? [];
     this.snapshot = {
       op: "state",
       hubs,
-      listeners: enrichedListeners,
+      listeners,
       available,
       my_remote_listeners: myRemoteListeners,
       directory_online_count: directoryOnlineCount,
+      unread_count: unreadCount,
+      activity: nextActivity,
       harnesses: resolvedHarnesses,
       ...(nextSettings ? { settings: nextSettings } : {}),
     };
     this.pending = true;
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
   }
-  directory(peers: UiRemotePeerSummary[], matchedCount = peers.length, onlineCount = peers.length): void {
+  directory(
+    peers: UiRemotePeerSummary[],
+    matchedCount = peers.length,
+    onlineCount = peers.length,
+    activity?: UiActivityItem[],
+    unreadCount?: number,
+  ): void {
     const bounded = [...peers];
+    const resolvedActivity = activity ?? this.snapshot.activity;
+    const resolvedUnread = unreadCount ?? this.snapshot.unread_count;
+    const boundedAct = resolvedActivity && resolvedActivity.length > 0 ? [...resolvedActivity] : undefined;
     while (
       bounded.length > 0 &&
-      Buffer.byteLength(JSON.stringify({ op: "directory", peers: bounded, matched_count: matchedCount, online_count: onlineCount }) + "\n", "utf8") >= 128 * 1024
+      Buffer.byteLength(
+        JSON.stringify({
+          op: "directory",
+          peers: bounded,
+          matched_count: matchedCount,
+          online_count: onlineCount,
+          ...(boundedAct ? { activity: boundedAct } : {}),
+          ...(unreadCount !== undefined ? { unread_count: unreadCount } : {}),
+        }) + "\n",
+        "utf8",
+      ) >= 128 * 1024
     ) {
       bounded.pop();
     }
-    this.directorySnapshot = { op: "directory", peers: bounded, matched_count: matchedCount, online_count: onlineCount };
+    this.directorySnapshot = {
+      op: "directory",
+      peers: bounded,
+      matched_count: matchedCount,
+      online_count: onlineCount,
+      ...(boundedAct ? { activity: boundedAct } : {}),
+      ...(resolvedUnread ? { unread_count: resolvedUnread } : {}),
+    };
     this.directoryPending = true;
     if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { this.scheduled = false; this.flush(); }); }
   }
   banner(payload: BannerPayload): void {
-    const harnesses = this.snapshot.harnesses ?? getUiHarnessMetadata();
-    const meta = harnesses.find(h => h.id === payload.target_harness);
-    const jumpUrl = payload.jump_url !== undefined
-      ? (isSafeJumpUrl(payload.jump_url) ? payload.jump_url : null)
-      : expandJumpUrl(meta?.jump_url_template, { session_id: payload.target_session_id, cwd: payload.target_cwd });
-    const jumpLabel = payload.jump_label ?? (jumpUrl && meta ? `Open in ${meta.display_name} ↗` : null);
-    const enriched: BannerPayload = {
-      ...payload,
-      ...(jumpUrl ? { jump_url: jumpUrl, ...(jumpLabel ? { jump_label: jumpLabel } : {}) } : {}),
-    };
-    this.banners.push(enriched);
+    this.banners.push(payload);
     if (this.banners.length > 100) this.banners.shift();
     this.flush();
   }

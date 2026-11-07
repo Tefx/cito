@@ -161,7 +161,6 @@ export interface SocketBridgeOptions {
   pidKeys?: readonly string[];
   cli?: HarnessCliDescriptor;
   setup?: HarnessSetupDescriptor;
-  canJump?: boolean;
 }
 
 export class SocketBridgeAdapter implements HarnessAdapter {
@@ -170,7 +169,6 @@ export class SocketBridgeAdapter implements HarnessAdapter {
   readonly pidKeys?: readonly string[];
   readonly cli?: HarnessCliDescriptor;
   readonly setup?: HarnessSetupDescriptor;
-  readonly canJump?: boolean;
   private readonly confirmDelivery: boolean;
 
   constructor(harnessId: string, options: SocketBridgeOptions = {}) {
@@ -179,7 +177,6 @@ export class SocketBridgeAdapter implements HarnessAdapter {
     this.manifest = options.manifest;
     this.pidKeys = options.pidKeys;
     if (options.pidKeys) registerPidKeys(options.pidKeys);
-    this.canJump = options.canJump ?? Boolean(options.manifest?.jumpUrlTemplate);
     this.cli = options.cli ?? (options.manifest?.cliFlag ? defaultCliDescriptor(this.id) : undefined);
     this.setup = options.setup;
   }

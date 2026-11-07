@@ -8,7 +8,8 @@ import { promisify } from "node:util";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { CitoError, harnessIdSchema, loadConfig, type CitoConfig } from "../shared/index.js";
-import { BUILTIN_PLUGINS } from "../../plugins/index.js";
+import { HUMAN_CHANNEL_REGISTRY, getHumanChannelPlugin, getHumanChannelPlugins, rejectedHumanPluginIds } from "../hub/engine.js";
+import { BUILTIN_HUMAN_PLUGINS, BUILTIN_PLUGINS } from "../../plugins/index.js";
 import { BASE_PID_KEYS, getAllPidKeys, gitMetadata, hasExplicitPid, registerPidKeys, resetPidKeys } from "./git.js";
 import { SocketBridgeAdapter, defaultCliDescriptor, identifyBridge } from "./socket-bridge.js";
 import type {
@@ -19,6 +20,7 @@ import type {
   CallerDetectionContext,
   CallerInput,
   HarnessAdapter,
+  HumanChannelPlugin,
   PluginFactory,
   PluginManifest,
   StdioChannelBridge,
@@ -30,20 +32,33 @@ export * from "./git.js";
 export * from "./socket-bridge.js";
 export * from "./types.js";
 export * from "./wake-card.js";
-export { expandJumpUrl, isSafeJumpUrl } from "../ui/index.js";
 export { CitoError } from "../shared/index.js";
 
 const ADAPTER_TIERS = ["stable", "experimental", "custom"] as const satisfies readonly AdapterTier[];
 const ADAPTER_TINTS = ["indigo", "teal", "orange", "blue", "purple", "green", "pink", "gray"] as const satisfies readonly AdapterTint[];
 
+const pluginFieldSchema = z.object({
+  key: z.string().trim().min(1).max(64).regex(/^[a-zA-Z][a-zA-Z0-9_]*$/),
+  scope: z.enum(["hub", "user"]),
+  label: z.string().trim().min(1).max(64),
+  type: z.enum(["string", "secret", "url", "boolean"]),
+  required: z.boolean().optional(),
+  placeholder: z.string().max(128).optional(),
+}).strict();
+
 const pluginManifestSchema = z.object({
   id: harnessIdSchema,
+  kind: z.enum(["agent", "human"]).optional(),
   displayName: z.string().trim().min(1).max(64).refine(v => !/[\x00-\x1f\x7f]/.test(v)),
   tier: z.enum(ADAPTER_TIERS).optional(),
   sfSymbol: z.string().trim().min(1).max(64).optional(),
   tint: z.enum(ADAPTER_TINTS).optional(),
-  jumpUrlTemplate: z.string().trim().min(1).max(512).optional(),
   cliFlag: z.boolean().optional(),
+  fields: z.array(pluginFieldSchema).optional(),
+  pairing: z.object({
+    supported: z.boolean(),
+    actionLabel: z.string().trim().min(1).max(64).optional(),
+  }).strict().optional(),
 }).strict();
 
 export const RESERVED_CLI_FLAGS = new Set([
@@ -51,21 +66,25 @@ export const RESERVED_CLI_FLAGS = new Set([
 ]);
 
 export const BUILTIN_PLUGIN_IDS = new Set<string>(BUILTIN_PLUGINS.map(p => p.id));
+export const BUILTIN_HUMAN_PLUGIN_IDS = new Set<string>(BUILTIN_HUMAN_PLUGINS.map(p => p.id));
 const BUILTIN_ORDER = new Map<string, number>(BUILTIN_PLUGINS.map((p, index) => [p.id, index]));
 
 const directBuiltinDir = resolve(fileURLToPath(new URL("../../plugins", import.meta.url)));
 const distBuiltinDir = resolve(fileURLToPath(new URL("../../../plugins", import.meta.url)));
 
+export { HUMAN_CHANNEL_REGISTRY, getHumanChannelPlugin, getHumanChannelPlugins };
 export const ADAPTER_REGISTRY = new Map<string, HarnessAdapter>();
-export const rejectedPluginIds = new Set<string>();
+const builtinHumanAdapters = new Map<string, HarnessAdapter>();
+export const rejectedPluginIds = rejectedHumanPluginIds;
 const externalPluginIds = new Set<string>();
+const externalHumanPluginIds = new Set<string>();
 const autoInstantiatedIds = new Set<string>();
 
 export function registerAdapter(adapter: HarnessAdapter, options?: { allowOverride?: boolean }): void {
   if (!harnessIdSchema.safeParse(adapter.id).success) {
     throw new CitoError("UNSUPPORTED_HARNESS", "Invalid adapter id");
   }
-  if (BUILTIN_PLUGIN_IDS.has(adapter.id) && ADAPTER_REGISTRY.has(adapter.id) && !options?.allowOverride) {
+  if ((BUILTIN_PLUGIN_IDS.has(adapter.id) || BUILTIN_HUMAN_PLUGIN_IDS.has(adapter.id)) && ADAPTER_REGISTRY.has(adapter.id) && !options?.allowOverride) {
     throw new CitoError("INVALID_INPUT", `Cannot override reserved built-in plugin '${adapter.id}'`);
   }
   if (adapter.pidKeys) registerPidKeys(adapter.pidKeys);
@@ -74,8 +93,25 @@ export function registerAdapter(adapter: HarnessAdapter, options?: { allowOverri
   ADAPTER_REGISTRY.set(adapter.id, adapter);
 }
 
+export function registerHumanChannelPlugin(plugin: HumanChannelPlugin, options?: { allowOverride?: boolean }): void {
+  if (!harnessIdSchema.safeParse(plugin.id).success) {
+    throw new CitoError("UNSUPPORTED_HARNESS", "Invalid human channel plugin id");
+  }
+  if ((BUILTIN_PLUGIN_IDS.has(plugin.id) || BUILTIN_HUMAN_PLUGIN_IDS.has(plugin.id)) && HUMAN_CHANNEL_REGISTRY.has(plugin.id) && !options?.allowOverride) {
+    throw new CitoError("INVALID_INPUT", `Cannot override reserved built-in plugin '${plugin.id}'`);
+  }
+  rejectedPluginIds.delete(plugin.id);
+  HUMAN_CHANNEL_REGISTRY.set(plugin.id, plugin);
+}
+
 for (const plugin of BUILTIN_PLUGINS) {
   registerAdapter(plugin, { allowOverride: true });
+}
+for (const humanPlugin of BUILTIN_HUMAN_PLUGINS) {
+  registerHumanChannelPlugin(humanPlugin, { allowOverride: true });
+  if ("probe" in humanPlugin && typeof humanPlugin.probe === "function" && "deliver" in humanPlugin && typeof humanPlugin.deliver === "function") {
+    builtinHumanAdapters.set(humanPlugin.id, humanPlugin as unknown as HarnessAdapter);
+  }
 }
 
 function ensurePluginLoaderHook(): void {
@@ -149,6 +185,10 @@ async function computePluginFingerprint(pluginDirs: readonly string[]): Promise<
   return parts.join("|");
 }
 
+function isReservedBuiltin(id: string): boolean {
+  return BUILTIN_PLUGIN_IDS.has(id) || BUILTIN_HUMAN_PLUGIN_IDS.has(id);
+}
+
 export async function loadPlugins(
   config: CitoConfig = loadConfig(),
   options?: { diagnostic?: (message: string) => void },
@@ -158,6 +198,10 @@ export async function loadPlugins(
     ADAPTER_REGISTRY.delete(id);
   }
   externalPluginIds.clear();
+  for (const id of externalHumanPluginIds) {
+    HUMAN_CHANNEL_REGISTRY.delete(id);
+  }
+  externalHumanPluginIds.clear();
   for (const id of autoInstantiatedIds) {
     ADAPTER_REGISTRY.delete(id);
   }
@@ -187,28 +231,28 @@ export async function loadPlugins(
       try {
         rawJson = JSON.parse(await readFile(manifestPath, "utf8"));
       } catch (error) {
-        if (!BUILTIN_PLUGIN_IDS.has(dirName)) rejectedPluginIds.add(dirName);
+        if (!isReservedBuiltin(dirName)) rejectedPluginIds.add(dirName);
         report(`Invalid or missing plugin.json in ${pluginDir}: ${error instanceof Error ? error.message : String(error)}`);
         continue;
       }
       const parsed = pluginManifestSchema.safeParse(rawJson);
       if (!parsed.success) {
-        if (!BUILTIN_PLUGIN_IDS.has(dirName)) rejectedPluginIds.add(dirName);
+        if (!isReservedBuiltin(dirName)) rejectedPluginIds.add(dirName);
         if (rawJson && typeof rawJson === "object" && "id" in rawJson && typeof (rawJson as { id?: unknown }).id === "string") {
           const rawId = (rawJson as { id: string }).id;
-          if (!BUILTIN_PLUGIN_IDS.has(rawId)) rejectedPluginIds.add(rawId);
+          if (!isReservedBuiltin(rawId)) rejectedPluginIds.add(rawId);
         }
         report(`Invalid plugin manifest in ${manifestPath}: ${parsed.error.message}`);
         continue;
       }
       const rawManifest = parsed.data;
       if (rawManifest.id !== dirName) {
-        if (!BUILTIN_PLUGIN_IDS.has(dirName)) rejectedPluginIds.add(dirName);
-        if (!BUILTIN_PLUGIN_IDS.has(rawManifest.id)) rejectedPluginIds.add(rawManifest.id);
+        if (!isReservedBuiltin(dirName)) rejectedPluginIds.add(dirName);
+        if (!isReservedBuiltin(rawManifest.id)) rejectedPluginIds.add(rawManifest.id);
         report(`Plugin id '${rawManifest.id}' in ${manifestPath} does not match directory name '${dirName}'`);
         continue;
       }
-      if (BUILTIN_PLUGIN_IDS.has(rawManifest.id)) {
+      if (isReservedBuiltin(rawManifest.id)) {
         report(`External plugin in ${pluginDir} cannot override reserved built-in plugin '${rawManifest.id}'`);
         continue;
       }
@@ -250,33 +294,43 @@ export async function loadPlugins(
             }
           }
           const exported = mod.default;
-          const adapter = typeof exported === "function" ? await exported(manifest) : exported;
-          if (
-            !adapter ||
-            typeof adapter !== "object" ||
-            adapter.id !== manifest.id ||
-            typeof adapter.probe !== "function" ||
-            typeof adapter.deliver !== "function"
-          ) {
-            throw new Error(`Entry module must default-export a HarnessAdapter with id '${manifest.id}'`);
+          const loaded = typeof exported === "function" ? await exported(manifest) : exported;
+          if (manifest.kind === "human") {
+            const hPlugin = loaded as HumanChannelPlugin | undefined;
+            if (!hPlugin || typeof hPlugin !== "object" || hPlugin.id !== manifest.id || typeof hPlugin.sendNotification !== "function") {
+              throw new Error(`Entry module must default-export a HumanChannelPlugin with id '${manifest.id}'`);
+            }
+            Object.defineProperty(hPlugin, "manifest", { value: manifest, enumerable: true, configurable: true });
+            HUMAN_CHANNEL_REGISTRY.set(manifest.id, hPlugin);
+            externalHumanPluginIds.add(manifest.id);
+            seenExternal.add(manifest.id);
+          } else {
+            const adapter = loaded as HarnessAdapter | undefined;
+            if (
+              !adapter ||
+              typeof adapter !== "object" ||
+              adapter.id !== manifest.id ||
+              typeof adapter.probe !== "function" ||
+              typeof adapter.deliver !== "function"
+            ) {
+              throw new Error(`Entry module must default-export a HarnessAdapter with id '${manifest.id}'`);
+            }
+            Object.defineProperty(adapter, "manifest", { value: manifest, enumerable: true, configurable: true });
+            if (manifest.cliFlag && !adapter.cli) {
+              Object.defineProperty(adapter, "cli", { value: defaultCliDescriptor(manifest.id), enumerable: true, configurable: true });
+            }
+            if (adapter.pidKeys) registerPidKeys(adapter.pidKeys);
+            ADAPTER_REGISTRY.set(manifest.id, adapter);
+            externalPluginIds.add(manifest.id);
+            seenExternal.add(manifest.id);
           }
-          Object.defineProperty(adapter, "manifest", { value: manifest, enumerable: true, configurable: true });
-          if (manifest.jumpUrlTemplate && adapter.canJump === undefined) {
-            Object.defineProperty(adapter, "canJump", { value: true, enumerable: true, configurable: true });
-          }
-          if (manifest.cliFlag && !adapter.cli) {
-            Object.defineProperty(adapter, "cli", { value: defaultCliDescriptor(manifest.id), enumerable: true, configurable: true });
-          }
-          if (adapter.pidKeys) registerPidKeys(adapter.pidKeys);
-          ADAPTER_REGISTRY.set(manifest.id, adapter);
-          externalPluginIds.add(manifest.id);
-          seenExternal.add(manifest.id);
         } catch (error) {
           rejectedPluginIds.add(manifest.id);
           ADAPTER_REGISTRY.delete(manifest.id);
+          HUMAN_CHANNEL_REGISTRY.delete(manifest.id);
           report(`Failed to load plugin '${manifest.id}' from ${entryPath}: ${error instanceof Error ? error.message : String(error)}`);
         }
-      } else {
+      } else if (manifest.kind !== "human") {
         const adapter = new SocketBridgeAdapter(manifest.id, { manifest });
         ADAPTER_REGISTRY.set(manifest.id, adapter);
         externalPluginIds.add(manifest.id);
@@ -310,15 +364,18 @@ export function getUiHarnessMetadata(): UiHarnessMetadata[] {
       tint: m?.tint ?? "blue",
       tier: BUILTIN_PLUGIN_IDS.has(adapter.id) ? (m?.tier ?? "stable") : "custom",
       order: getHarnessOrder(adapter.id),
-      jump_url_template: m?.jumpUrlTemplate ?? null,
     });
   }
   items.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   return items;
 }
 
+
+
 export function getAdapter(harness: string): HarnessAdapter | undefined {
   if (!harnessIdSchema.safeParse(harness).success || rejectedPluginIds.has(harness)) return;
+  const builtinHuman = builtinHumanAdapters.get(harness);
+  if (builtinHuman) return builtinHuman;
   if (!ADAPTER_REGISTRY.has(harness)) {
     const fallback = new SocketBridgeAdapter(harness, {
       manifest: {
@@ -461,7 +518,7 @@ export async function resolveAdapterCliMeta(
   config: CitoConfig,
 ): Promise<Record<string, unknown>> {
   if (!selection) return { caller_pid: process.ppid };
-  const adapter = ADAPTER_REGISTRY.get(selection.harness);
+  const adapter = ADAPTER_REGISTRY.get(selection.harness) ?? builtinHumanAdapters.get(selection.harness);
   if (!adapter || rejectedPluginIds.has(selection.harness)) {
     throw new CitoError("UNSUPPORTED_HARNESS", `Unknown harness: ${selection.harness}`);
   }
@@ -566,7 +623,7 @@ export async function resolveCaller(input: CallerInput = {}, config: CitoConfig 
   const meta: Record<string, unknown> = { ...ctx.meta, http_client_pid: ctx.httpClientPid, http_transport: ctx.httpTransport };
   const pid = explicitPid(meta);
   let explicit: Caller | undefined;
-  for (const adapter of ADAPTER_REGISTRY.values()) {
+  for (const adapter of [...ADAPTER_REGISTRY.values(), ...builtinHumanAdapters.values()]) {
     const caller = await detectCallerWithDeadline(adapter, ctx, config);
     if (!caller) continue;
     if (pid !== undefined || explicit) throw new CitoError("INVALID_INPUT", "Conflicting caller metadata");

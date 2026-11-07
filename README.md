@@ -1,12 +1,12 @@
 # Cito
 
-Cito is a cross-harness, cross-machine, multi-hub notification and wake bus for coding agents on macOS. It connects **Pi Coding Agent**, **ChatGPT / Codex Desktop (`ChatGPT.app`)**, and **Claude Code** across a built-in zero-config **`local`** hub (`local://` in-process inside `cito-daemon`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted mesh, `token` for pre-shared key, and `oidc` for team identity providers), with a native macOS Menu Bar control plane (`cito-ui`).
+Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` notification and wake network for coding agents and humans on macOS. It connects **Human Nodes** (`@self` / `@<username>`, reachable via `cito-ui` and external `HumanChannelPlugin`s like **Telegram**) and **Agent Session Nodes** (**Pi Coding Agent**, **ChatGPT / Codex Desktop (`ChatGPT.app`)**, and **Claude Code**) across a built-in zero-config **`local`** hub (`local://` in-process inside `cito-daemon`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted mesh, `token` for pre-shared key, and `oidc` for team identity providers), with a native macOS Menu Bar control plane (`cito-ui`).
 
 ### Key Capabilities
-- **Multi-Harness Wake & Delivery**: Wakes idle sessions or queues follow-ups across Pi Coding Agent, Codex Desktop, and Claude Code.
-- **Multi-Hub Simultaneous Connectivity**: Connect to a personal no-auth hub (e.g., Tailscale) and a team OIDC hub simultaneously, with 1-click session migration between hubs.
-- **Ego-Centric Menu Bar Control Plane (`380pt`)**: Inspect local active listeners, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** (private to your account) and **`👥 Team`** (`workspace`).
-- **Spotlight Network Directory (`560×440pt`)**: Search thousands of online agents across your team by free text or prefix filters (`@user`, `repo:`, `host:`, `is:pi` / `is:codex` / `is:claude`, `#id`) and press `Return` to copy any target ID.
+- **Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`**: Every human user (`harness: "human", session_id: "default"`) and every agent session is a host-independent `Node` reachable via $1 \dots K$ attached `Channels` (multiple Macs, `cito-ui`, `plugins/telegram`) without cross-host `FENCED_INACTIVE` eviction.
+- **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub (`cito_send` / `signal_ack`), with `to: "@self"` and `to: "@<username>"` shorthands, `[ Directory | Activity ]` feeds, and an inline `ComposerBar` in `DirectoryPanel`.
+- **Built-in `HumanChannelPlugin` Architecture (`plugins/human` & `plugins/telegram`)**: Configure two-scope (`scope: "hub" | "user"`) human channels in the 3-tab `SettingsPanel` (`Agent Apps`, `Human Channels`, `Hubs & Network`), pair via 1-click `/start cito-xxxxxx` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
+- **Ego-Centric Menu Bar Control Plane (`380pt`)**: Inspect your `Human Node` (`@<user> (Me)`), local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`).
 - **Automatic Daemon Handover**: Upgrading `@tefx/cito` automatically replaces any older local `cito-daemon` on the next CLI or MCP invocation without manual restarts.
 
 ---
@@ -24,10 +24,10 @@ Install globally so `cito`, `cito-mcp`, and `cito-claude-hook` are on your `PATH
 ```sh
 npm install -g @tefx/cito
 # Or install directly from an annotated GitHub release tag:
-npm install -g github:Tefx/cito#v0.14.0
+npm install -g github:Tefx/cito#v0.15.0
 
 cito --version
-# -> cito v0.14.0
+# -> cito v0.15.0
 ```
 
 *(To upgrade later, run `npm install -g @tefx/cito@latest`; the running background daemon will be replaced automatically on the next command.)*
@@ -165,7 +165,7 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 | `cito_listen({ about, tag?, hub?, scope? })` | Enroll the current session on the default or specified `hub` (`scope`: `"self"` default or `"workspace"`). |
 | `cito_unlisten({ hub? })` | Revoke listening for the current session on one `hub` or all active hubs. |
 | `cito_find({ query?, hub?, user?, host?, harness?, repo?, limit? })` | Search active visible sessions across connected hubs (`limit` default `20`, max `50`). |
-| `cito_send({ to, hub?, message, in_reply_to?, idempotency_key? })` | Send a notification (`1..65,536` Unicode codepoints; no hard 500-character policy cap) to a target listener ID (`<hub>:<id>` or `<id>`). |
+| `cito_send({ to, hub?, message, in_reply_to?, idempotency_key? })` | Send a notification (`1..65,536` Unicode codepoints; no hard 500-character policy cap) to `@self`, `@<username>`, or a target listener ID (`[<hub>:]@self`, `[<hub>:]@<username>`, or `[<hub>:]<id>`). |
 | `cito_inbox({ hub?, ack_ids?, ack_all? })` | Read and acknowledge unread signals (`ack_all` defaults to `true` when `ack_ids` is omitted; `false` when peeking or passing specific signal/batch `ack_ids`). |
 
 ---
@@ -185,17 +185,17 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 
 ---
 
-## Custom Harness Plugins (`~/.cito/plugins/`)
+## Custom Agent & Human Channel Plugins (`~/.cito/plugins/`)
 
-Cito ships three built-in plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]). To integrate another coding agent or IDE without modifying Cito, create `~/.cito/plugins/<id>/plugin.json` (and an optional `index.ts` or `index.js` implementing `HarnessAdapter` from `@tefx/cito/plugin-sdk`):
+Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and Human Channel plugins (`human` [Desktop UI], `telegram` [Telegram Bot API]). To integrate another coding agent (`kind: "agent"`) or external human messaging channel (`kind: "human"`) without modifying Cito core, create `~/.cito/plugins/<id>/plugin.json` (and an optional `index.ts` or `index.js` implementing `HarnessAdapter` or `HumanChannelPlugin` from `@tefx/cito/plugin-sdk`):
 
 ```json
 {
   "id": "cursor",
+  "kind": "agent",
   "displayName": "Cursor",
   "sfSymbol": "cursorarrow.rays",
   "tint": "purple",
-  "jumpUrlTemplate": "cursor://file/{cwd}",
   "cliFlag": true
 }
 ```

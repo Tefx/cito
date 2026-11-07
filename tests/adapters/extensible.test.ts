@@ -110,7 +110,6 @@ test("external plugins load from stateDir/plugins, enforce reserved IDs, directo
       tier: "stable",
       sfSymbol: "cursorarrow.rays",
       tint: "purple",
-      jumpUrlTemplate: "cursor://file/{cwd}",
       cliFlag: true,
     }),
   );
@@ -184,7 +183,6 @@ export default (manifest: PluginManifest) => new SocketBridgeAdapter(manifest.id
   const cursor = ADAPTER_REGISTRY.get("cursor");
   expect(cursor).toBeInstanceOf(SocketBridgeAdapter);
   expect(cursor?.manifest).toMatchObject({ id: "cursor", displayName: "Cursor", tier: "custom", tint: "purple", cliFlag: true });
-  expect(cursor?.canJump).toBe(true);
 
   const windsurf = ADAPTER_REGISTRY.get("windsurf");
   expect(windsurf?.manifest).toMatchObject({ id: "windsurf", displayName: "Windsurf", tier: "custom", tint: "green" });

@@ -6,14 +6,25 @@ import type { RepoMetadata } from "./git.js";
 export type AdapterTier = "stable" | "experimental" | "custom";
 export type AdapterTint = "indigo" | "teal" | "orange" | "blue" | "purple" | "green" | "pink" | "gray";
 
+export interface PluginFieldDescriptor {
+  key: string;
+  scope: "hub" | "user";
+  label: string;
+  type: "string" | "secret" | "url" | "boolean";
+  required?: boolean;
+  placeholder?: string;
+}
+
 export interface PluginManifest {
   id: string;
+  kind?: "agent" | "human";
   displayName: string;
   tier?: AdapterTier;
   sfSymbol?: string;
   tint?: AdapterTint;
-  jumpUrlTemplate?: string;
   cliFlag?: boolean;
+  fields?: readonly PluginFieldDescriptor[];
+  pairing?: { supported: boolean; actionLabel?: string };
 }
 
 export interface UiHarnessMetadata {
@@ -23,7 +34,6 @@ export interface UiHarnessMetadata {
   tint: AdapterTint;
   tier: AdapterTier;
   order: number;
-  jump_url_template?: string | null;
 }
 
 export interface SetupFileAction {
@@ -121,7 +131,6 @@ export interface HarnessAdapter {
   readonly id: string;
   readonly manifest?: PluginManifest;
   readonly pidKeys?: readonly string[];
-  readonly canJump?: boolean;
   readonly cli?: HarnessCliDescriptor;
   readonly setup?: HarnessSetupDescriptor;
   startStdioChannel?(
@@ -135,4 +144,91 @@ export interface HarnessAdapter {
   deliver(row: ListenerRow, ctx: DeliverContext): Promise<DeliverOutcome>;
   updateBadge?(row: ListenerRow, badge: string | undefined, config: CitoConfig, signal?: AbortSignal): Promise<void>;
 }
-export type PluginFactory = HarnessAdapter | ((manifest: PluginManifest) => HarnessAdapter | Promise<HarnessAdapter>);
+
+export interface HumanNotificationPayload {
+  signal_id: string;
+  seq: number;
+  principal_id: string;
+  owner_user: string;
+  from_user: string;
+  from_host_name: string;
+  from_harness: string | null;
+  from_listener_id: string | null;
+  from_title: string;
+  from_about: string | null;
+  message: string;
+  in_reply_to: string | null;
+  created_at: string;
+}
+
+export interface HumanChannelDeliveryResult {
+  delivered: boolean;
+  externalMessageId?: string | null;
+  detail?: string;
+}
+
+export interface HumanChannelServiceContext {
+  getHubConfig(): Record<string, unknown>;
+  getServiceState(): Record<string, unknown>;
+  setServiceState(state: Record<string, unknown>): void | Promise<void>;
+  completePairing(
+    code: string,
+    result: { userConfig: Record<string, unknown>; displayLabel?: string },
+  ): { ok: boolean; principal_id?: string; owner_user?: string; error?: string } | Promise<{ ok: boolean; principal_id?: string; owner_user?: string; error?: string }>;
+  resolvePrincipalByUserConfig(
+    matchKey: string,
+    matchValue: string,
+  ): { principal_id: string; owner_user: string; userConfig: Record<string, unknown> } | undefined;
+  resolveReplyTarget(
+    principalId: string,
+    options: { replyToExternalMsgId?: string | null; maxAgeMs?: number },
+  ): { signal_id: string; from_listener_id: string; from_title?: string; from_user?: string } | undefined;
+  sendReplyFromHuman(
+    principalId: string,
+    options: { to_listener_id: string; message: string; in_reply_to?: string | null },
+  ): Promise<{ ok: boolean; signal_id?: string; to_label?: string; error?: string }>;
+  fetchFn?: typeof fetch;
+}
+
+export interface HumanChannelPlugin {
+  readonly id: string;
+  readonly kind?: "human";
+  readonly manifest?: PluginManifest;
+  formatPairingInstruction?(options: {
+    code: string;
+    hubConfig: Record<string, unknown>;
+    botUsername?: string;
+    fetchFn?: typeof fetch;
+  }): Promise<string> | string;
+  testConnection?(options: {
+    hubConfig: Record<string, unknown>;
+    userConfig: Record<string, unknown>;
+    owner_user: string;
+    fetchFn?: typeof fetch;
+  }): Promise<{ ok: boolean; detail: string; botUsername?: string }>;
+  sendNotification(
+    notification: HumanNotificationPayload,
+    options: {
+      hubConfig: Record<string, unknown>;
+      userConfig: Record<string, unknown>;
+      fetchFn?: typeof fetch;
+    },
+  ): Promise<HumanChannelDeliveryResult>;
+  onAcked?(event: {
+    principal_id: string;
+    signal_ids: string[];
+    acked_at_ms: number;
+    channel_id?: string | null;
+    external_msg_ids?: Record<string, string>;
+    hubConfig: Record<string, unknown>;
+    userConfig: Record<string, unknown>;
+    fetchFn?: typeof fetch;
+  }): Promise<void> | void;
+  pollOnce?(ctx: HumanChannelServiceContext): Promise<number>;
+  startService?(ctx: HumanChannelServiceContext): Promise<{ stop(): Promise<void> | void } | void>;
+}
+
+export type PluginFactory =
+  | HarnessAdapter
+  | HumanChannelPlugin
+  | ((manifest: PluginManifest) => HarnessAdapter | HumanChannelPlugin | Promise<HarnessAdapter | HumanChannelPlugin>);

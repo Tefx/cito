@@ -4,17 +4,17 @@ import { mkdir } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { basename, join } from "node:path";
 import { z } from "zod";
-import { UiBridge, type UiAppSetupSummary, type UiHostHubSummary, type UiHubConfigSummary, type UiOptions, type UiRemotePeerSummary, type UiSettingsState, type UiToDaemonAction } from "../ui/index.js";
+import { UiBridge, type UiActivityItem, type UiAppSetupSummary, type UiChannelSetupSummary, type UiHostHubSummary, type UiHubConfigSummary, type UiOptions, type UiRemotePeerSummary, type UiSettingsState, type UiToDaemonAction } from "../ui/index.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverAllAvailableSessions, ensurePluginsLoaded, filterAvailableSessions, getAdapter, resolveCaller, callerBindingError, type AvailableSessionSummary, type Caller, type CachedSessionQuery, type CallerInput } from "../adapters/index.js";
 import { getLocalHubEngine } from "../hub/client.js";
 import { startHubServer, type HubServer } from "../hub/server.js";
 import { applySetup, ensureCliShims, inspectSetup, setLaunchAtLogin } from "../setup/index.js";
-import { Events, NatsErrorCode, type KvEntry, type QueuedIterator, KeyedMutex, listenMutex, CitoError, brokerNow, evaluateLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
-  localPrincipal, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
+import { Events, NatsErrorCode, type KvEntry, type QueuedIterator, KeyedMutex, listenMutex, CitoError, brokerNow, evaluateNodeLease, RETENTION_MS, isJsApiError, connectNats, provisionNats, loadConfig, getHostId,
+  localPrincipal, humanNodeKey, isHumanNode, listenerId, listenerSlug, normalizeSlug, publicListenerId, toCanonicalListenerId,
   senderEndpointKey, parseInput, successResult, errorResult, parseScopedId, formatScopedId, sha256, validateHarness,
   listenInputSchema, unlistenInputSchema, findInputSchema, sendInputSchema, inboxInputSchema,
-  type CitoConfig, type HubConfig, type Principal } from "../shared/index.js";
+  type ChannelAttachment, type CitoConfig, type HubConfig, type Principal } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, type ListenerRow, type Registration, type SentRow, type SignalRow } from "./state.js";
 import { OidcLogin, type BrowserOpener } from "./oidc.js";
 import { Receiver, encode, refreshSessionBadge, type Broker, type ReceiverOptions } from "./receiver.js";
@@ -284,7 +284,7 @@ export class HubDirectoryIndex {
     const currentBrokerIso = new Date(this.currentBrokerMs()).toISOString();
     const active: IndexedRegistration[] = [];
     for (const item of this.entries.values()) {
-      if (evaluateLease(item.value.state, currentBrokerIso, new Date(item.createdMs)) !== "ACTIVE") continue;
+      if (evaluateNodeLease(item.value, currentBrokerIso, new Date(item.createdMs)) !== "ACTIVE") continue;
       if (item.value.scope !== "workspace" && item.value.principal_id !== principal.principal_id) continue;
       active.push(item);
     }
@@ -530,6 +530,7 @@ export class CitoService {
   private directoryScope: "all" | "mine" = "all";
   private directoryHarness = "all";
   private settingsOpen = false;
+  private desktopBannerEnabled = true;
   private settingsState?: UiSettingsState;
   private hostHubServer?: HubServer;
   private hostHubPort?: number;
@@ -750,8 +751,25 @@ export class CitoService {
       error: this.hostHubError,
     };
 
+    let channels: UiChannelSetupSummary[] = [];
+    const defaultSlot = this.slots.get(this.config.defaultHub) ?? [...this.slots.values()][0];
+    const broker = defaultSlot?.connectedBroker();
+    if (broker && typeof broker.nc.rpc === "function") {
+      try {
+        const res = await broker.nc.rpc<{ channels: UiChannelSetupSummary[] }>("human_channels_list", {});
+        if (Array.isArray(res?.channels)) channels = res.channels;
+      } catch {}
+    } else {
+      try {
+        const localEngine = getLocalHubEngine(this.config.stateDir);
+        channels = localEngine.humanChannelsList(localPrincipal(this.config.user)).channels;
+      } catch {}
+    }
+
     const nextSettings: UiSettingsState = {
       apps,
+      channels,
+      desktop_banner_enabled: this.desktopBannerEnabled,
       hubs,
       host_hub,
       launch_at_login: inspection.launchAtLogin,
@@ -799,9 +817,37 @@ export class CitoService {
 
     await this.syncConnectedDirectories().catch(() => {});
   }
+  async ensureLocalHumanNode(slot: HubSlot): Promise<void> {
+    if (slot.config.natsUrl !== "local://" || !slot.principal) return;
+    const hId = listenerId(humanNodeKey(slot.principal));
+    const existingRow = this.state.listener(hId, slot.name);
+    if (existingRow?.status === "UNLISTENED") return;
+    const key = `${slot.name}:${hId}`;
+    const live = this.receivers.get(key);
+    if (live && !live.abort.signal.aborted) return;
+    await this.listen(
+      {
+        about: "Desktop notifications",
+        scope: "workspace",
+        hub: slot.name,
+        tag: slot.principal.owner_user,
+      },
+      {
+        meta: {
+          expected_harness: "human",
+          expected_session_id: "default",
+          title: `@${slot.principal.owner_user} (Me)`,
+        },
+      },
+    ).catch(() => {});
+  }
   async connectBackground(): Promise<void> {
-    await Promise.allSettled([...this.slots.values()].map(slot => slot.network({ interactive: false })));
+    await Promise.allSettled([...this.slots.values()].map(async slot => {
+      await slot.network({ interactive: false });
+      await this.ensureLocalHumanNode(slot);
+    }));
     await this.syncConnectedDirectories();
+    await this.refreshSettingsState().catch(() => {});
     this.pushUiState();
   }
   private liveActiveRows(): ListenerRow[] {
@@ -823,10 +869,18 @@ export class CitoService {
       if (!this.closing) this.log(error);
     }
   }
+  private activeChannelNames(reg?: Registration): string[] | undefined {
+    if (!reg?.channels) return undefined;
+    const names = Object.values(reg.channels)
+      .filter(c => c.state === "ACTIVE")
+      .map(c => c.host_name.replace(/\.local$/i, "") || c.kind);
+    return names.length > 0 ? [...new Set(names)] : undefined;
+  }
   private toRemotePeerSummary(slot: HubSlot, item: IndexedRegistration): UiRemotePeerSummary {
     const v = item.value;
     const pubId = displayId(v);
     const trunc = (s: string, max: number) => s.length > max ? s.slice(0, max) : s;
+    const channels = this.activeChannelNames(v);
     return {
       hub: slot.name,
       listener_id: v.listener_id,
@@ -844,6 +898,7 @@ export class CitoService {
       scope: v.scope,
       last_seen_at: item.createdIso,
       is_self_principal: slot.principal ? v.principal_id === slot.principal.principal_id : false,
+      ...(channels ? { channels } : {}),
     };
   }
   private collectMyRemoteAndOnlineCount(): { myRemote: UiRemotePeerSummary[]; onlineCount: number } {
@@ -854,7 +909,7 @@ export class CitoService {
       for (const item of slot.directoryIndex.readCached(slot.principal)) {
         onlineCount += 1;
         const isSelfPrincipal = item.value.principal_id === slot.principal.principal_id;
-        if (isSelfPrincipal && item.value.host_id !== this.hostId) {
+        if (isSelfPrincipal && item.value.host_id !== this.hostId && !isHumanNode(item.value)) {
           myRemoteItems.push({ slot, item });
         }
       }
@@ -948,6 +1003,52 @@ export class CitoService {
       if (broker) await slot.directoryIndex.ensureFresh(broker);
     }));
   }
+  private collectActivityAndUnread(): { activity: UiActivityItem[]; unreadCount: number } {
+    const now = Date.now();
+    const rows = this.state.signals(
+      "SELECT * FROM local_signals WHERE expires_at_ms > ? AND state != 'EXPIRED_UNSENT' ORDER BY seq DESC LIMIT 80",
+      now,
+    );
+    const listenerMap = new Map<string, ListenerRow>();
+    const allListeners = this.state.db.prepare("SELECT * FROM local_listeners").all() as unknown as ListenerRow[];
+    for (const l of allListeners) {
+      listenerMap.set(`${l.hub}:${l.listener_id}`, l);
+    }
+    let unreadCount = 0;
+    const activity: UiActivityItem[] = [];
+    for (const r of rows) {
+      const target = listenerMap.get(`${r.hub}:${r.listener_id}`);
+      const targetHarness = target?.harness ?? "human";
+      const targetTitle = target?.title ?? r.listener_id;
+      const targetScopedId = target ? this.scoped(r.hub, displayId(target)) : this.scoped(r.hub, r.listener_id);
+      const fromScopedId = r.from_listener_id
+        ? this.scoped(r.hub, r.from_listener_id)
+        : this.scoped(r.hub, `@${r.from_user}`);
+      const unread = r.acknowledged_at_ms === null;
+      const forMe = targetHarness === "human" || (r.state === "STORED_PASSIVE" && r.held_reason !== null);
+      if (unread && forMe) unreadCount += 1;
+      activity.push({
+        hub: r.hub,
+        signal_id: this.scoped(r.hub, r.signal_id),
+        listener_id: r.listener_id,
+        from_user: r.from_user,
+        from_host_name: r.from_host_name,
+        from_harness: r.from_harness,
+        from_title: r.from_title,
+        from_scoped_id: fromScopedId,
+        target_harness: targetHarness,
+        target_title: targetTitle,
+        target_scoped_id: targetScopedId,
+        message: r.message,
+        held_reason: r.held_reason,
+        in_reply_to: r.in_reply_to ? this.scoped(r.hub, r.in_reply_to) : null,
+        created_at: r.created_at,
+        unread,
+        for_me: forMe,
+      });
+    }
+    return { activity, unreadCount };
+  }
   pushUiDirectory(): void {
     if (this.closing || !this.ui) return;
     const allEntries = this.collectDirectoryEntries();
@@ -963,18 +1064,38 @@ export class CitoService {
     this.ui.directory(peers, matched.length, allEntries.length);
   }
   pushUiState(): void {
-    if (this.closing) return;
+    if (this.closing || !this.ui) return;
     const hubs = [...this.slots.values()].map(slot => ({ name: slot.name, status: slot.status,
       user: slot.principal?.owner_user ?? null, auth_mode: slot.config.authMode, error: slot.error }));
     const activeRows = this.liveActiveRows();
-    const listeners = activeRows.map(row => ({ hub: row.hub, listener_id: row.listener_id, public_id: displayId(row), scoped_id: this.scoped(row.hub, displayId(row)),
-      harness: row.harness, session_id: row.session_id, title: row.title, about: row.about, cwd: row.cwd, repo: row.repo, branch: row.branch, scope: row.scope,
-      can_jump: getAdapter(row.harness)?.canJump === true }));
+    activeRows.sort((a, b) => Number(isHumanNode(b)) - Number(isHumanNode(a)) || a.hub.localeCompare(b.hub) || a.listener_id.localeCompare(b.listener_id));
+    const listeners = activeRows.map(row => {
+      const slot = this.slots.get(row.hub);
+      const indexed = slot?.directoryIndex.entries.get(row.listener_id)?.value;
+      const channels = this.activeChannelNames(indexed);
+      return {
+        hub: row.hub,
+        listener_id: row.listener_id,
+        public_id: displayId(row),
+        scoped_id: this.scoped(row.hub, displayId(row)),
+        harness: row.harness,
+        session_id: row.session_id,
+        title: row.title,
+        about: row.about,
+        cwd: row.cwd,
+        repo: row.repo,
+        branch: row.branch,
+        scope: row.scope,
+        ...(channels ? { channels } : {}),
+      };
+    });
     const available = filterAvailableSessions(this.availableSessions, activeRows, this.slots.size);
     const { myRemote, onlineCount } = this.collectMyRemoteAndOnlineCount();
+    const { activity, unreadCount } = this.collectActivityAndUnread();
     if (this.settingsState) {
       this.settingsState = {
         ...this.settingsState,
+        desktop_banner_enabled: this.desktopBannerEnabled,
         hubs: this.settingsState.hubs.map(h => {
           const slot = this.slots.get(h.name);
           return slot
@@ -988,7 +1109,7 @@ export class CitoService {
         }),
       };
     }
-    this.ui?.state(hubs, listeners, available, myRemote, onlineCount, undefined, this.settingsState);
+    this.ui?.state(hubs, listeners, available, myRemote, onlineCount, undefined, this.settingsState, unreadCount, activity);
     if (this.directoryOpen) this.pushUiDirectory();
   }
   async handleUiAction(action: UiToDaemonAction): Promise<void> {
@@ -1049,6 +1170,109 @@ export class CitoService {
           await this.refreshSettingsState();
           break;
         }
+        case "set_desktop_banner": {
+          this.desktopBannerEnabled = action.enabled;
+          await this.refreshSettingsState();
+          break;
+        }
+        case "channel_save":
+        case "channel_test":
+        case "channel_pair": {
+          const targetSlot = action.hub ? this.slot(action.hub) : (this.slots.get(this.config.defaultHub) ?? [...this.slots.values()][0]);
+          const broker = targetSlot ? await targetSlot.network({ interactive: false }).catch(() => undefined) : undefined;
+          const values = action.values ?? {};
+          const hubConfig: Record<string, unknown> = {};
+          const userConfig: Record<string, unknown> = {};
+          const currentCh = this.settingsState?.channels?.find(c => c.id === action.channel_id);
+          for (const [k, v] of Object.entries(values)) {
+            const fieldMeta = currentCh?.fields.find(f => f.key === k);
+            if (fieldMeta?.scope === "hub") hubConfig[k] = v;
+            else userConfig[k] = v;
+          }
+          if (action.op === "channel_save") {
+            if (broker && typeof broker.nc.rpc === "function") {
+              await broker.nc.rpc("human_channels_configure", {
+                plugin_id: action.channel_id,
+                ...(action.enabled !== undefined ? { enabled: action.enabled } : {}),
+                hub_config: hubConfig,
+                user_config: userConfig,
+              }).catch(() => {});
+            }
+            await this.refreshSettingsState();
+          } else if (action.op === "channel_test") {
+            let testRes: { ok: boolean; detail: string } | undefined;
+            if (broker && typeof broker.nc.rpc === "function") {
+              testRes = await broker.nc.rpc<{ ok: boolean; detail: string }>("human_channels_test", {
+                plugin_id: action.channel_id,
+                hub_config: hubConfig,
+                user_config: userConfig,
+              }).catch(err => ({ ok: false, detail: err instanceof Error ? err.message : String(err) }));
+            }
+            await this.refreshSettingsState();
+            if (testRes && this.settingsState?.channels) {
+              this.settingsState = {
+                ...this.settingsState,
+                channels: this.settingsState.channels.map(c =>
+                  c.id === action.channel_id
+                    ? { ...c, status: testRes!.ok ? "ready" : "error", detail: testRes!.detail }
+                    : c,
+                ),
+              };
+            }
+          } else if (action.op === "channel_pair") {
+            let pairRes: { code: string; instruction: string } | undefined;
+            if (broker && typeof broker.nc.rpc === "function") {
+              pairRes = await broker.nc.rpc<{ code: string; instruction: string }>("human_channel_pair_start", {
+                plugin_id: action.channel_id,
+                hub_config: hubConfig,
+              }).catch(() => undefined);
+            }
+            await this.refreshSettingsState();
+            if (pairRes && this.settingsState?.channels) {
+              this.settingsState = {
+                ...this.settingsState,
+                channels: this.settingsState.channels.map(c =>
+                  c.id === action.channel_id
+                    ? { ...c, pairing_code: pairRes!.code, pairing_instruction: pairRes!.instruction }
+                    : c,
+                ),
+              };
+            }
+          }
+          break;
+        }
+        case "send_signal": {
+          const targetSlot = action.hub ? this.slot(action.hub) : (this.slots.get(this.config.defaultHub) ?? [...this.slots.values()][0]);
+          const hubName = targetSlot?.name ?? this.config.defaultHub;
+          const user = targetSlot?.principal?.owner_user ?? this.config.user;
+          await this.send(
+            {
+              to: action.to,
+              ...(action.hub ? { hub: action.hub } : {}),
+              message: action.message,
+              ...(action.in_reply_to ? { in_reply_to: action.in_reply_to } : {}),
+            },
+            {
+              meta: {
+                expected_harness: "human",
+                expected_session_id: "default",
+                title: `@${user} (Me)`,
+              },
+            },
+          );
+          if (action.in_reply_to) {
+            await this.ackSignalsFromUi({ hub: hubName, signal_ids: [action.in_reply_to] });
+          }
+          break;
+        }
+        case "ack_signals": {
+          await this.ackSignalsFromUi({
+            ...(action.hub ? { hub: action.hub } : {}),
+            ...(action.signal_ids ? { signal_ids: action.signal_ids } : {}),
+            ...(action.ack_all !== undefined ? { ack_all: action.ack_all } : {}),
+          });
+          break;
+        }
         case "setup_save_hub": {
           await applySetup({
             env: this.config.env,
@@ -1057,6 +1281,7 @@ export class CitoService {
               url: action.url,
               authMode: action.auth_mode,
               ...(action.token !== undefined ? { token: action.token } : {}),
+              ...(action.user !== undefined ? { user: action.user } : {}),
               ...(action.issuer !== undefined ? { oidcIssuer: action.issuer } : {}),
               ...(action.client_id !== undefined ? { oidcClientId: action.client_id } : {}),
               ...(action.set_default !== undefined ? { setDefault: action.set_default } : {}),
@@ -1182,6 +1407,65 @@ export class CitoService {
     this.calls.add(task);
     try { await task; } finally { this.calls.delete(task); this.pushUiState(); }
   }
+  async ackSignalsFromUi(options: { hub?: string; signal_ids?: string[]; ack_all?: boolean }): Promise<void> {
+    const now = Date.now();
+    const parsedIds = options.signal_ids?.map(raw => parseScopedId(raw, this.config, options.hub));
+    const affectedByHubAndNode = new Map<string, Set<string>>();
+    const affectedSessions = new Map<string, { harness: string; session_id: string }>();
+    this.state.transaction(() => {
+      let rows: SignalRow[];
+      if (options.ack_all) {
+        rows = options.hub
+          ? this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND acknowledged_at_ms IS NULL", options.hub)
+          : this.state.signals("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL");
+      } else if (parsedIds && parsedIds.length > 0) {
+        rows = [];
+        for (const p of parsedIds) {
+          rows.push(
+            ...this.state.signals(
+              "SELECT * FROM local_signals WHERE hub = ? AND signal_id = ? AND acknowledged_at_ms IS NULL",
+              p.hub,
+              p.id,
+            ),
+          );
+        }
+      } else {
+        rows = [];
+      }
+      for (const r of rows) {
+        this.state.run(
+          "UPDATE local_signals SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?), state = CASE WHEN state = 'RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub = ? AND signal_id = ?",
+          now,
+          r.hub,
+          r.signal_id,
+        );
+        const key = `${r.hub}:${r.listener_id}`;
+        let set = affectedByHubAndNode.get(key);
+        if (!set) { set = new Set(); affectedByHubAndNode.set(key, set); }
+        set.add(r.signal_id);
+        const lRow = this.state.listener(r.listener_id, r.hub);
+        if (lRow) affectedSessions.set(`${lRow.harness}:${lRow.session_id}`, { harness: lRow.harness, session_id: lRow.session_id });
+      }
+    });
+    for (const [key, sigIds] of affectedByHubAndNode) {
+      const colon = key.indexOf(":");
+      const hubName = key.slice(0, colon);
+      const nodeId = key.slice(colon + 1);
+      const slot = this.slots.get(hubName);
+      const broker = slot?.connectedBroker();
+      if (broker && typeof broker.nc.rpc === "function") {
+        await broker.nc.rpc("signal_ack", {
+          node_id: nodeId,
+          signal_ids: [...sigIds],
+          channel_id: `${this.hostId}:ui`,
+        }).catch(() => {});
+      }
+    }
+    for (const s of affectedSessions.values()) {
+      await refreshSessionBadge(this.state, this.config, s.harness, s.session_id).catch(() => {});
+    }
+    this.pushUiState();
+  }
   async unlistenById(hub: string, listenerId: string): Promise<ReturnType<typeof warning> | undefined> {
     const slot = this.slot(hub), id = toCanonicalListenerId(listenerId), key = `${hub}:${id}`;
     // Abort effects before waiting for their critical section; they hold the same mutex.
@@ -1193,7 +1477,6 @@ export class CitoService {
         this.state.run("UPDATE local_listeners SET status = 'UNLISTENED' WHERE hub = ? AND listener_id = ?", hub, id);
         this.state.run("UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'unlistened_before_dispatch' WHERE hub = ? AND listener_id = ? AND state IN ('RECEIVED','DISPATCHING')", hub, id);
       });
-      this.removeDirectoryEntry(hub, id);
       await refreshSessionBadge(this.state, this.config, row.harness, row.session_id).catch(error => this.log(error));
       this.pushUiState();
       // Local revocation must succeed even when the hub is offline or manually disconnected.
@@ -1201,10 +1484,36 @@ export class CitoService {
         const broker = slot.connectedBroker(), entry = await broker?.kv.get(id);
         if (entry && broker) {
           const value = registrationSchema.parse(entry.json());
-          if (value.owner_token === row.owner_token && value.binding_generation === row.binding_generation) await broker.kv.update(id,
-            encode({ ...value, state: "UNLISTENED", binding_generation: row.binding_generation + 1 }), entry.revision);
+          if (value.owner_token === row.owner_token && value.binding_generation === row.binding_generation) {
+            const channelId = `${row.host_id}:${row.harness}`;
+            const nextChannels = value.channels ? { ...value.channels } : undefined;
+            if (nextChannels?.[channelId]) {
+              nextChannels[channelId] = { ...nextChannels[channelId]!, state: "UNLISTENED" };
+            }
+            const siblingActive = nextChannels
+              ? Object.entries(nextChannels).find(([k, c]) => k !== channelId && c.state === "ACTIVE")?.[1]
+              : undefined;
+            if (siblingActive) {
+              const updated: Registration = {
+                ...value,
+                host_id: siblingActive.host_id,
+                host_name: siblingActive.host_name,
+                channels: nextChannels,
+              };
+              const rev = await broker.kv.update(id, encode(updated), entry.revision);
+              this.upsertDirectoryEntry(hub, id, updated, rev);
+            } else {
+              this.removeDirectoryEntry(hub, id);
+              await broker.kv.update(id,
+                encode({ ...value, state: "UNLISTENED", binding_generation: row.binding_generation + 1, ...(nextChannels ? { channels: nextChannels } : {}) }), entry.revision);
+            }
+          } else {
+            this.removeDirectoryEntry(hub, id);
+          }
+        } else {
+          this.removeDirectoryEntry(hub, id);
         }
-      } catch (error) { this.log(error); return warning(hub, error); }
+      } catch (error) { this.removeDirectoryEntry(hub, id); this.log(error); return warning(hub, error); }
     });
     await previous?.stop();
     if (this.receivers.get(key) === previous) { this.receivers.delete(key); this.state.liveReceivers.delete(key); slot.receivers.delete(id); }
@@ -1262,7 +1571,10 @@ export class CitoService {
     return {
       ...this.options,
       onStateChanged: () => this.pushUiState(),
-      onBanner: payload => { this.ui?.banner(payload); this.options.onBanner?.(payload); },
+      onBanner: payload => {
+        if (this.desktopBannerEnabled) this.ui?.banner(payload);
+        this.options.onBanner?.(payload);
+      },
       onSessionSwitched: (harness, sessionId) => this.revokeSession(harness, sessionId),
       onDirectoryUpsert: (hub, id, value, revision) => { this.upsertDirectoryEntry(hub, id, value, revision); this.pushUiState(); },
       onDirectoryRemove: (hub, id) => { this.removeDirectoryEntry(hub, id); this.pushUiState(); },
@@ -1345,8 +1657,9 @@ export class CitoService {
   }
   private sender(caller: Caller | undefined, principal: Principal, hub: string) {
     const endpoint = { principal_id: principal.principal_id, host_id: this.hostId, harness: caller?.harness ?? null, session_id: caller?.session_id ?? null };
-    const local = caller && this.state.listener(listenerId({ ...endpoint, harness: caller.harness, session_id: caller.session_id }), hub);
-    return { endpoint, caller, local, key: senderEndpointKey(endpoint) };
+    const nodeId = caller ? listenerId({ principal_id: principal.principal_id, harness: caller.harness, session_id: caller.session_id }) : null;
+    const local = nodeId ? this.state.listener(nodeId, hub) : undefined;
+    return { endpoint, caller, local, nodeId, key: senderEndpointKey(endpoint) };
   }
   call(name: string, input: unknown = {}, meta: CallerInput = {}) {
     const task = (async () => {
@@ -1374,12 +1687,12 @@ export class CitoService {
     const caller = await this.caller(meta, true), broker = await slot.network(), principal = await slot.identity();
     const normalizedTag = input.tag === undefined ? undefined : normalizeSlug(input.tag);
     if (input.tag !== undefined && !normalizedTag) throw new CitoError("INVALID_INPUT", "tag must contain letters or numbers");
-    const id = listenerId({ ...principal, host_id: this.hostId, harness: caller.harness, session_id: caller.session_id }), key = `${hub}:${id}`;
+    const id = listenerId({ principal_id: principal.principal_id, harness: caller.harness, session_id: caller.session_id }), key = `${hub}:${id}`;
     return listenMutex.run(key, async () => {
     if (this.closing || slot.manuallyDisconnected) throw new CitoError("NATS_UNAVAILABLE", "Hub disconnected");
     let previous: Receiver | undefined, ownedToken: string | undefined, rebinding = false;
     const checkCollision = (existing: Registration | ListenerRow | null | undefined) => {
-      if (existing && (existing.principal_id !== principal.principal_id || existing.host_id !== this.hostId || existing.harness !== caller.harness || existing.session_id !== caller.session_id)) {
+      if (existing && (existing.principal_id !== principal.principal_id || existing.harness !== caller.harness || existing.session_id !== caller.session_id)) {
         throw new CitoError("STALE_GENERATION", "Listener ID collision");
       }
     };
@@ -1397,15 +1710,40 @@ export class CitoService {
         ON CONFLICT(hub, listener_id) DO UPDATE SET status = 'REBINDING'`, hub, id, principal.principal_id,
         principal.owner_user, this.hostId, this.config.hostName, caller.harness, caller.session_id, caller.endpoint_pid ?? null,
         caller.cwd, caller.repo, caller.branch, caller.title, input.about, initialScope, tag, publicId);
-      const owner = randomUUID();
+      const freshOwner = randomUUID();
+      const channelId = `${this.hostId}:${caller.harness}`;
       for (let attempt = 0; attempt < 3; attempt++) {
         const entry = await broker.kv.get(id), row = this.state.listener(id, hub)!, remote = entry && registrationSchema.parse(entry.json());
         checkCollision(remote);
-        if (entry) this.state.recordOfflineGap(id, await brokerNow(broker.jsm), entry.created, hub);
-        const generation = Math.max(remote?.binding_generation ?? 0, row.binding_generation) + 1;
-        const next = { ...registration(row), ...principal, host_name: this.config.hostName, cwd: caller.cwd, repo: caller.repo,
+        const brokerTsIso = await brokerNow(broker.jsm);
+        if (entry) this.state.recordOfflineGap(id, brokerTsIso, entry.created, hub);
+        const nowMs = Date.parse(brokerTsIso);
+        const hasActiveSiblingHost = Boolean(
+          remote &&
+          remote.state === "ACTIVE" &&
+          ((remote.host_id !== this.hostId) ||
+            (remote.channels && Object.values(remote.channels).some(c => c.channel_id !== channelId && c.state === "ACTIVE"))),
+        );
+        const generation = hasActiveSiblingHost
+          ? remote!.binding_generation
+          : Math.max(remote?.binding_generation ?? 0, row.binding_generation) + 1;
+        const owner = hasActiveSiblingHost ? remote!.owner_token : freshOwner;
+        const nextChannels: Record<string, ChannelAttachment> = {
+          ...(remote?.channels ?? {}),
+          [channelId]: {
+            channel_id: channelId,
+            kind: caller.harness,
+            host_id: this.hostId,
+            host_name: this.config.hostName,
+            delivery_mode: isHumanNode(caller) ? "notify_fanout" : "wake_exclusive",
+            priority: 100,
+            state: "ACTIVE",
+            updated_at_ms: Number.isFinite(nowMs) ? nowMs : Date.now(),
+          },
+        };
+        const next: Registration = { ...registration(row, nextChannels), ...principal, host_id: this.hostId, host_name: this.config.hostName, cwd: caller.cwd, repo: caller.repo,
           branch: caller.branch, title: caller.title, about: input.about, tag, public_id: publicId,
-          scope: input.scope ?? row.scope, state: "ACTIVE" as const, binding_generation: generation, owner_token: owner };
+          scope: input.scope ?? row.scope, state: "ACTIVE" as const, binding_generation: generation, owner_token: owner, channels: nextChannels };
         let rev: number;
         try { rev = entry ? await broker.kv.update(id, encode(next), entry.revision) : await broker.kv.create(id, encode(next)); }
         catch (error) { if (isJsApiError(error, 10071)) continue; throw error; }
@@ -1506,17 +1844,40 @@ export class CitoService {
   private async send(input: z.infer<typeof sendInputSchema>, meta: CallerInput) {
     const { hub, id } = parseScopedId(input.to, this.config, input.hub);
     const replyId = input.in_reply_to === undefined ? null : parseScopedId(input.in_reply_to, this.config, hub).id;
-    const canonicalTo = toCanonicalListenerId(id), slot = this.slot(hub);
+    const isHandle = id.startsWith("@");
+    const prevalidatedTo = isHandle ? undefined : toCanonicalListenerId(id);
+    const slot = this.slot(hub);
     // Claim validation precedes network/DB effects.
     const caller = await this.optionalCaller(meta);
     const broker = await slot.network(), identity = await slot.identity();
     const from = this.sender(caller, identity, hub);
+    let canonicalTo: string;
+    if (isHandle) {
+      const handle = id.slice(1).toLowerCase();
+      if (handle === "self" || handle === identity.owner_user.toLowerCase()) {
+        await this.ensureLocalHumanNode(slot);
+        canonicalTo = listenerId(humanNodeKey(identity));
+      } else {
+        const active = await slot.directoryIndex.read(broker, identity);
+        const matches = active.filter(item => isHumanNode(item.value) && item.value.owner_user.toLowerCase() === handle);
+        if (matches.length === 0) {
+          throw new CitoError("LISTENER_NOT_FOUND", `Human node '@${handle}' is not online on hub '${hub}'`);
+        }
+        const distinctPrincipals = new Set(matches.map(m => m.value.principal_id));
+        if (distinctPrincipals.size > 1) {
+          throw new CitoError("INVALID_INPUT", "Ambiguous @username; use full listener_id");
+        }
+        canonicalTo = matches[0]!.value.listener_id;
+      }
+    } else {
+      canonicalTo = prevalidatedTo!;
+    }
     const entry = await broker.kv.get(canonicalTo, { checkForbiddenScope: true }), now = await brokerNow(broker.jsm);
     if (!entry) throw new CitoError("LISTENER_NOT_FOUND", "Target listener does not exist");
-    const target = registrationSchema.parse(entry.json()), lease = evaluateLease(target.state, now, entry.created);
+    const target = registrationSchema.parse(entry.json()), lease = evaluateNodeLease(target, now, entry.created);
     if (lease === "UNLISTENED") throw new CitoError("LISTENER_NOT_FOUND", "Target listener was revoked");
     if (lease === "EXPIRED") throw new CitoError("LISTENER_EXPIRED", "Target listener expired");
-    if (from.endpoint.principal_id === target.principal_id && from.endpoint.host_id === target.host_id && from.endpoint.harness === target.harness && from.endpoint.session_id === target.session_id) {
+    if (from.nodeId !== null && from.nodeId === canonicalTo) {
       throw new CitoError("SELF_SEND_FORBIDDEN", "Cannot send to your own session");
     }
     if (identity.principal_id !== target.principal_id && target.scope !== "workspace") throw new CitoError("FORBIDDEN_TARGET_SCOPE", "Target is private to its principal");
@@ -1590,19 +1951,46 @@ export class CitoService {
         AND state != 'EXPIRED_UNSENT' ORDER BY created_at ASC, hub ASC, seq ASC, signal_id ASC LIMIT 50`, ...values, now);
       const ids = new Map([...ackRows, ...(ackAll ? rows : [])].map(row => [`${row.hub}:${row.signal_id}`, row]));
       let count = 0;
-      for (const row of ids.values()) count += Number(this.state.run(`UPDATE local_signals SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?),
-        state = CASE WHEN state = 'RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub = ? AND listener_id = ? AND signal_id = ? AND acknowledged_at_ms IS NULL`, now, row.hub, row.listener_id, row.signal_id).changes);
+      const ackedByHubNode = new Map<string, string[]>();
+      for (const row of ids.values()) {
+        const changes = Number(this.state.run(`UPDATE local_signals SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?),
+          state = CASE WHEN state = 'RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub = ? AND listener_id = ? AND signal_id = ? AND acknowledged_at_ms IS NULL`, now, row.hub, row.listener_id, row.signal_id).changes);
+        if (changes > 0) {
+          count += changes;
+          const k = `${row.hub}:${row.listener_id}`;
+          let list = ackedByHubNode.get(k);
+          if (!list) { list = []; ackedByHubNode.set(k, list); }
+          list.push(row.signal_id);
+        }
+      }
       if (ackAll) for (const row of authorized) this.state.run("UPDATE local_listeners SET replay_gap_detected = 0, replay_gap_range = NULL WHERE hub = ? AND listener_id = ?", row.hub, row.id);
       const first = listeners[0], fallback = authorized[0]!;
-      return { ok: true, listener_id: first ? this.scoped(first.hub, displayId(first)) : this.scoped(fallback.hub, publicListenerId(listenerSlug(caller), fallback.id)),
+      return {
+        ackedByHubNode,
+        payload: { ok: true, listener_id: first ? this.scoped(first.hub, displayId(first)) : this.scoped(fallback.hub, publicListenerId(listenerSlug(caller), fallback.id)),
         replay_gap_detected: listeners.some(r => !!r.replay_gap_detected), replay_gap_range: listeners.find(r => r.replay_gap_range)?.replay_gap_range ?? null,
         signals: rows.map(row => ({ signal_id: this.scoped(row.hub, row.signal_id), hub: row.hub, seq: row.seq,
           from: { user: row.from_user, host_name: row.from_host_name, harness: row.from_harness,
             listener_id: row.from_listener_id ? this.scoped(row.hub, row.from_listener_id.startsWith("c_") ? publicListenerId(normalizeSlug(row.from_title) || row.from_harness || "listener", row.from_listener_id) : row.from_listener_id) : null,
-            about: row.from_about }, message: row.message, held_reason: row.held_reason, in_reply_to: row.in_reply_to ? this.scoped(row.hub, row.in_reply_to) : null, created_at: row.created_at })), acknowledged_count: count };
+            about: row.from_about }, message: row.message, held_reason: row.held_reason, in_reply_to: row.in_reply_to ? this.scoped(row.hub, row.in_reply_to) : null, created_at: row.created_at })), acknowledged_count: count },
+      };
     });
+    for (const [k, sigIds] of result.ackedByHubNode) {
+      const colon = k.indexOf(":");
+      const hubName = k.slice(0, colon);
+      const nodeId = k.slice(colon + 1);
+      const broker = this.slots.get(hubName)?.connectedBroker();
+      if (broker && typeof broker.nc.rpc === "function") {
+        void broker.nc.rpc("signal_ack", {
+          node_id: nodeId,
+          signal_ids: sigIds,
+          channel_id: `${this.hostId}:${caller.harness}`,
+        }).catch(() => {});
+      }
+    }
     await refreshSessionBadge(this.state, this.config, caller.harness, caller.session_id).catch(error => this.log(error));
-    return result;
+    this.pushUiState();
+    return result.payload;
   }
   private async revokeSession(harness: string, sessionId: string): Promise<void> {
     const rows = this.state.db.prepare("SELECT * FROM local_listeners WHERE harness = ? AND session_id = ? AND status = 'ACTIVE'").all(harness, sessionId) as unknown as ListenerRow[];

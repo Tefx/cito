@@ -1,0 +1,30 @@
+{
+  "id": "telegram",
+  "kind": "human",
+  "displayName": "Telegram",
+  "tier": "stable",
+  "sfSymbol": "paperplane.fill",
+  "tint": "blue",
+  "fields": [
+    {
+      "key": "botToken",
+      "scope": "hub",
+      "label": "Bot Token",
+      "type": "secret",
+      "required": true,
+      "placeholder": "123456:ABC-DEF..."
+    },
+    {
+      "key": "chatId",
+      "scope": "user",
+      "label": "Chat ID",
+      "type": "string",
+      "required": true,
+      "placeholder": "123456789"
+    }
+  ],
+  "pairing": {
+    "supported": true,
+    "actionLabel": "Pair Account…"
+  }
+}
