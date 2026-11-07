@@ -9,78 +9,48 @@
 version: 1
 project: cito
 strategy_ref: docs/DESIGN.md
-context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md,
-  AGENTS.md, and README.md across V1 (initial NATS JetStream relay, OIDC Auth Callout,
-  Pi/Codex host adapters, HUD banner, and MCP server), V2 (Multi-Hub & Extensible
-  Harness Architecture, 3-table SQLite schema at PRAGMA user_version = 4, confirmed
-  vs. unconfirmed auto-acknowledgment, and default drain-on-read in cito_inbox), V3
-  (macOS Menu Bar Daemon & Streamable HTTP Edition: singleton cito daemon + Streamable
-  HTTP MCP at http://127.0.0.1:4290/mcp + GET /health + Origin check + lsof client-tuple
-  PID attribution + cito-mcp stdio auto-forwarding, in-memory KeyedMutex, non-intrusive
-  Codex Desktop adapter, vendor-neutral standard OIDC, and in-process UiBridge + cito-ui.swift),
-  V4 (English-Only Production Menu Bar Card UI & Bespoke Vector Status Icon makeCitoStatusIcon
-  in cito-ui.swift, MCP 2026-07-28 protocol version support, pure adapter boundary
-  with detectExplicitCaller in src/adapters/codex.ts, optional CITO_CLAUDE_CHANNEL=1
-  stdio channel bridge, neutral example naming cleanup across src/, docs/, README.md,
-  deploy/, and tests/, and iterative code-hygiene gate), V5 (Theory-Grounded macOS
-  Menu Bar UI & Hub State-Machine: extended UiListenerSummary with about & branch,
-  clean manual HubSlot.disconnect error clearing and forced interactive OIDC re-login
-  on Switch Account, cell-accurate measureTextWidth and monochrome SF Symbol MenuControl,
-  zero-entropy default hub elimination with compact 44x22pt icon trigger, state-driven
-  380x32pt Hub action drawer, 380pt Control-Center menu panel with 360pt 2-row/3-row
-  session cards and untruncated short-ID copy pill, and iterative code-hygiene gate),
-  V6 (Direct Session Control Commands per docs/DESIGN.md §4: zero-dependency standalone
-  Pi /cito slash command in src/pi-extension/cito-bridge.ts with activeBadge tracking,
-  completions, and stateless HTTP POST /mcp binding via endpoint_pid; resolveCodexThreadId
-  in src/adapters/codex.ts; CLI direct control cito listen and cito unlisten in src/mcp/cli.ts
-  with caller_pid vs --codex metadata disambiguation; README.md documentation; unit/integration
-  tests; and iterative code-hygiene gate), V7 (Menu Bar On-Demand Session Discovery,
-  1-Click Listen, Viewport Capping & Flicker-Free Dynamic Refresh per docs/DESIGN.md
-  §4.3: AvailableSessionSummary and HarnessAdapter.discoverAvailableSessions across
-  SocketBridgeAdapter and CodexDesktopAdapter, discoverAllAvailableSessions and expected_session_id/expected_harness
-  identity fencing in resolveCaller, UiBridge/CitoService refresh_available and listen_session
-  actions with synchronous pushUiState, generation-guarded refreshAvailableSessions,
-  and debounced sockets watcher, and cito-ui.swift NSMenuDelegate in-place cardMenu
-  rebuild, eventTracking RunLoop delivery, Equatable diff guard with hasRenderedState
-  + pendingMutation, compact empty strip, AVAILABLE SESSIONS rows, FlippedView NSScrollView
-  viewport capping, and appended menuActions), and V8 (Ego-Centric Menu Bar Control
-  Plane, Spotlight Network Directory & Scalable NATS KV Discovery per docs/DESIGN.md
-  §§1.2–6: complete Claude Code removal from src/ and tests/ with transport-independent
-  regression tests migrated under pi, HubDirectoryIndex in src/mcp/service.ts with
-  single streams.info(KV_STREAM) + dual-termination watch + 16-worker concurrent point-get
-  fallback + directoryGen fencing + immediate local mutation coalescing + read-time
-  lease/visibility evaluation, removal of (!) replay_gap_detected badge suffix in
-  src/mcp/receiver.ts, Pi lastActiveMs interaction recency tracking and per-harness
-  candidate quota up to 8 per harness / max 16 total, Two-Surface macOS UI Architecture
-  with Surface 1 380pt Ego-Centric cardMenu Zones 1–4 and Surface 2 560x440pt Spotlight-style
-  DirectoryPanel KeyPanel: NSPanel + daemon-backed full-index query_directory, and
-  iterative code-hygiene gate). Keep Claude Code integration strictly as ''Proposed
-  Design Suggestion Only — Not Yet Implemented'' in docs/DESIGN.md §6 and README.md
-  with zero ''claude'' references in src/ or tests/, and forbid mutations to external
-  dotfiles or tela repositories.'
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V9 — Multi-Hub
-  Session Attachment, Atomic Hub Migration, Ego-Centric Menu Bar Control Plane & Spotlight
-  Network Directory, §§1–6), AGENTS.md, and README.md.
+context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md
+  (V16), docs/ROADMAP.md, AGENTS.md, and README.md across V1–V15 (NATS JetStream relay,
+  OIDC Auth Callout, 3-table SQLite schema at PRAGMA user_version = 4, singleton macOS
+  menu bar daemon + Streamable HTTP MCP at http://127.0.0.1:4290/mcp + GET /health
+  version handshake + automatic stale-daemon handover, scalable NATS KV HubDirectoryIndex,
+  Two-Surface macOS UI Architecture with Surface 1 380pt Ego-Centric cardMenu and
+  Surface 2 560x440pt Spotlight-style DirectoryPanel, prebuilt Apple Silicon bin/cito-ui-darwin-arm64
+  with quarantine-free installation and automatic swiftc fallback, and zero-script
+  Git/global npm packaging) and V16 / Stage 0 (v0.12.0 Unified Plugin Architecture,
+  Plugin Host SDK @tefx/cito/plugin-sdk in src/adapters/, Built-in Plugin Extraction
+  into plugins/{pi,codex,claude}/, Out-of-Tree ${CITO_STATE_DIR}/plugins/<id>/ loader
+  with 4 conflict-resolution/fault-isolation invariants, universal --harness <id>
+  [--session <sid>] CLI flags, and 100% Data-Driven macOS UI via UiHarnessMetadata[]
+  and ${stateDir}/bin/harnesses.json with zero hardcoded harness identifiers in src/
+  or src/macos/cito-ui.swift). Forbid mutations to external dotfiles or tela repositories.
+
+  '
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V16 — Harness-Agnostic
+  Core, Plugin Host SDK, Bundled & Out-of-Tree Plugins, Data-Driven macOS UI & Scalable
+  NATS KV Discovery, §§1–6), docs/ROADMAP.md (Stage 0 v0.12.0), AGENTS.md, and README.md.
 
   2. Hard boundaries: Enforce English-only UI/UX, code, and documentation (zero Chinese
-  characters in src/, docs/, README.md, AGENTS.md, deploy/) and zero company/environment-specific
-  names (rda, casdoor, rcatwin, keppel, mingchen) across src/, docs/, README.md, AGENTS.md,
-  deploy/, and tests/. Enforce zero case-insensitive ''claude'' matches across src/
-  and tests/, keeping Claude Code integration documented strictly as Proposed Design
-  Suggestion Only — Not Yet Implemented in docs/DESIGN.md §6 and README.md. Keep src/mcp/
-  harness-agnostic (zero references to pi, codex, or x-codex-turn-metadata in src/mcp/
-  except src/mcp/cli.ts delegating --codex CLI resolution to src/adapters/codex.ts)
-  and use open harnessIdSchema (^[a-z][a-z0-9_-]{0,31}$). Keep src/pi-extension/cito-bridge.ts
-  100% standalone with zero external or relative imports. Do NOT mutate external repositories
-  (/Users/tefx/dotfiles, tela) or live user ~/.cito / ~/.codex state during tests;
-  always isolate test state in temporary directories and ephemeral test nats-server
-  / HTTP instances.
+  characters in src/, plugins/, docs/, README.md, AGENTS.md, deploy/) and zero company/environment-specific
+  names (rda, casdoor, rcatwin, keppel, mingchen) across src/, plugins/, docs/, README.md,
+  AGENTS.md, deploy/, and tests/. Keep core modules (src/shared/, src/mcp/, src/ui/,
+  src/macos/cito-ui.swift, and the Plugin Host SDK in src/adapters/) 100% harness-agnostic
+  with zero hardcoded branches, config fields, CLI flag names, or visual tables for
+  "pi", "codex", or "claude"; all built-in harness implementations live in plugins/{pi,codex,claude}/
+  and external user plugins load from ${CITO_STATE_DIR}/plugins/<id>/. Keep plugins/pi/cito-bridge.ts
+  100% standalone with zero external or relative imports (only node:* built-in imports).
+  Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
+  / ~/.codex / ~/.claude state during tests; always isolate test state in temporary
+  directories and ephemeral test nats-server / HTTP instances.
 
-  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ & src/ui/ ->
-  src/mcp/), unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing
-  (formatScopedId / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4),
-  in-memory KeyedMutex serialization (zero cross-process flock lockfiles), and zero-SQLite3
-  cito-ui.swift invariants.'
+  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ (@tefx/cito/plugin-sdk)
+  & src/ui/ -> src/mcp/, with plugins/* importing only src/shared/ and src/adapters/),
+  unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing (formatScopedId
+  / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4), in-memory KeyedMutex
+  serialization (zero cross-process flock lockfiles), and zero-SQLite3 cito-ui.swift
+  invariants.
+
+  '
 phases:
 - id: v1
   name: Cito V1 NATS JetStream Relay, Auth Callout, Host Adapters, HUD Banner, and
@@ -4599,3 +4569,253 @@ phases:
       synchronized at ''0.11.3''; fresh-context structural-auditor 01a1b227-9fd0-7647-bc13-3c499a670b56
       and uiux-auditor 01a1b227-a023-770c-822c-7ff421ab9f6c verified #1 CLOSED and
       certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v16
+  name: V16 Unified Plugin Architecture, Built-in Plugin Extraction (plugins/{pi,codex,claude}),
+    Out-of-Tree ~/.cito/plugins/<id>/ & Data-Driven macOS UI (v0.12.0)
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, zero hardcoded "pi", "codex", or "claude" harness branches/strings
+    exist in src/ or src/macos/cito-ui.swift, built-in plugins (plugins/{pi,codex,claude}/)
+    and external user plugins (${stateDir}/plugins/<id>/ importing @tefx/cito/plugin-sdk)
+    load and execute in both dist-less source and compiled dist/ layouts, bin/cito-ui-darwin-arm64
+    is rebuilt and ad-hoc signed from data-driven src/macos/cito-ui.swift, plugins/pi/cito-bridge.ts
+    has zero non-Node built-in imports, zero Chinese characters exist in src/, plugins/,
+    docs/, README.md, AGENTS.md, or deploy/, zero company/environment-specific names
+    (rda, casdoor, rcatwin, keppel, mingchen) exist in src/, plugins/, docs/ (excluding
+    the policy rule line in docs/DESIGN.md), README.md, AGENTS.md, deploy/, or tests/,
+    CITO_VERSION and package.json version equal "0.12.0", and [REQUIRES_SKILL: code-hygiene]
+    verification passes with zero open issues.'
+  context: 'Implement and verify Stage 0 (v0.12.0) Unified Plugin Architecture, Built-in
+    Plugin Extraction (plugins/{pi,codex,claude}), Out-of-Tree ~/.cito/plugins/<id>/
+    Loader, and Data-Driven macOS UI per docs/DESIGN.md (V16 §§1–6) and docs/ROADMAP.md
+    (Stage 0): (1) decouple src/shared/config.ts (remove codexHome, codexBin, codexDesktopRunning,
+    claudeHome, enableClaudeChannel from CitoConfig; add env, pluginDirs, plugins,
+    and export expandHomeDir), rename src/adapters/pi.ts -> src/adapters/socket-bridge.ts,
+    export @tefx/cito/plugin-sdk from src/adapters/index.ts and package.json exports,
+    and update bin/loader.js so @tefx/cito/plugin-sdk and relative .js->.ts specifiers
+    resolve in both compiled dist/ and dist-less source modes (including external
+    ~/.cito/plugins/<id>/index.ts plugins); (2) extract built-in plugins into plugins/pi/
+    (plugin.json, index.ts, cito-bridge.ts), plugins/codex/ (plugin.json, index.ts),
+    and plugins/claude/ (plugin.json, index.ts, channel.ts, hook-cli.ts with bin/cito-claude-hook
+    updated), create plugins/index.ts for synchronous deterministic built-in registration
+    (pi -> codex -> claude), and implement external user plugin loading in src/adapters/index.ts
+    with all 4 conflict-resolution/fault-isolation invariants (reserved built-in IDs
+    + rejectedPluginIds, RESERVED_CLI_FLAGS + universal --harness <id> [--session
+    <sid>] + manifest.cliFlag shorthands, getAllPidKeys() + 1500ms detectExplicitCaller
+    arbitration + bottom-up depth 0..5 ancestor socket walk, and 1500ms per-plugin
+    discoverAvailableSessions timeout + single-stdio-channel guard + up to 8 candidates
+    per harness without cross-harness starvation); (3) make src/ui/index.ts and src/macos/cito-ui.swift
+    100% data-driven via UiHarnessMetadata[] and ${stateDir}/bin/harnesses.json (dynamic
+    group ordering, data-driven open/recent/available group count noun, experimental
+    tooltip, dynamic DirectoryPanel facet pills with horizontal NSScrollView overflow
+    when width > 544pt, and expandJumpUrl safe scheme validation with zero hardcoded
+    "pi", "codex", or "claude" strings in src/ or src/macos/cito-ui.swift); and (4)
+    rebuild bin/cito-ui-darwin-arm64, bump version to "0.12.0" across package.json,
+    package-lock.json, CITO_VERSION in src/shared/index.ts, and README.md, and complete
+    all docs/DESIGN.md §6.2 test migrations and new plugin/UI behavioral tests.'
+  depends_on:
+  - v15
+  steps:
+  - id: v16.impl
+    name: 'Implement Stage 0 (v0.12.0) Unified Plugin Architecture, Built-in Plugin
+      Extraction (plugins/{pi,codex,claude}), Out-of-Tree ~/.cito/plugins/<id>/ &
+      Data-Driven macOS UI [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ tsconfig.json\n    - README.md\n    - bin/**\n    - src/**\n    - plugins/**\n\
+      \    - tests/**\n  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n\
+      \  - Implement Stage 0 (`v0.12.0`) across `src/shared/`, `src/adapters/`, `plugins/{pi,codex,claude}/`,\
+      \ `bin/loader.js`, `bin/cito-claude-hook`, `src/mcp/cli.ts`, `src/ui/index.ts`,\
+      \ `src/macos/cito-ui.swift`, `package.json`, `tsconfig.json`, and `tests/**`\
+      \ per `docs/DESIGN.md` (V16 §§1–6) and `docs/ROADMAP.md` (Stage 0):\n    1.\
+      \ **Config Decoupling, Plugin Host SDK (`@tefx/cito/plugin-sdk`) & Dual-Mode\
+      \ ESM Loader (`src/shared/config.ts`, `src/adapters/`, `bin/loader.js`, `package.json`,\
+      \ `tsconfig.json`)**:\n       - In `src/shared/config.ts`, remove `codexHome`,\
+      \ `codexBin`, `codexDesktopRunning`, `claudeHome`, and `enableClaudeChannel`\
+      \ from `CitoConfig`; add `env: NodeJS.ProcessEnv` (preserving the exact `env`\
+      \ passed to `loadConfig(env)`), `pluginDirs: string[]` (defaulting to `[builtinPluginsDir,\
+      \ join(stateDir, \"plugins\")]` plus `CITO_PLUGIN_PATH` entries), and `plugins?:\
+      \ Record<string, Record<string, unknown>>`; keep rejecting empty/whitespace-only\
+      \ `CITO_*` path env vars (`CITO_STATE_DIR`, `CITO_CONFIG_PATH`, `CITO_OPEN_BIN`,\
+      \ `CITO_CODEX_HOME`, `CITO_CODEX_BIN`, `CITO_CLAUDE_HOME`); and export `expandHomeDir(value:\
+      \ string, name?: string): string`.\n       - Rename `src/adapters/pi.ts` ->\
+      \ `src/adapters/socket-bridge.ts` exporting generic `SocketBridgeAdapter`, `SocketBridgeError`\
+      \ (retaining `PI_BRIDGE_UNAVAILABLE` error code string for wire compatibility),\
+      \ `bridgeSocketPath`, `requestBridge`, and `identifyBridge`.\n       - Update\
+      \ `src/adapters/types.ts` and `src/adapters/git.ts` (`BASE_PID_KEYS = [\"endpoint_pid\"\
+      , \"caller_pid\"] as const`, `hasExplicitPid`, `gitMetadata`, `normalizeRepo`,\
+      \ `resolveExplicitCaller`) and export `@tefx/cito/plugin-sdk` from `src/adapters/index.ts`\
+      \ and `package.json` `\"exports\"` (`\"./plugin-sdk\"`).\n       - Update `bin/loader.js`\
+      \ so `node:module.register` always resolves `\"@tefx/cito/plugin-sdk\"` to the\
+      \ active `src/adapters/index.ts` or `dist/src/adapters/index.js` URL and retries\
+      \ relative `.js` specifiers as `.ts` with TypeScript type stripping in both\
+      \ repo source mode and compiled `dist/` mode (including external `~/.cito/plugins/<id>/index.ts`\
+      \ plugins).\n       - Update `package.json` (`\"files\": [\"bin\", \"dist/src\"\
+      , \"dist/plugins\", \"src\", \"plugins\", \"README.md\"]`, `\"exports\"`, `\"\
+      pi\": { \"extensions\": [\"./plugins/pi/cito-bridge.ts\"] }`) and `tsconfig.json`\
+      \ (`\"include\": [\"src/**/*.ts\", \"plugins/**/*.ts\", \"tests/**/*.ts\"]`\
+      \ with `\"erasableSyntaxOnly\": true`).\n    2. **Built-in Plugin Extraction\
+      \ (`plugins/{pi,codex,claude}/`, `plugins/index.ts`, `bin/cito-claude-hook`)\
+      \ & External `${stateDir}/plugins/<id>/` Loader (`src/adapters/index.ts`, `src/mcp/cli.ts`)**:\n\
+      \       - Extract `plugins/pi/` (`plugin.json`, `index.ts` registering `SocketBridgeAdapter(\"\
+      pi\", { manifest, pidKeys: [\"pi_pid\"] })`, and standalone zero-dependency\
+      \ `cito-bridge.ts` moved from `src/pi-extension/cito-bridge.ts`).\n       -\
+      \ Extract `plugins/codex/` (`plugin.json` and `index.ts` moved from `src/adapters/codex.ts`\
+      \ with `CodexDesktopAdapter`, `loadCodexConfig(config)`, `codexThreadId`, `readCodexThreadOptional`,\
+      \ `resolveCodexThreadId`, `codexDesktopRunning`, and `cli` descriptor for `--codex[=<thread_id>]`).\n\
+      \       - Extract `plugins/claude/` (`plugin.json`, `index.ts` moved from `src/adapters/claude.ts`\
+      \ with `ClaudeCodeAdapter`, `loadClaudeConfig(config)`, `claudeSessionClaim`,\
+      \ `resolveClaudeSessionId`, `resolveClaudeSessionTitle`, `validateClaudeSessionId`,\
+      \ `appendClaudeWake`, `drainClaudeWakes`, `writeClaudeBadge`, `claudeProjectDir`,\
+      \ `claudeWakeQueuePath`, `claudeBadgePath`, `cli` descriptor for `--claude[=<session_id>]`,\
+      \ and `startStdioChannel`, `channel.ts` moved from `src/adapters/claude-channel.ts`,\
+      \ and `hook-cli.ts` moved from `src/claude-hook/cli.ts` with `bin/cito-claude-hook`\
+      \ updated to `runEntrypoint(\"../dist/plugins/claude/hook-cli.js\", \"../plugins/claude/hook-cli.ts\"\
+      )`). Remove old `src/pi-extension/` and `src/claude-hook/` directories and `src/adapters/{pi,codex,claude,claude-channel}.ts`.\n\
+      \       - Create `plugins/index.ts` registering built-in plugins synchronously\
+      \ in deterministic order (`pi` -> `codex` -> `claude`) upon importing `src/adapters/index.ts`,\
+      \ and implement `loadPlugins` / `ensurePluginsLoaded` scanning external `config.pluginDirs`\
+      \ (`${stateDir}/plugins/<id>/` and `CITO_PLUGIN_PATH`) during `CitoService.create()`,\
+      \ `discoverAllAvailableSessions()`, and CLI `runDirectCommand()`.\n       -\
+      \ Enforce all 4 conflict-resolution and fault-isolation invariants in `src/adapters/index.ts`\
+      \ and `src/mcp/cli.ts`:\n         1. Reserved built-in IDs (`pi`, `codex`, `claude`),\
+      \ directory-name match, schema validation, forced `tier: \"custom\"` on external\
+      \ plugins, and `rejectedPluginIds` tracking so failed/invalid external plugins\
+      \ never fall through to auto-instantiated socket bridges;\n         2. `RESERVED_CLI_FLAGS`\
+      \ (`hub`, `team`, `scope`, `tag`, `harness`, `session`, `help`, `version`, `setup`),\
+      \ universal `--harness <id> [--session <sid>]` (`--harness=<id>`, `--session=<sid>`),\
+      \ dynamic `--<id>[=<sid>]` shorthand when `manifest.cliFlag === true`, and exit\
+      \ `1` on orphan `--session`, unknown/rejected harness, or conflicting flags;\n\
+      \         3. `getAllPidKeys()` unioning `BASE_PID_KEYS` with registered plugin\
+      \ `pidKeys`, `1500ms` per-plugin deadline on `detectExplicitCaller` (failing\
+      \ caller binding on timeout or thrown `CitoError` rather than falling through\
+      \ to implicit PID binding), `INVALID_INPUT: Conflicting caller metadata` when\
+      \ `> 1` plugin claims or `1` claim combines with explicit PID, and bottom-up\
+      \ parent-PID walk (`depth = 0..5`) binding to the closest ancestor socket;\n\
+      \         4. Independent `1500ms` per-plugin timeout in `discoverAllAvailableSessions`\
+      \ (retaining up to 8 candidates per harness ordered `pi` -> `codex` -> `claude`\
+      \ -> custom alphabetically with no global cross-harness cap) and single-stdio-channel\
+      \ guard in `startOptionalStdioChannel`.\n    3. **100% Data-Driven macOS UI\
+      \ (`src/ui/index.ts`, `src/macos/cito-ui.swift`, `bin/cito-ui-darwin-arm64`),\
+      \ Version `0.12.0` & §6.2 Test Migrations (`tests/**`)**:\n       - Update `src/ui/index.ts`\
+      \ to emit `harnesses?: UiHarnessMetadata[]` on `state` frames, write `${stateDir}/bin/harnesses.json`\
+      \ during `ensureUiCompiled(stateDir, source?)`, expand and validate `jump_url`\
+      \ / `jump_label` via `expandJumpUrl(template, { session_id, cwd })` (blocking\
+      \ `javascript:`, `file:`, `data:`, `http:`, `https:` schemes and omitting jump\
+      \ when required `{cwd}` is absent), and cache `harnesses` in `UiBridge.snapshot`.\n\
+      \       - Refactor `src/macos/cito-ui.swift` so all harness visuals (display\
+      \ name, SF Symbol, tint color, tier, sort order, group count noun `\"open\"\
+      ` / `\"recent\"` / `\"available\"`, `\"<displayName> (Experimental)\"` tooltip,\
+      \ jump URL/label fallback, and `DirectoryPanel` facet bar pills with horizontal\
+      \ `NSScrollView` overflow when width > `544pt`) are 100% data-driven from `Frame.harnesses`\
+      \ and startup `${executableDir}/harnesses.json`, with zero hardcoded `\"pi\"\
+      `, `\"codex\"`, or `\"claude\"` strings in `src/` or `src/macos/cito-ui.swift`\
+      \ while preserving exact built-in geometry (`dir_harness:pi` width `42` at `x:\
+      \ 256`, `dir_harness:codex` width `58` at `x: 302`, `dir_harness:claude` width\
+      \ `62` at `x: 364`).\n       - Rebuild and ad-hoc sign `bin/cito-ui-darwin-arm64`\
+      \ via `npm run compile`, bump `CITO_VERSION` in `src/shared/index.ts` and `\"\
+      version\"` in `package.json` / `package-lock.json` to `\"0.12.0\"`, complete\
+      \ all `docs/DESIGN.md` §6.2 test migrations (`tests/auth-callout/cli.test.ts`,\
+      \ `tests/adapters/pi-host.test.ts`, `tests/mcp/support.ts`, `tests/shared/shared.test.ts`,\
+      \ `tests/adapters/*.test.ts`, `tests/ui/lifecycle.test.ts`), and run `[REQUIRES_SKILL:\
+      \ code-hygiene]` self-audit.\n- **Boundary:** Owner `senior-engineer` (or `node-typescript-engineer`);\
+      \ modifies `/Users/tefx/Projects/cito` (`package.json`, `package-lock.json`,\
+      \ `tsconfig.json`, `README.md`, `bin/**`, `src/**`, `plugins/**`, `tests/**`).\
+      \ Must enforce zero hardcoded `\"pi\"`, `\"codex\"`, or `\"claude\"` strings\
+      \ in `src/` and `src/macos/cito-ui.swift`, zero non-Node built-in imports in\
+      \ `plugins/pi/cito-bridge.ts`, zero Chinese characters in `src/`, `plugins/`,\
+      \ `docs/`, `README.md`, `AGENTS.md`, `deploy/`, and zero company/environment-specific\
+      \ names (`rda`, `casdoor`, `rcatwin`, `keppel`, `mingchen`). Must not mutate\
+      \ external repositories (`/Users/tefx/dotfiles`, `tela`) or live user `~/.cito`\
+      \ / `~/.codex` / `~/.claude` state.\n- **Admit:** Completed Phase `v15`, `docs/DESIGN.md`\
+      \ (V16 §§1–6), `docs/ROADMAP.md` (Stage 0), `AGENTS.md`, and `README.md`. Verified\
+      \ by `npm run typecheck && npm run compile && npm test` exiting `0` and `[REQUIRES_SKILL:\
+      \ code-hygiene]` check. Consumed by `v16.gate`.\n- **Recovery:** Fix any failing\
+      \ typecheck, loader resolution, Swift compilation, Mach-O signature, or unit/E2E\
+      \ test in place within the isolated worktree and clean up any temporary test\
+      \ directories, sockets, HTTP servers, or child processes.\n"
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - tsconfig.json
+    - bin/loader.js
+    - bin/cito-claude-hook
+    - src/shared/config.ts
+    - src/shared/index.ts
+    - src/adapters/types.ts
+    - src/adapters/index.ts
+    - src/mcp/cli.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    agent: senior-engineer
+  - id: v16.gate
+    name: 'V16 Stage 0 (v0.12.0) acceptance, harness-agnostic core & UI audit, external
+      plugin verification, and code-hygiene gate [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Independent terminal Phase `v16` (Stage 0 `v0.12.0`) acceptance decision (`PASS`\
+      \ or `FAIL`) with `[REQUIRES_SKILL: code-hygiene]`, running `npm run typecheck\
+      \ && npm run compile && npm test`, verifying zero hardcoded harness branches\
+      \ or `\"pi\"` / `\"codex\"` / `\"claude\"` strings in `src/` and `src/macos/cito-ui.swift`,\
+      \ verifying both dist-less source and compiled `dist/` execution for built-in\
+      \ (`plugins/{pi,codex,claude}/`) and external (`${stateDir}/plugins/<id>/` importing\
+      \ `@tefx/cito/plugin-sdk`) plugins, verifying data-driven `cito-ui.swift` and\
+      \ rebuilt `bin/cito-ui-darwin-arm64`, and verifying `CITO_VERSION === \"0.12.0\"\
+      `.\n- **Boundary:** Owner `verifier` (mapped to `gate-reviewer` / `pathway-auditor`\
+      \ + `structural-auditor` + `integration-verifier` in the Larva roster, routing\
+      \ any admitted repair batch to `senior-engineer` before Delta re-verification);\
+      \ gate step itself is read-only (`repo_change_policy: no_repo_change`) and does\
+      \ not mutate repository files, Plan state, or external host directories.\n-\
+      \ **Admit:**\n  - Included phase and terminal outcomes: Phase `v16` (`v16.impl`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `npm run typecheck && npm run compile\
+      \ && npm test` passes 100% with zero skipped or failing tests and clean working\
+      \ tree (`git status --short`).\n    2. Harness-agnostic Core & UI verification\
+      \ (`docs/DESIGN.md` §§1.2, 2.1, 4.2–4.4):\n       - Zero hardcoded `\"pi\"`,\
+      \ `\"codex\"`, or `\"claude\"` branches, config fields, CLI flag names, or visual\
+      \ lookup tables in `src/shared/`, `src/adapters/`, `src/mcp/`, `src/ui/`, or\
+      \ `src/macos/cito-ui.swift`.\n       - Built-in plugins exist under `plugins/{pi,codex,claude}/`\
+      \ with valid `plugin.json` manifests; `plugins/pi/cito-bridge.ts` contains only\
+      \ `node:*` built-in imports.\n       - External user plugins under `${stateDir}/plugins/<id>/`\
+      \ importing `@tefx/cito/plugin-sdk` load and execute in both dist-less source\
+      \ mode and compiled `dist/` mode, and all 4 conflict-resolution/timeout invariants\
+      \ (`RESERVED_CLI_FLAGS`, `--harness <id> [--session <sid>]`, `getAllPidKeys()`,\
+      \ `1500ms` discovery/detection deadlines, `rejectedPluginIds`) are verified\
+      \ by behavioral tests.\n       - `bin/cito-ui-darwin-arm64` is rebuilt and ad-hoc\
+      \ signed from data-driven `src/macos/cito-ui.swift`, and `ensureUiCompiled`\
+      \ writes `${stateDir}/bin/harnesses.json`.\n    3. Version & hygiene verification\
+      \ (`docs/DESIGN.md` §§1.2, 5.2, 5.3, 6.2):\n       - `CITO_VERSION` in `src/shared/index.ts`\
+      \ and `\"version\"` in `package.json` / `package-lock.json` equal `\"0.12.0\"\
+      `.\n       - Zero Chinese characters (`[\\p{Script=Han}]`) in `src/`, `plugins/`,\
+      \ `docs/`, `README.md`, `AGENTS.md`, and `deploy/`.\n       - Zero case-insensitive\
+      \ matches for `rda|casdoor|rcatwin|keppel|mingchen` in `src/`, `plugins/`, `docs/`\
+      \ (excluding policy rule line in `docs/DESIGN.md`), `README.md`, `AGENTS.md`,\
+      \ `deploy/`, and `tests/`.\n       - `[REQUIRES_SKILL: code-hygiene]` audit\
+      \ passes with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n- **Recovery:**\
+      \ If any check fails or any actionable finding is admitted, record concrete\
+      \ file/line counterexamples and route one cohesive writable repair to `senior-engineer`\
+      \ before re-running this gate in Delta mode.\n"
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - package.json
+    - tsconfig.json
+    - bin/loader.js
+    - src/shared/config.ts
+    - src/shared/index.ts
+    - src/adapters/index.ts
+    - src/mcp/cli.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    depends_on:
+    - v16.impl
+    agent: verifier
