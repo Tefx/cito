@@ -6043,7 +6043,7 @@ phases:
     name: 'V20 Stage 4 (v0.16.0) acceptance, AppIcon.icns & Cito.app bundle, calm
       4-section homepage restraint, /cito/ subpath HTTP serving & code-hygiene gate
       [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
       \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
       \ Independent terminal Phase `v20` (Stage 4 `v0.16.0`) acceptance decision (`PASS`\
@@ -6117,3 +6117,5 @@ phases:
     depends_on:
     - v20.impl
     agent: verifier
+    claimed_by: verifier
+    claimed_at: '2026-11-07T21:13:12.884663Z'
