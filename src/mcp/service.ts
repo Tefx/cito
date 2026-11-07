@@ -141,7 +141,7 @@ export class HubDirectoryIndex {
       const sampleMonoMs = performance.now();
       const info = await broker.jsm.streams.info("KV_cito_listeners");
       if (!info.ts || !Number.isFinite(Date.parse(info.ts))) {
-        throw new Error("NATS >= 2.10 with broker StreamInfo.ts is required");
+        throw new Error("Hub broker StreamInfo.ts is required");
       }
       const brokerTs = info.ts;
       const targetSeq = info.state.last_seq;
@@ -368,13 +368,13 @@ export class HubSlot {
       catch (cause) {
         if (this.login && /authorization|authentication/i.test(String(cause))) {
           token = await this.login.recover(token?.token_sha256 ?? null, interactive, signal);
-          try { nc = await connect(); } catch (cause) { throw new CitoError("UNAUTHORIZED", "NATS rejected refreshed OIDC token", { cause }); }
+          try { nc = await connect(); } catch (cause) { throw new CitoError("UNAUTHORIZED", "Hub rejected refreshed OIDC token", { cause }); }
         } else if (this.config.authMode === "token" && /authorization|authentication/i.test(String(cause))) {
           throw new CitoError("UNAUTHORIZED", "Hub rejected bearer token", { cause });
         } else if (cause instanceof CitoError) {
           throw cause;
         } else {
-          throw new CitoError("NATS_UNAVAILABLE", "Cannot connect to NATS", { cause });
+          throw new CitoError("NATS_UNAVAILABLE", "Cannot connect to Hub", { cause });
         }
       }
       try {
@@ -387,7 +387,7 @@ export class HubSlot {
         this.track(this.monitor(this.broker, token?.token_sha256));
         await this.restore(this.broker);
         return this.broker;
-      } catch (cause) { await nc.close(); throw new CitoError("NATS_UNAVAILABLE", "NATS topology unavailable", { cause }); }
+      } catch (cause) { await nc.close(); throw new CitoError("NATS_UNAVAILABLE", "Hub topology unavailable", { cause }); }
     })().catch(error => {
       this.error = this.manuallyDisconnected || this.closing ? null : String(error);
       this.status = this.manuallyDisconnected || this.closing ? "disconnected" : error instanceof CitoError && ["UNAUTHORIZED", "OIDC_LOGIN_TIMEOUT"].includes(error.code) ? "auth_required" : "disconnected";
@@ -424,7 +424,7 @@ export class HubSlot {
   }
   private async monitor(broker: Broker, tokenHash?: string): Promise<void> {
     const statuses = broker.nc.status();
-    if (!("stop" in statuses) || typeof statuses.stop !== "function") throw new Error("Unsupported NATS status iterator");
+    if (!("stop" in statuses) || typeof statuses.stop !== "function") throw new Error("Unsupported Hub status iterator");
     const stop = statuses.stop.bind(statuses);
     const current = () => !this.closing && !this.manuallyDisconnected && this.broker === broker;
     const authError = (code: unknown) => [NatsErrorCode.AuthorizationViolation, NatsErrorCode.AuthenticationExpired, NatsErrorCode.PermissionsViolation].includes(code as NatsErrorCode);
@@ -435,7 +435,7 @@ export class HubSlot {
         if (auth && tokenHash) this.rejectedHash = tokenHash;
         this.restoreRetry?.abort(); this.cancel();
         this.status = auth ? "auth_required" : "disconnected";
-        this.error = String(terminalAuth ?? error ?? "NATS connection closed unexpectedly");
+        this.error = String(terminalAuth ?? error ?? "Hub connection closed unexpectedly");
         this.changed();
       }
       stop();
@@ -1541,7 +1541,7 @@ export class CitoService {
     const timer = setTimeout(() => accept(null), 2000), operation = AbortSignal.any([this.shuttingDown.signal, AbortSignal.timeout(10_000)]);
     let interrupt!: () => void;
     const interrupted = new Promise<never>((_, reject) => {
-      interrupt = () => reject(new CitoError("NATS_UNAVAILABLE", "Send interrupted or NATS operation deadline exceeded"));
+      interrupt = () => reject(new CitoError("NATS_UNAVAILABLE", "Send interrupted or Hub operation deadline exceeded"));
       operation.addEventListener("abort", interrupt, { once: true }); if (operation.aborted) interrupt();
     });
     try {

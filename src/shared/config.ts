@@ -68,11 +68,11 @@ export function validateNatsUrl(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed === "local" || trimmed === "local://") return "local://";
   let url: URL;
-  try { url = new URL(raw); } catch { throw new Error("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL"); }
+  try { url = new URL(raw); } catch { throw new Error("Hub URL must be a valid local://, http://, https://, ws://, or wss:// URL"); }
   if (!["http:", "https:", "nats:", "ws:", "wss:"].includes(url.protocol) || !url.hostname
     || url.username || url.password || url.hash || url.search
     || (url.protocol === "nats:" && url.pathname && url.pathname !== "/")) {
-    throw new Error("CITO_NATS_URL must use local://, http://, https://, nats://, ws:// or wss:// without credentials");
+    throw new Error("Hub URL must use local://, http://, https://, ws:// or wss:// without credentials");
   }
   return raw;
 }
