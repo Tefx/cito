@@ -4620,7 +4620,7 @@ phases:
     name: 'Implement Stage 0 (v0.12.0) Unified Plugin Architecture, Built-in Plugin
       Extraction (plugins/{pi,codex,claude}), Out-of-Tree ~/.cito/plugins/<id>/ &
       Data-Driven macOS UI [REQUIRES_SKILL: code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ tsconfig.json\n    - README.md\n    - bin/**\n    - src/**\n    - plugins/**\n\
@@ -4755,6 +4755,24 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T10:21:33.799467Z'
+    done_at: '2026-11-07T11:14:35.925929+00:00'
+    evidence: "Artifact:\n- Commit: f19b7bfe0cd8f6bf1906e1b35918546f7efc585e (on top\
+      \ of 7d5ef0e747eec2e6c82039ffbbd3181679d8089f; implemented by uiux-designer\
+      \ on openrouter/google/gemini-4-argon while openai OAuth is unavailable, and\
+      \ fast-forwarded onto main)\n\nVerification:\n- Run: npm run typecheck && npm\
+      \ run compile && npm test -> exit 0 (30 test files, 246 tests passed, 0 failed,\
+      \ 0 skipped)\n- Mechanical checks:\n  - Zero hardcoded 'pi', 'codex', or 'claude'\
+      \ branches/strings in src/ and src/macos/cito-ui.swift\n  - Zero non-Node built-in\
+      \ imports in plugins/pi/cito-bridge.ts\n  - [\\p{Script=Han}] in src/, plugins/,\
+      \ docs/, README.md, AGENTS.md, deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b in src/, plugins/, docs/ (excluding policy rule line in docs/DESIGN.md), README.md,\
+      \ deploy/, tests/: 0 matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n\
+      \  - Round 1 fresh-context structural-auditor (01a1b5ab-ad87-71b3-9530-e3711d528ce4)\
+      \ and uiux-auditor (01a1b5ab-ade4-7717-8d83-a227d13c2e08) audited 7d5ef0e; S1\
+      \ & S2 were resolved in f19b7bfe0cd8f6bf1906e1b35918546f7efc585e and verified\
+      \ CLOSED in Round 2 with Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md (V16 §§1–6), docs/ROADMAP.md (Stage 0 v0.12.0),\
+      \ and AGENTS.md"
   - id: v16.gate
     name: 'V16 Stage 0 (v0.12.0) acceptance, harness-agnostic core & UI audit, external
       plugin verification, and code-hygiene gate [REQUIRES_SKILL: code-hygiene]'
