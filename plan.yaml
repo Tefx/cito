@@ -10,45 +10,35 @@ version: 1
 project: cito
 strategy_ref: docs/DESIGN.md
 context: 'Deliver and verify Cito inside /Users/tefx/Projects/cito per docs/DESIGN.md
-  (V16), docs/ROADMAP.md, AGENTS.md, and README.md across V1–V15 (NATS JetStream relay,
-  OIDC Auth Callout, 3-table SQLite schema at PRAGMA user_version = 4, singleton macOS
-  menu bar daemon + Streamable HTTP MCP at http://127.0.0.1:4290/mcp + GET /health
-  version handshake + automatic stale-daemon handover, scalable NATS KV HubDirectoryIndex,
-  Two-Surface macOS UI Architecture with Surface 1 380pt Ego-Centric cardMenu and
-  Surface 2 560x440pt Spotlight-style DirectoryPanel, prebuilt Apple Silicon bin/cito-ui-darwin-arm64
-  with quarantine-free installation and automatic swiftc fallback, and zero-script
-  Git/global npm packaging) and V16 / Stage 0 (v0.12.0 Unified Plugin Architecture,
-  Plugin Host SDK @tefx/cito/plugin-sdk in src/adapters/, Built-in Plugin Extraction
-  into plugins/{pi,codex,claude}/, Out-of-Tree ${CITO_STATE_DIR}/plugins/<id>/ loader
-  with 4 conflict-resolution/fault-isolation invariants, universal --harness <id>
-  [--session <sid>] CLI flags, and 100% Data-Driven macOS UI via UiHarnessMetadata[]
-  and ${stateDir}/bin/harnesses.json with zero hardcoded harness identifiers in src/
-  or src/macos/cito-ui.swift). Forbid mutations to external dotfiles or tela repositories.
+  (V19 — Stage 3 v0.15.0), docs/ROADMAP.md, AGENTS.md, and README.md across V1–V18
+  and V19 / Stage 3 (v0.15.0: Symmetric Node (Human | Agent) <-> Hub <-> Channels
+  (1..K), HumanChannelPlugin architecture with built-in plugins/human and plugins/telegram,
+  Directory | Activity mode switcher + inline Hub ComposerBar, 3-tab SettingsPanel,
+  complete removal of jump_url window bypass, and full repository documentation sweep).
+  Forbid mutations to external dotfiles or tela repositories.
 
   '
-project_guidance: '1. Authoritative specification: docs/DESIGN.md (V16 — Harness-Agnostic
-  Core, Plugin Host SDK, Bundled & Out-of-Tree Plugins, Data-Driven macOS UI & Scalable
-  NATS KV Discovery, §§1–6), docs/ROADMAP.md (Stage 0 v0.12.0), AGENTS.md, and README.md.
+project_guidance: '1. Authoritative specification: docs/DESIGN.md (V19 — Stage 3 v0.15.0:
+  Symmetric Node (Human | Agent) <-> Hub <-> Channels (1..K), HumanChannelPlugin Architecture,
+  Directory | Activity + Inline Hub Composer & Complete Removal of jump_url Window
+  Bypass, §§1–6), docs/ROADMAP.md (Stage 3 v0.15.0), AGENTS.md, and README.md.
 
   2. Hard boundaries: Enforce English-only UI/UX, code, and documentation (zero Chinese
-  characters in src/, plugins/, docs/, README.md, AGENTS.md, deploy/) and zero company/environment-specific
-  names (rda, casdoor, rcatwin, keppel, mingchen) across src/, plugins/, docs/, README.md,
-  AGENTS.md, deploy/, and tests/. Keep core modules (src/shared/, src/mcp/, src/ui/,
-  src/macos/cito-ui.swift, and the Plugin Host SDK in src/adapters/) 100% harness-agnostic
-  with zero hardcoded branches, config fields, CLI flag names, or visual tables for
-  "pi", "codex", or "claude"; all built-in harness implementations live in plugins/{pi,codex,claude}/
-  and external user plugins load from ${CITO_STATE_DIR}/plugins/<id>/. Keep plugins/pi/cito-bridge.ts
-  100% standalone with zero external or relative imports (only node:* built-in imports).
-  Do NOT mutate external repositories (/Users/tefx/dotfiles, tela) or live user ~/.cito
-  / ~/.codex / ~/.claude state during tests; always isolate test state in temporary
-  directories and ephemeral test nats-server / HTTP instances.
+  characters in src/, plugins/, crates/, docs/, README.md, AGENTS.md, deploy/) and
+  zero company/environment-specific names (rda, casdoor, rcatwin, keppel, mingchen)
+  across src/, plugins/, crates/, docs/, README.md, AGENTS.md, deploy/, and tests/.
+  Keep core modules (src/shared/, src/hub/, src/mcp/, src/setup/, src/ui/, src/adapters/,
+  and src/macos/cito-ui.swift) 100% agent- and channel-agnostic: grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+  src/ MUST return 0 matches, and grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl''
+  src/ plugins/ MUST return 0 matches. Keep plugins/pi/cito-bridge.ts 100% standalone
+  with only node:* built-in imports. Do NOT mutate external repositories (/Users/tefx/dotfiles,
+  tela) or live user ~/.cito / ~/Library/LaunchAgents state during tests.
 
-  3. Preserve acyclic module boundaries (src/shared/ -> src/adapters/ (@tefx/cito/plugin-sdk)
-  & src/ui/ -> src/mcp/, with plugins/* importing only src/shared/ and src/adapters/),
-  unprefixed NATS wire/SQLite IDs with symmetric public <hub>:<id> addressing (formatScopedId
-  / parseScopedId), 3-table SQLite schema (PRAGMA user_version = 4), in-memory KeyedMutex
-  serialization (zero cross-process flock lockfiles), and zero-SQLite3 cito-ui.swift
-  invariants.
+  3. Preserve unified NATS-free HubEngine (local:// in-process & cito hub HTTP/SSE
+  + SQLite WAL), symmetric Node (Human | Agent Session) <-> Hub <-> Channels (1..K)
+  identity without host_id, separation of stream cursor consumer_ack from business
+  read signal_ack, and < 5 MB Cito.app / stripped bin/cito-{ui,native}-darwin-arm64
+  packaging invariants (cleaning crates/cito-native/target after compilation).
 
   '
 phases:
@@ -5530,3 +5520,284 @@ phases:
       CITO_VERSION = ''0.14.0''; fresh-context structural-auditor 01a1b68d-5e87-7555-8f18-f6116e608b9e
       and uiux-auditor 01a1b68d-5e31-77b6-961b-a79fd14cc4e1 certified Completeness:
       CLEAN | Simplicity: ZERO_NEW_ISSUES).'
+- id: v19
+  name: 'V19 Stage 3 (`v0.15.0`): Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels
+    (1..K)`, `HumanChannelPlugin` (`cito-ui` + `plugins/telegram`), `Directory | Activity`
+    + Inline Hub Composer, Removal of `jump_url` & Full Documentation Sweep'
+  status: pending
+  gate: 'npm run typecheck && npm run compile && npm test pass 100% across all unit
+    and E2E suites, grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+    src/ returns 0 matches, grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl''
+    src/ plugins/ returns 0 matches, all repository documentation (README.md, docs/DESIGN.md,
+    docs/ROADMAP.md, AGENTS.md, deploy/hub/README.md) is updated and accurate for
+    v0.15.0, CITO_VERSION, package.json, and crates/cito-native/Cargo.toml equal "0.15.0",
+    crates/cito-native/target is removed after compilation, and [REQUIRES_SKILL: code-hygiene]
+    verification passes with zero open issues.'
+  context: 'Implement and verify Stage 3 (v0.15.0) per docs/DESIGN.md (V19 §§1–6)
+    and docs/ROADMAP.md (Stage 3): (1) refactor listenerId in src/shared/identity.ts
+    to NodeKey = (principal_id, harness, session_id) without host_id (isHumanNode
+    = harness === ''human''), add @self (O(1)) and @<username> (directoryIndex.read
+    with ambiguity check) resolution in cito_send, and update SELF_SEND_FORBIDDEN
+    to compare from.nodeId !== null && from.nodeId === canonicalTo; (2) upgrade Registration
+    and HubEngine (src/hub/engine.ts) with channels: Record<string, ChannelAttachment>,
+    multi-channel lease evaluation (evaluateNodeLease), separation of stream cursor
+    consumer_ack from business read signal_ack (acked_at_ms + cito.ack.<node_id> broadcast),
+    atomic signal_claim_dispatch for wake_exclusive channels, and persistent hub_human_channels,
+    hub_channel_deliveries (last_delivered_seq + external_msg_id mapping), hub_plugin_services
+    (service_state_json), and hub_pairing_codes (48-bit Base32, 5-min TTL, rate-limited);
+    (3) remove jumpUrlTemplate, jump_url, can_jump, expandJumpUrl, and openJumpUrl
+    across src/, plugins/, and src/macos/cito-ui.swift so all interaction flows strictly
+    through the Hub; (4) implement plugins/human/ (exposing the user''s Human Node
+    in Zone 1 / Zone 3 with per-Hub Listen / Unlisten and Self / Team scope control)
+    and plugins/telegram/ (kind: ''human'', two-scope fields [botToken scope: ''hub'',
+    chatId scope: ''user''], pairing.supported: true, zero-dependency fetch sendMessage
+    + getUpdates /start <code> pairing, swipe-to-reply, and implicit recent-sender
+    reply), enforcing 0 hardcoded agent or channel names in src/ and src/macos/cito-ui.swift;
+    (5) upgrade src/macos/cito-ui.swift and src/ui/index.ts with Zone 1 top Human
+    Node card (and Zone 2 filter excluding harness == ''human''), Zone 4 unread/online
+    smart launcher, DirectoryPanel [ Directory | Activity ] mode switcher (For Me,
+    All Activity, Unread, Read All) + [ Message ] / [ Reply ] + bottom 1-line ComposerBar
+    (send_signal, ack_signals), WakeBanner click opening DirectoryPanel in Activity
+    mode focused on ComposerBar, and 3-tab SettingsPanel (Agent Apps, Human Channels
+    dynamic schema-driven cards + pairing flow, Hubs & Network with optional custom
+    Username / Handle); and (6) complete a full audit and update of all repository
+    documentation (README.md, docs/DESIGN.md, docs/ROADMAP.md, AGENTS.md, deploy/hub/README.md),
+    bump CITO_VERSION, package.json, and crates/cito-native/Cargo.toml to ''0.15.0'',
+    compile bin/cito-ui-darwin-arm64 and bin/cito-native-darwin-arm64, and complete
+    all §6 test updates and new Stage 3 tests.'
+  depends_on:
+  - v18
+  steps:
+  - id: v19.impl
+    name: 'Implement Stage 3 (v0.15.0) Symmetric Node <-> Hub <-> Channels (1..K),
+      HumanChannelPlugin (cito-ui + plugins/telegram), Directory | Activity + Inline
+      Hub Composer, Removal of jump_url & Full Documentation Sweep [REQUIRES_SKILL:
+      code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
+      \ README.md\n    - AGENTS.md\n    - docs/DESIGN.md\n    - docs/ROADMAP.md\n\
+      \    - deploy/hub/README.md\n    - crates/cito-native/**\n    - bin/**\n   \
+      \ - plugins/**\n    - src/shared/**\n    - src/hub/**\n    - src/adapters/**\n\
+      \    - src/mcp/**\n    - src/setup/**\n    - src/ui/**\n    - src/macos/cito-ui.swift\n\
+      \    - tests/**\n  blocked_paths:\n    - plan.yaml\n```\n\n- **Deliver:**\n\
+      \  - Implement Stage 3 (`v0.15.0`) across `src/shared/`, `src/hub/`, `src/adapters/`,\
+      \ `src/mcp/`, `src/setup/`, `src/ui/`, `src/macos/cito-ui.swift`, `plugins/{human,telegram,codex,pi,claude}/`,\
+      \ `crates/cito-native/Cargo.toml`, `package.json`, `README.md`, `docs/DESIGN.md`,\
+      \ `docs/ROADMAP.md`, `AGENTS.md`, `deploy/hub/README.md`, and `tests/**` per\
+      \ `docs/DESIGN.md` (V19 §§1–6) and `docs/ROADMAP.md` (Stage 3), including:\n\
+      \    1. **Symmetric `Node` Identity & `@self` / `@<username>` Shorthand (`src/shared/identity.ts`,\
+      \ `src/mcp/service.ts`)**:\n       - Refactor `listenerId` in `src/shared/identity.ts`\
+      \ to `NodeKey = { principal_id: string; harness: string; session_id: string\
+      \ }` without `host_id` (`isHumanNode(x) = x.harness === \"human\"`, with `harness\
+      \ = \"human\", session_id = \"default\"` for Human Nodes and `\"cito-v2|\" +\
+      \ [principal_id, harness, session_id].join(\"|\")` hashing while preserving\
+      \ `\"cito-v1|...\"` compatibility in regex validators).\n       - Add `[<hub>:]@self`\
+      \ ($O(1)$ resolution to `listenerId({ principal_id: identity.principal_id, harness:\
+      \ \"human\", session_id: \"default\" })`) and `[<hub>:]@<username>` (`slot.directoryIndex.read(broker,\
+      \ identity)` case-insensitive `owner_user` match with `0` -> `LISTENER_NOT_FOUND`\
+      \ and `> 1` distinct `principal_id`s -> `INVALID_INPUT` ambiguity check) in\
+      \ `cito_send`.\n       - Update `SELF_SEND_FORBIDDEN` to compare logical Node\
+      \ IDs (`from.nodeId !== null && from.nodeId === canonicalTo`) so `Human Node\
+      \ (@alice)` <-> `Agent Node` and unbound CLI `cito send --to @self` succeed\
+      \ while genuine self-loops are rejected.\n    2. **Multi-Channel Registration,\
+      \ Stream vs. Business Ack Separation, Atomic `signal_claim_dispatch` & Hub Persistence\
+      \ (`src/mcp/state.ts`, `src/shared/lease.ts`, `src/hub/engine.ts`, `src/mcp/receiver.ts`)**:\n\
+      \       - Upgrade `Registration` and `HubEngine` (`src/hub/engine.ts`) with\
+      \ `channels?: Record<string, ChannelAttachment>` and multi-channel lease evaluation\
+      \ (`evaluateNodeLease`: a Node remains `ACTIVE` whenever at least 1 attached\
+      \ channel has an active lease within the 60s TTL; `channel_detach` only marks\
+      \ that channel `\"UNLISTENED\"` without fencing sibling channels).\n       -\
+      \ Separate stream cursor `consumer_ack` (advancing only `consumer.ackedSeqs`)\
+      \ from business read `signal_ack` (`acked_at_ms` on `hub_signals` + `cito.ack.<node_id>`\
+      \ broadcast + `HumanChannelPlugin.onAcked`), and admit already-acked signals\
+      \ on reconnecting hosts with `acknowledged_at_ms = acked_at_ms, state = 'STORED_PASSIVE'`\
+      \ without re-firing banners or unread counts.\n       - Add atomic `signal_claim_dispatch({\
+      \ node_id, signal_ids, channel_id, lease_ms: 30_000 })` for `wake_exclusive`\
+      \ channels so at most 1 channel injects a wake prompt when multiple paths attach\
+      \ to the same Agent session.\n       - Persist `hub_human_channels`, `hub_channel_deliveries`\
+      \ (`last_delivered_seq` initialized to `MAX(seq)` on first bind + `external_msg_id\
+      \ -> (signal_id, from_listener_id)` mapping), `hub_plugin_services` (`service_state_json`),\
+      \ and `hub_pairing_codes` (48-bit Base32 `cito-xxxxxx`, 5-min TTL, rate-limited).\n\
+      \    3. **Complete Removal of `jump_url` Window Bypass (`src/`, `plugins/`,\
+      \ `src/macos/cito-ui.swift`)**:\n       - Remove `jumpUrlTemplate`, `jump_url`,\
+      \ `can_jump`, `expandJumpUrl`, `openJumpUrl`, and the Surface 1 `open:<scoped_id>`\
+      \ (`[ ↗ ]`) button across `src/`, `plugins/`, and `src/macos/cito-ui.swift`\
+      \ so all interaction flows strictly through the Hub.\n    4. **Built-in `plugins/human/`\
+      \ and `plugins/telegram/` with Zero Hardcoding in Core (`src/adapters/types.ts`,\
+      \ `plugins/human/`, `plugins/telegram/`)**:\n       - Implement `plugins/human/`\
+      \ exposing the user's `Human Node` (`@<user> (Me)`) in Zone 1 / Zone 3 with\
+      \ per-Hub `Listen / Unlisten` and `\U0001F512 Self / \U0001F465 Team` scope\
+      \ control (auto-enrolled on `local://` with `scope: \"workspace\"` unless unlistened;\
+      \ defaulting to `scope: \"self\"` when enrolled on remote OIDC/token Hubs).\n\
+      \       - Extend `PluginManifest` (`src/adapters/types.ts`) with `kind?: \"\
+      agent\" | \"human\"`, two-scope `fields?: readonly PluginFieldDescriptor[]`\
+      \ (`scope: \"hub\" | \"user\"`), and `pairing?: { supported: boolean; actionLabel?:\
+      \ string }`, plus Hub RPCs (`human_channels_list`, `human_channels_configure`,\
+      \ `human_channels_test`, `human_channel_pair_start`).\n       - Implement `plugins/telegram/`\
+      \ (`kind: \"human\"`, two-scope `fields` [`botToken` `scope: \"hub\"`, `chatId`\
+      \ `scope: \"user\"`], `pairing.supported: true`, zero-dependency Node `fetch`\
+      \ Bot API `getMe` / `sendMessage` / `getUpdates` / `editMessageText`, persistent\
+      \ `update_offset` via `ctx.getServiceState()` / `ctx.setServiceState()`, `/start\
+      \ <code>` pairing, swipe-to-reply, and implicit recent-sender reply within 10\
+      \ minutes), enforcing 0 hardcoded agent or channel names in `src/` and `src/macos/cito-ui.swift`.\n\
+      \    5. **Four-Surface macOS UI Upgrades (`src/macos/cito-ui.swift`, `src/ui/index.ts`)**:\n\
+      \       - Surface 1 (`cardMenu`): render active `Human Node` card at index `0`\
+      \ of Zone 1 (or in Zone 3 when unlistened), filter `harness == \"human\"` out\
+      \ of Zone 2, remove `open:<scoped_id>` (`baseActionWidth = showScopeToggle ?\
+      \ 88 : 22`), and update Zone 4 to `\"\U0001F514 N unread · M online\"` (opening\
+      \ `DirectoryPanel` in `\"activity\"` mode when `unread > 0` and `\"directory\"\
+      ` mode when `unread == 0`).\n       - Surface 2 (`DirectoryPanel`): add `dir_mode:directory`\
+      \ and `dir_mode:activity` mode switcher pills in `directory_search_bar`, preserve\
+      \ `directory_facet_bar` (`y: 362`) coordinates in `Directory` mode, add `msg_dir:<scoped_id>`\
+      \ (`[ \U0001F4AC Message ]`) on directory rows, implement `Activity` mode (`act_filter:me`,\
+      \ `act_filter:all`, `act_filter:unread`, `activity_mark_all_read`, `activity_row:<signal_id>`,\
+      \ `reply_activity:<signal_id>`), and add bottom 1-line `ComposerBar` (`id: \"\
+      directory_composer\"`, `y: 28`, `composer_target`, `composer_input`, `composer_send`,\
+      \ `composer_cancel` emitting `send_signal` and `ack_signals`).\n       - Surface\
+      \ 3 (`SettingsPanel`): upgrade header to 3 tabs (`settings_tab:apps`, `settings_tab:channels`,\
+      \ `settings_tab:hubs`), implement Tab 2 `settings_channels_tab` (`toggle_desktop_banner`\
+      \ + dynamic schema-driven `settings_channel:<id>` cards with `channel_field:<id>:<key>`,\
+      \ `pair_channel:<id>`, `test_channel:<id>`, `save_channel:<id>`), and add optional\
+      \ `settings_hub_user` (`Username / Handle`) in Tab 3 `add_hub_form`.\n     \
+      \  - Surface 4 (`WakeBanner`): clicking `WakeBanner` invokes `openDirectoryForReply(payload)`\
+      \ to open `DirectoryPanel` in `\"activity\"` mode focused on `composer_input`\
+      \ targeting `payload.from_scoped_id` (`in_reply_to: payload.signal_id`).\n \
+      \   6. **Full Repository Documentation Sweep, Version `0.15.0` Bump, Binary\
+      \ Compilation & §6 Tests**:\n       - Audit and update all repository documentation\
+      \ (`README.md`, `docs/DESIGN.md`, `docs/ROADMAP.md`, `AGENTS.md`, `deploy/hub/README.md`)\
+      \ for `v0.15.0`.\n       - Bump `CITO_VERSION` (`src/shared/index.ts`), `package.json`\
+      \ / `package-lock.json`, and `crates/cito-native/Cargo.toml` to `\"0.15.0\"\
+      `, compile `bin/cito-ui-darwin-arm64` and `bin/cito-native-darwin-arm64` (removing\
+      \ `crates/cito-native/target`), complete all `docs/DESIGN.md` §6 test updates\
+      \ and new Stage 3 tests (`npm run typecheck && npm run compile && npm test`),\
+      \ and run `[REQUIRES_SKILL: code-hygiene]` self-audit.\n- **Boundary:** Owner\
+      \ `senior-engineer`; modifies `/Users/tefx/Projects/cito`. Must enforce `grep\
+      \ -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' src/` returning `0` matches, `grep -rn 'jumpUrlTemplate\\|expandJumpUrl\\\
+      |openJumpUrl' src/ plugins/` returning `0` matches, zero leftover `crates/cito-native/target`\
+      \ after `npm run compile`, zero NATS packages in `package.json`, zero Chinese\
+      \ characters in `src/`, `plugins/`, `crates/`, `docs/`, `README.md`, `AGENTS.md`,\
+      \ `deploy/`, and zero company/environment-specific names (`rda`, `casdoor`,\
+      \ `rcatwin`, `keppel`, `mingchen`). Must not mutate external repositories or\
+      \ live user `~/.cito` / `~/Library/LaunchAgents` state during tests.\n- **Admit:**\
+      \ Completed Phase `v18`, `docs/DESIGN.md` (V19 §§1–6), `docs/ROADMAP.md` (Stage\
+      \ 3), `AGENTS.md`, and `README.md`. Verified by `npm run typecheck && npm run\
+      \ compile && npm test` exiting `0` and `[REQUIRES_SKILL: code-hygiene]` check.\
+      \ Consumed by `v19.gate`.\n- **Recovery:** Fix any failing typecheck, Rust/Swift\
+      \ compilation, Mach-O signature, Hub RPC/SSE/SQLite migration, or unit/E2E test\
+      \ in place within the isolated worktree, ensure `crates/cito-native/target`\
+      \ is removed after staging `bin/cito-native-darwin-arm64`, and clean up any\
+      \ temporary test directories, sockets, HTTP servers, or child processes."
+    verification: npm run typecheck && npm run compile && npm test
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - deploy/hub/README.md
+    - package.json
+    - crates/cito-native/Cargo.toml
+    - plugins/index.ts
+    - src/shared/identity.ts
+    - src/shared/lease.ts
+    - src/shared/index.ts
+    - src/adapters/types.ts
+    - src/adapters/index.ts
+    - src/hub/engine.ts
+    - src/hub/client.ts
+    - src/hub/server.ts
+    - src/mcp/service.ts
+    - src/mcp/receiver.ts
+    - src/mcp/state.ts
+    - src/setup/index.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - tests/ui/lifecycle.test.ts
+    agent: senior-engineer
+  - id: v19.gate
+    name: 'V19 Stage 3 (v0.15.0) acceptance, symmetric Node <-> Channels protocol,
+      HumanChannelPlugin (plugins/human & plugins/telegram), Directory | Activity
+      + ComposerBar, 3-tab SettingsPanel, documentation sweep & code-hygiene gate
+      [REQUIRES_SKILL: code-hygiene]'
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\nscope:\n\
+      \  allowed_paths: []\n  blocked_paths:\n    - \"**\"\n```\n\n- **Deliver:**\
+      \ Independent terminal Phase `v19` (Stage 3 `v0.15.0`) acceptance decision (`PASS`\
+      \ or `FAIL`) with `[REQUIRES_SKILL: code-hygiene]`, running `npm run typecheck\
+      \ && npm run compile && npm test`, verifying `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' src/` returns `0` matches, `grep -rn 'jumpUrlTemplate\\|expandJumpUrl\\|openJumpUrl'\
+      \ src/ plugins/` returns `0` matches, verifying all repository documentation\
+      \ (`README.md`, `docs/DESIGN.md`, `docs/ROADMAP.md`, `AGENTS.md`, `deploy/hub/README.md`)\
+      \ is updated and accurate for `v0.15.0`, and verifying `CITO_VERSION === \"\
+      0.15.0\"`.\n- **Boundary:** Owner `verifier` (routing any admitted repair batch\
+      \ to `senior-engineer` before Delta re-verification); gate step itself is read-only\
+      \ (`repo_change_policy: no_repo_change`) and does not mutate repository files,\
+      \ Plan state, or external host directories.\n- **Admit:**\n  - Included phase\
+      \ and terminal outcomes: Phase `v19` (`v19.impl`) bound to the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence and checks:\n\
+      \    1. `npm run typecheck && npm run compile && npm test` passes 100% with\
+      \ zero skipped or failing tests and clean working tree (`git status --short`).\n\
+      \    2. Stage 3 protocol, plugin & UI verification (`docs/DESIGN.md` §§1–6,\
+      \ `docs/ROADMAP.md` Stage 3):\n       - Symmetric `Node (Human | Agent) <->\
+      \ Hub <-> Channels (1..K)` identity without `host_id`, multi-channel lease evaluation\
+      \ (`evaluateNodeLease`) without cross-channel `FENCED_INACTIVE`, `@self` and\
+      \ `@<username>` resolution in `cito_send`, logical `nodeId` `SELF_SEND_FORBIDDEN`,\
+      \ separation of `consumer_ack` from `signal_ack`, atomic `signal_claim_dispatch`\
+      \ single-execution guarantee, and `hub_channel_deliveries` restart idempotency\
+      \ pass unit and integration verification.\n       - Built-in `plugins/human/`\
+      \ (per-Hub `Listen / Unlisten` and `\U0001F512 Self / \U0001F465 Team` scope\
+      \ control) and `plugins/telegram/` (`kind: \"human\"`, two-scope `fields`, 6-char\
+      \ Base32 pairing code flow, `sendMessage`, `getUpdates` `/start <code>` pairing,\
+      \ swipe-to-reply, and implicit recent-sender reply) pass verification.\n   \
+      \    - Four-surface macOS UI (`Zone 1` top `Human Node` card, `Zone 2` `harness\
+      \ !== \"human\"` filter, `Zone 4` unread/online smart launcher, `DirectoryPanel`\
+      \ `[ Directory | Activity ]` mode switcher + inline `ComposerBar` `send_signal`\
+      \ & `ack_signals`, `WakeBanner` click opening `DirectoryPanel` in `\"activity\"\
+      ` mode focused on `ComposerBar`, and 3-tab `SettingsPanel` with dynamic `Human\
+      \ Channels` tab and optional `settings_hub_user`) passes headless AppKit lifecycle\
+      \ verification (`initial.actions === 9`).\n    3. Mechanical, documentation\
+      \ & hygiene verification (`docs/DESIGN.md` §§1.2, 6):\n       - `grep -rnE -i\
+      \ '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' src/` returns `0` matches.\n       - `grep -rn 'jumpUrlTemplate\\|expandJumpUrl\\\
+      |openJumpUrl' src/ plugins/` returns `0` matches.\n       - `README.md`, `docs/DESIGN.md`,\
+      \ `docs/ROADMAP.md`, `AGENTS.md`, and `deploy/hub/README.md` are updated and\
+      \ accurate for `v0.15.0`.\n       - `CITO_VERSION` in `src/shared/index.ts`,\
+      \ `\"version\"` in `package.json` / `package-lock.json`, and `version` in `crates/cito-native/Cargo.toml`\
+      \ equal `\"0.15.0\"`, and `crates/cito-native/target` is absent after `npm run\
+      \ compile`.\n       - Zero Chinese characters (`[\\p{Script=Han}]`) in `src/`,\
+      \ `plugins/`, `crates/`, `docs/`, `README.md`, `AGENTS.md`, and `deploy/`, and\
+      \ zero matches for `rda|casdoor|rcatwin|keppel|mingchen` (excluding policy rule\
+      \ line in `docs/DESIGN.md`).\n       - `[REQUIRES_SKILL: code-hygiene]` audit\
+      \ passes with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n- **Recovery:**\
+      \ If any check fails or any actionable finding is admitted, record concrete\
+      \ file/line counterexamples and route one cohesive writable repair to `senior-engineer`\
+      \ before re-running this gate in Delta mode."
+    verification: npm run typecheck && npm run compile && npm test && git status --short
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - AGENTS.md
+    - README.md
+    - deploy/hub/README.md
+    - package.json
+    - crates/cito-native/Cargo.toml
+    - plugins/index.ts
+    - src/shared/identity.ts
+    - src/shared/lease.ts
+    - src/shared/index.ts
+    - src/adapters/types.ts
+    - src/adapters/index.ts
+    - src/hub/engine.ts
+    - src/hub/client.ts
+    - src/hub/server.ts
+    - src/mcp/service.ts
+    - src/mcp/receiver.ts
+    - src/mcp/state.ts
+    - src/setup/index.ts
+    - src/ui/index.ts
+    - src/macos/cito-ui.swift
+    - tests/ui/lifecycle.test.ts
+    depends_on:
+    - v19.impl
+    agent: verifier
