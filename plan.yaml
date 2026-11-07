@@ -5573,7 +5573,7 @@ phases:
       HumanChannelPlugin (cito-ui + plugins/telegram), Directory | Activity + Inline
       Hub Composer, Removal of jump_url & Full Documentation Sweep [REQUIRES_SKILL:
       code-hygiene]'
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       scope:\n  allowed_paths:\n    - package.json\n    - package-lock.json\n    -\
       \ README.md\n    - AGENTS.md\n    - docs/DESIGN.md\n    - docs/ROADMAP.md\n\
@@ -5717,6 +5717,26 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-07T18:52:42.059017Z'
+    done_at: '2026-11-07T20:26:54.182141+00:00'
+    evidence: "Artifact:\n- Commit: 150903bd643c202da07a2b271d029d55480172bd (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run: npm run\
+      \ typecheck && npm run compile && npm test -> exit 0 (31 test files, 259 tests\
+      \ passed, 0 failed, 0 skipped)\n- Mechanical & storage checks:\n  - grep -rnE\
+      \ -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' src/: 0 matches\n  - grep -rn 'jumpUrlTemplate\\|expandJumpUrl\\|openJumpUrl'\
+      \ src/ plugins/: 0 matches\n  - crates/cito-native/target removed after compilation\n\
+      \  - Zero NATS dependencies in package.json (only @modelcontextprotocol/sdk,\
+      \ jose, and zod in dependencies)\n  - Zero non-Node built-in imports in plugins/pi/cito-bridge.ts\n\
+      \  - [\\p{Script=Han}] in src/, plugins/, crates/, docs/, README.md, AGENTS.md,\
+      \ deploy/: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\b in src/,\
+      \ plugins/, crates/, docs/ (excluding policy rule line in docs/DESIGN.md:20),\
+      \ README.md, deploy/, tests/: 0 matches\n- [REQUIRES_SKILL: code-hygiene] ITERATIVE_CONVERGENCE:\n\
+      \  - Fresh-context structural-auditor (01a1b7ab-5d81-729c-9f4b-a8ed2eabf521)\
+      \ and uiux-auditor (01a1b7ab-5dc8-7604-a871-a1940662f708) audited 150903b across\
+      \ all 5 lenses and certified Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\
+      \nSpec link:\n- docs/DESIGN.md (V19 §§1–6), docs/ROADMAP.md (Stage 3 v0.15.0),\
+      \ and AGENTS.md"
   - id: v19.gate
     name: 'V19 Stage 3 (v0.15.0) acceptance, symmetric Node <-> Channels protocol,
       HumanChannelPlugin (plugins/human & plugins/telegram), Directory | Activity
