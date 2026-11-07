@@ -5803,3 +5803,9 @@ phases:
     depends_on:
     - v19.impl
     agent: verifier
+- id: v20
+  name: 'V20 Stage 4 (v0.16.0): Brand & Icon System (AppIcon.icns), Calm 4-Section
+    Product Website (site/), OpenAI Images 2.6 Artwork & GitHub Pages (https://tefx.github.io/cito/)'
+  status: locked
+  depends_on:
+  - v19
