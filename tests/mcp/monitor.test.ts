@@ -61,6 +61,6 @@ test("unexpected connection closure emits disconnected and cancels active receiv
   const broker = await slot.network(), snapshots = vi.spyOn(f.service.ui!, "state");
   await broker.nc.close();
   await waitFor(() => snapshots.mock.lastCall?.[0][0]?.status === "disconnected");
-  expect(slot.error).toBe("NATS connection closed unexpectedly");
+  expect(slot.error).toBe("Hub connection closed unexpectedly");
   expect(receiver.abort.signal.aborted).toBe(true); expect(snapshots.mock.lastCall?.[1]).toEqual([]);
 });

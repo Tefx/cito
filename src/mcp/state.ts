@@ -3,9 +3,21 @@ import { chmod, mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { CitoError, brokerAgeMs, RETENTION_MS, harnessIdSchema, canonicalListenerIdSchema,
-  unscopedListenerIdSchema, sanitizeSignalMessage } from "../shared/index.js";
+  unscopedListenerIdSchema, sanitizeSignalMessage, type ChannelAttachment } from "../shared/index.js";
 import type { ListenerRow, SignalRow } from "../shared/state-types.js";
 export type { ListenerRow, SignalRow, SentRow } from "../shared/state-types.js";
+export type { ChannelAttachment } from "../shared/index.js";
+
+export const channelAttachmentSchema = z.object({
+  channel_id: z.string().min(1),
+  kind: z.string().min(1),
+  host_id: z.string().min(1),
+  host_name: z.string(),
+  delivery_mode: z.enum(["notify_fanout", "wake_exclusive"]),
+  priority: z.number().int(),
+  state: z.enum(["ACTIVE", "UNLISTENED"]),
+  updated_at_ms: z.number(),
+});
 
 export const registrationSchema = z.object({
   listener_id: canonicalListenerIdSchema, public_id: unscopedListenerIdSchema.optional(), tag: z.string().nullable().optional(),
@@ -14,6 +26,7 @@ export const registrationSchema = z.object({
   cwd: z.string(), repo: z.string().nullable(), branch: z.string().nullable(), title: z.string(), about: z.string(),
   scope: z.enum(["self", "workspace"]), state: z.enum(["ACTIVE", "UNLISTENED"]),
   binding_generation: z.number().int().positive(), owner_token: z.string().uuid(),
+  channels: z.record(z.string(), channelAttachmentSchema).optional(),
 });
 export type Registration = z.infer<typeof registrationSchema>;
 export const signalSchema = z.object({
@@ -23,6 +36,7 @@ export const signalSchema = z.object({
     harness: harnessIdSchema.nullable(), listener_id: unscopedListenerIdSchema.nullable().default(null),
     title: z.string().default(""), about: z.string().nullable().default(null) }),
   message: z.string().transform(sanitizeSignalMessage), in_reply_to: z.string().nullable(),
+  acked_at_ms: z.number().nullable().optional(),
 });
 export type Signal = z.infer<typeof signalSchema>;
 
@@ -100,8 +114,16 @@ export class LocalState {
     if (brokerAgeMs(brokerNow, created) > RETENTION_MS) this.run(`UPDATE local_listeners SET replay_gap_detected = 1,
       replay_gap_range = 'offline_exceeded_30m' WHERE hub = ? AND listener_id = ?`, hub, id);
   }
-  admit(id: string, owner: string, signal: Signal, seq: number, created: string, expires: number, hub = "default"):
-    { row?: SignalRow; duplicate: boolean } {
+  admit(
+    id: string,
+    owner: string,
+    signal: Signal,
+    seq: number,
+    created: string,
+    expires: number,
+    hub = "default",
+    ackedAtMs: number | null = signal.acked_at_ms ?? null,
+  ): { row?: SignalRow; duplicate: boolean } {
     return this.transaction(() => {
       const target = this.listener(id, hub);
       if (!target || target.status !== "ACTIVE" || target.owner_token !== owner) throw new CitoError("STALE_GENERATION", "Listener owner changed");
@@ -110,22 +132,25 @@ export class LocalState {
       if (previous) { advance(); return { row: previous, duplicate: true }; }
       if (signal.from.principal_id !== target.principal_id && target.scope !== "workspace") { advance(); return { duplicate: false }; }
       const reason = signal.target_generation < target.binding_generation ? "stale_generation" : null;
+      const alreadyAcked = ackedAtMs !== null && Number.isFinite(ackedAtMs);
+      const initialState = (reason || alreadyAcked) ? "STORED_PASSIVE" : "RECEIVED";
       this.run(`INSERT INTO local_signals (hub, signal_id, listener_id, seq, binding_generation,
         from_user, from_host_name, from_harness, from_listener_id, from_title, from_about, message,
-        held_reason, in_reply_to, created_at, expires_at_ms, state) VALUES (${Array(17).fill("?").join(",")})`,
+        held_reason, in_reply_to, created_at, expires_at_ms, state, acknowledged_at_ms) VALUES (${Array(18).fill("?").join(",")})`,
         hub, signal.signal_id, id, seq, target.binding_generation, signal.from.user, signal.from.host_name, signal.from.harness,
         signal.from.listener_id, signal.from.title, signal.from.about, signal.message, reason, signal.in_reply_to,
-        created, expires, reason ? "STORED_PASSIVE" : "RECEIVED");
+        created, expires, initialState, alreadyAcked ? ackedAtMs : null);
       advance();
       return { row: this.signals("SELECT * FROM local_signals WHERE hub = ? AND signal_id = ?", hub, signal.signal_id)[0]!, duplicate: false };
     });
   }
   close(): void { this.db.close(); }
 }
-export function registration(row: ListenerRow): Registration {
+export function registration(row: ListenerRow, channels?: Record<string, ChannelAttachment>): Registration {
   return { listener_id: row.listener_id, public_id: row.public_id, tag: row.tag,
     principal_id: row.principal_id, owner_user: row.owner_user, host_id: row.host_id, host_name: row.host_name,
     harness: row.harness, session_id: row.session_id, cwd: row.cwd, repo: row.repo, branch: row.branch,
     title: row.title, about: row.about, scope: row.scope, state: row.status === "ACTIVE" ? "ACTIVE" : "UNLISTENED",
-    binding_generation: row.binding_generation, owner_token: row.owner_token };
+    binding_generation: row.binding_generation, owner_token: row.owner_token,
+    ...(channels ? { channels } : {}) };
 }

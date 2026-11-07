@@ -313,7 +313,6 @@ function transformCodexToml(
 export class CodexDesktopAdapter implements HarnessAdapter {
   readonly id = "codex";
   readonly manifest: PluginManifest;
-  readonly canJump = true;
   readonly setup: HarnessSetupDescriptor = {
     inspect: async (env: NodeJS.ProcessEnv) => {
       const codexHome = expandHomeDir(env.CITO_CODEX_HOME ?? "~/.codex", "CITO_CODEX_HOME", env.HOME);

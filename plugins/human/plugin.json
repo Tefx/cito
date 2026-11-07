@@ -1,0 +1,8 @@
+{
+  "id": "human",
+  "kind": "human",
+  "displayName": "Human",
+  "tier": "stable",
+  "sfSymbol": "person.crop.circle.fill",
+  "tint": "green"
+}

@@ -236,7 +236,7 @@ export async function startHubServer(options: HubServerOptions = {}): Promise<Hu
         }
         const body = parsed as Record<string, unknown>;
         const op = typeof body.op === "string" ? body.op : "";
-        const result = engine.handleRpc(op, body, principal);
+        const result = await engine.handleRpc(op, body, principal);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, result }));
         return;

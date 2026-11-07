@@ -4,8 +4,8 @@ import type { BannerPayload } from "../ui/index.js";
 import { getAdapter, formatWakeCard, type DeliverContext } from "../adapters/index.js";
 import {
   AckPolicy, DeliverPolicy, type Consumer, type ConsumerMessages, type JsMsg, type NatsConnection,
-  type QueuedIterator, type KvEntry,
-  listenMutex, sessionMutex, brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256,
+  type QueuedIterator, type KvEntry, type Subscription,
+  listenMutex, sessionMutex, brokerNow, localExpirationMs, SIGNALS_STREAM, listenerSlug, toCanonicalListenerId, formatScopedId, sha256, isHumanNode,
   type CitoConfig, type provisionNats,
 } from "../shared/index.js";
 import { LocalState, registration, registrationSchema, signalSchema, type ListenerRow, type Registration, type SignalRow } from "./state.js";
@@ -58,6 +58,7 @@ export class Receiver {
   private consumer?: Consumer;
   private messages?: ConsumerMessages;
   private watch?: QueuedIterator<KvEntry>;
+  private ackSub?: Subscription;
   private debounce?: ReturnType<typeof setTimeout>;
   private sweepTimer?: ReturnType<typeof setInterval>;
   private readonly tasks = new Set<Promise<unknown>>();
@@ -69,16 +70,28 @@ export class Receiver {
   private readonly broker: Broker;
   private readonly options: ReceiverOptions;
   readonly id: string; readonly hub: string; readonly owner: string; readonly generation: number;
+  readonly channelId: string;
   constructor(state: LocalState, config: CitoConfig, broker: Broker,
     row: ListenerRow, options: ReceiverOptions = {}) {
     this.state = state; this.config = config; this.broker = broker; this.options = options;
     this.id = row.listener_id; this.hub = row.hub; this.owner = row.owner_token; this.generation = row.binding_generation;
+    this.channelId = `${row.host_id}:${row.harness}`;
   }
   private row() { return this.state.listener(this.id, this.hub)!; }
   private log(error: unknown): void { (this.options.diagnostic ?? console.error)(`cito receiver ${this.hub}:${this.id}: ${String(error)}`); }
   private track(task: Promise<unknown>): void {
     this.tasks.add(task);
     void task.catch(error => { if (!this.abort.signal.aborted) this.log(error); }).finally(() => this.tasks.delete(task));
+  }
+  private isRemoteChannelActive(value: Registration | null | undefined): boolean {
+    if (!value || value.state !== "ACTIVE" || value.owner_token !== this.owner || value.binding_generation !== this.generation) {
+      return false;
+    }
+    const ch = value.channels?.[this.channelId];
+    if (ch && ch.state !== "ACTIVE") {
+      return false;
+    }
+    return true;
   }
   async start(): Promise<boolean> {
     if (this.abort.signal.aborted) return false;
@@ -90,10 +103,42 @@ export class Receiver {
           if (this.abort.signal.aborted) break;
           let value;
           try { value = entry.operation === "PUT" ? registrationSchema.parse(entry.json()) : null; } catch { value = null; }
-          if (!value || value.owner_token !== this.owner || value.binding_generation !== this.generation || value.state !== "ACTIVE") { this.fence(); break; }
+          if (!this.isRemoteChannelActive(value)) { this.fence(); break; }
         }
       })());
       if (this.abort.signal.aborted) return false;
+      this.ackSub = this.broker.nc.subscribe("cito.ack." + this.id, {
+        callback: (error, msg) => {
+          if (error || this.abort.signal.aborted) return;
+          try {
+            const payload = msg.json<{ type?: string; signal_ids?: unknown; acked_at_ms?: unknown; channel_id?: unknown }>();
+            if (payload?.type !== "node_ack" || !Array.isArray(payload.signal_ids)) return;
+            if (payload.channel_id === this.channelId) return;
+            const ackedAt = typeof payload.acked_at_ms === "number" ? payload.acked_at_ms : Date.now();
+            let changed = 0;
+            this.state.transaction(() => {
+              for (const rawId of payload.signal_ids as unknown[]) {
+                if (typeof rawId !== "string") continue;
+                const res = this.state.run(
+                  `UPDATE local_signals
+                   SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?),
+                       state = CASE WHEN state = 'RECEIVED' THEN 'STORED_PASSIVE' ELSE state END
+                   WHERE hub = ? AND listener_id = ? AND signal_id = ? AND acknowledged_at_ms IS NULL`,
+                  ackedAt,
+                  this.hub,
+                  this.id,
+                  rawId,
+                );
+                changed += Number(res.changes);
+              }
+            });
+            if (changed > 0) {
+              this.track(this.badge());
+              this.options.onStateChanged?.();
+            }
+          } catch {}
+        },
+      });
       const row = this.row();
       const info = await this.broker.jsm.consumers.add(SIGNALS_STREAM, {
         filter_subject: "cito.signal." + this.id, ack_policy: AckPolicy.Explicit,
@@ -120,7 +165,9 @@ export class Receiver {
     } catch (error) { await this.stop(); throw error; }
   }
   cancel(): void {
-    this.abort.abort(); clearTimeout(this.debounce); clearInterval(this.sweepTimer); this.watch?.stop(); void this.messages?.close();
+    this.abort.abort(); clearTimeout(this.debounce); clearInterval(this.sweepTimer);
+    this.ackSub?.unsubscribe(); this.ackSub = undefined;
+    this.watch?.stop(); void this.messages?.close();
     this.options.onStateChanged?.();
   }
   stop(): Promise<void> {
@@ -148,15 +195,45 @@ export class Receiver {
     const wall = Date.now(), mono = performance.now(), now = await brokerNow(this.broker.jsm, SIGNALS_STREAM);
     const created = new Date(msg.info.timestampNanos / 1_000_000).toISOString();
     const expires = localExpirationMs(wall, performance.now() - mono, now, created);
-    if (this.abort.signal.aborted) return;
-    const admitted = this.state.admit(this.id, this.owner, signal, msg.seq, created, expires, this.hub);
+    const ackedAtMs = msg.info.ackedAtMs ?? signal.acked_at_ms ?? null;
+    let admitted;
+    try { admitted = this.state.admit(this.id, this.owner, signal, msg.seq, created, expires, this.hub, ackedAtMs); }
+    catch (error) {
+      if (this.row()?.owner_token !== this.owner || this.row()?.status !== "ACTIVE") { this.fence(); return; }
+      throw error;
+    }
     if (admitted.row) this.broker.nc.publish("cito.ack." + signal.signal_id, encode(ackPayload(admitted.row)));
-    msg.ack();
-    if (!admitted.row || admitted.duplicate || admitted.row.state !== "RECEIVED") return;
+    await this.broker.nc.flush();
+    await msg.ackAck();
+    if (admitted.duplicate || !admitted.row) return;
+    if (admitted.row.acknowledged_at_ms !== null) {
+      this.track(this.badge());
+      this.options.onStateChanged?.();
+      return;
+    }
+    if (admitted.row.held_reason) {
+      this.track(this.badge());
+      this.options.onStateChanged?.();
+      return;
+    }
     const target = this.row();
-    this.options.onBanner?.({ target_harness: target.harness, target_session_id: target.session_id, target_title: target.title,
-      from_user: admitted.row.from_user, from_host: admitted.row.from_host_name, from_title: admitted.row.from_title,
-      message: admitted.row.message, effective_wake: true });
+    const fromScopedId = admitted.row.from_listener_id
+      ? formatScopedId(this.hub, admitted.row.from_listener_id, this.config)
+      : formatScopedId(this.hub, "@" + admitted.row.from_user, this.config);
+    this.options.onBanner?.({
+      target_harness: target.harness,
+      target_session_id: target.session_id,
+      target_title: target.title,
+      from_user: admitted.row.from_user,
+      from_host: admitted.row.from_host_name,
+      from_title: admitted.row.from_title,
+      message: admitted.row.message,
+      effective_wake: true,
+      signal_id: formatScopedId(this.hub, admitted.row.signal_id, this.config),
+      hub: this.hub,
+      from_scoped_id: fromScopedId,
+    });
+    this.options.onStateChanged?.();
     this.track(this.badge()); this.schedule();
   }
   badge(): Promise<void> { const row = this.row(); return refreshSessionBadge(this.state, this.config, row.harness, row.session_id); }
@@ -195,10 +272,8 @@ export class Receiver {
         rows = []; card = "";
         for (const row of candidates) {
           const next = render([...rows, row]);
-          // Include JSON escaping, leaving ample room for the bridge envelope.
           if (Buffer.byteLength(JSON.stringify(next)) > 256 * 1024) {
             if (rows.length) break;
-            // An oversized individual card remains readable through the inbox.
             this.state.run("UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = 'driver_unavailable' WHERE hub = ? AND signal_id = ?", this.hub, row.signal_id);
             continue;
           }
@@ -219,12 +294,30 @@ export class Receiver {
   private async effect(batch: SignalRow, submit: () => Promise<void>): Promise<void> {
     await listenMutex.run(`${this.hub}:${this.id}`, async () => {
       const entry = await this.broker.kv.get(this.id), remote = entry && registrationSchema.parse(entry.json());
-      if (!remote || remote.owner_token !== this.owner || remote.binding_generation !== this.generation || remote.state !== "ACTIVE") this.fence();
+      if (!this.isRemoteChannelActive(remote)) this.fence();
       const row = this.row();
-      const unread = this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND batch_id = ? AND acknowledged_at_ms IS NULL AND state = 'DISPATCHING' LIMIT 1", this.hub, batch.batch_id!);
+      const unread = this.state.signals("SELECT * FROM local_signals WHERE hub = ? AND batch_id = ? AND acknowledged_at_ms IS NULL AND state = 'DISPATCHING'", this.hub, batch.batch_id!);
       if (this.abort.signal.aborted || row.status !== "ACTIVE" || row.owner_token !== this.owner
         || row.binding_generation !== batch.binding_generation || row.dispatcher_token !== batch.dispatcher_token
         || Date.now() >= batch.batch_expires_at_ms! || !unread.length) throw new DispatchStopped();
+      const activeChannelCount = remote?.channels ? Object.values(remote.channels).filter(c => c.state === "ACTIVE").length : 1;
+      if (!isHumanNode(row) && activeChannelCount > 1 && typeof this.broker.nc.rpc === "function") {
+        const claim = await this.broker.nc.rpc<{ claimed: boolean }>("signal_claim_dispatch", {
+          node_id: this.id,
+          signal_ids: unread.map(r => r.signal_id),
+          channel_id: this.channelId,
+          lease_ms: 30_000,
+        }).catch(() => ({ claimed: true }));
+        if (!claim.claimed) {
+          this.state.run(
+            "UPDATE local_signals SET state = 'STORED_PASSIVE', acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?) WHERE hub = ? AND batch_id = ?",
+            Date.now(),
+            this.hub,
+            batch.batch_id!,
+          );
+          throw new DispatchStopped();
+        }
+      }
       this.state.run("UPDATE local_listeners SET lease_until_ms = ? WHERE hub = ? AND listener_id = ? AND owner_token = ?", Date.now() + 30_000, this.hub, this.id, this.owner);
       await submit();
     });
@@ -259,8 +352,16 @@ export class Receiver {
       } else {
         this.state.run(`UPDATE local_signals SET state = 'DISPATCHED', acknowledged_at_ms = CASE WHEN ? THEN COALESCE(acknowledged_at_ms, ?) ELSE acknowledged_at_ms END
           WHERE hub = ? AND batch_id = ? AND state = 'DISPATCHING' AND dispatcher_token = ?`, +(outcome === "delivered"), Date.now(), this.hub, batch, token);
+        if (outcome === "delivered" && typeof this.broker.nc.rpc === "function") {
+          void this.broker.nc.rpc("signal_ack", {
+            node_id: this.id,
+            signal_ids: rows.map(r => r.signal_id),
+            channel_id: this.channelId,
+          }).catch(() => {});
+        }
       }
       await this.badge();
+      this.options.onStateChanged?.();
     } catch (error) {
       if (this.abort.signal.aborted) return true;
       if (!(error instanceof DispatchStopped)) this.log(error);
@@ -278,14 +379,39 @@ export class Receiver {
         this.state.run(`UPDATE local_signals SET state = 'STORED_PASSIVE', held_reason = ? WHERE hub = ? AND listener_id = ?
           AND binding_generation <= ? AND state IN ('RECEIVED','DISPATCHING')`, reason, this.hub, this.id, this.generation);
       });
-      this.options.onDirectoryRemove?.(this.hub, this.id);
       this.options.onReceiverStopped?.(this.hub, this.id, this);
       await this.badge().catch(error => this.log(error));
       const entry = await this.broker.kv.get(this.id);
       if (entry) {
         const value = registrationSchema.parse(entry.json());
-        if (value.owner_token === this.owner && value.binding_generation === this.generation) await this.broker.kv.update(this.id,
-          encode({ ...value, state: "UNLISTENED", binding_generation: this.generation + 1 }), entry.revision);
+        if (value.owner_token === this.owner && value.binding_generation === this.generation) {
+          const nextChannels = value.channels ? { ...value.channels } : undefined;
+          if (nextChannels?.[this.channelId]) {
+            nextChannels[this.channelId] = { ...nextChannels[this.channelId]!, state: "UNLISTENED" };
+          }
+          const siblingActive = nextChannels
+            ? Object.entries(nextChannels).find(([k, c]) => k !== this.channelId && c.state === "ACTIVE")?.[1]
+            : undefined;
+          if (siblingActive) {
+            const updated: Registration = {
+              ...value,
+              host_id: siblingActive.host_id,
+              host_name: siblingActive.host_name,
+              channels: nextChannels,
+            };
+            const rev = await this.broker.kv.update(this.id, encode(updated), entry.revision);
+            this.options.onDirectoryUpsert?.(this.hub, this.id, updated, rev);
+          } else {
+            this.options.onDirectoryRemove?.(this.hub, this.id);
+            await this.broker.kv.update(
+              this.id,
+              encode({ ...value, state: "UNLISTENED", binding_generation: this.generation + 1, ...(nextChannels ? { channels: nextChannels } : {}) }),
+              entry.revision,
+            );
+          }
+        }
+      } else {
+        this.options.onDirectoryRemove?.(this.hub, this.id);
       }
     });
   }
@@ -310,9 +436,14 @@ export class Receiver {
       const row = this.row(); if (this.abort.signal.aborted || row.owner_token !== this.owner || row.status !== "ACTIVE") return;
       this.state.run("UPDATE local_listeners SET consecutive_probe_failures = 0 WHERE hub = ? AND listener_id = ? AND owner_token = ?", this.hub, this.id, this.owner);
       const entry = await this.broker.kv.get(this.id), value = entry && registrationSchema.parse(entry.json());
-      if (!value || value.owner_token !== this.owner || value.binding_generation !== this.generation || value.state !== "ACTIVE") { this.options.onDirectoryRemove?.(this.hub, this.id); this.fence(); return; }
-      if (row.scope !== value.scope) { this.state.run("UPDATE local_listeners SET scope = ? WHERE hub = ? AND listener_id = ?", value.scope, this.hub, this.id); this.options.onStateChanged?.(); }
-      const nextReg = registration(this.row());
+      if (!this.isRemoteChannelActive(value)) { this.options.onDirectoryRemove?.(this.hub, this.id); this.fence(); return; }
+      if (row.scope !== value!.scope) { this.state.run("UPDATE local_listeners SET scope = ? WHERE hub = ? AND listener_id = ?", value!.scope, this.hub, this.id); this.options.onStateChanged?.(); }
+      const nextChannels = value!.channels ? { ...value!.channels } : undefined;
+      if (nextChannels?.[this.channelId]) {
+        const brokerTs = Date.parse(await brokerNow(this.broker.jsm));
+        nextChannels[this.channelId] = { ...nextChannels[this.channelId]!, state: "ACTIVE", updated_at_ms: Number.isFinite(brokerTs) ? brokerTs : Date.now() };
+      }
+      const nextReg = registration(this.row(), nextChannels);
       const rev = await this.broker.kv.update(this.id, encode(nextReg), entry!.revision);
       this.options.onDirectoryUpsert?.(this.hub, this.id, nextReg, rev);
     });

@@ -12,13 +12,13 @@ import { loadClaudeConfig, loadCodexConfig } from "../../src/adapters/index.js";
 
 describe("keyless identity", () => {
   const key = { principal_id: "local", host_id: "host", harness: "pi" as const, session_id: "session" };
-  it("uses the SHA256 -> RFC4648 lowercase base32 test vector", () => {
-    // Independently generated using Python hashlib + base64.b32encode.
-    expect(listenerId(key)).toBe("c_za6ccpdr4its");
+  it("uses the host-independent cito-v2 SHA256 -> RFC4648 lowercase base32 test vector", () => {
+    expect(listenerId(key)).toBe("c_xed7ffxzgir3");
     expect(listenerId(key)).toMatch(/^c_[a-z2-7]{12}$/);
     expect(listenerId({ ...key })).toBe(listenerId(key));
+    expect(listenerId({ ...key, host_id: "other-host" })).toBe(listenerId(key));
     for (const changed of [
-      { principal_id: "other" }, { host_id: "other" }, { harness: "codex" as const }, { session_id: "other" },
+      { principal_id: "other" }, { harness: "codex" as const }, { session_id: "other" },
     ]) expect(listenerId({ ...key, ...changed })).not.toBe(listenerId(key));
   });
   it("distinguishes bound and unbound sender namespaces", () => {
@@ -112,9 +112,9 @@ describe("input and MCP envelopes", () => {
 });
 
 describe("configuration and machine identity", () => {
-  it("keeps CITO_VERSION synchronized with package.json version (0.14.0)", async () => {
+  it("keeps CITO_VERSION synchronized with package.json version (0.15.0)", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
-    expect(CITO_VERSION).toBe("0.14.0");
+    expect(CITO_VERSION).toBe("0.15.0");
     expect(CITO_VERSION).toBe(pkg.version);
   });
   it("loads defaults and validates OIDC, pluginDirs, expandHomeDir, and plugin configuration", () => {

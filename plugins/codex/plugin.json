@@ -4,6 +4,5 @@
   "tier": "stable",
   "sfSymbol": "sparkles",
   "tint": "teal",
-  "jumpUrlTemplate": "codex://threads/{session_id}",
   "cliFlag": true
 }

@@ -142,17 +142,16 @@ test("private targets are invisible and forbidden cross-user; workspace peer wak
   expect((await call(peer.service, "cito_find", { harness: "cursor" })).listeners).toEqual([]);
 });
 
-test.skipIf(process.platform !== "darwin")("real Codex HUD click opens its thread without accessing local state", async () => {
+test.skipIf(process.platform !== "darwin")("real Codex HUD click opens DirectoryPanel in Activity mode for Hub reply without external URL jump", async () => {
   const f = await setup(false), desktop = await codexDesktop(f);
   try {
-    f.serviceOptions.ui!.env = { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "5000", CITO_BANNER_URL_OPENER: f.config.openBin };
+    f.serviceOptions.ui!.env = { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "5000" };
     await f.service.startUi();
     const { listener_id: id } = await call(f.service, "cito_listen", { about: "click" }, desktop.meta);
     await call(f.service, "cito_send", { to: id, message: "click to read" });
     await waitFor(() => f.bannerDisplays.length > 0);
     process.kill(f.bannerDisplays[0]!.pid, "SIGUSR1");
-    await waitFor(async () => { try { return (await readFile(desktop.log, "utf8")).includes("codex://threads/" + desktop.thread); } catch { return false; } });
-    expect((await readFile(desktop.log, "utf8")).trim()).toBe(JSON.stringify(["open", "codex://threads/" + desktop.thread]));
+    await waitFor(() => f.diagnostics.includes("cito-ui: banner clicked"));
   } finally { await desktop.close(); }
 });
 

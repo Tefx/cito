@@ -41,11 +41,11 @@ describe("official local NATS JetStream + KV", () => {
     try {
       const { jsm } = await provisionNats(nc);
       await jsm.streams.update("KV_cito_listeners", { max_age: 300_000_000_000 });
-      await expect(provisionNats(nc)).rejects.toThrow("Incompatible NATS stream KV_cito_listeners");
+      await expect(provisionNats(nc)).rejects.toThrow("Incompatible Hub stream KV_cito_listeners");
       expect((await jsm.streams.info("KV_cito_listeners")).config.max_age).toBe(300_000_000_000);
       await jsm.streams.update("KV_cito_listeners", { max_age: 0 });
       await jsm.streams.update("CITO_SIGNALS", { max_age: 3_600_000_000_000 });
-      await expect(provisionNats(nc)).rejects.toThrow("Incompatible NATS stream CITO_SIGNALS");
+      await expect(provisionNats(nc)).rejects.toThrow("Incompatible Hub stream CITO_SIGNALS");
     } finally { await nc.close(); await broker.stop(); }
   });
   it("connects over the Node native WebSocket transport using the same JetStream APIs", async () => {

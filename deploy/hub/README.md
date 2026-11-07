@@ -46,3 +46,7 @@ When `cito hub` starts, it prints the ready-to-copy `cito setup` command to `std
   ```sh
   cito setup --hub team --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id <client-id> --default
   ```
+
+## 4. Shared Human Channels on `cito hub` (`plugins/telegram`)
+
+`cito hub` co-locates `HubEngine` and `HumanChannelHost` in the same process so external `kind: "human"` channels (such as `plugins/telegram`) stay online 24/7 even when laptops sleep. To pre-configure a shared Telegram Bot Token for all users on the Hub, pass `CITO_PLUGIN_TELEGRAM_BOT_TOKEN="<bot-token>"` in the server environment; users can then click **`Pair Account…`** in `Cito Settings → Human Channels` and send `/start cito-xxxxxx` to the bot.

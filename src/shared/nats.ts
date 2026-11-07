@@ -61,7 +61,7 @@ export {
 export async function connectNats(options: ConnectionOptions = {}): Promise<NatsConnection> {
   const servers = typeof options.servers === "string" ? [options.servers] : options.servers ?? ["local://"];
   if (servers.some(server => /^wss?:/.test(server)) && !servers.every(server => /^wss?:/.test(server))) {
-    throw new Error("Cannot mix TCP and WebSocket NATS servers");
+    throw new Error("Cannot mix TCP and WebSocket Hub servers");
   }
   const first = servers[0] ?? "local://";
   const normalized = toHttpHubUrl(first);
@@ -102,7 +102,7 @@ function assertConfig(actual: StreamConfig, expected: Partial<StreamConfig>): vo
     const found = actual[key as keyof StreamConfig];
     if (JSON.stringify(found) !== JSON.stringify(value)) {
       throw new Error(
-        "Incompatible NATS stream " +
+        "Incompatible Hub stream " +
           actual.name +
           ": " +
           key +
@@ -149,7 +149,7 @@ export async function provisionNats(nc: NatsConnection) {
 export async function brokerNow(jsm: JetStreamManager, stream = "KV_" + LISTENERS_BUCKET): Promise<string> {
   const info = await jsm.streams.info(stream);
   if (!info.ts || !Number.isFinite(Date.parse(info.ts))) {
-    throw new Error("NATS >= 2.10 with broker StreamInfo.ts is required");
+    throw new Error("Hub broker StreamInfo.ts is required");
   }
   return info.ts;
 }

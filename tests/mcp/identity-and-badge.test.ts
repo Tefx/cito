@@ -78,7 +78,7 @@ test("invalid explicit tags leave the existing receiver and persisted registrati
   expect(receiver.abort.signal.aborted).toBe(false);
 });
 
-test.each(["principal_id", "host_id", "harness", "session_id"])("collision guard checks %s before stopping an owner or writing SQLite", async field => {
+test.each(["principal_id", "harness", "session_id"])("collision guard checks %s before stopping an owner or writing SQLite", async field => {
   const f = await setup();
   const enrolled = await call(f.service, "cito_listen", { about: "untouched", tag: "stable" }, f.pi.meta);
   const id = toCanonicalListenerId(enrolled.listener_id), receiver = f.service.receivers.get(`default:${id}`)!;

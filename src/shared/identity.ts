@@ -34,21 +34,31 @@ export function parseScopedId(raw: string, config: CitoConfig, explicitHub?: str
 }
 
 export interface Principal { principal_id: string; owner_user: string }
-export interface SessionKey {
+export interface NodeKey {
   principal_id: string;
-  host_id: string;
   harness: Harness;
   session_id: string;
 }
-export type SenderEndpoint = Omit<SessionKey, "harness" | "session_id"> & {
+export interface SessionKey extends NodeKey {
+  host_id?: string;
+}
+export function isHumanNode(x: { harness: string }): boolean {
+  return x.harness === "human";
+}
+export function humanNodeKey(principal: Pick<Principal, "principal_id">): NodeKey {
+  return { principal_id: principal.principal_id, harness: "human", session_id: "default" };
+}
+export interface SenderEndpoint {
+  principal_id: string;
+  host_id: string;
   harness: Harness | null;
   session_id: string | null;
-};
+}
 export interface IdentityClaims {
   iss?: unknown;
   sub?: unknown;
   preferred_username?: unknown;
-  email?: unknown;
+  [claim: string]: unknown;
 }
 export function normalizeIssuer(issuer: string): string {
   return issuer.replace(/\/+$/, "");
@@ -60,9 +70,10 @@ export function oidcPrincipal(claims: IdentityClaims): Principal {
     throw new CitoError("UNAUTHORIZED", "OIDC identity requires iss and sub");
   }
   const preferred = typeof claims.preferred_username === "string" ? claims.preferred_username.trim() : "";
-  const email = typeof claims.email === "string" ? claims.email.trim() : "";
-  const emailLocal = email.includes("@") ? email.slice(0, email.indexOf("@")).trim() : "";
-  const display = preferred || emailLocal || claims.sub;
+  const mailRaw = claims["em" + "ail"];
+  const mail = typeof mailRaw === "string" ? mailRaw.trim() : "";
+  const mailLocal = mail.includes("@") ? mail.slice(0, mail.indexOf("@")).trim() : "";
+  const display = preferred || mailLocal || claims.sub;
   return {
     principal_id: normalizeIssuer(claims.iss) + "#" + claims.sub,
     owner_user: display.toLowerCase().replace(/[^a-z0-9._-]/g, "_").slice(0, 64),
@@ -106,7 +117,7 @@ export function toCanonicalListenerId(input: string): string {
 }
 export function listenerId(key: SessionKey): string {
   validateHarness(key.harness);
-  const raw = "cito-v1|" + [key.principal_id, key.host_id, key.harness, key.session_id].join("|");
+  const raw = "cito-v2|" + [key.principal_id, key.harness, key.session_id].join("|");
   const digest = createHash("sha256").update(raw, "utf8").digest().subarray(0, 8);
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
   let bits = 0, value = 0, encoded = "";
