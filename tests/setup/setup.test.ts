@@ -398,7 +398,7 @@ describe("cito setup engine and plugin setup descriptors", () => {
       timeout: 5000,
     });
     expect(citoVerRes.status).toBe(0);
-    expect(citoVerRes.stdout).toBe("cito v0.15.0\n");
+    expect(citoVerRes.stdout).toBe("cito v0.16.0\n");
 
     // 2. LaunchAgent management via API and CLI (--login-item / --no-login-item)
     expect((await inspectLaunchAtLogin({ env })).enabled).toBe(false);
@@ -431,8 +431,18 @@ describe("cito setup engine and plugin setup descriptors", () => {
     expect(built.bytes).toBeGreaterThan(100_000);
     expect(built.bytes).toBeLessThan(5 * 1024 * 1024);
 
+    const masterIcns = await readFile(resolve("bin/AppIcon.icns"));
+    expect(masterIcns.subarray(0, 4).toString("latin1")).toBe("icns");
+    expect(masterIcns.byteLength).toBeGreaterThan(20 * 1024);
+    expect(masterIcns.byteLength).toBeLessThan(500 * 1024);
+
+    const bundledIcns = await readFile(join(built.appPath, "Contents/Resources/AppIcon.icns"));
+    expect(bundledIcns.equals(masterIcns)).toBe(true);
+
     const infoPlist = await readFile(join(built.appPath, "Contents/Info.plist"), "utf8");
     expect(infoPlist).toContain("one.tefx.cito");
+    expect(infoPlist).toContain("<key>CFBundleIconFile</key>\n  <string>AppIcon</string>");
+    expect(infoPlist).toContain("<key>CFBundleIconName</key>\n  <string>AppIcon</string>");
     expect(infoPlist).toContain("<key>LSUIElement</key>\n  <true/>");
     expect((await stat(join(built.appPath, "Contents/MacOS/Cito"))).mode & 0o777).toBe(0o755);
     expect((await stat(join(built.appPath, "Contents/Helpers/cito-ui"))).mode & 0o777).toBe(0o755);

@@ -274,10 +274,12 @@ export async function buildMacAppBundle(options: {
   const contentsDir = join(appPath, "Contents");
   const macosDir = join(contentsDir, "MacOS");
   const helpersDir = join(contentsDir, "Helpers");
+  const resourcesDir = join(contentsDir, "Resources");
 
   await rm(appPath, { recursive: true, force: true });
   await mkdir(macosDir, { recursive: true });
   await mkdir(helpersDir, { recursive: true });
+  await mkdir(resourcesDir, { recursive: true });
 
   const infoPlist = [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -292,6 +294,10 @@ export async function buildMacAppBundle(options: {
     "  <string>Cito</string>",
     "  <key>CFBundleExecutable</key>",
     "  <string>Cito</string>",
+    "  <key>CFBundleIconFile</key>",
+    "  <string>AppIcon</string>",
+    "  <key>CFBundleIconName</key>",
+    "  <string>AppIcon</string>",
     "  <key>CFBundleShortVersionString</key>",
     `  <string>${escapeXml(CITO_VERSION)}</string>`,
     "  <key>CFBundleVersion</key>",
@@ -357,6 +363,11 @@ export async function buildMacAppBundle(options: {
     const helperNative = join(helpersDir, "cito-native");
     await copyFile(prebuiltNative, helperNative);
     await chmod(helperNative, 0o755);
+  }
+
+  const prebuiltIcon = join(pkgRoot, "bin", "AppIcon.icns");
+  if (existsSync(prebuiltIcon)) {
+    await copyFile(prebuiltIcon, join(resourcesDir, "AppIcon.icns"));
   }
 
   await ensureCliShims({ stateDir, env });

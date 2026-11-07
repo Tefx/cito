@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const CITO_VERSION: &str = "0.15.0";
+const CITO_VERSION: &str = "0.16.0";
 const DRAIN_SUFFIX: &str = ".draining-";
 const TITLE_TAIL_BYTES: u64 = 128 * 1024;
 const TITLE_MAX_CHARS: usize = 200;

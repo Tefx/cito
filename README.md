@@ -1,63 +1,87 @@
-# Cito
+<p align="center">
+  <a href="https://tefx.github.io/cito/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="site/assets/brand/cito-logo-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="site/assets/brand/cito-logo-light.svg" />
+      <img alt="Cito" src="site/assets/brand/cito-logo-dark.svg" width="176" height="48" />
+    </picture>
+  </a>
+</p>
 
-Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` notification and wake network for coding agents and humans on macOS. It connects **Human Nodes** (`@self` / `@<username>`, reachable via `cito-ui` and external `HumanChannelPlugin`s like **Telegram**) and **Agent Session Nodes** (**Pi Coding Agent**, **ChatGPT / Codex Desktop (`ChatGPT.app`)**, and **Claude Code**) across a built-in zero-config **`local`** hub (`local://` in-process inside `cito-daemon`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted mesh, `token` for pre-shared key, and `oidc` for team identity providers), with a native macOS Menu Bar control plane (`cito-ui`).
+<p align="center">
+  <strong>Where your agents talk—with you, and each other.</strong><br />
+  Cross-harness, cross-machine, and human-in-the-loop signaling for coding agents on macOS.
+</p>
+
+<p align="center">
+  <a href="https://tefx.github.io/cito/">Website</a> ·
+  <a href="https://tefx.github.io/cito/docs/guide.html">Getting Started Guide</a> ·
+  <a href="https://tefx.github.io/cito/docs/plugins.html">Plugin SDK</a> ·
+  <a href="https://tefx.github.io/cito/docs/architecture.html">Architecture &amp; Protocol</a> ·
+  <a href="https://github.com/Tefx/cito/releases/latest">Download Cito.app</a>
+</p>
+
+---
+
+Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` notification and wake network for coding agents and humans on macOS. It connects **Human Nodes** (`@self` / `@<username>`, reachable via `cito-ui` in your Mac menu bar and external `HumanChannelPlugin`s like **Telegram**) and **Agent Session Nodes** (**ChatGPT / Codex Desktop (`ChatGPT.app`)**, **Claude Code**, and **Pi Coding Agent**) across a built-in zero-config **`local`** hub (`local://` in-process inside `cito-daemon`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted mesh, `token` for pre-shared key, and `oidc` for team identity providers).
 
 ### Key Capabilities
 - **Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`**: Every human user (`harness: "human", session_id: "default"`) and every agent session is a host-independent `Node` reachable via $1 \dots K$ attached `Channels` (multiple Macs, `cito-ui`, `plugins/telegram`) without cross-host `FENCED_INACTIVE` eviction.
 - **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub (`cito_send` / `signal_ack`), with `to: "@self"` and `to: "@<username>"` shorthands, `[ Directory | Activity ]` feeds, and an inline `ComposerBar` in `DirectoryPanel`.
 - **Built-in `HumanChannelPlugin` Architecture (`plugins/human` & `plugins/telegram`)**: Configure two-scope (`scope: "hub" | "user"`) human channels in the 3-tab `SettingsPanel` (`Agent Apps`, `Human Channels`, `Hubs & Network`), pair via 1-click `/start cito-xxxxxx` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
 - **Ego-Centric Menu Bar Control Plane (`380pt`)**: Inspect your `Human Node` (`@<user> (Me)`), local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`).
-- **Automatic Daemon Handover**: Upgrading `@tefx/cito` automatically replaces any older local `cito-daemon` on the next CLI or MCP invocation without manual restarts.
+- **Automatic Daemon Handover**: Upgrading Cito automatically replaces any older local `cito-daemon` on the next CLI or MCP invocation without manual restarts.
 
 ---
 
-## Quick Start (Client Installation & Setup)
+## Installation (macOS Apple Silicon)
 
-### Prerequisites
-- **macOS** on Apple Silicon (`arm64` ships a prebuilt `cito-ui` binary out of the box; local `cito-ui.swift` edits automatically fall back to `/usr/bin/swiftc`).
-- **Node.js `>= 22.13.0`** (`^22.13.0 || ^24.0.0 || >=26.0.0`).
+Choose either of the two official installation methods. When `Cito.app` or `cito daemon` launches, it automatically installs `~/.cito/bin/{cito,cito-mcp,cito-claude-hook}` shims and configures detected Stable Agent Apps (`Codex` and `Pi`) out of the box—no manual terminal setup step is required.
 
-### 1. Install `@tefx/cito`
-
-Install globally so `cito`, `cito-mcp`, and `cito-claude-hook` are on your `PATH`:
+### Option 1: Homebrew (Recommended)
 
 ```sh
-npm install -g @tefx/cito
-# Or install directly from an annotated GitHub release tag:
-npm install -g github:Tefx/cito#v0.15.0
-
-cito --version
-# -> cito v0.15.0
+brew install tefx/tap/cito
 ```
 
-*(To upgrade later, run `npm install -g @tefx/cito@latest`; the running background daemon will be replaced automatically on the next command.)*
+This installs `Cito.app` and places `cito`, `cito-mcp`, and `cito-claude-hook` on your `PATH`:
 
-### 2. One-Command Setup (`cito setup`) or Manual Configuration
+```sh
+cito --version
+# -> cito v0.16.0
+```
 
-Out of the box (without `~/.cito/config.json`), Cito automatically runs an in-process **`local`** hub so sessions on the same Mac can discover and wake each other immediately.
+### Option 2: Download `Cito.app` for macOS
 
-To configure your installed agent harnesses (`Pi`, `Codex`, and optionally experimental `Claude`) and/or join a remote hub in one command:
+1. Download **[`Cito-macos-arm64.zip`](https://github.com/Tefx/cito/releases/latest)** from the latest GitHub Release.
+2. Move **`Cito.app`** into `/Applications` and open it.
+3. Click the Cito transceiver icon in the macOS menu bar and open **`Settings…` (`⌘,`)** to inspect or toggle **Agent Apps**, pair **Human Channels** (such as **Telegram**), or enable **Share Hub on Local Network**.
+
+---
+
+## Visual Settings (`⌘,`) & Network Configuration
+
+Out of the box (without `~/.cito/config.json`), Cito runs an in-process **`local`** hub so sessions on the same Mac can discover and wake each other immediately.
+
+Open **`Settings…` (`⌘,`)** from the Cito menu bar dropdown to configure:
+- **Tab 1 — `Agent Apps`**: One-click **`Configure`** for installed coding harnesses (`Codex`, `Pi`, and experimental `Claude Code`) plus **`Start Cito at Login`**.
+- **Tab 2 — `Human Channels`**: Configure your Telegram Bot Token (`scope: "hub"`), click **`🔗 Pair with Telegram`** to generate a 1-click `/start cito-xxxxxx` code, or click **`Send Test Message`**.
+- **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`✨ Paste from Invite`** / **`+ Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
+
+You can also inspect status or join hubs from the CLI when needed:
 
 ```sh
 # Inspect detected harnesses and hubs:
 cito setup --status
 
-# Configure local harnesses (Pi & Codex) for standalone single-Mac use:
-cito setup
-
-# Or join a Tailscale multi-Mac hub (auth: none) or team OIDC hub:
+# Join a Tailscale multi-Mac hub (auth: none) or team OIDC hub:
 cito setup --hub tailnet --url http://my-mac.tailnet.ts.net:4291
 cito setup --hub team --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id <your-client-id> --default
-
-# Enable experimental Claude Code integration:
-cito setup --enable claude
 ```
 
-You can also create or edit `~/.cito/config.json` manually:
+Or edit `~/.cito/config.json` directly:
 
-```sh
-mkdir -p ~/.cito && chmod 700 ~/.cito
-cat > ~/.cito/config.json <<'EOF'
+```json
 {
   "default_hub": "work",
   "hubs": {
@@ -75,15 +99,15 @@ cat > ~/.cito/config.json <<'EOF'
     }
   }
 }
-EOF
-chmod 600 ~/.cito/config.json
 ```
 
-### 3. Configure Your Agent Harness
+---
 
-All harnesses use the globally installed `cito-mcp` entrypoint (so you never need to edit your harness configuration files when upgrading Cito).
+## Agent Harness Configuration Reference
 
-#### Codex Desktop (`~/.codex/config.toml`)
+`Cito.app` and `Settings…` (`⌘,`) configure these files automatically, or you can inspect their entries manually:
+
+### Codex Desktop (`~/.codex/config.toml`)
 
 ```toml
 [mcp_servers.cito]
@@ -91,9 +115,9 @@ command = "cito-mcp"
 args = []
 ```
 
-#### Pi Coding Agent
+### Pi Coding Agent
 
-1. Install the standalone bridge extension (enables live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command) by adding `"npm:@tefx/cito"` to `packages` in `~/.pi/agent/settings.json`, or by copying the single zero-dependency file into `~/.pi/agent/extensions/`:
+1. Copy the standalone zero-dependency bridge extension (enables live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command) into `~/.pi/agent/extensions/`:
    ```sh
    mkdir -p ~/.pi/agent/extensions
    curl -fsSL https://raw.githubusercontent.com/Tefx/cito/main/plugins/pi/cito-bridge.ts \
@@ -111,7 +135,7 @@ args = []
    }
    ```
 
-#### Claude Code (`~/.claude/settings.json`)
+### Claude Code (`~/.claude/settings.json`)
 
 Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three turn-boundary `hooks` (`Stop`, `SessionStart`, `UserPromptSubmit`) to `~/.claude/settings.json`:
 
@@ -134,14 +158,15 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 }
 ```
 
-### 4. First Sign-In & Daily Usage
+---
+
+## Daily Usage
 
 1. **Sign In to OIDC Hubs**:
-   - When your agent starts `cito-mcp` (or you run `cito daemon`), the Cito icon appears in the macOS menu bar.
    - Click the Cito menu bar icon → under your OIDC hub (`work`), click **`Sign In…`** to complete browser PKCE login.
 2. **Start or Stop Listening**:
-   - **Menu Bar UI**: Under **`AVAILABLE SESSIONS`**, select the target hub pill (when multiple hubs are configured) and click **`+ Listen`** next to any open Pi, Codex, or Claude Code session.
-   - **Visibility (`Self` vs `Team`) & Hub Switching**: On any active session card, click **`🔒 Self`** to switch to **`👥 Team`** (`workspace`, visible to teammates on that hub), or click **`[ ● <hub> ]`** to migrate the session to another hub.
+   - **Menu Bar UI**: Under **`AVAILABLE SESSIONS`**, select the target hub pill (when multiple hubs are configured) and click **`+ Listen`** next to any open Pi, Codex, or Claude Code session (or your own `Human Node`).
+   - **Visibility (`Self` vs `Team`) & Hub Switching**: On any active card, click **`🔒 Self`** to switch to **`👥 Team`** (`workspace`, visible to teammates on that hub), or click **`[ ● <hub> ]`** to migrate the session to another hub.
    - **Pi Slash Command**:
      - `/cito` (toggle listening on the default hub)
      - `/cito on [--hub <hub>] [about...]` (private `self` scope)
@@ -181,13 +206,13 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 | `CITO_CLAUDE_CHANNEL` | `0`; set to `1` in Claude Code's MCP server `env` to enable the Claude wake channel. |
 | `CITO_CODEX_HOME` / `CITO_CLAUDE_HOME` | `~/.codex` / `~/.claude` (local session metadata directories). |
 
-**Optional Login LaunchAgent**: `cito-mcp` automatically starts `cito-daemon` on demand. If you want the menu bar icon running immediately at macOS login before any agent starts, configure a user LaunchAgent with `ProgramArguments: ["/usr/local/bin/cito-mcp", "daemon"]`, `RunAtLoad: true`, and `KeepAlive: { SuccessfulExit: false }`.
+**Optional Login LaunchAgent**: Enable **`Start Cito at Login`** in **`Settings…` (`⌘,`)** (or configure `~/Library/LaunchAgents/com.tefx.cito.daemon.plist`) so the menu bar transceiver icon runs immediately when you log into macOS.
 
 ---
 
 ## Custom Agent & Human Channel Plugins (`~/.cito/plugins/`)
 
-Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and Human Channel plugins (`human` [Desktop UI], `telegram` [Telegram Bot API]). To integrate another coding agent (`kind: "agent"`) or external human messaging channel (`kind: "human"`) without modifying Cito core, create `~/.cito/plugins/<id>/plugin.json` (and an optional `index.ts` or `index.js` implementing `HarnessAdapter` or `HumanChannelPlugin` from `@tefx/cito/plugin-sdk`):
+Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and Human Channel plugins (`human` [Desktop UI], `telegram` [Telegram Bot API]). To integrate another coding agent (`kind: "agent"`) or external human messaging channel (`kind: "human"`) without modifying Cito core, create `~/.cito/plugins/<id>/plugin.json` (and an optional `index.ts` or `index.js` implementing `HarnessAdapter` or `HumanChannelPlugin` from `@tefx/cito/plugin-sdk`). See the **[Plugin SDK Guide](https://tefx.github.io/cito/docs/plugins.html)** for full examples:
 
 ```json
 {
@@ -202,10 +227,11 @@ Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude`
 
 ---
 
-## Server Deployment & Architecture
+## Documentation, Server Deployment & Architecture
 
+- **Product Website & Guides**: **[https://tefx.github.io/cito/](https://tefx.github.io/cito/)** (**[Getting Started](https://tefx.github.io/cito/docs/guide.html)** · **[Plugin SDK](https://tefx.github.io/cito/docs/plugins.html)** · **[Architecture](https://tefx.github.io/cito/docs/architecture.html)**)
 - **Hub Server Deployment (`cito hub`)**: See **[`deploy/hub/README.md`](deploy/hub/README.md)** for standalone CLI and single-container Docker Compose deployment across `none`, `token`, and `oidc` authentication modes.
-- **Architecture, Protocol & Plugin SDK**: See **[`docs/DESIGN.md`](docs/DESIGN.md)** for module boundaries, symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` discovery, four-surface AppKit UI specifications (`cardMenu`, `DirectoryPanel`, `SettingsPanel`, `WakeBanner`), wire schemas, and custom `HarnessAdapter` / `HumanChannelPlugin` integration.
+- **Architecture & Protocol Specification**: See **[`docs/DESIGN.md`](docs/DESIGN.md)** and **[`docs/ROADMAP.md`](docs/ROADMAP.md)**.
 
 ---
 
