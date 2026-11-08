@@ -26,9 +26,10 @@ jobs:
       - name: Install dependencies, compile native binaries & run test suite
         run: |
           npm ci
+          npm install --prefix "$RUNNER_TEMP/cito-pi-host" --no-save --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.0
           npm run typecheck
           npm run compile
-          npm test
+          CITO_PI_PACKAGE_DIR="$RUNNER_TEMP/cito-pi-host/node_modules/@earendil-works/pi-coding-agent" npm test
           /usr/bin/ruby -c packaging/homebrew/cito.rb
 
       - name: Build relocatable Cito.app bundle
