@@ -220,6 +220,20 @@ describe("Stage 5 (v0.17.0): Zero-Node Core/Hub/UI, Native Plugin Manifests, Fir
     expect(codexAfterRemove).toBe(userToml);
     expect(codexAfterRemove).not.toContain("[mcp_servers.cito]");
 
+    // Also verify removing [mcp_servers.cito] when followed by a child sub-table [mcp_servers.cito.env] and another server
+    await writeFile(
+      codexTomlPath,
+      userToml +
+        '\n[mcp_servers.cito]\ncommand = "cito-mcp"\nargs = []\n\n[mcp_servers.cito.env]\nCITO_HUB_URL = "http://127.0.0.1:4291"\n\n[mcp_servers.after]\ncommand = "after-mcp"\n',
+      "utf8",
+    );
+    await removeSetup({ env, harnesses: ["codex"] });
+    const codexSubtableRemoved = await readFile(codexTomlPath, "utf8");
+    expect(codexSubtableRemoved).not.toContain("mcp_servers.cito");
+    expect(codexSubtableRemoved).toContain("[mcp_servers.custom]");
+    expect(codexSubtableRemoved).toContain("[mcp_servers.after]");
+    await writeFile(codexTomlPath, userToml, "utf8");
+
     await removeSetup({ env, harnesses: ["claude"] });
     const claudeAfterRemove = JSON.parse(await readFile(claudeSettingsPath, "utf8"));
     expect(claudeAfterRemove).toEqual(initialClaude);

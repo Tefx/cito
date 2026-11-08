@@ -320,23 +320,34 @@ function removeCodexToml(
     };
   }
   const lines = existing.split(/\r?\n/);
-  let citoSectionStart = -1;
-  let citoSectionLastKv = -1;
+  const removeLineIndices = new Set<number>();
+  let currentSecStart = -1;
+  let currentSecLastKv = -1;
   let inCitoSection = false;
   let hasDottedCito = false;
+
+  const flushCitoSection = () => {
+    if (inCitoSection && currentSecStart >= 0) {
+      for (let j = currentSecStart; j <= currentSecLastKv; j++) {
+        removeLineIndices.add(j);
+      }
+    }
+    inCitoSection = false;
+    currentSecStart = -1;
+    currentSecLastKv = -1;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const stripped = stripTomlComment(lines[i]!).trim();
     if (!stripped) continue;
     if (stripped.startsWith("[")) {
+      flushCitoSection();
       const headerInner = stripped.replace(/^\[+|\]+$/g, "").trim();
       const normalizedHeader = headerInner.replace(/["']/g, "").replace(/\s+/g, "");
-      if (normalizedHeader === "mcp_servers.cito") {
-        citoSectionStart = i;
-        citoSectionLastKv = i;
+      if (normalizedHeader === "mcp_servers.cito" || normalizedHeader.startsWith("mcp_servers.cito.")) {
+        currentSecStart = i;
+        currentSecLastKv = i;
         inCitoSection = true;
-      } else {
-        inCitoSection = false;
       }
       continue;
     }
@@ -344,33 +355,22 @@ function removeCodexToml(
     if (eqIdx <= 0) continue;
     const key = stripped.slice(0, eqIdx).trim().replace(/["']/g, "");
     if (inCitoSection) {
-      citoSectionLastKv = i;
+      currentSecLastKv = i;
     } else if (key.startsWith("mcp_servers.cito.")) {
       hasDottedCito = true;
+      removeLineIndices.add(i);
     }
   }
+  flushCitoSection();
 
-  if (citoSectionStart < 0 && !hasDottedCito) {
+  if (removeLineIndices.size === 0 && !hasDottedCito) {
     return {
       status: "unchanged",
       detail: "Codex config.toml has no [mcp_servers.cito] section",
     };
   }
 
-  let nextLines = lines;
-  if (citoSectionStart >= 0) {
-    nextLines = [...lines.slice(0, citoSectionStart), ...lines.slice(citoSectionLastKv + 1)];
-  }
-  if (hasDottedCito) {
-    nextLines = nextLines.filter(line => {
-      const stripped = stripTomlComment(line).trim();
-      if (!stripped || stripped.startsWith("[")) return true;
-      const eq = stripped.indexOf("=");
-      if (eq <= 0) return true;
-      const key = stripped.slice(0, eq).trim().replace(/["']/g, "");
-      return !key.startsWith("mcp_servers.cito.");
-    });
-  }
+  const nextLines = lines.filter((_, idx) => !removeLineIndices.has(idx));
   while (nextLines.length > 0 && nextLines.at(-1) === "") {
     nextLines.pop();
   }

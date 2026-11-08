@@ -463,10 +463,22 @@ fn transform_toml_remove(existing: Option<&str>) -> Result<(String, Option<Strin
         ));
     };
     let lines: Vec<&str> = existing.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
-    let mut sec_start: Option<usize> = None;
-    let mut sec_last_kv: usize = 0;
+    let mut remove_indices: HashSet<usize> = HashSet::new();
+    let mut cur_start: Option<usize> = None;
+    let mut cur_last_kv: usize = 0;
     let mut in_sec = false;
-    let mut has_dotted = false;
+
+    let flush_sec = |in_sec: &mut bool, cur_start: &mut Option<usize>, cur_last_kv: usize, remove_indices: &mut HashSet<usize>| {
+        if *in_sec {
+            if let Some(st) = *cur_start {
+                for j in st..=cur_last_kv {
+                    remove_indices.insert(j);
+                }
+            }
+        }
+        *in_sec = false;
+        *cur_start = None;
+    };
 
     for (i, &line) in lines.iter().enumerate() {
         let stripped = strip_toml_comment(line)?.trim();
@@ -474,17 +486,16 @@ fn transform_toml_remove(existing: Option<&str>) -> Result<(String, Option<Strin
             continue;
         }
         if stripped.starts_with('[') {
+            flush_sec(&mut in_sec, &mut cur_start, cur_last_kv, &mut remove_indices);
             let inner = stripped.trim_matches(&['[', ']'][..]).trim();
             let norm: String = inner
                 .chars()
                 .filter(|c| !matches!(c, '"' | '\'' | ' ' | '\t'))
                 .collect();
-            if norm == "mcp_servers.cito" {
-                sec_start = Some(i);
-                sec_last_kv = i;
+            if norm == "mcp_servers.cito" || norm.starts_with("mcp_servers.cito.") {
+                cur_start = Some(i);
+                cur_last_kv = i;
                 in_sec = true;
-            } else {
-                in_sec = false;
             }
             continue;
         }
@@ -495,14 +506,15 @@ fn transform_toml_remove(existing: Option<&str>) -> Result<(String, Option<Strin
                 .filter(|c| !matches!(c, '"' | '\''))
                 .collect();
             if in_sec {
-                sec_last_kv = i;
+                cur_last_kv = i;
             } else if key.starts_with("mcp_servers.cito.") {
-                has_dotted = true;
+                remove_indices.insert(i);
             }
         }
     }
+    flush_sec(&mut in_sec, &mut cur_start, cur_last_kv, &mut remove_indices);
 
-    if sec_start.is_none() && !has_dotted {
+    if remove_indices.is_empty() {
         return Ok((
             "unchanged".to_string(),
             None,
@@ -510,33 +522,11 @@ fn transform_toml_remove(existing: Option<&str>) -> Result<(String, Option<Strin
         ));
     }
 
-    let mut next_lines: Vec<&str> = if let Some(start) = sec_start {
-        let mut v = Vec::new();
-        v.extend_from_slice(&lines[..start]);
-        v.extend_from_slice(&lines[sec_last_kv + 1..]);
-        v
-    } else {
-        lines
-    };
-
-    if has_dotted {
-        next_lines.retain(|line| {
-            let Ok(s) = strip_toml_comment(line) else { return true };
-            let trimmed = s.trim();
-            if trimmed.is_empty() || trimmed.starts_with('[') {
-                return true;
-            }
-            if let Some(eq) = trimmed.find('=') {
-                let k: String = trimmed[..eq]
-                    .trim()
-                    .chars()
-                    .filter(|c| !matches!(c, '"' | '\''))
-                    .collect();
-                return !k.starts_with("mcp_servers.cito.");
-            }
-            true
-        });
-    }
+    let mut next_lines: Vec<&str> = lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, line)| (!remove_indices.contains(&idx)).then_some(line))
+        .collect();
 
     while next_lines.last() == Some(&"") {
         next_lines.pop();
