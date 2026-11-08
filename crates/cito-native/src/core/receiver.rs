@@ -61,18 +61,27 @@ fn plugin_request_owned(
             let renewal_due = elapsed.saturating_sub(last_renew) >= Duration::from_secs(10);
             if !checked_remote || renewal_due {
                 if let (Some((client, claim)), Some((state, row))) = (renew, fence) {
-                    let remote = client.kv_get(string(row, "listener_id"))?.map(|(r, _)| r);
-                    let valid = remote.as_ref().is_some_and(|r| {
-                        r["state"] == "ACTIVE"
-                            && r["binding_generation"] == row["binding_generation"]
-                            && r["owner_token"] == row["owner_token"]
-                            && r["channels"]
-                                .get(string(claim, "channel_id"))
-                                .is_none_or(|ch| ch["state"] == "ACTIVE")
-                    });
-                    if !valid {
+                    let channel = string(claim, "channel_id");
+                    let Some((mut remote, revision)) =
+                        client.kv_get(string(row, "listener_id"))?.filter(|(r, _)| {
+                            r["state"] == "ACTIVE"
+                                && r["binding_generation"] == row["binding_generation"]
+                                && r["owner_token"] == row["owner_token"]
+                                && r["channels"]
+                                    .get(channel)
+                                    .is_none_or(|ch| ch["state"] == "ACTIVE")
+                        })
+                    else {
                         state.fence_listener_for(row, "fenced_before_dispatch")?;
                         return Err("STALE_GENERATION: Remote listener changed during wake".into());
+                    };
+                    if renewal_due {
+                        if let Some(ch) = remote["channels"].get_mut(channel) {
+                            let now = now_ms();
+                            ch["updated_at_ms"] = json!(now);
+                            remote["updated_at_ms"] = json!(now);
+                            client.kv_save(string(row, "listener_id"), &remote, Some(revision))?;
+                        }
                     }
                 }
                 checked_remote = true;

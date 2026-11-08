@@ -1032,7 +1032,31 @@ impl HubEngine {
         Ok(result)
     }
     fn notify_ack(&self, p: &Value) -> Result<(), String> {
-        let frames=self.inner.db.transaction(|c|{let Some(node)=kv_row(c,s(p,"node_id"))?else{return Ok(Vec::new())};let mut out=Vec::new();for b in c.query("SELECT * FROM hub_human_channels WHERE principal_id=? AND enabled=1",&[node["principal_id"].clone()])?{let mut ext=Vec::new();for id in ids(p)?{for row in c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=?",&[b["plugin_id"].clone(),node["principal_id"].clone(),json!(id)])?{ext.push(row["external_msg_id"].clone())}}out.push((s(&b,"plugin_id").to_owned(),json!({"op":"on_acked","principal_id":node["principal_id"],"signal_ids":p["signal_ids"],"acked_at_ms":now_ms(),"external_msg_ids":ext,"user_config":parse(&b,"user_config_json")})));}Ok(out)})?;
+        let frames = self.inner.db.transaction(|c| {
+            let Some(node) = kv_row(c, s(p, "node_id"))? else {
+                return Ok(Vec::new());
+            };
+            let mut out = Vec::new();
+            for b in c.query("SELECT * FROM hub_human_channels WHERE enabled=1", &[])? {
+                if !principal_ids_equal(s(&b, "principal_id"), s(&node, "principal_id")) {
+                    continue;
+                }
+                let mut ext = Vec::new();
+                for id in ids(p)? {
+                    for row in c.query(
+                        "SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=?",
+                        &[b["plugin_id"].clone(), b["principal_id"].clone(), json!(id)],
+                    )? {
+                        ext.push(row["external_msg_id"].clone());
+                    }
+                }
+                out.push((
+                    s(&b, "plugin_id").to_owned(),
+                    json!({"op":"on_acked","principal_id":b["principal_id"],"signal_ids":p["signal_ids"],"acked_at_ms":now_ms(),"external_msg_ids":ext,"user_config":parse(&b,"user_config_json")}),
+                ));
+            }
+            Ok(out)
+        })?;
         for (id, frame) in frames {
             let proc = self
                 .inner
@@ -1425,10 +1449,10 @@ fn max_seq(c: &Connection) -> Result<i64, String> {
     .unwrap_or(0))
 }
 fn find_human(c: &Connection, pid: &str) -> Result<Option<String>, String> {
-    for row in c.query(
-        &format!("{KV_SELECT} WHERE principal_id=? ORDER BY revision DESC"),
-        &[json!(pid)],
-    )? {
+    for row in c.query(&format!("{KV_SELECT} ORDER BY revision DESC"), &[])? {
+        if !principal_ids_equal(s(&row, "principal_id"), pid) {
+            continue;
+        }
         let v = parse(&row, "value");
         if v["harness"] == "human" && v["session_id"] == "default" {
             return Ok(Some(s(&row, "key").into()));

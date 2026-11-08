@@ -554,6 +554,125 @@ fn reservations_retry_holes_and_record_all_chunks() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
+fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        e.set_plugin_roots(&[root.clone()]).unwrap();
+        e.rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"}}),
+            None,
+        )
+        .unwrap();
+        for (binding_pid, node_pid, signal) in [
+            (
+                "https://id.example.com#alice",
+                "oidc:https://id.example.com|alice",
+                "legacy-binding",
+            ),
+            (
+                "oidc:https://id.example.com|bob",
+                "https://id.example.com#bob",
+                "canonical-binding",
+            ),
+        ] {
+            let owner = json!({"principal_id":binding_pid,"owner_user":"alice"});
+            e.rpc(
+                "human_channels_configure",
+                &json!({"plugin_id":"fixture","enabled":true,"user_config":{"address":signal}}),
+                Some(&owner),
+            )
+            .unwrap();
+            let old_node = listener_id(binding_pid, "human", "default");
+            let mut registration = e
+                .inner
+                .db
+                .transaction(|c| {
+                    Ok(parse(
+                        &kv_row(c, &old_node)?.ok_or("Missing Human node")?,
+                        "value",
+                    ))
+                })
+                .unwrap();
+            let node = listener_id(node_pid, "human", "default");
+            registration["listener_id"] = json!(node);
+            registration["principal_id"] = json!(node_pid);
+            e.rpc("kv_delete", &json!({"key":old_node}), None).unwrap();
+            e.rpc(
+                "kv_put",
+                &json!({"key":node,"data_b64":encoded(&registration)}),
+                None,
+            )
+            .unwrap();
+            // A newer unrelated Human node must not capture this binding's replay.
+            let mut unrelated = registration.clone();
+            unrelated["principal_id"] = json!("oidc:https://id.example.com|unrelated");
+            unrelated["listener_id"] = json!("unrelated-human");
+            e.rpc(
+                "kv_put",
+                &json!({"key":"unrelated-human","data_b64":encoded(&unrelated)}),
+                None,
+            )
+            .unwrap();
+            send(&e, &node, signal);
+            wait_for(|| {
+                !e.inner.db.query(
+                "SELECT 1 AS n FROM hub_channel_deliveries WHERE principal_id=? AND signal_id=? AND status='delivered'",
+                &[json!(binding_pid),json!(signal)],
+            ).unwrap().is_empty()
+            });
+            assert_eq!(
+                e.rpc(
+                    "signal_ack",
+                    &json!({"node_id":node,"signal_ids":[signal]}),
+                    Some(&owner)
+                )
+                .unwrap()["acked_count"],
+                1
+            );
+            wait_for(|| {
+                std::fs::read_to_string(root.join("fixture/frames.jsonl"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                    .any(|f| f["op"] == "on_acked" && f["signal_ids"] == json!([signal]))
+            });
+        }
+    }));
+    // Stop the persistent child even when a behavioral assertion fails.
+    e.shutdown();
+    let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap_or_default();
+    std::fs::remove_dir_all(dir).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    let acks: Vec<Value> = frames
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|f| f["op"] == "on_acked")
+        .collect();
+    assert_eq!(acks.len(), 2);
+    for (ack, signal, pid) in [
+        (&acks[0], "legacy-binding", "https://id.example.com#alice"),
+        (
+            &acks[1],
+            "canonical-binding",
+            "oidc:https://id.example.com|bob",
+        ),
+    ] {
+        let mut external = ack["external_msg_ids"].as_array().unwrap().clone();
+        external.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        assert_eq!(
+            external,
+            vec![json!(format!("{signal}-1")), json!(format!("{signal}-2"))]
+        );
+        assert_eq!(ack["principal_id"], pid);
+        assert_eq!(ack["user_config"]["address"], signal);
+    }
+}
+#[test]
 fn reply_dedup_target_validation_and_ack_commit_together() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

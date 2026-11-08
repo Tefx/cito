@@ -448,13 +448,23 @@ fn single_effect_completion_stays_dispatched_and_preserves_concurrent_inbox_ack(
 }
 
 #[test]
-fn ten_second_renewal_extends_hub_and_local_leases_while_real_child_is_owned() -> Result<(), String>
-{
+fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_owned(
+) -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s")?;
     let worker = f.worker(f.plugin(WAIT));
     wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
     let db = f.hub_db()?;
+    let id = string(&f.row, "listener_id");
+    let channel = "host:fixture";
+    let (mut registration, revision) = f.client.kv_get(id)?.ok_or("Missing registration")?;
+    let initial_heartbeat = now_ms();
+    // Model a wake approaching the channel's TTL without a minute-long sleep.
+    registration["channels"][channel]["updated_at_ms"] = json!(initial_heartbeat - 55_000);
+    registration["updated_at_ms"] = json!(initial_heartbeat - 55_000);
+    registration["channels"]["sibling:fixture"] = json!({"state":"ACTIVE","updated_at_ms":1});
+    let sibling = registration["channels"]["sibling:fixture"].clone();
+    f.client.kv_save(id, &registration, Some(revision))?;
     let initial = db.query("SELECT claim_until_ms FROM hub_signals", &[])?[0]["claim_until_ms"]
         .as_u64()
         .ok_or("Missing claim deadline")?;
@@ -468,6 +478,17 @@ fn ten_second_renewal_extends_hub_and_local_leases_while_real_child_is_owned() -
                     .ok()
                     .flatten()
                     .is_some_and(|r| r["lease_until_ms"].as_u64().unwrap_or(0) >= initial + 9000)
+                && f.client.kv_get(id).ok().flatten().is_some_and(|(r, _)| {
+                    r["channels"][channel]["updated_at_ms"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        >= initial_heartbeat + 9000
+                        && r["updated_at_ms"] == r["channels"][channel]["updated_at_ms"]
+                        && r["channels"]["sibling:fixture"] == sibling
+                        && r["binding_generation"] == registration["binding_generation"]
+                        && r["owner_token"] == registration["owner_token"]
+                        && super::super::lease::evaluate_node_lease(&r, now_ms()) == "ACTIVE"
+                })
         },
         Duration::from_secs(13),
     );
