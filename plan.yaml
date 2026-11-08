@@ -6179,7 +6179,7 @@ phases:
   name: 'V21 Stage 5 (v0.17.0): Core/Hub/UI Node.js Removal, Native Harness Plugin
     Manifests, First-Launch Consent, Surgical Disconnect/Uninstall, Homebrew/Cito.app
     Distribution & Deep Code-Hygiene Audit'
-  status: pending
+  status: done
   depends_on:
   - v20
   steps:
@@ -6187,7 +6187,7 @@ phases:
     name: 'Implement Stage 5 (v0.17.0) Core/Hub/UI Node.js Removal, Native Harness
       Plugin Manifests, First-Launch Consent, Surgical Disconnect/Uninstall & Homebrew/Cito.app
       Distribution [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: done
     description: "Implement Stage 5 (v0.17.0) per docs/DESIGN.md (§8) and docs/ROADMAP.md\
       \ (Stage 5):\n1. Complete Core/Hub/UI Node.js runtime removal: bin/cito (crates/cito-native)\
       \ and bin/cito-ui (src/macos/cito-ui.swift) execute daemon, hub, mcp-stdio,\
@@ -6232,10 +6232,27 @@ phases:
     - src/macos/cito-ui.swift
     - plugins/pi/cito-bridge.ts
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-07T21:20:51.762011Z'
+    done_at: '2026-11-07T22:35:20.385156+00:00'
+    evidence: "Artifact:\n- Commit: c369081b7612809826cf446eb45598a6aaad4052 (implemented\
+      \ by uiux-designer on openrouter/google/gemini-4-argon while openai OAuth is\
+      \ unavailable, and fast-forwarded onto main)\n\nVerification:\n- Run: npm run\
+      \ typecheck && npm run compile && npm test && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ -> exit 0 (33 test files, 260 tests passed, 0 failed, 0 skipped; Syntax OK)\n\
+      - Clean-Room Zero-Node E2E tests (tests/setup/distribution.test.ts): PATH='/usr/bin:/bin:/usr/sbin:/sbin',\
+      \ CITO_NODE_BIN='' verified for Cito.app/Contents/MacOS/Cito, cito hub, cito\
+      \ setup, cito-mcp, and cito-claude-hook\n- Mechanical & storage checks:\n  -\
+      \ crates/cito-native/target removed after compilation\n  - Zero hardcoded agent\
+      \ or channel names in crates/cito-native/src/, src/, and src/macos/cito-ui.swift\n\
+      \  - Zero jumpUrlTemplate / expandJumpUrl / openJumpUrl in src/ plugins/\n \
+      \ - [\\p{Script=Han}] across repository: 0 matches\n  - \\b(rda|casdoor|rcatwin|keppel|mingchen)\\\
+      b across repository: 0 matches\n\nSpec link:\n- docs/DESIGN.md (§8), docs/ROADMAP.md\
+      \ (Stage 5 v0.17.0), and AGENTS.md"
   - id: v21.hygiene
     name: 'Deep Iterative Code-Hygiene Audit & Fix Across Full Repository (Rust, Swift,
       Plugins, Site, Docs & Tests) [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: done
     description: 'Load /Users/tefx/.pi/agent/skills/code-hygiene/SKILL.md and execute
       a deep, multi-round iterative code-hygiene audit and fix cycle across the entire
       repository (crates/cito-native/, src/, plugins/, site/, docs/, packaging/, .github/workflows/,
@@ -6265,10 +6282,31 @@ phases:
     depends_on:
     - v21.impl
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-07T22:35:20.875318Z'
+    done_at: '2026-11-07T22:52:31.018413+00:00'
+    evidence: "Artifact:\n- Commits: 135d3cfd15447f86e46f0e939095e720a794c4c3 and\
+      \ 54a8fb0325f5630ad5bef8f83481a9e500c238a5 (fast-forwarded onto main)\n\nVerification:\n\
+      - Run: npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb -> exit 0 (33 test files, 258 tests passed, 0 failed,\
+      \ 0 skipped; Syntax OK)\n- [REQUIRES_SKILL: code-hygiene] Full-Repository Iterative\
+      \ Convergence:\n  - Round 1: structural-auditor (01a1b829-d5a7-7507-87ac-5714a71fae4d)\
+      \ and uiux-auditor (01a1b829-d553-7149-b3ba-dfb69acc55a1) audited the full repository\
+      \ across all 5 lenses, identifying 3 dead-code/unused-import trims (read_json_map\
+      \ in crates/cito-native/src/setup.rs, hub_name_for_remove in crates/cito-native/src/daemon.rs,\
+      \ parseArgs import in plugins/pi/cito-bridge.ts) and 4 wiring/completeness/consolidation\
+      \ items (dotted-key TOML --force preservation in setup.rs, native cito inbox\
+      \ / cito find / sqlite-cli thread fallback parity in daemon.rs, first-launch\
+      \ explicit consent copy in site/index.html & site/docs/guide.html, and cancel_uninstall_all\
+      \ control ID consolidation in src/macos/cito-ui.swift).\n  - Round 2: All 7\
+      \ findings resolved in 54a8fb0325f5630ad5bef8f83481a9e500c238a5 with discriminating\
+      \ behavioral tests added in tests/setup/distribution.test.ts and tests/site/site.test.ts,\
+      \ converging to Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES.\n\nSpec link:\n\
+      - docs/DESIGN.md (§8), docs/ROADMAP.md (Stage 5 v0.17.0), and AGENTS.md"
   - id: v21.gate
     name: 'V21 Stage 5 (v0.17.0) Final Acceptance, Clean-Room Zero-Node E2E, Distribution
       & Code-Hygiene Gate [REQUIRES_SKILL: code-hygiene]'
-    status: pending
+    status: done
     description: 'Independent final verification gate for Stage 5 (v0.17.0):
 
       1. Run npm run typecheck && npm run compile && npm test and verify 100% pass
@@ -6293,3 +6331,61 @@ phases:
     depends_on:
     - v21.hygiene
     agent: verifier
+    claimed_by: verifier
+    claimed_at: '2026-11-07T22:52:31.487824Z'
+    done_at: '2026-11-07T22:57:08.962492+00:00'
+    evidence: 'Gate verdict: PASS (verifier.report.v2 from uiux-auditor + structural-auditor
+      validated via review_report_validator.py --kind verifier --binding /tmp/cito-v21-gate/binding.json:
+      valid=true, binding_checked=true, evidence_disposition=POSITIVE_EVIDENCE, target_ref=git:77734b7a44d323647961b8b34061f461672858c5).
+
+      Test output (npm run typecheck && npm run compile && npm test && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb): exit 0 (33 test files, 258 tests passed, 0 failed,
+      0 skipped; Syntax OK).
+
+      Mechanical regex & storage verification:
+
+      - package.json dependencies: [''@modelcontextprotocol/sdk'', ''jose'', ''zod'']
+      (0 NATS packages)
+
+      - crates/cito-native/target: absent (false)
+
+      - packaging/homebrew/cito.rb: Syntax OK, version ''0.17.0'', 0 depends_on ''node''
+
+      - LICENSE and .github/workflows/release.yml: present (true)
+
+      - grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/ src/: 0 matches
+
+      - grep -rn ''jumpUrlTemplate\|expandJumpUrl\|openJumpUrl'' src/ plugins/ crates/:
+      0 matches
+
+      - [\p{Script=Han}] in src/, plugins/, crates/, docs/, site/, packaging/, README.md,
+      AGENTS.md, deploy/: 0 matches
+
+      - \b(rda|casdoor|rcatwin|keppel|mingchen)\b in src/, plugins/, crates/, docs/,
+      site/, packaging/, README.md, AGENTS.md, deploy/, tests/: 0 matches
+
+      - Non-node imports in plugins/pi/cito-bridge.ts: 0 matches
+
+      Requirement results:
+
+      - V21-1-CORE-HUB-UI-ZERO-NODE-EXECUTION: PROVEN (crates/cito-native/src/{main,plugins,setup,hub,daemon}.rs
+      compiled to 636,608-byte bin/cito-native-darwin-arm64 executing daemon, hub,
+      mcp-stdio, hook, setup, listen, unlisten, find, send, and inbox with zero Node.js
+      dependency; verified by Clean-Room PATH=''/usr/bin:/bin:/usr/sbin:/sbin'' CITO_NODE_BIN=''''
+      E2E tests in tests/setup/distribution.test.ts).
+
+      - V21-2-NATIVE-HARNESS-MANIFESTS-CONSENT-AND-SURGICAL-DISCONNECT: PROVEN (plugins/pi/cito-bridge.ts
+      pi.registerMcpServer?.(''cito'', ...) + extensions/cito-bridge.ts + legacy ''npm:@tefx/cito''
+      cleanup, .agents/plugins/marketplace.json + plugins/codex/.codex-plugin/plugin.json
+      + plugins/codex/.mcp.json + surgical [mcp_servers.cito] & dotted-key preservation,
+      plugins/claude/.claude-plugin/plugin.json + plugins/claude/.mcp.json + plugins/claude/hooks/hooks.json
+      + surgical mcpServers.cito & cito-claude-hook removal, First-Launch Explicit
+      Consent, per-app remove_app:<id> Disconnect, and global open_uninstall_confirm
+      -> uninstall_purge_data -> confirm_uninstall_all / cancel_uninstall_all).
+
+      - V21-3-HOMEBREW-DISTRIBUTION-V0-17-0-AND-FULL-REPO-CODE-HYGIENE: PROVEN (packaging/homebrew/cito.rb
+      without depends_on ''node'', resolveStablePackageRoot /Cellar/<name>/<ver> ->
+      /opt/<name>, .github/workflows/release.yml, root MIT LICENSE, CITO_VERSION =
+      ''0.17.0'', and Round 2 full-repository code-hygiene convergence Completeness:
+      CLEAN | Simplicity: ZERO_NEW_ISSUES).'

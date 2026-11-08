@@ -15,6 +15,14 @@ export interface PluginFieldDescriptor {
   placeholder?: string;
 }
 
+export type PluginProtocol =
+  | "socket-bridge"
+  | "sqlite-cli"
+  | "transcript-hook"
+  | "desktop-ui"
+  | "http-bot-poll"
+  | "external-driver";
+
 export interface PluginManifest {
   id: string;
   kind?: "agent" | "human";
@@ -23,6 +31,9 @@ export interface PluginManifest {
   sfSymbol?: string;
   tint?: AdapterTint;
   cliFlag?: boolean;
+  protocol?: PluginProtocol;
+  driver?: string;
+  native?: Record<string, unknown>;
   fields?: readonly PluginFieldDescriptor[];
   pairing?: { supported: boolean; actionLabel?: string };
 }
@@ -57,6 +68,7 @@ export interface HarnessSetupDescriptor {
   inspect(env: NodeJS.ProcessEnv): Promise<{ installed: boolean; configured: boolean; paths: string[] }>;
   plan(env: NodeJS.ProcessEnv, options: { force?: boolean }): Promise<SetupFileAction[]>;
   apply(env: NodeJS.ProcessEnv, options: { force?: boolean }): Promise<SetupFileAction[]>;
+  remove(env: NodeJS.ProcessEnv): Promise<SetupFileAction[]>;
 }
 
 export interface HarnessCliDescriptor {

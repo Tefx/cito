@@ -1,0 +1,13 @@
+{
+  "name": "cito",
+  "version": "0.17.0",
+  "description": "Cross-harness agent and human signaling network for macOS",
+  "plugins": [
+    {
+      "name": "cito",
+      "description": "Discover, message, and wake sessions across Codex, Claude Code, Pi, and Human channels",
+      "version": "0.17.0",
+      "source": "./plugins/codex"
+    }
+  ]
+}

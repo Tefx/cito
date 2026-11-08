@@ -1,7 +1,21 @@
 {
   "id": "pi",
+  "kind": "agent",
   "displayName": "Pi",
   "tier": "stable",
   "sfSymbol": "terminal.fill",
-  "tint": "indigo"
+  "tint": "indigo",
+  "protocol": "socket-bridge",
+  "native": {
+    "pidKeys": [
+      "pi_pid"
+    ],
+    "homeEnv": "CITO_PI_HOME",
+    "defaultHome": "~/.pi/agent",
+    "extensionRelPath": "extensions/cito-bridge.ts",
+    "extensionSource": "cito-bridge.ts",
+    "mcpJsonRelPath": "mcp/global.mcp.json",
+    "legacySettingsRelPath": "settings.json",
+    "legacyPackageSpec": "npm:@tefx/cito"
+  }
 }

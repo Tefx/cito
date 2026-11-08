@@ -109,8 +109,8 @@ describe("cito setup engine and plugin setup descriptors", () => {
     expect(updatedToml).toContain("# Trailing comment");
     expect(updatedToml).toContain('[mcp_servers.cito]\ncommand = "cito-mcp"\nargs = []\n');
 
-    const piSettings = JSON.parse(await readFile(join(piDir, "settings.json"), "utf8"));
-    expect(piSettings.packages).toContain("npm:@tefx/cito");
+    const piExt = await readFile(join(piDir, "extensions/cito-bridge.ts"), "utf8");
+    expect(piExt).toContain("registerMcpServer");
     const piMcp = JSON.parse(await readFile(join(piDir, "mcp/global.mcp.json"), "utf8"));
     expect(piMcp.mcpServers.cito).toEqual({ command: "cito-mcp", args: [] });
 
@@ -398,7 +398,7 @@ describe("cito setup engine and plugin setup descriptors", () => {
       timeout: 5000,
     });
     expect(citoVerRes.status).toBe(0);
-    expect(citoVerRes.stdout).toBe("cito v0.16.0\n");
+    expect(citoVerRes.stdout).toBe("cito v0.17.0\n");
 
     // 2. LaunchAgent management via API and CLI (--login-item / --no-login-item)
     expect((await inspectLaunchAtLogin({ env })).enabled).toBe(false);

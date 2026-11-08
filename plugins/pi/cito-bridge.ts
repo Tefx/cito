@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -26,6 +26,7 @@ interface NotificationTheme {
 export type NotificationRenderer = (message: { content: unknown }, options: { expanded: boolean; outputPad?: number },
   theme: NotificationTheme) => { render(width: number): string[]; invalidate(): void };
 export interface BridgeAPI {
+  registerMcpServer?(name: string, config: { command: string; args?: string[]; env?: Record<string, string> }): void;
   registerMessageRenderer?(customType: string, renderer: NotificationRenderer): void;
   registerCommand?(name: string, options: BridgeCommandOptions): void;
   on(event: "session_start" | "session_shutdown" | "session_info_changed" | "session_tree",
@@ -82,6 +83,13 @@ const notificationRenderer: NotificationRenderer = (message, options, theme) => 
 
 export default function citoBridge(pi: BridgeAPI): void {
   pi.registerMessageRenderer?.("cito-notification", notificationRenderer);
+  const stateDir = process.env.CITO_STATE_DIR ?? join(homedir(), ".cito");
+  const resolvedStateDir = stateDir === "~" ? homedir() : stateDir.startsWith("~/")
+    ? join(homedir(), stateDir.slice(2)) : resolve(stateDir);
+  const shim = join(resolvedStateDir, "bin", "cito-mcp");
+  try {
+    pi.registerMcpServer?.("cito", { command: existsSync(shim) ? shim : "cito-mcp", args: [] });
+  } catch {}
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
   let activeBadge: string | undefined;
@@ -90,9 +98,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   let server: Server | undefined;
   let ownsSocket = false;
   const connections = new Set<Socket>();
-  const stateDir = process.env.CITO_STATE_DIR ?? join(homedir(), ".cito");
-  const directory = join(stateDir === "~" ? homedir() : stateDir.startsWith("~/")
-    ? join(homedir(), stateDir.slice(2)) : resolve(stateDir), "sockets");
+  const directory = join(resolvedStateDir, "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
   const subcommands = ["on", "team", "off"];
   const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;

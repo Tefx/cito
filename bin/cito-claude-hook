@@ -1,4 +1,5 @@
-#!/usr/bin/env node
+#!/bin/sh
+':' //; s="$0"; while [ -L "$s" ]; do d="$(cd -P "$(dirname "$s")" && pwd)"; t="$(readlink "$s")"; case "$t" in /*) s="$t" ;; *) s="$d/$t" ;; esac; done; b="$(cd -P "$(dirname "$s")" && pwd)"; n="$b/cito-native-darwin-arm64"; if [ "${CITO_DISABLE_NATIVE:-0}" != "1" ] && [ -x "$n" ]; then export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$b/../plugins}"; export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"; exec "$n" hook "$@"; fi; exec "${CITO_NODE_BIN:-node}" "$s" "$@"
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -10,7 +11,7 @@ if (
   process.env.CITO_DISABLE_NATIVE !== "1" &&
   existsSync(nativeBin)
 ) {
-  const res = spawnSync(nativeBin, ["claude-hook", ...process.argv.slice(2)], {
+  const res = spawnSync(nativeBin, ["hook", ...process.argv.slice(2)], {
     stdio: "inherit",
     env: {
       ...process.env,

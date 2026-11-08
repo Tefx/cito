@@ -36,7 +36,7 @@ Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` notificat
 
 ## Installation (macOS Apple Silicon)
 
-Choose either of the two official installation methods. When `Cito.app` or `cito daemon` launches, it automatically installs `~/.cito/bin/{cito,cito-mcp,cito-claude-hook}` shims and configures detected Stable Agent Apps (`Codex` and `Pi`) out of the box—no manual terminal setup step is required.
+Choose either of the two official installation methods. `Cito.app` and `cito` run natively with zero Node.js dependency. On first launch, `Cito.app` opens `Settings…` (`⌘,`) on the `Agent Apps` tab so you can connect `Codex`, `Pi`, or `Claude Code` with one click (and disconnect or uninstall cleanly at any time).
 
 ### Option 1: Homebrew (Recommended)
 
@@ -48,7 +48,7 @@ This installs `Cito.app` and places `cito`, `cito-mcp`, and `cito-claude-hook` o
 
 ```sh
 cito --version
-# -> cito v0.16.0
+# -> cito v0.17.0
 ```
 
 ### Option 2: Download `Cito.app` for macOS

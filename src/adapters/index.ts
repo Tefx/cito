@@ -54,6 +54,9 @@ const pluginManifestSchema = z.object({
   sfSymbol: z.string().trim().min(1).max(64).optional(),
   tint: z.enum(ADAPTER_TINTS).optional(),
   cliFlag: z.boolean().optional(),
+  protocol: z.enum(["socket-bridge", "sqlite-cli", "transcript-hook", "desktop-ui", "http-bot-poll", "external-driver"]).optional(),
+  driver: z.string().trim().min(1).max(256).optional(),
+  native: z.record(z.string(), z.unknown()).optional(),
   fields: z.array(pluginFieldSchema).optional(),
   pairing: z.object({
     supported: z.boolean(),

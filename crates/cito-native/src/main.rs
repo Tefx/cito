@@ -1,19 +1,24 @@
+mod daemon;
+mod hub;
+mod plugins;
+mod setup;
+
+use plugins::{
+    ensure_daemon, http_post_mcp, load_native_config, now_ms, random_uuid_v4, LoadedPlugins,
+    NativeConfig, CITO_VERSION,
+};
 use serde_json::{json, Map, Value};
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
-const CITO_VERSION: &str = "0.16.0";
 const DRAIN_SUFFIX: &str = ".draining-";
 const TITLE_TAIL_BYTES: u64 = 128 * 1024;
 const TITLE_MAX_CHARS: usize = 200;
@@ -21,312 +26,7 @@ const TITLE_CACHE_ENTRIES: usize = 32;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TRACKED_BATCHES: usize = 200;
 
-const HOOK_USAGE: &str = "Usage: cito-claude-hook (reads a Claude Code hook payload on stdin)\n\
-Install on Stop, SessionStart and UserPromptSubmit to deliver queued Cito wakes.\n";
-
-#[derive(Clone, Debug)]
-struct NativeConfig {
-    state_dir: PathBuf,
-    daemon_port: u16,
-    claude_home: PathBuf,
-    enable_claude_channel: bool,
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn random_uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        let t = now_ms().to_le_bytes();
-        let p = std::process::id().to_le_bytes();
-        bytes[0..8].copy_from_slice(&t);
-        bytes[8..12].copy_from_slice(&p);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
-}
-
-fn system_home_dir() -> String {
-    if let Ok(h) = env::var("HOME") {
-        let t = h.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if !pw.is_null() && !(*pw).pw_dir.is_null() {
-            if let Ok(s) = std::ffi::CStr::from_ptr((*pw).pw_dir).to_str() {
-                if !s.is_empty() {
-                    return s.to_string();
-                }
-            }
-        }
-    }
-    "/tmp".to_string()
-}
-
-fn expand_home_dir(value: &str, name: &str, base_home: Option<&str>) -> Result<PathBuf, String> {
-    if value.trim().is_empty() {
-        return Err(format!("{name} must not be empty"));
-    }
-    let home = match base_home.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(h) => h.to_string(),
-        None => system_home_dir(),
-    };
-    let expanded = if value == "~" {
-        PathBuf::from(&home)
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        PathBuf::from(&home).join(rest)
-    } else {
-        PathBuf::from(value)
-    };
-    if expanded.is_absolute() {
-        Ok(expanded)
-    } else {
-        Ok(env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(expanded))
-    }
-}
-
-fn is_checked_cito_env_key(key: &str) -> bool {
-    if !key.starts_with("CITO_") {
-        return false;
-    }
-    let rest = &key["CITO_".len()..];
-    if matches!(rest, "STATE_DIR" | "CONFIG_PATH" | "OPEN_BIN") {
-        return true;
-    }
-    if let Some(prefix) = rest.strip_suffix("_HOME").or_else(|| rest.strip_suffix("_BIN")) {
-        return !prefix.is_empty()
-            && prefix
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    }
-    false
-}
-
-fn validate_hub_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > 32 {
-        return false;
-    }
-    if !(bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit()) {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-}
-
-fn validate_nats_url(raw: &str) -> Result<(), String> {
-    let trimmed = raw.trim();
-    if trimmed == "local" || trimmed == "local://" {
-        return Ok(());
-    }
-    let Some((scheme, rest)) = raw.split_once("://") else {
-        return Err("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string());
-    };
-    if !matches!(scheme, "http" | "https" | "nats" | "ws" | "wss") {
-        return Err(
-            "CITO_NATS_URL must use local://, http://, https://, nats://, ws:// or wss:// without credentials"
-                .to_string(),
-        );
-    }
-    if rest.is_empty() || rest.contains('@') || rest.contains('?') || rest.contains('#') {
-        return Err(
-            "CITO_NATS_URL must use local://, http://, https://, nats://, ws:// or wss:// without credentials"
-                .to_string(),
-        );
-    }
-    let host_port = rest.split('/').next().unwrap_or("");
-    if host_port.is_empty() {
-        return Err("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string());
-    }
-    if let Some((_, port_str)) = host_port.rsplit_once(':') {
-        if !port_str.is_empty() && !port_str.ends_with(']') {
-            let p = port_str
-                .parse::<u32>()
-                .map_err(|_| "CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string())?;
-            if !(1..=65535).contains(&p) {
-                return Err("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_https_issuer(raw: &str) -> Result<(), String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("CITO_OIDC_ISSUER is required in oidc mode".to_string());
-    }
-    let is_https = trimmed.starts_with("https://");
-    let is_loopback_http =
-        trimmed.starts_with("http://127.0.0.1:") || trimmed == "http://127.0.0.1" || trimmed.starts_with("http://127.0.0.1/");
-    if (!is_https && !is_loopback_http) || trimmed.contains('?') || trimmed.contains('#') || trimmed.contains('@') {
-        return Err(
-            "CITO_OIDC_ISSUER must use HTTPS (http://127.0.0.1 is allowed for tests), without credentials, query or fragment"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn load_native_config() -> Result<NativeConfig, String> {
-    for (k, v) in env::vars() {
-        if is_checked_cito_env_key(&k) && v.trim().is_empty() {
-            return Err(format!("{k} must not be empty"));
-        }
-    }
-    if let Ok(redir) = env::var("CITO_OIDC_REDIRECT_PORT") {
-        let p = redir
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| "CITO_OIDC_REDIRECT_PORT must be an integer in 1..65535".to_string())?;
-        if !(1..=65535).contains(&p) {
-            return Err("CITO_OIDC_REDIRECT_PORT must be an integer in 1..65535".to_string());
-        }
-    }
-    if let Ok(user) = env::var("CITO_USER") {
-        if user.is_empty()
-            || user.len() > 64
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        {
-            return Err("CITO_USER must contain 1-64 letters, numbers, dots, underscores or hyphens".to_string());
-        }
-    }
-    if let Ok(hub_env) = env::var("CITO_HUB") {
-        let h = hub_env.trim();
-        if !h.is_empty() && !validate_hub_name(h) {
-            return Err("default_hub must be a valid hub name".to_string());
-        }
-    }
-    if let Ok(url) = env::var("CITO_HUB_URL").or_else(|_| env::var("CITO_NATS_URL")) {
-        validate_nats_url(&url)?;
-    }
-    let auth_mode = env::var("CITO_AUTH_MODE").unwrap_or_else(|_| "none".to_string());
-    if !matches!(auth_mode.as_str(), "none" | "token" | "oidc") {
-        return Err("CITO_AUTH_MODE must be none, token, or oidc".to_string());
-    }
-    if auth_mode == "token" {
-        let tok = env::var("CITO_HUB_TOKEN").unwrap_or_default();
-        if tok.trim().is_empty() {
-            return Err("CITO_HUB_TOKEN is required in token mode".to_string());
-        }
-    }
-    let issuer_env = env::var("CITO_OIDC_ISSUER").ok();
-    let client_env = env::var("CITO_OIDC_CLIENT_ID").ok();
-    if let Some(ref iss) = issuer_env {
-        validate_https_issuer(iss)?;
-    }
-    if auth_mode == "oidc" && issuer_env.as_deref().unwrap_or("").trim().is_empty() {
-        return Err("CITO_OIDC_ISSUER is required in oidc mode".to_string());
-    }
-    if (auth_mode == "oidc" || issuer_env.is_some()) && client_env.as_deref().unwrap_or("").trim().is_empty() {
-        return Err("CITO_OIDC_CLIENT_ID is required with an OIDC issuer".to_string());
-    }
-    if let Some(ref cid) = client_env {
-        if cid.is_empty() || cid != cid.trim() {
-            return Err("CITO_OIDC_CLIENT_ID must be a non-empty trimmed string".to_string());
-        }
-    }
-
-    let home_env = env::var("HOME").ok();
-    let raw_state = env::var("CITO_STATE_DIR").unwrap_or_else(|_| "~/.cito".to_string());
-    let state_dir = expand_home_dir(&raw_state, "CITO_STATE_DIR", home_env.as_deref())?;
-    let explicit_config = env::var("CITO_CONFIG_PATH").ok();
-    let config_path = match explicit_config {
-        Some(ref p) => expand_home_dir(p, "CITO_CONFIG_PATH", home_env.as_deref())?,
-        None => state_dir.join("config.json"),
-    };
-
-    let mut cfg_daemon_port: Option<u16> = None;
-    let mut cfg_claude_home: Option<String> = None;
-    let mut cfg_enable_channel: Option<bool> = None;
-
-    if explicit_config.is_some() || config_path.exists() {
-        let raw = fs::read_to_string(&config_path)
-            .map_err(|_| format!("Cannot load hub configuration: {}", config_path.display()))?;
-        let Value::Object(map) = serde_json::from_str::<Value>(&raw)
-            .map_err(|_| format!("Cannot load hub configuration: {}", config_path.display()))?
-        else {
-            return Err(format!("Cannot load hub configuration: {}", config_path.display()));
-        };
-        let Some(Value::Object(hubs_map)) = map.get("hubs") else {
-            return Err(format!("Cannot load hub configuration: {}", config_path.display()));
-        };
-        if hubs_map.is_empty() {
-            return Err(format!("Cannot load hub configuration: {}", config_path.display()));
-        }
-        if let Some(p) = map.get("daemonPort").and_then(|v| v.as_u64()) {
-            if (1..=65535).contains(&p) {
-                cfg_daemon_port = Some(p as u16);
-            }
-        }
-        if let Some(plugins) = map.get("plugins").and_then(|v| v.as_object()) {
-            if let Some(claude) = plugins.get("claude").and_then(|v| v.as_object()) {
-                if let Some(ch) = claude.get("claudeHome").and_then(|v| v.as_str()) {
-                    cfg_claude_home = Some(ch.to_string());
-                }
-                if let Some(en) = claude.get("enableClaudeChannel").and_then(|v| v.as_bool()) {
-                    cfg_enable_channel = Some(en);
-                }
-            }
-        }
-    }
-
-    let daemon_port = match env::var("CITO_DAEMON_PORT") {
-        Ok(val) => {
-            let parsed = val
-                .trim()
-                .parse::<u32>()
-                .map_err(|_| "CITO_DAEMON_PORT must be an integer in 1..65535".to_string())?;
-            if !(1..=65535).contains(&parsed) {
-                return Err("CITO_DAEMON_PORT must be an integer in 1..65535".to_string());
-            }
-            parsed as u16
-        }
-        Err(_) => cfg_daemon_port.unwrap_or(4290),
-    };
-
-    let raw_claude_home = cfg_claude_home
-        .or_else(|| env::var("CITO_CLAUDE_HOME").ok())
-        .unwrap_or_else(|| "~/.claude".to_string());
-    let claude_home = expand_home_dir(&raw_claude_home, "CITO_CLAUDE_HOME", home_env.as_deref())?;
-
-    let enable_claude_channel = cfg_enable_channel.unwrap_or_else(|| {
-        env::var("CITO_CLAUDE_CHANNEL")
-            .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false)
-    });
-
-    Ok(NativeConfig {
-        state_dir,
-        daemon_port,
-        claude_home,
-        enable_claude_channel,
-    })
-}
-
-fn is_valid_transcript_uuid(s: &str) -> bool {
+pub fn is_valid_transcript_uuid(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.len() != 36 {
         return false;
@@ -343,30 +43,30 @@ fn is_valid_transcript_uuid(s: &str) -> bool {
     true
 }
 
-fn validate_claude_session_id(raw: &str) -> Result<String, String> {
+fn validate_session_id(raw: &str, display_name: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     let bytes = trimmed.as_bytes();
     if bytes.is_empty() || bytes.len() > 128 {
-        return Err("Invalid Claude session identifier".to_string());
+        return Err(format!("Invalid {display_name} session identifier"));
     }
     if !bytes[0].is_ascii_alphanumeric() {
-        return Err("Invalid Claude session identifier".to_string());
+        return Err(format!("Invalid {display_name} session identifier"));
     }
     if !bytes
         .iter()
         .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     {
-        return Err("Invalid Claude session identifier".to_string());
+        return Err(format!("Invalid {display_name} session identifier"));
     }
     Ok(trimmed.to_string())
 }
 
-fn claude_project_dir(cwd: &str, claude_home: &Path) -> PathBuf {
+fn transcript_project_dir(cwd: &str, transcript_home: &Path) -> PathBuf {
     let slug: String = cwd
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    claude_home.join("projects").join(slug)
+    transcript_home.join("projects").join(slug)
 }
 
 fn file_mtime_ms(meta: &fs::Metadata) -> f64 {
@@ -377,8 +77,8 @@ fn file_mtime_ms(meta: &fs::Metadata) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn resolve_claude_session_id(cwd: &str, claude_home: &Path) -> Option<String> {
-    let dir = claude_project_dir(cwd, claude_home);
+pub fn resolve_transcript_session_id(cwd: &str, transcript_home: &Path) -> Option<String> {
+    let dir = transcript_project_dir(cwd, transcript_home);
     let entries = fs::read_dir(dir).ok()?;
     let mut newest: Option<(String, f64)> = None;
     for entry in entries.flatten() {
@@ -405,16 +105,16 @@ fn resolve_claude_session_id(cwd: &str, claude_home: &Path) -> Option<String> {
 
 type TitleCache = VecDeque<(PathBuf, u64, u64, Option<String>)>;
 
-fn resolve_claude_session_title(
+fn resolve_transcript_session_title(
     cwd: &str,
     session_id: &str,
-    claude_home: &Path,
+    transcript_home: &Path,
     cache: &mut TitleCache,
 ) -> Option<String> {
     if !is_valid_transcript_uuid(session_id) {
         return None;
     }
-    let path = claude_project_dir(cwd, claude_home).join(format!("{session_id}.jsonl"));
+    let path = transcript_project_dir(cwd, transcript_home).join(format!("{session_id}.jsonl"));
     let meta = fs::metadata(&path).ok()?;
     if !meta.is_file() {
         return None;
@@ -490,11 +190,11 @@ fn resolve_claude_session_title(
     title
 }
 
-fn resolve_claude_transcript_mtime_ms(cwd: &str, session_id: &str, claude_home: &Path) -> u64 {
+fn resolve_transcript_mtime_ms(cwd: &str, session_id: &str, transcript_home: &Path) -> u64 {
     if !is_valid_transcript_uuid(session_id) {
         return 0;
     }
-    let path = claude_project_dir(cwd, claude_home).join(format!("{session_id}.jsonl"));
+    let path = transcript_project_dir(cwd, transcript_home).join(format!("{session_id}.jsonl"));
     match fs::metadata(path) {
         Ok(meta) if meta.is_file() => file_mtime_ms(&meta).round() as u64,
         _ => 0,
@@ -502,34 +202,40 @@ fn resolve_claude_transcript_mtime_ms(cwd: &str, session_id: &str, claude_home: 
 }
 
 #[derive(Clone, Debug)]
-struct ClaudeWake {
+struct QueuedWake {
     batch_id: String,
     content: String,
     wake: bool,
 }
 
-fn claude_wakes_dir(state_dir: &Path) -> PathBuf {
-    state_dir.join("claude").join("wakes")
+fn wakes_dir(state_dir: &Path, plugin_id: &str) -> PathBuf {
+    state_dir.join(plugin_id).join("wakes")
 }
 
-fn claude_wake_queue_path(state_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
-    let valid = validate_claude_session_id(session_id)?;
-    Ok(claude_wakes_dir(state_dir).join(format!("{valid}.jsonl")))
+fn wake_queue_path(state_dir: &Path, plugin_id: &str, display_name: &str, session_id: &str) -> Result<PathBuf, String> {
+    let valid = validate_session_id(session_id, display_name)?;
+    Ok(wakes_dir(state_dir, plugin_id).join(format!("{valid}.jsonl")))
 }
 
-fn claude_badge_path(state_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
-    let valid = validate_claude_session_id(session_id)?;
-    Ok(state_dir.join("claude").join("badges").join(valid))
+fn badge_path(state_dir: &Path, plugin_id: &str, display_name: &str, session_id: &str) -> Result<PathBuf, String> {
+    let valid = validate_session_id(session_id, display_name)?;
+    Ok(state_dir.join(plugin_id).join("badges").join(valid))
 }
 
-fn claude_alias_path(state_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
-    let valid = validate_claude_session_id(session_id)?;
-    Ok(state_dir.join("claude").join("aliases").join(valid))
+fn alias_path(state_dir: &Path, plugin_id: &str, display_name: &str, session_id: &str) -> Result<PathBuf, String> {
+    let valid = validate_session_id(session_id, display_name)?;
+    Ok(state_dir.join(plugin_id).join("aliases").join(valid))
 }
 
-fn write_claude_session_alias(state_dir: &Path, session_id: &str, target_session_id: &str) -> Result<(), String> {
-    let path = claude_alias_path(state_dir, session_id)?;
-    let target = validate_claude_session_id(target_session_id)?;
+fn write_session_alias(
+    state_dir: &Path,
+    plugin_id: &str,
+    display_name: &str,
+    session_id: &str,
+    target_session_id: &str,
+) -> Result<(), String> {
+    let path = alias_path(state_dir, plugin_id, display_name, session_id)?;
+    let target = validate_session_id(target_session_id, display_name)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
@@ -539,26 +245,29 @@ fn write_claude_session_alias(state_dir: &Path, session_id: &str, target_session
     Ok(())
 }
 
-fn read_claude_session_alias(state_dir: &Path, session_id: &str) -> Option<String> {
-    let path = claude_alias_path(state_dir, session_id).ok()?;
+fn read_session_alias(state_dir: &Path, plugin_id: &str, display_name: &str, session_id: &str) -> Option<String> {
+    let path = alias_path(state_dir, plugin_id, display_name, session_id).ok()?;
     let raw = fs::read_to_string(path).ok()?;
-    let target = validate_claude_session_id(&raw).ok()?;
-    if target.starts_with("claude-") && target != session_id {
+    let target = validate_session_id(&raw, display_name).ok()?;
+    let prefix = format!("{plugin_id}-");
+    if target.starts_with(&prefix) && target != session_id {
         Some(target)
     } else {
         None
     }
 }
 
-fn append_claude_wake(
+fn append_wake(
     state_dir: &Path,
+    plugin_id: &str,
+    display_name: &str,
     session_id: &str,
     batch_id: &str,
     content: &str,
     wake: bool,
     created_at_ms: u64,
 ) -> Result<(), String> {
-    let path = claude_wake_queue_path(state_dir, session_id)?;
+    let path = wake_queue_path(state_dir, plugin_id, display_name, session_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
@@ -582,7 +291,7 @@ fn append_claude_wake(
     Ok(())
 }
 
-fn parse_wakes(text: &str) -> Vec<ClaudeWake> {
+fn parse_wakes(text: &str) -> Vec<QueuedWake> {
     let mut out = Vec::new();
     for line in text.split('\n') {
         if line.trim().is_empty() {
@@ -598,7 +307,7 @@ fn parse_wakes(text: &str) -> Vec<ClaudeWake> {
                 None => continue,
             };
             let wake = row.get("wake").and_then(|v| v.as_bool()) != Some(false);
-            out.push(ClaudeWake {
+            out.push(QueuedWake {
                 batch_id,
                 content,
                 wake,
@@ -608,16 +317,21 @@ fn parse_wakes(text: &str) -> Vec<ClaudeWake> {
     out
 }
 
-fn drain_claude_wakes(state_dir: &Path, session_id: &str) -> Result<Vec<ClaudeWake>, String> {
-    let valid_id = validate_claude_session_id(session_id)?;
-    let alias = read_claude_session_alias(state_dir, &valid_id);
+fn drain_wakes(
+    state_dir: &Path,
+    plugin_id: &str,
+    display_name: &str,
+    session_id: &str,
+) -> Result<Vec<QueuedWake>, String> {
+    let valid_id = validate_session_id(session_id, display_name)?;
+    let alias = read_session_alias(state_dir, plugin_id, display_name, &valid_id);
     let sessions = match alias {
         Some(a) => vec![a, valid_id],
         None => vec![valid_id],
     };
-    let dir = claude_wakes_dir(state_dir);
+    let dir = wakes_dir(state_dir, plugin_id);
     for id in &sessions {
-        let path = claude_wake_queue_path(state_dir, id)?;
+        let path = wake_queue_path(state_dir, plugin_id, display_name, id)?;
         let staged = PathBuf::from(format!("{}{}{}", path.display(), DRAIN_SUFFIX, random_uuid_v4()));
         match fs::rename(&path, &staged) {
             Ok(()) => {}
@@ -667,8 +381,14 @@ fn drain_claude_wakes(state_dir: &Path, session_id: &str) -> Result<Vec<ClaudeWa
     Ok(wakes)
 }
 
-fn write_claude_badge(state_dir: &Path, session_id: &str, badge: Option<&str>) -> Result<(), String> {
-    let path = claude_badge_path(state_dir, session_id)?;
+fn write_badge(
+    state_dir: &Path,
+    plugin_id: &str,
+    display_name: &str,
+    session_id: &str,
+    badge: Option<&str>,
+) -> Result<(), String> {
+    let path = badge_path(state_dir, plugin_id, display_name, session_id)?;
     match badge {
         None => {
             let _ = fs::remove_file(path);
@@ -686,8 +406,8 @@ fn write_claude_badge(state_dir: &Path, session_id: &str, badge: Option<&str>) -
     }
 }
 
-fn strip_badge_unread_count(state_dir: &Path, session_id: &str) {
-    let path = match claude_badge_path(state_dir, session_id) {
+fn strip_badge_unread_count(state_dir: &Path, plugin_id: &str, display_name: &str, session_id: &str) {
+    let path = match badge_path(state_dir, plugin_id, display_name, session_id) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -702,250 +422,64 @@ fn strip_badge_unread_count(state_dir: &Path, session_id: &str) {
             if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
                 let stripped = &current[..open_paren];
                 if !stripped.is_empty() && stripped != current {
-                    let _ = write_claude_badge(state_dir, session_id, Some(stripped));
+                    let _ = write_badge(state_dir, plugin_id, display_name, session_id, Some(stripped));
                 }
             }
         }
     }
 }
 
-struct HttpResponse {
-    status: u16,
-    body: String,
-}
-
-fn read_http_response(stream: &mut TcpStream) -> Result<HttpResponse, String> {
-    let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    let n = reader.read_line(&mut status_line).map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err("Empty HTTP response".to_string());
-    }
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| format!("Invalid HTTP status: {}", status_line.trim()))?;
-
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-    loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        if read == 0 || line == "\r\n" || line == "\n" {
-            break;
+fn run_transcript_hook(args: &[String]) {
+    let (cfg_res, hook_cmd, plugin_id, display_name, session_env, meta_key) = match load_native_config() {
+        Ok((cfg, plugins)) => {
+            let tp = plugins.find_by_protocol("transcript-hook");
+            let hc = tp
+                .and_then(|p| p.native_str("hookCommand"))
+                .unwrap_or("cito-hook")
+                .to_string();
+            let pid = tp.map(|p| p.id.clone()).unwrap_or_else(|| "transcript".to_string());
+            let dname = tp
+                .map(|p| p.display_name.clone())
+                .unwrap_or_else(|| "Session".to_string());
+            let senv = tp
+                .and_then(|p| p.native_str("sessionEnv"))
+                .unwrap_or("SESSION_ID")
+                .to_string();
+            let mkey = tp
+                .and_then(|p| p.native_str("metaKey"))
+                .unwrap_or("sessionId")
+                .to_string();
+            (Ok(cfg), hc, pid, dname, senv, mkey)
         }
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim().to_ascii_lowercase();
-            let val = v.trim().to_ascii_lowercase();
-            if key == "content-length" {
-                content_length = val.parse::<usize>().ok();
-            } else if key == "transfer-encoding" && val.contains("chunked") {
-                chunked = true;
-            }
+        Err(e) => {
+            let plugins = plugins::load_plugins(Path::new("/tmp"));
+            let tp = plugins.find_by_protocol("transcript-hook");
+            let hc = tp
+                .and_then(|p| p.native_str("hookCommand"))
+                .unwrap_or("cito-hook")
+                .to_string();
+            let pid = tp.map(|p| p.id.clone()).unwrap_or_else(|| "transcript".to_string());
+            let dname = tp
+                .map(|p| p.display_name.clone())
+                .unwrap_or_else(|| "Session".to_string());
+            let senv = tp
+                .and_then(|p| p.native_str("sessionEnv"))
+                .unwrap_or("SESSION_ID")
+                .to_string();
+            let mkey = tp
+                .and_then(|p| p.native_str("metaKey"))
+                .unwrap_or("sessionId")
+                .to_string();
+            (Err(e), hc, pid, dname, senv, mkey)
         }
-    }
+    };
 
-    if status == 202 || status == 204 {
-        return Ok(HttpResponse {
-            status,
-            body: String::new(),
-        });
-    }
-
-    let mut body_bytes = Vec::new();
-    if chunked {
-        loop {
-            let mut size_line = String::new();
-            let r = reader.read_line(&mut size_line).map_err(|e| e.to_string())?;
-            if r == 0 {
-                break;
-            }
-            let size_hex = size_line.trim().split(';').next().unwrap_or("");
-            let chunk_size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
-            if chunk_size == 0 {
-                let mut trailer = String::new();
-                let _ = reader.read_line(&mut trailer);
-                break;
-            }
-            let mut chunk = vec![0u8; chunk_size];
-            reader.read_exact(&mut chunk).map_err(|e| e.to_string())?;
-            body_bytes.extend_from_slice(&chunk);
-            let mut crlf = [0u8; 2];
-            let _ = reader.read_exact(&mut crlf);
-        }
-    } else if let Some(len) = content_length {
-        body_bytes.resize(len, 0);
-        reader.read_exact(&mut body_bytes).map_err(|e| e.to_string())?;
-    } else {
-        let _ = reader.read_to_end(&mut body_bytes);
-    }
-
-    Ok(HttpResponse {
-        status,
-        body: String::from_utf8_lossy(&body_bytes).to_string(),
-    })
-}
-
-fn http_post_mcp(port: u16, body: &str, timeout: Duration) -> Result<HttpResponse, String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-    let req = format!(
-        "POST /mcp HTTP/1.1\r\n\
-         Host: 127.0.0.1:{port}\r\n\
-         Content-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\n\
-         Connection: close\r\n\
-         Content-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-    read_http_response(&mut stream)
-}
-
-#[derive(Debug)]
-struct DaemonHealth {
-    pid: i32,
-    version: Option<String>,
-}
-
-fn probe_daemon_health(config: &NativeConfig) -> Option<DaemonHealth> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.daemon_port));
-    let timeout = Duration::from_millis(500);
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-    let req = format!(
-        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-        config.daemon_port
-    );
-    stream.write_all(req.as_bytes()).ok()?;
-    let resp = read_http_response(&mut stream).ok()?;
-    if resp.status != 200 {
-        return None;
-    }
-    let val: Value = serde_json::from_str(&resp.body).ok()?;
-    let obj = val.as_object()?;
-    if obj.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
-    }
-    let state_dir = obj.get("stateDir").and_then(|v| v.as_str())?;
-    if Path::new(state_dir) != config.state_dir {
-        return None;
-    }
-    let pid = obj.get("pid").and_then(|v| v.as_i64())?;
-    if pid <= 0 {
-        return None;
-    }
-    let version = obj.get("version").and_then(|v| v.as_str()).map(String::from);
-    Some(DaemonHealth {
-        pid: pid as i32,
-        version,
-    })
-}
-
-fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn resolve_node_bin() -> String {
-    if let Ok(b) = env::var("CITO_NODE_BIN") {
-        let t = b.trim();
-        if !t.is_empty() && Path::new(t).exists() {
-            return t.to_string();
-        }
-    }
-    if let Ok(path_var) = env::var("PATH") {
-        for dir in path_var.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            let cand = Path::new(dir).join("node");
-            if cand.is_file() {
-                return cand.to_string_lossy().to_string();
-            }
-        }
-    }
-    for cand in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
-        if Path::new(cand).is_file() {
-            return cand.to_string();
-        }
-    }
-    "node".to_string()
-}
-
-fn resolve_cito_mcp_entry() -> Result<PathBuf, String> {
-    if let Ok(entry) = env::var("CITO_MCP_ENTRY") {
-        let t = entry.trim();
-        if !t.is_empty() && Path::new(t).exists() {
-            return Ok(PathBuf::from(t));
-        }
-    }
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let exe_dir = exe.parent().ok_or_else(|| "Cannot resolve binary parent dir".to_string())?;
-    let sibling = exe_dir.join("cito-mcp");
-    if sibling.exists() {
-        return Ok(sibling);
-    }
-    Err("Cannot locate bin/cito-mcp for daemon startup".to_string())
-}
-
-fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
-    if let Some(existing) = probe_daemon_health(config) {
-        if existing.version.as_deref() == Some(CITO_VERSION) {
-            return Ok(());
-        }
-        unsafe {
-            libc::kill(existing.pid, libc::SIGTERM);
-        }
-        let stop_deadline = Instant::now() + Duration::from_millis(5000);
-        while pid_alive(existing.pid) && Instant::now() < stop_deadline {
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    let node_bin = resolve_node_bin();
-    let entry = resolve_cito_mcp_entry()?;
-    let mut cmd = Command::new(node_bin);
-    cmd.arg(entry)
-        .arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
-
-    let deadline = Instant::now() + Duration::from_millis(5000);
-    while Instant::now() < deadline {
-        if let Some(h) = probe_daemon_health(config) {
-            if h.version.as_deref() == Some(CITO_VERSION) {
-                return Ok(());
-            }
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    Err(format!(
-        "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",
-        config.daemon_port,
-        config.state_dir.display()
-    ))
-}
-
-fn run_claude_hook(args: &[String]) {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        let _ = std::io::stderr().write_all(HOOK_USAGE.as_bytes());
+        let usage = format!(
+            "Usage: {hook_cmd} (reads a {display_name} Code hook payload on stdin)\n\
+             Install on Stop, SessionStart and UserPromptSubmit to deliver queued Cito wakes.\n"
+        );
+        let _ = std::io::stderr().write_all(usage.as_bytes());
         return;
     }
 
@@ -985,7 +519,7 @@ fn run_claude_hook(args: &[String]) {
             return Ok(None);
         }
 
-        let config = load_native_config()?;
+        let config = cfg_res?;
         let cwd = input
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -1005,40 +539,40 @@ fn run_claude_hook(args: &[String]) {
             .filter(|s| !s.trim().is_empty())
             .map(String::from)
             .or_else(|| {
-                env::var("CLAUDE_SESSION_ID")
+                env::var(&session_env)
                     .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
             });
 
         let explicit_session = match explicit_raw {
-            Some(s) => Some(validate_claude_session_id(&s)?),
+            Some(s) => Some(validate_session_id(&s, &display_name)?),
             None => None,
         };
 
-        let wakes_dir = claude_wakes_dir(&config.state_dir);
-        if !wakes_dir.exists() {
+        let w_dir = wakes_dir(&config.state_dir, &plugin_id);
+        if !w_dir.exists() {
             return Ok(None);
         }
 
         let session = match explicit_session {
             Some(s) => s,
-            None => match resolve_claude_session_id(&cwd, &config.claude_home) {
+            None => match resolve_transcript_session_id(&cwd, &config.transcript_home) {
                 Some(s) => s,
                 None => return Ok(None),
             },
         };
 
-        let wakes = drain_claude_wakes(&config.state_dir, &session)?;
+        let wakes = drain_wakes(&config.state_dir, &plugin_id, &display_name, &session)?;
         if wakes.is_empty() {
             return Ok(None);
         }
 
-        let alias = read_claude_session_alias(&config.state_dir, &session);
+        let alias = read_session_alias(&config.state_dir, &plugin_id, &display_name, &session);
         let ack_session = alias.as_deref().unwrap_or(&session);
-        strip_badge_unread_count(&config.state_dir, &session);
+        strip_badge_unread_count(&config.state_dir, &plugin_id, &display_name, &session);
         if let Some(ref a) = alias {
-            strip_badge_unread_count(&config.state_dir, a);
+            strip_badge_unread_count(&config.state_dir, &plugin_id, &display_name, a);
         }
 
         let ack_ids: Vec<String> = wakes.iter().map(|w| w.batch_id.clone()).collect();
@@ -1053,7 +587,7 @@ fn run_claude_hook(args: &[String]) {
                     "ack_ids": ack_ids,
                 },
                 "_meta": {
-                    "claudeSessionId": ack_session,
+                    meta_key: ack_session,
                     "cwd": cwd,
                 }
             }
@@ -1094,7 +628,7 @@ fn run_claude_hook(args: &[String]) {
         }
         Ok(None) => emit_empty(),
         Err(err) => {
-            let _ = std::io::stderr().write_all(format!("cito-claude-hook: {err}\n").as_bytes());
+            let _ = std::io::stderr().write_all(format!("{hook_cmd}: {err}\n").as_bytes());
             emit_empty();
         }
     }
@@ -1103,6 +637,8 @@ fn run_claude_hook(args: &[String]) {
 struct BridgeCleanupState {
     socket_path: Option<PathBuf>,
     state_dir: PathBuf,
+    plugin_id: String,
+    display_name: String,
     badged_sessions: HashSet<String>,
 }
 
@@ -1114,8 +650,10 @@ fn perform_bridge_cleanup(cleanup: &Mutex<BridgeCleanupState>) {
             let _ = fs::remove_file(sock);
         }
         let sessions: Vec<String> = guard.badged_sessions.drain().collect();
+        let pid = guard.plugin_id.clone();
+        let dname = guard.display_name.clone();
         for id in sessions {
-            let _ = write_claude_badge(&guard.state_dir, &id, None);
+            let _ = write_badge(&guard.state_dir, &pid, &dname, &id, None);
         }
     }
 }
@@ -1153,6 +691,9 @@ fn probe_live_bridge(path: &Path) -> bool {
 
 struct ChannelRuntime {
     config: NativeConfig,
+    plugin_id: String,
+    display_name: String,
+    notif_method: String,
     endpoint_pid: u32,
     cwd: String,
     explicit_env_id: Option<String>,
@@ -1178,10 +719,10 @@ impl ChannelRuntime {
 
     fn current_session_id(&mut self) -> Result<String, String> {
         if let Some(ref exp) = self.explicit_env_id.clone() {
-            let valid = validate_claude_session_id(exp)?;
+            let valid = validate_session_id(exp, &self.display_name)?;
             return Ok(self.note_session(valid));
         }
-        let resolved = resolve_claude_session_id(&self.cwd, &self.config.claude_home);
+        let resolved = resolve_transcript_session_id(&self.cwd, &self.config.transcript_home);
         let Some(resolved_id) = resolved else {
             return Ok(self.note_session(self.fallback_id.clone()));
         };
@@ -1191,7 +732,13 @@ impl ChannelRuntime {
                     self.last_active_ms = now_ms();
                 }
                 self.first_transcript = Some(resolved_id.clone());
-                let _ = write_claude_session_alias(&self.config.state_dir, &resolved_id, &self.fallback_id);
+                let _ = write_session_alias(
+                    &self.config.state_dir,
+                    &self.plugin_id,
+                    &self.display_name,
+                    &resolved_id,
+                    &self.fallback_id,
+                );
                 return Ok(self.note_session(self.fallback_id.clone()));
             }
             self.use_fallback_alias = false;
@@ -1212,13 +759,13 @@ impl ChannelRuntime {
             } else {
                 current.clone()
             };
-            let title = resolve_claude_session_title(
+            let title = resolve_transcript_session_title(
                 &self.cwd,
                 &transcript_id,
-                &self.config.claude_home,
+                &self.config.transcript_home,
                 &mut self.title_cache,
             );
-            let mtime_ms = resolve_claude_transcript_mtime_ms(&self.cwd, &transcript_id, &self.config.claude_home);
+            let mtime_ms = resolve_transcript_mtime_ms(&self.cwd, &transcript_id, &self.config.transcript_home);
             let fallback_name = Path::new(&self.cwd)
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -1254,7 +801,15 @@ impl ChannelRuntime {
                     guard.badged_sessions.remove(&current);
                 }
             }
-            if write_claude_badge(&self.config.state_dir, &current, badge_str).is_err() {
+            if write_badge(
+                &self.config.state_dir,
+                &self.plugin_id,
+                &self.display_name,
+                &current,
+                badge_str,
+            )
+            .is_err()
+            {
                 return json!({ "ok": false, "error": "DELIVERY_FAILED" });
             }
             return json!({ "ok": true });
@@ -1275,8 +830,10 @@ impl ChannelRuntime {
         let wake = req.get("wake").and_then(|v| v.as_bool()) != Some(false);
         let deduplicated = self.delivered.iter().any(|b| b == batch_id);
         if !deduplicated {
-            if append_claude_wake(
+            if append_wake(
                 &self.config.state_dir,
+                &self.plugin_id,
+                &self.display_name,
                 &current,
                 batch_id,
                 content,
@@ -1294,7 +851,7 @@ impl ChannelRuntime {
             self.last_active_ms = now_ms();
             let notif = json!({
                 "jsonrpc": "2.0",
-                "method": "notifications/claude/channel",
+                "method": self.notif_method,
                 "params": {
                     "content": content,
                     "meta": {
@@ -1318,61 +875,81 @@ impl ChannelRuntime {
     }
 }
 
-fn start_claude_channel_listener(
+fn start_transcript_channel_listener(
     config: &NativeConfig,
+    plugins: &LoadedPlugins,
     endpoint_pid: u32,
     stdout_lock: Arc<Mutex<()>>,
     cleanup: Arc<Mutex<BridgeCleanupState>>,
-) -> bool {
-    if !config.enable_claude_channel {
-        return false;
+) -> Option<String> {
+    if !config.enable_transcript_channel {
+        return None;
     }
+    let tp = plugins.find_by_protocol("transcript-hook")?;
+    let plugin_id = tp.id.clone();
+    let display_name = tp.display_name.clone();
+    let session_env = tp.native_str("sessionEnv").unwrap_or("SESSION_ID");
+    let cap_key = tp.native_str("channelCapability").unwrap_or("channel").to_string();
+    let notif_method = tp
+        .native_str("channelNotificationMethod")
+        .unwrap_or("notifications/channel")
+        .to_string();
+
     let sockets_dir = config.state_dir.join("sockets");
     if fs::create_dir_all(&sockets_dir).is_err() {
-        return false;
+        return None;
     }
     let _ = fs::set_permissions(&sockets_dir, fs::Permissions::from_mode(0o700));
-    let socket_path = sockets_dir.join(format!("claude-pid-{endpoint_pid}.sock"));
+    let socket_path = sockets_dir.join(format!("{plugin_id}-pid-{endpoint_pid}.sock"));
 
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             if probe_live_bridge(&socket_path) {
                 let _ = std::io::stderr().write_all(
-                    format!("cito-native: socket {} already in use by live bridge\n", socket_path.display()).as_bytes(),
+                    format!(
+                        "cito-native: socket {} already in use by live bridge\n",
+                        socket_path.display()
+                    )
+                    .as_bytes(),
                 );
-                return false;
+                return None;
             }
             let _ = fs::remove_file(&socket_path);
             match UnixListener::bind(&socket_path) {
                 Ok(l) => l,
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let _ = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600));
     if let Ok(mut guard) = cleanup.lock() {
         guard.socket_path = Some(socket_path);
+        guard.plugin_id = plugin_id.clone();
+        guard.display_name = display_name.clone();
     }
 
     let cwd = env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .to_string_lossy()
         .to_string();
-    let explicit_env_id = env::var("CLAUDE_SESSION_ID")
+    let explicit_env_id = env::var(session_env)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let use_fallback_alias =
-        explicit_env_id.is_none() && resolve_claude_session_id(&cwd, &config.claude_home).is_none();
+        explicit_env_id.is_none() && resolve_transcript_session_id(&cwd, &config.transcript_home).is_none();
 
     let mut runtime = ChannelRuntime {
         config: config.clone(),
+        plugin_id: plugin_id.clone(),
+        display_name,
+        notif_method,
         endpoint_pid,
         cwd,
         explicit_env_id,
-        fallback_id: format!("claude-{endpoint_pid}"),
+        fallback_id: format!("{plugin_id}-{endpoint_pid}"),
         use_fallback_alias,
         first_transcript: None,
         last_session_id: None,
@@ -1424,13 +1001,13 @@ fn start_claude_channel_listener(
         }
     });
 
-    true
+    Some(cap_key)
 }
 
-fn enrich_initialize_result(mut msg: Value, channel_enabled: bool) -> Value {
-    if !channel_enabled {
+fn enrich_initialize_result(mut msg: Value, channel_cap: Option<&str>) -> Value {
+    let Some(cap_key) = channel_cap else {
         return msg;
-    }
+    };
     if let Value::Object(ref mut root) = msg {
         if let Some(Value::Object(ref mut result)) = root.get_mut("result") {
             if result.contains_key("protocolVersion") {
@@ -1448,7 +1025,7 @@ fn enrich_initialize_result(mut msg: Value, channel_enabled: bool) -> Value {
                         *exp = Value::Object(Map::new());
                     }
                     if let Value::Object(ref mut exp_map) = exp {
-                        exp_map.insert("claude/channel".to_string(), json!({}));
+                        exp_map.insert(cap_key.to_string(), json!({}));
                     }
                 }
             }
@@ -1457,7 +1034,7 @@ fn enrich_initialize_result(mut msg: Value, channel_enabled: bool) -> Value {
     msg
 }
 
-fn extract_jsonrpc_from_http_body(body: &str) -> Option<Value> {
+pub fn extract_jsonrpc_from_http_body(body: &str) -> Option<Value> {
     let mut last_data: Option<&str> = None;
     for line in body.lines() {
         if let Some(rest) = line.strip_prefix("data:") {
@@ -1486,7 +1063,7 @@ fn run_mcp_stdio() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    let config = match load_native_config() {
+    let (config, plugins) = match load_native_config() {
         Ok(c) => c,
         Err(e) => {
             let _ = std::io::stderr().write_all(format!("cito-mcp: {e}\n").as_bytes());
@@ -1509,6 +1086,8 @@ fn run_mcp_stdio() {
     let cleanup = Arc::new(Mutex::new(BridgeCleanupState {
         socket_path: None,
         state_dir: config.state_dir.clone(),
+        plugin_id: String::new(),
+        display_name: String::new(),
         badged_sessions: HashSet::new(),
     }));
 
@@ -1518,8 +1097,13 @@ fn run_mcp_stdio() {
         libc::signal(libc::SIGTERM, handle_term_signal as *const () as libc::sighandler_t);
     }
 
-    let channel_active =
-        start_claude_channel_listener(&config, endpoint_pid, stdout_lock.clone(), cleanup.clone());
+    let channel_cap = start_transcript_channel_listener(
+        &config,
+        &plugins,
+        endpoint_pid,
+        stdout_lock.clone(),
+        cleanup.clone(),
+    );
 
     let stdin = std::io::stdin();
     let reader = BufReader::new(stdin.lock());
@@ -1562,7 +1146,7 @@ fn run_mcp_stdio() {
             Ok(resp) => {
                 if has_id {
                     if let Some(rpc_val) = extract_jsonrpc_from_http_body(&resp.body) {
-                        let out_val = enrich_initialize_result(rpc_val, channel_active);
+                        let out_val = enrich_initialize_result(rpc_val, channel_cap.as_deref());
                         if let Ok(out_str) = serde_json::to_string(&out_val) {
                             if let Ok(_guard) = stdout_lock.lock() {
                                 let _ = std::io::stdout().write_all(format!("{out_str}\n").as_bytes());
@@ -1587,14 +1171,14 @@ fn run_mcp_stdio() {
                     }
                 }
             }
-            Err(err) => {
-                if let Some(id_val) = req_id {
+            Err(e) => {
+                if has_id {
                     let err_val = json!({
                         "jsonrpc": "2.0",
-                        "id": id_val,
+                        "id": req_id.unwrap_or(Value::Null),
                         "error": {
                             "code": -32603,
-                            "message": err,
+                            "message": e,
                         }
                     });
                     if let Ok(out_str) = serde_json::to_string(&err_val) {
@@ -1603,8 +1187,6 @@ fn run_mcp_stdio() {
                             let _ = std::io::stdout().flush();
                         }
                     }
-                } else {
-                    let _ = std::io::stderr().write_all(format!("cito-mcp: {err}\n").as_bytes());
                 }
             }
         }
@@ -1621,17 +1203,62 @@ fn main() {
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    if argv0_name.ends_with("cito-claude-hook") {
-        run_claude_hook(&args[1..]);
+    if argv0_name.ends_with("-hook") {
+        run_transcript_hook(&args[1..]);
         return;
     }
 
-    match args.get(1).map(String::as_str) {
-        Some("claude-hook") => run_claude_hook(&args[2..]),
-        Some("mcp-stdio") => run_mcp_stdio(),
+    match args.get(1).map(|s| s.as_str()) {
         Some("--version" | "-v") => {
-            let _ = std::io::stdout().write_all(format!("cito v{CITO_VERSION}\n").as_bytes());
+            println!("cito v{CITO_VERSION}");
         }
-        _ => run_mcp_stdio(),
+        Some(sub) if sub == "hook" || sub.ends_with("-hook") => {
+            run_transcript_hook(&args[2..]);
+        }
+        Some("setup") => {
+            setup::run_setup_cli(&args[2..]);
+        }
+        Some("hub") => {
+            hub::run_hub_cli(&args[2..]);
+        }
+        Some("daemon") => {
+            let (config, plugins) = match load_native_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("cito daemon: {e}");
+                    std::process::exit(1);
+                }
+            };
+            daemon::run_daemon(&config, &plugins);
+        }
+        Some("listen" | "unlisten" | "find" | "send" | "inbox") => {
+            let cmd = args[1].as_str();
+            let (config, plugins) = match load_native_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            };
+            daemon::run_cli_command(cmd, &args[2..], &config, &plugins);
+        }
+        Some("mcp-stdio") | None => {
+            if argv0_name == "Cito" && args.get(1).is_none() {
+                let (config, plugins) = match load_native_config() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("cito daemon: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                daemon::run_daemon(&config, &plugins);
+                return;
+            }
+            run_mcp_stdio();
+        }
+        Some(other) => {
+            let _ = std::io::stderr().write_all(format!("cito-native: unknown subcommand '{other}'\n").as_bytes());
+            std::process::exit(1);
+        }
     }
 }

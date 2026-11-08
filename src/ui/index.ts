@@ -161,6 +161,8 @@ export type UiToDaemonAction =
   | { op: "open_settings" }
   | { op: "close_settings" }
   | { op: "setup_apply"; harness: string; force?: boolean }
+  | { op: "setup_remove_app"; harness: string }
+  | { op: "setup_uninstall_all"; purge_data?: boolean }
   | { op: "set_host_hub"; enabled: boolean; port?: number; reset_token?: boolean }
   | { op: "set_launch_at_login"; enabled: boolean }
   | { op: "set_desktop_banner"; enabled: boolean }
@@ -243,6 +245,12 @@ export function validAction(value: unknown): value is UiToDaemonAction {
     if (!harnessIdSchema.safeParse(a.harness).success) return false;
     if (a.force !== undefined && typeof a.force !== "boolean") return false;
     return true;
+  }
+  if (a.op === "setup_remove_app") {
+    return harnessIdSchema.safeParse(a.harness).success;
+  }
+  if (a.op === "setup_uninstall_all") {
+    return a.purge_data === undefined || typeof a.purge_data === "boolean";
   }
   if (a.op === "set_host_hub") {
     if (typeof a.enabled !== "boolean") return false;

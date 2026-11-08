@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -56,6 +56,9 @@ export interface SetupOptions {
   disableHubs?: string[];
   removeHubs?: string[];
   enableHarnesses?: string[];
+  disableHarnesses?: string[];
+  uninstall?: boolean;
+  purgeData?: boolean;
   hostHub?: SetupHostHubInput;
   launchAtLogin?: boolean;
   force?: boolean;
@@ -92,12 +95,31 @@ export interface SetupResult {
   actions: SetupFileAction[];
 }
 
+export function resolveStablePackageRoot(inputPath?: string): string {
+  const raw = inputPath ?? (() => {
+    const direct = fileURLToPath(new URL("../../package.json", import.meta.url));
+    if (existsSync(direct)) return dirname(direct);
+    const fromDist = fileURLToPath(new URL("../../../package.json", import.meta.url));
+    if (existsSync(fromDist)) return dirname(fromDist);
+    return resolve(".");
+  })();
+  const match = /^(.*)\/Cellar\/([^/]+)\/[^/]+(\/.*)?$/.exec(raw);
+  if (match) {
+    return `${match[1]}/opt/${match[2]}${match[3] ?? ""}`;
+  }
+  return raw;
+}
+
 function resolvePackageRoot(): string {
   const direct = fileURLToPath(new URL("../../package.json", import.meta.url));
-  if (existsSync(direct)) return dirname(direct);
-  const fromDist = fileURLToPath(new URL("../../../package.json", import.meta.url));
-  if (existsSync(fromDist)) return dirname(fromDist);
-  return resolve(".");
+  const rawRoot = existsSync(direct)
+    ? dirname(direct)
+    : (() => {
+        const fromDist = fileURLToPath(new URL("../../../package.json", import.meta.url));
+        return existsSync(fromDist) ? dirname(fromDist) : resolve(".");
+      })();
+  const stable = resolveStablePackageRoot(rawRoot);
+  return existsSync(stable) ? stable : rawRoot;
 }
 
 function resolvePaths(env: NodeJS.ProcessEnv): { stateDir: string; configPath: string; homeDir: string } {
@@ -121,39 +143,48 @@ export async function ensureCliShims(options: {
 
   const pkgRoot = resolvePackageRoot();
   const pkgJsonPath = join(pkgRoot, "package.json");
-  const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { bin?: Record<string, string> };
-  const bins = pkg.bin ?? { cito: "bin/cito-mcp", "cito-mcp": "bin/cito-mcp" };
-  const nodeBin = env.CITO_NODE_BIN?.trim() || process.execPath;
-  const nativePath = join(pkgRoot, "bin", "cito-native-darwin-arm64");
+  const pkg = existsSync(pkgJsonPath)
+    ? (JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { bin?: Record<string, string> })
+    : {};
+  const bins = pkg.bin ?? {
+    cito: "bin/cito-mcp",
+    "cito-mcp": "bin/cito-mcp",
+  };
+  const nativePath = existsSync(join(pkgRoot, "Contents", "Helpers", "cito-native"))
+    ? join(pkgRoot, "Contents", "Helpers", "cito-native")
+    : join(pkgRoot, "bin", "cito-native-darwin-arm64");
+  const pluginsDir = existsSync(join(pkgRoot, "Contents", "Resources", "plugins"))
+    ? join(pkgRoot, "Contents", "Resources", "plugins")
+    : join(pkgRoot, "plugins");
   const written: string[] = [];
 
-  for (const [binName, relTarget] of Object.entries(bins)) {
-    const targetPath = join(pkgRoot, relTarget);
+  for (const binName of Object.keys(bins)) {
     const shimPath = join(binDir, binName);
     let script: string;
     if (binName.endsWith("-hook")) {
-      const subMode = binName.replace(/^cito-/, "");
       script = [
         "#!/bin/sh",
-        `NATIVE_BIN=${JSON.stringify(nativePath)}`,
-        'if [ "${CITO_DISABLE_NATIVE:-0}" != "1" ] && [ -x "$NATIVE_BIN" ]; then',
-        `  exec "$NATIVE_BIN" ${JSON.stringify(subMode)} "$@"`,
+        `export CITO_BUILTIN_PLUGINS_DIR="\${CITO_BUILTIN_PLUGINS_DIR:-${pluginsDir}}"`,
+        'export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"',
+        `exec ${JSON.stringify(nativePath)} hook "$@"`,
+        "",
+      ].join("\n");
+    } else if (binName === "cito-mcp") {
+      script = [
+        "#!/bin/sh",
+        `export CITO_BUILTIN_PLUGINS_DIR="\${CITO_BUILTIN_PLUGINS_DIR:-${pluginsDir}}"`,
+        'export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"',
+        'if [ "$#" -eq 0 ]; then',
+        `  exec ${JSON.stringify(nativePath)} mcp-stdio`,
         "fi",
-        `NODE_BIN="\${CITO_NODE_BIN:-${nodeBin}}"`,
-        `exec "$NODE_BIN" ${JSON.stringify(targetPath)} "$@"`,
+        `exec ${JSON.stringify(nativePath)} "$@"`,
         "",
       ].join("\n");
     } else {
       script = [
         "#!/bin/sh",
-        `NATIVE_BIN=${JSON.stringify(nativePath)}`,
-        `NODE_BIN="\${CITO_NODE_BIN:-${nodeBin}}"`,
-        'export CITO_NODE_BIN="$NODE_BIN"',
-        `export CITO_MCP_ENTRY=${JSON.stringify(targetPath)}`,
-        'if [ "$#" -eq 0 ] && [ "${CITO_DISABLE_NATIVE:-0}" != "1" ] && [ -x "$NATIVE_BIN" ]; then',
-        '  exec "$NATIVE_BIN" mcp-stdio',
-        "fi",
-        `exec "$NODE_BIN" ${JSON.stringify(targetPath)} "$@"`,
+        `export CITO_BUILTIN_PLUGINS_DIR="\${CITO_BUILTIN_PLUGINS_DIR:-${pluginsDir}}"`,
+        `exec ${JSON.stringify(nativePath)} "$@"`,
         "",
       ].join("\n");
     }
@@ -211,10 +242,8 @@ export async function setLaunchAtLogin(
   }
 
   await ensureCliShims({ stateDir, env });
-  const pkgRoot = resolvePackageRoot();
-  const citoMcpPath = join(pkgRoot, "bin", "cito-mcp");
-  const nodeBin = env.CITO_NODE_BIN?.trim() || process.execPath;
   const binDir = join(stateDir, "bin");
+  const citoBinPath = join(binDir, "cito");
   const pathValue = `${binDir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
 
   const plistXml = [
@@ -226,8 +255,7 @@ export async function setLaunchAtLogin(
     "  <string>com.tefx.cito.daemon</string>",
     "  <key>ProgramArguments</key>",
     "  <array>",
-    `    <string>${escapeXml(nodeBin)}</string>`,
-    `    <string>${escapeXml(citoMcpPath)}</string>`,
+    `    <string>${escapeXml(citoBinPath)}</string>`,
     "    <string>daemon</string>",
     "  </array>",
     "  <key>RunAtLoad</key>",
@@ -261,9 +289,27 @@ async function computeDirectoryBytes(dirPath: string): Promise<number> {
   return sizes.reduce((acc, n) => acc + n, 0);
 }
 
+export function resolveCodesignArgs(
+  targetPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+  explicitIdentity?: string,
+): string[] {
+  const identity = (
+    explicitIdentity ??
+    env.CITO_CODESIGN_IDENTITY ??
+    env.APPLE_SIGNING_IDENTITY ??
+    ""
+  ).trim();
+  if (identity) {
+    return ["--force", "--options", "runtime", "--timestamp", "--deep", "--sign", identity, targetPath];
+  }
+  return ["-s", "-", "--force", "--deep", targetPath];
+}
+
 export async function buildMacAppBundle(options: {
   destDir?: string;
   env?: NodeJS.ProcessEnv;
+  codesignIdentity?: string;
 } = {}): Promise<{ appPath: string; bytes: number }> {
   const env = options.env ?? process.env;
   const { stateDir } = resolvePaths(env);
@@ -315,37 +361,21 @@ export async function buildMacAppBundle(options: {
   await writeFile(join(contentsDir, "Info.plist"), infoPlist, { encoding: "utf8", mode: 0o644 });
 
   const pkgRoot = resolvePackageRoot();
-  const citoMcpPath = join(pkgRoot, "bin", "cito-mcp");
-  const fallbackNode = env.CITO_NODE_BIN?.trim() || process.execPath;
   const launcherScript = [
     "#!/bin/sh",
     "set -e",
-    'resolve_node() {',
-    '  for cand in "$CITO_NODE_BIN" ' +
-      `${JSON.stringify(fallbackNode)} ` +
-      '"/opt/homebrew/bin/node" "/usr/local/bin/node" ' +
-      '"$HOME/.local/share/mise/shims/node" "$HOME/.fnm/current/bin/node" ' +
-      '"$HOME/.volta/bin/node" "$HOME/.cito/runtime/bin/node"; do',
-    '    if [ -n "$cand" ] && [ -x "$cand" ]; then',
-    '      echo "$cand"',
-    "      return 0",
-    "    fi",
-    "  done",
-    '  for nvm_cand in "$HOME"/.nvm/versions/node/*/bin/node; do',
-    '    if [ -x "$nvm_cand" ]; then',
-    '      echo "$nvm_cand"',
-    "      return 0",
-    "    fi",
-    "  done",
-    "  command -v node 2>/dev/null || true",
-    "}",
-    'NODE_BIN="$(resolve_node)"',
-    'if [ -z "$NODE_BIN" ]; then',
-    '  echo "Cito.app: Node.js (>= 22.13) not found" >&2',
-    "  exit 1",
+    'APP_CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"',
+    'export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}"',
+    'if [ "$#" -eq 0 ]; then',
+    '  exec "$APP_CONTENTS/Helpers/cito-native" daemon',
     "fi",
-    'export CITO_NODE_BIN="$NODE_BIN"',
-    `exec "$NODE_BIN" ${JSON.stringify(citoMcpPath)} daemon "$@"`,
+    'case "$1" in',
+    "  -psn_*)",
+    "    shift",
+    '    exec "$APP_CONTENTS/Helpers/cito-native" daemon "$@"',
+    "    ;;",
+    "esac",
+    'exec "$APP_CONTENTS/Helpers/cito-native" "$@"',
     "",
   ].join("\n");
   const launcherPath = join(macosDir, "Cito");
@@ -370,10 +400,17 @@ export async function buildMacAppBundle(options: {
     await copyFile(prebuiltIcon, join(resourcesDir, "AppIcon.icns"));
   }
 
+  const pluginsSrc = join(pkgRoot, "plugins");
+  if (existsSync(pluginsSrc)) {
+    await cp(pluginsSrc, join(resourcesDir, "plugins"), { recursive: true });
+  }
+
   await ensureCliShims({ stateDir, env });
 
   if (process.platform === "darwin") {
-    await exec("/usr/bin/codesign", ["-s", "-", "--force", "--deep", appPath]).catch(() => {});
+    await exec("/usr/bin/xattr", ["-cr", appPath]).catch(() => {});
+    const signArgs = resolveCodesignArgs(appPath, env, options.codesignIdentity);
+    await exec("/usr/bin/codesign", signArgs).catch(() => {});
   }
 
   const bytes = await computeDirectoryBytes(appPath);
@@ -558,11 +595,144 @@ export async function inspectSetup(options: { env?: NodeJS.ProcessEnv } = {}): P
   };
 }
 
+export async function removeSetup(options: {
+  env?: NodeJS.ProcessEnv;
+  harnesses?: string[];
+} = {}): Promise<SetupResult> {
+  const env = options.env ?? process.env;
+  const { configPath } = resolvePaths(env);
+  const rawText = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
+  const parsed = normalizeExistingConfig(rawText);
+  const targetIds = options.harnesses
+    ? options.harnesses.map(h => validateHarness(h))
+    : [...ADAPTER_REGISTRY.values()].filter(a => !rejectedPluginIds.has(a.id) && a.setup).map(a => a.id);
+
+  for (const id of targetIds) {
+    if (!ADAPTER_REGISTRY.has(id) || rejectedPluginIds.has(id)) {
+      throw new Error(`Unknown harness: ${id}`);
+    }
+  }
+
+  const actions: SetupFileAction[] = [];
+  for (const id of targetIds) {
+    const adapter = ADAPTER_REGISTRY.get(id);
+    if (!adapter?.setup) continue;
+    const removed = await adapter.setup.remove(env);
+    actions.push(...removed);
+  }
+
+  return {
+    ok: true,
+    dryRun: false,
+    configPath,
+    defaultHub: parsed.default_hub,
+    actions,
+  };
+}
+
+export async function uninstallSetup(options: {
+  env?: NodeJS.ProcessEnv;
+  purgeData?: boolean;
+  unlistenAll?: () => Promise<void>;
+} = {}): Promise<SetupResult> {
+  const env = options.env ?? process.env;
+  const { stateDir, configPath, homeDir } = resolvePaths(env);
+  const rawText = existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined;
+  const parsed = normalizeExistingConfig(rawText);
+
+  if (options.unlistenAll) {
+    await options.unlistenAll().catch(() => {});
+  } else {
+    const daemonPort = Number(env.CITO_DAEMON_PORT) || 4290;
+    await fetch(`http://127.0.0.1:${daemonPort}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "cito_unlisten",
+          arguments: {},
+          _meta: { expected_harness: "human", expected_session_id: "default" },
+        },
+      }),
+      signal: AbortSignal.timeout(500),
+    }).catch(() => {});
+  }
+
+  const actions: SetupFileAction[] = [];
+  for (const adapter of ADAPTER_REGISTRY.values()) {
+    if (rejectedPluginIds.has(adapter.id) || !adapter.setup) continue;
+    const removed = await adapter.setup.remove(env);
+    actions.push(...removed);
+  }
+
+  const plistPath = launchAgentPlistPath(env);
+  if (existsSync(plistPath)) {
+    await rm(plistPath, { force: true });
+    actions.push({
+      target: "cito",
+      path: plistPath,
+      status: "updated",
+      detail: "Removed LaunchAgent plist",
+    });
+  }
+
+  const binDir = join(stateDir, "bin");
+  if (existsSync(binDir)) {
+    await rm(binDir, { recursive: true, force: true });
+    actions.push({
+      target: "cito",
+      path: binDir,
+      status: "updated",
+      detail: "Removed CLI shims directory",
+    });
+  }
+
+  if (options.purgeData) {
+    const userAppPath = join(homeDir, "Applications", "Cito.app");
+    if (existsSync(userAppPath)) {
+      await rm(userAppPath, { recursive: true, force: true });
+      actions.push({
+        target: "cito",
+        path: userAppPath,
+        status: "updated",
+        detail: "Removed ~/Applications/Cito.app",
+      });
+    }
+    if (existsSync(stateDir)) {
+      await rm(stateDir, { recursive: true, force: true });
+      actions.push({
+        target: "cito",
+        path: stateDir,
+        status: "updated",
+        detail: "Removed local state directory",
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    dryRun: false,
+    configPath,
+    defaultHub: parsed.default_hub,
+    actions,
+  };
+}
+
 async function runSetupEngine(options: SetupOptions, dryRun: boolean): Promise<SetupResult> {
   const env = options.env ?? process.env;
+  if (options.uninstall) {
+    return await uninstallSetup({ env, purgeData: options.purgeData });
+  }
   const { stateDir, configPath } = resolvePaths(env);
   const enabledHarnesses = new Set((options.enableHarnesses ?? []).map(h => validateHarness(h)));
-  for (const h of enabledHarnesses) {
+  const disabledHarnesses = new Set((options.disableHarnesses ?? []).map(h => validateHarness(h)));
+  for (const h of [...enabledHarnesses, ...disabledHarnesses]) {
     if (!ADAPTER_REGISTRY.has(h) || rejectedPluginIds.has(h)) {
       throw new Error(`Unknown harness: ${h}`);
     }
@@ -677,6 +847,13 @@ async function runSetupEngine(options: SetupOptions, dryRun: boolean): Promise<S
 
   for (const adapter of ADAPTER_REGISTRY.values()) {
     if (rejectedPluginIds.has(adapter.id) || !adapter.setup) continue;
+    if (disabledHarnesses.has(adapter.id)) {
+      if (!dryRun) {
+        const removed = await adapter.setup.remove(env);
+        actions.push(...removed);
+      }
+      continue;
+    }
     const tier = BUILTIN_PLUGIN_IDS.has(adapter.id) ? (adapter.manifest?.tier ?? "stable") : "custom";
     const shouldConfigure = tier === "stable" || enabledHarnesses.has(adapter.id);
     if (!shouldConfigure) {
@@ -730,6 +907,8 @@ export async function runSetupCli(
   let dryRun = false;
   let force = false;
   let jsonOutput = false;
+  let uninstall = false;
+  let purgeData = false;
   let hubName: string | undefined;
   let hubUrl: string | undefined;
   let hubAuth: HubAuthMode | undefined;
@@ -746,6 +925,7 @@ export async function runSetupCli(
   const disableHubs: string[] = [];
   const removeHubs: string[] = [];
   const enableHarnesses: string[] = [];
+  const disableHarnesses: string[] = [];
 
   const readVal = (arg: string, idx: number, flag: string): [string, number] => {
     if (arg.startsWith(flag + "=")) {
@@ -771,6 +951,10 @@ export async function runSetupCli(
         force = true;
       } else if (arg === "--json") {
         jsonOutput = true;
+      } else if (arg === "--uninstall") {
+        uninstall = true;
+      } else if (arg === "--purge-data") {
+        purgeData = true;
       } else if (arg === "--default") {
         setDefault = true;
       } else if (arg === "--login-item") {
@@ -826,6 +1010,10 @@ export async function runSetupCli(
         let val: string;
         [val, i] = readVal(arg, i, "--enable");
         enableHarnesses.push(val);
+      } else if (arg === "--disable" || arg.startsWith("--disable=")) {
+        let val: string;
+        [val, i] = readVal(arg, i, "--disable");
+        disableHarnesses.push(val);
       } else if (arg.startsWith("-")) {
         throw new Error(`Unknown flag: ${arg}`);
       } else {
@@ -864,6 +1052,41 @@ export async function runSetupCli(
       return;
     }
 
+    if (uninstall) {
+      const result = await uninstallSetup({ env, purgeData });
+      if (jsonOutput) {
+        process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      } else {
+        for (const action of result.actions) {
+          process.stdout.write(`[${action.status}] ${action.target}: ${action.path} (${action.detail})\n`);
+        }
+      }
+      return;
+    }
+
+    const onlyDisable =
+      disableHarnesses.length > 0 &&
+      enableHarnesses.length === 0 &&
+      !hubName &&
+      enableHubs.length === 0 &&
+      disableHubs.length === 0 &&
+      removeHubs.length === 0 &&
+      launchAtLogin === undefined &&
+      shareHub === undefined &&
+      sharePort === undefined;
+
+    if (onlyDisable) {
+      const result = await removeSetup({ env, harnesses: disableHarnesses });
+      if (jsonOutput) {
+        process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      } else {
+        for (const action of result.actions) {
+          process.stdout.write(`[${action.status}] ${action.target}: ${action.path} (${action.detail})\n`);
+        }
+      }
+      return;
+    }
+
     const opts: SetupOptions = {
       env,
       force,
@@ -872,6 +1095,7 @@ export async function runSetupCli(
       disableHubs,
       removeHubs,
       enableHarnesses,
+      disableHarnesses,
       ...(launchAtLogin !== undefined ? { launchAtLogin } : {}),
       ...(shareHub !== undefined || sharePort !== undefined
         ? { hostHub: { ...(shareHub !== undefined ? { enabled: shareHub } : {}), ...(sharePort !== undefined ? { port: sharePort } : {}) } }
