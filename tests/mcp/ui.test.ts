@@ -6,6 +6,76 @@ import {agent,remoteAgent,cleanroom,provider,seed,sendUnbound,received,action,ro
 import {freePort,waitFor,object} from "../support/native-harness.js";
 import {loginFixture} from "../support/oidc-native.js";
 
+test("hub invites reject non-object JSON without crashing or changing config", async () => {
+ const f = await cleanroom();
+ const daemon = await f.daemon();
+ const before = await readFile(f.configPath, "utf8");
+ for (const invite of ["[]", "42", "true", '"invite"', "null"]) {
+  expect(await action(f, {op:"paste_hub_invite",invite}, true)).toMatchObject({
+   http_status:400,ok:false,error:"INVALID_INPUT: Invalid hub invite"
+  });
+  expect(await readFile(f.configPath, "utf8")).toBe(before);
+  expect((await action(f, {op:"get_snapshot"})).http_status).toBe(200);
+ }
+ expect(daemon.child.exitCode).toBeNull();
+ expect(await action(f, {op:"paste_hub_invite",invite:JSON.stringify({name:"work",url:"local://",authMode:"none"})})).toMatchObject({http_status:200});
+ expect(JSON.parse(await readFile(f.configPath, "utf8")).hubs.work).toMatchObject({url:"local://",authMode:"none"});
+});
+test("UI and MCP boundaries handle non-object JSON and normalize malformed tool metadata", async () => {
+ const f = await cleanroom();
+ const daemon = await f.daemon();
+ for (const value of [[], 42, true, "request", null]) {
+  for (const path of ["/ui", "/action", "/control", "/mcp"]) {
+   const response = await fetch(`http://127.0.0.1:${f.daemonPort}${path}`, {
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(value),signal:AbortSignal.timeout(3000)
+   });
+   expect(response.status).toBe(400);
+   const body = object(await response.json());
+   if (path === "/mcp") expect(body.error).toMatchObject({code:-32600,message:"Invalid Request"});
+   else expect(body.error).toBe("INVALID_INPUT: Action must be an object");
+  }
+  const response = await fetch(`http://127.0.0.1:${f.daemonPort}/mcp`, {
+   method:"POST",headers:{"content-type":"application/json"},
+   body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:value}),signal:AbortSignal.timeout(3000)
+  });
+  expect(response.status).toBe(200);
+  expect(object(await response.json()).result).toMatchObject({isError:true});
+  expect(await f.mcp("tools/call", {name:"cito_find",arguments:{},_meta:value})).toMatchObject({isError:false});
+ }
+ expect(await f.mcp("ping")).toEqual({});
+ expect(daemon.child.exitCode).toBeNull();
+});
+test("host and listener mutations reject non-object values without overwriting them", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url}},defaultHub:"work"});
+ await f.daemon();
+ const config = await readFile(f.configPath,"utf8"), id = "c_1111111111111111";
+ for (const value of [[], 42, true, "invalid"]) {
+  for (const key of ["host_hub", "hostHub"]) {
+   const raw = JSON.parse(config); raw[key] = value;
+   await writeFile(f.configPath, JSON.stringify(raw));
+   const before = await readFile(f.configPath,"utf8");
+   expect(await action(f, {op:"set_host_hub",enabled:false}, true)).toMatchObject({
+    http_status:400,error:"INVALID_INPUT: Host hub must be an object"
+   });
+   expect(await readFile(f.configPath,"utf8")).toBe(before);
+  }
+  await writeFile(f.configPath, config);
+  const data = Buffer.from(JSON.stringify(value)).toString("base64");
+  await hub.rpc("kv_put", {key:id,data_b64:data});
+  expect(await action(f, {op:"set_scope",hub:"work",listener_id:id,scope:"self"}, true)).toMatchObject({
+   http_status:400,error:"INVALID_INPUT: Listener must be an object"
+  });
+  expect(object(await hub.rpc("kv_get",{key:id})).value_b64).toBe(data);
+ }
+ // Missing maps retain the existing local-hub auto-vivification behavior.
+ await f.writeConfig({});
+ expect((await action(f,{op:"setup_toggle_hub",hub:"local",enabled:false})).http_status).toBe(200);
+ expect(JSON.parse(await readFile(f.configPath,"utf8")).hubs.local.enabled).toBe(false);
+ expect((await action(f,{op:"hub_action",hub:"local",action:"reconnect"})).http_status).toBe(200);
+ expect(JSON.parse(await readFile(f.configPath,"utf8")).hubs.local.enabled).toBe(true);
+});
+
 test.each([true,false])("cito_send desktop banner admission respects desktopBanner=%s",async desktopBanner=>{
  const f=await cleanroom({desktopBanner}),p=await provider(f);
  const log=join(f.root,"ui-frames.jsonl"),ui=join(f.root,"ui-reader.mjs");

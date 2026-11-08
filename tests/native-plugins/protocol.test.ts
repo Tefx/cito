@@ -21,7 +21,6 @@ function fixture() {
 }
 function binary(name: string) {
   return process.env.CITO_NATIVE_PLUGIN_TEST_BIN_DIR ? join(process.env.CITO_NATIVE_PLUGIN_TEST_BIN_DIR, name)
-    : existsSync(join(root, ".scratch/plugin-target/debug", name)) ? join(root, ".scratch/plugin-target/debug", name)
     : join(root, "plugins", name === "cito-claude-hook" ? "claude" : name.replace("cito-plugin-", ""), "bin", name);
 }
 function call(name: string, request: unknown, env: NodeJS.ProcessEnv): Promise<Record<string, any>> {

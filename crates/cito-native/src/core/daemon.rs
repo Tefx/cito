@@ -1322,7 +1322,17 @@ impl DaemonService {
                     if remote["binding_generation"]!=row["binding_generation"]||remote["owner_token"]!=row["owner_token"]{let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
                     let channel=format!("{}:{}",host_id,string(&row,"harness"));
-                    if let Some(ch)=remote["channels"].as_object_mut().and_then(|m|m.get_mut(&channel)){if now_ms().saturating_sub(ch["updated_at_ms"].as_u64().unwrap_or(0))>=20_000 {ch["updated_at_ms"]=json!(now_ms());let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision));}}
+                    if let Some(ch) = remote["channels"]
+                        .as_object_mut()
+                        .and_then(|m| m.get_mut(&channel))
+                        .and_then(Value::as_object_mut)
+                    {
+                        let updated = ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
+                        if now_ms().saturating_sub(updated) >= 20_000 {
+                            ch.insert("updated_at_ms".into(), json!(now_ms()));
+                            let _ = slot.kv_save(string(&row, "listener_id"), &remote, Some(revision));
+                        }
+                    }
                 }
                 if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |signal| {
                     if let Some(ui) = &ui {
@@ -1514,6 +1524,9 @@ impl DaemonService {
         }
         crate::plugins::with_config_lock(&self.config.config_path, || {
             let mut raw = self.raw_config()?;
+            if !raw.is_object() {
+                return Err("INVALID_INPUT: Config must be an object".into());
+            }
             action(&mut raw)?;
             let tmp = self
                 .config
@@ -1531,6 +1544,9 @@ impl DaemonService {
         })
     }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
+        if !action.is_object() {
+            return Err("INVALID_INPUT: Action must be an object".into());
+        }
         let op = string(action, "op");
         let hub = action["hub"]
             .as_str()
@@ -1628,9 +1644,30 @@ impl DaemonService {
                     Ok(())
                 })?;
             }
-            "setup_toggle_hub" => {
-                let enabled = action["enabled"].as_bool().unwrap_or(true);
+            "setup_toggle_hub" | "hub_action" => {
+                let enabled = if op == "setup_toggle_hub" {
+                    action["enabled"].as_bool().unwrap_or(true)
+                } else {
+                    string(action, "action") != "disconnect"
+                };
+                if op == "hub_action" && action["action"] == "reconnect" {
+                    if let Some(old) = self.slots.remove(&hub) {
+                        old.closed.store(true, Ordering::SeqCst);
+                    }
+                }
                 self.mutate_config(|v| {
+                    if v["hubs"].is_null() {
+                        v["hubs"] = json!({});
+                    }
+                    if !v["hubs"].is_object() {
+                        return Err("INVALID_INPUT: Hubs must be an object".into());
+                    }
+                    if v["hubs"][&hub].is_null() {
+                        v["hubs"][&hub] = json!({});
+                    }
+                    if !v["hubs"][&hub].is_object() {
+                        return Err("INVALID_INPUT: Hub must be an object".into());
+                    }
                     v["hubs"][&hub]["enabled"] = json!(enabled);
                     Ok(())
                 })?;
@@ -1649,9 +1686,11 @@ impl DaemonService {
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
             "paste_hub_invite" => {
                 let invite = string(action, "invite");
-                let value: Value = serde_json::from_str(invite)
+                let mut value: Value = serde_json::from_str(invite)
                     .map_err(|_| "INVALID_INPUT: Invalid hub invite")?;
-                let mut value = value;
+                if !value.is_object() {
+                    return Err("INVALID_INPUT: Invalid hub invite".into());
+                }
                 value["op"] = json!("save_hub");
                 return self.action(&value);
             }
@@ -1700,16 +1739,16 @@ impl DaemonService {
                     params["enabled"] = json!(false);
                 }
                 let result = self.slot(&hub)?.rpc(rpc, &params)?;
-                if rpc == "human_channel_pair_start" {
+                if matches!(rpc, "human_channel_pair_start" | "human_channels_test") {
+                    if !result.is_object() {
+                        return Err("INVALID_INPUT: Channel result must be an object".into());
+                    }
                     let mut frame = result.clone();
-                    frame["op"] = json!("pair_code");
-                    frame["channel_id"] = json!(id);
-                    frame["hub"] = json!(hub);
-                    self.emit(frame);
-                }
-                if rpc == "human_channels_test" {
-                    let mut frame = result.clone();
-                    frame["op"] = json!("channel_test_result");
+                    frame["op"] = json!(if rpc == "human_channel_pair_start" {
+                        "pair_code"
+                    } else {
+                        "channel_test_result"
+                    });
                     frame["channel_id"] = json!(id);
                     frame["hub"] = json!(hub);
                     self.emit(frame);
@@ -1810,6 +1849,9 @@ impl DaemonService {
                 }
                 let slot = self.slot(&hub)?;
                 let (mut row, rev) = slot.kv_get(id)?.ok_or("LISTENER_NOT_FOUND")?;
+                if !row.is_object() {
+                    return Err("INVALID_INPUT: Listener must be an object".into());
+                }
                 row["scope"] = json!(scope);
                 slot.kv_save(id, &row, Some(rev))?;
                 self.state.db.execute(
@@ -1879,18 +1921,6 @@ impl DaemonService {
                     self.unlisten_id(from, string(&row, "listener_id"))?;
                 }
             }
-            "hub_action" => {
-                let connected = string(action, "action") != "disconnect";
-                if action["action"] == "reconnect" {
-                    if let Some(old) = self.slots.remove(&hub) {
-                        old.closed.store(true, Ordering::SeqCst);
-                    }
-                }
-                self.mutate_config(|v| {
-                    v["hubs"][&hub]["enabled"] = json!(connected);
-                    Ok(())
-                })?;
-            }
             "set_host_hub" => {
                 self.mutate_config(|v| {
                     let mut host = v
@@ -1898,6 +1928,12 @@ impl DaemonService {
                         .or_else(|| v.get("hostHub"))
                         .cloned()
                         .unwrap_or_else(|| json!({}));
+                    if host.is_null() {
+                        host = json!({});
+                    }
+                    if !host.is_object() {
+                        return Err("INVALID_INPUT: Host hub must be an object".into());
+                    }
                     for key in ["enabled", "port", "token", "auth_mode", "bind"] {
                         if let Some(value) = action.get(key) {
                             host[key] = value.clone();
@@ -2431,7 +2467,7 @@ fn handle_http(mut stream: TcpStream, service: Arc<Mutex<DaemonService>>) {
         return;
     }
     let id = parsed["id"].clone();
-    if parsed["jsonrpc"] != "2.0" || !parsed["method"].is_string() {
+    if !parsed.is_object() || parsed["jsonrpc"] != "2.0" || !parsed["method"].is_string() {
         respond(
             &mut stream,
             400,
@@ -2451,6 +2487,9 @@ fn handle_http(mut stream: TcpStream, service: Arc<Mutex<DaemonService>>) {
         "tools/list" => tools_list(),
         "ping" => json!({}),
         "tools/call" => {
+            if !parsed["params"].is_object() {
+                parsed["params"] = json!({});
+            }
             let name = string(&parsed["params"], "name").to_string();
             if !parsed["params"]["_meta"].is_object() {
                 parsed["params"]["_meta"] = json!({});
@@ -2833,6 +2872,53 @@ pub use super::cli::run_cli_command;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cito-config-shape-{}", random_uuid_v4()));
+        let result = (|| {
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let config = NativeConfig {
+                state_dir: dir.join("state"),
+                config_path: dir.join("config.json"),
+                home_dir: dir.join("home"),
+                daemon_port: 0,
+                user: "alice".into(),
+                default_hub: "local".into(),
+            };
+            let plugins = LoadedPlugins {
+                plugins: vec![],
+                rejected_ids: Default::default(),
+            };
+            let mut service = DaemonService::open(&config, &plugins)?;
+            let result = (|| {
+                for raw in ["[]", "42", "true", "\"config\"", "null"] {
+                    fs::write(&config.config_path, raw).map_err(|e| e.to_string())?;
+                    assert_eq!(
+                        service.mutate_config(|v| {
+                            v["user"] = json!("bob");
+                            Ok(())
+                        }),
+                        Err("INVALID_INPUT: Config must be an object".into())
+                    );
+                    assert_eq!(
+                        fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
+                        raw
+                    );
+                }
+                fs::write(&config.config_path, r#"{"other":7}"#).map_err(|e| e.to_string())?;
+                service.mutate_config(|v| {
+                    v["user"] = json!("bob");
+                    Ok(())
+                })?;
+                assert_eq!(service.raw_config()?, json!({"other":7,"user":"bob"}));
+                Ok(())
+            })();
+            service.shutdown();
+            result
+        })();
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        result
+    }
     #[test]
     fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("cito-ui-layout-{}", random_uuid_v4()));
