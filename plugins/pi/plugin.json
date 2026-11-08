@@ -1,21 +1,13 @@
 {
   "id": "pi",
-  "kind": "agent",
-  "displayName": "Pi",
+  "kind": "agent-harness",
+  "displayName": "Pi Coding Agent",
   "tier": "stable",
+  "scope": "hub",
   "sfSymbol": "terminal.fill",
-  "tint": "indigo",
-  "protocol": "socket-bridge",
-  "native": {
-    "pidKeys": [
-      "pi_pid"
-    ],
-    "homeEnv": "CITO_PI_HOME",
-    "defaultHome": "~/.pi/agent",
-    "extensionRelPath": "extensions/cito-bridge.ts",
-    "extensionSource": "cito-bridge.ts",
-    "mcpJsonRelPath": "mcp/global.mcp.json",
-    "legacySettingsRelPath": "settings.json",
-    "legacyPackageSpec": "npm:@tefx/cito"
-  }
+  "tint": "amber",
+  "cliFlag": false,
+  "command": [
+    "./bin/cito-plugin-pi"
+  ]
 }

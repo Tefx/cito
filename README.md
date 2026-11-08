@@ -1,10 +1,6 @@
 <p align="center">
   <a href="https://tefx.github.io/cito/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="site/assets/brand/cito-logo-dark.svg" />
-      <source media="(prefers-color-scheme: light)" srcset="site/assets/brand/cito-logo-light.svg" />
-      <img alt="Cito" src="site/assets/brand/cito-logo-dark.svg" width="176" height="48" />
-    </picture>
+    <img alt="Cito" src="site/assets/brand/cito-logo-dark.svg" width="176" height="48" />
   </a>
 </p>
 
@@ -28,7 +24,7 @@ Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` notificat
 ### Key Capabilities
 - **Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`**: Every human user (`harness: "human", session_id: "default"`) and every agent session is a host-independent `Node` reachable via $1 \dots K$ attached `Channels` (multiple Macs, `cito-ui`, `plugins/telegram`) without cross-host `FENCED_INACTIVE` eviction.
 - **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub (`cito_send` / `signal_ack`), with `to: "@self"` and `to: "@<username>"` shorthands, `[ Directory | Activity ]` feeds, and an inline `ComposerBar` in `DirectoryPanel`.
-- **Built-in `HumanChannelPlugin` Architecture (`plugins/human` & `plugins/telegram`)**: Configure two-scope (`scope: "hub" | "user"`) human channels in the 3-tab `SettingsPanel` (`Agent Apps`, `Human Channels`, `Hubs & Network`), pair via 1-click `/start cito-xxxxxx` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
+- **Built-in `HumanChannelPlugin` Architecture (`plugins/human` & `plugins/telegram`)**: Configure two-scope (`scope: "hub" | "user"`) human channels in the 3-tab `SettingsPanel` (`Agent Apps`, `Human Channels`, `Hubs & Network`), pair via short-lived `/start cito-a1b2c3d4e5` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
 - **Ego-Centric Menu Bar Control Plane (`380pt`)**: Inspect your `Human Node` (`@<user> (Me)`), local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`).
 - **Automatic Daemon Handover**: Upgrading Cito automatically replaces any older local `cito-daemon` on the next CLI or MCP invocation without manual restarts.
 
@@ -48,7 +44,7 @@ This installs `Cito.app` and places `cito`, `cito-mcp`, and `cito-claude-hook` o
 
 ```sh
 cito --version
-# -> cito v0.17.0
+# -> cito v0.18.0
 ```
 
 ### Option 2: Download `Cito.app` for macOS
@@ -64,8 +60,10 @@ cito --version
 Out of the box (without `~/.cito/config.json`), Cito runs an in-process **`local`** hub so sessions on the same Mac can discover and wake each other immediately.
 
 Open **`Settings…` (`⌘,`)** from the Cito menu bar dropdown to configure:
-- **Tab 1 — `Agent Apps`**: One-click **`Configure`** for installed coding harnesses (`Codex`, `Pi`, and experimental `Claude Code`) plus **`Start Cito at Login`**.
-- **Tab 2 — `Human Channels`**: Configure your Telegram Bot Token (`scope: "hub"`), click **`🔗 Pair with Telegram`** to generate a 1-click `/start cito-xxxxxx` code, or click **`Send Test Message`**.
+Use **`Remove All Integrations…`** in the footer for a separate uninstall confirmation; changing tabs cancels that confirmation. Card lists scroll when more plugins or Hubs are installed.
+
+- **Tab 1 — `Agent Apps`**: One-click **`Set Up`** and **`Disconnect`** for installed coding harnesses (`Codex`, `Pi`, and experimental `Claude Code`) plus **`Start Cito at Login`**.
+- **Tab 2 — `Human Channels`**: Select the target Hub, securely enter its Telegram Bot Token (`scope: "hub"`), click **`Pair Account…`** and follow the displayed `/start cito-a1b2c3d4e5` instruction, or click **`Send Test`**. Pairing updates your account fields without overwriting edits.
 - **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`✨ Paste from Invite`** / **`+ Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
 
 You can also inspect status or join hubs from the CLI when needed:

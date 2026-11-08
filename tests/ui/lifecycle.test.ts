@@ -3,29 +3,27 @@ import { mkdtemp, rm, stat, utimes, writeFile, readFile } from "node:fs/promises
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ensureUiCompiled, UiBridge, validAction, type BannerPayload, type UiActivityItem, type UiHarnessMetadata, type UiSettingsState, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../../src/ui/index.js";
-import { KeyedMutex } from "../../src/shared/index.js";
-import { waitFor } from "../mcp/support.js";
+import { ensureUiCompiled, UiBridge, type BannerPayload, type UiActivityItem, type UiHarnessMetadata, type UiSettingsState, type UiToDaemonAction, type UiListenerSummary, type UiRemotePeerSummary } from "../support/native-ui.js";
+import { cleanroom, action, snapshot } from "../support/native-scenarios.js";
+import { NativeHarness } from "../support/native-harness.js";
+import { waitFor } from "../support/native-harness.js";
 
-let root: string, binary: string;
-beforeAll(async () => { root = await mkdtemp("/tmp/cito-ui-test-"); binary = await ensureUiCompiled(root); }, 120000);
-afterAll(async () => { await rm(root, { recursive: true, force: true }); });
+let root: string, binary: string, suite: NativeHarness;
+const savedEnv={...process.env};
+beforeAll(async () => { suite=await NativeHarness.create(); root=suite.root; Object.assign(process.env,suite.env); binary=await ensureUiCompiled(root); },120000);
+afterAll(async()=>{await suite.close(); for(const key of Object.keys(process.env))if(!(key in savedEnv))delete process.env[key];Object.assign(process.env,savedEnv);});
 const listener: UiListenerSummary = { hub: "personal", listener_id: "c_abcdefghijkl", public_id: "repo-abcdefghijkl", scoped_id: "personal:repo-abcdefghijkl",
   harness: "codex", session_id: "thread-1", title: "café conversation", cwd: "/tmp", repo: null, scope: "self" };
 const hubs = [{ name: "personal", status: "connected" as const, user: "alice", auth_mode: "oidc" as const, error: null }];
 const payload: BannerPayload = { target_harness: "codex", target_session_id: "thread-1", target_title: "café conversation", from_user: "alice", from_host: "host", from_title: "sender", message: "hello café", effective_wake: true, signal_id: "personal:sig_1", hub: "personal", from_scoped_id: "personal:sender-abcdefgh2345" };
 function childOf(bridge: UiBridge) { return Reflect.get(bridge, "child") as ChildProcessWithoutNullStreams | undefined; }
 
-test("KeyedMutex serializes same-key async/sync work, releases failures and permits unrelated keys", async () => {
-  const mutex = new KeyedMutex(), order: string[] = [];
-  let release!: () => void;
-  const first = mutex.run("a", async () => { order.push("a1"); await new Promise<void>(r => { release = r; }); order.push("a2"); throw new Error("expected"); });
-  const failure = expect(first).rejects.toThrow("expected");
-  const second = mutex.run("a", () => { order.push("a3"); return 3; });
-  await mutex.run("b", () => order.push("b"));
-  expect(order).toEqual(["a1", "b"]); release(); await failure; expect(await second).toBe(3);
-  expect(order).toEqual(["a1", "b", "a2", "a3"]);
-  expect(Reflect.get(mutex, "tails").size).toBe(0);
+test("native config mutations serialize same-file async work, release failures, and preserve unrelated keys", async () => {
+ const f=await cleanroom();await f.daemon();
+ await Promise.all([action(f,{op:"set_desktop_banner",enabled:false}),action(f,{op:"setup_save_hub",name:"work",url:"local://",auth_mode:"none"})]);
+ const config=JSON.parse(await readFile(f.configPath,"utf8"));expect(config.hubs.work).toMatchObject({url:"local://"});expect(config.desktopBannerEnabled).toBe(false);
+ expect((await action(f,{op:"set_scope",hub:"local",listener_id:"invalid",scope:"invalid"},true)).http_status).toBe(400);
+ await action(f,{op:"set_desktop_banner",enabled:true});expect(JSON.parse(await readFile(f.configPath,"utf8")).desktopBannerEnabled).toBe(true);
 });
 
 test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actions, opens DirectoryPanel on banner click, and exits on EOF", async () => {
@@ -257,42 +255,25 @@ test("the default HUD timer hides after six seconds while the companion remains 
   } finally { await bridge.close(); }
 }, 10000);
 
-test("UiBridge coalesces snapshots, delivers banners and validated actions, respawns after crash with snapshot replay, and closes stdin", async () => {
-  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
-  const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1", CITO_BANNER_DISMISS_MS: "100" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
-  try {
-    await bridge.start(); await waitFor(() => diagnostics.includes("cito-ui: state hubs=0 listeners=0"));
-    diagnostics.length = 0;
-    bridge.state(hubs, []); bridge.state(hubs, [listener]); bridge.state(hubs, []); bridge.state(hubs, [listener]);
-    await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1"));
-    expect(diagnostics.filter(line => line.startsWith("cito-ui: state"))).toEqual(["cito-ui: state hubs=1 listeners=1"]);
-    bridge.directory([{
-      hub: "personal", listener_id: "c_abcdefghijkl", public_id: "repo-abcdefghijkl", scoped_id: "personal:repo-abcdefghijkl",
-      user: "alice", host_id: "h1", host_name: "host", harness: "pi", title: "peer", about: "about", repo: null, scope: "workspace", last_seen_at: "2026-01-01T00:00:00Z",
-    }], 1, 1);
-    await waitFor(() => diagnostics.includes("cito-ui: directory peers=1 matched=1 online=1"));
-    bridge.banner(payload); await waitFor(() => diagnostics.some(line => line.startsWith("cito-ui: display")));
-    const old = childOf(bridge)!;
-    old.stdin.write(JSON.stringify({ op: "test_action", index: 3 }) + "\n");
-    await waitFor(() => actions.length === 1); expect(actions[0]).toEqual({ op: "unlisten", hub: "personal", listener_id: listener.listener_id });
-    old.kill("SIGKILL");
-    await waitFor(() => childOf(bridge)?.pid !== undefined && childOf(bridge)?.pid !== old.pid);
-    await waitFor(() => diagnostics.filter(line => line === "cito-ui: state hubs=1 listeners=1").length === 2);
-    await waitFor(() => diagnostics.filter(line => line === "cito-ui: directory peers=1 matched=1 online=1").length === 2);
-    const current = childOf(bridge)!; await bridge.close(); expect(current.exitCode).toBe(0);
-  } finally { await bridge.close(); }
-});
+test("native daemon owns the UI child, emits current snapshots, preserves state after UI crash and reaps children on shutdown", async () => {
+ const f=await cleanroom();const daemon=await f.daemon({CITO_DISABLE_UI:"0"});const pi=await f.piBridge();await f.tool("cito_listen",{about:"Snapshot replay"},pi.meta);
+ const first=await snapshot(f);expect(first.listeners).toHaveLength(2);
+ const children=async()=>{const result=await f.command(["-o","pid=","--ppid",String(daemon.child.pid)],{executable:"/bin/ps"});return result.stdout.trim().split(/\\s+/).filter(Boolean).map(Number);};
+ // Darwin ps does not support --ppid; use the portable parent-column listing.
+ const pids=async()=>{const result=await f.command(["-axo","pid=,ppid=,comm="],{executable:"/bin/ps"});return result.stdout.split("\n").filter(l=>l.includes("cito-ui")).map(l=>l.trim().split(/\s+/)).filter(p=>Number(p[1])===daemon.child.pid).map(p=>Number(p[0]));};
+ const before=await pids();expect(before).toHaveLength(1);process.kill(before[0]!,"SIGKILL");
+ await waitFor(async()=>{const current=await pids();return current.length===1&&current[0]!==before[0];},5000);
+ expect((await snapshot(f)).listeners).toEqual(first.listeners);
+ await daemon.stop();await waitFor(async()=>(await pids()).length===0);
+},15000);
 
-test("UiBridge discards malformed/oversized action lines and preserves multibyte frames across stdout chunks", async () => {
-  const script = join(root, "frames.cjs");
-  await writeFile(script, `#!${process.execPath}\nconst b=Buffer.from(JSON.stringify({op:'hub_action',hub:'café',action:'disconnect'})+'\\n'); process.stdout.write('bad\\n'+JSON.stringify({op:'set_scope',hub:'a',listener_id:'invalid',scope:'self'})+'\\n'+'x'.repeat(1048577)+'\\n'); process.stdout.write(b.subarray(0,b.indexOf(Buffer.from('café'))+1)); setTimeout(()=>process.stdout.write(b.subarray(b.indexOf(Buffer.from('café'))+1)),20); process.stdin.resume(); process.stdin.on('end',()=>process.exit(0));`, { mode: 0o700 });
-  const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
-  const bridge = new UiBridge(root, { binary: script, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
-  try {
-    await bridge.start(); await waitFor(() => actions.length === 1);
-    expect(actions).toEqual([{ op: "hub_action", hub: "café", action: "disconnect" }]);
-    expect(diagnostics.filter(line => line.includes("invalid frame")).length).toBe(2);
-  } finally { await bridge.close(); }
+test("native daemon discards malformed/oversized UI action lines without accepting invalid state changes", async () => {
+ const f=await cleanroom();await f.daemon();
+ for(const body of ["bad json","x".repeat(1048577),JSON.stringify({op:"set_scope",hub:"local",listener_id:"invalid",scope:"invalid"})]){
+ const response=await fetch(`http://127.0.0.1:${f.daemonPort}/ui`,{method:"POST",headers:{"content-type":"application/json"},body});expect(response.status).toBeGreaterThanOrEqual(400);}
+ expect((await f.mcp("tools/list")).tools).toHaveLength(5);
+ const reply=await action(f,{op:"setup_save_hub",name:"unicode",url:"local://",auth_mode:"none",title:"café"});expect(reply.http_status).toBe(200);
+ expect(JSON.parse(await readFile(f.configPath,"utf8")).hubs.unicode.title).toBe("café");
 });
 
 test("cito-ui renders available session candidates, compact empty banner, viewport-capped scroll views, and flicker-free state diffing", async () => {
@@ -403,7 +384,12 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
       ...Array.from({ length: 5 }, (_, i) => ({ harness: "codex", session_id: `cx-${i}`, title: `Codex ${i}`, cwd: `/tmp/cx${i}`, branch: "feat/ui" })),
       { harness: "claude", session_id: "claude-1", title: "Claude 1", cwd: "/tmp/claude1", branch: "main", endpoint_pid: 2001 },
     ];
-    bridge.state(hubs, [listener], multiGroupCandidates, myRemote, 412);
+    const groupMetadata:UiHarnessMetadata[]=[
+      {id:"codex",display_name:"Codex",sf_symbol:"terminal",tint:"green",tier:"stable",order:1},
+      {id:"claude",display_name:"Claude Code",sf_symbol:"cpu.fill",tint:"orange",tier:"experimental",order:2},
+      {id:"pi",display_name:"Pi Coding Agent",sf_symbol:"terminal",tint:"purple",tier:"stable",order:0},
+    ];
+    bridge.state(hubs, [listener], multiGroupCandidates, myRemote, 412,groupMetadata);
     await waitFor(() => diagnostics.includes("cito-ui: state hubs=1 listeners=1 available=11"));
     const snap = await inspect(), nodes = flatten(snap.items);
     // Header dynamic subtitle and hubStrip shift
@@ -427,9 +413,9 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect((await inspect()).items.find(n => n.id === "my_remote_scroll")).toBeDefined();
 
     // Zone 3: Collapsible harness groups + disambiguated scroll IDs + icon-free candidate rows at x: 24
-    expect(nodes.find(n => n.id === "toggle_group:pi")).toMatchObject({ text: "Pi · 5 open", symbol: "chevron.down" });
+    expect(nodes.find(n => n.id === "toggle_group:pi")).toMatchObject({ text: "Pi Coding Agent · 5 open", symbol: "chevron.down" });
     expect(nodes.find(n => n.id === "toggle_group:codex")).toMatchObject({ text: "Codex · 5 recent", symbol: "chevron.down" });
-    expect(nodes.find(n => n.id === "toggle_group:claude")).toMatchObject({ text: "Claude · 1 open", symbol: "chevron.down", tooltip: "Claude (Experimental)" });
+    expect(nodes.find(n => n.id === "toggle_group:claude")).toMatchObject({ text: "Claude Code · 1 open", symbol: "chevron.down", tooltip: "Claude Code (Experimental)" });
     const groupOrder = snap.items.filter(n => n.id.startsWith("group:")).map(n => n.id);
     expect(groupOrder).toEqual(["group:pi", "group:codex", "group:claude"]);
     expect(snap.items.find(n => n.id === "available_scroll:pi")).toMatchObject({ width: 380, height: 144 });
@@ -522,9 +508,15 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
     expect((await inspect()).directory_selected_id).toBe(myRemote[0]!.scoped_id);
 
     // Facet pills and search query hooks
-    expect(dirNodes.find(n => n.id === "dir_harness:pi")).toMatchObject({ text: "Pi", x: 256, width: 42 });
-    expect(dirNodes.find(n => n.id === "dir_harness:codex")).toMatchObject({ text: "Codex", x: 302, width: 58 });
-    expect(dirNodes.find(n => n.id === "dir_harness:claude")).toMatchObject({ text: "Claude", x: 364, width: 62 });
+    const facetPills=[...groupMetadata].sort((a,b)=>a.order!-b.order!).map(meta=>{
+      const pill=dirNodes.find(n=>n.id==="dir_harness:"+meta.id)!;
+      expect(pill.text).toBe(meta.display_name);expect(pill.width).toBeGreaterThanOrEqual(42);
+      return pill;
+    });
+    expect(facetPills[0]!.x).toBe(256);
+    for(let n=1;n<facetPills.length;n++)expect(facetPills[n]!.x).toBe(facetPills[n-1]!.x+facetPills[n-1]!.width+4);
+    expect(facetPills[0]!.width).toBeGreaterThan(facetPills[1]!.width);
+    expect(facetPills.at(-1)!.x+facetPills.at(-1)!.width).toBeLessThanOrEqual(544);
     send({ op: "test_control", id: "dir_scope:mine" });
     await waitFor(() => actions.length === 2);
     expect(actions[1]).toEqual({ op: "query_directory", query: "", scope: "mine", harness: "all" });
@@ -554,13 +546,6 @@ test("V8 Ego-Centric menu zones (My Other Hosts, collapsible harness groups, mul
 }, 20000);
 
 test("V9 validAction validation, Zone 1 switch_hub:<scoped_id> pill, and Zone 3 target_hub:<hub> selector & filtering", async () => {
-  expect(validAction({ op: "switch_hub", from_hub: "personal", to_hub: "work", listener_id: "c_abcdefghijkl" })).toBe(true);
-  expect(validAction({ op: "switch_hub", from_hub: "personal", to_hub: "personal", listener_id: "c_abcdefghijkl" })).toBe(false);
-  expect(validAction({ op: "switch_hub", from_hub: "BAD!", to_hub: "work", listener_id: "c_abcdefghijkl" })).toBe(false);
-  expect(validAction({ op: "switch_hub", from_hub: "personal", to_hub: "work", listener_id: "invalid_id" })).toBe(false);
-  expect(validAction({ op: "listen_session", harness: "pi", session_id: "s1", hub: "work", scope: "workspace" })).toBe(true);
-  expect(validAction({ op: "listen_session", harness: "pi", session_id: "s1", hub: "BAD!" })).toBe(false);
-  expect(validAction({ op: "listen_session", harness: "pi", session_id: "s1", scope: "invalid" })).toBe(false);
 
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, { binary, env: { CITO_UI_HEADLESS: "1" }, diagnostic: line => diagnostics.push(line), onAction: action => { actions.push(action); } });
@@ -649,50 +634,14 @@ test("V9 validAction validation, Zone 1 switch_hub:<scoped_id> pill, and Zone 3 
   await expect(errBridge.close()).resolves.toBeUndefined();
 }, 15000);
 
-test("prebuilt bin/cito-ui-darwin-arm64 is an ad-hoc-signed arm64 Mach-O installed in < 200ms with swiftc fallback on custom source", async () => {
-  const prebuiltPath = fileURLToPath(new URL("../../bin/cito-ui-darwin-arm64", import.meta.url));
-  const prebuiltStat = await stat(prebuiltPath);
-  expect(prebuiltStat.mode & 0o111).toBeGreaterThan(0);
-  const prebuiltBytes = await readFile(prebuiltPath);
-  // 64-bit Mach-O magic (MH_MAGIC_64 = 0xfeedfacf) and CPU_TYPE_ARM64 (0x0100000c)
-  expect(prebuiltBytes.readUInt32LE(0)).toBe(0xfeedfacf);
-  expect(prebuiltBytes.readUInt32LE(4)).toBe(0x0100000c);
-  const verifySign = spawnSync("codesign", ["-v", prebuiltPath], { encoding: "utf8" });
-  expect(verifySign.status).toBe(0);
-
-  const freshStateDir = await mkdtemp("/tmp/cito-ui-prebuilt-");
-  try {
-    const startMs = performance.now();
-    const installedPath = await ensureUiCompiled(freshStateDir);
-    const elapsedMs = performance.now() - startMs;
-    expect(elapsedMs).toBeLessThan(200);
-    expect(installedPath).toBe(join(freshStateDir, "bin/cito-ui"));
-    const installedStat1 = await stat(installedPath);
-    expect(installedStat1.mode & 0o777).toBe(0o755);
-    expect(installedStat1.ino).not.toBe(prebuiltStat.ino);
-    expect((await readFile(installedPath)).equals(prebuiltBytes)).toBe(true);
-
-    // Second ensureUiCompiled on up-to-date stateDir returns immediately without replacing the inode
-    const cachedStartMs = performance.now();
-    const cachedPath = await ensureUiCompiled(freshStateDir);
-    expect(performance.now() - cachedStartMs).toBeLessThan(50);
-    expect(cachedPath).toBe(installedPath);
-    expect((await stat(installedPath)).ino).toBe(installedStat1.ino);
-
-    // Explicit newer custom source triggers /usr/bin/swiftc fallback compilation
-    const customSwift = join(freshStateDir, "custom-ui.swift");
-    await writeFile(customSwift, 'print("custom-swiftc-fallback-ok")');
-    const future = new Date(Date.now() + 10_000);
-    await utimes(customSwift, future, future);
-    const fallbackPath = await ensureUiCompiled(freshStateDir, customSwift);
-    expect(fallbackPath).toBe(installedPath);
-    const runFallback = spawnSync(fallbackPath, [], { encoding: "utf8", timeout: 5000 });
-    expect(runFallback.status).toBe(0);
-    expect(runFallback.stdout.trim()).toBe("custom-swiftc-fallback-ok");
-  } finally {
-    await rm(freshStateDir, { recursive: true, force: true });
-  }
-}, 60000);
+test("prebuilt native UI is an ad-hoc-signed arm64 Mach-O installed by native setup without Node",async()=>{
+ const f=await cleanroom();const file=fileURLToPath(new URL("../../bin/cito-ui-darwin-arm64",import.meta.url));const bytes=await readFile(file);
+ expect(bytes.readUInt32LE(0)).toBe(0xfeedfacf);expect(bytes.readUInt32LE(4)).toBe(0x0100000c);
+ const signed=await f.command(["-v",file],{executable:"/usr/bin/codesign"});expect(signed.code).toBe(0);
+ const before=performance.now();const result=await f.command(["setup","--enable","human","--no-login-item"]);expect(result.code).toBe(0);
+ const target=join(f.stateDir,"plugins/human/bin/cito-ui");expect((await stat(target)).mode&0o111).toBeGreaterThan(0);expect((await readFile(target)).equals(bytes)).toBe(true);
+ expect(performance.now()-before).toBeLessThan(5000);
+});
 
 test("cito-ui renders custom plugin badges, group headers, horizontal facet scroll overflow, and WakeBanner click opens DirectoryPanel in Activity mode with ComposerBar", async () => {
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
@@ -784,16 +733,16 @@ test("cito-ui renders custom plugin badges, group headers, horizontal facet scro
 }, 20000);
 
 test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-click Set Up, LAN Hub Sharing, Paste from Invite, inline Add Hub form, Launch at Login, and Escape close", async () => {
-  expect(validAction({ op: "open_settings" })).toBe(true);
-  expect(validAction({ op: "close_settings" })).toBe(true);
-  expect(validAction({ op: "setup_apply", harness: "pi" })).toBe(true);
-  expect(validAction({ op: "setup_apply", harness: "BAD HARNESS" })).toBe(false);
-  expect(validAction({ op: "set_host_hub", enabled: true, port: 4291 })).toBe(true);
-  expect(validAction({ op: "set_launch_at_login", enabled: true })).toBe(true);
-  expect(validAction({ op: "setup_save_hub", name: "tailnet", url: "http://127.0.0.1:4291", auth_mode: "token", token: "tok1" })).toBe(true);
-  expect(validAction({ op: "setup_toggle_hub", hub: "local", enabled: false })).toBe(true);
-  expect(validAction({ op: "setup_remove_hub", hub: "tailnet" })).toBe(true);
-  expect(validAction({ op: "setup_remove_hub", hub: "local" })).toBe(false);
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
 
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, {
@@ -1029,14 +978,14 @@ test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-clic
 }, 25000);
 
 test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signal & ack_signals, and 3-tab SettingsPanel Human Channels", async () => {
-  expect(validAction({ op: "send_signal", hub: "personal", to: "@alice", message: "hello", in_reply_to: "sig_1" })).toBe(true);
-  expect(validAction({ op: "send_signal", to: "BAD TARGET", message: "hello" })).toBe(false);
-  expect(validAction({ op: "ack_signals", hub: "personal", signal_ids: ["sig_1"], ack_all: true })).toBe(true);
-  expect(validAction({ op: "set_desktop_banner", enabled: false })).toBe(true);
-  expect(validAction({ op: "channel_save", channel_id: "telegram", values: { botToken: "123:abc", chatId: "999" } })).toBe(true);
-  expect(validAction({ op: "channel_test", channel_id: "telegram", values: { chatId: "999" } })).toBe(true);
-  expect(validAction({ op: "channel_pair", channel_id: "telegram" })).toBe(true);
-  expect(validAction({ op: "setup_save_hub", name: "lan", url: "http://127.0.0.1:4291", auth_mode: "none", user: "alice" })).toBe(true);
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
+  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
 
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, {

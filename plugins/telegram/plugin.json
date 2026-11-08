@@ -1,11 +1,15 @@
 {
   "id": "telegram",
-  "kind": "human",
+  "kind": "human-channel",
   "displayName": "Telegram",
   "tier": "stable",
+  "scope": "hub",
   "sfSymbol": "paperplane.fill",
   "tint": "blue",
-  "protocol": "http-bot-poll",
+  "cliFlag": false,
+  "command": [
+    "./bin/cito-plugin-telegram"
+  ],
   "fields": [
     {
       "key": "botToken",
@@ -21,7 +25,7 @@
       "label": "Chat ID",
       "type": "string",
       "required": true,
-      "placeholder": "123456789"
+      "placeholder": "Paired via /start or enter Chat ID"
     }
   ],
   "pairing": {

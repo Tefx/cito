@@ -21,7 +21,7 @@ export async function signingKey(alg: "RS256" | "RS384" | "RS512" | "PS256" | "E
 export async function startOidc(keys: JWK[] = []) {
   const state = { scopesSupported: undefined as string[] | undefined, keys, fail: false, stall: false, discoveryRequests: 0, jwksRequests: 0,
     refreshStatus: 200, refreshRequests: 0, codeRequests: 0, authorizationRequests: 0,
-    tokenResponse: {} as { id_token?: string; refresh_token?: string }, challenge: "", redirect: "" };
+    tokenResponse: {} as { id_token?: string; refresh_token?: string }, tokenFactory: undefined as undefined | ((nonce: string) => Promise<{id_token?:string;refresh_token?:string}>), nonce: "", requestedScopes: "", challenge: "", redirect: "" };
   let issuer = "";
   const server = createServer((req, res) => {
     if (req.url === "/.well-known/openid-configuration") {
@@ -38,6 +38,7 @@ export async function startOidc(keys: JWK[] = []) {
     } else if (req.url?.startsWith("/authorize?")) {
       const url = new URL(req.url, issuer);
       state.authorizationRequests++;
+      state.nonce=url.searchParams.get("nonce")??"";state.requestedScopes=url.searchParams.get("scope")??"";
       state.challenge = url.searchParams.get("code_challenge") ?? "";
       state.redirect = url.searchParams.get("redirect_uri") ?? "";
       if (url.searchParams.get("code_challenge_method") !== "S256" || !state.challenge) { res.writeHead(400).end(); return; }
@@ -47,7 +48,7 @@ export async function startOidc(keys: JWK[] = []) {
     } else if (req.url === "/token" && req.method === "POST") {
       let body = "";
       req.setEncoding("utf8").on("data", chunk => { body += chunk; });
-      req.on("end", () => {
+      req.on("end", async () => {
         const params = new URLSearchParams(body);
         if (params.get("grant_type") === "refresh_token") {
           state.refreshRequests++;
@@ -57,7 +58,7 @@ export async function startOidc(keys: JWK[] = []) {
           const challenge = createHash("sha256").update(params.get("code_verifier") ?? "").digest("base64url");
           if (params.get("code") !== "fixture-code" || challenge !== state.challenge || params.get("redirect_uri") !== state.redirect) { res.writeHead(400).end(); return; }
         }
-        res.setHeader("content-type", "application/json"); res.end(JSON.stringify(state.tokenResponse));
+        res.setHeader("content-type", "application/json"); res.end(JSON.stringify(state.tokenFactory?await state.tokenFactory(state.nonce):state.tokenResponse));
       });
     } else { res.writeHead(404).end(); }
   });

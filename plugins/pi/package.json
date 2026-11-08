@@ -1,0 +1,11 @@
+{
+  "name": "@tefx/cito-pi",
+  "version": "0.18.0",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./cito-bridge.ts"
+    ]
+  }
+}

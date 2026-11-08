@@ -3,8 +3,68 @@ import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { runInNewContext } from "node:vm";
 
 const SITE_DIR = resolve("site");
+
+async function copyFixture(writeText?: (command: string) => Promise<void>) {
+  const badge = { textContent: "Copy", setAttribute() {} };
+  let click: (() => Promise<void>) | undefined;
+  const button = {
+    disabled: false,
+    getAttribute: () => "brew install tefx/tap/cito",
+    querySelector: () => badge,
+    addEventListener(_event: string, handler: () => Promise<void>) { click = handler; },
+  };
+  const source = await readFile(join(SITE_DIR, "scripts/hero-preview.js"), "utf8");
+  runInNewContext(source, {
+    document: {
+      querySelectorAll: (selector: string) => selector === "[data-copy-command]" ? [button] : [],
+      querySelector: () => null,
+    },
+    navigator: { clipboard: writeText ? { writeText } : undefined },
+  });
+  return { badge, button, click: () => click!() };
+}
+
+describe("Copy command feedback", () => {
+  it("waits for the actual Clipboard API promise and prevents duplicate pending writes", async () => {
+    let resolveWrite!: () => void;
+    const writes: string[] = [];
+    const fixture = await copyFixture(command => {
+      writes.push(command);
+      return new Promise<void>(resolve => { resolveWrite = resolve; });
+    });
+    const pending = fixture.click();
+    expect(fixture.badge.textContent).toBe("Copy");
+    expect(fixture.button.disabled).toBe(true);
+    await fixture.click();
+    expect(writes).toEqual(["brew install tefx/tap/cito"]);
+    resolveWrite();
+    await pending;
+    expect(fixture.badge.textContent).toBe("Copied ✓");
+    expect(fixture.button.disabled).toBe(false);
+  });
+
+  it("reports permission rejection and allows a successful retry", async () => {
+    let attempt = 0;
+    const fixture = await copyFixture(async () => {
+      if (++attempt === 1) throw new Error("Permission denied");
+    });
+    await fixture.click();
+    expect(fixture.badge.textContent).toBe("Copy failed");
+    expect(fixture.button.disabled).toBe(false);
+    await fixture.click();
+    expect(fixture.badge.textContent).toBe("Copied ✓");
+  });
+
+  it("reports an unavailable Clipboard API", async () => {
+    const fixture = await copyFixture();
+    await fixture.click();
+    expect(fixture.badge.textContent).toBe("Copy failed");
+    expect(fixture.button.disabled).toBe(false);
+  });
+});
 
 const MIME_BY_EXT: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -43,7 +103,7 @@ function extractLocalRefs(html: string): string[] {
   return refs;
 }
 
-describe("Stage 4 (v0.16.0): Brand assets, calm 4-section homepage, technical docs & /cito/ subpath bundle", () => {
+describe("Website assets, behavior, and /cito/ subpath bundle", () => {
   let server: Server;
   let baseUrl = "";
 
@@ -110,6 +170,13 @@ describe("Stage 4 (v0.16.0): Brand assets, calm 4-section homepage, technical do
       expect(svg).toContain("M 14.84 5.36 A 7.75 7.75 0 0 1 14.84 12.64");
       expect(svg).toContain("#F3F4F6");
       expect(svg).toContain("#F59E0B");
+      if (rel.includes("cito-logo")) {
+        expect(svg).toMatch(/<rect[^>]*width="130"[^>]*height="34"[^>]*rx="9"[^>]*fill="#14171F"/);
+        expect(svg).toMatch(/<text[^>]*fill="#F3F4F6"/);
+      }
+      if (rel.endsWith("cito-mark.svg")) {
+        expect(svg).toMatch(/<rect[^>]*width="34"[^>]*height="34"[^>]*rx="8"[^>]*fill="#14171F"/);
+      }
     }
 
     const touchIcon = await readFile(resolve("site/apple-touch-icon.png"));
@@ -168,7 +235,7 @@ describe("Stage 4 (v0.16.0): Brand assets, calm 4-section homepage, technical do
     }
   });
 
-  it("enforces homepage restraint, 4 spacious sections, and official installation channels across site and README", async () => {
+  it("keeps official installation links and technical documentation references", async () => {
     const indexHtml = await readFile(resolve("site/index.html"), "utf8");
     const guideHtml = await readFile(resolve("site/docs/guide.html"), "utf8");
     const pluginsHtml = await readFile(resolve("site/docs/plugins.html"), "utf8");
@@ -177,8 +244,8 @@ describe("Stage 4 (v0.16.0): Brand assets, calm 4-section homepage, technical do
 
     // 4 homepage sections & key product copy
     expect(indexHtml).toContain("Where your agents talk—with you, and each other.");
-    expect(indexHtml).toContain("[ ⚡ Agent → Agent ]");
-    expect(indexHtml).toContain("[ 💬 Agent ↔ You ]");
+    expect(indexHtml).toContain("⚡ Agent → Agent");
+    expect(indexHtml).toContain("💬 Agent ↔ You");
     expect(indexHtml).toContain("Stop playing courier between your agents");
     expect(indexHtml).toContain("You are a node on the same network");
     expect(indexHtml).toContain("From one Mac to your whole team");
@@ -223,10 +290,8 @@ describe("Stage 4 (v0.16.0): Brand assets, calm 4-section homepage, technical do
       expect(doc).not.toContain("automatically bootstraps your local hub and detected coding harnesses");
     }
 
-    // README adaptive <picture> header
-    expect(readmeMd).toContain("<picture>");
-    expect(readmeMd).toContain("site/assets/brand/cito-logo-dark.svg");
-    expect(readmeMd).toContain("site/assets/brand/cito-logo-light.svg");
+    // Both logo variants contain their own backing; README uses a theme-independent image.
+    expect(readmeMd).toMatch(/<img alt="Cito" src="site\/assets\/brand\/cito-logo-dark\.svg"/);
     expect(readmeMd).toContain("https://tefx.github.io/cito/");
 
     // Technical docs coverage

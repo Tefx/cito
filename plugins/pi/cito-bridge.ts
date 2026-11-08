@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { createServer, type Server, type Socket } from "node:net";
+import { chmodSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -36,7 +36,7 @@ export interface BridgeAPI {
 }
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 
-// This extension is copied on its own into Pi: keep rendering free of host-package imports.
+// The package extension keeps rendering free of host-package imports.
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 function columns(value: string): number {
   if (/^[\p{Mark}\u200d\ufe0f]*$/u.test(value)) return 0;
@@ -87,9 +87,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   const resolvedStateDir = stateDir === "~" ? homedir() : stateDir.startsWith("~/")
     ? join(homedir(), stateDir.slice(2)) : resolve(stateDir);
   const shim = join(resolvedStateDir, "bin", "cito-mcp");
-  try {
-    pi.registerMcpServer?.("cito", { command: existsSync(shim) ? shim : "cito-mcp", args: [] });
-  } catch {}
+  try { pi.registerMcpServer?.("cito", { command: shim, args: [] }); }
+  catch { /* The host may register extensions before its MCP registry is ready. */ }
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
   let activeBadge: string | undefined;
@@ -109,7 +108,13 @@ export default function citoBridge(pi: BridgeAPI): void {
     return ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || "Pi session";
   }
   async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const port = Number(process.env.CITO_DAEMON_PORT) || 4290;
+    let configuredPort: unknown;
+    try { configuredPort = (JSON.parse(readFileSync(join(resolvedStateDir, "config.json"), "utf8")) as { daemonPort?: unknown }).daemonPort; }
+    catch {} // A missing config falls back to the environment and default port.
+    const candidatePorts = [configuredPort, process.env.CITO_DAEMON_PORT]
+      .filter(value => typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
+      .map(Number);
+    const port = candidatePorts.find(value => Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -168,6 +173,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   function handle(req: Record<string, unknown>): Record<string, unknown> {
     const ctx = context;
     if (ctx) update(ctx);
+    if (req.op === "ping") return { ok: true };
     if (req.op === "identify") {
       if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
       return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: sessionId,
@@ -228,7 +234,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     });
     server = instance;
     try {
-      await new Promise<void>((resolve, reject) => {
+      const listen = () => new Promise<void>((resolve, reject) => {
         instance.once("error", reject);
         instance.listen(socketPath, () => {
           ownsSocket = true;
@@ -236,6 +242,38 @@ export default function citoBridge(pi: BridgeAPI): void {
           resolve();
         });
       });
+      try { await listen(); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+        const live = await new Promise<boolean>(resolve => {
+          const peer = createConnection(socketPath);
+          let buffer = "";
+          let finished = false;
+          const finish = (alive: boolean) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            peer.destroy();
+            resolve(alive);
+          };
+          const timer = setTimeout(() => finish(false), 250);
+          peer.once("error", () => finish(false));
+          peer.once("close", () => finish(false));
+          peer.once("connect", () => peer.write('{"op":"ping"}\n'));
+          peer.on("data", chunk => {
+            buffer += chunk.toString("utf8");
+            if (buffer.length > MAX_REQUEST_BYTES) { finish(false); return; }
+            const end = buffer.indexOf("\n");
+            if (end < 0) return;
+            try { finish((JSON.parse(buffer.slice(0, end)) as { ok?: unknown }).ok === true); }
+            catch { finish(false); }
+          });
+        });
+        if (live) throw error;
+        try { unlinkSync(socketPath); }
+        catch (unlinkError) { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError; }
+        await listen();
+      }
       chmodSync(socketPath, 0o600);
       process.once("exit", unlinkSocket);
       // Listen errors after startup must not become unhandled process errors.
@@ -336,6 +374,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         if (sessionId !== commandSessionId) return;
         ctx.ui.notify?.(error instanceof Error ? error.message : String(error), "error");
       }
+      ctx.ui.setStatus("cito", activeBadge);
     },
   });
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });

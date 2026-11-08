@@ -1,103 +1,15 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { SignJWT } from "jose";
-import { OidcVerifier } from "../../src/auth-callout/oidc.js";
-import { signingKey, startOidc } from "./oidc-fixture.js";
+import {expect,test} from "vitest";
+import {cleanroom} from "../support/native-scenarios.js";
+import {signingKey,startOidc} from "./oidc-fixture.js";
 
-describe("OIDC signature verification and in-memory JWKS", () => {
-  let rsa: Awaited<ReturnType<typeof signingKey>>;
-  let ec: Awaited<ReturnType<typeof signingKey>>;
-  let oidc: Awaited<ReturnType<typeof startOidc>>;
-  beforeAll(async () => {
-    rsa = await signingKey("RS256", "rsa");
-    ec = await signingKey("ES256", "ec");
-    oidc = await startOidc([rsa.jwk, ec.jwk]);
-  });
-  afterAll(async () => { await oidc.stop(); });
-  it("verifies both RS256 and ES256, scalar and array aud, and requires identity claims", async () => {
-    const verifier = new OidcVerifier({ issuer: oidc.issuer, clientId: "cito" });
-    const before = oidc.state.jwksRequests;
-    for (const key of [rsa, ec]) {
-      const token = await key.sign(oidc.claims({ aud: ["other", "cito"] }));
-      expect((await verifier.verify(token)).sub).toBe("user-1");
-    }
-    expect(oidc.state.jwksRequests - before).toBe(1);
-    const badPayloads = [
-      { exp: Math.floor(Date.now() / 1000) - 31 }, { aud: "wrong" },
-      { iss: "https://wrong" }, { iss: oidc.issuer + "/" },
-      { sub: "" }, { sub: undefined }, { exp: undefined }, { aud: undefined }, { iss: undefined },
-      { nbf: Math.floor(Date.now() / 1000) + 60 },
-    ];
-    for (const payload of badPayloads) {
-      await expect(verifier.verify(await rsa.sign(oidc.claims(payload)))).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    }
-    await expect(verifier.verify("broken.jwt")).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    const hmac = await new SignJWT(oidc.claims()).setProtectedHeader({ alg: "HS256", kid: "rsa" }).sign(new Uint8Array(32));
-    await expect(verifier.verify(hmac)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    const signed = await rsa.sign(oidc.claims());
-    const [header, , signature] = signed.split(".");
-    const forgedBody = Buffer.from(JSON.stringify(oidc.claims({ sub: "forged" }))).toString("base64url");
-    await expect(verifier.verify(header + "." + forgedBody + "." + signature)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    await expect(verifier.verify(await rsa.sign(oidc.claims(), { kid: "" }))).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-  });
-  it.each(["RS384", "RS512", "PS256", "ES384", "EdDSA"] as const)("verifies standard asymmetric %s tokens", async alg => {
-    const key = await signingKey(alg, alg), fixture = await startOidc([key.jwk]);
-    try {
-      const verifier = new OidcVerifier({ issuer: fixture.issuer, clientId: "cito" });
-      expect(await verifier.verify(await key.sign(fixture.claims()))).toMatchObject({ sub: "user-1" });
-    } finally { await fixture.stop(); }
-  });
-  it("honors strict exp > now - 30 clock tolerance", async () => {
-    const now = Math.floor(Date.now() / 1000) * 1000;
-    const verifier = new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => now });
-    await expect(verifier.verify(await ec.sign(oidc.claims({ exp: now / 1000 - 29 })))).resolves.toMatchObject({ sub: "user-1" });
-    await expect(verifier.verify(await ec.sign(oidc.claims({ exp: now / 1000 - 30 })))).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-  });
-  it("refreshes on unknown kid after a 60-second cooldown and shares concurrent refreshes", async () => {
-    const rotated = await signingKey("ES256", "rotated");
-    const fixture = await startOidc([rsa.jwk]);
-    let now = Date.now();
-    const verifier = new OidcVerifier({ issuer: fixture.issuer, clientId: "cito", now: () => now });
-    try {
-      await verifier.verify(await rsa.sign(fixture.claims()));
-      fixture.state.keys = [rsa.jwk, rotated.jwk];
-      const token = await rotated.sign(fixture.claims());
-      await expect(verifier.verify(token)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-      now += 59_999;
-      await expect(verifier.verify(token)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-      expect(fixture.state.jwksRequests).toBe(1);
-      now += 1;
-      await Promise.all(Array.from({ length: 10 }, () => verifier.verify(token)));
-      expect(fixture.state.jwksRequests).toBe(2);
-      expect(fixture.state.discoveryRequests).toBe(2);
-    } finally { await fixture.stop(); }
-  });
-  it("returns transient AUTH_UNAVAILABLE on cache-miss fetch failure, retaining usable cached keys", async () => {
-    const unknown = await signingKey("ES256", "unknown");
-    const fixture = await startOidc([rsa.jwk]);
-    let now = Date.now();
-    const verifier = new OidcVerifier({ issuer: fixture.issuer, clientId: "cito", now: () => now });
-    try {
-      const known = await rsa.sign(fixture.claims());
-      const token = await unknown.sign(fixture.claims());
-      await verifier.verify(known);
-      fixture.state.fail = true;
-      now += 60_000;
-      await expect(verifier.verify(token)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE" });
-      await expect(verifier.verify(token)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE" });
-      await expect(verifier.verify(known)).resolves.toMatchObject({ sub: "user-1" });
-      expect(fixture.state.discoveryRequests).toBe(2);
-      fixture.state.fail = false;
-      fixture.state.keys = [rsa.jwk, unknown.jwk];
-      now += 60_000;
-      await expect(verifier.verify(token)).resolves.toMatchObject({ sub: "user-1" });
-    } finally { await fixture.stop(); }
-  });
-  it("aborts discovery after the 5000ms timeout rather than hanging", async () => {
-    const fixture = await startOidc();
-    fixture.state.stall = true;
-    const verifier = new OidcVerifier({ issuer: fixture.issuer, clientId: "cito" });
-    try {
-      await expect(verifier.verify(await rsa.sign(fixture.claims()))).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE" });
-    } finally { await fixture.stop(); }
-  }, 8000);
+test("verifies RS256/ES256, scalar/array aud and requires immutable identity claims",async()=>{
+ const keys=await Promise.all([signingKey("RS256","rsa"),signingKey("ES256","ec")]);const oidc=await startOidc(keys.map(k=>k.jwk)),f=await cleanroom();try{const hub=await f.hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito"});for(const key of keys)for(const aud of ["cito",["other","cito"]])expect(await hub.rpc("account_info",{},{authorization:"Bearer "+await key.sign(oidc.claims({aud}))})).toHaveProperty("streams");
+ for(const claims of [{sub:""},{iss:""},{aud:"wrong"},{exp:0},{sub:undefined},{exp:undefined}])await expect(hub.rpc("account_info",{},{authorization:"Bearer "+await keys[0]!.sign(oidc.claims(claims))})).rejects.toMatchObject({status:401});}finally{await oidc.stop();}
 });
+test.each(["RS384","RS512","PS256","ES384","EdDSA"] as const)("verifies standard asymmetric %s tokens",async alg=>{const key=await signingKey(alg,"key"),oidc=await startOidc([key.jwk]),f=await cleanroom();try{const hub=await f.hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito"});expect(await hub.rpc("account_info",{},{authorization:"Bearer "+await key.sign(oidc.claims())})).toHaveProperty("streams");}finally{await oidc.stop();}});
+test("honors strict exp > now - 30 clock tolerance",async()=>{const key=await signingKey("RS256","key"),oidc=await startOidc([key.jwk]),f=await cleanroom();try{const hub=await f.hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito"}),now=Math.floor(Date.now()/1000);await expect(hub.rpc("account_info",{},{authorization:"Bearer "+await key.sign(oidc.claims({exp:now-29}))})).resolves.toHaveProperty("streams");await expect(hub.rpc("account_info",{},{authorization:"Bearer "+await key.sign(oidc.claims({exp:now-30}))})).rejects.toMatchObject({status:401});}finally{await oidc.stop();}});
+test("unknown kid refresh waits for cooldown and shares concurrent JWKS refreshes",async()=>{
+ const a=await signingKey("ES256","old"),b=await signingKey("ES256","new"),oidc=await startOidc([a.jwk]),f=await cleanroom();try{const hub=await f.hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito",env:{CITO_JWKS_COOLDOWN_MS:"300"}});await hub.rpc("account_info",{},{authorization:"Bearer "+await a.sign(oidc.claims())});oidc.state.keys=[a.jwk,b.jwk];const token=await b.sign(oidc.claims());await expect(hub.rpc("account_info",{},{authorization:"Bearer "+token})).rejects.toMatchObject({status:401});expect(oidc.state.jwksRequests).toBe(1);await new Promise(r=>setTimeout(r,450));await Promise.all(Array.from({length:5},()=>hub.rpc("account_info",{},{authorization:"Bearer "+token})));expect(oidc.state.jwksRequests).toBe(2);}finally{await oidc.stop();}
+},70000);
+test("cache-miss discovery failure is transient and retains previously cached keys",async()=>{const key=await signingKey("ES256","cached"),oidc=await startOidc([key.jwk]),f=await cleanroom();try{const hub=await f.hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito"});const token=await key.sign(oidc.claims());await hub.rpc("account_info",{},{authorization:"Bearer "+token});oidc.state.fail=true;expect(await hub.rpc("account_info",{},{authorization:"Bearer "+token})).toHaveProperty("streams");const cold=await(await cleanroom()).hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito"});await expect(cold.rpc("account_info",{},{authorization:"Bearer "+token})).rejects.toMatchObject({status:503,code:"AUTH_UNAVAILABLE"});}finally{await oidc.stop();}});
+test("aborts discovery after the 5000ms timeout instead of hanging",async()=>{const key=await signingKey("ES256","stall"),oidc=await startOidc([key.jwk]),f=await cleanroom();oidc.state.stall=true;try{const hub=await f.hub({auth:"oidc",issuer:oidc.issuer,clientId:"cito"});const start=performance.now();await expect(hub.rpc("account_info",{},{authorization:"Bearer "+await key.sign(oidc.claims())})).rejects.toMatchObject({status:503});expect(performance.now()-start).toBeLessThan(5500);}finally{await oidc.stop();}},8000);

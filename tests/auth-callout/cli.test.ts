@@ -1,315 +1,130 @@
-import { describe, expect, it } from "vitest";
-import { spawn, spawnSync } from "node:child_process";
+import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { connectNats } from "../../src/shared/nats.js";
-import { startNats } from "../shared/nats-server.js";
+import { cp, lstat, mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { NativeHarness, nativeFixture, object, projectRoot } from "../support/native-harness.js";
 import { signingKey, startOidc } from "./oidc-fixture.js";
 
-function isolatedEnv(directory: string): NodeJS.ProcessEnv {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("CITO_")));
-  return { ...env, CITO_STATE_DIR: join(directory, "state"), CITO_CODEX_HOME: join(directory, "codex") };
-}
-async function entrypoint(): Promise<string> {
-  const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
-  return resolve(pkg.bin.cito);
-}
-describe("cito hub CLI and zero-script packaging contract", () => {
+const fixtures: NativeHarness[] = [];
+afterEach(async () => { const results=await Promise.allSettled(fixtures.splice(0).reverse().map(f=>f.close()));const failed=results.find(r=>r.status==="rejected");if(failed?.status==="rejected")throw failed.reason; });
+async function fixture() { const f = await nativeFixture(); fixtures.push(f); return f; }
+
+describe("native cito hub CLI and zero-runtime-dependency npm distribution", () => {
   it("fails before network access with exit 1 and a diagnostic for missing/malformed config", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "cito-cli-"));
-    try {
-      const secretToken = "super-secret-token-value-123";
-      const base = {
-        ...isolatedEnv(directory),
-        CITO_AUTH_MODE: "oidc",
-        CITO_OIDC_ISSUER: "http://127.0.0.1:9",
-        CITO_OIDC_CLIENT_ID: "cito",
-        CITO_HUB_TOKEN: secretToken,
-      };
-      const cases: [string[], NodeJS.ProcessEnv, RegExp][] = [
-        [["hub"], { CITO_AUTH_MODE: "other" }, /CITO_AUTH_MODE/],
-        [["hub"], { CITO_HUB_PORT: "invalid" }, /CITO_HUB_PORT/],
-        [["hub"], { CITO_HUB_PORT: "70000" }, /CITO_HUB_PORT/],
-        [["hub"], { CITO_HUB_BIND: "   " }, /CITO_HUB_BIND/],
-        [["hub"], { CITO_OIDC_ISSUER: "" }, /CITO_OIDC_ISSUER/],
-        [["hub"], { CITO_OIDC_ISSUER: "http://example" }, /CITO_OIDC_ISSUER/],
-        [["hub"], { CITO_OIDC_CLIENT_ID: "" }, /CITO_OIDC_CLIENT_ID/],
-        [["hub"], { CITO_AUTH_MODE: "token", CITO_HUB_TOKEN: "" }, /CITO_HUB_TOKEN/],
-        [["hub"], { CITO_AUTH_MODE: "token", CITO_HUB_TOKEN: "   " }, /CITO_HUB_TOKEN/],
-        [["hub", "--unknown-flag"], {}, /Unknown flag: --unknown-flag/],
-        [["hub", "positional"], {}, /Unexpected argument: positional/],
-      ];
-      const bin = await entrypoint();
-      for (const [args, overrides, message] of cases) {
-        const result = spawnSync(bin, args, {
-          cwd: directory,
-          env: { ...base, ...overrides },
-          encoding: "utf8",
-          timeout: 3000,
-        });
-        expect(result.error).toBeUndefined();
-        expect(result.status).toBe(1);
-        expect(result.stdout).toBe("");
-        expect(result.stderr).toMatch(message);
-        expect(result.stderr).not.toContain(secretToken);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+    const f = await fixture();
+    const secretToken = "super-secret-token-value-123";
+    const base = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "http://127.0.0.1:9", CITO_OIDC_CLIENT_ID: "cito", CITO_HUB_TOKEN: secretToken };
+    const cases: [string[], NodeJS.ProcessEnv, RegExp][] = [
+      [["hub"], { CITO_AUTH_MODE: "other" }, /CITO_AUTH_MODE/],
+      [["hub"], { CITO_HUB_PORT: "invalid" }, /CITO_HUB_PORT/],
+      [["hub"], { CITO_HUB_PORT: "70000" }, /CITO_HUB_PORT/],
+      [["hub"], { CITO_HUB_BIND: "   " }, /CITO_HUB_BIND/],
+      [["hub"], { CITO_OIDC_ISSUER: "" }, /CITO_OIDC_ISSUER/],
+      [["hub"], { CITO_OIDC_ISSUER: "http://example" }, /CITO_OIDC_ISSUER/],
+      [["hub"], { CITO_OIDC_CLIENT_ID: "" }, /CITO_OIDC_CLIENT_ID/],
+      [["hub"], { CITO_AUTH_MODE: "token", CITO_HUB_TOKEN: "" }, /CITO_HUB_TOKEN/],
+      [["hub"], { CITO_AUTH_MODE: "token", CITO_HUB_TOKEN: "   " }, /CITO_HUB_TOKEN/],
+      [["hub", "--unknown-flag"], {}, /Unknown flag: --unknown-flag/],
+      [["hub", "positional"], {}, /Unexpected argument: positional/],
+    ];
+    for (const [args, overrides, message] of cases) {
+      const result = await f.command(args, { env: { ...base, ...overrides }, timeout: 3_000, network:"deny" });
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(message);
+      expect(result.stderr).not.toContain(secretToken);
     }
   }, 15_000);
 
-  it("boots through the real cito hub CLI, serves OIDC authentication and exits cleanly on SIGTERM", async () => {
-    const key = await signingKey("ES256", "ec");
-    const oidc = await startOidc([key.jwk]);
-    const directory = await mkdtemp(join(tmpdir(), "cito-hub-cli-"));
-    let child: ReturnType<typeof spawn> | undefined;
-    let exited: Promise<number | null> | undefined;
-    let client: Awaited<ReturnType<typeof connectNats>> | undefined;
+  it("boots through the real native cito hub CLI, serves OIDC authentication and exits cleanly on SIGTERM", async () => {
+    const key = await signingKey("ES256", "ec"), oidc = await startOidc([key.jwk]);
+    const f = await fixture();
     try {
-      child = spawn(await entrypoint(), ["hub", "--port", "0", "--bind", "127.0.0.1", "--auth", "oidc"], {
-        cwd: directory,
-        env: {
-          ...isolatedEnv(directory),
-          CITO_OIDC_ISSUER: oidc.issuer,
-          CITO_OIDC_CLIENT_ID: "cito",
-          CITO_HUB_DATA_DIR: join(directory, "data"),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      exited = new Promise(resolveExit => child!.once("close", resolveExit));
-      const hubUrl = await new Promise<string>((resolveReady, rejectReady) => {
-        const timeout = setTimeout(() => rejectReady(new Error("CLI did not become ready")), 5000);
-        const cleanup = () => clearTimeout(timeout);
-        let stderr = "";
-        child!.stderr!.on("data", data => {
-          stderr += String(data);
-          const match = /cito hub: ready on (http:\/\/127\.0\.0\.1:\d+) \(auth=oidc\)/.exec(stderr);
-          if (match?.[1] && stderr.includes("cito setup --hub team")) {
-            cleanup();
-            resolveReady(match[1]);
-          }
-        });
-        child!.once("error", error => { cleanup(); rejectReady(error); });
-        void exited!.then(code => { cleanup(); rejectReady(new Error("CLI exited " + code + ": " + stderr)); });
-      });
-      client = await connectNats({ servers: hubUrl, token: await key.sign(oidc.claims()), timeout: 2000 });
-      await client.flush();
-      child.kill("SIGTERM");
-      expect(await exited).toBe(0);
-    } finally {
-      await client?.close();
-      if (child && child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await exited;
-      }
-      await oidc.stop();
-      await rm(directory, { recursive: true, force: true });
-    }
+      const hub = await f.hub({ auth: "oidc", issuer: oidc.issuer, clientId: "cito" });
+      const response = object(await hub.rpc("stream_info", { stream: "KV_cito_listeners" }, { authorization: `Bearer ${await key.sign(oidc.claims())}` }));
+      expect(response.config).toMatchObject({ name: "KV_cito_listeners" });
+      await hub.process.stop();
+      expect((await hub.process.result).code).toBe(0);
+    } finally { await oidc.stop(); }
   }, 10_000);
 
-  it("runs the no-auth HubServer without any authorization credentials", async () => {
-    const broker = await startNats();
-    let client: Awaited<ReturnType<typeof connectNats>> | undefined;
-    try {
-      client = await connectNats({ servers: broker.url });
-      const info = await (await client.jetstreamManager()).getAccountInfo();
-      expect(info.streams).toBe(0);
-    } finally {
-      await client?.close();
-      await broker.stop();
-    }
+  it("runs the native no-auth HubServer without any authorization credentials", async () => {
+    const f = await fixture(), hub = await f.hub();
+    const info = object(await hub.rpc("account_info"));
+    expect(info.streams).toBe(0);
   });
 
-  it("enforces zero-script git packaging contract and executes native TypeScript entrypoints without dist/", async () => {
-    const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
-    expect(pkg.files).toEqual(["bin", "dist/src", "dist/plugins", "src", "plugins", "README.md"]);
+  it("packs and installs precompiled native entrypoints without dist, source, a Node fallback, or runtime dependencies", async () => {
+    const f = await fixture();
+    const pkg = object(JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8")));
+    expect(pkg.files).toEqual(["bin", "plugins", "README.md", "LICENSE"]);
     for (const forbidden of ["prepare", "build", "prepack", "preinstall", "install", "postinstall"]) {
-      expect(pkg.scripts?.[forbidden]).toBeUndefined();
+      expect(object(pkg.scripts)[forbidden]).toBeUndefined();
     }
-    expect(Object.keys(pkg.scripts ?? {})).toEqual(["test", "typecheck", "compile", "prepublishOnly"]);
-    expect(pkg.scripts?.compile).toBe("rm -rf dist && tsc && if [ \"$(uname -s)-$(uname -m)\" = \"Darwin-arm64\" ]; then swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64 && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64 && cargo build --release --manifest-path crates/cito-native/Cargo.toml && cp crates/cito-native/target/release/cito-native bin/cito-native-darwin-arm64 && strip -x bin/cito-native-darwin-arm64 && codesign -s - --force bin/cito-native-darwin-arm64 && rm -rf crates/cito-native/target; fi");
-    expect(pkg.scripts?.prepublishOnly).toBe("npm run typecheck && npm run compile");
-    expect(pkg.dependencies?.tsx).toBeUndefined();
-    expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["@modelcontextprotocol/sdk", "jose", "zod"]);
-    expect(Object.keys(pkg.bin ?? {})).toEqual(["cito", "cito-mcp", "cito-claude-hook"]);
+    expect(Object.keys(object(pkg.scripts))).toEqual(["test", "typecheck", "compile", "prepublishOnly"]);
+    expect(object(pkg.scripts).compile).toBe("node bin/build.mjs");
+    expect(object(pkg.scripts).prepublishOnly).toBe("npm run typecheck && npm run compile && npm test");
+    expect(pkg.dependencies).toEqual({});
+    for (const dependency of ["@modelcontextprotocol/sdk", "jose", "zod"]) expect(object(pkg.devDependencies)[dependency]).toBeTypeOf("string");
+    expect(pkg.bin).toEqual({ cito: "bin/cito", "cito-mcp": "bin/cito-mcp" });
+    for (const key of ["main", "types", "exports", "pi"]) expect(pkg[key]).toBeUndefined();
 
-    const directory = await mkdtemp(join(tmpdir(), "cito-pkg-"));
-    try {
-      const sandbox = join(directory, "sandbox");
-      for (const item of ["package.json", "bin", "src", "plugins"]) {
-        await cp(resolve(item), join(sandbox, item), { recursive: true });
-      }
-      await symlink(resolve("node_modules"), join(sandbox, "node_modules"), "dir");
-      expect(existsSync(join(sandbox, "dist"))).toBe(false);
+    const sandbox = join(f.root, "sandbox");
+    for (const item of ["package.json", "bin", "plugins", "README.md", "LICENSE"]) await cp(join(projectRoot, item), join(sandbox, item), { recursive: true });
+    expect(existsSync(join(sandbox, "dist"))).toBe(false);
+    expect(existsSync(join(sandbox, "src"))).toBe(false);
+    const custom = join(f.stateDir, "plugins", "cursor");
+    await mkdir(custom, { recursive: true });
+    await writeFile(join(custom, "plugin.json"), JSON.stringify({ id: "cursor", displayName: "Cursor", kind: "agent-harness", cliFlag: true, command: ["./driver"] }));
+    await writeFile(join(custom, "driver"), '#!/bin/sh\nread request\nprintf \'%s\\n\' \'{"ok":false,"error_code":"BINDING_REQUIRED","message":"Cursor subprocess plugin executed"}\'\n', { mode: 0o700 });
 
-      const sandboxEnv = isolatedEnv(directory);
-      const cursorPluginDir = join(sandboxEnv.CITO_STATE_DIR!, "plugins/cursor");
-      await mkdir(cursorPluginDir, { recursive: true });
-      await writeFile(
-        join(cursorPluginDir, "plugin.json"),
-        JSON.stringify({ id: "cursor", displayName: "Cursor", sfSymbol: "cursorarrow.rays", tint: "purple", cliFlag: true }),
-      );
-      await writeFile(
-        join(cursorPluginDir, "index.ts"),
-        `import { CitoError, SocketBridgeAdapter, type PluginManifest } from "@tefx/cito/plugin-sdk";
-export default (manifest: PluginManifest) => new SocketBridgeAdapter(manifest.id, {
-  manifest,
-  cli: {
-    resolveMeta: () => { throw new CitoError("BINDING_REQUIRED", "Cursor custom plugin executed via @tefx/cito/plugin-sdk"); },
-  },
-});\n`,
-      );
+    const mcp = await f.command(["listen", "--unknown-flag"], { executable: join(sandbox, "bin/cito-mcp") });
+    expect(mcp.code).toBe(1); expect(mcp.stderr).toContain("Unknown flag: --unknown-flag");
+    const hub = await f.command(["hub"], { executable: join(sandbox, "bin/cito"), env: { CITO_AUTH_MODE: "other" } });
+    expect(hub.code).toBe(1); expect(hub.stderr).toMatch(/cito hub:.*CITO_AUTH_MODE/);
+    const hook = await f.command([], { executable: join(sandbox, "plugins/claude/bin/cito-claude-hook"), input: JSON.stringify({ hook_event_name: "Stop", cwd: f.root }) });
+    expect.soft(hook).toMatchObject({ code: 0, stdout: "{}\n", stderr: "" });
+    const cursor = await f.command(["listen", "--cursor"], { executable: join(sandbox, "bin/cito") });
+    expect(cursor.code).toBe(1); expect(cursor.stderr).toContain("Cursor subprocess plugin executed");
 
-      const mcpSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-mcp"), "listen", "--unknown-flag"], {
-        cwd: directory,
-        env: isolatedEnv(directory),
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(mcpSandbox.error).toBeUndefined();
-      expect(mcpSandbox.status).toBe(1);
-      expect(mcpSandbox.stderr).toContain("Unknown flag: --unknown-flag");
-
-      const hubSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-mcp"), "hub"], {
-        cwd: directory,
-        env: { ...isolatedEnv(directory), CITO_AUTH_MODE: "other" },
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(hubSandbox.error).toBeUndefined();
-      expect(hubSandbox.status).toBe(1);
-      expect(hubSandbox.stderr).toMatch(/cito hub:.*CITO_AUTH_MODE/);
-
-      const hookSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-claude-hook")], {
-        cwd: directory,
-        env: sandboxEnv,
-        input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(hookSandbox.error).toBeUndefined();
-      expect(hookSandbox.status).toBe(0);
-      expect(hookSandbox.stdout).toBe("{}\n");
-      expect(hookSandbox.stderr).toBe("");
-
-      const cursorSandbox = spawnSync(process.execPath, [join(sandbox, "bin/cito-mcp"), "listen", "--cursor"], {
-        cwd: directory,
-        env: sandboxEnv,
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(cursorSandbox.error).toBeUndefined();
-      expect(cursorSandbox.status).toBe(1);
-      expect(cursorSandbox.stderr).toContain("Cursor custom plugin executed via @tefx/cito/plugin-sdk");
-
-      if (existsSync(resolve("dist/src/mcp/cli.js"))) {
-        const cursorDist = spawnSync(process.execPath, [resolve("bin/cito-mcp"), "listen", "--harness", "cursor"], {
-          cwd: directory,
-          env: sandboxEnv,
-          encoding: "utf8",
-          timeout: 5000,
-        });
-        expect(cursorDist.error).toBeUndefined();
-        expect(cursorDist.status).toBe(1);
-        expect(cursorDist.stderr).toContain("Cursor custom plugin executed via @tefx/cito/plugin-sdk");
-      }
-
-      const repo = join(directory, "repo");
-      const prefix = join(directory, "prefix");
-      for (const item of ["package.json", "package-lock.json", "tsconfig.json", "README.md", "bin", "src", "plugins"]) {
-        await cp(resolve(item), join(repo, item), { recursive: true });
-      }
-      for (const args of [
-        ["init", "-q"],
-        ["config", "user.email", "test@example.com"],
-        ["config", "user.name", "test"],
-        ["add", "."],
-        ["commit", "-q", "-m", "init"],
-      ]) {
-        const git = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
-        expect(git.status).toBe(0);
-      }
-
-      const install = spawnSync(
-        "npm",
-        ["install", "-g", "--prefix", prefix, "--prefer-offline", "--no-audit", "--no-fund", `git+file://${repo}`],
-        { cwd: directory, encoding: "utf8", timeout: 30_000 },
-      );
-      expect(install.error).toBeUndefined();
-      expect(install.status).toBe(0);
-
-      const installedPkgRoot = await realpath(join(prefix, "lib/node_modules/@tefx/cito"));
-      expect(existsSync(join(installedPkgRoot, "dist"))).toBe(false);
-      expect(existsSync(join(installedPkgRoot, "bin/cito-ui-darwin-arm64"))).toBe(true);
-      if (process.platform === "darwin" && process.arch === "arm64") {
-        const nativeBinPath = join(installedPkgRoot, "bin/cito-native-darwin-arm64");
-        expect(existsSync(nativeBinPath)).toBe(true);
-        // Warm macOS AMFI/syspolicyd CDHash cache on first execution of copied binary
-        spawnSync(nativeBinPath, ["claude-hook"], {
-          cwd: directory,
-          env: isolatedEnv(directory),
-          input: "{}",
-          encoding: "utf8",
-          timeout: 5000,
-        });
-        const t0 = performance.now();
-        const nativeFastHook = spawnSync(nativeBinPath, ["claude-hook"], {
-          cwd: directory,
-          env: isolatedEnv(directory),
-          input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
-          encoding: "utf8",
-          timeout: 5000,
-        });
-        const elapsedMs = performance.now() - t0;
-        expect(nativeFastHook.status).toBe(0);
-        expect(nativeFastHook.stdout).toBe("{}\n");
-        expect(elapsedMs).toBeLessThan(15);
-      }
-      for (const [binName, targetRel] of [
-        ["cito", "bin/cito-mcp"],
-        ["cito-mcp", "bin/cito-mcp"],
-        ["cito-claude-hook", "bin/cito-claude-hook"],
-      ] as const) {
-        const binPath = join(prefix, "bin", binName);
-        expect((await lstat(binPath)).isSymbolicLink()).toBe(true);
-        expect(await realpath(binPath)).toBe(join(installedPkgRoot, targetRel));
-      }
-
-      const installedCito = spawnSync(join(prefix, "bin/cito"), ["listen", "--unknown-flag"], {
-        cwd: directory,
-        env: isolatedEnv(directory),
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(installedCito.error).toBeUndefined();
-      expect(installedCito.status).toBe(1);
-      expect(installedCito.stderr).toContain("Unknown flag: --unknown-flag");
-
-      const installedHub = spawnSync(join(prefix, "bin/cito"), ["hub"], {
-        cwd: directory,
-        env: { ...isolatedEnv(directory), CITO_AUTH_MODE: "other" },
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(installedHub.error).toBeUndefined();
-      expect(installedHub.status).toBe(1);
-      expect(installedHub.stderr).toMatch(/cito hub:.*CITO_AUTH_MODE/);
-
-      const installedHook = spawnSync(join(prefix, "bin/cito-claude-hook"), [], {
-        cwd: directory,
-        env: isolatedEnv(directory),
-        input: JSON.stringify({ hook_event_name: "Stop", cwd: directory }),
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      expect(installedHook.error).toBeUndefined();
-      expect(installedHook.status).toBe(0);
-      expect(installedHook.stdout).toBe("{}\n");
-      expect(installedHook.stderr).toBe("");
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+    // npm pack/install exercise npm's files/bin contract, with all state and cache inside this cleanroom.
+    const npm = (args: string[], cwd = sandbox) => {
+      const result = spawnSync("npm", args, { cwd, env: { ...f.env, npm_config_cache: join(f.root, "npm-cache") }, encoding: "utf8", timeout: 30_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      return result;
+    };
+    const packed = JSON.parse(npm(["pack", "--ignore-scripts", "--json", "--pack-destination", f.root]).stdout) as { filename: string }[];
+    const prefix = join(f.root, "prefix");
+    npm(["install", "-g", "--prefix", prefix, "--ignore-scripts", "--no-audit", "--no-fund", join(f.root, packed[0]!.filename)]);
+    const installed = await realpath(join(prefix, "lib/node_modules/@tefx/cito"));
+    expect(existsSync(join(installed, "dist"))).toBe(false);
+    expect(existsSync(join(installed, "src"))).toBe(false);
+    expect(existsSync(join(installed, "node_modules"))).toBe(false);
+    expect(existsSync(join(installed, "bin/cito-ui-darwin-arm64"))).toBe(true);
+    expect(existsSync(join(installed, "bin/cito-native-darwin-arm64"))).toBe(true);
+    for (const [name, target] of [["cito", "bin/cito"], ["cito-mcp", "bin/cito-mcp"]]) {
+      const path = join(prefix, "bin", name!);
+      expect((await lstat(path)).isSymbolicLink()).toBe(true);
+      expect(await realpath(path)).toBe(join(installed, target!));
     }
-  }, 45_000);
+    expect(existsSync(join(prefix, "bin/cito-claude-hook"))).toBe(false);
+    const linked = join(f.root, "linked-cito"); await symlink(join(prefix, "bin/cito"), linked);
+    const installedCito = await f.command(["listen", "--unknown-flag"], { executable: linked });
+    expect(installedCito.code).toBe(1); expect(installedCito.stderr).toContain("Unknown flag: --unknown-flag");
+    const installedHub = await f.command(["hub"], { executable: join(prefix, "bin/cito"), env: { CITO_AUTH_MODE: "other" } });
+    expect(installedHub.code).toBe(1); expect(installedHub.stderr).toMatch(/cito hub:.*CITO_AUTH_MODE/);
+    const installedF=await fixture();await cp(custom,join(installedF.stateDir,"plugins/cursor"),{recursive:true});
+    const installedCursor=await installedF.command(["listen","--cursor"],{executable:join(prefix,"bin/cito"),env:{CITO_BUILTIN_PLUGINS_DIR:undefined,CITO_UI_BINARY:join(installed,"bin/cito-ui-darwin-arm64")}});
+    expect(installedCursor.code).toBe(1);expect(installedCursor.stderr).toContain("Cursor subprocess plugin executed");
+    const health=object(await(await fetch(`http://127.0.0.1:${installedF.daemonPort}/health`)).json());expect(health.stateDir).toBe(installedF.stateDir);expect(health.version).toBe("0.18.0");
+    const image=await installedF.command(["-p",String(health.pid),"-o","command="],{executable:"/bin/ps"});expect(image.stdout).toContain(join(installed,"bin/cito-native-darwin-arm64"));
+    const installedHook = await installedF.command([], { executable: join(installed, "plugins/claude/bin/cito-claude-hook"), input: JSON.stringify({ hook_event_name: "Stop", cwd: installedF.root }) });
+    expect.soft(installedHook).toMatchObject({ code: 0, stdout: "{}\n", stderr: "" });
+  }, 60_000);
+});
+
+it("executes a warmed copied native Claude hook in under 15 ms",async()=>{
+ const f=await nativeFixture();try{const hook=join(f.root,"copied-hook");await cp(join(projectRoot,"plugins/claude/bin/cito-claude-hook"),hook);const opts={cwd:f.root,env:f.env,encoding:"utf8" as const,timeout:5000};const warm=spawnSync(hook,[],{...opts,input:"{}"});expect(warm.status).toBe(0);const start=performance.now();const result=spawnSync(hook,[],{...opts,input:JSON.stringify({hook_event_name:"Stop",cwd:f.root})});const elapsed=performance.now()-start;expect(result.status).toBe(0);expect(result.stdout).toBe("{}\n");expect(elapsed).toBeLessThan(15);}finally{await f.close();}
 });

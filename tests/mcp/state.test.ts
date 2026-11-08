@@ -1,64 +1,19 @@
-import { afterEach, expect, test } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { LocalState, type Signal } from "../../src/mcp/state.js";
-
-const cleanup: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-async function setup() {
-  const dir = await mkdtemp("/tmp/cito-state-"); cleanup.push(() => rm(dir, { recursive: true, force: true }));
-  const state = await LocalState.open(dir); cleanup.push(async () => state.close());
-  for (const hub of ["personal", "work"]) state.run(`INSERT INTO local_listeners (hub,listener_id,principal_id,owner_user,host_id,host_name,
-    harness,session_id,endpoint_pid,cwd,title,about,scope,status,binding_generation,owner_token)
-    VALUES (?, 'c_abcdefgh2345','alice','alice','host','host','cursor','s',123,'/tmp','Title','About','self','ACTIVE',2,'owner')`, hub);
-  return state;
-}
-function wire(id = "s1", patch: Partial<Signal> = {}): Signal {
-  return { signal_id: id, to: "c_abcdefgh2345", target_generation: 2, sender_endpoint_key: "sender",
-    from: { principal_id: "alice", user: "alice", host_id: "other", host_name: "other", harness: null, listener_id: null, title: "Sender", about: null },
-    message: "Hello", in_reply_to: null, ...patch };
-}
-function admit(state: LocalState, signal: Signal, seq: number, hub = "personal") {
-  return state.admit("c_abcdefgh2345", "owner", signal, seq, new Date().toISOString(), Date.now() + 60_000, hub);
-}
-test("admission is hub scoped, deduplicates and advances the cursor without any quota", async () => {
-  const state = await setup();
-  const first = admit(state, wire(), 1).row!;
-  expect(first).toMatchObject({ hub: "personal", state: "RECEIVED", held_reason: null });
-  expect(admit(state, wire(), 3)).toEqual({ row: first, duplicate: true });
-  expect(admit(state, wire(), 1, "work").duplicate).toBe(false);
-  for (let i = 4; i <= 12; i++) expect(admit(state, wire("s" + i), i).row!.state).toBe("RECEIVED");
-  expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(12);
-  expect(state.listener("c_abcdefgh2345", "work")!.persisted_seq).toBe(1);
+import {expect,test} from "vitest";
+import {agent,cleanroom,provider,wire,received} from "../support/native-scenarios.js";
+import {waitFor,type NativeHarness,type JsonObject} from "../support/native-harness.js";
+export function inject(f:NativeHarness,signal:JsonObject,seq:number,db="hub.sqlite") {f.mutate("INSERT INTO hub_signals(seq,subject,msg_id,signal_id,created_ms,data) VALUES(?,?,?,?,?,CAST(? AS BLOB))",[seq,"cito.signal."+String(signal.to),"wire-"+seq,String(signal.signal_id),Date.now(),JSON.stringify(signal)],db);}
+test("admission is hub scoped, deduplicates and advances the cursor without quotas",async()=>{
+ const personal=await cleanroom(),work=await cleanroom(),a=await personal.hub(),b=await work.hub(),f=await cleanroom({hubs:{personal:{url:a.url,user:"alice"},work:{url:b.url,user:"alice"}},defaultHub:"personal"}),p=await provider(f);await f.daemon();const first=await f.tool("cito_listen",{hub:"personal",about:"personal"},p.meta),second=await f.tool("cito_listen",{hub:"work",about:"work"},p.meta),id=String(first.canonical_listener_id);expect(second.canonical_listener_id).toBe(id);for(let n=1;n<=12;n++)inject(personal,wire(n===3?"sig_1":"sig_"+n,id,"none#alice",Number(first.binding_generation)),n,"hub/hub.sqlite");inject(work,wire("sig_1",id,"none#alice",Number(second.binding_generation)),1,"hub/hub.sqlite");await waitFor(()=>f.query("SELECT * FROM local_signals WHERE listener_id=?",[id]).length===12,10000);expect(f.query("SELECT hub,seq FROM local_signals WHERE signal_id='sig_1' ORDER BY hub")).toEqual([{hub:"personal",seq:1},{hub:"work",seq:1}]);expect(f.query("SELECT hub,persisted_seq FROM local_listeners WHERE listener_id=? ORDER BY hub",[id])).toEqual([{hub:"personal",persisted_seq:12},{hub:"work",persisted_seq:1}]);
 });
-test("private cross-principal messages drop silently, workspace messages wake, stale generations stay passive", async () => {
-  const state = await setup(), peer = wire().from; peer.principal_id = "bob";
-  expect(admit(state, wire("denied", { from: peer }), 1).row).toBeUndefined();
-  expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(1);
-  state.run("UPDATE local_listeners SET scope = 'workspace' WHERE hub = 'personal'");
-  expect(admit(state, wire("peer", { from: peer }), 2).row).toMatchObject({ state: "RECEIVED", held_reason: null });
-  expect(admit(state, wire("stale", { target_generation: 1 }), 3).row).toMatchObject({ state: "STORED_PASSIVE", held_reason: "stale_generation" });
+test("private cross-principal messages drop silently, workspace wakes and stale generations stay passive",async()=>{
+ const {f,id,p}=await agent();await f.tool("cito_unlisten",{},p.meta);await f.tool("cito_listen",{scope:"self",about:"private"},p.meta);let row=f.query("SELECT * FROM local_listeners WHERE listener_id=?",[id])[0]!;expect(row.binding_generation).toBe(2);expect(row.scope).toBe("self");inject(f,wire("private",id,"none#bob",2),1);await waitFor(()=>Number(f.query("SELECT persisted_seq FROM local_listeners WHERE listener_id=?",[id])[0]?.persisted_seq)>=1);expect(f.query("SELECT * FROM local_signals WHERE signal_id='private'")).toEqual([]);
+ await f.tool("cito_listen",{scope:"workspace",about:"workspace"},p.meta);row=f.query("SELECT * FROM local_listeners WHERE listener_id=?",[id])[0]!;expect(row.scope).toBe("workspace");inject(f,wire("workspace",id,"none#bob",Number(row.binding_generation)),2);await received(f,id);inject(f,wire("stale",id,String(row.principal_id),1),3);await received(f,id,2);expect(f.query("SELECT state,held_reason FROM local_signals WHERE signal_id='stale'")[0]).toEqual({state:"STORED_PASSIVE",held_reason:"stale_generation"});
 });
-test("stale owners cannot admit or advance cursor and transaction errors roll back", async () => {
-  const state = await setup();
-  expect(() => state.admit("c_abcdefgh2345", "wrong", wire(), 1, new Date().toISOString(), Date.now(), "personal")).toThrow("Listener owner changed");
-  expect(() => state.transaction(() => { state.run("UPDATE local_listeners SET persisted_seq = 10"); throw new Error("rollback"); })).toThrow("rollback");
-  expect(state.listener("c_abcdefgh2345", "personal")!.persisted_seq).toBe(0);
+test("failed admission transactions roll back and never advance the cursor past an earlier failure",async()=>{
+ const {f,id,row}=await agent();f.mutate("CREATE TRIGGER reject_signal BEFORE INSERT ON local_signals BEGIN SELECT RAISE(ABORT,'injected constraint failure');END;");inject(f,wire("first",id,String(row.principal_id),Number(row.binding_generation)),1);
+ await new Promise(r=>setTimeout(r,700));expect(f.query("SELECT * FROM local_signals WHERE listener_id=?",[id])).toEqual([]);expect(Number(f.query("SELECT persisted_seq FROM local_listeners WHERE listener_id=?",[id])[0]?.persisted_seq??0)).toBe(0);f.mutate("DROP TRIGGER reject_signal");await received(f,id);expect(f.query("SELECT persisted_seq FROM local_listeners WHERE listener_id=?",[id])[0]!.persisted_seq).toBe(1);
 });
-test("schema reset atomically discards pre-V4 state, removes pairwise table and preserves V4 rows on reopening", async () => {
-  const dir = await mkdtemp("/tmp/cito-upgrade-");
-  try {
-    const db = new DatabaseSync(join(dir, "state.sqlite"));
-    db.exec("CREATE TABLE local_listeners (legacy TEXT); CREATE TABLE local_pairwise_wakes (legacy TEXT); PRAGMA user_version = 3;"); db.close();
-    const state = await LocalState.open(dir);
-    expect(state.db.prepare("PRAGMA user_version").get()!.user_version).toBe(4);
-    expect(state.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => row.name))
-      .toEqual(["daemon_owner", "local_listeners", "local_sent_idempotency", "local_signals"]);
-    expect(state.db.prepare("PRAGMA table_info(local_listeners)").all().map(row => row.name)).toContain("endpoint_pid");
-    state.run("INSERT INTO local_sent_idempotency (hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES ('work','d','h','s','t','queued','now',1)"); state.close();
-    const reopened = await LocalState.open(dir);
-    try { expect(reopened.db.prepare("SELECT hub, dedup_id FROM local_sent_idempotency").all()).toEqual([{ hub: "work", dedup_id: "d" }]); }
-    finally { reopened.close(); }
-  } finally { await rm(dir, { recursive: true, force: true }); }
+test("pre-V4 state resets atomically and V4 state survives non-destructive reopening",async()=>{
+ const f=await cleanroom();f.mutate("CREATE TABLE local_listeners(legacy TEXT);CREATE TABLE local_pairwise_wakes(legacy TEXT);PRAGMA user_version=3;");const daemon=await f.daemon();expect(f.query("PRAGMA user_version")[0]!.user_version).toBe(4);expect(f.query("SELECT name FROM sqlite_master WHERE name='local_pairwise_wakes'")).toEqual([]);expect(f.query("PRAGMA table_info(local_listeners)").some(c=>c.name==="endpoint_pid")).toBe(true);
+ f.mutate("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES('work','d','p','s','c_abcdefgh2345','PENDING_PUBLISH','now',0)");await daemon.stop();await f.daemon();expect(f.query("SELECT signal_id FROM local_sent_idempotency WHERE hub='work' AND dedup_id='d'")).toEqual([{signal_id:"s"}]);
 });

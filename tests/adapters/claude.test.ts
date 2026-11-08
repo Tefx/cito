@@ -1,179 +1,48 @@
-import { afterEach, expect, test } from "vitest";
-import { appendFile, mkdir, readFile, rename, stat, utimes, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { isolatedState, unixServer } from "./support.js";
-import { loadConfig, type CitoConfig } from "../../src/shared/index.js";
-import {
-  ADAPTER_REGISTRY, ClaudeCodeAdapter, appendClaudeWake, claudeBadgePath, claudeProjectDir, claudeSessionClaim,
-  claudeWakeQueuePath, drainClaudeWakes, getAdapter, peekClaudeWakes, resolveCaller, resolveClaudeSessionId,
-  resolveClaudeSessionTitle, validateClaudeSessionId, writeClaudeBadge,
-} from "../../src/adapters/index.js";
-import type { DeliverContext } from "../../src/adapters/types.js";
-import type { ListenerRow } from "../../src/mcp/state.js";
+import {expect,test} from "vitest";
+import {mkdir,writeFile,readFile,stat,rename,readdir} from "node:fs/promises";
+import {join} from "node:path";
+import {cleanroom} from "../support/native-scenarios.js";
+import {SESSION,OTHER,transcript,projectDir,queue,sidecar,request} from "../support/plugin-fixtures.js";
 
-const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-const SESSION = "11111111-2222-3333-4444-555555555555";
-const OLDER = "99999999-8888-7777-6666-555555555555";
+test("the newest transcript names the running session and unrelated files never do",async()=>{
+ const f=await cleanroom();expect((await f.plugin("claude",{op:"resolve_caller",cwd:f.root})).ok).toBe(false);await transcript(f,OTHER,undefined,1700000000000);await transcript(f,SESSION,undefined,1800000000000);await writeFile(join(projectDir(f),"unrelated.txt"),"{}");
+ const ambiguous=await f.plugin("claude",{op:"resolve_caller",cwd:f.root});expect(ambiguous.error_code).toBe("BINDING_REQUIRED");
+ const explicit=await f.plugin("claude",{op:"resolve_caller",cwd:f.root,meta:{claudeSessionId:SESSION}});expect(explicit.caller).toMatchObject({session_id:SESSION});
+});
+test("the newest custom-title names the session, and an untitled or unreadable transcript has none",async()=>{
+ const f=await cleanroom();await transcript(f,SESSION,"Original");await writeFile(join(projectDir(f),SESSION+".jsonl"),JSON.stringify({type:"custom-title",customTitle:"First"})+"\n"+JSON.stringify({type:"custom-title",customTitle:"Renamed"})+"\n");
+ expect((await f.plugin("claude",{op:"resolve_caller",cwd:f.root,meta:{claudeSessionId:SESSION}})).caller).toMatchObject({title:"Renamed",session_id:SESSION});
+ await transcript(f,SESSION);expect((await f.plugin("claude",{op:"resolve_caller",cwd:f.root,meta:{claudeSessionId:SESSION}})).caller).not.toMatchObject({title:"Renamed"});
+});
+test("only the transcript tail is read, so a title older than the window yields the workspace fallback",async()=>{
+ const f=await cleanroom();await transcript(f,SESSION,"Old title");await writeFile(join(projectDir(f),SESSION+".jsonl"),JSON.stringify({type:"custom-title",customTitle:"Old title"})+"\n"+"{}\n".repeat(100000));const r=await f.plugin("claude",{op:"resolve_caller",cwd:f.root,meta:{claudeSessionId:SESSION}});expect(r.caller).not.toMatchObject({title:"Old title"});
+});
+test("explicit session claims accept one identifier, defer expected_session_id with a socket PID, and reject conflicts",async()=>{
+ const f=await cleanroom();for(const key of ["claudeSessionId","claude_session_id","sessionId"]){const r=await f.plugin("claude",{op:"resolve_caller",cwd:f.root,meta:{[key]:SESSION}});expect(r.caller).toMatchObject({session_id:SESSION});}
+ expect((await f.plugin("claude",{op:"resolve_caller",cwd:f.root,meta:{claudeSessionId:SESSION,expected_session_id:OTHER}})).ok).toBe(false);
+});
+test("a claimed session binds to its workspace and socket identity conflicts fail",async()=>{
+ const f=await cleanroom();await transcript(f,SESSION,"UI Session");const channel=await sidecar(f,{CLAUDE_SESSION_ID:SESSION});try{
+ expect((await f.plugin("claude",{op:"resolve_caller",cwd:f.root,endpoint_pid:process.pid,meta:{expected_session_id:SESSION}})).caller).toMatchObject({session_id:SESSION,cwd:f.root,title:"UI Session"});
+ expect((await f.plugin("claude",{op:"resolve_caller",cwd:f.root,endpoint_pid:process.pid,meta:{expected_session_id:OTHER}})).ok).toBe(false);
+ }finally{await channel.close();}
+});
+test("the wake queue drains once and survives append/drain races",async()=>{
+ const f=await cleanroom();const wake=(i:number)=>f.plugin("claude",{op:"wake",session_id:SESSION,batch_id:"batch-"+i,text:"card-"+i,wake:true});
+ await Promise.all(Array.from({length:30},(_,i)=>wake(i)));const hook=()=>f.command([],{executable:"plugins/claude/bin/cito-claude-hook",input:JSON.stringify({hook_event_name:"Stop",session_id:SESSION,cwd:f.root})});
+ const racing=await Promise.all([hook(),...Array.from({length:30},(_,i)=>wake(i+30))]);const last=await hook();const text=String(JSON.parse(racing[0]!.stdout).reason??"")+String(JSON.parse(last.stdout).reason??"");for(let i=0;i<60;i++)expect(text.match(new RegExp(`card-${i}(?![0-9])`,"g"))).toHaveLength(1);
+ expect(await queue(f)).toEqual([]);expect(JSON.parse((await hook()).stdout)).toEqual({});
+});
+test("badges are written beside the queue and removed with the session",async()=>{
+ const f=await cleanroom();await f.plugin("claude",{op:"update_badge",session_id:SESSION,badge:"🔔 listener (1)"});const path=join(f.stateDir,"claude/badges",SESSION);expect(await readFile(path,"utf8")).toBe("🔔 listener (1)\n");await f.plugin("claude",{op:"update_badge",session_id:SESSION,badge:null});await expect(stat(path)).rejects.toMatchObject({code:"ENOENT"});
+});
+test("claude is registered by default and queues a card without claiming it was read",async()=>{
+ const f=await cleanroom();const r=await f.plugin("claude",{op:"wake",session_id:SESSION,batch_id:"a",text:"card",wake:true});expect(r.outcome).toBe("delivered_unconfirmed");expect((await queue(f))[0]).toMatchObject({batch_id:"a",content:"card",wake:true});
+});
 
-async function transcript(claudeHome: string, cwd: string, id: string, mtimeMs: number): Promise<void> {
-  const dir = claudeProjectDir(cwd, { claudeHome });
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, id + ".jsonl");
-  await writeFile(path, "{}\n");
-  await utimes(path, mtimeMs / 1000, mtimeMs / 1000);
-}
-function deliverContext(config: CitoConfig, card = "🔔 Cito · one"): DeliverContext {
-  return { batchId: "batch-1", card, queueWritten: false, markQueueWritten: () => {},
-    runEffect: async submit => { try { await submit(); return true; } catch { return false; } },
-    config, signal: new AbortController().signal };
-}
-
-test("the newest transcript names the running session and unrelated files never do", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  expect(await resolveClaudeSessionId(f.root, config)).toBeUndefined();
-  await transcript(f.claudeHome, f.root, OLDER, 1_700_000_000_000);
-  await transcript(f.claudeHome, f.root, SESSION, 1_800_000_000_000);
-  await writeFile(join(claudeProjectDir(f.root, config), "summary.jsonl"), "{}\n");
-  await writeFile(join(claudeProjectDir(f.root, config), SESSION + ".txt"), "{}\n");
-  expect(await resolveClaudeSessionId(f.root, config)).toBe(SESSION);
-  await transcript(f.claudeHome, f.root, OLDER, 1_900_000_000_000);
-  expect(await resolveClaudeSessionId(f.root, config)).toBe(OLDER);
+test("a native Stop recovers abandoned staging before a persisted queue larger than 4 MiB",async()=>{
+ const f=await cleanroom();for(const [id,text]of [["a","first"],["b","second"]])await f.plugin("claude",{op:"wake",session_id:SESSION,batch_id:id,text,wake:true});const path=join(f.stateDir,"claude/wakes",SESSION+".jsonl");await rename(path,path+".draining-abandoned");const large="x".repeat(Math.floor(4.2*1024*1024));await writeFile(path,JSON.stringify({batch_id:"c",content:large,wake:false,created_at_ms:3})+"\n");const result=await f.command([],{executable:"plugins/claude/bin/cito-claude-hook",input:JSON.stringify({hook_event_name:"Stop",session_id:SESSION,cwd:f.root})});expect(result.code).toBe(0);const response=JSON.parse(result.stdout);expect(response.decision).toBe("block");expect(response.reason).toBe("first\n\nsecond\n\n"+large);expect((await readdir(join(f.stateDir,"claude/wakes"))).filter(name=>name.includes(".draining"))).toEqual([]);expect(await queue(f)).toEqual([]);
 });
-test("the newest custom-title names the session, and an untitled or unreadable transcript has none", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  const dir = claudeProjectDir(f.root, config);
-  await mkdir(dir, { recursive: true });
-  const write = async (id: string, body: string) => { await writeFile(join(dir, id + ".jsonl"), body); };
-  const record = (title: string) => JSON.stringify({ type: "custom-title", customTitle: title });
-  // The last record wins, unrelated and malformed lines are skipped, and control characters are flattened.
-  await write(SESSION, [
-    record("First name"), '{"type":"user"}', "{not json",
-    JSON.stringify({ type: "custom-title" }), JSON.stringify({ type: "custom-title", customTitle: "   " }),
-    record("Review\u0007 the\tadapter"), '{"type":"assistant"}', "",
-  ].join("\n"));
-  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Review  the adapter");
-  await write(OLDER, '{"type":"user"}\n');
-  expect(await resolveClaudeSessionTitle(f.root, OLDER, config)).toBeUndefined();
-  expect(await resolveClaudeSessionTitle(f.root, "66666666-6666-6666-6666-666666666666", config)).toBeUndefined();
-  // A session id that is not a transcript name must never be turned into a path.
-  expect(await resolveClaudeSessionTitle(f.root, "claude-123", config)).toBeUndefined();
-  await write(SESSION, record("x".repeat(500)));
-  expect((await resolveClaudeSessionTitle(f.root, SESSION, config))!).toHaveLength(200);
-});
-test("only the transcript tail is read, so a title older than the window yields the workspace fallback", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  const dir = claudeProjectDir(f.root, config);
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, SESSION + ".jsonl");
-  const filler = JSON.stringify({ type: "assistant", text: "y".repeat(4000) }) + "\n";
-  await writeFile(path, JSON.stringify({ type: "custom-title", customTitle: "Ancient" }) + "\n" + filler.repeat(50));
-  expect((await stat(path)).size).toBeGreaterThan(128 * 1024);
-  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBeUndefined();
-  // Appending a fresh title both lands inside the window and invalidates the cached miss.
-  await appendFile(path, JSON.stringify({ type: "custom-title", customTitle: "Current" }) + "\n");
-  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Current");
-  // Growing the transcript past the 128 KiB tail window without a newer custom-title preserves the cached title.
-  await appendFile(path, filler.repeat(50));
-  expect(await resolveClaudeSessionTitle(f.root, SESSION, config)).toBe("Current");
-});
-test("explicit session claims accept one identifier, defer expected_session_id when a socket PID is present, and reject conflicts", () => {
-  expect(claudeSessionClaim({})).toBeUndefined();
-  expect(claudeSessionClaim({ claudeSessionId: " " + SESSION + " " })).toBe(SESSION);
-  expect(claudeSessionClaim({ claude_session_id: SESSION })).toBe(SESSION);
-  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION })).toBe(SESSION);
-  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION, endpoint_pid: process.pid })).toBeUndefined();
-  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION, caller_pid: process.pid })).toBeUndefined();
-  expect(claudeSessionClaim({ expected_harness: "claude", expected_session_id: SESSION, pi_pid: process.pid })).toBeUndefined();
-  expect(claudeSessionClaim({ expected_harness: "codex", expected_session_id: SESSION })).toBeUndefined();
-  expect(claudeSessionClaim({ claudeSessionId: SESSION }, { "x-claude-session-id": SESSION })).toBe(SESSION);
-  expect(() => claudeSessionClaim({ claudeSessionId: SESSION }, { "x-claude-session-id": OLDER }))
-    .toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
-  for (const bad of ["../escape", "a/b", "", ".hidden", "x".repeat(129)]) {
-    expect(() => validateClaudeSessionId(bad)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
-  }
-});
-test("a claimed session binds to its workspace, UI socket PID + expected_session_id resolves via socket bridge, and explicit + PID conflicts fail", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  expect(await resolveCaller({ meta: { claudeSessionId: SESSION, cwd: f.root }, httpTransport: true }, config))
-    .toMatchObject({ harness: "claude", session_id: SESSION, cwd: f.root });
-  await expect(resolveCaller({ meta: { claudeSessionId: SESSION, cwd: f.root, endpoint_pid: process.pid }, httpTransport: true }, config))
-    .rejects.toMatchObject({ code: "INVALID_INPUT" });
-  // A claim for a session that moved on is rejected before any effect runs.
-  await expect(resolveCaller({ meta: { claudeSessionId: SESSION, cwd: f.root, expected_harness: "claude", expected_session_id: OLDER }, httpTransport: true }, config))
-    .rejects.toMatchObject({ code: "INVALID_INPUT" });
-  // UI listen_session / switch_hub pass both endpoint_pid and expected_session_id; resolve via socket bridge.
-  const server = await unixServer(join(f.stateDir, `sockets/claude-pid-${process.pid}.sock`),
-    socket => socket.once("data", () => socket.end(JSON.stringify({
-      ok: true, endpoint_pid: process.pid, session_id: SESSION, session_name: "Claude UI Session", cwd: f.root,
-    }) + "\n")));
-  cleanups.push(() => server.stop());
-  expect(await resolveCaller({
-    meta: { endpoint_pid: process.pid, expected_harness: "claude", expected_session_id: SESSION, cwd: f.root },
-  }, config)).toMatchObject({ harness: "claude", endpoint_pid: process.pid, session_id: SESSION, cwd: f.root, title: "Claude UI Session" });
-  await expect(resolveCaller({
-    meta: { endpoint_pid: process.pid, expected_harness: "claude", expected_session_id: OLDER, cwd: f.root },
-  }, config)).rejects.toMatchObject({ code: "SESSION_NOT_OPEN" });
-});
-test("the wake queue drains once, merges aliased fallback queues, recovers staging files over 4 MiB, and survives an append that races a drain", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  expect(await drainClaudeWakes(config, SESSION)).toEqual([]);
-  await appendClaudeWake(config, SESSION, { batch_id: "a", content: "first", wake: true, created_at_ms: 1 });
-  await appendClaudeWake(config, SESSION, { batch_id: "b", content: "second", wake: true, created_at_ms: 2 });
-  expect((await peekClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["a", "b"]);
-  // A drain that died after staging must not swallow the cards it had taken, even when > 4 MiB.
-  const path = claudeWakeQueuePath(config, SESSION);
-  await rename(path, path + ".draining-abandoned");
-  const largePayload = "x".repeat(4.2 * 1024 * 1024);
-  await appendClaudeWake(config, SESSION, { batch_id: "c", content: largePayload, wake: false, created_at_ms: 3 });
-  const drained = await drainClaudeWakes(config, SESSION);
-  expect(drained.map(w => w.batch_id)).toEqual(["a", "b", "c"]);
-  expect(drained[2]!.content).toHaveLength(largePayload.length);
-  expect(drained.map(w => w.wake)).toEqual([true, true, false]);
-  expect(await drainClaudeWakes(config, SESSION)).toEqual([]);
-  expect(await peekClaudeWakes(config, SESSION)).toEqual([]);
-  // A torn line never blocks the cards around it.
-  await appendClaudeWake(config, SESSION, { batch_id: "d", content: "fourth", wake: true, created_at_ms: 4 });
-  await writeFile(path, await readFile(path, "utf8") + '{"batch_id":"e","con', { flag: "w" });
-  expect((await drainClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["d"]);
-  // Aliased first-turn fallback queues are drained and deduplicated alongside the transcript session queue.
-  const aliasDir = join(config.stateDir, "claude", "aliases");
-  await mkdir(aliasDir, { recursive: true });
-  await writeFile(join(aliasDir, SESSION), "claude-4242\n", { mode: 0o600 });
-  await appendClaudeWake(config, "claude-4242", { batch_id: "alias-1", content: "from-fallback", wake: true, created_at_ms: 5 });
-  await appendClaudeWake(config, SESSION, { batch_id: "alias-1", content: "from-fallback", wake: true, created_at_ms: 6 });
-  await appendClaudeWake(config, SESSION, { batch_id: "alias-2", content: "from-session", wake: true, created_at_ms: 7 });
-  expect((await peekClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["alias-1", "alias-2"]);
-  expect((await drainClaudeWakes(config, SESSION)).map(w => w.batch_id)).toEqual(["alias-1", "alias-2"]);
-  expect(await peekClaudeWakes(config, "claude-4242")).toEqual([]);
-});
-test("badges are written beside the queue and removed with the session", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  await writeClaudeBadge(config, SESSION, "🔔 abcdefghijkl (1)");
-  expect(await readFile(claudeBadgePath(config, SESSION), "utf8")).toBe("🔔 abcdefghijkl (1)\n");
-  await writeClaudeBadge(config, SESSION, undefined);
-  await expect(readFile(claudeBadgePath(config, SESSION), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-});
-test("claude is registered by default and queues a card without claiming it was read", async () => {
-  const f = await isolatedState(); cleanups.push(() => f.cleanup());
-  const config = loadConfig(f.env);
-  const adapter = ADAPTER_REGISTRY.get("claude");
-  expect(adapter).toBeInstanceOf(ClaudeCodeAdapter);
-  expect(getAdapter("claude")).toBe(adapter);
-  const row = { harness: "claude", session_id: SESSION, endpoint_pid: process.pid } as ListenerRow;
-  let reply: object = { ok: true, delivered: true };
-  const server = await unixServer(join(f.stateDir, `sockets/claude-pid-${process.pid}.sock`),
-    socket => socket.once("data", () => socket.end(JSON.stringify(reply) + "\n")));
-  cleanups.push(() => server.stop());
-  expect(await adapter!.deliver(row, deliverContext(config))).toBe("delivered_unconfirmed");
-  reply = { ok: false, error: "SESSION_MISMATCH" };
-  expect(await adapter!.deliver(row, deliverContext(config))).toBe("session_switched");
-  reply = { ok: true, delivered: true };
-  expect(await adapter!.deliver({ ...row, endpoint_pid: 2147483647 } as ListenerRow, deliverContext(config))).toBe("driver_unavailable");
+test("native Stop merges and deduplicates fallback aliases while draining both queue files",async()=>{
+ const f=await cleanroom(),alias="claude-4242";await mkdir(join(f.stateDir,"claude/aliases"),{recursive:true});await writeFile(join(f.stateDir,"claude/aliases",SESSION),alias+"\n",{mode:0o600});for(const [session_id,batch_id,text]of [[alias,"alias-1","from-fallback"],[SESSION,"alias-1","from-fallback"],[SESSION,"alias-2","from-session"]])await f.plugin("claude",{op:"wake",session_id,batch_id,text,wake:true});const result=await f.command([],{executable:"plugins/claude/bin/cito-claude-hook",input:JSON.stringify({hook_event_name:"Stop",session_id:SESSION,cwd:f.root})});expect(JSON.parse(result.stdout)).toEqual({decision:"block",reason:"from-fallback\n\nfrom-session"});expect(await queue(f)).toEqual([]);expect(await queue(f,alias)).toEqual([]);
 });

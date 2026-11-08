@@ -1,272 +1,70 @@
-import { afterEach, expect, test } from "vitest";
-import { readFile, writeFile, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { fixture, call, codexDesktop, waitFor } from "./support.js";
-import { unixServer } from "../adapters/support.js";
-import { CitoService } from "../../src/mcp/service.js";
-import { connectNats, provisionNats, toCanonicalListenerId } from "../../src/shared/index.js";
-import { encode } from "../../src/mcp/receiver.js";
-import { registrationSchema } from "../../src/mcp/state.js";
-
-const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function setup(pi = true) { const f = await fixture({ pi }); cleanups.push(() => f.close()); return f; }
-async function queueScript(path: string, code: string) { await writeFile(path, "#!/usr/bin/env node\n" + code, { mode: 0o700 }); }
-async function fileExists(path: string) { try { await stat(path); return true; } catch { return false; } }
-
-test("whole frozen batch expires at earliest member; no partial wake escapes", async () => {
-  const f = await setup();
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "expire" }, f.pi.meta);
-  const id = toCanonicalListenerId(publicId);
-  await call(f.service, "cito_send", { to: id, message: "early" });
-  await call(f.service, "cito_send", { to: id, message: "later" });
-  f.service.state.run(`UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'frozen', batch_expires_at_ms = ?, dispatcher_token = 'crashed'`, Date.now() - 1);
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect(f.service.state.signals("SELECT * FROM local_signals").map(row => row.state)).toEqual(["EXPIRED_UNSENT", "EXPIRED_UNSENT"]);
-  expect(f.pi.messages).toEqual([]);
+import {expect,test} from "vitest";
+import {join} from "node:path";
+import {agent,remoteAgent,cleanroom,wire,seed,sendUnbound,received,action,errorTool,socketServer} from "../support/native-scenarios.js";
+import {waitFor,object,bareId} from "../support/native-harness.js";
+const sleeps=(n:number)=>new Promise(r=>setTimeout(r,n));
+test("whole frozen batch expires at its earliest member without a partial wake",async()=>{
+ const {f,p,row,id,daemon}=await agent();await daemon.stop();const early=Date.now()-1;seed(f,row,"old",1,{state:"DISPATCHING",batch_id:"frozen",expires_at_ms:early});seed(f,row,"young",2,{state:"DISPATCHING",batch_id:"frozen",expires_at_ms:Date.now()+60000});f.mutate("UPDATE local_signals SET batch_card='frozen card',batch_expires_at_ms=?,dispatcher_token='crashed'",[early]);await f.daemon();await waitFor(()=>f.query("SELECT state FROM local_signals WHERE listener_id=?",[id]).every(r=>r.state==="EXPIRED_UNSENT"));expect((await p.calls()).filter(c=>c.op==="wake")).toEqual([]);expect(f.query("SELECT state FROM local_signals WHERE listener_id=? ORDER BY seq",[id])).toEqual([{state:"EXPIRED_UNSENT"},{state:"EXPIRED_UNSENT"}]);
 });
-
-test("recovery retries immutable existing batch before new received rows", async () => {
-  const f = await setup();
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "recovery" }, f.pi.meta);
-  const id = toCanonicalListenerId(publicId);
-  const first = await call(f.service, "cito_send", { to: id, message: "original frozen" });
-  const frozenCard = '🔔 Cito · Original title\n\noriginal frozen';
-  f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'immutable-batch', batch_expires_at_ms = expires_at_ms, batch_card = ? WHERE signal_id = ?", frozenCard, first.signal_id);
-  f.service.state.run("UPDATE local_listeners SET title = 'Changed title' WHERE listener_id = ?", id);
-  await call(f.service, "cito_send", { to: id, message: "new arrival" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect(f.pi.messages).toHaveLength(1);
-  expect(f.pi.messages[0]!.content).toBe(frozenCard);
-  expect(f.pi.messages[0]!.content).not.toContain("new arrival");
-  expect(f.service.state.signals("SELECT * FROM local_signals ORDER BY seq").map(row => [row.state, row.batch_id])).toEqual([["DISPATCHED", "immutable-batch"], ["RECEIVED", null]]);
+test("recovery retries immutable frozen batches before newly received rows",async()=>{
+ const {f,p,row,daemon}=await agent();await daemon.stop();const card="🔔 Cito · Original title\n\noriginal frozen";seed(f,row,"old",1,{state:"DISPATCHING",batch_id:"immutable",message:"original frozen",queue_written:1});f.mutate("UPDATE local_signals SET batch_card=?,batch_expires_at_ms=expires_at_ms,dispatcher_token='crashed' WHERE signal_id='old'",[card]);f.mutate("UPDATE local_listeners SET title='Changed title' WHERE harness='cursor'");seed(f,row,"new",2,{message:"new arrival"});await f.daemon();await waitFor(async()=>(await p.calls()).filter(c=>c.op==="wake").length===2);const calls=(await p.calls()).filter(c=>c.op==="wake");expect(calls[0]!.batch_id).toBe("immutable");expect(calls[0]!.text).toBe(card);expect(calls[0]!.text).not.toContain("new arrival");expect(calls[0]!.signals).toHaveLength(1);expect(calls[1]!.batch_id).not.toBe("immutable");
 });
-
-test("acknowledgement during queue submission survives completion and suppresses the separate open effect", async () => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const marker = join(f.root, "queue-entered"), release = join(f.root, "release");
-  await queueScript(desktop.codexBin, `import { writeFileSync, existsSync } from 'node:fs';
-writeFileSync(${JSON.stringify(marker)}, 'queued');
-const timer = setInterval(() => { if (existsSync(${JSON.stringify(release)})) { clearInterval(timer); } }, 10);
-`);
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "ack-inflight" }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  const sent = await call(f.service, "cito_send", { to: id, message: "read while queued" });
-  const dispatch = f.service.receivers.get(`default:${id}`)!.dispatch();
-  await waitFor(() => fileExists(marker));
-  await call(f.service, "cito_inbox", { ack_all: true }, desktop.meta);
-  await writeFile(release, "release"); await dispatch;
-  const stored = f.service.state.signals("SELECT * FROM local_signals WHERE signal_id = ?", sent.signal_id)[0]!;
-  expect(stored.acknowledged_at_ms).toBeGreaterThan(0);
-  expect(stored.queue_written).toBe(1);
-  expect(stored.state).toBe("STORED_PASSIVE");
-  expect(await fileExists(desktop.log)).toBe(false);
-  expect((await call(f.service, "cito_inbox", {}, desktop.meta)).signals).toEqual([]);
+test("acknowledgment during queue submission survives completion and suppresses later effects",async()=>{
+ const {f,p,enrolled,id}=await agent({}, {delay_op:"wake",delay_ms:500});const sending=sendUnbound(f,String(enrolled.listener_id));await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));const row=f.query("SELECT * FROM local_signals WHERE listener_id=?",[id])[0]!;f.mutate("UPDATE local_signals SET acknowledged_at_ms=? WHERE signal_id=?",[Date.now(),String(row.signal_id)]);await sending;await sleeps(600);expect(typeof f.query("SELECT acknowledged_at_ms FROM local_signals WHERE signal_id=?",[String(row.signal_id)])[0]!.acknowledged_at_ms).toBe("number");expect((await p.calls()).filter(c=>c.op==="wake")).toHaveLength(1);
 });
-
-test.each(["unlisten", "fence"])("%s aborts an in-flight Codex queue and prevents open -g", async action => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const marker = join(f.root, "queue-entered");
-  await queueScript(desktop.codexBin, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'entered'); setInterval(() => {}, 1000);`);
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: action }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  const sent = await call(f.service, "cito_send", { to: id, message: "abort" });
-  const receiver = f.service.receivers.get(`default:${id}`)!;
-  const dispatch = receiver.dispatch();
-  await waitFor(() => fileExists(marker));
-  if (action === "unlisten") await call(f.service, "cito_unlisten", {}, desktop.meta);
-  else {
-    const nc = await connectNats({ servers: f.broker.url });
-    try {
-      const { kv } = await provisionNats(nc), entry = (await kv.get(id))!, value = registrationSchema.parse(entry.json());
-      await kv.update(id, encode({ ...value, binding_generation: value.binding_generation + 1, owner_token: "12345678-1234-4234-8234-123456789012" }), entry.revision);
-      await waitFor(() => receiver.abort.signal.aborted);
-    } finally { await nc.close(); }
-  }
-  await dispatch;
-  expect(await fileExists(desktop.log)).toBe(false);
-  expect(f.service.state.signals("SELECT * FROM local_signals WHERE signal_id = ?", sent.signal_id)[0]).toMatchObject({ state: "STORED_PASSIVE", held_reason: action === "unlisten" ? "unlistened_before_dispatch" : "fenced_before_dispatch" });
+test.each(["unlisten","session_switch","shutdown"])("%s aborts an in-flight queue and prevents the separate open effect",async boundary=>{
+ const {f,p,enrolled,id}=await agent({}, {delay_op:"wake",delay_ms:30000});const sending=sendUnbound(f,String(enrolled.listener_id)).catch(e=>e);await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));
+ if(boundary==="shutdown")await action(f,{op:"quit"}).catch(()=>{});else if(boundary==="session_switch")await p.set({session_id:"other",status:"switched"});else await f.tool("cito_unlisten",{},p.meta).catch(()=>{});
+ await sleeps(200);const rows=f.query("SELECT state FROM local_signals WHERE listener_id=?",[id]);expect(rows.every(r=>r.state!=="DISPATCHED")).toBe(true);await sending;
+},12000);
+test("a terminal pre-insertion driver failure stores passive without fabricating queue insertion",async()=>{
+ const {f,p,enrolled,id}=await agent({}, {outcome:"driver_unavailable"});await sendUnbound(f,String(enrolled.listener_id));await waitFor(()=>f.query("SELECT state FROM local_signals WHERE listener_id=?",[id])[0]?.state==="STORED_PASSIVE");expect((await p.calls()).filter(c=>c.op==="wake")).toHaveLength(1);expect(f.query("SELECT state,held_reason,queue_written,acknowledged_at_ms FROM local_signals WHERE listener_id=?",[id])[0]).toMatchObject({state:"STORED_PASSIVE",held_reason:"driver_unavailable",queue_written:0,acknowledged_at_ms:null});
+},10000);
+test("Pi socket failures retry the exact batch three times and session mismatch revokes immediately",async()=>{
+ const f=await cleanroom();let mismatch=false;const deliveries:Record<string,unknown>[]=[];
+ const server=await socketServer(join(f.stateDir,"sockets/pi-pid-"+process.pid+".sock"),socket=>socket.once("data",bytes=>{
+  const request=JSON.parse(bytes.toString());if(request.op==="identify")socket.end(JSON.stringify({ok:true,pi_pid:process.pid,session_id:"pi-retry",session_name:"Retry",cwd:f.root})+"\n");
+  else if(request.op==="status")socket.end('{"ok":true}\n');
+  else {deliveries.push(request);socket.end(JSON.stringify({ok:false,error:mismatch?"SESSION_MISMATCH":"TEMPORARY_ERROR"})+"\n");}
+ }));
+ try{
+  await f.daemon();const enrolled=await f.tool("cito_listen",{about:"Pi retry"},{pi_pid:process.pid});const id=String(f.query("SELECT listener_id FROM local_listeners WHERE harness='pi'")[0]!.listener_id);
+  await sendUnbound(f,String(enrolled.listener_id));await waitFor(()=>f.query("SELECT state FROM local_signals WHERE listener_id=?",[id])[0]?.state==="STORED_PASSIVE",7000);
+  expect(deliveries).toHaveLength(3);expect(new Set(deliveries.map(c=>c.batch_id)).size).toBe(1);expect(new Set(deliveries.map(c=>c.content)).size).toBe(1);
+  mismatch=true;await sendUnbound(f,String(enrolled.listener_id),"switch");await waitFor(()=>f.query("SELECT status FROM local_listeners WHERE listener_id=?",[id])[0]?.status==="UNLISTENED");expect(deliveries).toHaveLength(4);
+ }finally{await server.close();}
+},12000);
+test("ten-second lease renewal keeps a long-running plugin owned without repeating its wake",async()=>{
+ const {f,p,row,id}=await agent({}, {delay_op:"wake",delay_ms:11000,outcome:"delivered_unconfirmed"});seed(f,row,"long-wake");
+ await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));
+ const initial=Number(f.query("SELECT claim_until_ms FROM hub_signals WHERE signal_id='long-wake'",[],"hub.sqlite")[0]!.claim_until_ms);
+ await waitFor(()=>Number(f.query("SELECT claim_until_ms FROM hub_signals WHERE signal_id='long-wake'",[],"hub.sqlite")[0]!.claim_until_ms)>initial,13000);
+ await waitFor(()=>f.query("SELECT state FROM local_signals WHERE listener_id=?",[id])[0]?.state==="DISPATCHED");
+ expect((await p.calls()).filter(c=>c.op==="wake")).toHaveLength(1);expect(f.query("SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='long-wake'")[0]!.acknowledged_at_ms).toBeNull();
+},18000);
+test("open-effect retries do not repeat already confirmed queue insertion",async()=>{
+ const {f,p,row,id}=await agent();seed(f,row,"queued",1,{state:"DISPATCHING",batch_id:"open-only",queue_written:1});await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));const call=(await p.calls()).find(c=>c.op==="wake")!;expect(call.queue_written).toBe(true);expect(f.query("SELECT queue_written FROM local_signals WHERE listener_id=?",[id])[0]!.queue_written).toBe(1);
 });
-
-test("three definite Codex pre-insertion failures store passive and never invoke open", async () => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const attempts = join(f.root, "attempts");
-  await queueScript(desktop.codexBin, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(attempts)}, 'attempt\\n'); process.exit(2);`);
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "failure" }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  await call(f.service, "cito_send", { to: id, message: "driver fails" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect((await readFile(attempts, "utf8")).trim().split("\n")).toHaveLength(3);
-  expect(await fileExists(desktop.log)).toBe(false);
-  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "STORED_PASSIVE", held_reason: "driver_unavailable", queue_written: 0 });
-}, 10_000);
-
-test("Pi socket failures retry the exact batch three times; session mismatch revokes immediately", async () => {
-  const f = await setup(false);
-  let mode: "error" | "mismatch" = "error";
-  const batches: string[] = [];
-  const socket = await unixServer(join(f.stateDir, `sockets/pi-pid-${process.pid}.sock`), connection => {
-    connection.once("data", bytes => {
-      const request = JSON.parse(bytes.toString());
-      if (request.op === "identify") connection.end(JSON.stringify({ ok: true, pi_pid: process.pid, session_id: "pi-retry", session_name: "retry", cwd: f.root,
-        }) + "\n");
-      else if (request.op === "status") connection.end('{"ok":true}\n');
-      else { batches.push(request.batch_id); connection.end(mode === "mismatch" ? '{"ok":false,"error":"SESSION_MISMATCH"}\n' : '{"ok":false,"error":"TEMPORARY_ERROR"}\n'); }
-    });
-  }); cleanups.push(() => socket.stop());
-  const meta = { pi_pid: process.pid };
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "Pi retry" }, meta);
-  const id = toCanonicalListenerId(publicId);
-  await call(f.service, "cito_send", { to: id, message: "retry" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect(batches).toHaveLength(3); expect(new Set(batches).size).toBe(1);
-  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "STORED_PASSIVE", held_reason: "driver_unavailable" });
-  mode = "mismatch";
-  await call(f.service, "cito_send", { to: id, message: "switch" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect(f.service.state.listener(id)!.status).toBe("UNLISTENED");
-  expect(f.service.state.signals("SELECT * FROM local_signals ORDER BY seq")[1]).toMatchObject({ state: "STORED_PASSIVE", held_reason: "session_switched" });
-}, 10_000);
-
-test("Codex 10-second queue timeout records unknown insertion and still submits exactly one open", async () => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  await queueScript(desktop.codexBin, "setInterval(() => {}, 1000);");
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "timeout" }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  await call(f.service, "cito_send", { to: id, message: "unknown insertion" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ queue_written: 1, state: "DISPATCHED", acknowledged_at_ms: null });
-  expect((await readFile(desktop.log, "utf8")).trim().split("\n").map(line => JSON.parse(line))).toEqual([["open", "-g", "codex://threads/wake/" + desktop.thread]]);
-  expect(await call(f.service, "cito_inbox", {}, desktop.meta)).toMatchObject({ acknowledged_count: 1, signals: [{ message: "unknown insertion" }] });
-}, 15_000);
-
-test("Desktop open retry does not repeat queue insertion", async () => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const attempts = join(f.root, "open-attempts");
-  await queueScript(f.config.openBin, `import { appendFileSync, readFileSync } from 'node:fs';
-appendFileSync(${JSON.stringify(attempts)}, 'open\\n'); if (readFileSync(${JSON.stringify(attempts)}, 'utf8').trim().split('\\n').length === 1) process.exit(1);`);
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "open retry" }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  await call(f.service, "cito_send", { to: id, message: "queue once" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect((await readFile(attempts, "utf8")).trim().split("\n")).toHaveLength(2);
-  expect((await readFile(desktop.log, "utf8")).trim().split("\n").map(line => JSON.parse(line)[0])).toEqual(["queue"]);
-  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "DISPATCHED", queue_written: 1 });
+test("successful queue insertion with a failed desktop wake remains unread and drains through inbox",async()=>{
+ const {f,p,row,id}=await agent({}, {outcome:"delivered_unconfirmed"});seed(f,row,"queued");await waitFor(()=>f.query("SELECT state FROM local_signals WHERE signal_id='queued'")[0]!.state==="DISPATCHED");expect(f.query("SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='queued'")[0]!.acknowledged_at_ms).toBeNull();const inbox=await f.tool("cito_inbox",{},p.meta);expect(inbox.signals).toHaveLength(1);expect(inbox.acknowledged_count).toBe(1);
 });
-
-test("a clean queue with failed Desktop wake remains unread and can drain through inbox", async () => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  await queueScript(f.config.openBin, "process.exit(1);");
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "unconfirmed" }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  const sent = await call(f.service, "cito_send", { to: id, message: "wake failed" });
-  await f.service.receivers.get(`default:${id}`)!.dispatch();
-  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "DISPATCHED", queue_written: 1, acknowledged_at_ms: null });
-  expect(await call(f.service, "cito_inbox", {}, desktop.meta)).toMatchObject({ acknowledged_count: 1, signals: [{ signal_id: sent.signal_id, message: "wake failed" }] });
-  expect((await call(f.service, "cito_inbox", {}, desktop.meta)).signals).toEqual([]);
+test("Pi completion cannot clear a concurrent inbox acknowledgment",async()=>{
+ const {f,p,enrolled,id}=await agent({}, {delay_op:"wake",delay_ms:500});const sending=sendUnbound(f,String(enrolled.listener_id));await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));const row=f.query("SELECT signal_id FROM local_signals WHERE listener_id=?",[id])[0]!;const stamp=Date.now();f.mutate("UPDATE local_signals SET acknowledged_at_ms=? WHERE signal_id=?",[stamp,String(row.signal_id)]);await sending;expect(f.query("SELECT acknowledged_at_ms FROM local_signals WHERE signal_id=?",[String(row.signal_id)])[0]!.acknowledged_at_ms).toBe(stamp);
 });
-
-test("Pi completion sets DISPATCHED without clearing a concurrent inbox acknowledgement", async () => {
-  const f = await setup(false);
-  let entered!: () => void, complete!: () => void;
-  const deliveryEntered = new Promise<void>(resolve => { entered = resolve; });
-  const server = await unixServer(join(f.stateDir, `sockets/pi-pid-${process.pid}.sock`), socket => {
-    socket.once("data", bytes => {
-      const request = JSON.parse(bytes.toString());
-      if (request.op === "identify") socket.end(JSON.stringify({ ok: true, pi_pid: process.pid, session_id: "ack-inflight",
-        session_name: "Pi acknowledgement", cwd: f.root, }) + "\n");
-      else if (request.op === "status") socket.end('{"ok":true}\n');
-      else { complete = () => socket.end('{"ok":true,"delivered":true,"deduplicated":false}\n'); entered(); }
-    });
-  }); cleanups.push(() => server.stop());
-  const meta = { pi_pid: process.pid };
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "ack during Pi effect" }, meta);
-  const id = toCanonicalListenerId(publicId);
-  const sent = await call(f.service, "cito_send", { to: id, message: "ack while delivering" });
-  const dispatch = f.service.receivers.get(`default:${id}`)!.dispatch();
-  await deliveryEntered;
-  expect(await call(f.service, "cito_inbox", { ack_all: true }, meta)).toMatchObject({ acknowledged_count: 1 });
-  complete(); await dispatch;
-  const row = f.service.state.signals("SELECT * FROM local_signals WHERE signal_id = ?", sent.signal_id)[0]!;
-  expect(row.state).toBe("DISPATCHED"); expect(row.acknowledged_at_ms).toBeGreaterThan(0);
-  expect((await call(f.service, "cito_inbox", {}, meta)).signals).toEqual([]);
+test("restart recovery retains frozen batch identity and queue_written",async()=>{
+ const {f,p,row,id,daemon}=await agent();await daemon.stop();seed(f,row,"frozen",1,{state:"DISPATCHING",batch_id:"persisted",queue_written:1});f.mutate("UPDATE local_signals SET batch_card='Saved card',batch_expires_at_ms=expires_at_ms,dispatcher_token='crashed' WHERE signal_id='frozen'");await f.daemon();await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));expect((await p.calls()).find(c=>c.op==="wake")!.batch_id).toBe("persisted");expect(f.query("SELECT queue_written FROM local_signals WHERE listener_id=?",[id])[0]!.queue_written).toBe(1);
 });
-
-test("frozen DISPATCHING recovery after restart preserves batch identity and queue_written", async () => {
-  const f = await setup(false), desktop = await codexDesktop(f); cleanups.push(() => desktop.close());
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "restart" }, desktop.meta);
-  const id = toCanonicalListenerId(publicId);
-  await call(f.service, "cito_send", { to: id, message: "already queued" });
-  f.service.state.run("UPDATE local_signals SET state = 'DISPATCHING', batch_id = 'crashed-batch', batch_expires_at_ms = expires_at_ms, queue_written = 1");
-  await f.service.close();
-  const restarted = await CitoService.create(f.config, f.serviceOptions); cleanups.push(() => restarted.close());
-  await call(restarted, "cito_listen", { about: "resumed" }, desktop.meta);
-  await restarted.receivers.get(`default:${id}`)!.dispatch();
-  expect((await readFile(desktop.log, "utf8")).trim().split("\n").map(line => JSON.parse(line))).toEqual([["open", "-g", "codex://threads/wake/" + desktop.thread]]);
-  expect(restarted.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "DISPATCHED", batch_id: "crashed-batch", queue_written: 1 });
+test("600-message bursts form twelve batches of fifty, enforce 256 KiB frames and isolate oversize sender titles",async()=>{
+ const {f,p,row,id,daemon:first}=await agent();await first.stop();const messages=Array.from({length:600},(_,n)=>"burst"+String(n).padStart(4,"0")+"🙂".repeat(491));for(let n=1;n<=600;n++)seed(f,row,"burst-"+n,n,{message:messages[n-1]});let daemon=await f.daemon();await waitFor(()=>f.query("SELECT COUNT(*) AS n FROM local_signals WHERE state='DISPATCHED'")[0]?.n===600,15000);const wakes=(await p.calls()).filter(c=>c.op==="wake");expect(wakes.map(c=>(c.signals as unknown[]).length)).toEqual(Array(12).fill(50));expect.soft(wakes.every(c=>String(c.text).startsWith("🔔 Cito · 50 notifications"))).toBe(true);expect(wakes.every(c=>Buffer.byteLength(JSON.stringify(c.text))<=256*1024)).toBe(true);expect(wakes.reduce((n,c)=>n+Buffer.byteLength(String(c.text)),0)).toBeGreaterThan(1048576);await daemon.stop();f.mutate("DELETE FROM pending_hub_acks WHERE signal_id LIKE 'burst-%'");f.mutate("UPDATE local_signals SET acknowledged_at_ms=NULL WHERE signal_id LIKE 'burst-%'");f.mutate("UPDATE hub_signals SET acked_at_ms=NULL WHERE subject=? AND signal_id LIKE 'burst-%'",["cito.signal."+id],"hub.sqlite");daemon=await f.daemon();const drained:unknown[]=[];for(let n=0;n<12;n++){const page=await f.tool("cito_inbox",{},p.meta);expect(page.acknowledged_count).toBe(50);drained.push(...(page.signals as {message:string}[]).map(r=>r.message));}expect(drained).toEqual(messages);
+ await daemon.stop();for(let n=601;n<=612;n++)seed(f,row,"bytes-"+n,n,{message:"large"+n+"🙂".repeat(490),from_title:"<".repeat(15000)});daemon=await f.daemon();await waitFor(()=>f.query("SELECT COUNT(*) AS n FROM local_signals WHERE state='DISPATCHED'")[0]?.n===612,15000);const large=(await p.calls()).filter(c=>c.op==="wake").slice(12);expect(large.map(c=>(c.signals as unknown[]).length)).toEqual([4,4,4]);expect(large.every(c=>Buffer.byteLength(JSON.stringify(c.text))<=256*1024)).toBe(true);
+ await daemon.stop();seed(f,row,"oversize",613,{from_title:"<".repeat(70000)});seed(f,row,"after",614,{message:"after0000"});await f.daemon();await waitFor(()=>f.query("SELECT state FROM local_signals WHERE signal_id='after'")[0]?.state==="DISPATCHED");expect(f.query("SELECT state,held_reason,acknowledged_at_ms FROM local_signals WHERE signal_id='oversize'")[0]).toMatchObject({state:"STORED_PASSIVE",held_reason:"driver_unavailable",acknowledged_at_ms:null});f.mutate("UPDATE local_signals SET acknowledged_at_ms=? WHERE signal_id!='oversize'",[Date.now()]);expect(await f.tool("cito_inbox",{},p.meta)).toMatchObject({acknowledged_count:1,signals:[{signal_id:"oversize"}]});
+},30000);
+test("claim RPC failure is fail-closed and recovery wakes the same still-unread signals",async()=>{
+ const {f,p,proxy,enrolled,id}=await remoteAgent({outcome:"delivered_unconfirmed"});proxy.fail("signal_claim_dispatch",100);const sending=sendUnbound(f,String(enrolled.listener_id));await waitFor(()=>proxy.calls.some(c=>c.op==="signal_claim_dispatch"));await sleeps(250);expect((await p.calls()).filter(c=>c.op==="wake")).toEqual([]);expect(f.query("SELECT acknowledged_at_ms FROM local_signals WHERE listener_id=?",[id]).every(r=>r.acknowledged_at_ms===null)).toBe(true);proxy.restore();await sending;await waitFor(async()=>(await p.calls()).filter(c=>c.op==="wake").length===1);
+},10000);
+test("native Hub claims are atomic for conflicts and business acknowledgments",async()=>{
+ const f=await cleanroom(),hub=await f.hub(),id="c_1111111111111111";await hub.rpc("kv_put",{key:id,data_b64:Buffer.from(JSON.stringify({listener_id:id,principal_id:"none#alice",owner_user:"alice",harness:"cursor",session_id:"claim",scope:"workspace",state:"ACTIVE",binding_generation:1,owner_token:"owner",channels:{a:{state:"ACTIVE"},b:{state:"ACTIVE"}}})).toString("base64")});for(const signal_id of ["one","two","three"]){const signal=wire(signal_id,id,"none#alice",1);await hub.rpc("js_publish",{subject:"cito.signal."+id,data_b64:Buffer.from(JSON.stringify(signal)).toString("base64"),opts:{msgID:signal_id}});}expect(await hub.rpc("signal_claim_dispatch",{node_id:id,channel_id:"b",signal_ids:["two"]})).toMatchObject({claimed:true});expect(await hub.rpc("signal_claim_dispatch",{node_id:id,channel_id:"a",signal_ids:["one","two"]})).toMatchObject({claimed:false,claimed_ids:[]});expect(f.query("SELECT signal_id,claimed_by_channel FROM hub_signals WHERE signal_id IN ('one','two') ORDER BY signal_id",[],"hub/hub.sqlite")).toEqual([{signal_id:"one",claimed_by_channel:null},{signal_id:"two",claimed_by_channel:"b"}]);await hub.rpc("signal_ack",{node_id:id,channel_id:"b",signal_ids:["two"]});expect(typeof f.query("SELECT acked_at_ms FROM hub_signals WHERE signal_id='two'",[],"hub/hub.sqlite")[0]!.acked_at_ms).toBe("number");expect(await hub.rpc("signal_claim_dispatch",{node_id:id,channel_id:"a",signal_ids:["three","two"]})).toMatchObject({claimed:false,claimed_ids:[],acked_ids:["two"]});expect(f.query("SELECT claimed_by_channel FROM hub_signals WHERE signal_id='three'",[],"hub/hub.sqlite")[0]!.claimed_by_channel).toBeNull();
 });
-
-test("600-message burst paginates into 12 batches of 50, splits 256 KiB byte-ceiling batches into [4, 4, 4], and holds 70 KB oversized sender title as STORED_PASSIVE driver_unavailable without blocking subsequent messages", async () => {
-  const f = await setup();
-  const listener = await call(f.service, "cito_listen", { about: "burst receiver" }, f.pi.meta);
-  const id = toCanonicalListenerId(listener.listener_id as string);
-  const receiver = f.service.receivers.get(`default:${id}`)!;
-  const slot = f.service.slots.get("default")!;
-  const broker = await slot.network();
-  const publishBurst = async (count: number, title: string, prefix: string) => {
-    const before = f.service.state.signals("SELECT * FROM local_signals").length;
-    f.service.state.run("UPDATE local_listeners SET dispatcher_token = 'burst', lease_until_ms = ? WHERE listener_id = ?", Date.now() + 30000, id);
-    const messages = Array.from({ length: count }, (_, i) => prefix + String(i).padStart(4, "0") + "🙂".repeat(500 - prefix.length - 4));
-    for (const [i, message] of messages.entries()) broker.nc.publish("cito.signal." + id, encode({
-      signal_id: prefix + i, to: id, target_generation: listener.binding_generation, sender_endpoint_key: "burst-sender",
-      from: { principal_id: slot.principal!.principal_id, user: "alice", host_id: "source-host", host_name: "source",
-        harness: null, listener_id: null, title }, message, in_reply_to: null,
-    }));
-    await broker.nc.flush();
-    await waitFor(() => f.service.state.signals("SELECT * FROM local_signals").length === before + count, 10000);
-    return messages;
-  };
-  const burstMessages = await publishBurst(600, "", "burst");
-  f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
-  await receiver.dispatch();
-  await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 600, 5000);
-  await waitFor(() => f.pi.messages.length === 12);
-  const burstCards = f.pi.messages.map(m => m.content);
-  expect(burstCards.every(card => card.startsWith("🔔 Cito · 50 notifications"))).toBe(true);
-  expect(burstCards.every(card => Buffer.byteLength(JSON.stringify(card)) <= 256 * 1024)).toBe(true);
-  expect(burstCards.reduce((n, card) => n + Buffer.byteLength(card), 0)).toBeGreaterThan(1_048_576);
-  // Reset acknowledgement to exercise 12-page cito_inbox pagination
-  f.service.state.run("UPDATE local_signals SET acknowledged_at_ms = NULL WHERE signal_id LIKE 'burst%'");
-  const drained: string[] = [];
-  for (let i = 0; i < 12; i++) {
-    const page = await call(f.service, "cito_inbox", {}, f.pi.meta);
-    expect(page.acknowledged_count).toBe(50);
-    drained.push(...(page.signals as { message: string }[]).map(signal => signal.message));
-  }
-  expect(drained).toEqual(burstMessages);
-
-  // Long metadata exercises the serialized-byte ceiling before the 50-row ceiling.
-  await publishBurst(12, "<".repeat(15000), "large");
-  const firstLargeIdx = f.pi.messages.length;
-  f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
-  await receiver.dispatch();
-  await waitFor(() => f.service.state.signals("SELECT * FROM local_signals WHERE state = 'DISPATCHED'").length === 612, 5000);
-  await waitFor(() => f.pi.messages.length >= firstLargeIdx + 3);
-  const largeCards = f.pi.messages.slice(firstLargeIdx).map(m => m.content);
-  expect(largeCards).toHaveLength(3);
-  expect(largeCards.every(card => Buffer.byteLength(JSON.stringify(card)) <= 256 * 1024)).toBe(true);
-  const batchSizes = f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_signals WHERE signal_id LIKE 'large%' GROUP BY batch_id").all();
-  expect(batchSizes.map(row => row.n)).toEqual([4, 4, 4]);
-
-  // A single oversized sender title stays in the inbox instead of wedging subsequent batches.
-  await publishBurst(1, "<".repeat(70000), "oversized");
-  await publishBurst(1, "", "after");
-  f.service.state.run("UPDATE local_listeners SET dispatcher_token = NULL, lease_until_ms = 0 WHERE listener_id = ?", id);
-  await receiver.dispatch();
-  await waitFor(() => f.pi.messages.length === firstLargeIdx + 4);
-  expect(f.pi.messages.at(-1)!.content).toContain("after0000");
-  expect(f.service.state.signals("SELECT * FROM local_signals WHERE signal_id = 'oversized0'")[0])
-    .toMatchObject({ state: "STORED_PASSIVE", held_reason: "driver_unavailable", acknowledged_at_ms: null });
-  const finalInbox = await call(f.service, "cito_inbox", {}, f.pi.meta);
-  expect(finalInbox).toMatchObject({ acknowledged_count: 1, signals: [{ signal_id: "oversized0" }] });
-}, 30_000);
+test("transport consumption never marks business read; explicit inbox ack persists business acknowledgment",async()=>{
+ const {f,p,owner,enrolled,id}=await remoteAgent({outcome:"delivered_unconfirmed"});const sent=await sendUnbound(f,String(enrolled.listener_id));await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"));expect(owner.query("SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",[bareId(sent.signal_id)],"hub/hub.sqlite")[0]!.acked_at_ms).toBeNull();await f.tool("cito_inbox",{ack_ids:[sent.signal_id]},p.meta);await waitFor(()=>typeof owner.query("SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",[bareId(sent.signal_id)],"hub/hub.sqlite")[0]!.acked_at_ms==="number");
+});

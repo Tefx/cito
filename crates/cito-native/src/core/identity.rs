@@ -1,0 +1,189 @@
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+pub fn local_host_name() -> String {
+    if let Ok(name) = std::env::var("CITO_HOST_NAME") {
+        if !name.trim().is_empty() {
+            return name;
+        }
+    }
+    let mut bytes = [0u8; 256];
+    // SAFETY: gethostname writes at most the provided buffer; leave a final NUL.
+    if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len() - 1) } == 0 {
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+        return String::from_utf8_lossy(&bytes[..end]).into_owned();
+    }
+    "localhost".into()
+}
+pub fn normalize_slug(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if out.len() < 32 {
+                out.push(ch.to_ascii_lowercase());
+            }
+        } else if !out.is_empty() && !out.ends_with('-') && out.len() < 32 {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-');
+    if out.is_empty() {
+        "user".into()
+    } else {
+        out.into()
+    }
+}
+pub fn listener_id(principal: &str, harness: &str, session: &str) -> String {
+    let hash = Sha256::digest(format!("cito-v2|{principal}|{harness}|{session}").as_bytes());
+    format!(
+        "c_{}",
+        hash[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+/// Candidate keys preserve existing registrations when the wire's hash representation changes.
+pub fn listener_id_candidates(identity: &Value, harness: &str, session: &str) -> Vec<String> {
+    let principal = string(identity, "principal_id");
+    let mut principals = vec![principal.to_string()];
+    if let Some(legacy) = identity["legacy_principal_id"].as_str() {
+        principals.push(legacy.to_string());
+    } else if let Some(oidc) = principal.strip_prefix("oidc:") {
+        if let Some((issuer, subject)) = oidc.split_once('|') {
+            principals.push(format!("{issuer}#{subject}"));
+        }
+    } else if principal.starts_with("https://") || principal.starts_with("http://") {
+        if let Some((issuer, subject)) = principal.split_once('#') {
+            principals.push(format!("oidc:{issuer}|{subject}"));
+        }
+    }
+    let mut ids = Vec::new();
+    for principal in principals {
+        let id = listener_id(&principal, harness, session);
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+        let bytes = Sha256::digest(format!("cito-v2|{principal}|{harness}|{session}").as_bytes());
+        let mut legacy = String::from("c_");
+        let mut bits: u32 = 0;
+        let mut available = 0;
+        for byte in &bytes[..8] {
+            bits = (bits << 8) | u32::from(*byte);
+            available += 8;
+            while available >= 5 && legacy.len() < 14 {
+                available -= 5;
+                legacy.push(
+                    b"abcdefghijklmnopqrstuvwxyz234567"[((bits >> available) & 31) as usize]
+                        as char,
+                );
+            }
+        }
+        if !ids.contains(&legacy) {
+            ids.push(legacy);
+        }
+    }
+    ids
+}
+
+pub fn canonical_node_id(raw: &str) -> Result<String, String> {
+    let suffix = if let Some(suffix) = raw.strip_prefix("c_") {
+        suffix
+    } else {
+        let (slug, suffix) = raw
+            .rsplit_once('-')
+            .ok_or("INVALID_INPUT: Invalid Node address")?;
+        if slug.is_empty()
+            || slug.len() > 64
+            || !slug
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err("INVALID_INPUT: Invalid Node address".into());
+        }
+        suffix
+    };
+    if !(suffix.len() == 16
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        && !(suffix.len() == 12
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)))
+    {
+        return Err("INVALID_INPUT: Invalid Node address".into());
+    }
+    Ok(format!("c_{suffix}"))
+}
+
+pub fn public_listener_id(slug: &str, id: &str) -> String {
+    format!(
+        "{}-{}",
+        normalize_slug(slug),
+        id.strip_prefix("c_").unwrap_or(id)
+    )
+}
+pub fn principal(user: &str) -> Value {
+    json!({"principal_id":format!("none#{}",user.to_ascii_lowercase()),"owner_user":user.to_ascii_lowercase()})
+}
+pub fn hash(raw: &str) -> String {
+    Sha256::digest(raw.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+pub fn sanitize_message(raw: &str) -> Result<String, String> {
+    let clean: String = raw
+        .chars()
+        .filter(|c| !c.is_ascii_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect();
+    if clean.trim().is_empty() || clean.chars().count() > 65_536 {
+        Err("INVALID_INPUT: message must contain 1..65,536 characters".into())
+    } else {
+        Ok(clean.trim().to_string())
+    }
+}
+pub fn string<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+pub fn iso(ms: u64) -> String {
+    let seconds = (ms / 1000) as libc::time_t;
+    // SAFETY: tm is initialized by reentrant conversion and output buffer is fixed and sized.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::gmtime_r(&seconds, &mut tm).is_null() {
+            return format!("{ms}");
+        }
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            ms % 1000
+        )
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn slugs_and_node_ids() {
+        assert_eq!(normalize_slug("Alice._Smith"), "alice-smith");
+        assert_eq!(normalize_slug("___"), "user");
+        assert_eq!(listener_id("p", "human", "default").len(), 18);
+        assert_eq!(
+            listener_id("p", "human", "default"),
+            listener_id("p", "human", "default")
+        );
+    }
+    #[test]
+    fn message_validation() {
+        assert!(sanitize_message("\u{0}").is_err());
+        assert_eq!(sanitize_message("a\u{0}\nb").ok(), Some("a\nb".into()));
+        assert!(sanitize_message(&"x".repeat(65537)).is_err());
+    }
+}

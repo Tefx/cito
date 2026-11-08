@@ -527,6 +527,7 @@ struct HubConfigItem: Decodable, Equatable {
 }
 struct SettingsPayload: Decodable, Equatable {
     let apps: [AppSetupItem]
+    let channel_hub: String?
     let channels: [ChannelSetupItem]?
     let desktop_banner_enabled: Bool?
     let hubs: [HubConfigItem]
@@ -535,6 +536,14 @@ struct SettingsPayload: Decodable, Equatable {
 }
 struct Frame: Decodable {
     let op: String
+    let hub: String?
+    let ok: Bool?
+    let error: String?
+    let composer_error: String?
+    let channel_id: String?
+    let code: String?
+    let instruction: String?
+    let detail: String?
     let hubs: [Hub]?
     let listeners: [Listener]?
     let available: [Candidate]?
@@ -782,6 +791,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var directoryTableView: NSTableView?
     var directoryScrollView: NSScrollView?
     var directorySummaryLabel: NSTextField?
+    var directoryShortcutsLabel: NSTextField?
+    var serverDirectoryQuery: String?
+    var serverDirectoryScope = "all"
+    var serverDirectoryHarness = "all"
+    var serverDirectoryMatchedCount = 0
     var directoryFacetBar: NSView?
     var directoryDynamicHarnessViews: [NSView] = []
     var lastDirectoryFacetSignature = ""
@@ -792,6 +806,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var composerTarget = ""
     var composerTargetHub = ""
     var composerReplySignalId: String?
+    var composerErrorLabel: NSTextField?
+    var composerPendingText: String?
+    var composerPendingTarget = ""
+    var composerPendingHub = ""
     var settings: SettingsPayload?
     var settingsVisible = false
     var settingsActiveTab = "apps"
@@ -806,6 +824,29 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var addHubClientId = ""
     var settingsFieldControls: [String: NSTextField] = [:]
     var channelFieldDrafts: [String: String] = [:]
+    var selectedChannelHub = ""
+    var channelSettingsByHub: [String: [ChannelSetupItem]] = [:]
+    var channelInstructions: [String: String] = [:]
+    var channelResults: [String: String] = [:]
+    var settingsScrollOffsets: [String: CGFloat] = [:]
+    var pendingOnboardingMarker: String?
+    var settingsKeyMonitor: Any?
+    var effectiveChannelHub: String {
+        selectedChannelHub.isEmpty ? (settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? "local") : selectedChannelHub
+    }
+    func draftKey(_ fieldId: String) -> String { effectiveChannelHub + "|" + fieldId }
+    func acceptSettings(_ value: SettingsPayload, hub: String? = nil) {
+        settings = value
+        let target = value.channel_hub ?? hub ?? effectiveChannelHub
+        channelSettingsByHub[target] = value.channels ?? []
+        for channel in value.channels ?? [] {
+            for field in channel.fields {
+                let key = target + "|channel_field:\(channel.id):\(field.key)"
+                if channelFieldDrafts[key] == field.value { channelFieldDrafts.removeValue(forKey: key) }
+            }
+            channelInstructions.removeValue(forKey: target + "|" + channel.id)
+        }
+    }
     var uninstallConfirmOpen = false
     var uninstallPurgeData = false
     var hasCheckedFirstLaunchOnboarding = false
@@ -829,6 +870,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         clickSource?.resume()
         cardMenu.autoenablesItems = false
         cardMenu.delegate = self
+        settingsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command && event.charactersIgnoringModifiers == "," {
+                self?.openSettingsPanel()
+                return nil
+            }
+            return event
+        }
         MenuControl.tracksPhysicalPointer = !headless
         if headless { headlessStatusButton = NSButton(frame: .zero) }
         else {
@@ -940,11 +988,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     composerInputField?.stringValue = value
                     return
                 }
-                if id.hasPrefix("channel_field:") {
-                    channelFieldDrafts[id] = value
-                }
                 if let field = settingsFieldControls[id] ?? (settingsPanel?.contentView.flatMap { findTextField(in: $0, id: id) }) {
                     field.stringValue = value
+                    controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
                 }
                 syncAddHubFieldsFromControls()
                 return
@@ -998,6 +1044,34 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
+        if frame.op == "composer_result" {
+            guard composerPendingText != nil else { return }
+            if frame.ok == true {
+                if composerTarget == composerPendingTarget && composerTargetHub == composerPendingHub && composerInputField?.stringValue == composerPendingText { closeComposer() }
+                else { composerErrorLabel?.stringValue = "Sent. Your newer draft is preserved." }
+            } else {
+                composerErrorLabel?.stringValue = frame.error ?? "Send failed. Your draft is preserved."
+            }
+            composerPendingText = nil
+            composerPendingTarget = ""
+            composerPendingHub = ""
+            return
+        }
+        if frame.op == "settings", let value = frame.settings {
+            acceptSettings(value, hub: frame.hub)
+            if settingsPanel != nil { rebuildSettingsPanel() }
+            return
+        }
+        if frame.op == "pair_code", let id = frame.channel_id {
+            channelInstructions["\(frame.hub ?? effectiveChannelHub)|\(id)"] = frame.instruction ?? frame.code ?? ""
+            if settingsPanel != nil { rebuildSettingsPanel() }
+            return
+        }
+        if frame.op == "channel_test_result", let id = frame.channel_id {
+            channelResults["\(frame.hub ?? effectiveChannelHub)|\(id)"] = frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed")
+            if settingsPanel != nil { rebuildSettingsPanel() }
+            return
+        }
         if frame.op == "state", let h = frame.hubs, let l = frame.listeners,
            h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "token", "oidc"].contains($0.auth_mode) }),
            l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
@@ -1014,7 +1088,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if harnessesChanged { harnesses = nextHarnesses }
             let nextSettings = frame.settings ?? settings
             let settingsChanged = nextSettings != settings
-            if settingsChanged { settings = nextSettings }
+            if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name) }
+            if let error = frame.composer_error, !error.isEmpty { composerErrorLabel?.stringValue = error }
             if hasRenderedState && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
                 let count = uniqueSessionCount
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
@@ -1041,16 +1116,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if !hasCheckedFirstLaunchOnboarding, let s = settings, !s.apps.isEmpty {
                 hasCheckedFirstLaunchOnboarding = true
-                let forceOnboard = ProcessInfo.processInfo.environment["CITO_FORCE_ONBOARDING"] == "1"
-                if (!headless || forceOnboard) && !s.apps.contains(where: { $0.configured }) {
+                if !headless && !s.apps.contains(where: { $0.configured }) {
                     let rawStateDir = ProcessInfo.processInfo.environment["CITO_STATE_DIR"] ?? (NSHomeDirectory() + "/.cito")
                     let expandedStateDir = rawStateDir.hasPrefix("~/")
                         ? (NSHomeDirectory() + "/" + String(rawStateDir.dropFirst(2)))
                         : (rawStateDir == "~" ? NSHomeDirectory() : rawStateDir)
                     let markerPath = expandedStateDir + "/onboarding-shown"
                     if !FileManager.default.fileExists(atPath: markerPath) {
-                        try? FileManager.default.createDirectory(atPath: expandedStateDir, withIntermediateDirectories: true)
-                        try? "1\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
+                        pendingOnboardingMarker = markerPath
                         settingsActiveTab = "apps"
                         openSettingsPanel()
                     }
@@ -1059,6 +1132,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
         } else if frame.op == "directory", let peers = frame.peers {
             directoryAllPeers = peers
+            serverDirectoryQuery = directoryQuery
+            serverDirectoryScope = directoryScopeFilter
+            serverDirectoryHarness = directoryHarnessFilter
+            serverDirectoryMatchedCount = frame.matched_count ?? peers.count
             directoryOnlineCount = frame.online_count ?? peers.count
             if let act = frame.activity { activityAllItems = act }
             if let u = frame.unread_count { unreadCount = u }
@@ -1638,6 +1715,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.openSettingsPanel()
         }
         footer.addSubview(openSettings)
+        let settingsShortcut = NSMenuItem(title: "Settings…", action: #selector(openSettingsShortcut), keyEquivalent: ",")
+        settingsShortcut.target = self
+        settingsShortcut.keyEquivalentModifierMask = [.command]
+        settingsShortcut.isHidden = true
+        settingsShortcut.allowsKeyEquivalentWhenHidden = true
+        menu.addItem(settingsShortcut)
         let quit = MenuControl("Quit Cito ⌘Q", frame: NSRect(x: 262, y: 6, width: 106, height: 24))
         quit.identifier = NSUserInterfaceItemIdentifier("quit")
         quit.pressed = { self.emit(["op": "quit"]) }
@@ -1648,6 +1731,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         footerItem.keyEquivalent = "q"; footerItem.keyEquivalentModifierMask = [.command]
         menu.update()
     }
+    @objc func openSettingsShortcut() { openSettingsPanel() }
     @objc func quitMenu() { emit(["op": "quit"]) }
 
     // MARK: - Surface 3: Native AppKit Settings Panel (520 × 460 pt KeyPanel: NSPanel)
@@ -1675,13 +1759,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if let userField = settingsFieldControls["settings_hub_user"] { addHubUser = userField.stringValue }
         if let issuerField = settingsFieldControls["settings_hub_issuer"] { addHubIssuer = issuerField.stringValue }
         if let clientField = settingsFieldControls["settings_hub_client_id"] { addHubClientId = clientField.stringValue }
-        for (id, field) in settingsFieldControls where id.hasPrefix("channel_field:") {
-            channelFieldDrafts[id] = field.stringValue
-        }
     }
 
-    func makeEditableField(_ id: String, frame: NSRect, placeholder: String, value: String) -> NSTextField {
-        let field = NSTextField(frame: frame)
+    func makeEditableField(_ id: String, frame: NSRect, placeholder: String, value: String, secret: Bool = false) -> NSTextField {
+        let field: NSTextField = secret ? NSSecureTextField(frame: frame) : NSTextField(frame: frame)
         field.identifier = NSUserInterfaceItemIdentifier(id)
         field.placeholderString = placeholder
         field.stringValue = value
@@ -1696,7 +1777,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func handlePasteHubInvite() {
-        let raw = (clipboardString.isEmpty ? (NSPasteboard.general.string(forType: .string) ?? "") : clipboardString)
+        let systemText = NSPasteboard.general.string(forType: .string) ?? ""
+        let raw = (systemText.isEmpty && headless ? clipboardString : systemText)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
 
@@ -1753,9 +1835,33 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         emit(action)
     }
 
+    func mountSettingsCards(_ content: NSView, in root: NSView) {
+        let id = content.identifier?.rawValue ?? ""
+        let minY = content.subviews.map { $0.frame.minY }.min() ?? 8
+        let extra = max(0, 8 - minY)
+        for child in content.subviews { child.frame.origin.y += extra }
+        let viewport = content.frame
+        content.frame = NSRect(x: 0, y: 0, width: viewport.width, height: viewport.height + extra)
+        let scroll = NSScrollView(frame: viewport)
+        scroll.identifier = NSUserInterfaceItemIdentifier(id)
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.isHidden = content.isHidden || uninstallConfirmOpen
+        content.isHidden = false
+        scroll.documentView = content
+        root.addSubview(scroll)
+        let top = max(0, content.frame.height - scroll.contentSize.height)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(top, settingsScrollOffsets[id] ?? top)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
     func rebuildSettingsPanel() {
         guard let window = settingsPanel else { return }
         MenuControl.clearHoverWhere { $0.window === window }
+        for case let scroll as NSScrollView in window.contentView?.subviews ?? [] {
+            if let id = scroll.identifier?.rawValue { settingsScrollOffsets[id] = scroll.contentView.bounds.origin.y }
+        }
         settingsFieldControls.removeAll()
 
         let root = SurfaceView(frame: NSRect(x: 0, y: 0, width: 520, height: 460), radius: 14,
@@ -1780,6 +1886,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         appsTab.pressed = { [weak self] in
             guard let self = self else { return }
             self.syncAddHubFieldsFromControls()
+            self.uninstallConfirmOpen = false
             self.settingsActiveTab = "apps"
             self.rebuildSettingsPanel()
         }
@@ -1791,6 +1898,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         channelsTab.pressed = { [weak self] in
             guard let self = self else { return }
             self.syncAddHubFieldsFromControls()
+            self.uninstallConfirmOpen = false
             self.settingsActiveTab = "channels"
             self.rebuildSettingsPanel()
         }
@@ -1802,6 +1910,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hubsTab.pressed = { [weak self] in
             guard let self = self else { return }
             self.syncAddHubFieldsFromControls()
+            self.uninstallConfirmOpen = false
             self.settingsActiveTab = "hubs"
             self.rebuildSettingsPanel()
         }
@@ -1829,7 +1938,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 configured: false, status: "not_configured", detail: "Click Set Up to connect", paths: [])
         }
         let map = harnessMap
-        for (idx, app) in resolvedApps.prefix(4).enumerated() {
+        for (idx, app) in resolvedApps.enumerated() {
             let cardY = 250 - CGFloat(idx) * 66
             let card = roundedView(NSRect(x: 20, y: cardY, width: 480, height: 58), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.11))
@@ -1881,7 +1990,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             appsView.addSubview(card)
         }
-        root.addSubview(appsView)
+        mountSettingsCards(appsView, in: root)
 
         // Tab 2: Human Channels (520 × 368 pt, y: 44)
         let channelsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
@@ -1889,7 +1998,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         channelsView.isHidden = settingsActiveTab != "channels"
 
         let bannerEnabled = settings?.desktop_banner_enabled ?? true
-        let bannerCard = roundedView(NSRect(x: 20, y: 294, width: 480, height: 54), radius: 10,
+        let bannerCard = roundedView(NSRect(x: 20, y: 274, width: 480, height: 54), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.11))
         bannerCard.identifier = NSUserInterfaceItemIdentifier("settings_desktop_banner_card")
         bannerCard.addSubview(textLabel("Mac Desktop Banner", NSRect(x: 14, y: 28, width: 240, height: 17), size: 13, weight: .semibold))
@@ -1903,13 +2012,39 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         bannerCard.addSubview(toggleBanner)
         channelsView.addSubview(bannerCard)
 
-        let resolvedChannels = settings?.channels ?? []
-        var chCursorY: CGFloat = 280
-        for ch in resolvedChannels.prefix(2) {
+        let selector = NSScrollView(frame: NSRect(x: 20, y: 336, width: 480, height: 28))
+        selector.drawsBackground = false
+        selector.hasHorizontalScroller = true
+        let selectorContent = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 28))
+        var selectorX: CGFloat = 0
+        let channelHubs = settings?.hubs.map { $0.name } ?? hubs.map { $0.name }
+        for name in channelHubs {
+            let width = max(64, measureTextWidth(name, font: .systemFont(ofSize: 11)) + 24)
+            let pill = MenuControl(name, frame: NSRect(x: selectorX, y: 3, width: width, height: 22), radius: 11)
+            pill.identifier = NSUserInterfaceItemIdentifier("channel_hub_selector:\(name)")
+            pill.style = effectiveChannelHub == name ? .prominent : .neutral
+            pill.pressed = { [weak self] in
+                guard let self = self else { return }
+                self.selectedChannelHub = name
+                self.emit(["op": "open_settings", "hub": name])
+                self.rebuildSettingsPanel()
+            }
+            selectorContent.addSubview(pill)
+            selectorX += width + 6
+        }
+        selectorContent.setFrameSize(NSSize(width: max(480, selectorX), height: 28))
+        selector.documentView = selectorContent
+        channelsView.addSubview(selector)
+
+        let resolvedChannels = channelSettingsByHub[effectiveChannelHub] ?? []
+        var chCursorY: CGFloat = 260
+        for ch in resolvedChannels {
             let visibleFields = ch.fields.filter { $0.hidden != true }
-            let cardHeight: CGFloat = max(140, CGFloat(visibleFields.count) * 32 + (ch.pairing_instruction != nil ? 96 : 74))
+            let instruction = channelInstructions["\(effectiveChannelHub)|\(ch.id)"] ?? ch.pairing_instruction ?? ""
+            let instructionHeight = instruction.isEmpty ? CGFloat(0) : max(36, ceil((instruction as NSString).boundingRect(with: NSSize(width: 452, height: CGFloat.greatestFiniteMagnitude), options: [.usesLineFragmentOrigin], attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold)]).height) + 4)
+            let cardHeight: CGFloat = max(140, CGFloat(visibleFields.count) * 32 + 90 + instructionHeight)
             chCursorY -= cardHeight
-            let chCard = roundedView(NSRect(x: 20, y: max(8, chCursorY), width: 480, height: cardHeight), radius: 10,
+            let chCard = roundedView(NSRect(x: 20, y: chCursorY, width: 480, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.12))
             chCard.identifier = NSUserInterfaceItemIdentifier("settings_channel:\(ch.id)")
 
@@ -1929,24 +2064,29 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             chStatusLabel.identifier = NSUserInterfaceItemIdentifier("settings_channel_status:\(ch.id)")
             chCard.addSubview(chStatusLabel)
 
-            let chDetail = textLabel(ch.detail, NSRect(x: 48, y: cardHeight - 43, width: 418, height: 15), size: 11, color: .secondaryLabelColor)
+            let chDetail = textLabel(channelResults["\(effectiveChannelHub)|\(ch.id)"] ?? ch.detail, NSRect(x: 48, y: cardHeight - 43, width: 418, height: 15), size: 11, color: .secondaryLabelColor)
             chDetail.identifier = NSUserInterfaceItemIdentifier("settings_channel_detail:\(ch.id)")
             chCard.addSubview(chDetail)
 
             var fieldY = cardHeight - 76
             for f in visibleFields {
                 let fieldId = "channel_field:\(ch.id):\(f.key)"
-                let labelView = textLabel(f.label, NSRect(x: 14, y: fieldY + 4, width: 110, height: 16), size: 11.5, weight: .medium)
+                let labelView = textLabel(f.label, NSRect(x: 14, y: fieldY + 4, width: 150, height: 16), size: 11.5, weight: .medium)
+                labelView.toolTip = f.label
                 chCard.addSubview(labelView)
-                let initialVal = channelFieldDrafts[fieldId] ?? f.value
-                let inputField = makeEditableField(fieldId, frame: NSRect(x: 130, y: fieldY, width: 336, height: 24),
-                    placeholder: f.placeholder, value: initialVal)
+                let initialVal = channelFieldDrafts[draftKey(fieldId)] ?? f.value
+                let inputField = makeEditableField(fieldId, frame: NSRect(x: 170, y: fieldY, width: 296, height: 24),
+                    placeholder: f.placeholder, value: initialVal, secret: f.type == "secret")
                 chCard.addSubview(inputField)
                 fieldY -= 32
             }
 
-            if let instruction = ch.pairing_instruction, !instruction.isEmpty {
-                let instrLabel = textLabel(instruction, NSRect(x: 14, y: 40, width: 452, height: 16), size: 11.5, weight: .semibold, color: .systemBlue)
+            if !instruction.isEmpty {
+                let instrLabel = textLabel(instruction, NSRect(x: 14, y: 40, width: 452, height: instructionHeight), size: 11.5, weight: .semibold, color: .systemBlue)
+                instrLabel.maximumNumberOfLines = 0
+                instrLabel.lineBreakMode = .byWordWrapping
+                instrLabel.isSelectable = true
+                instrLabel.toolTip = instruction
                 instrLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .semibold)
                 instrLabel.identifier = NSUserInterfaceItemIdentifier("pairing_instruction:\(ch.id)")
                 chCard.addSubview(instrLabel)
@@ -1959,7 +2099,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 var vals: [String: String] = [:]
                 for f in ch.fields {
                     let fid = "channel_field:\(chId):\(f.key)"
-                    if let v = self.channelFieldDrafts[fid] ?? self.settingsFieldControls[fid]?.stringValue {
+                    if let v = self.channelFieldDrafts[self.draftKey(fid)] ?? self.settingsFieldControls[fid]?.stringValue {
                         vals[f.key] = v
                     } else if !f.value.isEmpty {
                         vals[f.key] = f.value
@@ -1974,7 +2114,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pairBtn.identifier = NSUserInterfaceItemIdentifier("pair_channel:\(ch.id)")
                 pairBtn.pressed = { [weak self] in
                     guard let self = self else { return }
-                    self.emit(["op": "channel_pair", "channel_id": chId, "values": collectValues()])
+                    self.emit(["op": "channel_pair", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues()])
                 }
                 chCard.addSubview(pairBtn)
             }
@@ -1983,7 +2123,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             testBtn.identifier = NSUserInterfaceItemIdentifier("test_channel:\(ch.id)")
             testBtn.pressed = { [weak self] in
                 guard let self = self else { return }
-                self.emit(["op": "channel_test", "channel_id": chId, "values": collectValues()])
+                self.emit(["op": "channel_test", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues()])
             }
             chCard.addSubview(testBtn)
 
@@ -1992,14 +2132,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             saveBtn.style = .prominent
             saveBtn.pressed = { [weak self] in
                 guard let self = self else { return }
-                self.emit(["op": "channel_save", "channel_id": chId, "enabled": true, "values": collectValues()])
+                let values = collectValues()
+                self.emit(["op": "channel_save", "hub": self.effectiveChannelHub, "channel_id": chId, "enabled": true, "values": values])
             }
             chCard.addSubview(saveBtn)
 
             channelsView.addSubview(chCard)
             chCursorY -= 10
         }
-        root.addSubview(channelsView)
+        mountSettingsCards(channelsView, in: root)
 
         // Tab 3: Hubs & Network (520 × 368 pt, y: 44)
         let hubsView = NSView(frame: NSRect(x: 0, y: 44, width: 520, height: 368))
@@ -2096,7 +2237,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     placeholder: "Username / Handle (optional)", value: addHubUser))
             } else if addHubAuth == "token" {
                 form.addSubview(makeEditableField("settings_hub_token", frame: NSRect(x: 14, y: 66, width: 274, height: 24),
-                    placeholder: "Bearer token", value: addHubToken))
+                    placeholder: "Bearer token", value: addHubToken, secret: true))
                 form.addSubview(makeEditableField("settings_hub_user", frame: NSRect(x: 296, y: 66, width: 170, height: 24),
                     placeholder: "Username (optional)", value: addHubUser))
             } else if addHubAuth == "oidc" {
@@ -2152,7 +2293,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 HubConfigItem(name: h.name, url: h.name == "local" ? "local://" : "http://127.0.0.1:4291",
                     auth_mode: h.auth_mode, enabled: true, is_default: false, status: h.status, user: h.user, error: h.error)
             }
-            for (idx, hub) in resolvedHubs.prefix(3).enumerated() {
+            for (idx, hub) in resolvedHubs.enumerated() {
                 let rowY = 132 - CGFloat(idx) * 54
                 let row = roundedView(NSRect(x: 20, y: rowY, width: 480, height: 48), radius: 9,
                     color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
@@ -2195,7 +2336,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 hubsView.addSubview(row)
             }
         }
-        root.addSubview(hubsView)
+        mountSettingsCards(hubsView, in: root)
 
         // Persistent Footer (520 × 44 pt, y: 0)
         let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 44))
@@ -2269,7 +2410,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func openSettingsPanel() {
         ensureSettingsPanel()
         settingsVisible = true
-        emit(["op": "open_settings"])
+        emit(["op": "open_settings", "hub": effectiveChannelHub])
         if !headless, let window = settingsPanel {
             if let screen = NSScreen.main {
                 let area = screen.visibleFrame
@@ -2277,6 +2418,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+            if window.isVisible, let markerPath = pendingOnboardingMarker {
+                try? FileManager.default.createDirectory(atPath: (markerPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                try? "1\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
+                pendingOnboardingMarker = nil
+            }
         }
     }
 
@@ -2464,7 +2610,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         root.addSubview(scroll)
 
         // Bottom Single-Line ComposerBar (560 × 44 pt, y: 28)
-        let composer = roundedView(NSRect(x: 0, y: 28, width: 560, height: 44), radius: 0,
+        let composer = roundedView(NSRect(x: 0, y: 28, width: 560, height: 62), radius: 0,
             color: .windowBackgroundColor.withAppearanceAlpha(0.92))
         composer.identifier = NSUserInterfaceItemIdentifier("directory_composer")
         composer.isHidden = true
@@ -2499,6 +2645,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         cancelComposerBtn.pressed = { [weak self] in self?.closeComposer() }
         composer.addSubview(cancelComposerBtn)
 
+        let composerError = textLabel("", NSRect(x: 16, y: 44, width: 528, height: 15), size: 10.5, color: .systemRed)
+        composerError.identifier = NSUserInterfaceItemIdentifier("composer_error")
+        composerError.toolTip = "Send status. Failed sends preserve your draft."
+        composer.addSubview(composerError)
+        composerErrorLabel = composerError
         directoryComposerBar = composer
         root.addSubview(composer)
 
@@ -2508,7 +2659,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         footerBar.addSubview(roundedView(NSRect(x: 0, y: 27, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         let shortcuts = textLabel("↵ Copy Selected ID    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: .secondaryLabelColor)
         shortcuts.identifier = NSUserInterfaceItemIdentifier("directory_shortcuts")
+        directoryShortcutsLabel = shortcuts
         footerBar.addSubview(shortcuts)
+        updateDirectoryShortcuts()
         let summary = textLabel("0 of 0 online", NSRect(x: 320, y: 6, width: 224, height: 16), size: 11, color: .secondaryLabelColor)
         summary.alignment = .right
         summary.identifier = NSUserInterfaceItemIdentifier("directory_summary")
@@ -2521,7 +2674,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         updateDirectoryFacetStyles()
     }
 
+    func updateDirectoryShortcuts() {
+        directoryShortcutsLabel?.stringValue = !(directoryComposerBar?.isHidden ?? true)
+            ? "↵ Send    ⎋ Cancel Reply"
+            : (directoryMode == "activity" ? "↵ Reply    ⎋ Close" : "↵ Copy Selected ID    ⎋ Close")
+    }
+
     func updateDirectoryModePills() {
+        updateDirectoryShortcuts()
         directoryModeDirPill?.style = directoryMode == "directory" ? .prominent : .neutral
         directoryModeActPill?.style = directoryMode == "activity" ? .prominent : .neutral
         let actTitle = unreadCount > 0 ? "Activity · \(unreadCount)" : "Activity"
@@ -2542,6 +2702,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func openComposer(target: String, hub: String = "", replySignalId: String? = nil) {
         ensureDirectoryPanel()
+        composerErrorLabel?.stringValue = ""
         composerTarget = target
         composerTargetHub = hub
         composerReplySignalId = replySignalId
@@ -2549,7 +2710,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerTargetPill?.setAccessibilityLabel(target)
         composerTargetPill?.toolTip = target
         directoryComposerBar?.isHidden = false
-        directoryScrollView?.frame = NSRect(x: 0, y: 72, width: 560, height: 290)
+        updateDirectoryShortcuts()
+        directoryScrollView?.frame = NSRect(x: 0, y: 90, width: 560, height: 272)
         if !headless, let window = directoryPanel, let field = composerInputField {
             window.makeFirstResponder(field)
         }
@@ -2561,12 +2723,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerReplySignalId = nil
         composerInputField?.stringValue = ""
         directoryComposerBar?.isHidden = true
+        composerErrorLabel?.stringValue = ""
+        updateDirectoryShortcuts()
         directoryScrollView?.frame = NSRect(x: 0, y: 28, width: 560, height: 334)
     }
 
     func submitComposer() {
         let text = (composerInputField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !composerTarget.isEmpty, !text.isEmpty else { return }
+        guard composerPendingText == nil, !composerTarget.isEmpty, !text.isEmpty else { return }
         var action: [String: Any] = [
             "op": "send_signal",
             "to": composerTarget,
@@ -2577,25 +2741,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         if let replyId = composerReplySignalId, !replyId.isEmpty {
             action["in_reply_to"] = replyId
-            activityAllItems = activityAllItems.map { item in
-                guard item.signal_id == replyId else { return item }
-                return ActivityItem(
-                    hub: item.hub, signal_id: item.signal_id, listener_id: item.listener_id,
-                    from_user: item.from_user, from_host_name: item.from_host_name,
-                    from_harness: item.from_harness, from_title: item.from_title,
-                    from_scoped_id: item.from_scoped_id, target_harness: item.target_harness,
-                    target_title: item.target_title, target_scoped_id: item.target_scoped_id,
-                    message: item.message, held_reason: item.held_reason,
-                    in_reply_to: item.in_reply_to, created_at: item.created_at,
-                    unread: false, for_me: item.for_me
-                )
-            }
-            unreadCount = activityAllItems.filter { $0.unread && $0.for_me }.count
-            updateDirectoryModePills()
-            if directoryMode == "activity" { applyActivityFilter() }
         }
+        composerPendingText = composerInputField?.stringValue
+        composerPendingTarget = composerTarget
+        composerPendingHub = composerTargetHub
+        composerErrorLabel?.stringValue = "Sending…"
         emit(action)
-        closeComposer()
     }
 
     func rebuildDirectoryFacetBar() {
@@ -2787,8 +2938,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
         let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
-        directoryFilteredPeers = fromDaemonFrame ? directoryAllPeers : directoryAllPeers.filter { matchesDirectoryPeer($0) }
-        directoryMatchedCount = daemonMatchedCount ?? directoryFilteredPeers.count
+        let sameServerQuery = serverDirectoryQuery == directoryQuery && serverDirectoryScope == directoryScopeFilter && serverDirectoryHarness == directoryHarnessFilter
+        directoryFilteredPeers = (fromDaemonFrame || sameServerQuery) ? directoryAllPeers : directoryAllPeers.filter { matchesDirectoryPeer($0) }
+        directoryMatchedCount = daemonMatchedCount ?? (sameServerQuery ? serverDirectoryMatchedCount : directoryFilteredPeers.count)
         if directoryFilteredPeers.isEmpty {
             directorySelectedIndex = 0
         } else if let prev = previousSelectedId, let idx = directoryFilteredPeers.firstIndex(where: { $0.scoped_id == prev }) {
@@ -2811,14 +2963,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if (directorySearchField?.currentEditor() as? NSTextInputClient)?.hasMarkedText() == true { return }
         switch key.lowercased() {
         case "down":
-            guard !directoryFilteredPeers.isEmpty else { return }
-            directorySelectedIndex = min(directoryFilteredPeers.count - 1, directorySelectedIndex + 1)
+            let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
+            guard count > 0 else { return }
+            directorySelectedIndex = min(count - 1, directorySelectedIndex + 1)
             directoryTableView?.reloadData()
             directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
             directoryTableView?.scrollRowToVisible(directorySelectedIndex)
             directoryTableView?.layoutSubtreeIfNeeded()
         case "up":
-            guard !directoryFilteredPeers.isEmpty else { return }
+            let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
+            guard count > 0 else { return }
             directorySelectedIndex = max(0, directorySelectedIndex - 1)
             directoryTableView?.reloadData()
             directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
@@ -2865,6 +3019,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             emit(["op": "query_directory", "query": directoryQuery, "scope": directoryScopeFilter, "harness": directoryHarnessFilter])
             return
+        }
+        if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue, id.hasPrefix("channel_field:") {
+            channelFieldDrafts[draftKey(id)] = field.stringValue
         }
         syncAddHubFieldsFromControls()
     }
@@ -2956,7 +3113,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 view.effectiveAppearance.performAsCurrentDrawingAppearance { result["tint"] = components(image.contentTintColor) }
             }
             if let cell = view as? DirectoryPeerCellView { result["reuse_identifier"] = cell.identifier?.rawValue ?? "" }
-            if let label = view as? NSTextField { result["text"] = label.stringValue }
+            if let label = view as? NSTextField {
+                result["text"] = label is NSSecureTextField ? "••••" : label.stringValue
+                result["secure"] = label is NSSecureTextField
+            }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
                 result["green"] = control.label.textColor == NSColor.systemGreen

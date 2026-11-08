@@ -16,10 +16,10 @@ html {
 }
 
 body {
+  overflow-wrap: anywhere;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
   min-height: 100vh;
-  overflow-x: hidden;
 }
 
 a {
@@ -37,6 +37,23 @@ img {
 code, pre {
   font-family: var(--font-mono);
 }
+
+/* Native surface illustrations use the same labels as the macOS panels. */
+.surface-showcase { margin-top: var(--space-xl); }
+.surface-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; }
+.surface-card { min-width: 0; padding: 1.25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-elevated); }
+.surface-card h3 { font-size: 1rem; margin-bottom: 1rem; }
+.native-panel { min-width: 0; border: 1px solid var(--border-strong); border-radius: 0.75rem; background: var(--bg-surface); padding: 1rem; font-size: 0.85rem; }
+.native-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.65rem; margin: 0.75rem 0; }
+.native-row > * { min-width: 0; }
+.native-muted { color: var(--text-secondary); font-size: 0.8rem; }
+.native-pill, .preview-tabs button { display: inline-block; padding: 0.25rem 0.6rem; border: 1px solid var(--border-strong); border-radius: 0.45rem; background: var(--bg-surface-hover); font: inherit; color: var(--text-primary); }
+.preview-tabs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.8rem; }
+.preview-tabs button { cursor: pointer; min-height: 2.75rem; }
+.preview-tabs button[aria-selected="true"] { border-color: var(--accent-blue); color: var(--accent-blue); }
+.native-field { padding: 0.5rem 0.7rem; border: 1px solid var(--border-strong); border-radius: 0.4rem; margin: 0.6rem 0; }
+.native-banner { border-left: 3px solid var(--accent-amber); }
+:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 
 /* Top Navigation */
 .site-header {
@@ -437,7 +454,7 @@ code, pre {
 
 .moment-card {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
   gap: var(--space-lg);
   align-items: center;
   padding: var(--space-lg);
@@ -670,6 +687,7 @@ code, pre {
 }
 
 .docs-content {
+  min-width: 0;
   max-width: 48rem;
   display: flex;
   flex-direction: column;
@@ -766,6 +784,20 @@ code, pre {
 
 .docs-table td {
   color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+  .nav-inner { flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 1rem; }
+  .nav-links { width: 100%; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: 0.85rem; }
+  .nav-links a { min-height: 2.75rem; display: inline-flex; align-items: center; }
+  .surface-grid { grid-template-columns: minmax(0, 1fr); }
+  .section { padding: 3rem 1rem; }
+  .moment-card { padding: 1.25rem; }
+  .topology-tier, .hero-stage-toolbar, .stage-interactive-bar { flex-wrap: wrap; }
+  .copy-command-pill { flex-wrap: wrap; justify-content: center; width: 100%; }
+  .copy-command-pill code { font-size: 0.78rem; }
+  .moment-topology-panel { padding: 1rem; }
+  .scene-switcher { flex-wrap: wrap; }
 }
 
 @media (max-width: 52rem) {

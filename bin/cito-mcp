@@ -1,46 +1,18 @@
 #!/bin/sh
-':' //; s="$0"; while [ -L "$s" ]; do d="$(cd -P "$(dirname "$s")" && pwd)"; t="$(readlink "$s")"; case "$t" in /*) s="$t" ;; *) s="$d/$t" ;; esac; done; b="$(cd -P "$(dirname "$s")" && pwd)"; n="$b/cito-native-darwin-arm64"; if [ "${CITO_DISABLE_NATIVE:-0}" != "1" ] && [ -x "$n" ]; then export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$b/../plugins}"; export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"; if [ "$#" -eq 0 ]; then exec "$n" mcp-stdio; else exec "$n" "$@"; fi; fi; exec "${CITO_NODE_BIN:-node}" "$s" "$@"
-import { existsSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-
-const nativeBin = fileURLToPath(new URL("./cito-native-darwin-arm64", import.meta.url));
-if (
-  process.argv.length <= 2 &&
-  process.platform === "darwin" &&
-  process.arch === "arm64" &&
-  process.env.CITO_DISABLE_NATIVE !== "1" &&
-  existsSync(nativeBin)
-) {
-  const child = spawn(nativeBin, ["mcp-stdio"], {
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      CITO_ENDPOINT_PID: process.env.CITO_ENDPOINT_PID ?? String(process.ppid),
-    },
-  });
-  const forwardSignal = (sig) => {
-    try {
-      child.kill(sig);
-    } catch {}
-  };
-  process.on("SIGINT", () => forwardSignal("SIGINT"));
-  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-  child.on("exit", (code, signal) => {
-    if (signal) {
-      process.exit(0);
-    }
-    process.exit(code ?? 0);
-  });
-  child.on("error", () => {
-    process.exit(1);
-  });
-} else {
-  const { runEntrypoint } = await import("./loader.js");
-  try {
-    await runEntrypoint("../dist/src/mcp/cli.js", "../src/mcp/cli.ts");
-  } catch (error) {
-    process.stderr.write("cito-mcp: " + (error instanceof Error ? error.message : String(error)) + "\n");
-    process.exitCode = 1;
-  }
-}
+set -eu
+s="$0"
+while [ -L "$s" ]; do
+  d="$(cd -P "$(dirname "$s")" && pwd)"
+  t="$(readlink "$s")"
+  case "$t" in /*) s="$t" ;; *) s="$d/$t" ;; esac
+done
+b="$(cd -P "$(dirname "$s")" && pwd)"
+n="$b/cito-native-darwin-arm64"
+if [ ! -x "$n" ]; then
+  printf '%s\n' 'Cito native binary is missing. Run npm run compile or reinstall the macOS arm64 package.' >&2
+  exit 127
+fi
+export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$b/../plugins}"
+export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
+if [ "$#" -eq 0 ]; then exec "$n" mcp-stdio; fi
+exec "$n" "$@"

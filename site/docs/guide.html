@@ -87,8 +87,8 @@
         Click the Cito icon in your macOS menu bar and select <strong><code>Settings…</code></strong> (or press <code>⌘,</code>) to open the 3-tab configuration window:
       </p>
       <ul>
-        <li><strong>Tab 1 — <code>Agent Apps</code></strong>: Displays every installed or available coding harness plugin (<code>Codex</code>, <code>Pi</code>, and experimental <code>Claude Code</code>) with live status badges and a one-click <strong><code>Configure</code></strong> button, plus the <strong><code>Start Cito at Login</code></strong> toggle in the footer.</li>
-        <li><strong>Tab 2 — <code>Human Channels</code></strong>: Configure external human notification channels such as <strong>Telegram</strong> for any Hub, pair your personal chat with a 6-character code, or send a live test notification.</li>
+        <li><strong>Tab 1 — <code>Agent Apps</code></strong>: Displays every installed or available coding harness plugin (<code>Codex</code>, <code>Pi</code>, and experimental <code>Claude Code</code>) with live status badges and a one-click <strong><code>Set Up</code></strong> button and <strong><code>Disconnect</code></strong> control, plus the <strong><code>Start Cito at Login</code></strong> toggle in the footer.</li>
+        <li><strong>Tab 2 — <code>Human Channels</code></strong>: Configure external human notification channels such as <strong>Telegram</strong> for any Hub, select the target Hub, enter credentials in masked fields, click <strong><code>Pair Account…</code></strong> to pair your personal chat, or click <strong><code>Send Test</code></strong>. The footer also provides <strong><code>Remove All Integrations…</code></strong> with a separate confirmation.</li>
         <li><strong>Tab 3 — <code>Hubs &amp; Network</code></strong>: Enable <strong><code>Share Hub on Local Network</code></strong> to link multiple Macs, copy a 1-click invite code, or join a remote team Hub (<code>none</code>, <code>token</code>, or <code>oidc</code>).</li>
       </ul>
 
@@ -117,7 +117,7 @@ args = []</code></pre>
 
       <h3>Claude Code (<code>~/.claude/settings.json</code>)</h3>
       <p>
-        In <code>Settings…</code> → <code>Agent Apps</code>, click <strong><code>Configure</code></strong> next to <strong>Claude Code</strong> to register both the MCP server and the fast native turn-boundary hook (<code>cito-claude-hook</code>):
+        In <code>Settings…</code> → <code>Agent Apps</code>, click <strong><code>Set Up</code></strong> next to <strong>Claude Code</strong> to register both the MCP server and the fast native turn-boundary hook (<code>cito-claude-hook</code>):
       </p>
       <pre><code>{
   "mcpServers": {
@@ -143,7 +143,7 @@ args = []</code></pre>
       <ol>
         <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top.</li>
         <li>Paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) under Hub settings and click <strong><code>Save</code></strong>.</li>
-        <li>Click <strong><code>🔗 Pair with Telegram</code></strong>. Cito generates a short-lived 6-character pairing command (such as <code>/start cito-4k9m2p</code>) and copies it to your clipboard.</li>
+        <li>Select the target Hub and click <strong><code>Pair Account…</code></strong>. Follow the account-specific instruction displayed in the card, containing a short-lived 10-character pairing command (such as <code>/start cito-a1b2c3d4e5</code>).</li>
         <li>Send that <code>/start cito-xxxxxx</code> message to your bot in Telegram. Your Telegram <code>chatId</code> binds to your user profile automatically.</li>
         <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification (or send a plain message within 10 minutes of the most recent alert) to route your reply straight back to that agent through the Hub.</li>
       </ol>

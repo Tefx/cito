@@ -5,28 +5,25 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bridgeSocketPath, identifyBridge, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
-import { startHttpServer } from "../../src/mcp/server.js";
-import { loadConfig } from "../../src/shared/index.js";
-import type { ListenerRow } from "../../src/mcp/state.js";
-import { fixture } from "../mcp/support.js";
+import { bridgeSocketPath, identifyBridge, SocketBridgeAdapter, type DeliverContext } from "../support/plugin-adapter.js";
+import type { JsonObject as ListenerRow } from "../support/native-harness.js";
+import { cleanroom } from "../support/native-scenarios.js";
 import { isolatedState } from "./support.js";
 
 // The host is intentionally not an npm dependency. CI can point at an installed 1.5.0 package.
 const host = process.env.CITO_PI_PACKAGE_DIR ?? join(homedir(), ".pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent");
 const hostAvailable = existsSync(join(host, "dist/core/extensions/loader.js"));
 
-it.skipIf(!hostAvailable)("loads a standalone file through Pi 1.5.0 and verifies /cito command, bindCore sendMessage arguments and socket cleanup", async () => {
+it("loads a standalone file through Pi 1.5.0 and verifies /cito command, bindCore sendMessage arguments and socket cleanup", async () => {
   expect(JSON.parse(await readFile(join(host, "package.json"), "utf8")).version).toBe("1.5.0");
-  const f = await fixture({ pi: false });
-  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
+  expect(hostAvailable).toBe(true);const f=await cleanroom();const daemon=await f.daemon();
   const state = await isolatedState();
   try {
     const standalone = join(state.root, "bridge.ts");
     await copyFile(fileURLToPath(new URL("../../plugins/pi/cito-bridge.ts", import.meta.url)), standalone);
     for (const stop of ["shutdown", "exit"]) {
       const child = fork(fileURLToPath(new URL("fixtures/pi-runtime.mjs", import.meta.url)), [host, standalone, f.root],
-        { env: { ...f.env, CITO_DAEMON_PORT: String(http.port), PI_CODING_AGENT_DIR: join(state.root, "pi-agent") }, silent: true });
+        { env: { ...f.env, CITO_DAEMON_PORT: String(f.daemonPort), PI_CODING_AGENT_DIR: join(state.root, "pi-agent") }, silent: true });
       const messages: Record<string, unknown>[] = [];
       let stderr = "";
       child.stderr!.on("data", data => { stderr += data.toString(); });
@@ -76,7 +73,7 @@ it.skipIf(!hostAvailable)("loads a standalone file through Pi 1.5.0 and verifies
           ]);
         }
         const row = { endpoint_pid: pid, session_id: info.session_id } as ListenerRow, adapter = new SocketBridgeAdapter("pi");
-        const context: DeliverContext = { batchId: "batch", card: "Host-loaded card", config: loadConfig(f.env),
+        const context: DeliverContext = { batchId: "batch", card: "Host-loaded card", config: f,
           signal: new AbortController().signal, queueWritten: false, markQueueWritten() {},
           runEffect: async submit => { await submit(); return true; } };
         expect(await adapter.deliver(row, context)).toBe("delivered");
@@ -100,5 +97,5 @@ it.skipIf(!hostAvailable)("loads a standalone file through Pi 1.5.0 and verifies
         await exited;
       }
     }
-  } finally { await http.close(); await f.close(); await state.cleanup(); }
+  } finally { await daemon.stop(); await f.close(); await state.cleanup(); }
 }, 30_000);

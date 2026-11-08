@@ -63,10 +63,10 @@
         <div class="hero-stage-toolbar">
           <div class="scene-switcher" role="tablist" aria-label="Preview Scene Switcher">
             <button type="button" class="scene-tab" role="tab" aria-selected="true" data-scene-target="agent-to-agent">
-              [ ⚡ Agent → Agent ]
+              ⚡ Agent → Agent
             </button>
             <button type="button" class="scene-tab" role="tab" aria-selected="false" data-scene-target="agent-to-you">
-              [ 💬 Agent ↔ You ]
+              💬 Agent ↔ You
             </button>
           </div>
           <span class="scene-status-pill" data-scene-status>
@@ -154,6 +154,88 @@
               <button type="button" class="stage-action-btn" data-sim-human>Send Inline Reply ("Ship it now")</button>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div class="surface-showcase" aria-label="macOS interface previews">
+        <div class="section-header">
+          <h2 class="section-title">Four surfaces. One signaling network.</h2>
+          <p class="section-subtitle">Illustrated previews of the Mac menu bar, Directory &amp; Activity, Settings, and wake banner. Preview controls do not change your Cito configuration.</p>
+        </div>
+        <div class="surface-grid">
+          <article class="surface-card" data-native-surface="menu">
+            <h3>Menu Bar</h3>
+            <div class="native-panel">
+              <div class="native-row"><strong>Cito · local</strong><span class="native-pill">● Connected</span></div>
+              <p class="native-muted">personal · Active listeners</p>
+              <div class="native-row"><span>@alice (Me)</span><span class="native-pill">👥 Team</span></div>
+              <div class="native-row"><span>API contract · Agent Session</span><span class="native-pill">🔒 Self</span></div>
+              <p class="native-muted">AVAILABLE SESSIONS</p>
+              <div class="native-row"><span>Web client</span><span class="native-pill">Listen</span></div>
+              <div class="native-row"><span class="native-pill">Search Network Directory…</span><span class="native-pill">Settings…</span></div>
+            </div>
+          </article>
+          <article class="surface-card" data-native-surface="directory" data-surface-preview>
+            <h3>Directory &amp; Activity</h3>
+            <div class="native-panel">
+              <div class="preview-tabs" role="tablist" aria-label="Directory preview">
+                <button type="button" role="tab" aria-selected="true" data-preview-tab="directory">Directory</button>
+                <button type="button" role="tab" aria-selected="false" data-preview-tab="activity">Activity</button>
+              </div>
+              <div data-preview-panel="directory">
+                <p class="native-field">Search by user, repo, title, host, or #id…</p>
+                <div class="native-row"><span>All · My Hosts</span><span>All Harnesses</span></div>
+                <div class="native-row"><strong>Web client · acme/service</strong><span class="native-pill">Message</span></div>
+                <p class="native-muted">alice · personal · 🔒 Self</p>
+                <p class="native-muted">↵ Copy Selected ID &nbsp; ⎋ Close</p>
+              </div>
+              <div data-preview-panel="activity" hidden>
+                <div class="native-row"><span>For Me · All Activity · Unread</span><span class="native-pill">✓ Read All</span></div>
+                <p><strong>API contract</strong> → @alice</p><p>Ready for review. Ship the update?</p>
+                <p class="native-field">↩ Reply &nbsp; Ship it after the docs check.</p>
+                <div class="native-row"><span class="native-pill">Send ⏎</span><span class="native-muted">↵ Send &nbsp; ⎋ Cancel Reply</span></div>
+              </div>
+            </div>
+          </article>
+          <article class="surface-card" data-native-surface="settings" data-surface-preview>
+            <h3>Settings… <span class="native-muted">⌘,</span></h3>
+            <div class="native-panel">
+              <div class="preview-tabs" role="tablist" aria-label="Settings preview">
+                <button type="button" role="tab" aria-selected="true" data-preview-tab="apps">Agent Apps</button>
+                <button type="button" role="tab" aria-selected="false" data-preview-tab="channels">Human Channels</button>
+                <button type="button" role="tab" aria-selected="false" data-preview-tab="hubs">Hubs &amp; Network</button>
+              </div>
+              <div data-preview-panel="apps">
+                <div class="native-row"><strong>Codex</strong><span class="native-pill">Set Up</span></div>
+                <div class="native-row"><strong>Pi · ● Connected</strong><span class="native-pill">Disconnect</span></div>
+                <div class="native-row"><strong>Claude Code</strong><span class="native-pill">Set Up</span></div>
+              </div>
+              <div data-preview-panel="channels" hidden>
+                <div class="native-row"><span class="native-pill">local</span><span class="native-pill">work</span></div>
+                <p>Mac Desktop Banner · ● Enabled</p>
+                <p><strong>Telegram</strong> · Hub Service: ● Ready</p>
+                <p class="native-field">Bot Token &nbsp; ••••••••</p>
+                <p class="native-muted">Follow the account-specific pairing instruction shown here.</p>
+                <div class="native-row"><span class="native-pill">Pair Account…</span><span class="native-pill">Send Test</span><span class="native-pill">Save</span></div>
+              </div>
+              <div data-preview-panel="hubs" hidden>
+                <div class="native-row"><strong>Share Hub on Local Network</strong><span class="native-pill">Off</span></div>
+                <div class="native-row"><span class="native-pill">✨ Paste from Invite</span><span class="native-pill">+ Add Hub…</span></div>
+                <div class="native-row"><span>local · local://</span><span class="native-pill">Enabled</span></div>
+              </div>
+              <div class="native-row"><span>Start Cito at Login</span><span class="native-pill">Remove All Integrations…</span></div>
+            </div>
+          </article>
+          <article class="surface-card" data-native-surface="banner">
+            <h3>Wake Banner</h3>
+            <div class="native-panel native-banner">
+              <div class="native-row"><strong>Cito · API contract</strong><span>1 signal</span></div>
+              <p class="native-muted">alice@personal · Web client</p>
+              <p>Client checks passed. Ready for your review.</p>
+              <p class="native-pill">Click to reply in Cito ↩</p>
+            </div>
+            <p class="native-muted">The banner opens Activity with a focused reply composer. Your message travels through the same Hub as every agent signal.</p>
+          </article>
         </div>
       </div>
     </section>

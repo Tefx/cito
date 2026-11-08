@@ -1,41 +1,21 @@
 {
   "name": "@tefx/cito",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "license": "MIT",
   "description": "Notification-only cross-harness, cross-machine, multi-user wake and signaling service for coding agents",
   "type": "module",
-  "main": "dist/src/mcp/service.js",
-  "types": "dist/src/mcp/service.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/src/mcp/service.d.ts",
-      "default": "./dist/src/mcp/service.js"
-    },
-    "./plugin-sdk": {
-      "types": "./dist/src/adapters/index.d.ts",
-      "default": "./dist/src/adapters/index.js"
-    }
-  },
   "engines": {
     "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
   },
   "bin": {
-    "cito": "bin/cito-mcp",
-    "cito-mcp": "bin/cito-mcp",
-    "cito-claude-hook": "bin/cito-claude-hook"
-  },
-  "pi": {
-    "extensions": [
-      "./plugins/pi/cito-bridge.ts"
-    ]
+    "cito": "bin/cito",
+    "cito-mcp": "bin/cito-mcp"
   },
   "files": [
     "bin",
-    "dist/src",
-    "dist/plugins",
-    "src",
     "plugins",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
@@ -45,20 +25,19 @@
     "url": "git+https://github.com/Tefx/cito.git"
   },
   "scripts": {
-    "test": "vitest run --dir tests",
+    "test": "vitest run --maxWorkers=4",
     "typecheck": "tsc --noEmit",
-    "compile": "rm -rf dist && tsc && if [ \"$(uname -s)-$(uname -m)\" = \"Darwin-arm64\" ]; then swiftc -O -target arm64-apple-macos13.0 src/macos/cito-ui.swift -o bin/cito-ui-darwin-arm64 && strip -x bin/cito-ui-darwin-arm64 && codesign -s - --force bin/cito-ui-darwin-arm64 && cargo build --release --manifest-path crates/cito-native/Cargo.toml && cp crates/cito-native/target/release/cito-native bin/cito-native-darwin-arm64 && strip -x bin/cito-native-darwin-arm64 && codesign -s - --force bin/cito-native-darwin-arm64 && rm -rf crates/cito-native/target; fi",
-    "prepublishOnly": "npm run typecheck && npm run compile"
+    "compile": "node bin/build.mjs",
+    "prepublishOnly": "npm run typecheck && npm run compile && npm test"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
-    "jose": "^6.1.3",
-    "zod": "^4.6.7"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.19.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "jose": "^6.1.3",
+    "zod": "^4.6.7"
   }
 }

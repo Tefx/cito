@@ -1,9 +1,11 @@
 {
   "id": "human",
-  "kind": "human",
-  "displayName": "Human",
+  "kind": "human-channel",
+  "displayName": "Desktop",
   "tier": "stable",
+  "scope": "user",
   "sfSymbol": "person.crop.circle.fill",
   "tint": "green",
-  "protocol": "desktop-ui"
+  "cliFlag": false,
+  "command": ["./bin/cito-ui"]
 }

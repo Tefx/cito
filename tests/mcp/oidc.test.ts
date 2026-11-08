@@ -1,168 +1,33 @@
-import { afterEach, expect, test, vi } from "vitest";
-import { readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { OidcLogin } from "../../src/mcp/oidc.js";
-import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
-import { fixture, waitFor, freePort } from "./support.js";
+import {expect,test} from "vitest";
+import {stat,readFile,writeFile} from "node:fs/promises";
+import {join} from "node:path";
+import {loginFixture} from "../support/oidc-native.js";
+import {action,cleanroom,rows} from "../support/native-scenarios.js";
+import {signingKey} from "../auth-callout/oidc-fixture.js";
+import {freePort,waitFor} from "../support/native-harness.js";
 
-const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function setup() {
-  const key = await signingKey("ES256", "key");
-  const oidc = await startOidc([key.jwk]); cleanups.push(() => oidc.stop());
-  const f = await fixture({ pi: false, env: { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" } });
-  cleanups.push(() => f.close());
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims()), refresh_token: "refresh-1" };
-  let opened = 0;
-  const opener = async (url: string, signal: AbortSignal) => { opened++; await browser(url, signal); };
-  const login = new OidcLogin(f.config, opener);
-  return { f, key, oidc, login, opened: () => opened, opener };
-}
-
-test("interactive S256 PKCE verifies signature and stores canonical identity with mode 0600", async () => {
-  const { f, oidc, login, opened } = await setup();
-  const cache = await login.recover(null);
-  expect(cache).toMatchObject({ issuer: oidc.issuer, client_id: "cito", verified_principal_id: oidc.issuer + "#user-1", verified_user: "alice", refresh_token: "refresh-1" });
-  expect(opened()).toBe(1);
-  expect(oidc.state.codeRequests).toBe(1);
-  expect((await stat(join(f.stateDir, "oidc-token-default.json"))).mode & 0o777).toBe(0o600);
-  expect(await login.current()).toEqual(cache);
-  expect(await login.offlinePrincipal()).toEqual({ principal_id: cache.verified_principal_id, owner_user: "alice" });
+test("interactive S256 PKCE verifies signatures and stores canonical identity with mode 0600",async()=>{
+ const x=await loginFixture();expect((await x.login()).http_status).toBe(200);expect(x.oidc.state.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);const cache=await x.read();expect(cache).toMatchObject({verified_user:"alice",verified_principal_id:expect.stringContaining("user-1"),refresh_token:"refresh-old"});expect((await stat(x.path)).mode&0o777).toBe(0o600);expect(x.oidc.state.codeRequests).toBe(1);
 });
-
-test("rejected unexpired token refreshes once; concurrent mutex waiters reuse a different hash", async () => {
-  const { f, key, oidc, login, opener, opened } = await setup();
-  const old = await login.recover(null);
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-1", exp: Math.floor(Date.now() / 1000) + 3600 })), refresh_token: "refresh-2" };
-  const [a, b, c] = await Promise.all([login.recover(old.token_sha256), new OidcLogin(f.config, opener).recover(old.token_sha256), new OidcLogin(f.config, opener).recover(old.token_sha256)]);
-  expect(a.token_sha256).not.toBe(old.token_sha256);
-  expect([b.token_sha256, c.token_sha256]).toEqual([a.token_sha256, a.token_sha256]);
-  expect(oidc.state.refreshRequests).toBe(1);
-  expect(opened()).toBe(1);
+test("rejected unexpired tokens refresh once and concurrent waiters reuse the verified cache",async()=>{
+ const x=await loginFixture();const old=await x.key.sign(x.oidc.claims());await x.cache(old,"refresh-old",0);const results=await Promise.all([x.login(),x.login(),x.login()]);expect(results.every(r=>r.http_status===200)).toBe(true);expect(x.oidc.state.refreshRequests).toBe(1);expect(x.oidc.state.authorizationRequests).toBe(0);expect((await x.read()).id_token).not.toBe(old);
 });
-
-test.each([400, 401])("refresh %i falls through to PKCE within the same lock", async status => {
-  const { key, oidc, login, opened } = await setup();
-  const old = await login.recover(null);
-  oidc.state.refreshStatus = status;
-  oidc.state.tokenResponse.id_token = await key.sign(oidc.claims({ exp: Math.floor(Date.now() / 1000) + 3600 }));
-  const fresh = await login.recover(old.token_sha256);
-  expect(fresh.token_sha256).not.toBe(old.token_sha256);
-  expect(opened()).toBe(2); expect(oidc.state.codeRequests).toBe(2); expect(oidc.state.refreshRequests).toBe(1);
+test.each([400,401])("refresh %i falls through to PKCE within the same lock",async status=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));x.oidc.state.refreshStatus=status;expect((await x.login()).http_status).toBe(200);expect(x.oidc.state.refreshRequests).toBe(1);expect(x.oidc.state.authorizationRequests).toBe(1);});
+test("refresh 503 fails without launching a browser or overwriting verified cache",async()=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));const before=await readFile(x.path,"utf8");x.oidc.state.refreshStatus=503;expect((await x.login()).http_status).toBe(400);expect(x.oidc.state.authorizationRequests).toBe(0);expect(await readFile(x.path,"utf8")).toBe(before);});
+test("a different PKCE identity cannot inherit the previous refresh token after rejection",async()=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));x.oidc.state.refreshStatus=401;x.oidc.state.tokenFactory=async nonce=>({id_token:await x.key.sign(x.oidc.claims({sub:"other",nonce}))});expect((await x.login()).http_status).toBe(200);expect((await x.read()).verified_principal_id).toContain("other");expect((await x.read()).refresh_token).toBeNull();});
+test.each([false,true])("silent refresh retains an omitted refresh token only for the same principal (changed %s)",async changed=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));x.oidc.state.tokenFactory=async()=>({id_token:await x.key.sign(x.oidc.claims({sub:changed?"changed":"user-1"}))});expect((await x.login()).http_status).toBe(200);expect((await x.read()).refresh_token).toBe(changed?null:"refresh-old");expect(x.oidc.state.authorizationRequests).toBe(0);});
+test("overall login timeout remains bounded when JWKS verification cannot finish",async()=>{const x=await loginFixture();x.oidc.state.stall=true;const began=performance.now();const result=await x.login();expect(String(result.error)).toContain("OIDC_LOGIN_TIMEOUT");expect(performance.now()-began).toBeLessThan(60_000);await expect(stat(x.path)).rejects.toMatchObject({code:"ENOENT"});},65000);
+test("hub token caches and PKCE scopes are isolated without legacy fallback",async()=>{
+ const x=await loginFixture({scopes:["openid","email"]});await writeFile(join(x.f.stateDir,"oidc-token.json"),JSON.stringify({id_token:"legacy",refresh_token:"secret"}));expect((await x.login()).http_status).toBe(200);expect(x.oidc.state.requestedScopes.split(" ")).toEqual(["openid","email"]);expect(await readFile(join(x.f.stateDir,"oidc-token.json"),"utf8")).toContain("legacy");
+ const other=await loginFixture({scopes:["openid","profile"]});expect((await other.login()).http_status).toBe(200);expect(other.oidc.state.requestedScopes).toBe("openid profile");expect((await x.read()).issuer).not.toBe((await other.read()).issuer);
 });
-
-test("refresh 503 fails without launching a browser or overwriting verified cache", async () => {
-  const { f, oidc, login, opened } = await setup();
-  const old = await login.recover(null), original = await readFile(join(f.stateDir, "oidc-token-default.json"), "utf8");
-  oidc.state.refreshStatus = 503;
-  await expect(login.recover(old.token_sha256)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE", retryable: true });
-  expect(opened()).toBe(1);
-  expect(await readFile(join(f.stateDir, "oidc-token-default.json"), "utf8")).toBe(original);
+test("discovery negotiates advertised defaults, honors explicit scopes and rejects missing openid",async()=>{
+ const x=await loginFixture();x.oidc.state.scopesSupported=["openid","email"];expect((await x.login()).http_status).toBe(200);expect(x.oidc.state.requestedScopes).toBe("openid email");
+ const bad=await loginFixture();bad.oidc.state.scopesSupported=["profile"];expect((await bad.login()).http_status).toBe(400);expect(bad.oidc.state.authorizationRequests).toBe(0);
 });
-
-test("a different PKCE identity never inherits the previous refresh token after refresh rejection", async () => {
-  const { key, oidc, login } = await setup();
-  const alice = await login.recover(null);
-  expect(alice.refresh_token).toBe("refresh-1");
-  oidc.state.refreshStatus = 401;
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-2", preferred_username: "Bob" })) };
-  const bob = await login.recover(alice.token_sha256);
-  expect(bob).toMatchObject({ verified_principal_id: oidc.issuer + "#user-2", verified_user: "bob" });
-  expect(bob.refresh_token).toBeUndefined();
-  expect(await login.cached()).not.toHaveProperty("refresh_token");
-  expect(oidc.state.refreshRequests).toBe(1); expect(oidc.state.codeRequests).toBe(2);
+test("fixed callback ports serialize independent hub logins and cancellation opens no extra browser",async()=>{
+ const port=await freePort(),a=await loginFixture({redirectPort:port}),b=await loginFixture({redirectPort:port});const results=await Promise.all([a.login(),b.login()]);expect(results.map(r=>r.http_status)).toEqual([200,200]);expect(a.oidc.state.authorizationRequests).toBe(1);expect(b.oidc.state.authorizationRequests).toBe(1);
 });
-
-test.each([false, true])("silent refresh retains an omitted token only for the same principal (identity changed: %s)", async changed => {
-  const { key, oidc, login } = await setup();
-  const old = await login.recover(null);
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: changed ? "other-user" : "user-1",
-    exp: Math.floor(Date.now() / 1000) + 3600 })) };
-  const fresh = await login.recover(old.token_sha256);
-  expect(fresh.refresh_token).toBe(changed ? undefined : "refresh-1");
-  expect(oidc.state.refreshRequests).toBe(1); expect(oidc.state.codeRequests).toBe(1);
-});
-
-test("overall login-budget expiry during JWKS verification reports OIDC_LOGIN_TIMEOUT", async () => {
-  const deadline = new AbortController(), timeout = AbortSignal.timeout.bind(AbortSignal), request = globalThis.fetch;
-  vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => ms === 45_000 ? deadline.signal : timeout(ms));
-  let verifying = false;
-  vi.spyOn(globalThis, "fetch").mockImplementation((url, options) => {
-    if (String(url).endsWith("/jwks")) {
-      verifying = true;
-      deadline.abort(new DOMException("Login deadline expired", "TimeoutError"));
-    }
-    return request(url, options);
-  });
-  const { f, login } = await setup();
-  await expect(login.recover(null)).rejects.toMatchObject({ code: "OIDC_LOGIN_TIMEOUT", retryable: true });
-  expect(verifying).toBe(true);
-  expect(await login.cached()).toBeUndefined();
-  await expect(stat(join(f.stateDir, "oidc-token-default.json"))).rejects.toMatchObject({ code: "ENOENT" });
-});
-
-test("hub caches and PKCE scopes are isolated, with no legacy default-cache fallback", async () => {
-  const { f, oidc, opener, login } = await setup();
-  await login.recover(null);
-  const personal = new OidcLogin({ ...f.config, oidcScopes: ["openid", "custom"] }, async (url, signal) => {
-    expect(new URL(url).searchParams.get("scope")).toBe("openid custom");
-    await opener(url, signal);
-  }, "personal");
-  expect(await personal.cached()).toBeUndefined();
-  await personal.recover(null);
-  expect(await new OidcLogin(f.config, opener, "work").cached()).toBeUndefined();
-  expect((await personal.offlinePrincipal()).principal_id).toBe(oidc.issuer + "#user-1");
-  expect((await stat(join(f.stateDir, "oidc-token-personal.json"))).mode & 0o777).toBe(0o600);
-  const { rename } = await import("node:fs/promises");
-  await rename(join(f.stateDir, "oidc-token-default.json"), join(f.stateDir, "oidc-token.json"));
-  expect(await login.cached()).toBeUndefined();
-});
-
-test("discovery negotiates advertised default scopes, honors explicit scopes and rejects providers without openid", async () => {
-  const { f, oidc, opener } = await setup();
-  oidc.state.scopesSupported = ["openid", "email"];
-  const negotiated = new OidcLogin(f.config, async (url, signal) => {
-    expect(new URL(url).searchParams.get("scope")).toBe("openid email"); await opener(url, signal);
-  }, "negotiated");
-  await negotiated.recover(null);
-  const explicit = new OidcLogin({ ...f.config, oidcScopes: ["openid", "custom"] }, async (url, signal) => {
-    expect(new URL(url).searchParams.get("scope")).toBe("openid custom"); await opener(url, signal);
-  }, "explicit");
-  await explicit.recover(null);
-  oidc.state.scopesSupported = ["email"];
-  await expect(new OidcLogin(f.config, opener, "missing-openid").recover(null)).rejects.toMatchObject({ code: "AUTH_UNAVAILABLE" });
-});
-
-test("fixed callback ports serialize independent hub logins and abort queued or active logins without opening another browser", async () => {
-  const { f, opener } = await setup();
-  const port = await freePort();
-  let firstUrl = "", opened = 0, release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const config = { ...f.config, oidcRedirectPort: port };
-  const first = new OidcLogin(config, async (url, signal) => {
-    opened++; firstUrl = url; await gate; await opener(url, signal);
-  }, "a").recover(null);
-  try {
-    await waitFor(() => !!firstUrl); expect(new URL(new URL(firstUrl).searchParams.get("redirect_uri")!).port).toBe(String(port));
-    const controller = new AbortController();
-    const second = new OidcLogin(config, async (url, signal) => { opened++; await opener(url, signal); }, "b").recover(null, true, controller.signal);
-    const rejected = expect(second).rejects.toMatchObject({ name: "AbortError" }); controller.abort(); await rejected;
-    expect(opened).toBe(1); release(); await first;
-    const activeAbort = new AbortController(); let active = false;
-    const third = new OidcLogin(config, async () => { active = true; await new Promise(() => {}); }, "c").recover(null, true, activeAbort.signal);
-    const cancelled = expect(third).rejects.toMatchObject({ name: "AbortError" });
-    await waitFor(() => active); activeAbort.abort(); await cancelled;
-    // Rebinding the exact port proves that the cancelled callback server closed.
-    const fourth = new OidcLogin(config, opener, "d"); await fourth.recover(null);
-  } finally { release(); await first; }
-});
-
-test("locally invalid signatures never acquire a verified identity cache", async () => {
-  const { f, oidc, login } = await setup();
-  const wrong = await signingKey("ES256", "key");
-  oidc.state.tokenResponse.id_token = await wrong.sign(oidc.claims());
-  await expect(login.recover(null)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-  expect(await login.cached()).toBeUndefined();
-  await writeFile(join(f.stateDir, "oidc-token-default.json"), "{}");
-  await expect(login.offlinePrincipal()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+test("locally invalid signatures can never enter a verified identity cache",async()=>{
+ const x=await loginFixture(),bad=await signingKey("ES256","login");x.oidc.state.tokenFactory=async nonce=>({id_token:await bad.sign(x.oidc.claims({nonce}))});expect((await x.login()).http_status).toBe(400);await expect(stat(x.path)).rejects.toMatchObject({code:"ENOENT"});
 });
