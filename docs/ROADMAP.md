@@ -1,13 +1,14 @@
 # Cito Product & Architecture Roadmap
 
-Cito's evolution from `v0.11.3` through `v0.18.0` is organized into **seven `0.x` stages (`Stage 0` through `Stage 6`)**:
+Cito's evolution from `v0.11.3` through `v0.19.0` is organized into **eight `0.x` stages (`Stage 0` through `Stage 7`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
 - **Stage 3 (`v0.15.0` — Completed)**: Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`, `HumanChannelPlugin` (`cito-ui` + `plugins/telegram`), `Directory | Activity` Feed & Inline Hub Reply Composer
 - **Stage 4 (`v0.16.0` — Completed)**: Project Website, Visual Architecture Showcase, Plugin SDK Authoring Guide & Onboarding Docs
 - **Stage 5 (`v0.17.0` — Completed)**: Initial Native Packaging, First-Launch Consent & Surgical Disconnect/Uninstall
-- **Stage 6 (`v0.18.0` — Active)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
+- **Stage 6 (`v0.18.0` — Active / Phase `v22`)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
+- **Stage 7 (`v0.19.0` — Planned / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
 
 ---
 
@@ -82,3 +83,14 @@ Completed in Phase `v18` (`2ade0a7`, tag `v0.14.0`).
    - **Claude Code (`plugins/claude/`)**: `cito-claude-hook` is relocated out of Core/top-level `bin/` into `plugins/claude/bin/cito-claude-hook` with `flock` queue serialization and torn-line isolation (`F35, F36, F44, F62`).
 3. **UI/UX Polish, High-Contrast Brand Assets & Live GitHub Pages / Release / Homebrew Tap (`v0.18.0`)**:
    - Resolve all `cito-ui.swift`, `README.md`, `site/assets/brand/`, and `site/` issues (`F3, F5, F26, F27, F32, F42, F47–F51, F57`), enable and verify live GitHub Pages (`https://tefx.github.io/cito/`), publish GitHub Release `v0.18.0` (`Cito-macos-arm64.zip` on `macos-15`), and sync the verified SHA-256 to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`F4`).
+
+---
+
+## Stage 7 (`v0.19.0` — Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
+
+1. **Remove Root Node.js / Vitest Scaffolding**:
+   - Delete root `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, and `tests/**/*.ts` (`tests/support/native-harness.ts`), keeping only `plugins/pi/{package.json, cito-bridge.ts}` for the Pi host.
+2. **Promote Root `Cargo.toml` Workspace & Migrate Full E2E/Integration Suite to `cargo test`**:
+   - Establish root `Cargo.toml` workspace and migrate all behavioral, protocol, SQLite, plugin subprocess, headless `cito-ui`, website, and `F1`–`F64` regression tests into native Rust tests (`crates/cito-native/tests/*.rs`) executed via `cargo test --workspace`.
+3. **Pure-Rust CI & `v0.19.0` Release**:
+   - Remove `actions/setup-node` / `npm` steps from `.github/workflows/release.yml`, bump version to `v0.19.0`, run iterative `code-hygiene` convergence, and publish `v0.19.0` to GitHub Releases and `Tefx/homebrew-tap`.

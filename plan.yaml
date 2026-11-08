@@ -6665,3 +6665,175 @@ phases:
     depends_on:
     - v22.hygiene
     agent: gate-reviewer
+- id: v23
+  name: 'V23 Stage 7 (v0.19.0): Pure Rust Workspace Consolidation, Removal of Root
+    Node/Vitest Scaffolding & Unified cargo test Native Test Suite'
+  status: locked
+  gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
+    pass 100%, root package.json, package-lock.json, tsconfig.json, vitest.config.ts,
+    node_modules/, and tests/**/*.ts are absent, only plugins/pi/{package.json, cito-bridge.ts}
+    remains for the Pi host, [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]
+    converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES, and GitHub Release
+    v0.19.0 + Tefx/homebrew-tap + GitHub Pages (https://tefx.github.io/cito/) are
+    live.'
+  context: 'Consolidate Cito into a 100% pure Rust + Swift workspace in Stage 7 (v0.19.0)
+    per docs/DESIGN.md §9 and docs/ROADMAP.md: promote a root Cargo.toml workspace
+    (members = ["crates/cito-native"]) with unified cargo build --release and cargo
+    test --workspace execution, migrate all behavioral, protocol, SQLite, plugin subprocess,
+    headless cito-ui AppKit, website, Homebrew Formula, and F1–F64 regression tests
+    into native Rust integration tests (crates/cito-native/tests/*.rs), remove transitional
+    root Node.js / Vitest scaffolding (package.json, package-lock.json, tsconfig.json,
+    vitest.config.ts, node_modules/, tests/**/*.ts) while keeping only plugins/pi/{package.json,
+    cito-bridge.ts} for the Pi host, remove Node/npm steps from .github/workflows/release.yml,
+    run iterative code-hygiene convergence, and publish v0.19.0 to GitHub Releases
+    and Tefx/homebrew-tap.'
+  depends_on:
+  - v22
+  steps:
+  - id: v23.impl
+    name: Implement V23 Stage 7 (v0.19.0) Root Cargo.toml Workspace, Native Rust Integration
+      Suite (cargo test --workspace) & Root Node/Vitest Scaffolding Removal
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      ```\n\n- **Deliver:** Complete Stage 7 (`v0.19.0`) implementation per `docs/DESIGN.md`\
+      \ §9 and `docs/ROADMAP.md`:\n  1. **Root `Cargo.toml` Workspace & Unified Build\
+      \ Pipeline**: Promote/create a root `Cargo.toml` workspace (`members = [\"crates/cito-native\"\
+      ]`) and `Cargo.lock` so `cargo build --release` at the repository root compiles\
+      \ `bin/cito` (with `bin/cito-mcp` symlink), `bin/cito-ui` (`src/macos/cito-ui.swift`),\
+      \ and all built-in plugin executables (`plugins/{pi,codex,claude,telegram}/bin/cito-plugin-*`\
+      \ and `plugins/claude/bin/cito-claude-hook`).\n  2. **Native Rust Integration\
+      \ & E2E Test Suite (`crates/cito-native/tests/*.rs`)**: Migrate all behavioral,\
+      \ protocol, SQLite (`state.sqlite` & `hub.sqlite`), plugin subprocess (`pi`,\
+      \ `codex`, `claude`, `human`, `telegram`, plus `cito-claude-hook` `flock` and\
+      \ torn-line isolation, and `plugins/pi/cito-bridge.ts` verified via zero-npm-dependency\
+      \ `node` subprocess when available), headless `bin/cito-ui` AppKit view-tree\
+      \ & interaction (`cardMenu`, `DirectoryPanel` `Directory | Activity` + `ComposerBar`,\
+      \ 3-Tab `SettingsPanel`, `WakeBanner`), static `site/` & brand SVG contrast,\
+      \ Homebrew Formula (`ruby -c packaging/homebrew/cito.rb`), and `F1`–`F64` regression\
+      \ tests into native Rust integration tests executed via `cargo test --workspace`.\n\
+      \  3. **Complete Removal of Root Node.js / Vitest Scaffolding**: Delete root\
+      \ `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`,\
+      \ `node_modules/`, and `tests/**/*.ts` (including `tests/support/native-harness.ts`),\
+      \ keeping only `plugins/pi/package.json` (`\"private\": true`, zero `dependencies`\
+      \ / `devDependencies`) and `plugins/pi/cito-bridge.ts` for the Pi host.\n  4.\
+      \ **Pure-Rust CI Workflow, Docs & `v0.19.0` Version Bump**: Update `.github/workflows/release.yml`\
+      \ to remove `actions/setup-node@v4` and `npm` steps (running pure `cargo test\
+      \ --workspace && cargo build --release && ./bin/cito setup --build-app ./build\
+      \ && /usr/bin/ruby -c packaging/homebrew/cito.rb`), update `README.md`, `AGENTS.md`,\
+      \ and `docs/**` to reflect the pure Rust workspace, and bump `CITO_VERSION`\
+      \ / `Cargo.toml` / `packaging/homebrew/cito.rb` / `plugins/*/plugin.json` to\
+      \ `\"0.19.0\"`.\n- **Boundary:** Owner `rust-senior`; repository-modifying implementation\
+      \ within `/Users/tefx/Projects/cito` (`plan.yaml` managed exclusively by Vectl;\
+      \ transient Cargo `target/` cleaned after verifying binaries and tests).\n-\
+      \ **Admit:** Completed Phase `v22`, `docs/DESIGN.md` §9, and `docs/ROADMAP.md`\
+      \ (Stage 7 `v0.19.0`); verification passes `cargo test --workspace && cargo\
+      \ build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` with root\
+      \ Node/Vitest files absent and zero hardcoded agent/channel names in `crates/cito-native/src/core/`\
+      \ and `src/macos/`.\n- **Recovery:** Reconcile compilation or test failures\
+      \ in place within the step worktree before completion; remove transient build\
+      \ artifacts (`target/`) once binaries and `cargo test --workspace` are verified.\n"
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/Cargo.toml
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    - README.md
+    - AGENTS.md
+    agent: rust-senior
+  - id: v23.hygiene
+    name: 'Iterative Code-Hygiene Convergence on Pure Rust Workspace & Live v0.19.0
+      Distribution Closure (GitHub Release v0.19.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
+      code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** `[REQUIRES_SKILL: code-hygiene]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`
+      Run iterative fresh-context `pathway-auditor` + `structural-auditor` + `uiux-auditor`
+      rounds over the pure Rust + Swift workspace (`Cargo.toml`, `crates/cito-native/`,
+      `src/macos/`, `plugins/`, `site/`, `docs/`, `packaging/`, `.github/workflows/`,
+      and `deploy/`) and resolve every admitted finding across all 5 code-hygiene
+      lenses (Completeness & Wiring, Dead Code & Over-Engineering Trim, Duplication
+      Consolidation, Interface Orthogonality & Zero Hardcoding, and Test Authenticity)
+      until a fresh audit round returns `ZERO_NEW_ISSUES` (`Completeness: CLEAN` and
+      `Simplicity: ZERO_NEW_ISSUES`). Then publish GitHub Release `v0.19.0` (`Cito-macos-arm64.zip`
+      on `macos-15`), verify live GitHub Pages (`https://tefx.github.io/cito/`), and
+      sync the verified SHA-256 to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap`.
+
+      - **Boundary:** Owner `rust-senior`; repository changes in `/Users/tefx/Projects/cito`
+      plus authorized distribution effects on `Tefx/cito` (GitHub Release `v0.19.0`
+      & GitHub Pages) and `Tefx/homebrew-tap` (`Formula/cito.rb`), only after code-hygiene
+      convergence and `cargo test --workspace` pass.
+
+      - **Admit:** Completed `v23.impl`, fresh-context audit reports from `pathway-auditor`,
+      `structural-auditor`, and `uiux-auditor`, `cargo test --workspace && cargo build
+      --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exiting `0`, HTTP
+      `200` on `https://tefx.github.io/cito/`, and verified SHA-256 parity across
+      GitHub Release `v0.19.0`, `packaging/homebrew/cito.rb`, and `Tefx/homebrew-tap`.
+
+      - **Recovery:** If any audit round reports actionable findings or a release/Pages
+      workflow fails, repair in place, re-run affected checks and fresh-context delta
+      verification until `ZERO_NEW_ISSUES`, and reconcile release tags/tap formula
+      so `v0.19.0` artifacts and SHA-256 match.
+
+      '
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v23.impl
+    agent: rust-senior
+  - id: v23.gate
+    name: V23 Stage 7 (v0.19.0) Independent Terminal Acceptance, Pure Rust Workspace
+      Verification & Live Distribution Gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
+      \n- **Deliver:** Independent terminal Phase `v23` and `v0.19.0` acceptance decision\
+      \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session (never resuming\
+      \ an earlier hygiene session).\n- **Boundary:** Owner `gate-reviewer`; strictly\
+      \ read-only (`repo_change_policy: no_repo_change`) over the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito` and live public endpoints.\n- **Admit:**\n\
+      \  - Included phase and terminal outcomes: Phase `v23` (`v23.impl` and `v23.hygiene`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `cargo test --workspace && cargo\
+      \ build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exits `0`\
+      \ with 100% pass rate across all native Rust unit, integration, and `F1`–`F64`\
+      \ regression tests.\n    2. Zero root Node/Vitest scaffolding residue: root\
+      \ `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`,\
+      \ `node_modules/`, and `tests/**/*.ts` are absent; only `plugins/pi/{package.json,\
+      \ cito-bridge.ts}` remains for the Pi host (`\"private\": true`, zero npm dependencies);\
+      \ `.github/workflows/release.yml` contains zero `setup-node` or `npm` steps.\n\
+      \    3. Zero hardcoded agent/channel names or forbidden strings: `grep -rnE\
+      \ -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` returns `0` matches; `[\\p{Script=Han}]`\
+      \ and `\\b(rda|casdoor|rcatwin|keppel|mingchen)\\b` return `0` matches across\
+      \ repository files (excluding the policy rule line in `docs/DESIGN.md`).\n \
+      \   4. Live distribution verification: `https://tefx.github.io/cito/` returns\
+      \ HTTP `200`, GitHub Release `v0.19.0` publishes `Cito-macos-arm64.zip` + `.sha256`,\
+      \ and `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` `Formula/cito.rb`\
+      \ match the published SHA-256.\n- **Recovery:** If any acceptance check fails,\
+      \ record concrete counterexamples and route a cohesive writable repair to `rust-senior`\
+      \ before re-running this gate in Delta mode.\n"
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v23.hygiene
+    agent: gate-reviewer
