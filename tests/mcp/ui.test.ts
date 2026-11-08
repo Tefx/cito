@@ -2,7 +2,7 @@ import {expect,test} from "vitest";
 import {readFile,writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {createHash} from "node:crypto";
-import {agent,remoteAgent,cleanroom,provider,seed,sendUnbound,received,action,rows,errorTool,human} from "../support/native-scenarios.js";
+import {agent,remoteAgent,cleanroom,provider,seed,sendUnbound,received,action,rows,errorTool,human,wire} from "../support/native-scenarios.js";
 import {freePort,waitFor,object} from "../support/native-harness.js";
 import {loginFixture} from "../support/oidc-native.js";
 
@@ -130,6 +130,62 @@ test("UI send_signal validates tool arguments before persisting and reports comp
  expect(object(JSON.parse(String(stored[0]!.payload)))).toMatchObject({to:id,message:"hello",in_reply_to:"original"});
  await waitFor(async () => (await frames()).length === invalid.length + 1);
  expect((await frames()).at(-1)).toEqual({op:"composer_result",ok:true,error:null});
+});
+test("UI send_reply_from_human validates recipients and atomically publishes and acknowledges replies", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url,user:"alice"}},defaultHub:"work"});
+ await f.daemon();
+ await f.tool("cito_listen",{about:"Human replies",scope:"self"},human);
+ const node = f.query("SELECT listener_id,binding_generation FROM local_listeners WHERE harness='human'")[0]!;
+ const target = {listener_id:"c_1111111111111111",public_id:"bob-1111111111111111",owner_user:"bob",principal_id:"none#bob",
+  harness:"cursor",session_id:"target",scope:"workspace",state:"ACTIVE",binding_generation:7,channels:{},updated_at_ms:Date.now()};
+ const putTarget = async (patch = {}) => hub.rpc("kv_put",{key:target.listener_id,data_b64:Buffer.from(JSON.stringify({...target,...patch})).toString("base64")});
+ await putTarget();
+ for (const id of ["original","second"]) {
+  const source = wire(id,String(node.listener_id),"none#bob",Number(node.binding_generation),"Please reply");
+  const from = {...source.from,listener_id:"work:"+target.public_id};
+  await hub.rpc("js_publish",{subject:"cito.signal."+String(node.listener_id),data_b64:Buffer.from(JSON.stringify({...source,from})).toString("base64")});
+ }
+ const request = {op:"send_reply_from_human",hub:"work",to_listener_id:"work:"+target.public_id,message:"Approved",in_reply_to:"original"};
+ for (const [patch,code] of [
+  [{to_listener_id:"work:missing"},"LISTENER_NOT_FOUND"],
+  [{to_listener_id:String(node.listener_id)},"SELF_SEND_FORBIDDEN"],
+  [{message:""},"INVALID_INPUT"], [{message:" \u0000 "},"INVALID_INPUT"],
+  [{message:"😀".repeat(65_537)},"INVALID_INPUT"], [{message:42},"INVALID_INPUT"],
+  [{in_reply_to:42},"INVALID_INPUT"], [{in_reply_to:""},"INVALID_INPUT"]
+ ] as const) {
+  expect(await action(f,{...request,...patch},true)).toMatchObject({http_status:400,error:expect.stringContaining(code+":")});
+ }
+ for (const patch of [{state:"UNLISTENED"},{updated_at_ms:Date.now()-1_800_001}]) {
+  await putTarget(patch);
+  expect(await action(f,request,true)).toMatchObject({http_status:400,error:expect.stringContaining("LISTENER_NOT_FOUND:")});
+ }
+ await putTarget({scope:"self"});
+ expect(await action(f,request,true)).toMatchObject({http_status:400,error:expect.stringContaining("FORBIDDEN_TARGET_SCOPE:")});
+ expect(owner.query("SELECT signal_id,acked_at_ms FROM hub_signals ORDER BY seq",[],"hub/hub.sqlite")).toEqual([
+  {signal_id:"original",acked_at_ms:null},{signal_id:"second",acked_at_ms:null}
+ ]);
+ await putTarget();
+ // The authenticated caller owns the sender; request fields cannot override it.
+ const sent = await action(f,{...request,message:undefined,text:"Approved\u0000\nnext",signal_id:"second",principal_id:"none#bob",owner_user:"bob"});
+ expect(sent).toMatchObject({http_status:200,ok:true,target_display:target.public_id});
+ const payload = object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(sent.signal_id)],"hub/hub.sqlite")[0]!.data)));
+ expect(payload).toMatchObject({signal_id:sent.signal_id,to:target.listener_id,target_generation:7,message:"Approved\nnext",in_reply_to:"original",
+  from:{principal_id:"none#alice",user:"alice",harness:"human",listener_id:"alice-"+String(node.listener_id).replace(/^c_/,"")}});
+ expect(owner.query("SELECT signal_id,acked_at_ms FROM hub_signals WHERE signal_id IN ('original','second') ORDER BY seq",[],"hub/hub.sqlite")).toEqual([
+  {signal_id:"original",acked_at_ms:expect.any(Number)},{signal_id:"second",acked_at_ms:null}
+ ]);
+ // A disconnected retained target remains replyable; aliases and code-point limits share the same path.
+ await putTarget({scope:"self",principal_id:"none#alice",updated_at_ms:Date.now()-61_000});
+ const text = "😀".repeat(65_536);
+ const alias = await action(f,{op:"send_reply_from_human",hub:"work",to:target.listener_id,text,signal_id:"second"});
+ expect(alias).toMatchObject({http_status:200,ok:true});
+ expect(object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(alias.signal_id)],"hub/hub.sqlite")[0]!.data)))).toMatchObject({message:text,in_reply_to:"second"});
+ expect(owner.query("SELECT acked_at_ms FROM hub_signals WHERE signal_id='second'",[],"hub/hub.sqlite")).toEqual([{acked_at_ms:expect.any(Number)}]);
+ const unthreaded = await action(f,{op:"send_reply_from_human",hub:"work",to:target.public_id,message:"Follow-up"});
+ expect(unthreaded).toMatchObject({http_status:200,ok:true});
+ expect(object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(unthreaded.signal_id)],"hub/hub.sqlite")[0]!.data)))).toMatchObject({message:"Follow-up",in_reply_to:null});
+ expect(owner.query("SELECT signal_id FROM hub_signals WHERE subject=?",["cito.signal."+target.listener_id],"hub/hub.sqlite").map(row=>row.signal_id)).toEqual([sent.signal_id,alias.signal_id,unthreaded.signal_id]);
 });
 test("channel RPC failures emit card feedback for every action alias", async () => {
  const f = await cleanroom();

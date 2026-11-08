@@ -428,7 +428,7 @@ impl HubEngine {
             return self.human_rpc(op, params, principal);
         }
         let mut events = Vec::new();
-        let result = self
+        let (result, ack_request) = self
             .inner
             .db
             .transaction(|c| self.rpc_conn(c, op, params, principal, &mut events))?;
@@ -437,6 +437,9 @@ impl HubEngine {
         }
         if op == "signal_ack" {
             self.notify_ack(params)?;
+        }
+        if let Some(request) = ack_request {
+            self.notify_ack(&request)?;
         }
         Ok(result)
     }
@@ -447,8 +450,8 @@ impl HubEngine {
         p: &Value,
         caller: Option<&Value>,
         events: &mut Vec<Value>,
-    ) -> Result<Value, String> {
-        match op {
+    ) -> Result<(Value, Option<Value>), String> {
+        let result = match op {
             "stream_info" => stream_info(c, required(p, "stream")?),
             "stream_add" | "stream_update" => {
                 admin(caller)?;
@@ -504,10 +507,10 @@ impl HubEngine {
             }
             "kv_get" => {
                 let Some(row) = kv_row(c, required(p, "key")?)? else {
-                    return Ok(Value::Null);
+                    return Ok((Value::Null, None));
                 };
                 if !visible(&row, caller) {
-                    return Ok(json!({"forbidden_scope":true}));
+                    return Ok((json!({"forbidden_scope":true}), None));
                 }
                 kv_wire(&row)
             }
@@ -608,11 +611,14 @@ impl HubEngine {
                 if subject.starts_with("cito.ack.") {
                     own(c, subject_target(subject).unwrap_or(""), caller)?;
                     events.push(json!({"type":"nc","subject":subject,"data_b64":B64.encode(&raw)}));
-                    return Ok(if op == "nc_publish" {
-                        json!({"ok":true})
-                    } else {
-                        json!({"seq":0,"duplicate":false,"stream":""})
-                    });
+                    return Ok((
+                        if op == "nc_publish" {
+                            json!({"ok":true})
+                        } else {
+                            json!({"seq":0,"duplicate":false,"stream":""})
+                        },
+                        None,
+                    ));
                 }
                 let data = payload_metadata(&raw);
                 let result = publish_payload(
@@ -717,6 +723,28 @@ impl HubEngine {
                     Ok(json!({"acked":true}))
                 }
             }
+            "send_reply_from_human" => {
+                let sender = caller.ok_or("FORBIDDEN: Human identity required")?;
+                let target = p["to_listener_id"]
+                    .as_str()
+                    .or_else(|| p["to"].as_str())
+                    .ok_or("INVALID_INPUT: to_listener_id is required")?;
+                let text = p["message"]
+                    .as_str()
+                    .or_else(|| p["text"].as_str())
+                    .ok_or("INVALID_INPUT: message is required")?;
+                let in_reply_to = p
+                    .get("in_reply_to")
+                    .filter(|v| !v.is_null())
+                    .or_else(|| p.get("signal_id").filter(|v| !v.is_null()))
+                    .map(|v| {
+                        v.as_str()
+                            .filter(|s| !s.is_empty())
+                            .ok_or("INVALID_INPUT: in_reply_to must be a non-empty string")
+                    })
+                    .transpose()?;
+                return publish_human_reply(c, sender, "human", target, text, in_reply_to, events);
+            }
             "signal_claim_dispatch" => claim(c, p, caller),
             "signal_ack" => ack(c, p, caller, events),
             "account_info" => {
@@ -733,7 +761,8 @@ impl HubEngine {
                 )
             }
             _ => Err(format!("INVALID_INPUT: Unknown hub RPC op: {op}")),
-        }
+        }?;
+        Ok((result, None))
     }
     fn plugin(&self, id: &str) -> Result<ChannelPlugin, String> {
         self.inner
@@ -1073,29 +1102,87 @@ impl HubEngine {
     }
     fn inbound_reply(&self, id: &str, f: &Value) -> Result<Value, String> {
         let mut events = Vec::new();
-        let mut ack_request = Value::Null;
+        let mut ack_request = None;
         let result=self.inner.db.transaction(|c|{
         let update=required(f,"update_id")?;if one(c,"SELECT 1 AS n FROM hub_processed_replies WHERE plugin_id=? AND update_id=?",&[json!(id),json!(update)])?.is_some(){return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null}))}
         let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;
         let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?;let binding=bindings.into_iter().find(|b|{let cfg=parse(b,"user_config_json");s(&cfg,"_external_chat_id")==chat&&s(&cfg,"_external_user_id")==user}).ok_or("FORBIDDEN: external account is not bound")?;let pid=s(&binding,"principal_id");
         let target=if let Some(ext)=f["reply_to_external_msg_id"].as_str(){one(c,"SELECT signal_id,from_listener_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND external_msg_id=?",&[json!(id),json!(pid),json!(ext)])?}else{one(c,"SELECT signal_id,from_listener_id FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND status='delivered' AND delivered_ms>=? AND from_listener_id IS NOT NULL ORDER BY delivered_ms DESC,seq DESC LIMIT 1",&[json!(id),json!(pid),json!(now_ms()-600_000)])?}.ok_or("LISTENER_NOT_FOUND: no recent sender to reply to")?;
-        let raw=s(&target,"from_listener_id").rsplit_once(':').map(|(_,s)|s).unwrap_or(s(&target,"from_listener_id"));let target_row=resolve_registration(c,raw)?.ok_or("LISTENER_NOT_FOUND: reply target not found")?;let registration=parse(&target_row,"value");if !matches!(evaluate_node_lease(&registration, now_ms() as u64), "ACTIVE" | "DISCONNECTED_RETAINED"){return Err("LISTENER_NOT_FOUND: reply target is inactive or expired".into())}if s(&target_row,"scope")=="self"&&!principal_ids_equal(s(&target_row,"principal_id"),pid){return Err("FORBIDDEN_TARGET_SCOPE: reply target is private".into())}
-        let text=required(f,"text")?;let text:String=text.chars().filter(|c|!c.is_control()||c.is_whitespace()).collect();if text.trim().is_empty()||text.chars().count()>65_536{return Err("INVALID_INPUT: reply must contain 1..65536 code points".into())}
-        let human=find_human(c,pid)?.unwrap_or_else(||listener_id(pid, "human", "default"));let owner=s(&binding,"owner_user");let sig=random_id("sig_")?;let target_id=s(&target_row,"key");if human==target_id{return Err("SELF_SEND_FORBIDDEN: cannot reply to the same node".into())}
-        let payload=json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|hub|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":"hub","host_name":id,"harness":"human","listener_id":format!("{}-{}",slug(owner),human.trim_start_matches("c_")),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":target["signal_id"]});
-        publish(c,&format!("cito.signal.{target_id}"),&payload,Some(&sig),None,&mut events)?;
-        ack_request=json!({"node_id":human,"signal_ids":[target["signal_id"]],"channel_id":format!("hub:{id}")});ack(c,&ack_request,None,&mut events)?;
+        let (reply, request)=publish_human_reply(c,&binding,id,required(&target,"from_listener_id")?,required(f,"text")?,target["signal_id"].as_str(),&mut events)?;
+        ack_request=request;
         c.execute("INSERT INTO hub_processed_replies(plugin_id,update_id,processed_at_ms) VALUES(?,?,?)",&[json!(id),json!(update),json!(now_ms())])?;
-        Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"signal_id":sig,"target_display":registration["public_id"],"error":null}))
+        Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"signal_id":reply["signal_id"],"target_display":reply["target_display"],"error":null}))
         })?;
         for event in events {
             self.emit(event)
         }
-        if !ack_request.is_null() {
-            self.notify_ack(&ack_request)?;
+        if let Some(request) = ack_request {
+            self.notify_ack(&request)?;
         }
         Ok(result)
     }
+}
+
+fn publish_human_reply(
+    c: &Connection,
+    sender: &Value,
+    channel: &str,
+    target: &str,
+    text: &str,
+    in_reply_to: Option<&str>,
+    events: &mut Vec<Value>,
+) -> Result<(Value, Option<Value>), String> {
+    let pid = required(sender, "principal_id")?;
+    let owner = required(sender, "owner_user")?;
+    let raw = target.rsplit_once(':').map(|(_, s)| s).unwrap_or(target);
+    let target_row =
+        resolve_registration(c, raw)?.ok_or("LISTENER_NOT_FOUND: reply target not found")?;
+    let registration = parse(&target_row, "value");
+    if !matches!(
+        evaluate_node_lease(&registration, now_ms() as u64),
+        "ACTIVE" | "DISCONNECTED_RETAINED"
+    ) {
+        return Err("LISTENER_NOT_FOUND: reply target is inactive or expired".into());
+    }
+    if s(&target_row, "scope") == "self"
+        && !principal_ids_equal(s(&target_row, "principal_id"), pid)
+    {
+        return Err("FORBIDDEN_TARGET_SCOPE: reply target is private".into());
+    }
+    let text: String = text
+        .chars()
+        .filter(|c| !c.is_control() || c.is_whitespace())
+        .collect();
+    if text.trim().is_empty() || text.chars().count() > 65_536 {
+        return Err("INVALID_INPUT: reply must contain 1..65536 code points".into());
+    }
+    let human = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
+    let target_id = s(&target_row, "key");
+    if human == target_id {
+        return Err("SELF_SEND_FORBIDDEN: cannot reply to the same node".into());
+    }
+    let sig = random_id("sig_")?;
+    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|hub|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":"hub","host_name":channel,"harness":"human","listener_id":format!("{}-{}",slug(owner),human.trim_start_matches("c_")),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
+    publish(
+        c,
+        &format!("cito.signal.{target_id}"),
+        &payload,
+        Some(&sig),
+        None,
+        events,
+    )?;
+    let ack_request = if let Some(source) = in_reply_to {
+        let request =
+            json!({"node_id":human,"signal_ids":[source],"channel_id":format!("hub:{channel}")});
+        ack(c, &request, None, events)?;
+        Some(request)
+    } else {
+        None
+    };
+    Ok((
+        json!({"ok":true,"signal_id":sig,"target_display":registration["public_id"],"error":null}),
+        ack_request,
+    ))
 }
 
 fn next_revision(c: &Connection) -> Result<i64, String> {

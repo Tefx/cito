@@ -711,6 +711,142 @@ fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
     }
 }
 #[test]
+fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        e.set_plugin_roots(&[root.clone()]).unwrap();
+        e.rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"}}),
+            None,
+        )
+        .unwrap();
+        let owner = local_principal("alice");
+        e.rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","enabled":true,"user_config":{"address":"reply-test"}}),
+            Some(&owner),
+        )
+        .unwrap();
+        let human = listener_id("none#alice", "human", "default");
+        put(&e, "target", "none#bob", "workspace");
+        send(&e, &human, "source");
+        wait_for(|| {
+            !e.inner.db.query("SELECT 1 AS n FROM hub_channel_deliveries WHERE signal_id='source' AND status='delivered'", &[]).unwrap().is_empty()
+        });
+        let reply = e
+            .rpc(
+                "send_reply_from_human",
+                &json!({"to":"target","message":"Approved","signal_id":"source"}),
+                Some(&owner),
+            )
+            .unwrap();
+        assert_eq!(reply["ok"], true);
+        wait_for(|| {
+            std::fs::read_to_string(root.join("fixture/frames.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .any(|f| f["op"] == "on_acked" && f["signal_ids"] == json!(["source"]))
+        });
+        assert!(e
+            .inner
+            .db
+            .query(
+                "SELECT acked_at_ms FROM hub_signals WHERE signal_id='source'",
+                &[]
+            )
+            .unwrap()[0]["acked_at_ms"]
+            .is_number());
+        let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
+        let ack = frames
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|f| f["op"] == "on_acked" && f["signal_ids"] == json!(["source"]))
+            .unwrap();
+        assert_eq!(ack["principal_id"], "none#alice");
+        let mut external = ack["external_msg_ids"].as_array().unwrap().clone();
+        external.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        assert_eq!(external, vec![json!("source-1"), json!("source-2")]);
+        let stored = e
+            .inner
+            .db
+            .query(
+                "SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",
+                &[reply["signal_id"].clone()],
+            )
+            .unwrap();
+        assert_eq!(parse(&stored[0], "data")["in_reply_to"], "source");
+    }));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+#[test]
+fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    let sender = local_principal("alice");
+    let human = listener_id("none#alice", "human", "default");
+    put(&e, "target", "none#bob", "workspace");
+    send(&e, &human, "original");
+    let events = e.subscribe(None).unwrap();
+    let request = json!({"to":"work:target","message":"Approved","in_reply_to":"original"});
+    e.inner.db.execute("CREATE TRIGGER fail_reply_ack BEFORE UPDATE OF acked_at_ms ON hub_signals WHEN OLD.signal_id='original' BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
+    assert!(e
+        .rpc("send_reply_from_human", &request, Some(&sender))
+        .unwrap_err()
+        .contains("injected ack failure"));
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT signal_id,acked_at_ms FROM hub_signals", &[])
+            .unwrap(),
+        vec![json!({"signal_id":"original","acked_at_ms":null})]
+    );
+    assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    e.inner
+        .db
+        .execute("DROP TRIGGER fail_reply_ack", &[])
+        .unwrap();
+    let reply = e
+        .rpc("send_reply_from_human", &request, Some(&sender))
+        .unwrap();
+    let published = events.recv_timeout(Duration::from_millis(100)).unwrap();
+    assert_eq!(published["type"], "signal");
+    let payload: Value =
+        serde_json::from_slice(&B64.decode(s(&published, "data_b64")).unwrap()).unwrap();
+    assert_eq!(payload["signal_id"], reply["signal_id"]);
+    assert_eq!(payload["to"], "target");
+    assert_eq!(payload["message"], "Approved");
+    assert_eq!(payload["in_reply_to"], "original");
+    assert_eq!(payload["from"]["principal_id"], "none#alice");
+    assert_eq!(
+        payload["from"]["listener_id"],
+        format!("alice-{}", human.trim_start_matches("c_"))
+    );
+    let event = events.recv_timeout(Duration::from_millis(100)).unwrap();
+    assert_eq!(event["subject"], format!("cito.ack.{human}"));
+    let ack: Value = serde_json::from_slice(&B64.decode(s(&event, "data_b64")).unwrap()).unwrap();
+    assert_eq!(ack["node_id"], human);
+    assert_eq!(ack["signal_ids"], json!(["original"]));
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id='original'",
+            &[]
+        )
+        .unwrap()[0]["acked_at_ms"]
+        .is_number());
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
 fn reply_dedup_target_validation_and_ack_commit_together() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();
