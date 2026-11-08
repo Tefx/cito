@@ -170,6 +170,12 @@ impl LocalState {
                 (rows, old["batch_id"].clone(), expires, card)
             } else {
                 let mut rows = c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND binding_generation=? AND state='RECEIVED' AND batch_id IS NULL AND acknowledged_at_ms IS NULL AND held_reason IS NULL AND expires_at_ms>? ORDER BY seq LIMIT 50", &[json!(hub), json!(id), listener["binding_generation"].clone(), json!(now)])?;
+                // Plugins receive batch-wide queue flags, so re-batched survivors
+                // must never share a request with a different insertion checkpoint.
+                if let Some(first) = rows.first() {
+                    let checkpoint = (first["queue_written"].clone(), first["queue_confirmed"].clone());
+                    rows.retain(|row| row["queue_written"] == checkpoint.0 && row["queue_confirmed"] == checkpoint.1);
+                }
                 while !rows.is_empty() {
                     let card = format_wake_card(&listener,&rows,hub,qualify_ids);
                     if serde_json::to_vec(&card).map_err(|e| e.to_string())?.len() <= 262_144 { break; }

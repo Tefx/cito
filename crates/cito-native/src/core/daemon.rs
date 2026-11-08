@@ -1039,6 +1039,18 @@ impl DaemonService {
                 }
             }
         }
+        if handle.is_some() && matches.len() > 1 {
+            let now = now_ms();
+            let is_live = |row: &Value| {
+                matches!(
+                    super::lease::evaluate_node_lease(row, now),
+                    "ACTIVE" | "DISCONNECTED_RETAINED"
+                )
+            };
+            if matches.iter().any(is_live) {
+                matches.retain(is_live);
+            }
+        }
         if matches.len() > 1 {
             let principal = string(&matches[0], "principal_id");
             if matches.iter().any(|row| {

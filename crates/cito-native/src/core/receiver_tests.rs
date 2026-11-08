@@ -313,6 +313,55 @@ fn final_response_checkpoint_survives_protocol_retry_before_later_arrivals() -> 
 }
 
 #[test]
+fn partially_acked_checkpoint_keeps_plugin_retry_separate_from_fresh_arrivals() -> Result<(), String>
+{
+    for confirmed in [false, true] {
+        let f = Fixture::new()?;
+        f.seed("read")?;
+        f.seed("unread")?;
+        let plugin = f.plugin(&format!(
+            "if not r['queue_written']:\n with open(os.path.join(root,'insertions'),'a') as f: f.write(json.dumps([s['signal_id'] for s in r['signals']])+'\\n')\nn=sum(1 for _ in open(os.path.join(root,'requests.jsonl')))\nprint(json.dumps({{'ok':True,'outcome':'driver_unavailable' if n==1 else 'delivered_unconfirmed','queue_written':True,'insertion_unknown':{},'open_confirmed':True}}))",
+            if confirmed { "False" } else { "True" }
+        ));
+        f.dispatch(&plugin)?;
+        f.state.acknowledge(
+            "local",
+            string(&f.row, "listener_id"),
+            &[json!("read")],
+            "other",
+        )?;
+        f.client.rpc(
+            "signal_ack",
+            &json!({"node_id":f.row["listener_id"],"signal_ids":["read"],"channel_id":"other"}),
+        )?;
+        f.seed("fresh")?;
+        f.dispatch(&plugin)?;
+        let requests = f.requests()?;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["queue_written"], true);
+        assert_eq!(requests[1]["queue_confirmed"], confirmed);
+        assert_eq!(requests[1]["signals"][0]["signal_id"], "unread");
+        assert_eq!(requests[1]["signals"].as_array().map(Vec::len), Some(1));
+        let rows = f.rows()?;
+        assert_eq!(rows[1]["queue_written"], 1);
+        assert_eq!(rows[1]["queue_confirmed"], i64::from(confirmed));
+        assert_eq!(rows[1]["acknowledged_at_ms"].is_number(), confirmed);
+        assert_eq!(rows[2]["state"], "RECEIVED");
+        f.dispatch(&plugin)?;
+        let fresh = &f.requests()?[2];
+        assert_eq!(fresh["queue_written"], false);
+        assert_eq!(fresh["queue_confirmed"], false);
+        assert_eq!(fresh["signals"][0]["signal_id"], "fresh");
+        assert_eq!(fresh["signals"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("insertions")).map_err(|e| e.to_string())?,
+            "[\"read\", \"unread\"]\n[\"fresh\"]\n"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_subprocess_retries_frozen_batch_without_mixing_new_arrivals() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("first")?;

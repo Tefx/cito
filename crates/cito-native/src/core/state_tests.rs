@@ -275,29 +275,94 @@ fn duplicate_received_recovers_schedule_but_passive_redelivery_keeps_fallback() 
 
 #[test]
 fn acked_members_rebatch_remaining_unread_without_losing_queue_checkpoint() -> Result<(), String> {
+    for confirmed in [false, true] {
+        let f = Fixture::new()?;
+        f.seed("read", 1)?;
+        f.seed("unread", 2)?;
+        let original = f.state.claim_wake_batch("local", "c_1")?;
+        f.state.finish_wake_batch(
+            &f.listener()?,
+            &original[0],
+            "DISPATCHING",
+            None,
+            true,
+            confirmed,
+            false,
+            false,
+        )?;
+        f.state
+            .acknowledge("local", "c_1", &[json!("read")], "other")?;
+        f.seed("fresh", 3)?;
+        let next = f.state.claim_wake_batch("local", "c_1")?;
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0]["signal_id"], "unread");
+        assert_ne!(next[0]["batch_id"], original[0]["batch_id"]);
+        assert_ne!(next[0]["batch_card"], original[0]["batch_card"]);
+        assert_eq!(next[0]["queue_written"], 1);
+        assert_eq!(next[0]["queue_confirmed"], i64::from(confirmed));
+        let fresh = &f.rows()?[2];
+        assert_eq!(fresh["state"], "RECEIVED");
+        assert!(fresh["batch_id"].is_null());
+        f.state.finish_wake_batch(
+            &f.listener()?,
+            &next[0],
+            "DISPATCHED",
+            None,
+            false,
+            false,
+            false,
+            false,
+        )?;
+        let fresh = f.state.claim_wake_batch("local", "c_1")?;
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0]["signal_id"], "fresh");
+        assert_eq!(fresh[0]["queue_written"], 0);
+        assert_eq!(fresh[0]["queue_confirmed"], 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn new_batches_separate_persisted_queue_confirmation_checkpoints() -> Result<(), String> {
     let f = Fixture::new()?;
-    f.seed("read", 1)?;
-    f.seed("unread", 2)?;
-    let original = f.state.claim_wake_batch("local", "c_1")?;
-    f.state.finish_wake_batch(
-        &f.listener()?,
-        &original[0],
-        "DISPATCHING",
-        None,
-        true,
-        true,
-        false,
-        false,
+    for (seq, id) in ["unknown-a", "confirmed", "fresh", "unknown-b"]
+        .iter()
+        .enumerate()
+    {
+        f.seed(id, seq + 1)?;
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET queue_written=1,queue_confirmed=CASE WHEN signal_id='confirmed' THEN 1 ELSE 0 END WHERE signal_id<>'fresh'",
+        &[],
     )?;
-    f.state
-        .acknowledge("local", "c_1", &[json!("read")], "other")?;
-    let next = f.state.claim_wake_batch("local", "c_1")?;
-    assert_eq!(next.len(), 1);
-    assert_eq!(next[0]["signal_id"], "unread");
-    assert_ne!(next[0]["batch_id"], original[0]["batch_id"]);
-    assert_ne!(next[0]["batch_card"], original[0]["batch_card"]);
-    assert_eq!(next[0]["queue_written"], 1);
-    assert_eq!(next[0]["queue_confirmed"], 1);
+    for (ids, written, confirmed) in [
+        (vec!["unknown-a", "unknown-b"], 1, 0),
+        (vec!["confirmed"], 1, 1),
+        (vec!["fresh"], 0, 0),
+    ] {
+        let batch = f.state.claim_wake_batch("local", "c_1")?;
+        assert_eq!(
+            batch
+                .iter()
+                .map(|row| string(row, "signal_id"))
+                .collect::<Vec<_>>(),
+            ids
+        );
+        for row in &batch {
+            assert_eq!(row["queue_written"], written);
+            assert_eq!(row["queue_confirmed"], confirmed);
+        }
+        f.state.finish_wake_batch(
+            &f.listener()?,
+            &batch[0],
+            "DISPATCHED",
+            None,
+            false,
+            false,
+            false,
+            false,
+        )?;
+    }
     Ok(())
 }
 
