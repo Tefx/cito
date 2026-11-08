@@ -365,3 +365,55 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
    - In `site/scripts/hero-preview.js`, set `"Copied ✓"` only after `await navigator.clipboard.writeText(cmd)` resolves, showing `"Copy failed"` on rejection or missing Clipboard API (`F42`).
    - Enable GitHub Pages (`gh api -X POST repos/Tefx/cito/pages -f build_type=workflow` and `enablement: true` in `.github/workflows/pages.yml`), set `runs-on: macos-15` in `.github/workflows/release.yml`, publish `v0.18.0` `Cito-macos-arm64.zip` + `.sha256`, write the real SHA-256 into `packaging/homebrew/cito.rb` (installing `cito` and `cito-mcp`), and push `Formula/cito.rb` to `Tefx/homebrew-tap` (`F4`).
 
+---
+
+## 9. Stage 7 (`v0.19.0` — Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
+
+### 9.1 Purpose & Clean-Slate Repository Layout
+Once Phase `v22` verifies that all 33 historical Vitest suites and `F1`–`F64` regressions pass against the compiled native binaries, Phase `v23` removes the transitional root Node.js / Vitest scaffolding so the repository is a **100% pure Rust + Swift workspace** at the top level:
+
+```text
+cito/
+├── Cargo.toml                        # Root Cargo workspace manifest (single source of build & test)
+├── Cargo.lock                        # Cargo lockfile
+├── crates/
+│   └── cito-native/                  # Core + plugin binaries & native integration test suite
+│       ├── Cargo.toml
+│       ├── build.rs                  # Compiles src/macos/cito-ui.swift & stages bin/ + plugins/*/bin/
+│       ├── src/
+│       └── tests/                    # Full Rust integration & E2E test suite (`cargo test`)
+├── src/macos/
+│   └── cito-ui.swift                 # Native macOS AppKit UI
+├── plugins/
+│   ├── pi/                           # Only directory with package.json & .ts (loaded by Pi host, 0 npm deps)
+│   │   ├── plugin.json
+│   │   ├── package.json
+│   │   ├── cito-bridge.ts
+│   │   └── bin/cito-plugin-pi
+│   ├── codex/
+│   ├── claude/
+│   ├── human/
+│   └── telegram/
+├── site/                             # Static product website (GitHub Pages)
+├── packaging/homebrew/cito.rb        # Homebrew Formula
+└── deploy/hub/                       # Standalone Hub Docker & deployment configs
+```
+
+### 9.2 Root Node/Vitest Scaffolding Removal & `cargo test` Migration Contract
+1. **Complete Removal of Root Node.js / Vitest Artifacts**:
+   - Delete root `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, and `tests/**/*.ts` (including `tests/support/native-harness.ts`).
+   - Only `plugins/pi/package.json` (`"private": true`, zero `dependencies` / `devDependencies`) and `plugins/pi/cito-bridge.ts` remain in the repository because Pi itself is a TypeScript host that loads `plugins/pi` as a standard Pi Package.
+2. **Unified Build & Test via `cargo build --release` & `cargo test`**:
+   - Promote/add a root `Cargo.toml` workspace (`members = ["crates/cito-native"]`).
+   - `cargo test --workspace` executes the complete behavioral test suite in Rust (`crates/cito-native/tests/*.rs`), covering:
+     - All `HubEngine` (`local://`, LAN `:4291`, standalone `cito hub` HTTP/SSE, `none`/`token`/`oidc` RSA/ECDSA JWKS verification, RLS, 30m retention/dedup pruning, `signal_claim_dispatch` atomicity, `signal_ack` offline reconciliation, and `HumanChannel` subprocess lifecycle) contracts;
+     - All `DaemonService` (`state.sqlite` persistence, `cito_listen`/`cito_unlisten`/`cito_find`/`cito_send`/`cito_inbox`, stale-daemon handover, and all 27 `cito-ui` NDJSON IPC actions + `< 256 KiB` frame bounding) contracts;
+     - All 5 built-in plugins (`plugins/{pi,codex,claude,human,telegram}` subprocess contracts, `cito-claude-hook` `flock` + torn-line isolation, Codex multiline TOML & wake, Pi `settings.json` `packages` registration, and `plugins/pi/cito-bridge.ts` socket/MCP registration verified via `node` subprocess when available);
+     - Headless `bin/cito-ui` AppKit view-tree & interaction tests (`cardMenu`, `DirectoryPanel` `Directory | Activity` + `ComposerBar`, 3-Tab `SettingsPanel`, `WakeBanner`);
+     - Static website (`site/`), brand SVG contrast, and Homebrew Formula (`ruby -c packaging/homebrew/cito.rb`) checks;
+     - All `F1`–`F64` regression cases.
+3. **CI Workflow & Documentation Alignment (`.github/workflows/release.yml`, `README.md`, `AGENTS.md`)**:
+   - Update `.github/workflows/release.yml` to remove `actions/setup-node@v4` and `npm ci` / `npm run ...`, running pure `cargo test --workspace`, `cargo build --release`, `./bin/cito setup --build-app ./build`, and `/usr/bin/ruby -c packaging/homebrew/cito.rb`.
+   - Bump `CITO_VERSION` to `"0.19.0"`, publish GitHub Release `v0.19.0`, and sync `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap`.
+
+
