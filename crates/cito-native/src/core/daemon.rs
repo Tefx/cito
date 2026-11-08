@@ -1776,7 +1776,28 @@ impl DaemonService {
                 return Ok(result);
             }
             "send_reply_from_human" => {
-                return self.slot(&hub)?.rpc("send_reply_from_human", action)
+                let target = action["to_listener_id"]
+                    .as_str()
+                    .or_else(|| action["to"].as_str())
+                    .ok_or("INVALID_INPUT: to_listener_id is required")?;
+                let (target_hub, _) = target.split_once(':').unwrap_or((&hub, target));
+                if action["hub"].is_string() && target_hub != hub {
+                    return Err("INVALID_INPUT: Conflicting hub prefixes".into());
+                }
+                let mut normalized = action.clone();
+                for key in ["in_reply_to", "signal_id"] {
+                    if let Some((reply_hub, id)) =
+                        action[key].as_str().and_then(|v| v.split_once(':'))
+                    {
+                        if reply_hub != target_hub {
+                            return Err("INVALID_INPUT: Reply belongs to another Hub".into());
+                        }
+                        normalized[key] = json!(id);
+                    }
+                }
+                return self
+                    .slot(target_hub)?
+                    .rpc("send_reply_from_human", &normalized);
             }
             "send_signal" => {
                 let meta = json!({"expected_harness":"human","expected_session_id":"default"});

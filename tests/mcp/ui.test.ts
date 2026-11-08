@@ -131,12 +131,12 @@ test("UI send_signal validates tool arguments before persisting and reports comp
  await waitFor(async () => (await frames()).length === invalid.length + 1);
  expect((await frames()).at(-1)).toEqual({op:"composer_result",ok:true,error:null});
 });
-test("UI send_reply_from_human validates recipients and atomically publishes and acknowledges replies", async () => {
+test("UI send_reply_from_human validates recipients and scoped IDs and atomically publishes and acknowledges replies", async () => {
  const owner = await cleanroom(), hub = await owner.hub();
- const f = await cleanroom({hubs:{work:{url:hub.url,user:"alice"}},defaultHub:"work"});
+ const f = await cleanroom({hubs:{personal:{url:"local://"},work:{url:hub.url,user:"alice"}},defaultHub:"personal"});
  await f.daemon();
- await f.tool("cito_listen",{about:"Human replies",scope:"self"},human);
- const node = f.query("SELECT listener_id,binding_generation FROM local_listeners WHERE harness='human'")[0]!;
+ await f.tool("cito_listen",{hub:"work",about:"Human replies",scope:"self"},human);
+ const node = f.query("SELECT listener_id,binding_generation FROM local_listeners WHERE hub='work' AND harness='human'")[0]!;
  const target = {listener_id:"c_1111111111111111",public_id:"bob-1111111111111111",owner_user:"bob",principal_id:"none#bob",
   harness:"cursor",session_id:"target",scope:"workspace",state:"ACTIVE",binding_generation:7,channels:{},updated_at_ms:Date.now()};
  const putTarget = async (patch = {}) => hub.rpc("kv_put",{key:target.listener_id,data_b64:Buffer.from(JSON.stringify({...target,...patch})).toString("base64")});
@@ -146,7 +146,24 @@ test("UI send_reply_from_human validates recipients and atomically publishes and
   const from = {...source.from,listener_id:"work:"+target.public_id};
   await hub.rpc("js_publish",{subject:"cito.signal."+String(node.listener_id),data_b64:Buffer.from(JSON.stringify({...source,from})).toString("base64")});
  }
- const request = {op:"send_reply_from_human",hub:"work",to_listener_id:"work:"+target.public_id,message:"Approved",in_reply_to:"original"};
+ const request = {op:"send_reply_from_human",hub:"work",to_listener_id:"work:"+target.public_id,message:"Approved",in_reply_to:"work:original"};
+ for (const patch of [
+  {in_reply_to:"other:original"},
+  {signal_id:"other:second"},
+  {in_reply_to:undefined,signal_id:"other:second"}
+ ]) {
+  expect(await action(f,{...request,...patch},true)).toMatchObject({
+   http_status:400,error:"INVALID_INPUT: Reply belongs to another Hub"
+  });
+ }
+ for (const patch of [
+  {hub:"other"},
+  {to_listener_id:"other:"+target.public_id}
+ ]) {
+  expect(await action(f,{...request,...patch},true)).toMatchObject({
+   http_status:400,error:"INVALID_INPUT: Conflicting hub prefixes"
+  });
+ }
  for (const [patch,code] of [
   [{to_listener_id:"work:missing"},"LISTENER_NOT_FOUND"],
   [{to_listener_id:String(node.listener_id)},"SELF_SEND_FORBIDDEN"],
@@ -167,7 +184,7 @@ test("UI send_reply_from_human validates recipients and atomically publishes and
  ]);
  await putTarget();
  // The authenticated caller owns the sender; request fields cannot override it.
- const sent = await action(f,{...request,message:undefined,text:"Approved\u0000\nnext",signal_id:"second",principal_id:"none#bob",owner_user:"bob"});
+ const sent = await action(f,{...request,message:undefined,text:"Approved\u0000\nnext",signal_id:"work:second",principal_id:"none#bob",owner_user:"bob"});
  expect(sent).toMatchObject({http_status:200,ok:true,target_display:target.public_id});
  const payload = object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(sent.signal_id)],"hub/hub.sqlite")[0]!.data)));
  expect(payload).toMatchObject({signal_id:sent.signal_id,to:target.listener_id,target_generation:7,message:"Approved\nnext",in_reply_to:"original",
@@ -178,7 +195,7 @@ test("UI send_reply_from_human validates recipients and atomically publishes and
  // A disconnected retained target remains replyable; aliases and code-point limits share the same path.
  await putTarget({scope:"self",principal_id:"none#alice",updated_at_ms:Date.now()-61_000});
  const text = "😀".repeat(65_536);
- const alias = await action(f,{op:"send_reply_from_human",hub:"work",to:target.listener_id,text,signal_id:"second"});
+ const alias = await action(f,{op:"send_reply_from_human",to:"work:"+target.listener_id,text,signal_id:"work:second"});
  expect(alias).toMatchObject({http_status:200,ok:true});
  expect(object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(alias.signal_id)],"hub/hub.sqlite")[0]!.data)))).toMatchObject({message:text,in_reply_to:"second"});
  expect(owner.query("SELECT acked_at_ms FROM hub_signals WHERE signal_id='second'",[],"hub/hub.sqlite")).toEqual([{acked_at_ms:expect.any(Number)}]);

@@ -384,6 +384,88 @@ fn wait_for(mut f: impl FnMut() -> bool) {
     }
 }
 #[test]
+fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Drive exactly one tick; a background retry must not satisfy this test.
+        e.inner.closed.store(true, Ordering::SeqCst);
+        let worker = e.inner.worker.lock().unwrap().take().unwrap();
+        worker.join().unwrap();
+        e.inner.closed.store(false, Ordering::SeqCst);
+
+        let healthy = root.join("b");
+        std::fs::rename(root.join("fixture"), &healthy).unwrap();
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(healthy.join("plugin.json")).unwrap())
+                .unwrap();
+        manifest["id"] = json!("b");
+        std::fs::write(healthy.join("plugin.json"), manifest.to_string()).unwrap();
+        let broken = root.join("a");
+        std::fs::create_dir_all(&broken).unwrap();
+        manifest["id"] = json!("a");
+        manifest["command"] = json!([dir.join("missing-executable")]);
+        std::fs::write(broken.join("plugin.json"), manifest.to_string()).unwrap();
+        e.set_plugin_roots(&[root.clone()]).unwrap();
+        assert_eq!(
+            e.inner
+                .plugins
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        let pid = "none#alice";
+        e.inner.db.transaction(|c| {
+            for id in ["a", "b"] {
+                save_service(c, id, &json!({"credential":"test-only"}))?;
+                c.execute(
+                    "INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,?,'alice',?)",
+                    &[json!(pid), json!(id), json!(json!({"address":"room"}).to_string())],
+                )?;
+            }
+            Ok(())
+        }).unwrap();
+        let human = listener_id(pid, "human", "default");
+        send(&e, &human, "sibling-notification");
+        assert!(e.inner.processes.lock().unwrap().is_empty());
+        assert!(e.tick().unwrap_err().starts_with("PLUGIN_EXEC_FAILED: a:"));
+        wait_for(|| {
+            !e.inner.db.query(
+                "SELECT 1 AS n FROM hub_channel_deliveries WHERE plugin_id='b' AND signal_id='sibling-notification' AND status='delivered'",
+                &[],
+            ).unwrap().is_empty()
+        });
+        let frames: Vec<Value> = std::fs::read_to_string(healthy.join("frames.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            frames.iter().map(|f| s(f, "op")).collect::<Vec<_>>(),
+            vec!["configure", "deliver"]
+        );
+        assert_eq!(frames[0]["hub_config"]["credential"], "test-only");
+        assert_eq!(
+            frames[0]["bindings"],
+            json!([{"principal_id":pid,"user":"alice","config":{"address":"room"}}])
+        );
+        assert_eq!(frames[1]["signal"]["signal_id"], "sibling-notification");
+        assert_eq!(frames[1]["signal"]["to"]["listener_id"], human);
+        assert_eq!(frames[1]["signal"]["message"], "hello");
+        assert_eq!(frames[1]["config"]["address"], "room");
+    }));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
 fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let dir = temp();
     let root = fixture(&dir);
@@ -739,7 +821,7 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
         let reply = e
             .rpc(
                 "send_reply_from_human",
-                &json!({"to":"target","message":"Approved","signal_id":"source"}),
+                &json!({"to":"target","message":"Approved","signal_id":"work:source"}),
                 Some(&owner),
             )
             .unwrap();
@@ -795,7 +877,7 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     put(&e, "target", "none#bob", "workspace");
     send(&e, &human, "original");
     let events = e.subscribe(None).unwrap();
-    let request = json!({"to":"work:target","message":"Approved","in_reply_to":"original"});
+    let request = json!({"to":"work:target","message":"Approved","in_reply_to":"work:original"});
     e.inner.db.execute("CREATE TRIGGER fail_reply_ack BEFORE UPDATE OF acked_at_ms ON hub_signals WHEN OLD.signal_id='original' BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
     assert!(e
         .rpc("send_reply_from_human", &request, Some(&sender))

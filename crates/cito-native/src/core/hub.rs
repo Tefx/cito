@@ -971,6 +971,7 @@ impl HubEngine {
             .lock()
             .map_err(|_| "Registry lock poisoned")?
             .clone();
+        let mut first_error = None;
         for plugin in plugins {
             let should_run=self.inner.db.transaction(|c|{let(cfg,_)=service(c,&plugin.id)?;let bound=one(c,"SELECT 1 AS n FROM hub_human_channels WHERE plugin_id=? AND enabled=1 LIMIT 1",&[json!(plugin.id)])?.is_some();let pairing=one(c,"SELECT 1 AS n FROM hub_pairing_codes WHERE plugin_id=? AND consumed_ms IS NULL AND expires_ms>? LIMIT 1",&[json!(plugin.id),json!(now_ms())])?.is_some();Ok(ready(&plugin,&cfg,"hub")&&(cfg.as_object().is_some_and(|m|m.values().any(configured))||bound||pairing))})?;
             if !should_run {
@@ -985,10 +986,14 @@ impl HubEngine {
                 }
                 continue;
             }
-            let process = self.ensure_process(&plugin)?;
-            self.replay(&plugin, &process)?;
+            if let Err(error) = self
+                .ensure_process(&plugin)
+                .and_then(|process| self.replay(&plugin, &process))
+            {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
     fn replay(&self, plugin: &ChannelPlugin, process: &ChannelProcess) -> Result<(), String> {
         // A live process owns its entire queue, including multipart network delivery.
@@ -1161,6 +1166,7 @@ fn publish_human_reply(
     if human == target_id {
         return Err("SELF_SEND_FORBIDDEN: cannot reply to the same node".into());
     }
+    let in_reply_to = in_reply_to.map(|raw| raw.rsplit_once(':').map(|(_, id)| id).unwrap_or(raw));
     let sig = random_id("sig_")?;
     let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|hub|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":"hub","host_name":channel,"harness":"human","listener_id":format!("{}-{}",slug(owner),human.trim_start_matches("c_")),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
     publish(
