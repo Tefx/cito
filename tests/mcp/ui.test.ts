@@ -23,6 +23,44 @@ test.each([true,false])("cito_send desktop banner admission respects desktopBann
  expect(banners).toHaveLength(desktopBanner?1:0);
  if(desktopBanner)expect(banners[0]!.payload).toMatchObject({message:"Admission banner",signal_id:sent.signal_id,target_harness:"cursor",target_session_id:"session-1",from_user:"alice",hub:"local"});
 });
+test("UI send_signal validates tool arguments before persisting and reports composer results", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url,user:"alice"}},defaultHub:"work"});
+ const log = join(f.root,"composer-frames.jsonl"), ui = join(f.root,"ui-reader.mjs");
+ await writeFile(ui, `#!${process.execPath}\nimport fs from "node:fs";import readline from "node:readline";for await(const line of readline.createInterface({input:process.stdin})){const frame=JSON.parse(line);if(frame.op==="composer_result")fs.appendFileSync(${JSON.stringify(log)},line+"\\n");}`, {mode:0o700});
+ await f.daemon({CITO_DISABLE_UI:"0",CITO_UI_BINARY:ui});
+ const id = "c_1111111111111111";
+ await hub.rpc("kv_put", {key:id,data_b64:Buffer.from(JSON.stringify({
+  listener_id:id,public_id:"bob-1111111111111111",owner_user:"bob",principal_id:"none#bob",
+  harness:"human",session_id:"default",scope:"workspace",state:"ACTIVE",binding_generation:1,
+  channels:{},title:"Human target",about:"Human target",updated_at_ms:Date.now()
+ })).toString("base64")});
+ const invalid = [
+  {to:"@bob/"}, {in_reply_to:42}, {in_reply_to:""}, {idempotency_key:""},
+  {hub:42}, {hub:"BAD!"}, {extra:"unknown"}
+ ];
+ for (const args of invalid) {
+  expect(await action(f,{op:"send_signal",to:"@bob",message:"hello",...args},true)).toMatchObject({
+   http_status:400,error:expect.stringContaining("INVALID_INPUT:")
+  });
+ }
+ expect(f.query("SELECT * FROM local_sent_idempotency")).toEqual([]);
+ expect(owner.query("SELECT * FROM hub_signals",[],"hub/hub.sqlite")).toEqual([]);
+ const frames = async () => {
+  try { return (await readFile(log,"utf8")).trim().split("\n").filter(Boolean).map(line=>object(JSON.parse(line))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+ };
+ await waitFor(async () => (await frames()).length === invalid.length);
+ expect(await frames()).toEqual(invalid.map(()=>({op:"composer_result",ok:false,error:expect.stringContaining("INVALID_INPUT:")})));
+ const sent = await action(f,{op:"send_signal",to:"@bob",hub:"work",message:"hello",in_reply_to:"original",idempotency_key:"valid"});
+ expect(sent).toMatchObject({http_status:200,to:"work:bob-1111111111111111"});
+ expect(f.query("SELECT signal_id,status FROM local_sent_idempotency")).toEqual([{signal_id:String(sent.signal_id).split(":").at(-1),status:"wake_accepted"}]);
+ const stored = owner.query("SELECT CAST(data AS TEXT) AS payload FROM hub_signals",[],"hub/hub.sqlite");
+ expect(stored).toHaveLength(1);
+ expect(object(JSON.parse(String(stored[0]!.payload)))).toMatchObject({to:id,message:"hello",in_reply_to:"original"});
+ await waitFor(async () => (await frames()).length === invalid.length + 1);
+ expect((await frames()).at(-1)).toEqual({op:"composer_result",ok:true,error:null});
+});
 test("send rejects --wake before starting a daemon",async()=>{
  const f=await cleanroom();const result=await f.command(["send","--to","@self","--message","hello","--wake"]);
  expect(result.code).toBe(1);expect(result.stderr).toContain("--wake is not supported");

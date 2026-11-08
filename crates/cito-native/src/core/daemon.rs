@@ -1721,7 +1721,12 @@ impl DaemonService {
             }
             "send_signal" => {
                 let meta = json!({"expected_harness":"human","expected_session_id":"default"});
-                let result = self.send(&hub, action, &meta);
+                let mut send_args = action.clone();
+                if let Some(args) = send_args.as_object_mut() {
+                    args.remove("op");
+                }
+                let result = validate_tool_input("cito_send", &send_args)
+                    .and_then(|()| self.send(&hub, &send_args, &meta));
                 self.emit(match &result {
                     Ok(_) => json!({"op":"composer_result","ok":true,"error":null}),
                     Err(e) => json!({"op":"composer_result","ok":false,"error":e}),
