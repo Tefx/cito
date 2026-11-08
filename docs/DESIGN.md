@@ -281,7 +281,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 1. **OIDC JWT Verification**:
    - Discovers `jwks_uri` from `<issuer>/.well-known/openid-configuration`, caches RSA (`RS256`) and EC (`ES256`) public keys with automatic key-rotation refresh on unknown `kid`, verifies signature, `iss == issuer`, `aud` containing `clientId`, and `exp > now`, and derives `principal_id = "oidc:" + iss + "|" + sub` and `owner_user` from `preferred_username` / `email` local-part / `sub`.
 2. **Row-Level Security (`RLS`) across RPCs & SSE (`F6`)**:
-   - **`stream_get_message`**: Loads the target row from `hub_signals` and verifies that either `row.principal_id == caller.principal_id`, `row.sender_principal_id == caller.principal_id`, or the target registration in `hub_kv` has `scope == "workspace"`; otherwise returns `403 FORBIDDEN`.
+   - **`stream_get_message`**: Loads the target row from `hub_signals` and verifies that either the target registration in `hub_kv` is owned by `caller.principal_id` or `data.from.principal_id` matches `caller.principal_id`; otherwise returns `403 FORBIDDEN`.
    - **SSE `/v1/events` (`msg` and `nc` ack frames)**: In OIDC mode, `cito.ack.<node_id>` (`nc`) frames are delivered **only** to SSE clients whose `caller.principal_id` owns `<node_id>` (matching the `principal_id` stored on the Node's `hub_kv` registration).
 3. **Hub Admin Authority for `scope: "hub"` Channel Credentials (`F7`)**:
    - In `authMode == "none"` or `"token"`, any authenticated caller can configure `scope: "hub"` fields (`botToken`).
