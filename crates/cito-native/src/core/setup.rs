@@ -1407,6 +1407,26 @@ mod tests {
     }
 
     #[test]
+    fn app_bundle_rejects_plugin_copy_failure() {
+        let (root, _) = fixture();
+        let bundled = root.join("bundled");
+        fs::create_dir_all(&bundled).unwrap();
+        let unreadable = bundled.join("unreadable");
+        fs::write(&unreadable, "plugin resource").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = cli_child(&root, &["--build-app"]);
+        let contents = root.join("Applications/Cito.app/Contents");
+        let copied_native = contents.join("Helpers/cito-native").is_file();
+        let reached_plugins = contents.join("Resources/plugins").is_dir();
+        fs::remove_dir_all(root).unwrap();
+        assert!(copied_native);
+        assert!(reached_plugins);
+        assert!(!result.status.success());
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(error.contains("os error 13"), "{error}");
+    }
+
+    #[test]
     fn cli_dry_run_guards_build_uninstall_and_disable() {
         let (root, _) = fixture();
         fs::create_dir_all(root.join("bin")).unwrap();

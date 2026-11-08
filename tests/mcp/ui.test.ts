@@ -1,6 +1,7 @@
 import {expect,test} from "vitest";
 import {readFile,writeFile} from "node:fs/promises";
 import {join} from "node:path";
+import {createHash} from "node:crypto";
 import {agent,remoteAgent,cleanroom,provider,seed,sendUnbound,received,action,rows,errorTool,human} from "../support/native-scenarios.js";
 import {freePort,waitFor,object} from "../support/native-harness.js";
 import {loginFixture} from "../support/oidc-native.js";
@@ -59,6 +60,56 @@ test("available-session refresh filters active listeners synchronously and fence
 test("directory queries expose remote peers and apply prefix tokens and facets",async()=>{
  const {f,hub}=await remoteAgent();for(const [id,title,harness]of [["c_1111111111111111","Build API","cursor"],["c_2222222222222222","Review UI","aider"]])await hub.rpc("kv_put",{key:id,data_b64:Buffer.from(JSON.stringify({listener_id:id,public_id:title!.toLowerCase().replaceAll(" ","-")+"-"+id!.slice(2),state:"ACTIVE",scope:"workspace",owner_user:"alice",principal_id:"none#alice",host_id:"remote",host_name:"laptop",harness,title,about:title,repo:"acme/api",channels:{remote:{state:"ACTIVE"}}})).toString("base64")});const all=await action(f,{op:"query_directory",hub:"work",query:""});expect(rows(all.peers).length).toBeGreaterThanOrEqual(2);const selected=rows((await action(f,{op:"query_directory",hub:"work",query:"harness:cursor build"})).peers);expect(selected).toHaveLength(1);expect(selected[0]!.title).toBe("Build API");expect(rows((await action(f,{op:"get_snapshot"})).my_remote_listeners).length).toBeGreaterThanOrEqual(2);
 });
+test("directory queries and snapshots normalize retained OIDC identity and share token semantics", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ // A closed loopback issuer keeps retained-identity projection independent of login and external services.
+ const issuer = `https://127.0.0.1:${await freePort()}`, principal = `oidc:${issuer}|sub-1`;
+ const f = await cleanroom({hubs:{work:{url:hub.url,authMode:"oidc",issuer,clientId:"cito"}},defaultHub:"work"});
+ const token = "retained-identity";
+ await writeFile(join(f.stateDir,"oidc-token-work.json"), JSON.stringify({
+  issuer,client_id:"cito",id_token:token,token_sha256:createHash("sha256").update(token).digest("hex"),
+  expires_at:0,verified_principal_id:principal,verified_user:"bob"
+ }), {mode:0o600});
+ await f.daemon();
+ const id = "c_1111111111111111", publicId = "billing-1111111111111111", otherId = "ledger-2222222222222222";
+ const target = {listener_id:id,public_id:publicId,state:"ACTIVE",scope:"self",principal_id:`${issuer}#sub-1`,
+  owner_user:"bob",harness:"cursor",title:"Title-marker",about:"About-marker",repo:"acme/billing",
+  cwd:"/projects/payments",branch:"feature/invoices",host_name:"desktop",host_id:"host-remote",channels:{remote:{state:"ACTIVE"}}};
+ for (const peer of [
+  target,
+  {...target,listener_id:"c_2222222222222222",public_id:otherId,principal_id:principal,harness:"cursor-preview",repo:"acme/ledger",title:"Ledger",about:"Ledger",cwd:"/projects/ledger",branch:"main",host_name:"laptop",host_id:"host-other"},
+  {...target,listener_id:"c_3333333333333333",public_id:"private-3333333333333333",principal_id:`${issuer}#someone-else`},
+  {...target,listener_id:"c_4444444444444444",public_id:"shared-4444444444444444",principal_id:`${issuer}#someone-else`,scope:"workspace",owner_user:"alice",harness:"aider",repo:"acme/other",title:"Other",about:"Other",cwd:"/projects/other",branch:"main",host_name:"other",host_id:"host-other"}
+ ]) {
+  await hub.rpc("kv_put", {key:peer.listener_id,data_b64:Buffer.from(JSON.stringify(peer)).toString("base64")});
+ }
+ const queries: [string, string[]][] = [
+  ["@bob",[publicId,otherId]], ["user:bob",[publicId,otherId]],
+  ["is:cursor",[publicId]], ["is:cur",[]], ["harness:cur",[publicId,otherId]],
+  [`#${publicId}`,[publicId]], [`#work:${publicId}`,[publicId]], [`#${id}`,[publicId]],
+  ["repo:billing",[publicId]], ["host:desktop",[publicId]], ["host:host-remote",[publicId]],
+  ["@BOB is:cursor repo:billing",[publicId]],
+  ...["title-marker","about-marker","/projects/payments","billing","feature/invoices","desktop","host-remote",`work:${publicId}`,id].map(query => [query,[publicId]] as [string,string[]]),
+  ["bob",[publicId,otherId]], ["cursor",[publicId,otherId]],
+  ["@",[]], ["#",[]], ["is:",[]], ["repo:",[]], ["host:",[]], ["user:",[]]
+ ];
+ for (const [query, expected] of queries) {
+  const peers = rows((await action(f,{op:"query_directory",hub:"work",query})).peers);
+  const listeners = rows((await f.tool("cito_find",{hub:"work",query},human)).listeners);
+  for (const found of [peers,listeners]) {
+   expect(found.map(peer => peer.public_id).sort(), query).toEqual([...expected].sort());
+   expect(found.every(peer => peer.is_self_principal === true), query).toBe(true);
+  }
+ }
+ const mine = rows((await action(f,{op:"query_directory",hub:"work",scope:"mine"})).peers);
+ expect(mine.map(peer => peer.public_id).sort()).toEqual([publicId,otherId].sort());
+ const shared = rows((await f.tool("cito_find",{hub:"work",query:"@alice"},human)).listeners);
+ expect(shared).toHaveLength(1);
+ expect(shared[0]).toMatchObject({public_id:"shared-4444444444444444",is_self_principal:false});
+ const snapshot = rows((await action(f,{op:"get_snapshot"})).my_remote_listeners);
+ expect(snapshot.map(peer => peer.public_id).sort()).toEqual([publicId,otherId].sort());
+ expect(snapshot.every(peer => peer.is_self_principal === true)).toBe(true);
+}, 15_000);
 test("directory facets filter exact harness and ownership before the result limit",async()=>{
  const {f,hub,row}=await remoteAgent();
  const own=String(row.principal_id),target="z-match-ffffffffffffffff",sameHarness="y-other-eeeeeeeeeeeeeeee",otherHarness="y-other-dddddddddddddddd";

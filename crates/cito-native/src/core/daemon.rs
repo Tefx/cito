@@ -732,7 +732,7 @@ impl DaemonService {
         if !(1..=50).contains(&limit) {
             return Err("INVALID_INPUT: limit must be 1..50".into());
         }
-        let query = string(args, "query").to_ascii_lowercase();
+        let query = string(args, "query").to_lowercase();
         let mut rows = Vec::new();
         let mut warnings = Vec::new();
         let mut retried = false;
@@ -781,7 +781,10 @@ impl DaemonService {
                     for row in directory {
                         if super::lease::evaluate_node_lease(&row, now_ms()) != "ACTIVE"
                             || (row["scope"] == "self"
-                                && row["principal_id"] != slot.identity["principal_id"])
+                                && !super::auth::principal_ids_equal(
+                                    string(&row, "principal_id"),
+                                    string(&slot.identity, "principal_id"),
+                                ))
                         {
                             continue;
                         }
@@ -799,29 +802,65 @@ impl DaemonService {
                         }) {
                             continue;
                         }
-                        let haystack = format!(
-                            "{} {} {} {} {}",
+                        let scoped_id = self.scoped(&name, string(&row, "public_id"));
+                        let haystack = [
                             string(&row, "title"),
                             string(&row, "about"),
                             string(&row, "repo"),
                             string(&row, "cwd"),
-                            string(&row, "public_id")
-                        )
-                        .to_ascii_lowercase();
-                        if !query.split_whitespace().all(|w| {
-                            if let Some((field, token)) = w.split_once(':') {
-                                let field = match field {
-                                    "user" => "owner_user",
-                                    "host" => "host_name",
-                                    other => other,
-                                };
-                                return string(&row, field).to_ascii_lowercase().contains(token);
+                            string(&row, "branch"),
+                            string(&row, "owner_user"),
+                            string(&row, "host_name"),
+                            string(&row, "host_id"),
+                            string(&row, "harness"),
+                            string(&row, "public_id"),
+                            &scoped_id,
+                            string(&row, "listener_id"),
+                        ]
+                        .join(" ")
+                        .to_lowercase();
+                        if !query.split_whitespace().all(|token| {
+                            let contains =
+                                |field, value| string(&row, field).to_lowercase().contains(value);
+                            if let Some(user) = token.strip_prefix('@').filter(|s| !s.is_empty()) {
+                                contains("owner_user", user)
+                            } else if let Some(user) =
+                                token.strip_prefix("user:").filter(|s| !s.is_empty())
+                            {
+                                contains("owner_user", user)
+                            } else if let Some(repo) =
+                                token.strip_prefix("repo:").filter(|s| !s.is_empty())
+                            {
+                                contains("repo", repo)
+                            } else if let Some(host) =
+                                token.strip_prefix("host:").filter(|s| !s.is_empty())
+                            {
+                                contains("host_name", host) || contains("host_id", host)
+                            } else if let Some(harness) =
+                                token.strip_prefix("is:").filter(|s| !s.is_empty())
+                            {
+                                string(&row, "harness").to_lowercase() == harness
+                            } else if let Some(harness) =
+                                token.strip_prefix("harness:").filter(|s| !s.is_empty())
+                            {
+                                contains("harness", harness)
+                            } else if let Some(id) =
+                                token.strip_prefix('#').filter(|s| !s.is_empty())
+                            {
+                                contains("public_id", id)
+                                    || scoped_id.to_lowercase().contains(id)
+                                    || contains("listener_id", id)
+                            } else {
+                                haystack.contains(token)
                             }
-                            haystack.contains(w)
                         }) {
                             continue;
                         }
-                        rows.push(json!({"hub":name,"listener_id":self.scoped(&name,string(&row,"public_id")),"public_id":row["public_id"],"scoped_id":self.scoped(&name,string(&row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"about":row["about"],"title":row["title"],"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"is_self_principal":row["principal_id"]==slot.identity["principal_id"]}));
+                        let is_self_principal = super::auth::principal_ids_equal(
+                            string(&row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        );
+                        rows.push(json!({"hub":name,"listener_id":scoped_id,"public_id":row["public_id"],"scoped_id":scoped_id,"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"about":row["about"],"title":row["title"],"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"is_self_principal":is_self_principal}));
                     }
                 }
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
@@ -1430,7 +1469,7 @@ impl DaemonService {
         )
     }
     fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|s.identity["principal_id"]==row["principal_id"]),"channels":row["channels"].as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()})
+        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()})
     }
     fn emit(&self, frame: Value) {
         if let Some(ui) = &self.ui {
