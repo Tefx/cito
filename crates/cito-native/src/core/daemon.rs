@@ -145,6 +145,22 @@ struct UiMailbox {
     closed: AtomicBool,
 }
 impl UiMailbox {
+    fn emit(&self, frame: Value) {
+        // Snapshots coalesce; command results and banners stay ordered.
+        let key = if matches!(string(&frame, "op"), "state" | "settings" | "directory") {
+            Some(format!(
+                "{}:{}",
+                string(&frame, "op"),
+                string(&frame, "hub")
+            ))
+        } else {
+            None
+        };
+        if let Ok(mut bytes) = bounded_frame(frame) {
+            bytes.push(b'\n');
+            self.push(key, bytes);
+        }
+    }
     fn push(&self, key: Option<String>, bytes: Vec<u8>) {
         if self.closed.load(Ordering::SeqCst) {
             return;
@@ -183,6 +199,12 @@ impl UiMailbox {
         self.ready.notify_all();
     }
 }
+#[derive(Default)]
+struct InteractiveLogin {
+    cancelled: AtomicBool,
+    serial: Mutex<()>,
+}
+
 pub struct DaemonService {
     pub config: NativeConfig,
     pub plugins: LoadedPlugins,
@@ -195,6 +217,7 @@ pub struct DaemonService {
     probes: HashMap<String, (Instant, Option<thread::JoinHandle<()>>)>,
     session_activity: Option<super::session_activity::SessionActivity>,
     ui: Option<Arc<UiMailbox>>,
+    logins: HashMap<String, Arc<InteractiveLogin>>,
     last_ui: Instant,
     closing: bool,
     host_id: String,
@@ -236,6 +259,7 @@ impl DaemonService {
                 config, plugins,
             )),
             ui: None,
+            logins: HashMap::new(),
             last_ui: Instant::now() - Duration::from_secs(1),
             closing: false,
             host_id,
@@ -284,6 +308,12 @@ impl DaemonService {
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
             if hub["enabled"] == false || hub["disabled"] == true {
+                continue;
+            }
+            if self.logins.contains_key(&name)
+                && self.slots.get(&name).is_some_and(|old| old.config == hub)
+            {
+                keep.push(name);
                 continue;
             }
             let auth = hub
@@ -1223,6 +1253,8 @@ impl DaemonService {
             let state = self.state.clone();
             let state_dir = self.config.state_dir.clone();
             let host_id = self.host_id.clone();
+            let ui = self.ui.clone().filter(|_| self.desktop_banner_enabled());
+            let id_prefix = self.scoped(hub, "");
             let plugin = self.plugins.find_by_id(string(&row, "harness")).cloned();
             self.receivers.insert(key,thread::spawn(move||{
                 if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
@@ -1231,7 +1263,21 @@ impl DaemonService {
                     let channel=format!("{}:{}",host_id,string(&row,"harness"));
                     if let Some(ch)=remote["channels"].as_object_mut().and_then(|m|m.get_mut(&channel)){if now_ms().saturating_sub(ch["updated_at_ms"].as_u64().unwrap_or(0))>=20_000 {ch["updated_at_ms"]=json!(now_ms());let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision));}}
                 }
-                if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir){if !slot.closed.load(Ordering::SeqCst){eprintln!("cito receiver {}: {error}",slot.name);}}
+                if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |signal| {
+                    if let Some(ui) = &ui {
+                        if !slot.closed.load(Ordering::SeqCst) {
+                            ui.emit(json!({"op":"banner","payload":{
+                                "target_harness":row["harness"],"target_session_id":row["session_id"],
+                                "target_title":row["title"],"target_cwd":row["cwd"],
+                                "from_user":signal["from"]["user"],"from_host":signal["from"]["host_name"],
+                                "from_title":string(&signal["from"],"title"),"message":signal["message"],
+                                "effective_wake":signal["target_generation"]==row["binding_generation"],
+                                "signal_id":format!("{id_prefix}{}",string(signal,"signal_id")),"hub":slot.name,
+                                "from_scoped_id":signal["from"]["listener_id"].as_str().map(|id|format!("{id_prefix}{id}")),"count":1
+                            }}));
+                        }
+                    }
+                }){if !slot.closed.load(Ordering::SeqCst){eprintln!("cito receiver {}: {error}",slot.name);}}
             }));
         }
         let live = self.live_receivers()?;
@@ -1280,7 +1326,7 @@ impl DaemonService {
             .unwrap_or(&Value::Null);
         let port = host["port"].as_u64().unwrap_or(4291);
         let token = string(host, "token");
-        json!({"apps":apps,"channel_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":format!("http://127.0.0.1:{port}"),"token":token,"invite_command":format!("cito setup --hub lan --url http://127.0.0.1:{port}"),"error":null},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":raw["desktopBannerEnabled"].as_bool().unwrap_or(true)})
+        json!({"apps":apps,"channel_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":format!("http://127.0.0.1:{port}"),"token":token,"invite_command":format!("cito setup --hub lan --url http://127.0.0.1:{port}"),"error":null},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
     fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
         rows.into_iter()
@@ -1377,21 +1423,19 @@ impl DaemonService {
         json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|s.identity["principal_id"]==row["principal_id"]),"channels":row["channels"].as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()})
     }
     fn emit(&self, frame: Value) {
-        // Snapshots replace older queued snapshots; command results stay ordered and
-        // retained until the UI consumes them. A stalled UI cannot block Hub calls.
-        let key = if matches!(string(&frame, "op"), "state" | "settings" | "directory") {
-            Some(format!(
-                "{}:{}",
-                string(&frame, "op"),
-                string(&frame, "hub")
-            ))
-        } else {
-            None
-        };
-        if let (Some(ui), Ok(mut bytes)) = (&self.ui, bounded_frame(frame)) {
-            bytes.push(b'\n');
-            ui.push(key, bytes);
+        if let Some(ui) = &self.ui {
+            ui.emit(frame);
         }
+    }
+    fn desktop_banner_enabled(&self) -> bool {
+        self.raw_config()
+            .ok()
+            .and_then(|raw| {
+                raw.get("desktopBannerEnabled")
+                    .or_else(|| raw.get("desktopBanner"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(true)
     }
     fn push_ui(&self) {
         if self.ui.is_some() {
@@ -1426,12 +1470,22 @@ impl DaemonService {
         })
     }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
-        self.reload_slots()?;
         let op = string(action, "op");
         let hub = action["hub"]
             .as_str()
             .unwrap_or(&self.config.default_hub)
             .to_string();
+        if matches!(
+            op,
+            "setup_remove_hub" | "remove_hub" | "save_hub" | "setup_save_hub"
+        ) || (op == "hub_action" && action["action"] == "disconnect")
+            || (op == "setup_toggle_hub" && action["enabled"] == false)
+        {
+            if let Some(cancelled) = self.logins.remove(&hub) {
+                cancelled.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+        self.reload_slots()?;
         match op {
             "get_snapshot" => return self.snapshot(),
             "set_user" => {
@@ -1532,43 +1586,6 @@ impl DaemonService {
                 })?;
             }
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
-            "login_hub" => {
-                let cfg = self.slot(&hub)?.config.clone();
-                let snapshot = login_cache_snapshot(
-                    &self.config.state_dir.join(format!("oidc-token-{hub}.json")),
-                );
-                let changed = action.get("_cache_generation").is_some_and(|generation| {
-                    snapshot.as_ref().map(|(_, g)| g).unwrap_or(&Value::Null) != generation
-                });
-                let rejected = if changed {
-                    None
-                } else if let Some(hash) = action.get("_rejected_token_sha256") {
-                    hash.as_str()
-                } else {
-                    snapshot
-                        .as_ref()
-                        .and_then(|(cache, _)| cache["token_sha256"].as_str())
-                };
-                let (token, identity) =
-                    super::login::recover(&self.config.state_dir, &hub, &cfg, rejected, true)?;
-                if let Some(old) = self.slots.remove(&hub) {
-                    old.closed.store(true, Ordering::SeqCst);
-                }
-                for row in self.state.active()?.into_iter().filter(|row| {
-                    row["hub"] == hub
-                        && !super::auth::principal_ids_equal(
-                            string(row, "principal_id"),
-                            string(&identity, "principal_id"),
-                        )
-                }) {
-                    self.state
-                        .fence_listener_for(&row, "fenced_before_dispatch")?;
-                }
-                self.reload_slots()?;
-                return Ok(
-                    json!({"ok":true,"user":identity["owner_user"],"authenticated":!token.is_empty()}),
-                );
-            }
             "paste_hub_invite" => {
                 let invite = string(action, "invite");
                 let value: Value = serde_json::from_str(invite)
@@ -1789,11 +1806,6 @@ impl DaemonService {
                 }
             }
             "hub_action" => {
-                if action["action"] == "login" {
-                    let mut login = action.clone();
-                    login["op"] = json!("login_hub");
-                    return self.action(&login);
-                }
                 let connected = string(action, "action") != "disconnect";
                 if action["action"] == "reconnect" {
                     if let Some(old) = self.slots.remove(&hub) {
@@ -1858,7 +1870,13 @@ impl DaemonService {
                     json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
                 );
             }
-            "close_settings" | "close_directory" | "copy_id" | "refresh_available" => {}
+            "refresh_available" => {
+                if let Some(activity) = self.session_activity.as_mut() {
+                    activity.refresh_discovery();
+                }
+                self.poll()?;
+            }
+            "close_settings" | "close_directory" | "copy_id" => {}
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;
@@ -2149,7 +2167,78 @@ fn http_client_pid(stream: &TcpStream) -> Option<u32> {
         None
     }
 }
-fn handle_http(mut stream: TcpStream, service: Arc<Mutex<DaemonService>>, config: &NativeConfig) {
+fn interactive_login(action: &Value) -> bool {
+    action["op"] == "login_hub" || (action["op"] == "hub_action" && action["action"] == "login")
+}
+fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Result<Value, String> {
+    let (hub, config, state_dir, attempt, snapshot) = {
+        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        if s.closing || shutdown_requested() {
+            return Err("Shutting down".into());
+        }
+        if !interactive_login(action) {
+            return s.action(action);
+        }
+        s.reload_slots()?;
+        let hub = action["hub"]
+            .as_str()
+            .unwrap_or(&s.config.default_hub)
+            .to_string();
+        let config = s.slot(&hub)?.config.clone();
+        let snapshot =
+            login_cache_snapshot(&s.config.state_dir.join(format!("oidc-token-{hub}.json")));
+        let attempt = s.logins.entry(hub.clone()).or_default().clone();
+        (hub, config, s.config.state_dir.clone(), attempt, snapshot)
+    };
+    // Browser callbacks and cache-lock waits never hold the daemon's global mutex.
+    // Same-hub UI logins share publication, even when the provider returns
+    // identical bearer bytes. Neither this queue nor the browser holds service.
+    let _serial = attempt.serial.lock().map_err(|_| "Login lock poisoned")?;
+    let result = {
+        let current = login_cache_snapshot(&state_dir.join(format!("oidc-token-{hub}.json")));
+        let changed = snapshot.as_ref().map(|(_, generation)| generation)
+            != current.as_ref().map(|(_, generation)| generation);
+        let rejected = if changed {
+            None
+        } else {
+            snapshot
+                .as_ref()
+                .and_then(|(cache, _)| cache["token_sha256"].as_str())
+        };
+        super::login::recover_cancellable(&state_dir, &hub, &config, rejected, true, &|| {
+            shutdown_requested() || attempt.cancelled.load(Ordering::SeqCst)
+        })
+    };
+    let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+    let current = s.logins.get(&hub).is_some_and(|c| Arc::ptr_eq(c, &attempt));
+    if current && Arc::strong_count(&attempt) == 2 {
+        s.logins.remove(&hub);
+    }
+    if !current || attempt.cancelled.load(Ordering::SeqCst) || s.closing || shutdown_requested() {
+        return Err("OIDC_LOGIN_TIMEOUT: OIDC login cancelled".into());
+    }
+    s.reload_slots()?;
+    if !s.slots.get(&hub).is_some_and(|slot| slot.config == config) {
+        return Err("OIDC_LOGIN_TIMEOUT: Hub changed during login".into());
+    }
+    let (token, identity) = result?;
+    if let Some(old) = s.slots.remove(&hub) {
+        old.closed.store(true, Ordering::SeqCst);
+    }
+    for row in s.state.active()?.into_iter().filter(|row| {
+        row["hub"] == hub
+            && !super::auth::principal_ids_equal(
+                string(row, "principal_id"),
+                string(&identity, "principal_id"),
+            )
+    }) {
+        s.state.fence_listener_for(&row, "fenced_before_dispatch")?;
+    }
+    s.reload_slots()?;
+    s.push_ui();
+    Ok(json!({"ok":true,"user":identity["owner_user"],"authenticated":!token.is_empty()}))
+}
+fn handle_http(mut stream: TcpStream, service: Arc<Mutex<DaemonService>>) {
     if stream.set_nonblocking(false).is_err() {
         return;
     }
@@ -2246,38 +2335,21 @@ fn handle_http(mut stream: TcpStream, service: Arc<Mutex<DaemonService>>, config
         respond(&mut stream, 400, &json!({"error":"Invalid JSON"}));
         return;
     };
-    if matches!(path, "/ui" | "/action" | "/control")
-        && (parsed["op"] == "login_hub"
-            || (parsed["op"] == "hub_action" && parsed["action"] == "login"))
-    {
-        let hub = parsed["hub"].as_str().unwrap_or(&config.default_hub);
-        if crate::plugins::validate_hub_name(hub) {
-            let snapshot =
-                login_cache_snapshot(&config.state_dir.join(format!("oidc-token-{hub}.json")));
-            parsed["_rejected_token_sha256"] = snapshot
-                .as_ref()
-                .map(|(cache, _)| cache["token_sha256"].clone())
-                .unwrap_or(Value::Null);
-            parsed["_cache_generation"] = snapshot
-                .map(|(_, generation)| generation)
-                .unwrap_or(Value::Null);
+    if matches!(path, "/ui" | "/action" | "/control") {
+        match dispatch_action(&service, &parsed) {
+            Ok(v) => match bounded_frame(v) {
+                Ok(bytes) => respond_bytes(&mut stream, 200, &bytes),
+                Err(error) => respond(&mut stream, 500, &json!({"ok":false,"error":error})),
+            },
+            Err(e) => respond(&mut stream, 400, &json!({"ok":false,"error":e})),
         }
+        return;
     }
     let Ok(mut s) = service.lock() else {
         return;
     };
     if s.closing || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         respond(&mut stream, 503, &json!({"error":"Shutting down"}));
-        return;
-    }
-    if path == "/ui" || path == "/action" || path == "/control" {
-        match s.action(&parsed) {
-            Ok(v) => match bounded_frame(v) {
-                Ok(bytes) => respond_bytes(&mut stream, 200, &bytes),
-                Err(error) => respond(&mut stream, 500, &json!({"ok":false,"error":error})),
-            },
-            Err(e) => respond(&mut stream, 400, &json!({"ok":false,"error":e})),
-        };
         return;
     }
     if path != "/mcp" {
@@ -2402,17 +2474,34 @@ struct UiChild {
     reader: thread::JoinHandle<()>,
     writer: thread::JoinHandle<()>,
 }
+fn resolve_ui_binary(
+    root: &std::path::Path,
+    plugins: &LoadedPlugins,
+    explicit: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let plugin_binary = plugins.find_by_id("human").and_then(|plugin| {
+        let command = plugin.command.first()?;
+        Some(plugin.plugin_dir.join(command))
+    });
+    explicit
+        .into_iter()
+        .chain(plugin_binary)
+        .chain([
+            root.join("Helpers/cito-ui"),
+            root.join("Resources/plugins/human/bin/cito-ui"),
+            root.join("plugins/human/bin/cito-ui"),
+        ])
+        .find(|path| path.is_file())
+}
 fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
     if std::env::var("CITO_DISABLE_UI").ok().as_deref() == Some("1") {
         return None;
     }
-    let root = resolve_package_root();
-    let bin = std::env::var_os("CITO_UI_BINARY")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("plugins/human/bin/cito-ui"));
-    if !bin.exists() {
-        return None;
-    }
+    let bin = resolve_ui_binary(
+        &resolve_package_root(),
+        &service.lock().ok()?.plugins,
+        std::env::var_os("CITO_UI_BINARY").map(std::path::PathBuf::from),
+    )?;
     let mut child = Command::new(bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2436,6 +2525,7 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
     }
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(output);
+        let mut logins: Vec<thread::JoinHandle<()>> = Vec::new();
         loop {
             let mut line = String::new();
             match reader
@@ -2448,12 +2538,33 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 _ => {}
             }
             if let Ok(action) = serde_json::from_str::<Value>(&line) {
-                if let Ok(mut s) = service.lock() {
-                    if let Err(e) = s.action(&action) {
-                        s.emit(json!({"op":"error","error":e}));
+                let is_login = interactive_login(&action);
+                let service = service.clone();
+                let run = move || {
+                    if let Err(e) = dispatch_action(&service, &action) {
+                        if let Ok(s) = service.lock() {
+                            s.emit(json!({"op":"error","error":e}));
+                        }
+                    }
+                };
+                if is_login {
+                    logins.push(thread::spawn(run));
+                } else {
+                    run();
+                }
+                let mut pending = Vec::new();
+                for login in logins.drain(..) {
+                    if login.is_finished() {
+                        let _ = login.join();
+                    } else {
+                        pending.push(login);
                     }
                 }
+                logins = pending;
             }
+        }
+        for login in logins {
+            let _ = login.join();
         }
     });
     Some(UiChild {
@@ -2531,8 +2642,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             match listener.accept() {
                 Ok((stream, _)) => {
                     let s = service.clone();
-                    let config = config.clone();
-                    calls.push(thread::spawn(move || handle_http(stream, s, &config)));
+                    calls.push(thread::spawn(move || handle_http(stream, s)));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -2546,8 +2656,8 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
                 if let Err(e) = s.poll() {
                     eprintln!("cito poll: {e}");
                 }
+                last_poll = Instant::now();
             }
-            last_poll = Instant::now();
         }
         let mut pending = Vec::new();
         for call in calls.drain(..) {
@@ -2649,6 +2759,30 @@ pub use super::cli::run_cli_command;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cito-ui-layout-{}", random_uuid_v4()));
+        let root = dir.join("Cito.app/Contents");
+        let result = (|| {
+            fs::create_dir_all(root.join("Helpers")).map_err(|e| e.to_string())?;
+            let bin = root.join("Helpers/cito-ui");
+            fs::write(&bin, "").map_err(|e| e.to_string())?;
+            let plugins = LoadedPlugins {
+                plugins: vec![],
+                rejected_ids: Default::default(),
+            };
+            assert_eq!(resolve_ui_binary(&root, &plugins, None), Some(bin));
+            let override_bin = dir.join("custom-ui");
+            fs::write(&override_bin, "").map_err(|e| e.to_string())?;
+            assert_eq!(
+                resolve_ui_binary(&root, &plugins, Some(override_bin.clone())),
+                Some(override_bin)
+            );
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(dir);
+        result
+    }
     #[test]
     fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
         let mailbox = UiMailbox::default();

@@ -1,4 +1,6 @@
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 #[path = "config.rs"]
 mod config;
 pub use config::*;
@@ -29,10 +31,8 @@ pub struct PluginDescriptor {
     pub plugin_dir: PathBuf,
     pub is_builtin: bool,
     pub command: Vec<String>,
-    pub scope: String,
     pub channel_env: Option<String>,
     pub fields: Vec<Value>,
-    pub pairing: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +53,7 @@ impl LoadedPlugins {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn human_plugins(&self) -> Vec<&PluginDescriptor> {
         self.plugins
             .iter()
@@ -137,18 +138,6 @@ pub fn random_hex(bytes_len: usize) -> String {
         }
     }
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-pub fn random_base32_12() -> String {
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut bytes = [0u8; 12];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    }
-    bytes
-        .iter()
-        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
-        .collect()
 }
 
 pub fn system_home_dir() -> String {
@@ -459,7 +448,6 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let pairing = map.get("pairing").cloned().unwrap_or(Value::Null);
 
     Ok(PluginDescriptor {
         id,
@@ -472,10 +460,8 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         plugin_dir: dir.to_path_buf(),
         is_builtin,
         command,
-        scope,
         channel_env,
         fields,
-        pairing,
     })
 }
 
@@ -964,6 +950,7 @@ fn peek_plugin_exit(pid: u32) -> Result<Option<(bool, i32)>, String> {
     )))
 }
 
+#[cfg(test)]
 pub fn plugin_call(plugin: &PluginDescriptor, request: &Value) -> Value {
     plugin_request(plugin, request).unwrap_or_else(
         |message| json!({"ok":false,"error_code":"PLUGIN_EXEC_FAILED","message":message}),

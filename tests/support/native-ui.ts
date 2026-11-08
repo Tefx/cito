@@ -156,7 +156,7 @@ export type UiToDaemonAction =
   | { op: "query_directory"; query?: string; scope?: "all" | "mine"; harness?: string; mode?: "directory" | "activity"; filter?: "me" | "all" | "unread" }
   | { op: "send_signal"; hub?: string; to: string; message: string; in_reply_to?: string | null }
   | { op: "ack_signals"; hub?: string; signal_ids?: string[]; ack_all?: boolean }
-  | { op: "open_settings" }
+  | { op: "open_settings"; hub?: string }
   | { op: "close_settings" }
   | { op: "setup_apply"; harness: string; force?: boolean }
   | { op: "setup_remove_app"; harness: string }

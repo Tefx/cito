@@ -8,14 +8,14 @@ import { createServer, type Server } from "node:http";
 import citoBridge, { type BridgeAPI, type BridgeContext, type BridgeCommandOptions } from "../../plugins/pi/cito-bridge.js";
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const f of cleanups.splice(0).reverse()) await f(); });
-function fixture() {
+function fixture(register?: BridgeAPI["registerMcpServer"]) {
   const home = mkdtempSync(join(tmpdir(), "cito-pi-bridge-"));
   const old = process.env.CITO_STATE_DIR; const oldPort = process.env.CITO_DAEMON_PORT;
   process.env.CITO_STATE_DIR = home; process.env.CITO_DAEMON_PORT = "1";
   cleanups.push(() => { if (old === undefined) delete process.env.CITO_STATE_DIR; else process.env.CITO_STATE_DIR = old; if (oldPort === undefined) delete process.env.CITO_DAEMON_PORT; else process.env.CITO_DAEMON_PORT = oldPort; rmSync(home, { recursive: true, force: true }); });
   const handlers = new Map<string, (e: unknown, c: BridgeContext) => void | Promise<void>>();
   let registration: unknown; let command: BridgeCommandOptions | undefined;
-  const pi: BridgeAPI = { on: (name, fn) => handlers.set(name, fn), registerMcpServer: (name, config) => { registration = { name, config }; }, registerCommand: (_name, opts) => { command = opts; }, sendMessage: () => {} };
+  const pi: BridgeAPI = { on: (name, fn) => handlers.set(name, fn), registerMcpServer: register ?? ((name, config) => { registration = { name, config }; }), registerCommand: (_name, opts) => { command = opts; }, sendMessage: () => {} };
   const ctx: BridgeContext = { cwd: "/repo", sessionManager: { getSessionId: () => "session-a", getSessionName: () => "work" }, ui: { setStatus: () => {} } };
   citoBridge(pi); cleanups.push(() => handlers.get("session_shutdown")?.({}, ctx));
   return { home, handlers, ctx, registration, command: () => command! };
@@ -29,6 +29,21 @@ function request(path: string, req: object): Promise<any> {
   });
 }
 describe("Pi package initialization", () => {
+  it("retries deferred MCP registration at session_start and surfaces persistent errors", async () => {
+    let attempts = 0;
+    const registrations: unknown[] = [];
+    const f = fixture((name, config) => {
+      if (++attempts === 1) throw new Error("Registry is not ready");
+      registrations.push({ name, config });
+    });
+    await f.handlers.get("session_start")!({}, f.ctx);
+    expect(registrations).toEqual([{name:"cito",config:{command:join(f.home,"bin/cito-mcp"),args:[]}}]);
+    await f.handlers.get("session_start")!({}, f.ctx);
+    expect(attempts).toBe(2);
+    await f.handlers.get("session_shutdown")!({}, f.ctx);
+    const broken = fixture(() => { throw new Error("Registry failed"); });
+    await expect(broken.handlers.get("session_start")!({}, broken.ctx)).rejects.toThrow("Registry failed");
+  });
   it("registers the absolute MCP shim on initialization and reclaims a dead Unix socket", async () => {
     const f = fixture(); expect(f.registration).toEqual({ name: "cito", config: { command: join(f.home, "bin/cito-mcp"), args: [] } });
     const dir = join(f.home, "sockets"); mkdirSync(dir); const path = join(dir, `pi-pid-${process.pid}.sock`);

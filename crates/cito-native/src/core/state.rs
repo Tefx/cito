@@ -132,6 +132,7 @@ impl LocalState {
         )?;
         Ok(())
     }
+    #[cfg(test)]
     pub fn claim_wake_batch(&self, hub: &str, id: &str) -> Result<Vec<Value>, String> {
         let Some(listener) = self.listener(hub, id)? else {
             return Ok(Vec::new());
@@ -197,6 +198,7 @@ impl LocalState {
         })
     }
     /// Compatibility helper; receiver completion uses the token-fenced API below.
+    #[cfg(test)]
     pub fn clear_wake_claim(&self, hub: &str, ids: &[Value], passive: bool) -> Result<(), String> {
         self.db.transaction(|c| {
             for id in ids {
@@ -300,6 +302,7 @@ impl LocalState {
         self.db.execute("INSERT INTO wake_retries(hub,listener_id,retry_at_ms) SELECT hub,listener_id,? FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=? ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=excluded.retry_at_ms", &[json!(now_ms()+delay), listener["hub"].clone(), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
         Ok(())
     }
+    #[cfg(test)]
     pub fn schedule_wake_retry(&self, hub: &str, id: &str, delay: u64) -> Result<(), String> {
         self.db.execute("INSERT INTO wake_retries VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=excluded.retry_at_ms",&[json!(hub),json!(id),json!(now_ms()+delay)])?;
         Ok(())

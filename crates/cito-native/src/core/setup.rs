@@ -492,9 +492,7 @@ pub fn inspect_setup_json(
     })
 }
 
-pub use crate::plugins::{
-    normalize_existing_config, try_normalize_existing_config, with_config_lock,
-};
+use crate::plugins::try_normalize_existing_config;
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| e.to_string())?;
@@ -1322,8 +1320,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> (PathBuf, LoadedPlugins) {
-        let root = PathBuf::from(env::var("HOME").expect("isolated HOME"))
-            .join(format!("cito-setup-test-{}", random_hex(8)));
+        let root = env::temp_dir().join(format!("cito-setup-test-{}", random_hex(8)));
         let plugin_dir = root.join("plugins/sample");
         fs::create_dir_all(plugin_dir.join("bin")).unwrap();
         fs::write(plugin_dir.join("plugin.json"), r#"{"id":"sample","kind":"agent-harness","displayName":"Sample","command":["./bin/sample"]}"#).unwrap();
@@ -1356,7 +1353,11 @@ mod tests {
         let args: Vec<String> =
             serde_json::from_str(&env::var("CITO_SETUP_TEST_ARGS").expect("worker arguments"))
                 .unwrap();
-        if env::var("CITO_SETUP_TEST_LOAD_CONFIG").is_ok() {
+        if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
+            let root = PathBuf::from(env::var("HOME").unwrap());
+            let plugins = crate::plugins::load_plugins(&root);
+            set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
+        } else if env::var("CITO_SETUP_TEST_LOAD_CONFIG").is_ok() {
             let (config, _) = crate::plugins::load_native_config().unwrap();
             assert_eq!(
                 config.config_path,
@@ -1714,11 +1715,29 @@ mod tests {
 
     #[test]
     fn launch_agent_preserves_nondefault_config_path() {
-        let (root, plugins) = fixture();
+        let (root, _) = fixture();
         let state = root.join("installed");
-        let plist = set_launch_at_login(true, &state, &root, &plugins).unwrap();
-        let xml = fs::read_to_string(plist).unwrap();
-        let expected = env::var("CITO_CONFIG_PATH").expect("isolated config path");
+        let expected = root.join("custom/config.json");
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "setup_cli_process_worker",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("HOME", &root)
+            .env("CITO_CONFIG_PATH", &expected)
+            .env("CITO_SETUP_TEST_LAUNCH_CONFIG", "1")
+            .env("CITO_SETUP_TEST_ARGS", "[]")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let xml = fs::read_to_string(launch_agent_plist_path(&root)).unwrap();
+        let expected = expected.to_string_lossy();
         assert!(xml.contains(&format!(
             "<key>CITO_CONFIG_PATH</key><string>{}</string>",
             escape_xml(&expected)

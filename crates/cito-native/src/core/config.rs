@@ -166,14 +166,6 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
     Ok((default_hub, hubs, obj))
 }
 
-/// Compatibility accessor for read-only legacy callers. Mutations must use the checked API.
-pub fn normalize_existing_config(raw: Option<&str>) -> NormalizedConfig {
-    match try_normalize_existing_config(raw) {
-        Ok(config) => config,
-        Err(_) => (String::new(), Map::new(), Map::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

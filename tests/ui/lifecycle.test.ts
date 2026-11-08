@@ -58,7 +58,7 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
   } finally { if (child.exitCode === null) child.kill("SIGKILL"); await exited; }
 });
 
-interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; hovered?: boolean; reuse_identifier?: string; background?: number[]; border?: number[]; border_width?: number; foreground?: number[]; tint?: number[]; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; children: MenuNode[] }
+interface MenuNode { id: string; text?: string; tooltip?: string; symbol?: string; green?: boolean; hovered?: boolean; reuse_identifier?: string; background?: number[]; border?: number[]; border_width?: number; foreground?: number[]; tint?: number[]; width: number; height: number; x: number; y: number; radius: number; hidden?: boolean; secure?: boolean; children: MenuNode[] }
 interface MenuSnapshot { icon_alpha: Record<string, number>; button_title: string; button_image_position: number; button_font_size: number; button_font_weight: number; button_font_features: { type: number; selector: number }[]; button_digit_widths: number[]; items: MenuNode[]; actions: number; count: number; available_count?: number; rebuilds?: number; directory_open?: boolean; directory_mode?: string; activity_filter?: string; unread_count?: number; composer_open?: boolean; composer_target?: string; composer_reply_signal_id?: string; directory_online_count?: number; directory_matched_count?: number; directory_query?: string; directory_scope?: string; directory_harness?: string; directory_selected_id?: string; directory_items?: MenuNode[]; settings_open?: boolean; settings_tab?: string; settings_launch_at_login?: boolean; settings_items?: MenuNode[]; icon_template: boolean; icon_width: number; icon_height: number; clipboard: string }
 function flatten(nodes: MenuNode[]): MenuNode[] { return nodes.flatMap(node => [node, ...flatten(node.children)]); }
 
@@ -258,7 +258,6 @@ test("the default HUD timer hides after six seconds while the companion remains 
 test("native daemon owns the UI child, emits current snapshots, preserves state after UI crash and reaps children on shutdown", async () => {
  const f=await cleanroom();const daemon=await f.daemon({CITO_DISABLE_UI:"0"});const pi=await f.piBridge();await f.tool("cito_listen",{about:"Snapshot replay"},pi.meta);
  const first=await snapshot(f);expect(first.listeners).toHaveLength(2);
- const children=async()=>{const result=await f.command(["-o","pid=","--ppid",String(daemon.child.pid)],{executable:"/bin/ps"});return result.stdout.trim().split(/\\s+/).filter(Boolean).map(Number);};
  // Darwin ps does not support --ppid; use the portable parent-column listing.
  const pids=async()=>{const result=await f.command(["-axo","pid=,ppid=,comm="],{executable:"/bin/ps"});return result.stdout.split("\n").filter(l=>l.includes("cito-ui")).map(l=>l.trim().split(/\s+/)).filter(p=>Number(p[1])===daemon.child.pid).map(p=>Number(p[0]));};
  const before=await pids();expect(before).toHaveLength(1);process.kill(before[0]!,"SIGKILL");
@@ -734,15 +733,6 @@ test("cito-ui renders custom plugin badges, group headers, horizontal facet scro
 
 test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-click Set Up, LAN Hub Sharing, Paste from Invite, inline Add Hub form, Launch at Login, and Escape close", async () => {
   // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
 
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
   const bridge = new UiBridge(root, {
@@ -925,6 +915,7 @@ test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-clic
     send({
       op: "test_clipboard",
       text: "cito setup --hub studio-mac --url http://100.64.0.99:4291 --auth token --token lan-token-xyz --default",
+      system_only: true,
     });
     send({ op: "test_control", id: "paste_hub_invite" });
     await waitFor(() =>
@@ -978,13 +969,6 @@ test("Surface 3 SettingsPanel (520x460pt) renders Agent Apps & Hubs tabs, 1-clic
 }, 25000);
 
 test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signal & ack_signals, and 3-tab SettingsPanel Human Channels", async () => {
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
-  // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
   // Native action validation is exercised through /ui in tests/mcp/ui.test.ts.
 
   const diagnostics: string[] = [], actions: UiToDaemonAction[] = [];
@@ -1102,7 +1086,10 @@ test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signa
         },
       ],
       desktop_banner_enabled: true,
-      hubs: [],
+      hubs: ["personal", "work"].map(name => ({
+        name, url: "local://", auth_mode: "none" as const, enabled: true,
+        is_default: name === "personal", status: "connected", user: "alice", error: null,
+      })),
       host_hub: {
         enabled: false,
         running: false,
@@ -1138,10 +1125,15 @@ test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signa
     const actNodes = flatten(actSnap.directory_items ?? []);
     expect(actNodes.find(n => n.id === "dir_mode:activity")?.text).toBe("Activity · 1");
     expect(actNodes.find(n => n.id === "activity_row:personal:sig_unread_1")).toBeDefined();
+    expect(actNodes.find(n => n.id === "directory_shortcuts")?.text).toBe("↵ Reply    ⎋ Close");
 
     // Filter switching: act_filter:all shows both items; act_filter:unread shows 1 item
     send({ op: "test_control", id: "act_filter:all" });
     expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "activity_row:personal:sig_other_2")).toBeDefined();
+    send({ op: "test_directory_key", key: "down" });
+    expect((await inspect()).directory_selected_id).toBe("personal:sig_other_2");
+    send({ op: "test_directory_key", key: "up" });
+    expect((await inspect()).directory_selected_id).toBe("personal:sig_unread_1");
     send({ op: "test_control", id: "act_filter:unread" });
     expect(flatten((await inspect()).directory_items ?? []).find(n => n.id === "activity_row:personal:sig_other_2")).toBeUndefined();
 
@@ -1153,6 +1145,7 @@ test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signa
       composer_target: peer.scoped_id,
       composer_reply_signal_id: "personal:sig_unread_1",
     });
+    expect(flatten(replySnap.directory_items ?? []).find(n => n.id === "directory_shortcuts")?.text).toBe("↵ Send    ⎋ Cancel Reply");
     send({ op: "test_composer_input", value: "Approved, go ahead!" });
     send({ op: "test_control", id: "composer_send" });
     await waitFor(() => actions.some(a => a.op === "send_signal"));
@@ -1164,14 +1157,25 @@ test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signa
       in_reply_to: "personal:sig_unread_1",
     });
 
+    send({ op: "composer_result", ok: false, error: "Hub unavailable. Retry." });
+    const failedSend = await inspect();
+    expect(failedSend.composer_open).toBe(true);
+    expect(flatten(failedSend.directory_items ?? []).find(n => n.id === "composer_input")?.text).toBe("Approved, go ahead!");
+    expect(flatten(failedSend.directory_items ?? []).find(n => n.id === "composer_error")?.text).toBe("Hub unavailable. Retry.");
+    // An Activity-mode state update must preserve the independently loaded directory.
+    bridge.state(hubs, [listener, humanListener], [], [], 2, undefined, settingsWithChannels, 1, activityItems);
+
     // Switch to Directory mode, click Message on peer row, and cancel composer
     send({ op: "test_control", id: "dir_mode:directory" });
     const dirModeSnap = await inspect();
     expect(dirModeSnap.directory_mode).toBe("directory");
+    expect(flatten(dirModeSnap.directory_items ?? []).find(n => n.id === "msg_dir:" + peer.scoped_id)).toBeDefined();
     send({ op: "test_control", id: "msg_dir:" + peer.scoped_id });
     expect((await inspect()).composer_target).toBe(peer.scoped_id);
     send({ op: "test_control", id: "composer_cancel" });
-    expect((await inspect()).composer_open).toBe(false);
+    const cancelledComposer = await inspect();
+    expect(cancelledComposer.composer_open).toBe(false);
+    expect(flatten(cancelledComposer.directory_items ?? []).find(n => n.id === "directory_shortcuts")?.text).toBe("↵ Copy Selected ID    ⎋ Close");
 
     // Switch back to Activity mode and click ✓ Read All -> emits ack_signals
     send({ op: "test_control", id: "dir_mode:activity" });
@@ -1187,6 +1191,30 @@ test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signa
     expect(chNodes.find(n => n.id === "toggle_desktop_banner")?.text).toBe("● Enabled");
     expect(chNodes.find(n => n.id === "settings_channel:telegram")).toBeDefined();
     expect(chNodes.find(n => n.id === "pairing_instruction:telegram")?.text).toBe('Send "/start cito-ab23cd" to @cito_test_bot');
+
+    expect(chNodes.find(n => n.id === "channel_field:telegram:botToken")).toMatchObject({ secure: true, text: "••••" });
+    send({ op: "test_control", id: "channel_hub_selector:work" });
+    await waitFor(() => actions.some(a => a.op === "open_settings" && a.hub === "work"));
+    send({ op: "settings", hub: "work", settings: settingsWithChannels });
+    send({ op: "test_settings_input", id: "channel_field:telegram:botToken", value: "new-secret" });
+    const pairedSettings = structuredClone(settingsWithChannels);
+    pairedSettings.channels![0]!.fields.find(f => f.key === "chatId")!.value = "server-chat";
+    send({ op: "settings", hub: "work", settings: pairedSettings });
+    const paired = flatten((await inspect()).settings_items ?? []);
+    expect(paired.find(n => n.id === "channel_field:telegram:chatId")?.text).toBe("server-chat");
+    send({ op: "test_control", id: "save_channel:telegram" });
+    await waitFor(() => actions.some(a => a.op === "channel_save" && a.hub === "work" && a.values.chatId === "server-chat" && a.values.botToken === "new-secret"));
+    send({ op: "test_control", id: "channel_hub_selector:personal" });
+    await waitFor(() => actions.some(a => a.op === "open_settings" && a.hub === "personal"));
+    send({ op: "test_control", id: "open_uninstall_confirm" });
+    const confirm = flatten((await inspect()).settings_items ?? []);
+    expect(confirm.find(n => n.id === "uninstall_confirm_box")).toMatchObject({hidden:false});
+    expect(confirm.find(n => n.id === "settings_channels_tab")).toMatchObject({hidden:true});
+    send({ op: "test_control", id: "settings_tab:hubs" });
+    const switched = flatten((await inspect()).settings_items ?? []);
+    expect(switched.find(n => n.id === "uninstall_confirm_box")).toBeUndefined();
+    expect(switched.find(n => n.id === "settings_hubs_tab")).toMatchObject({hidden:false});
+    send({ op: "test_control", id: "settings_tab:channels" });
 
     send({ op: "test_control", id: "toggle_desktop_banner" });
     await waitFor(() => actions.some(a => a.op === "set_desktop_banner" && a.enabled === false));

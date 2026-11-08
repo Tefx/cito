@@ -66,7 +66,7 @@
       <h3>Option 1: Homebrew (Recommended)</h3>
       <pre><code>brew install tefx/tap/cito</code></pre>
       <p>
-        Homebrew installs <code>Cito.app</code> alongside the <code>cito</code>, <code>cito-mcp</code>, and <code>cito-claude-hook</code> binaries on your <code>PATH</code>.
+        Homebrew installs <code>Cito.app</code> alongside the <code>cito</code> and <code>cito-mcp</code> binaries on your <code>PATH</code>.
       </p>
 
       <h3>Option 2: Download <code>Cito.app</code> for macOS</h3>
@@ -99,18 +99,14 @@
 
       <h3>Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
       <pre><code>[mcp_servers.cito]
-command = "cito-mcp"
+command = "~/.cito/bin/cito-mcp"
 args = []</code></pre>
 
-      <h3>Pi Coding Agent (<code>~/.pi/agent/mcp/global.mcp.json</code>)</h3>
+      <h3>Pi Coding Agent (<code>~/.pi/agent/settings.json</code>)</h3>
       <pre><code>{
-  "mcpServers": {
-    "cito": {
-      "command": "cito-mcp",
-      "args": []
-    }
-  }
+  "packages": ["~/.cito/plugins/pi"]
 }</code></pre>
+      <p>The installed plugin package registers <code>~/.cito/bin/cito-mcp</code> and the session bridge automatically.</p>
       <p>
         Inside any Pi session, use the <code>/cito</code> slash command (<code>/cito on</code>, <code>/cito team</code>, <code>/cito off</code>) or click <strong><code>+ Listen</code></strong> under <code>AVAILABLE SESSIONS</code> in the menu bar dropdown.
       </p>
@@ -122,7 +118,7 @@ args = []</code></pre>
       <pre><code>{
   "mcpServers": {
     "cito": {
-      "command": "cito-mcp",
+      "command": "~/.cito/bin/cito-mcp",
       "args": [],
       "env": {
         "CITO_CLAUDE_CHANNEL": "1"
@@ -130,9 +126,9 @@ args = []</code></pre>
     }
   },
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "cito-claude-hook" }] }],
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "cito-claude-hook" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "cito-claude-hook" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }]
   }
 }</code></pre>
 
@@ -144,7 +140,7 @@ args = []</code></pre>
         <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top.</li>
         <li>Paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) under Hub settings and click <strong><code>Save</code></strong>.</li>
         <li>Select the target Hub and click <strong><code>Pair Account…</code></strong>. Follow the account-specific instruction displayed in the card, containing a short-lived 10-character pairing command (such as <code>/start cito-a1b2c3d4e5</code>).</li>
-        <li>Send that <code>/start cito-xxxxxx</code> message to your bot in Telegram. Your Telegram <code>chatId</code> binds to your user profile automatically.</li>
+        <li>Send that <code>/start cito-a1b2c3d4e5</code> message to your bot in Telegram. Your Telegram <code>chatId</code> binds to your user profile automatically.</li>
         <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification (or send a plain message within 10 minutes of the most recent alert) to route your reply straight back to that agent through the Hub.</li>
       </ol>
 

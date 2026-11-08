@@ -87,8 +87,23 @@ export default function citoBridge(pi: BridgeAPI): void {
   const resolvedStateDir = stateDir === "~" ? homedir() : stateDir.startsWith("~/")
     ? join(homedir(), stateDir.slice(2)) : resolve(stateDir);
   const shim = join(resolvedStateDir, "bin", "cito-mcp");
-  try { pi.registerMcpServer?.("cito", { command: shim, args: [] }); }
-  catch { /* The host may register extensions before its MCP registry is ready. */ }
+  let mcpRegistered = false;
+  function registerMcpServer(): void {
+    if (mcpRegistered || !pi.registerMcpServer) return;
+    try {
+      pi.registerMcpServer("cito", { command: shim, args: [] });
+      mcpRegistered = true;
+    } catch (error) {
+      if (error instanceof Error && /already registered/i.test(error.message)) {
+        mcpRegistered = true;
+        return;
+      }
+      throw error;
+    }
+  }
+  // Some hosts initialize the registry after synchronous extension loading.
+  try { registerMcpServer(); }
+  catch { /* session_start retries and surfaces any persistent failure. */ }
   const sessions = new Map<string, Set<string>>();
   let sessionId: string | undefined;
   let activeBadge: string | undefined;
@@ -201,6 +216,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    registerMcpServer();
     lastActiveMs = Date.now();
     update(ctx);
     if (server) return;

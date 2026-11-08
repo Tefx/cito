@@ -347,7 +347,10 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let node = e.rpc("kv_get", &json!({"key":human}), Some(&user)).unwrap();
     let reg: Value = serde_json::from_slice(&B64.decode(s(&node, "value_b64")).unwrap()).unwrap();
     assert_eq!(reg["scope"], "self");
-    assert!(node_active(&reg, 0, now_ms() + 10_000_000));
+    assert_eq!(
+        evaluate_node_lease(&reg, (now_ms() + 10_000_000) as u64),
+        "ACTIVE"
+    );
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -364,7 +367,7 @@ fn human_public_id_uses_canonical_slug_normalization() {
         Some(&caller),
     )
     .unwrap();
-    let id = human_id(s(&caller, "principal_id"));
+    let id = listener_id(s(&caller, "principal_id"), "human", "default");
     let row = e.inner.db.transaction(|c| kv_row(c, &id)).unwrap().unwrap();
     assert_eq!(
         parse(&row, "value")["public_id"],
@@ -398,7 +401,7 @@ fn reservations_retry_holes_and_record_all_chunks() {
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[root.clone()]).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
-    let node = human_id("none#alice");
+    let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "historical");
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":true,"hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}),Some(&owner)).unwrap();
     send(&e, &node, "fail-once");
@@ -475,7 +478,7 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
     let e = HubEngine::open(&dir).unwrap();
     put(&e, "sender", "none#bob", "workspace");
     let pid = "none#alice";
-    let node = human_id(pid);
+    let node = listener_id(pid, "human", "default");
     put(&e, &node, pid, "self");
     send(&e, &node, "original");
     e.inner.db.transaction(|c|{c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,'fixture','alice',?)",&[json!(pid),json!(json!({"_external_chat_id":"room","_external_user_id":"user"}).to_string())])?;c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES('fixture',?,'chunk-1','original','work:sender')",&[json!(pid)])?;Ok(())}).unwrap();
@@ -1007,7 +1010,7 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[root.clone()]).unwrap();
     let pid = "none#alice";
-    let node = human_id(pid);
+    let node = listener_id(pid, "human", "default");
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":true,"hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}),Some(&json!({"principal_id":pid,"owner_user":"alice"}))).unwrap();
     e.inner.db.transaction(|c|{for i in 0..201{let id=format!("message-{i}");c.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES(?,?,?,CAST(? AS BLOB))",&[json!(format!("cito.signal.{node}")),json!(id),json!(now_ms()),json!(json!({"signal_id":id,"message":"hello","from":{"listener_id":"sender"}}).to_string())])?;if i<200{c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms) VALUES('fixture',?,?,?,'delivered',?)",&[json!(pid),json!(id),json!(i+1),json!(now_ms())])?;}}Ok(())}).unwrap();
     wait_for(|| {
@@ -1026,13 +1029,13 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn reservations_are_exclusive_and_stale_inflight_is_retried() {
+fn reservations_renew_while_process_is_live_and_replay_after_exit() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[root.clone()]).unwrap();
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":true,"hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}),Some(&json!({"principal_id":"none#alice","owner_user":"alice"}))).unwrap();
-    let node = human_id("none#alice");
+    let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "concurrent");
     let plugin = e.plugin("fixture").unwrap();
     let process = e.ensure_process(&plugin).unwrap();
@@ -1052,8 +1055,23 @@ fn reservations_are_exclusive_and_stale_inflight_is_retried() {
     wait_for(|| {
         e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
     });
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='in_flight',delivered_ms=?,reservation_id='abandoned' WHERE signal_id='concurrent'",&[json!(now_ms()-60_001)]).unwrap();
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='in_flight',delivered_ms=?,reservation_id='abandoned' WHERE signal_id='concurrent'",&[json!(now_ms()-180_001)]).unwrap();
     e.replay(&plugin, &process).unwrap();
+    let row = e
+        .inner
+        .db
+        .query(
+            "SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent'",
+            &[],
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(row["reservation_id"], "abandoned");
+    assert_eq!(row["status"], "in_flight");
+    assert!(n(&row, "delivered_ms") > now_ms() - 1000);
+    process.shutdown();
+    let replacement = e.ensure_process(&plugin).unwrap();
+    e.replay(&plugin, &replacement).unwrap();
     wait_for(|| {
         e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
     });

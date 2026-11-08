@@ -206,7 +206,7 @@ impl<'a> Settings<'a> {
             .scopes
             .clone()
             .unwrap_or_else(|| {
-                ["openid", "profile", concat!("e", "mail"), "offline_access"]
+                ["openid", "profile", "email", "offline_access"]
                     .into_iter()
                     .filter(|scope| {
                         supported
@@ -376,44 +376,6 @@ fn publish(path: &Path, cache: &Value, deadline: &Deadline<'_>) -> Result<(), St
     result
 }
 
-pub fn cached(dir: &Path, hub: &str, config: &Value) -> Result<Option<LoginResult>, String> {
-    let deadline = Deadline {
-        at: Instant::now() + LOGIN_TIMEOUT,
-        cancelled: &super::daemon::shutdown_requested,
-    };
-    let settings = Settings::new(config)?;
-    match read_cache(&cache_path(dir, hub)?, &settings)? {
-        Some(cache) if fresh(&cache) => verify_cache(&cache, &settings, &deadline).map(Some),
-        _ => Ok(None),
-    }
-}
-pub fn login(
-    dir: &Path,
-    hub: &str,
-    config: &Value,
-    interactive: bool,
-) -> Result<LoginResult, String> {
-    let deadline = Deadline {
-        at: Instant::now() + LOGIN_TIMEOUT,
-        cancelled: &super::daemon::shutdown_requested,
-    };
-    let settings = Settings::new(config)?;
-    deadline.remaining()?;
-    let current = read_cache(&cache_path(dir, hub)?, &settings)?;
-    if let Some(cache) = current.as_ref().filter(|cache| fresh(cache)) {
-        return verify_cache(cache, &settings, &deadline);
-    }
-    recover_inner(
-        dir,
-        hub,
-        &settings,
-        current
-            .as_ref()
-            .and_then(|cache| cache["token_sha256"].as_str()),
-        interactive,
-        &deadline,
-    )
-}
 /// Recover a rejected bearer generation even if its JWT has not expired. Callers must pass
 /// the hash of the bearer that actually received 401, never the subsequently reloaded cache.
 pub fn recover(
@@ -423,9 +385,26 @@ pub fn recover(
     rejected_hash: Option<&str>,
     interactive: bool,
 ) -> Result<LoginResult, String> {
+    recover_cancellable(
+        dir,
+        hub,
+        config,
+        rejected_hash,
+        interactive,
+        &super::daemon::shutdown_requested,
+    )
+}
+pub fn recover_cancellable(
+    dir: &Path,
+    hub: &str,
+    config: &Value,
+    rejected_hash: Option<&str>,
+    interactive: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<LoginResult, String> {
     let deadline = Deadline {
         at: Instant::now() + LOGIN_TIMEOUT,
-        cancelled: &super::daemon::shutdown_requested,
+        cancelled,
     };
     recover_inner(
         dir,
@@ -1015,18 +994,15 @@ mod tests {
     #[test]
     fn real_pkce_scopes_signature_nonce_and_private_publication() {
         for (scopes, expected) in [
-            (None, concat!("openid e", "mail")),
-            (
-                Some(vec!["openid", concat!("e", "mail")]),
-                concat!("openid e", "mail"),
-            ),
+            (None, "openid email"),
+            (Some(vec!["openid", "email"]), "openid email"),
             (Some(vec!["openid", "profile"]), "openid profile"),
         ] {
             let dir = Temp::new();
             let provider = Provider::new();
             let mut config = provider.config();
             provider.state.lock().unwrap().scopes_supported =
-                Some(vec!["openid".into(), concat!("e", "mail").into()]);
+                Some(vec!["openid".into(), "email".into()]);
             if let Some(scopes) = scopes {
                 config["scopes"] = json!(scopes);
             }
@@ -1105,7 +1081,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    login(&path, "work", &config, false).unwrap().0
+                    recover(&path, "work", &config, None, false).unwrap().0
                 })
             })
             .collect();
@@ -1174,7 +1150,7 @@ mod tests {
         provider.seed(&dir.0, 0);
         let before = fs::read(cache_path(&dir.0, "work").unwrap()).unwrap();
         provider.state.lock().unwrap().refresh_status = 503;
-        assert!(login(&dir.0, "work", &provider.config(), false)
+        assert!(recover(&dir.0, "work", &provider.config(), None, false)
             .unwrap_err()
             .contains("AUTH_UNAVAILABLE"));
         assert_eq!(
@@ -1238,11 +1214,7 @@ mod tests {
             fs::read_to_string(dir.0.join("oidc-token.json")).unwrap(),
             "legacy"
         );
-        for scopes in [
-            json!([]),
-            json!([concat!("e", "mail")]),
-            json!(["openid", "bad scope"]),
-        ] {
+        for scopes in [json!([]), json!(["email"]), json!(["openid", "bad scope"])] {
             let mut config = config.clone();
             config["scopes"] = scopes;
             assert!(Settings::new(&config).is_err());
@@ -1250,7 +1222,7 @@ mod tests {
         let settings = Settings::new(&config).unwrap();
         assert_eq!(
             settings.scopes(&json!({})).unwrap(),
-            concat!("openid profile e", "mail offline_access")
+            "openid profile email offline_access"
         );
     }
     #[test]

@@ -20,7 +20,7 @@ export async function signingKey(alg: "RS256" | "RS384" | "RS512" | "PS256" | "E
 }
 export async function startOidc(keys: JWK[] = []) {
   const state = { scopesSupported: undefined as string[] | undefined, keys, fail: false, stall: false, discoveryRequests: 0, jwksRequests: 0,
-    refreshStatus: 200, refreshRequests: 0, codeRequests: 0, authorizationRequests: 0,
+    refreshStatus: 200, refreshRequests: 0, codeRequests: 0, authorizationRequests: 0, holdAuthorization: false,
     tokenResponse: {} as { id_token?: string; refresh_token?: string }, tokenFactory: undefined as undefined | ((nonce: string) => Promise<{id_token?:string;refresh_token?:string}>), nonce: "", requestedScopes: "", challenge: "", redirect: "" };
   let issuer = "";
   const server = createServer((req, res) => {
@@ -38,6 +38,7 @@ export async function startOidc(keys: JWK[] = []) {
     } else if (req.url?.startsWith("/authorize?")) {
       const url = new URL(req.url, issuer);
       state.authorizationRequests++;
+      if (state.holdAuthorization) return;
       state.nonce=url.searchParams.get("nonce")??"";state.requestedScopes=url.searchParams.get("scope")??"";
       state.challenge = url.searchParams.get("code_challenge") ?? "";
       state.redirect = url.searchParams.get("redirect_uri") ?? "";

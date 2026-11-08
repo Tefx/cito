@@ -19,7 +19,7 @@ describe("native cito hub CLI and zero-runtime-dependency npm distribution", () 
       [["hub"], { CITO_AUTH_MODE: "other" }, /CITO_AUTH_MODE/],
       [["hub"], { CITO_HUB_PORT: "invalid" }, /CITO_HUB_PORT/],
       [["hub"], { CITO_HUB_PORT: "70000" }, /CITO_HUB_PORT/],
-      [["hub"], { CITO_HUB_BIND: "   " }, /CITO_HUB_BIND/],
+      [["hub", "--bind", ""], {}, /--bind/],
       [["hub"], { CITO_OIDC_ISSUER: "" }, /CITO_OIDC_ISSUER/],
       [["hub"], { CITO_OIDC_ISSUER: "http://example" }, /CITO_OIDC_ISSUER/],
       [["hub"], { CITO_OIDC_CLIENT_ID: "" }, /CITO_OIDC_CLIENT_ID/],
@@ -49,8 +49,8 @@ describe("native cito hub CLI and zero-runtime-dependency npm distribution", () 
     } finally { await oidc.stop(); }
   }, 10_000);
 
-  it("runs the native no-auth HubServer without any authorization credentials", async () => {
-    const f = await fixture(), hub = await f.hub();
+  it("runs the native no-auth HubServer with blank optional OIDC environment values", async () => {
+    const f = await fixture(), hub = await f.hub({env:{CITO_OIDC_ISSUER:"",CITO_OIDC_CLIENT_ID:"",CITO_HUB_BIND:""}});
     const info = object(await hub.rpc("account_info"));
     expect(info.streams).toBe(0);
   });

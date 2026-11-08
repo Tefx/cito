@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;
+
 struct InterruptibleStream<'a> {
     socket: std::net::TcpStream,
     client: &'a HubClient,
@@ -90,6 +94,7 @@ pub struct HubClient {
     pub status: Arc<Mutex<String>>,
     pub closed: Arc<AtomicBool>,
     pub registration: Arc<Mutex<()>>,
+    agent: ureq::Agent,
 }
 impl HubClient {
     pub fn new(name: String, config: Value, user: &str, local: Option<Arc<HubEngine>>) -> Self {
@@ -113,6 +118,7 @@ impl HubClient {
             status: Arc::new(Mutex::new(status.into())),
             closed: Arc::new(AtomicBool::new(false)),
             registration: Arc::new(Mutex::new(())),
+            agent: ureq::agent(),
         }
     }
     pub fn rpc(&self, op: &str, params: &Value) -> Result<Value, String> {
@@ -125,12 +131,14 @@ impl HubClient {
         if string(&self.config, "url").starts_with("http://") {
             return self.rpc_http(op, params);
         }
-        let mut request = ureq::post(&format!(
-            "{}/v1/rpc",
-            string(&self.config, "url").trim_end_matches('/')
-        ))
-        .timeout(Duration::from_secs(5))
-        .set("X-Cito-User", string(&self.identity, "owner_user"));
+        let mut request = self
+            .agent
+            .post(&format!(
+                "{}/v1/rpc",
+                string(&self.config, "url").trim_end_matches('/')
+            ))
+            .timeout(Duration::from_secs(5))
+            .set("X-Cito-User", string(&self.identity, "owner_user"));
         if let Some(token) = self.bearer.as_deref().filter(|s| !s.is_empty()) {
             request = request.set("Authorization", &format!("Bearer {token}"));
         }
@@ -172,10 +180,10 @@ impl HubClient {
         let mut bytes = Vec::new();
         result
             .into_reader()
-            .take(262_145)
+            .take(8 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
-        if bytes.len() > 262_144 {
+        if bytes.len() > 8 * 1024 * 1024 {
             return Err("Hub response exceeds frame limit".into());
         }
         let response: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;

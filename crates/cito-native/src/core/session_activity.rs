@@ -640,10 +640,8 @@ print(json.dumps(response), flush=True)
                 cli_flag: false,
                 plugin_dir: path.clone(),
                 is_builtin: false,
-                scope: "user".into(),
                 channel_env: None,
                 fields: Vec::new(),
-                pairing: Value::Null,
                 command: vec![
                     "/usr/bin/env".into(),
                     format!("HOME={}", self.config.home_dir.display()),

@@ -12,6 +12,16 @@ test("interactive S256 PKCE verifies signatures and stores canonical identity wi
 test("rejected unexpired tokens refresh once and concurrent waiters reuse the verified cache",async()=>{
  const x=await loginFixture();const old=await x.key.sign(x.oidc.claims());await x.cache(old,"refresh-old",0);const results=await Promise.all([x.login(),x.login(),x.login()]);expect(results.every(r=>r.http_status===200)).toBe(true);expect(x.oidc.state.refreshRequests).toBe(1);expect(x.oidc.state.authorizationRequests).toBe(0);expect((await x.read()).id_token).not.toBe(old);
 });
+test("concurrent interactive logins reuse a refreshed publication with identical bearer bytes",async()=>{
+ const x=await loginFixture(),token=await x.key.sign(x.oidc.claims());
+ await x.cache(token,"refresh-old",0);
+ x.oidc.state.tokenFactory=async()=>({id_token:token,refresh_token:"refresh-next"});
+ const results=await Promise.all([x.login(),x.login(),x.login()]);
+ expect(results.map(r=>r.http_status)).toEqual([200,200,200]);
+ expect(x.oidc.state.refreshRequests).toBe(1);
+ expect((await x.read()).refresh_token).toBe("refresh-next");
+ expect(x.oidc.state.authorizationRequests).toBe(0);
+});
 test.each([400,401])("refresh %i falls through to PKCE within the same lock",async status=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));x.oidc.state.refreshStatus=status;expect((await x.login()).http_status).toBe(200);expect(x.oidc.state.refreshRequests).toBe(1);expect(x.oidc.state.authorizationRequests).toBe(1);});
 test("refresh 503 fails without launching a browser or overwriting verified cache",async()=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));const before=await readFile(x.path,"utf8");x.oidc.state.refreshStatus=503;expect((await x.login()).http_status).toBe(400);expect(x.oidc.state.authorizationRequests).toBe(0);expect(await readFile(x.path,"utf8")).toBe(before);});
 test("a different PKCE identity cannot inherit the previous refresh token after rejection",async()=>{const x=await loginFixture();await x.cache(await x.key.sign(x.oidc.claims()));x.oidc.state.refreshStatus=401;x.oidc.state.tokenFactory=async nonce=>({id_token:await x.key.sign(x.oidc.claims({sub:"other",nonce}))});expect((await x.login()).http_status).toBe(200);expect((await x.read()).verified_principal_id).toContain("other");expect((await x.read()).refresh_token).toBeNull();});

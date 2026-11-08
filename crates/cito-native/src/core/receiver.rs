@@ -156,6 +156,7 @@ pub fn poll_listener(
     row: &Value,
     plugin: Option<&PluginDescriptor>,
     state_dir: &std::path::Path,
+    mut on_admit: impl FnMut(&Value),
 ) -> Result<(), String> {
     let id = string(row, "listener_id");
     let hub = &client.name;
@@ -184,7 +185,7 @@ pub fn poll_listener(
             .filter(|v| v.is_number())
             .or_else(|| signal.get("acked_at_ms"))
             .unwrap_or(&Value::Null);
-        local.admit(
+        let admitted = local.admit(
             hub,
             row,
             &signal,
@@ -193,6 +194,9 @@ pub fn poll_listener(
             created + 1_800_000,
             acked,
         )?;
+        if admitted && !acked.is_number() {
+            on_admit(&signal);
+        }
         client.rpc(
             "consumer_ack",
             &json!({"stream":"CITO_SIGNALS","name":name,"seq":item["seq"]}),

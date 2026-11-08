@@ -1000,7 +1000,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 return
             }
             if op == "test_clipboard", let text = object["text"] as? String {
-                clipboardString = text
+                if object["system_only"] as? Bool != true { clipboardString = text }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
                 return

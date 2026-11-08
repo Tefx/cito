@@ -100,9 +100,9 @@
 
       <h2 id="three-layers">4. Three-Layer Logical Architecture</h2>
       <ol>
-        <li><strong>Layer 1 — <code>HubEngine</code> (<code>src/hub/</code>)</strong>: Single-authority node registry, signal stream, read-state tracking, and OIDC/token row-level security. Runs identically in-process for standalone single-Mac use (<code>url: "local://"</code>) and over HTTP/SSE in <code>cito hub</code>.</li>
-        <li><strong>Layer 2 — <code>AgentChannelHost</code> (<code>src/mcp/</code>, <code>src/adapters/</code>, <code>crates/cito-native/</code>)</strong>: Local daemon, Rust hot-path stdio/hook binary, and agent harness plugins.</li>
-        <li><strong>Layer 3 — <code>HumanChannelHost</code> (<code>src/ui/</code>, <code>src/macos/cito-ui.swift</code>, <code>plugins/human</code>, <code>plugins/telegram</code>)</strong>: Four-surface native macOS UI (<code>cardMenu</code>, <code>DirectoryPanel</code> with <code>Directory | Activity</code> + inline <code>ComposerBar</code>, 3-tab <code>SettingsPanel</code>, and <code>WakeBanner</code>) plus external human messaging plugins.</li>
+        <li><strong>Layer 1 — <code>HubEngine</code> (<code>crates/cito-native/src/core/hub.rs</code>)</strong>: Single-authority node registry, signal stream, read-state tracking, and OIDC/token row-level security. Runs identically in-process for standalone single-Mac use (<code>url: "local://"</code>) and over HTTP/SSE in <code>cito hub</code>.</li>
+        <li><strong>Layer 2 — <code>AgentChannelHost</code> (<code>crates/cito-native/src/core/daemon.rs</code>, <code>crates/cito-native/src/core/plugins.rs</code>, <code>plugins/*/native.rs</code>)</strong>: Local daemon, Rust hot-path stdio/hook binary, and agent harness plugins.</li>
+        <li><strong>Layer 3 — <code>HumanChannelHost</code> (<code>src/macos/cito-ui.swift</code>, <code>plugins/human</code>, <code>plugins/telegram</code>)</strong>: Four-surface native macOS UI (<code>cardMenu</code>, <code>DirectoryPanel</code> with <code>Directory | Activity</code> + inline <code>ComposerBar</code>, 3-tab <code>SettingsPanel</code>, and <code>WakeBanner</code>) plus external human messaging plugins.</li>
       </ol>
 
       <h2 id="mcp-tools">5. The 5 MCP Tools</h2>

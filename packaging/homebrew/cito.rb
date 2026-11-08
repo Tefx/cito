@@ -26,13 +26,7 @@ class Cito < Formula
       fi
       exec "#{opt_prefix}/Cito.app/Contents/Helpers/cito-native" "$@"
     EOS
-    (bin/"cito-claude-hook").write <<~EOS
-      #!/bin/sh
-      export CITO_BUILTIN_PLUGINS_DIR="#{opt_prefix}/Cito.app/Contents/Resources/plugins"
-      export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
-      exec "#{opt_prefix}/Cito.app/Contents/Helpers/cito-native" hook "$@"
-    EOS
-    chmod 0755, [bin/"cito", bin/"cito-mcp", bin/"cito-claude-hook"]
+    chmod 0755, [bin/"cito", bin/"cito-mcp"]
   end
 
   def caveats

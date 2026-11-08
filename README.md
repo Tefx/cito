@@ -40,7 +40,7 @@ Choose either of the two official installation methods. `Cito.app` and `cito` ru
 brew install tefx/tap/cito
 ```
 
-This installs `Cito.app` and places `cito`, `cito-mcp`, and `cito-claude-hook` on your `PATH`:
+This installs `Cito.app` and places `cito` and `cito-mcp` on your `PATH`. The native turn-boundary hook stays inside the Claude plugin bundle:
 
 ```sh
 cito --version
@@ -109,29 +109,21 @@ Or edit `~/.cito/config.json` directly:
 
 ```toml
 [mcp_servers.cito]
-command = "cito-mcp"
+command = "~/.cito/bin/cito-mcp"
 args = []
 ```
 
 ### Pi Coding Agent
 
-1. Copy the standalone zero-dependency bridge extension (enables live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command) into `~/.pi/agent/extensions/`:
-   ```sh
-   mkdir -p ~/.pi/agent/extensions
-   curl -fsSL https://raw.githubusercontent.com/Tefx/cito/main/plugins/pi/cito-bridge.ts \
-     -o ~/.pi/agent/extensions/cito-bridge.ts
-   ```
-2. Register the MCP server in `~/.pi/agent/mcp/global.mcp.json` (or `pi.mcp.json`):
-   ```json
-   {
-     "mcpServers": {
-       "cito": {
-         "command": "cito-mcp",
-         "args": []
-       }
-     }
-   }
-   ```
+Enable the installed plugin package in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "packages": ["~/.cito/plugins/pi"]
+}
+```
+
+The package registers `~/.cito/bin/cito-mcp`, live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command. `Settings…` installs the package and adds this entry automatically.
 
 ### Claude Code (`~/.claude/settings.json`)
 
@@ -141,7 +133,7 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 {
   "mcpServers": {
     "cito": {
-      "command": "cito-mcp",
+      "command": "~/.cito/bin/cito-mcp",
       "args": [],
       "env": {
         "CITO_CLAUDE_CHANNEL": "1"
@@ -149,9 +141,9 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
     }
   },
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "cito-claude-hook" }] }],
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "cito-claude-hook" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "cito-claude-hook" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }]
   }
 }
 ```

@@ -8,7 +8,7 @@
   <link rel="canonical" href="https://tefx.github.io/cito/docs/plugins.html" />
   <meta property="og:type" content="article" />
   <meta property="og:title" content="Plugin SDK Guide — Cito Documentation" />
-  <meta property="og:description" content="Authoring guide for @tefx/cito/plugin-sdk: kind: agent (HarnessAdapter) and kind: human (HumanChannelPlugin with scope: hub | user fields and 6-char pairing)." />
+  <meta property="og:description" content="Authoring guide for @tefx/cito/plugin-sdk: kind: agent (HarnessAdapter) and kind: human (HumanChannelPlugin with scope: hub | user fields and 10-char pairing)." />
   <meta property="og:url" content="https://tefx.github.io/cito/docs/plugins.html" />
   <meta property="og:image" content="https://tefx.github.io/cito/assets/og-card.png" />
   <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
@@ -44,7 +44,7 @@
         <a class="docs-nav-link" href="#overview">1. Plugin Architecture</a>
         <a class="docs-nav-link" href="#agent-plugins">2. Agent App Plugins (kind: "agent")</a>
         <a class="docs-nav-link" href="#human-plugins">3. Human Channel Plugins (kind: "human")</a>
-        <a class="docs-nav-link" href="#two-scope-fields">4. Two-Scope Fields &amp; 6-Char Pairing</a>
+        <a class="docs-nav-link" href="#two-scope-fields">4. Two-Scope Fields &amp; 10-Char Pairing</a>
       </div>
     </aside>
 
@@ -160,7 +160,7 @@ export default cursorAdapter;</code></pre>
 
       <h3>Step 2: Implement <code>HumanChannelPlugin</code> in <code>index.ts</code></h3>
       <p>
-        When <code>pairing.supported</code> is <code>true</code>, clicking the pairing button in <code>Settings…</code> generates a 6-character Base32 code (<code>cito-xxxxxx</code>). Your background service can complete pairing via <code>ctx.completePairing(code, { userConfig })</code> and route human replies back to agents via <code>ctx.resolveReplyTarget</code> and <code>ctx.sendReplyFromHuman</code>:
+        When <code>pairing.supported</code> is <code>true</code>, clicking the pairing button in <code>Settings…</code> generates a 10-character Base32 code (<code>cito-a1b2c3d4e5</code>). Your background service can complete pairing via <code>ctx.completePairing(code, { userConfig })</code> and route human replies back to agents via <code>ctx.resolveReplyTarget</code> and <code>ctx.sendReplyFromHuman</code>:
       </p>
       <pre><code>import type {
   HumanChannelPlugin,

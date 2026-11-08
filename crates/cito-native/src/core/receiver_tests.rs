@@ -96,10 +96,8 @@ impl Fixture {
             plugin_dir: self.dir.clone(),
             is_builtin: false,
             command: vec!["/usr/bin/python3".into(), "-c".into(), script],
-            scope: "daemon".into(),
             channel_env: None,
             fields: vec![],
-            pairing: Value::Null,
         }
     }
     fn dispatch(&self, plugin: &PluginDescriptor) -> Result<(), String> {
@@ -265,7 +263,7 @@ fn losing_channel_stays_unread_until_fallback_then_can_recover_without_business_
         .as_u64()
         .ok_or("Missing retry")?;
     assert!(retry >= start + 30_500 && retry <= now_ms() + 30_500);
-    poll_listener(&f.state, &f.client, &f.row, Some(&plugin), &f.dir)?;
+    poll_listener(&f.state, &f.client, &f.row, Some(&plugin), &f.dir, |_| {})?;
     assert!(f.requests()?.is_empty());
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     // Advance persisted deadlines instead of spending 30 seconds of wall time.
@@ -274,7 +272,7 @@ fn losing_channel_stays_unread_until_fallback_then_can_recover_without_business_
     f.state
         .db
         .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
-    poll_listener(&f.state, &f.client, &f.row, Some(&plugin), &f.dir)?;
+    poll_listener(&f.state, &f.client, &f.row, Some(&plugin), &f.dir, |_| {})?;
     assert_eq!(f.requests()?.len(), 1);
     assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
     Ok(())
@@ -610,12 +608,12 @@ fn durable_remote_ack_reconciliation_works_after_transport_cursor_has_advanced(
 ) -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s")?;
-    poll_listener(&f.state, &f.client, &f.row, None, &f.dir)?;
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
     f.client.rpc(
         "signal_ack",
         &json!({"node_id":f.row["listener_id"],"signal_ids":["s"],"channel_id":"sibling:fixture"}),
     )?;
-    poll_listener(&f.state, &f.client, &f.row, None, &f.dir)?;
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     assert!(f.requests()?.is_empty());

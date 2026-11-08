@@ -105,15 +105,10 @@ pub fn parse_cli(
                 );
             }
             "--wake" if cmd == "send" => {
-                let value = if raw.contains('=') {
-                    read_value(args, &mut i, flag)?
-                } else {
-                    "true".into()
-                };
-                if !matches!(value.as_str(), "true" | "false") {
-                    return Err("--wake must be true or false".into());
-                }
-                input.insert("wake".into(), json!(value == "true"));
+                return Err(
+                    "--wake is not supported by send; delivery follows the target's channel policy"
+                        .into(),
+                );
             }
             "--user" | "-u" if cmd == "find" => {
                 input.insert("user".into(), json!(read_value(args, &mut i, flag)?));
