@@ -669,19 +669,28 @@ impl HubEngine {
                 };
                 let stream = p["stream"].as_str().unwrap_or(SIGNALS);
                 c.execute("INSERT INTO hub_consumers(name,stream,filter_subject,start_seq,cursor_seq,principal_id) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET stream=excluded.stream,filter_subject=excluded.filter_subject,start_seq=excluded.start_seq,cursor_seq=excluded.cursor_seq",&[json!(name),json!(stream),json!(filter),json!(start),json!(start),caller.map(|p|p["principal_id"].clone()).unwrap_or(Value::Null)])?;
-                let backlog = backlog(c, &name, caller)?;
+                let row = consumer(c, &name, caller)?;
+                let backlog = backlog_from(c, &row, caller, n(&row, "start_seq"))?;
                 Ok(
                     json!({"name":name,"stream_name":stream,"config":cfg,"backlog":backlog["backlog"]}),
                 )
             }
-            "consumer_backlog" => backlog(c, required(p, "name")?, caller),
+            "consumer_backlog" => {
+                let row = consumer(c, required(p, "name")?, caller)?;
+                backlog_from(c, &row, caller, n(&row, "start_seq"))
+            }
             "consumer_next" => {
                 let name = required(p, "name")?;
                 let row = consumer(c, name, caller)?;
-                let rows = backlog(c, name, caller)?;
+                let rows = backlog_from(
+                    c,
+                    &row,
+                    caller,
+                    n(&row, "start_seq").max(n(&row, "cursor_seq")),
+                )?;
                 let item = rows["backlog"]
                     .as_array()
-                    .and_then(|rows| rows.iter().find(|r| n(r, "seq") >= n(&row, "cursor_seq")))
+                    .and_then(|rows| rows.first())
                     .cloned()
                     .unwrap_or(Value::Null);
                 if !item.is_null() {
@@ -1241,10 +1250,14 @@ fn consumer(c: &Connection, name: &str, p: Option<&Value>) -> Result<Value, Stri
     consumer_owner(&row, p)?;
     Ok(row)
 }
-fn backlog(c: &Connection, name: &str, p: Option<&Value>) -> Result<Value, String> {
+fn backlog_from(
+    c: &Connection,
+    row: &Value,
+    p: Option<&Value>,
+    min_seq: i64,
+) -> Result<Value, String> {
     prune(c)?;
-    let row = consumer(c, name, p)?;
-    let rows=c.query(&format!("{SIGNAL_SELECT} WHERE seq>=? AND seq NOT IN(SELECT seq FROM hub_consumer_acks WHERE name=?) ORDER BY seq"),&[row["start_seq"].clone(),json!(name)])?;
+    let rows=c.query(&format!("{SIGNAL_SELECT} WHERE seq>=? AND seq NOT IN(SELECT seq FROM hub_consumer_acks WHERE name=?) ORDER BY seq"),&[json!(min_seq),row["name"].clone()])?;
     let mut items = Vec::new();
     let mut page_bytes = 0;
     for item in rows {
@@ -1253,7 +1266,8 @@ fn backlog(c: &Connection, name: &str, p: Option<&Value>) -> Result<Value, Strin
         {
             let wire = signal_wire(&item)?;
             let size = wire.to_string().len() + 1;
-            // Transport acknowledgments advance the next page without a second cursor.
+            // Apply the caller's sequence floor before byte pagination so unread pages
+            // cannot hide later items from sequential consumers.
             if !items.is_empty() && page_bytes + size > 4 * 1024 * 1024 {
                 break;
             }

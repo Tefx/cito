@@ -82,6 +82,10 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
             "oidc:https://id.example.com|subject"
         );
         assert_eq!(principal["owner_user"], "alice.smith");
+        let mut fallback = claims.clone();
+        fallback["preferred_username"] = Value::Null;
+        fallback["email"] = json!("alice@example.com");
+        assert_eq!(v.verify(&signed(&fallback)).unwrap()["owner_user"], "alice");
         for (k, value) in [
             ("iss", json!("https://other.example.com")),
             ("aud", json!("other")),

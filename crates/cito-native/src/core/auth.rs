@@ -326,7 +326,7 @@ impl OidcVerifier {
             .as_str()
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                claims[concat!("e", "mail")]
+                claims[crate::oidc_constants::OIDC_EMAIL_CLAIM]
                     .as_str()
                     .and_then(|s| s.split_once('@').map(|x| x.0))
             })

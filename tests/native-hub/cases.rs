@@ -12,6 +12,87 @@ fn send(e: &HubEngine, id: &str, sig: &str) {
     e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data_b64":encoded(&json!({"signal_id":sig,"from":{"principal_id":"oidc:https://id.example.com|sender","listener_id":"sender","user":"bob"},"message":"hello"})),"opts":{"msgID":sig}}),None).unwrap();
 }
 #[test]
+fn consumer_next_crosses_byte_pages_without_transport_acknowledgments() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    put(&e, "target", "p", "workspace");
+    let mut sequences = Vec::new();
+    for i in 0..4 {
+        let result = e
+            .rpc(
+                "js_publish",
+                &json!({
+                    "subject":"cito.signal.target",
+                    "data_b64":encoded(&json!({
+                        "signal_id":format!("page-{i}"),
+                        "message":"x".repeat(1024 * 1024),
+                    })),
+                }),
+                None,
+            )
+            .unwrap();
+        sequences.push(result["seq"].clone());
+    }
+    let page = e
+        .rpc(
+            "consumer_add",
+            &json!({"config":{"durable_name":"paged","filter_subject":"cito.signal.target"}}),
+            None,
+        )
+        .unwrap();
+    let first_page: Vec<_> = page["backlog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["seq"].clone())
+        .collect();
+    assert_eq!(first_page, sequences[..2]);
+    for (i, seq) in sequences.iter().enumerate() {
+        let item = e
+            .rpc("consumer_next", &json!({"name":"paged"}), None)
+            .unwrap();
+        assert_eq!(&item["seq"], seq, "cursor stopped at item {i}");
+        let payload: Value =
+            serde_json::from_slice(&B64.decode(item["data_b64"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(payload["signal_id"], format!("page-{i}"));
+        assert_eq!(payload["message"].as_str().unwrap().len(), 1024 * 1024);
+    }
+    assert_eq!(
+        e.rpc("consumer_next", &json!({"name":"paged"}), None)
+            .unwrap(),
+        Value::Null,
+    );
+    let backlog = e
+        .rpc("consumer_backlog", &json!({"name":"paged"}), None)
+        .unwrap();
+    let pending: Vec<_> = backlog["backlog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["seq"].clone())
+        .collect();
+    // Sequential reads never acknowledge transport backlog.
+    assert_eq!(pending, first_page);
+    for seq in &sequences[..2] {
+        e.rpc("consumer_ack", &json!({"name":"paged","seq":seq}), None)
+            .unwrap();
+    }
+    let backlog = e
+        .rpc("consumer_backlog", &json!({"name":"paged"}), None)
+        .unwrap();
+    let pending: Vec<_> = backlog["backlog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["seq"].clone())
+        .collect();
+    assert_eq!(pending, sequences[2..]);
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn atomic_batch_claims_and_business_ack_are_distinct() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

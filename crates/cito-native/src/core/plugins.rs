@@ -1227,6 +1227,35 @@ mod tests {
     }
 
     #[test]
+    fn documented_subprocess_manifests_load() {
+        let html = include_str!("../../../../site/docs/plugins.html");
+        let examples: Vec<_> = html
+            .split("<pre><code data-plugin-manifest>")
+            .skip(1)
+            .map(|part| {
+                serde_json::from_str::<Value>(part.split("</code>").next().unwrap()).unwrap()
+            })
+            .collect();
+        assert_eq!(examples.len(), 2);
+        let root = env::temp_dir().join(format!("cito-doc-manifests-{}", random_hex(8)));
+        for (example, (id, kind)) in examples.iter().zip([
+            ("sample-agent", "agent-harness"),
+            ("sample-chat", "human-channel"),
+        ]) {
+            let dir = root.join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("plugin.json"), example.to_string()).unwrap();
+            let descriptor = parse_manifest_dir(&dir, false).unwrap();
+            assert_eq!(descriptor.id, id);
+            assert_eq!(descriptor.kind, kind);
+            assert_eq!(descriptor.tier, "experimental");
+            assert_eq!(descriptor.plugin_dir, dir);
+            assert_eq!(descriptor.command, vec![format!("./bin/cito-plugin-{id}")]);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ndjson_request_round_trip_and_relative_command() {
         let (root, plugin) = fixture("/bin/cat");
         let request = json!({"op":"setup_inspect","payload":"line\\nquoted \"value\""});

@@ -52,7 +52,7 @@ Disabling every binding and clearing the hub configuration stops the plugin. Clo
 
 ## Embedded Daemon Integration
 
-Use one `HubEngine::open(state_dir)` for every `local://` slot. To expose that same engine over LAN, call `engine.start_server(bind, port, HubAuth::new(...))`; never open a second database or engine for the listener. `HubServer::shutdown()` stops only that listener, preserving the engine for local callers. Standalone services can use `HubEngine::open_with_remote(data_dir, true)` so restored or newly paired human nodes retain remote-private defaults. `set_remote(true)` applies that default to subsequent enrollment on an existing engine without changing explicit user scopes.
+Use one `HubEngine::open(state_dir)` for every `local://` slot. To expose that same engine over LAN, call `engine.start_server(bind, port, HubAuth::new(...))`; never open a second database or engine for the listener. `HubServer::shutdown()` stops only that listener, preserving the engine for local callers. Standalone services can use `HubEngine::open_with_remote(data_dir, true)` so restored or newly paired human nodes retain remote-private defaults.
 
 `engine.rpc(op, params, principal)` accepts a verified principal or trusted local `None`. HTTP authentication supplies verified OIDC principals; callers must never treat decoded-but-unverified JWT claims as trusted input. When matching persisted ownership outside the engine, use `auth::principal_matches` / `principal_ids_equal` to recognize the verified legacy OIDC identity alias. `engine.subscribe(principal)` supplies filtered wire events; a slow subscriber is disconnected so its client reconnects and resumes from durable consumer state.
 

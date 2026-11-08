@@ -1,6 +1,7 @@
 mod core;
 mod daemon;
 mod hub;
+mod oidc_constants;
 mod plugins;
 mod setup;
 

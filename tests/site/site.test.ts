@@ -238,7 +238,6 @@ describe("Website assets, behavior, and /cito/ subpath bundle", () => {
   it("keeps official installation links and technical documentation references", async () => {
     const indexHtml = await readFile(resolve("site/index.html"), "utf8");
     const guideHtml = await readFile(resolve("site/docs/guide.html"), "utf8");
-    const pluginsHtml = await readFile(resolve("site/docs/plugins.html"), "utf8");
     const archHtml = await readFile(resolve("site/docs/architecture.html"), "utf8");
     const readmeMd = await readFile(resolve("README.md"), "utf8");
 
@@ -294,10 +293,7 @@ describe("Website assets, behavior, and /cito/ subpath bundle", () => {
     expect(readmeMd).toMatch(/<img alt="Cito" src="site\/assets\/brand\/cito-logo-dark\.svg"/);
     expect(readmeMd).toContain("https://tefx.github.io/cito/");
 
-    // Technical docs coverage
-    expect(pluginsHtml).toContain("@tefx/cito/plugin-sdk");
-    expect(pluginsHtml).toContain("HarnessAdapter");
-    expect(pluginsHtml).toContain("HumanChannelPlugin");
+    // Protocol examples are validated by the native manifest parser tests.
     expect(archHtml).toContain("@self");
     expect(archHtml).toContain("cito_listen");
     expect(archHtml).toContain("cito_send");

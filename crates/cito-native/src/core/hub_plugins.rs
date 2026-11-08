@@ -109,20 +109,30 @@ pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
 }
 
 pub fn default_roots(data_dir: &Path) -> Vec<PathBuf> {
+    roots_for_executable(data_dir, std::env::current_exe().ok().as_deref())
+}
+
+fn roots_for_executable(data_dir: &Path, executable: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            roots.push(dir.join("../plugins"));
-        }
+    if let Some(dir) = executable.and_then(Path::parent) {
+        roots.push(dir.join("../plugins"));
+        roots.push(dir.join("../Resources/plugins"));
     }
     // Also supports development without relying on the process working directory.
     roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
+    if let Ok(dir) = std::env::var("CITO_BUILTIN_PLUGINS_DIR") {
+        roots.push(PathBuf::from(dir));
+    }
     if let Ok(dir) = std::env::var("CITO_PLUGIN_DIR") {
         roots.push(PathBuf::from(dir));
     }
     roots.push(data_dir.join("plugins"));
     roots
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/native-hub/hub_plugin_cases.rs"]
+mod tests;
 
 type Pending = Arc<Mutex<HashMap<String, mpsc::SyncSender<Value>>>>;
 pub struct ChannelProcess {
