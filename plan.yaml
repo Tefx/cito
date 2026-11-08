@@ -6569,7 +6569,7 @@ phases:
     name: 'Iterative Code-Hygiene Convergence Across Full Repository & Live v0.18.0
       Distribution Closure (GitHub Pages, Release v0.18.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
       code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: '```yaml
 
       step_type: implementation
@@ -6621,6 +6621,8 @@ phases:
     depends_on:
     - v22.impl
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-08T18:11:37.263140Z'
   - id: v22.gate
     name: V22 Stage 6 (v0.18.0) Independent Terminal Acceptance, Zero-TS-Core Residue,
       F1–F64 Conformance & Live Distribution Gate
