@@ -6422,7 +6422,7 @@ phases:
     name: Implement V22 Stage 6 (v0.18.0) Pure Rust Core (libsqlite3), Symmetric Subprocess
       Plugins, Relocation of cito-claude-hook to plugins/claude/, Standard Pi Package
       Mode, Retirement of Duplicate src/*.ts & Complete F1–F64 Remediation
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete V22 Stage 6 (`v0.18.0`) implementation and full\
       \ `F1`–`F64` remediation per `docs/DESIGN.md` §§1–8:\n  1. **Pure Rust Core\
@@ -6522,6 +6522,49 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-08T10:44:09.981579Z'
+    done_at: '2026-11-08T18:11:20.131870+00:00'
+    evidence: "Artifact:\n- Commit: dca081cb6a1c615e6d356dca874cce5cbae4a88d (183\
+      \ files changed, +24060 / -25914 lines)\n- Executor: rust-senior\n- Deliverables:\n\
+      \  1. Pure Rust Core (`crates/cito-native/src/core/{auth,cli,config,daemon,database,hub,hub_plugins,identity,lease,login,plugins,receiver,registration,session_activity,setup,state,transport}.rs`)\
+      \ linked to system `libsqlite3` (`state.sqlite` & `hub.sqlite`, `PRAGMA user_version\
+      \ = 4` non-destructive migrations + additive tables `pending_hub_acks`, `hub_channel_delivery_msgs`,\
+      \ `hub_processed_replies`, `hub_pairing_codes.instruction`), full `DaemonService`\
+      \ (all 27 UI IPC actions, `< 256 KiB` frame cap, global unread count before\
+      \ `LIMIT 80`, stale-daemon handover, async-signal-safe `SIGTERM`/`SIGINT`, `user`\
+      \ live reload, `authMode` canonicalization, channel-scoped detach, unconditional\
+      \ `signal_claim_dispatch` with fail-closed RPC, atomic batch claims, losing-channel\
+      \ unread preservation, retry recovery), and full `HubEngine` (real OIDC JWKS\
+      \ `RS256`/`ES256`/`RS384`/`RS512`/`PS256`/`ES384`/`EdDSA` verification, `stream_get_message`\
+      \ & SSE `nc` RLS, OIDC Hub-admin guard, SSE EOF auto-reconnect, persistent `local://`\
+      \ & LAN `hub.sqlite`, offline `signal_ack` reconciliation, non-expiring `host_id\
+      \ == \"hub\"` leases, remote `@self` auto-enrollment, `token` hub `scope: \"\
+      self\"`, `normalize_slug` Human IDs, fixed `session_id == \"default\"`, 30m\
+      \ signal/dedup pruning, `deploy/hub/` Rust `Dockerfile` + `docker-compose.yml`\
+      \ + `/health` `auth_mode`).\n  2. Symmetric Subprocess Plugins (`plugins/{pi,codex,claude,human,telegram}/`):\
+      \ `cito-claude-hook` relocated to `plugins/claude/bin/cito-claude-hook`, `plugins/pi/package.json`\
+      \ standard Pi Package mode (`pi.registerMcpServer(\"cito\", ...)`, `config.json.daemonPort`\
+      \ lookup, dead-socket reclamation on `EADDRINUSE`), persistent `cito-plugin-telegram`\
+      \ NDJSON subprocess (`< 100 ms` `stdin EOF` watchdog, 10-char Base32 pairing\
+      \ code, `@<botUsername>` persisted instruction, private-chat binding, pre-I/O\
+      \ reservation lock, `>4096`-char multipart chunking + hole-retry, `hub_processed_replies`\
+      \ isolation, validated `send_reply_from_human`).\n  3. Complete retirement of\
+      \ duplicate TypeScript core (`src/{mcp,hub,setup,ui,shared,adapters,auth-callout}/`,\
+      \ `bin/loader.js`, `bin/cito-claude-hook`, `plugins/{index.ts,*/index.ts,claude/channel.ts,claude/hook-cli.ts}`\
+      \ removed), `package.json` updated to `\"0.18.0\"` with `\"dependencies\": {}`,\
+      \ and all 35 Vitest test files (328 tests) + 116 Rust unit tests migrated to\
+      \ `tests/support/native-harness.ts` (`--maxWorkers=4`).\n  4. Native macOS UI\
+      \ (`src/macos/cito-ui.swift`), brand contrast SVGs (`site/assets/brand/*.svg`),\
+      \ `README.md`, and `site/` remediations (`F3, F5, F42, F47–F51, F57`).\n\nVerification:\n\
+      - Run: `npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` -> 0 errors, 6 Rust targets + macOS UI compiled\
+      \ and `crates/cito-native/target` removed, 35 test files / 328 tests passed\
+      \ 100%, `Syntax OK`\n- Run: `cargo test --locked --manifest-path crates/cito-native/Cargo.toml`\
+      \ -> 116 passed, 0 failed\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Run: CJK & forbidden-name\
+      \ scan across all tracked repository files -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v22.impl` (`df -h`: 164 GiB available).\n\
+      \nSpec link:\n- docs/DESIGN.md (§§1–8, V22 Stage 6 v0.18.0)\n- docs/ROADMAP.md\n\
+      - .vectl/audit-v16-v21-findings-f1-f64.md"
   - id: v22.hygiene
     name: 'Iterative Code-Hygiene Convergence Across Full Repository & Live v0.18.0
       Distribution Closure (GitHub Pages, Release v0.18.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
