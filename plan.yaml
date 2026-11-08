@@ -6394,7 +6394,7 @@ phases:
     Plugin Architecture, Relocation of cito-claude-hook to plugins/claude/, Standard
     Pi Package Mode, Retirement of Duplicate src/*.ts, Complete F1–F64 Remediation
     & Live Distribution Closure'
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, src/{mcp,hub,setup,ui,shared,adapters,auth-callout}, bin/loader.js,
     bin/cito-claude-hook, and legacy plugins/{index.ts,*/index.ts,claude/channel.ts,claude/hook-cli.ts}
@@ -6656,7 +6656,7 @@ phases:
   - id: v22.gate
     name: V22 Stage 6 (v0.18.0) Independent Terminal Acceptance, Zero-TS-Core Residue,
       F1–F64 Conformance & Live Distribution Gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v22` and `v0.18.0` acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session (never resuming\
@@ -6697,10 +6697,38 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-08T23:02:02.697273Z'
+    done_at: '2026-11-08T23:12:03.655304+00:00'
+    evidence: 'Artifact:
+
+      - Gate Report: `/Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-08T23-11-31-010Z-2026-11-08T23-03-50-523Z_01a1bd67-5dfa-7687-a7ba-ca87693d77ce.js-480323cd31204b5d.txt`
+      (`gate.report.v2`, `status: "PASS"`, `evidence_disposition: "POSITIVE_GATE_EVIDENCE"`,
+      `valid: true`, `binding_checked: true`).
+
+      - Reviewer: fresh-context `gate-reviewer` session `2026-11-08T23-03-50-523Z_01a1bd67-5dfa-7687-a7ba-ca87693d77ce.jsonl`
+      bound to `git:747b681a4d39ef7f5df2c868693a8c051196306b` (code commit `ecdc3b18043eb0be20f59b2c12cd27f0b489dbfc`).
+
+
+      Verification:
+
+      - Run: `python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v22-gate/delta-binding.json <report>` -> `{"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}`
+
+      - All 5 bound requirements (`REQ-V22-1-TESTS-AND-RUBY-PASS`, `REQ-V22-2-ZERO-TS-CORE-RESIDUE-AND-NATIVE-PLUGINS`,
+      `REQ-V22-3-ZERO-HARDCODING-AND-LANGUAGE-POLICY`, `REQ-V22-4-HYGIENE-LEDGER-CLOSURE-AND-ZERO-REGRESSION`,
+      `REQ-V22-5-LIVE-DISTRIBUTION-F4`) verified `PROVEN`.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1–8, V22 Stage 6 v0.18.0)
+
+      - docs/ROADMAP.md
+
+      - packaging/homebrew/cito.rb'
 - id: v23
   name: 'V23 Stage 7 (v0.19.0): Pure Rust Workspace Consolidation, Removal of Root
     Node/Vitest Scaffolding & Unified cargo test Native Test Suite'
-  status: locked
+  status: pending
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, root package.json, package-lock.json, tsconfig.json, vitest.config.ts,
     node_modules/, and tests/**/*.ts are absent, only plugins/pi/{package.json, cito-bridge.ts}
