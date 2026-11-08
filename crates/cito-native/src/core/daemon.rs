@@ -1460,20 +1460,25 @@ impl DaemonService {
         let activity = self.activity_dto(activity);
         let mut remote = Vec::new();
         let mut online = 0;
+        let now = now_ms();
         for (hub, slot) in &self.slots {
-            {
-                let directory = slot.cached_directory();
-                online += directory.len();
-                for row in directory {
-                    if super::auth::principal_ids_equal(
-                        string(&row, "principal_id"),
-                        string(&slot.identity, "principal_id"),
-                    ) && !sessions
+            for row in slot.cached_directory() {
+                let own_principal = super::auth::principal_ids_equal(
+                    string(&row, "principal_id"),
+                    string(&slot.identity, "principal_id"),
+                );
+                if super::lease::evaluate_node_lease(&row, now) != "ACTIVE"
+                    || (row["scope"] == "self" && !own_principal)
+                {
+                    continue;
+                }
+                online += 1;
+                if own_principal
+                    && !sessions
                         .iter()
                         .any(|s| s["hub"] == *hub && s["listener_id"] == row["listener_id"])
-                    {
-                        remote.push(self.peer_dto(hub, &row));
-                    }
+                {
+                    remote.push(self.peer_dto(hub, &row));
                 }
             }
         }
@@ -1738,11 +1743,26 @@ impl DaemonService {
                 if op == "disconnect_human_channel" {
                     params["enabled"] = json!(false);
                 }
-                let result = self.slot(&hub)?.rpc(rpc, &params)?;
-                if matches!(rpc, "human_channel_pair_start" | "human_channels_test") {
-                    if !result.is_object() {
-                        return Err("INVALID_INPUT: Channel result must be an object".into());
+                let result = self
+                    .slot(&hub)
+                    .and_then(|slot| slot.rpc(rpc, &params))
+                    .and_then(|result| {
+                        if matches!(rpc, "human_channel_pair_start" | "human_channels_test")
+                            && !result.is_object()
+                        {
+                            Err("INVALID_INPUT: Channel result must be an object".into())
+                        } else {
+                            Ok(result)
+                        }
+                    });
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.emit(json!({"op":"channel_test_result","channel_id":id,"hub":hub,"ok":false,"error":error,"detail":error}));
+                        return Err(error);
                     }
+                };
+                if matches!(rpc, "human_channel_pair_start" | "human_channels_test") {
                     let mut frame = result.clone();
                     frame["op"] = json!(if rpc == "human_channel_pair_start" {
                         "pair_code"

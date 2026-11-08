@@ -36,6 +36,9 @@ test("compiled cito-ui decodes UTF-8 fragmented frames, drives actual menu actio
     const split = state.indexOf(Buffer.from("café")) + 1;
     child.stdin.write(state.subarray(0, split)); child.stdin.write(state.subarray(split));
     await waitFor(() => stderr.includes("state hubs=1 listeners=1"));
+    send({ op: "error", error: "Channel action failed" });
+    await waitFor(() => stderr.includes("cito-ui: error Channel action failed"));
+    expect(stderr).not.toContain("invalid frame");
     child.stdin.write("bad json\n" + "x".repeat(1048577) + "\n");
     send({ op: "banner", payload }); await waitFor(() => stderr.includes("display "));
     await waitFor(() => stderr.includes("banner hidden")); expect(child.exitCode).toBeNull();
@@ -1196,6 +1199,8 @@ test("Stage 3 Directory | Activity mode switching, inline ComposerBar send_signa
     send({ op: "test_control", id: "channel_hub_selector:work" });
     await waitFor(() => actions.some(a => a.op === "open_settings" && a.hub === "work"));
     send({ op: "settings", hub: "work", settings: settingsWithChannels });
+    send({ op: "channel_test_result", hub: "work", channel_id: "telegram", ok: false, error: "Channel RPC failed" });
+    expect(flatten((await inspect()).settings_items ?? []).some(n => n.text === "Channel RPC failed")).toBe(true);
     send({ op: "test_settings_input", id: "channel_field:telegram:botToken", value: "new-secret" });
     const pairedSettings = structuredClone(settingsWithChannels);
     pairedSettings.channels![0]!.fields.find(f => f.key === "chatId")!.value = "server-chat";

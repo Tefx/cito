@@ -165,6 +165,43 @@ fn child_gone(f: &Fixture) -> Result<(), String> {
 }
 
 #[test]
+fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Result<(), String> {
+    let f = Fixture::new()?;
+    let id = string(&f.row, "listener_id");
+    for remote in [
+        json!([]),
+        json!(42),
+        json!(true),
+        json!("invalid"),
+        Value::Null,
+        json!({"channels":{"host:fixture":[]}}),
+    ] {
+        let revision = f.client.kv_get(id)?.ok_or("Missing registration")?.1;
+        f.client.kv_save(id, &remote, Some(revision))?;
+        let error = detach_channel_from_other_sessions(&f.client, id, "host:fixture")
+            .expect_err("Malformed registrations must reject detach");
+        assert!(error.starts_with("INVALID_INPUT: Listener"));
+        assert_eq!(
+            f.client.kv_get(id)?.ok_or("Missing registration")?.0,
+            remote
+        );
+        if !remote.is_object() {
+            assert_eq!(
+                register_listener(
+                    &f.state,
+                    &f.client,
+                    "host",
+                    &json!({"about":"Test receiver"}),
+                    &json!({"harness":"fixture","session_id":"session"}),
+                ),
+                Err("INVALID_INPUT: Listener must be an object".into()),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s")?;

@@ -1057,6 +1057,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             composerPendingHub = ""
             return
         }
+        if frame.op == "error" {
+            diagnostic("error \(frame.error ?? "Unknown daemon error")")
+            return
+        }
         if frame.op == "settings", let value = frame.settings {
             acceptSettings(value, hub: frame.hub)
             if settingsPanel != nil { rebuildSettingsPanel() }

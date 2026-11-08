@@ -12,6 +12,44 @@ fn send(e: &HubEngine, id: &str, sig: &str) {
     e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data_b64":encoded(&json!({"signal_id":sig,"from":{"principal_id":"oidc:https://id.example.com|sender","listener_id":"sender","user":"bob"},"message":"hello"})),"opts":{"msgID":sig}}),None).unwrap();
 }
 #[test]
+fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<(), String> {
+    let dir = temp();
+    let e = HubEngine::open(&dir)?;
+    let result = (|| {
+        let pid = "none#alice";
+        let id = listener_id(pid, "human", "default");
+        for value in [
+            json!([]),
+            json!(42),
+            json!(true),
+            json!("invalid"),
+            Value::Null,
+        ] {
+            e.rpc(
+                "kv_put",
+                &json!({"key":id,"data_b64":encoded(&value)}),
+                None,
+            )?;
+            let binding = json!({"principal_id":pid,"owner_user":"alice","plugin_id":"fixture"});
+            assert_eq!(
+                e.inner.db.transaction(|c| attach(c, &binding, true, false)),
+                Err("INVALID_INPUT: Listener must be an object".into()),
+            );
+            let row = e
+                .inner
+                .db
+                .transaction(|c| kv_row(c, &id))?
+                .ok_or("Missing registration")?;
+            assert_eq!(parse(&row, "value"), value);
+        }
+        Ok(())
+    })();
+    e.shutdown();
+    std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
 fn consumer_next_crosses_byte_pages_without_transport_acknowledgments() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

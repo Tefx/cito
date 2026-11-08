@@ -1477,6 +1477,9 @@ fn attach(c: &Connection, b: &Value, enabled: bool, remote: bool) -> Result<(), 
     let id = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let old = kv_row(c, &id)?;
     let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":format!("{}-{}",slug(s(b,"owner_user")),id.trim_start_matches("c_")),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":format!("@{} (Me)",s(b,"owner_user")),"about":"Human node","scope":if remote{"self"}else{"workspace"},"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
+    if !reg.is_object() {
+        return Err("INVALID_INPUT: Listener must be an object".into());
+    }
     if !reg["channels"].is_object() {
         reg["channels"] = json!({})
     }

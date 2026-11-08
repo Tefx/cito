@@ -128,6 +128,9 @@ fn register_locked(
             .as_ref()
             .map(|r| r.0.clone())
             .unwrap_or_else(|| json!({}));
+        if !previous.is_object() {
+            return Err("INVALID_INPUT: Listener must be an object".into());
+        }
         if remote.is_some()
             && (!principal_ids_equal(
                 string(&previous, "principal_id"),

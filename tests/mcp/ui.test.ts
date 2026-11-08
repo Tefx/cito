@@ -131,6 +131,70 @@ test("UI send_signal validates tool arguments before persisting and reports comp
  await waitFor(async () => (await frames()).length === invalid.length + 1);
  expect((await frames()).at(-1)).toEqual({op:"composer_result",ok:true,error:null});
 });
+test("channel RPC failures emit card feedback for every action alias", async () => {
+ const f = await cleanroom();
+ const log = join(f.root,"channel-frames.jsonl"), ui = join(f.root,"ui-reader.mjs");
+ await writeFile(ui, `#!${process.execPath}\nimport fs from "node:fs";import readline from "node:readline";for await(const line of readline.createInterface({input:process.stdin})){const frame=JSON.parse(line);if(frame.op==="channel_test_result")fs.appendFileSync(${JSON.stringify(log)},line+"\\n");}`, {mode:0o700});
+ const daemon = await f.daemon({CITO_DISABLE_UI:"0",CITO_UI_BINARY:ui});
+ const ops = ["channel_pair","pair_human_channel","channel_test","test_human_channel","channel_save","configure_human_channel","disconnect_human_channel"];
+ const error = "INVALID_INPUT: Unknown human channel plugin: missing";
+ for (const op of ops) {
+  expect(await action(f,{op,hub:"local",channel_id:"missing"},true)).toMatchObject({http_status:400,error});
+ }
+ const frames = async () => {
+  try { return (await readFile(log,"utf8")).trim().split("\n").filter(Boolean).map(line=>object(JSON.parse(line))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+ };
+ await waitFor(async () => (await frames()).length === ops.length);
+ expect(await frames()).toEqual(ops.map(()=>({op:"channel_test_result",channel_id:"missing",hub:"local",ok:false,error,detail:error})));
+ expect(daemon.child.exitCode).toBeNull();
+});
+test("unlisten revokes local listeners even when remote KV registrations are malformed", async () => {
+ const {f,p,daemon,hub,id,row} = await remoteAgent();
+ const original = object(await hub.rpc("kv_get",{key:id}));
+ const registration = object(JSON.parse(Buffer.from(String(original.value_b64),"base64").toString()));
+ const channel = String(row.host_id) + ":" + String(row.harness);
+ for (const malformed of [[], {...registration,channels:{[channel]:[]}}]) {
+  await hub.rpc("kv_put",{key:id,data_b64:original.value_b64});
+  await f.tool("cito_listen",{about:"Native receiver",scope:"workspace"},p.meta);
+  const data = Buffer.from(JSON.stringify(malformed)).toString("base64");
+  await hub.rpc("kv_put",{key:id,data_b64:data});
+  expect((await action(f,{op:"unlisten",hub:"work",listener_id:id})).http_status).toBe(200);
+  expect(f.query("SELECT status FROM local_listeners WHERE listener_id=?",[id])).toEqual([{status:"UNLISTENED"}]);
+  expect(rows((await action(f,{op:"get_snapshot"})).listeners).some(peer=>peer.listener_id===id)).toBe(false);
+  expect(object(await hub.rpc("kv_get",{key:id})).value_b64).toBe(data);
+  expect(await f.mcp("ping")).toEqual({});
+  expect(daemon.child.exitCode).toBeNull();
+ }
+});
+test("snapshots count only active visible directory peers and keep remote ownership distinct", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url,user:"alice"}},defaultHub:"work"});
+ await f.daemon();
+ await action(f,{op:"query_directory",hub:"work"});
+ const before = await action(f,{op:"get_snapshot"});
+ const target = {listener_id:"c_1111111111111111",public_id:"active-1111111111111111",state:"ACTIVE",scope:"workspace",
+  principal_id:"none#alice",owner_user:"alice",harness:"cursor",title:"Remote",about:"Remote",channels:{remote:{state:"ACTIVE",updated_at_ms:Date.now()}}};
+ const peers = [
+  target,
+  {...target,listener_id:"c_2222222222222222",public_id:"private-2222222222222222",scope:"self"},
+  {...target,listener_id:"c_3333333333333333",public_id:"shared-3333333333333333",principal_id:"none#bob",owner_user:"bob"},
+  {...target,listener_id:"c_4444444444444444",public_id:"hidden-4444444444444444",principal_id:"none#bob",owner_user:"bob",scope:"self"},
+  {...target,listener_id:"c_5555555555555555",public_id:"revoked-5555555555555555",state:"UNLISTENED"},
+  {...target,listener_id:"c_6666666666666666",public_id:"expired-6666666666666666",channels:{remote:{state:"ACTIVE",updated_at_ms:Date.now()-1_800_001}}},
+  {...target,listener_id:"c_7777777777777777",public_id:"retained-7777777777777777",channels:{remote:{state:"ACTIVE",updated_at_ms:Date.now()-60_001}}}
+ ];
+ for (const peer of peers) await hub.rpc("kv_put",{key:peer.listener_id,data_b64:Buffer.from(JSON.stringify(peer)).toString("base64")});
+ const directory = rows((await action(f,{op:"query_directory",hub:"work"})).peers);
+ const snapshot = await action(f,{op:"get_snapshot"});
+ const active = peers.slice(0,3).map(peer=>peer.listener_id);
+ expect(directory.filter(peer=>peers.some(p=>p.public_id===peer.public_id)).map(peer=>peer.public_id).sort()).toEqual(peers.slice(0,3).map(peer=>peer.public_id).sort());
+ expect(snapshot).toMatchObject({directory_online_count:Number(before.directory_online_count)+3,total_online:Number(before.total_online)+3});
+ expect(rows(snapshot.my_remote_listeners).map(peer=>peer.listener_id).sort()).toEqual(
+  [...rows(before.my_remote_listeners).map(peer=>String(peer.listener_id)),...active.slice(0,2)].sort()
+ );
+});
+
 test("send rejects --wake before starting a daemon",async()=>{
  const f=await cleanroom();const result=await f.command(["send","--to","@self","--message","hello","--wake"]);
  expect(result.code).toBe(1);expect(result.stderr).toContain("--wake is not supported");
@@ -217,6 +281,7 @@ test("directory queries and snapshots normalize retained OIDC identity and share
  const snapshot = rows((await action(f,{op:"get_snapshot"})).my_remote_listeners);
  expect(snapshot.map(peer => peer.public_id).sort()).toEqual([publicId,otherId].sort());
  expect(snapshot.every(peer => peer.is_self_principal === true)).toBe(true);
+ expect((await action(f,{op:"get_snapshot"})).directory_online_count).toBe(3);
 }, 15_000);
 test("directory facets filter exact harness and ownership before the result limit",async()=>{
  const {f,hub,row}=await remoteAgent();

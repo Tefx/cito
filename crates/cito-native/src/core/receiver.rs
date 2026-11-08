@@ -64,7 +64,8 @@ fn plugin_request_owned(
                     let channel = string(claim, "channel_id");
                     let Some((mut remote, revision)) =
                         client.kv_get(string(row, "listener_id"))?.filter(|(r, _)| {
-                            r["state"] == "ACTIVE"
+                            r.is_object()
+                                && r["state"] == "ACTIVE"
                                 && r["binding_generation"] == row["binding_generation"]
                                 && r["owner_token"] == row["owner_token"]
                                 && r["channels"]
@@ -78,7 +79,9 @@ fn plugin_request_owned(
                     if renewal_due {
                         if let Some(ch) = remote["channels"].get_mut(channel) {
                             let now = now_ms();
-                            ch["updated_at_ms"] = json!(now);
+                            ch.as_object_mut()
+                                .ok_or("INVALID_INPUT: Listener channel must be an object")?
+                                .insert("updated_at_ms".into(), json!(now));
                             remote["updated_at_ms"] = json!(now);
                             client.kv_save(string(row, "listener_id"), &remote, Some(revision))?;
                         }
@@ -531,6 +534,9 @@ fn detach_channel_expected(
         let Some((mut remote, revision)) = client.kv_get(id)? else {
             return Ok(());
         };
+        if !remote.is_object() {
+            return Err("INVALID_INPUT: Listener must be an object".into());
+        }
         if captured.is_some_and(|row| {
             remote["binding_generation"] != row["binding_generation"]
                 || remote["owner_token"] != row["owner_token"]
@@ -541,7 +547,9 @@ fn detach_channel_expected(
             .as_object_mut()
             .and_then(|c| c.get_mut(channel))
         {
-            ch["state"] = json!("UNLISTENED");
+            ch.as_object_mut()
+                .ok_or("INVALID_INPUT: Listener channel must be an object")?
+                .insert("state".into(), json!("UNLISTENED"));
         }
         let any = remote["channels"]
             .as_object()
