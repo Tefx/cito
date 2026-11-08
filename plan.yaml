@@ -6728,7 +6728,7 @@ phases:
 - id: v23
   name: 'V23 Stage 7 (v0.19.0): Pure Rust Workspace Consolidation, Removal of Root
     Node/Vitest Scaffolding & Unified cargo test Native Test Suite'
-  status: pending
+  status: in_progress
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, root package.json, package-lock.json, tsconfig.json, vitest.config.ts,
     node_modules/, and tests/**/*.ts are absent, only plugins/pi/{package.json, cito-bridge.ts}
@@ -6753,7 +6753,7 @@ phases:
   - id: v23.impl
     name: Implement V23 Stage 7 (v0.19.0) Root Cargo.toml Workspace, Native Rust Integration
       Suite (cargo test --workspace) & Root Node/Vitest Scaffolding Removal
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 7 (`v0.19.0`) implementation per `docs/DESIGN.md`\
       \ §9 and `docs/ROADMAP.md`:\n  1. **Root `Cargo.toml` Workspace & Unified Build\
@@ -6803,6 +6803,8 @@ phases:
     - README.md
     - AGENTS.md
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-08T23:31:40.108994Z'
   - id: v23.hygiene
     name: 'Iterative Code-Hygiene Convergence on Pure Rust Workspace & Live v0.19.0
       Distribution Closure (GitHub Release v0.19.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
