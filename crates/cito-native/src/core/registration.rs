@@ -107,24 +107,6 @@ fn register_locked(
             }
         }
     }
-    let scope = args["scope"]
-        .as_str()
-        .or_else(|| local.as_ref().and_then(|row| row["scope"].as_str()))
-        .unwrap_or(
-            if client.config["authMode"]
-                .as_str()
-                .or_else(|| client.config["auth_mode"].as_str())
-                .unwrap_or("none")
-                == "none"
-            {
-                "workspace"
-            } else {
-                "self"
-            },
-        );
-    if !matches!(scope, "self" | "workspace") {
-        return Err("INVALID_INPUT: Invalid scope".into());
-    }
     let tag = args
         .get("tag")
         .cloned()
@@ -155,6 +137,29 @@ fn register_locked(
                 || (!string(&previous, "listener_id").is_empty() && previous["listener_id"] != id))
         {
             return Err("STALE_GENERATION: Listener collision".into());
+        }
+        let scope = args["scope"]
+            .as_str()
+            .or_else(|| local.as_ref().and_then(|row| row["scope"].as_str()))
+            .or_else(|| {
+                previous["scope"]
+                    .as_str()
+                    .filter(|scope| matches!(*scope, "self" | "workspace"))
+            })
+            .unwrap_or(
+                if client.config["authMode"]
+                    .as_str()
+                    .or_else(|| client.config["auth_mode"].as_str())
+                    .unwrap_or("none")
+                    == "none"
+                {
+                    "workspace"
+                } else {
+                    "self"
+                },
+            );
+        if !matches!(scope, "self" | "workspace") {
+            return Err("INVALID_INPUT: Invalid scope".into());
         }
         let sibling = previous["channels"].as_object().is_some_and(|channels| {
             channels
@@ -219,4 +224,67 @@ fn register_locked(
         );
     }
     Err("STALE_GENERATION: Listener CAS retries exhausted".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::hub::HubEngine;
+    use std::{fs, sync::Arc};
+
+    #[test]
+    fn automatic_second_host_preserves_remote_scope() -> Result<(), String> {
+        for (auth_mode, scope) in [("none", "self"), ("token", "workspace")] {
+            let root = std::env::temp_dir().join(format!("cito-registration-{}", random_uuid_v4()));
+            let engine = Arc::new(HubEngine::open(&root.join("hub"))?);
+            engine.set_plugin_roots(&[])?;
+            let result: Result<(), String> = (|| {
+                let first = LocalState::open(&root.join("first"))?;
+                let second = LocalState::open(&root.join("second"))?;
+                let client = HubClient::new(
+                    "work".into(),
+                    json!({"url":"local://","authMode":auth_mode}),
+                    "alice",
+                    Some(engine.clone()),
+                );
+                let caller = json!({"harness":"human","session_id":"default","title":"Human"});
+                let initial = register_listener(
+                    &first,
+                    &client,
+                    "first-host",
+                    &json!({"about":"Human","scope":scope}),
+                    &caller,
+                )?;
+                let attached = register_automatic_human(
+                    &second,
+                    &client,
+                    "second-host",
+                    &json!({"about":"Human"}),
+                    &caller,
+                )?;
+                let id = string(&initial, "canonical_listener_id");
+                assert_eq!(attached["canonical_listener_id"], id);
+                assert_eq!(attached["scope"], scope);
+                assert_eq!(
+                    attached["binding_generation"],
+                    initial["binding_generation"]
+                );
+                assert_eq!(
+                    second
+                        .listener("work", id)?
+                        .ok_or("Missing second-host row")?["scope"],
+                    scope
+                );
+                let remote = client.kv_get(id)?.ok_or("Missing remote registration")?.0;
+                assert_eq!(remote["scope"], scope);
+                assert_eq!(remote["channels"]["first-host:human"]["state"], "ACTIVE");
+                assert_eq!(remote["channels"]["second-host:human"]["state"], "ACTIVE");
+                Ok(())
+            })();
+            engine.shutdown();
+            fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+            result?;
+        }
+        Ok(())
+    }
 }

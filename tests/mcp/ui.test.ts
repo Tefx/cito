@@ -59,6 +59,31 @@ test("available-session refresh filters active listeners synchronously and fence
 test("directory queries expose remote peers and apply prefix tokens and facets",async()=>{
  const {f,hub}=await remoteAgent();for(const [id,title,harness]of [["c_1111111111111111","Build API","cursor"],["c_2222222222222222","Review UI","aider"]])await hub.rpc("kv_put",{key:id,data_b64:Buffer.from(JSON.stringify({listener_id:id,public_id:title!.toLowerCase().replaceAll(" ","-")+"-"+id!.slice(2),state:"ACTIVE",scope:"workspace",owner_user:"alice",principal_id:"none#alice",host_id:"remote",host_name:"laptop",harness,title,about:title,repo:"acme/api",channels:{remote:{state:"ACTIVE"}}})).toString("base64")});const all=await action(f,{op:"query_directory",hub:"work",query:""});expect(rows(all.peers).length).toBeGreaterThanOrEqual(2);const selected=rows((await action(f,{op:"query_directory",hub:"work",query:"harness:cursor build"})).peers);expect(selected).toHaveLength(1);expect(selected[0]!.title).toBe("Build API");expect(rows((await action(f,{op:"get_snapshot"})).my_remote_listeners).length).toBeGreaterThanOrEqual(2);
 });
+test("directory facets filter exact harness and ownership before the result limit",async()=>{
+ const {f,hub,row}=await remoteAgent();
+ const own=String(row.principal_id),target="z-match-ffffffffffffffff",sameHarness="y-other-eeeeeeeeeeeeeeee",otherHarness="y-other-dddddddddddddddd";
+ for(let i=0;i<55;i++){
+  const hex=(i+1).toString(16).padStart(16,"0"),id="c_"+hex;
+  const principal=i<52?"none#bob":own,harness=i===52?"cursor-preview":i===53?"aider":"cursor";
+  const public_id=i<52?"a-decoy-"+hex:i===52?sameHarness:i===53?otherHarness:target;
+  await hub.rpc("kv_put",{key:id,data_b64:Buffer.from(JSON.stringify({listener_id:id,public_id,state:"ACTIVE",scope:"workspace",principal_id:principal,owner_user:i<52?"bob":"alice",host_id:"remote",host_name:"laptop",harness,title:"Facet fixture",about:"Facet fixture",channels:{remote:{state:"ACTIVE"}}})).toString("base64")});
+ }
+ const query={hub:"work",query:"Facet"};
+ const all=rows((await action(f,{op:"query_directory",...query,scope:"all",harness:"all"})).peers);
+ expect(all).toHaveLength(50);
+ expect(all.some(peer=>peer.public_id===target)).toBe(false);
+ for(const op of ["query_directory","open_directory"]){
+  for(const scope of ["mine","self"]){
+   const peers=rows((await action(f,{op,...query,scope,harness:"cursor"})).peers);
+   expect(peers.map(peer=>peer.public_id)).toEqual([target]);
+   expect(peers[0]).toMatchObject({harness:"cursor",is_self_principal:true});
+  }
+ }
+ const mine=rows((await action(f,{op:"query_directory",...query,scope:"mine",harness:"all"})).peers);
+ expect(mine.map(peer=>peer.public_id).sort()).toEqual([target,sameHarness,otherHarness].sort());
+ const other=rows((await action(f,{op:"query_directory",...query,scope:"all",harness:"aider"})).peers);
+ expect(other.map(peer=>peer.public_id)).toEqual([otherHarness]);
+});
 test("directory snapshots retain concurrent upserts/removals and omit revoked KV entries",async()=>{
  const {f,hub,proxy,id}=await remoteAgent();proxy.hold("kv_snapshot");const pending=action(f,{op:"query_directory",hub:"work"});await waitFor(()=>proxy.calls.some(c=>c.op==="kv_snapshot"));const entry=object(await hub.rpc("kv_get",{key:id}));const reg=object(JSON.parse(Buffer.from(String(entry.value_b64),"base64").toString()));await hub.rpc("kv_update",{key:id,revision:entry.revision,data_b64:Buffer.from(JSON.stringify({...reg,state:"UNLISTENED"})).toString("base64")});proxy.release("kv_snapshot");await pending;expect(rows((await action(f,{op:"query_directory",hub:"work"})).peers).some(r=>r.listener_id===id||r.listener_id===reg.public_id)).toBe(false);
 });

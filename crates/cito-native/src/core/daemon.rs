@@ -719,6 +719,119 @@ impl DaemonService {
         }
         Ok(false)
     }
+    fn find_listeners(
+        &mut self,
+        args: &Value,
+        include: impl Fn(&Value) -> bool,
+    ) -> Result<Value, String> {
+        let hub = args["hub"]
+            .as_str()
+            .unwrap_or(&self.config.default_hub)
+            .to_string();
+        let limit = args["limit"].as_u64().unwrap_or(20);
+        if !(1..=50).contains(&limit) {
+            return Err("INVALID_INPUT: limit must be 1..50".into());
+        }
+        let query = string(args, "query").to_ascii_lowercase();
+        let mut rows = Vec::new();
+        let mut warnings = Vec::new();
+        let mut retried = false;
+        let snapshots = loop {
+            let snapshots = thread::scope(|scope| {
+                let workers: Vec<_> = self
+                    .slots
+                    .iter()
+                    .filter(|(name, _)| !args["hub"].is_string() || *name == &hub)
+                    .map(|(name, slot)| {
+                        let worker = scope.spawn(move || slot.directory());
+                        (name.clone(), slot.clone(), worker)
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|(name, slot, worker)| {
+                        (
+                            name,
+                            slot,
+                            worker.join().unwrap_or_else(|_| {
+                                Err("NATS_UNAVAILABLE: Directory worker failed".into())
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if !retried
+                && snapshots.iter().any(|(_, slot, result)| {
+                    slot.config["authMode"] == "oidc"
+                        && result.as_ref().is_err_and(|e| {
+                            e.starts_with("UNAUTHORIZED:")
+                                || e.starts_with("AUTHORIZATION_VIOLATION:")
+                        })
+                })
+            {
+                retried = true;
+                self.reload_slots()?;
+                continue;
+            }
+            break snapshots;
+        };
+        for (name, slot, snapshot) in snapshots {
+            match snapshot {
+                Ok(directory) => {
+                    for row in directory {
+                        if super::lease::evaluate_node_lease(&row, now_ms()) != "ACTIVE"
+                            || (row["scope"] == "self"
+                                && row["principal_id"] != slot.identity["principal_id"])
+                        {
+                            continue;
+                        }
+                        if ["user", "harness", "repo", "host"].iter().any(|key| {
+                            let filter = string(args, key);
+                            let field = match *key {
+                                "user" => "owner_user",
+                                "host" => "host_name",
+                                other => other,
+                            };
+                            !filter.is_empty()
+                                && !string(&row, field)
+                                    .to_ascii_lowercase()
+                                    .contains(&filter.to_ascii_lowercase())
+                        }) {
+                            continue;
+                        }
+                        let haystack = format!(
+                            "{} {} {} {} {}",
+                            string(&row, "title"),
+                            string(&row, "about"),
+                            string(&row, "repo"),
+                            string(&row, "cwd"),
+                            string(&row, "public_id")
+                        )
+                        .to_ascii_lowercase();
+                        if !query.split_whitespace().all(|w| {
+                            if let Some((field, token)) = w.split_once(':') {
+                                let field = match field {
+                                    "user" => "owner_user",
+                                    "host" => "host_name",
+                                    other => other,
+                                };
+                                return string(&row, field).to_ascii_lowercase().contains(token);
+                            }
+                            haystack.contains(w)
+                        }) {
+                            continue;
+                        }
+                        rows.push(json!({"hub":name,"listener_id":self.scoped(&name,string(&row,"public_id")),"public_id":row["public_id"],"scoped_id":self.scoped(&name,string(&row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"about":row["about"],"title":row["title"],"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"is_self_principal":row["principal_id"]==slot.identity["principal_id"]}));
+                    }
+                }
+                Err(e) => warnings.push(json!({"hub":name,"message":e})),
+            }
+        }
+        rows.retain(include);
+        rows.sort_by_key(|r| format!("{}:{}", string(r, "hub"), string(r, "listener_id")));
+        rows.truncate(limit as usize);
+        Ok(json!({"ok":true,"listeners":rows,"warnings":warnings}))
+    }
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
         validate_tool_input(name, args)?;
         if meta
@@ -771,110 +884,7 @@ impl DaemonService {
             }
             "cito_find" => {
                 let _ = self.caller(meta, false)?;
-                let limit = args["limit"].as_u64().unwrap_or(20);
-                if !(1..=50).contains(&limit) {
-                    return Err("INVALID_INPUT: limit must be 1..50".into());
-                }
-                let query = string(args, "query").to_ascii_lowercase();
-                let mut rows = Vec::new();
-                let mut warnings = Vec::new();
-                let mut retried = false;
-                let snapshots = loop {
-                    let snapshots = thread::scope(|scope| {
-                        let workers: Vec<_> = self
-                            .slots
-                            .iter()
-                            .filter(|(name, _)| !args["hub"].is_string() || *name == &hub)
-                            .map(|(name, slot)| {
-                                let worker = scope.spawn(move || slot.directory());
-                                (name.clone(), slot.clone(), worker)
-                            })
-                            .collect();
-                        workers
-                            .into_iter()
-                            .map(|(name, slot, worker)| {
-                                (
-                                    name,
-                                    slot,
-                                    worker.join().unwrap_or_else(|_| {
-                                        Err("NATS_UNAVAILABLE: Directory worker failed".into())
-                                    }),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                    if !retried
-                        && snapshots.iter().any(|(_, slot, result)| {
-                            slot.config["authMode"] == "oidc"
-                                && result.as_ref().is_err_and(|e| {
-                                    e.starts_with("UNAUTHORIZED:")
-                                        || e.starts_with("AUTHORIZATION_VIOLATION:")
-                                })
-                        })
-                    {
-                        retried = true;
-                        self.reload_slots()?;
-                        continue;
-                    }
-                    break snapshots;
-                };
-                for (name, slot, snapshot) in snapshots {
-                    match snapshot {
-                        Ok(directory) => {
-                            for row in directory {
-                                if super::lease::evaluate_node_lease(&row, now_ms()) != "ACTIVE"
-                                    || (row["scope"] == "self"
-                                        && row["principal_id"] != slot.identity["principal_id"])
-                                {
-                                    continue;
-                                }
-                                if ["user", "harness", "repo", "host"].iter().any(|key| {
-                                    let filter = string(args, key);
-                                    let field = match *key {
-                                        "user" => "owner_user",
-                                        "host" => "host_name",
-                                        other => other,
-                                    };
-                                    !filter.is_empty()
-                                        && !string(&row, field)
-                                            .to_ascii_lowercase()
-                                            .contains(&filter.to_ascii_lowercase())
-                                }) {
-                                    continue;
-                                }
-                                let haystack = format!(
-                                    "{} {} {} {} {}",
-                                    string(&row, "title"),
-                                    string(&row, "about"),
-                                    string(&row, "repo"),
-                                    string(&row, "cwd"),
-                                    string(&row, "public_id")
-                                )
-                                .to_ascii_lowercase();
-                                if !query.split_whitespace().all(|w| {
-                                    if let Some((field, token)) = w.split_once(':') {
-                                        let field = match field {
-                                            "user" => "owner_user",
-                                            "host" => "host_name",
-                                            other => other,
-                                        };
-                                        return string(&row, field)
-                                            .to_ascii_lowercase()
-                                            .contains(token);
-                                    }
-                                    haystack.contains(w)
-                                }) {
-                                    continue;
-                                }
-                                rows.push(json!({"hub":name,"listener_id":self.scoped(&name,string(&row,"public_id")),"public_id":row["public_id"],"scoped_id":self.scoped(&name,string(&row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"about":row["about"],"title":row["title"],"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"is_self_principal":row["principal_id"]==slot.identity["principal_id"]}));
-                            }
-                        }
-                        Err(e) => warnings.push(json!({"hub":name,"message":e})),
-                    }
-                }
-                rows.sort_by_key(|r| format!("{}:{}", string(r, "hub"), string(r, "listener_id")));
-                rows.truncate(limit as usize);
-                Ok(json!({"ok":true,"listeners":rows,"warnings":warnings}))
+                self.find_listeners(args, |_| true)
             }
             "cito_send" => match self.send(&hub, args, meta) {
                 Err(e)
@@ -1752,11 +1762,19 @@ impl DaemonService {
                 )?;
             }
             "open_directory" | "query_directory" => {
-                let result = self.tool(
-                    "cito_find",
-                    &json!({"hub":hub,"query":action["query"].as_str().unwrap_or(""),"limit":50}),
-                    &json!({}),
-                )?;
+                let args =
+                    json!({"hub":hub,"query":action["query"].as_str().unwrap_or(""),"limit":50});
+                validate_tool_input("cito_find", &args)?;
+                self.slot(&hub)?;
+                let _ = self.caller(&json!({}), false)?;
+                let harness = action["harness"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && *id != "all");
+                let mine = matches!(action["scope"].as_str(), Some("mine" | "self"));
+                let result = self.find_listeners(&args, |row| {
+                    harness.is_none_or(|id| row["harness"] == id)
+                        && (!mine || row["is_self_principal"] == true)
+                })?;
                 let (activity, unread) = self.state.activity()?;
                 let activity = self.activity_dto(activity);
                 let frame = json!({"op":"directory","hub":hub,"peers":result["listeners"],"activity":activity,"unread_count":unread});

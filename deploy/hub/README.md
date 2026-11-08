@@ -62,7 +62,7 @@ Shutdown order: stop admitting new daemon work, drain in-flight operations, stop
 
 ```sh
 CARGO_TARGET_DIR="$PWD/.scratch/native-hub/target" \
-  cargo test --manifest-path crates/cito-native/Cargo.toml --test native-hub
+  cargo test --locked --manifest-path crates/cito-native/Cargo.toml --bin cito-native
 ```
 
 Tests use disposable SQLite databases, local HTTPS and HTTP-loopback discovery/JWKS fixtures, real signatures for all seven supported asymmetric algorithms, and a protocol-only channel subprocess. They do not contact an external identity provider or messaging service. Python 3 and OpenSSL are test prerequisites; neither is required by the native Hub runtime.

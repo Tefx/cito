@@ -595,8 +595,9 @@ pub fn build_mac_app_bundle_native(
     ] {
         if ui_cand.is_file() {
             let helper_ui = helpers_dir.join("cito-ui");
-            let _ = fs::copy(&ui_cand, &helper_ui);
-            let _ = fs::set_permissions(&helper_ui, fs::Permissions::from_mode(0o755));
+            fs::copy(&ui_cand, &helper_ui).map_err(|e| e.to_string())?;
+            fs::set_permissions(&helper_ui, fs::Permissions::from_mode(0o755))
+                .map_err(|e| e.to_string())?;
             break;
         }
     }
@@ -612,7 +613,7 @@ pub fn build_mac_app_bundle_native(
     }
 
     if let Some(plugins_src) = resolve_builtin_plugins_dir() {
-        let _ = copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"));
+        copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"))?;
     }
 
     let _ = ensure_cli_shims_native(state_dir, plugins);
@@ -1386,6 +1387,23 @@ mod tests {
             .env("CITO_SETUP_TEST_ARGS", serde_json::to_string(args).unwrap())
             .output()
             .unwrap()
+    }
+
+    #[test]
+    fn app_bundle_rejects_ui_copy_failure() {
+        let (root, plugins) = fixture();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let ui = root.join("bin/cito-ui");
+        fs::write(&ui, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&ui, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = build_mac_app_bundle_native(None, &root, &plugins);
+        let copied_native = root
+            .join("Applications/Cito.app/Contents/Helpers/cito-native")
+            .is_file();
+        fs::remove_dir_all(root).unwrap();
+        assert!(copied_native);
+        let error = result.unwrap_err();
+        assert!(error.contains("os error 13"), "{error}");
     }
 
     #[test]
