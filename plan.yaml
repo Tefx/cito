@@ -6394,7 +6394,7 @@ phases:
     Plugin Architecture, Relocation of cito-claude-hook to plugins/claude/, Standard
     Pi Package Mode, Retirement of Duplicate src/*.ts, Complete F1–F64 Remediation
     & Live Distribution Closure'
-  status: pending
+  status: in_progress
   gate: 'npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, src/{mcp,hub,setup,ui,shared,adapters,auth-callout}, bin/loader.js,
     bin/cito-claude-hook, and legacy plugins/{index.ts,*/index.ts,claude/channel.ts,claude/hook-cli.ts}
@@ -6422,7 +6422,7 @@ phases:
     name: Implement V22 Stage 6 (v0.18.0) Pure Rust Core (libsqlite3), Symmetric Subprocess
       Plugins, Relocation of cito-claude-hook to plugins/claude/, Standard Pi Package
       Mode, Retirement of Duplicate src/*.ts & Complete F1–F64 Remediation
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete V22 Stage 6 (`v0.18.0`) implementation and full\
       \ `F1`–`F64` remediation per `docs/DESIGN.md` §§1–8:\n  1. **Pure Rust Core\
@@ -6520,6 +6520,8 @@ phases:
     - package.json
     - packaging/homebrew/cito.rb
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-08T10:44:09.981579Z'
   - id: v22.hygiene
     name: 'Iterative Code-Hygiene Convergence Across Full Repository & Live v0.18.0
       Distribution Closure (GitHub Pages, Release v0.18.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
