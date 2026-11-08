@@ -6656,7 +6656,7 @@ phases:
   - id: v22.gate
     name: V22 Stage 6 (v0.18.0) Independent Terminal Acceptance, Zero-TS-Core Residue,
       F1–F64 Conformance & Live Distribution Gate
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v22` and `v0.18.0` acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session (never resuming\
@@ -6695,6 +6695,8 @@ phases:
     depends_on:
     - v22.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-08T23:02:02.697273Z'
 - id: v23
   name: 'V23 Stage 7 (v0.19.0): Pure Rust Workspace Consolidation, Removal of Root
     Node/Vitest Scaffolding & Unified cargo test Native Test Suite'
