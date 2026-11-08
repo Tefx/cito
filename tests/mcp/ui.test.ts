@@ -1,574 +1,395 @@
-import { afterEach, expect, test, vi } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { CitoService } from "../../src/mcp/service.js";
-import { discoverAllAvailableSessions } from "../../src/adapters/index.js";
-import { startHubServer } from "../../src/hub/index.js";
-import { registrationSchema } from "../../src/mcp/state.js";
-import { encode } from "../../src/mcp/receiver.js";
-import { loadConfig, toCanonicalListenerId } from "../../src/shared/index.js";
-import { fixture, call, waitFor, freePort, piBridge } from "./support.js";
-import { signingKey, startOidc, browser } from "../auth-callout/oidc-fixture.js";
+import {expect,test} from "vitest";
+import {readFile,writeFile} from "node:fs/promises";
+import {join} from "node:path";
+import {createHash} from "node:crypto";
+import {agent,remoteAgent,cleanroom,provider,seed,sendUnbound,received,action,rows,errorTool,human,wire} from "../support/native-scenarios.js";
+import {freePort,waitFor,object} from "../support/native-harness.js";
+import {loginFixture} from "../support/oidc-native.js";
 
-const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const close of cleanups.splice(0).reverse()) await close(); });
-async function setup() { const f = await fixture({ observeBanner: true }); cleanups.push(() => f.close()); return f; }
-
-test("menu disconnect retains ACTIVE rows while removing live receivers, blocks every network call, and reconnect/login restore them", async () => {
-  const f = await setup(), slot = f.service.slots.get("default")!;
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "disconnect", tag: "connected" }, f.pi.meta);
-  const id = toCanonicalListenerId(publicId), old = f.service.receivers.get(`default:${id}`)!;
-  const states = vi.spyOn(f.service.ui!, "state");
-  f.service.pushUiState();
-  expect(states.mock.lastCall?.[1]).toMatchObject([{ listener_id: id, about: "disconnect", branch: f.service.state.listener(id)!.branch }]);
-  slot.error = "CitoError: Hub disconnected";
-  await f.service.handleUiAction({ op: "hub_action", hub: "default", action: "disconnect" });
-  expect(slot.manuallyDisconnected).toBe(true); expect(slot.status).toBe("disconnected"); expect(slot.error).toBeNull();
-  expect(old.abort.signal.aborted).toBe(true); expect(f.service.state.listener(id)!.status).toBe("ACTIVE");
-  expect(f.pi.badges.at(-1)).toBeUndefined(); expect(states.mock.lastCall?.[1]).toEqual([]);
-  await expect(slot.network()).rejects.toMatchObject({ code: "NATS_UNAVAILABLE", message: "Hub 'default' is manually disconnected" });
-  expect((await f.service.call("cito_find")).isError).toBe(true);
-  for (const action of ["reconnect", "login"] as const) {
-    await f.service.handleUiAction({ op: "hub_action", hub: "default", action });
-    expect(slot.manuallyDisconnected).toBe(false); expect(slot.status).toBe("connected"); expect(slot.error).toBeNull();
-    expect(f.service.receivers.get(`default:${id}`)!.abort.signal.aborted).toBe(false);
-    expect(states.mock.lastCall?.[1]).toMatchObject([{ listener_id: id, about: "disconnect" }]);
+test("hub invites reject non-object JSON without crashing or changing config", async () => {
+ const f = await cleanroom();
+ const daemon = await f.daemon();
+ const before = await readFile(f.configPath, "utf8");
+ for (const invite of ["[]", "42", "true", '"invite"', "null"]) {
+  expect(await action(f, {op:"paste_hub_invite",invite}, true)).toMatchObject({
+   http_status:400,ok:false,error:"INVALID_INPUT: Invalid hub invite"
+  });
+  expect(await readFile(f.configPath, "utf8")).toBe(before);
+  expect((await action(f, {op:"get_snapshot"})).http_status).toBe(200);
+ }
+ expect(daemon.child.exitCode).toBeNull();
+ expect(await action(f, {op:"paste_hub_invite",invite:JSON.stringify({name:"work",url:"local://",authMode:"none"})})).toMatchObject({http_status:200});
+ expect(JSON.parse(await readFile(f.configPath, "utf8")).hubs.work).toMatchObject({url:"local://",authMode:"none"});
+});
+test("UI and MCP boundaries handle non-object JSON and normalize malformed tool metadata", async () => {
+ const f = await cleanroom();
+ const daemon = await f.daemon();
+ for (const value of [[], 42, true, "request", null]) {
+  for (const path of ["/ui", "/action", "/control", "/mcp"]) {
+   const response = await fetch(`http://127.0.0.1:${f.daemonPort}${path}`, {
+    method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(value),signal:AbortSignal.timeout(3000)
+   });
+   expect(response.status).toBe(400);
+   const body = object(await response.json());
+   if (path === "/mcp") expect(body.error).toMatchObject({code:-32600,message:"Invalid Request"});
+   else expect(body.error).toBe("INVALID_INPUT: Action must be an object");
   }
-});
-
-test("KV-first scope changes preserve owner/generation; probe and restore reconcile authoritative remote scope", async () => {
-  const f = await setup(), slot = f.service.slots.get("default")!;
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "scope" }, f.pi.meta);
-  const id = toCanonicalListenerId(publicId), before = f.service.state.listener(id)!, broker = await slot.network();
-  const update = broker.kv.update.bind(broker.kv);
-  const barrier = vi.spyOn(broker.kv, "update").mockImplementationOnce(async (...args) => {
-    expect(f.service.state.listener(id)!.scope).toBe("self");
-    const revision = await update(...args);
-    expect(f.service.state.listener(id)!.scope).toBe("self");
-    return revision;
+  const response = await fetch(`http://127.0.0.1:${f.daemonPort}/mcp`, {
+   method:"POST",headers:{"content-type":"application/json"},
+   body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:value}),signal:AbortSignal.timeout(3000)
   });
-  await f.service.handleUiAction({ op: "set_scope", hub: "default", listener_id: id, scope: "workspace" });
-  barrier.mockRestore();
-  expect(f.service.state.listener(id)).toMatchObject({ scope: "workspace", owner_token: before.owner_token, binding_generation: before.binding_generation });
-  expect(registrationSchema.parse((await broker.kv.get(id))!.json()).scope).toBe("workspace");
-  const failure = vi.spyOn(broker.kv, "update").mockRejectedValueOnce(new Error("KV offline"));
-  await expect(f.service.setScope("default", id, "self")).rejects.toThrow("KV offline"); failure.mockRestore();
-  expect(f.service.state.listener(id)!.scope).toBe("workspace");
-  let entry = (await broker.kv.get(id))!;
-  await broker.kv.update(id, encode({ ...registrationSchema.parse(entry.json()), scope: "self" }), entry.revision);
-  await f.service.receivers.get(`default:${id}`)!.sweep();
-  expect(f.service.state.listener(id)!.scope).toBe("self");
-  entry = (await broker.kv.get(id))!;
-  await broker.kv.update(id, encode({ ...registrationSchema.parse(entry.json()), scope: "workspace" }), entry.revision);
-  const receiver = f.service.receivers.get(`default:${id}`)!; await receiver.stop();
-  await slot.network();
-  expect(f.service.state.listener(id)!.scope).toBe("workspace");
-  expect(f.service.receivers.get(`default:${id}`)).not.toBe(receiver);
+  expect(response.status).toBe(200);
+  expect(object(await response.json()).result).toMatchObject({isError:true});
+  expect(await f.mcp("tools/call", {name:"cito_find",arguments:{},_meta:value})).toMatchObject({isError:false});
+ }
+ expect(await f.mcp("ping")).toEqual({});
+ expect(daemon.child.exitCode).toBeNull();
 });
-
-test("UI state obeys the live-receiver owner fence; unlisten and unlisten-all make pending signals passive; quit closes the real companion", async () => {
-  const f = await setup();
-  const enrolled = await call(f.service, "cito_listen", { about: "UI actions" }, f.pi.meta), id = toCanonicalListenerId(enrolled.listener_id);
-  const states = vi.spyOn(f.service.ui!, "state");
-  const receiver = f.service.receivers.get(`default:${id}`)!;
-  f.service.state.run("UPDATE local_listeners SET owner_token = 'different' WHERE listener_id = ?", id);
-  f.service.pushUiState(); expect(states.mock.lastCall?.[1]).toEqual([]);
-  f.service.state.run("UPDATE local_listeners SET owner_token = ? WHERE listener_id = ?", receiver.owner, id);
-  f.service.pushUiState(); expect(states.mock.lastCall?.[1]).toMatchObject([{ listener_id: id }]);
-  await call(f.service, "cito_send", { to: id, message: "cancel via menu" });
-  await f.service.handleUiAction({ op: "unlisten", hub: "default", listener_id: id });
-  expect(f.service.state.listener(id)!.status).toBe("UNLISTENED");
-  expect(f.service.state.signals("SELECT * FROM local_signals")[0]).toMatchObject({ state: "STORED_PASSIVE", held_reason: "unlistened_before_dispatch" });
-  await call(f.service, "cito_listen", { about: "all" }, f.pi.meta);
-  await f.service.handleUiAction({ op: "unlisten_all" });
-  expect(f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_listeners WHERE status = 'ACTIVE'").get()!.n).toBe(0);
-  const child = Reflect.get(f.service.ui!, "child");
-  await f.service.handleUiAction({ op: "quit" }); expect(child.exitCode).toBe(0);
-});
-
-test("disconnect aborts interactive login and prevents a late connection; subsequent reconnect and disconnect actions serialize", async () => {
-  const key = await signingKey("ES256", "cancel"), oidc = await startOidc([key.jwk]); cleanups.push(() => oidc.stop());
-  let opened = false;
-  const f = await fixture({ env: { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" },
-    service: { browserOpener: async () => { opened = true; await new Promise(() => {}); } } }); cleanups.push(() => f.close());
-  const slot = f.service.slots.get("default")!;
-  const pending = slot.network();
-  const failure = expect(pending).rejects.toBeDefined();
-  await waitFor(() => opened);
-  await slot.disconnect(); await failure;
-  expect(slot.connectedBroker()).toBeUndefined(); expect(slot.manuallyDisconnected).toBe(true);
-  expect(slot.status).toBe("disconnected"); expect(slot.error).toBeNull();
-  // Both operations act on the same lifetime queue. Disconnect interrupts login.
-  const login = slot.reconnect(true); const cancelled = expect(login).rejects.toBeDefined();
-  await waitFor(() => slot.status === "connecting"); await slot.disconnect(); await cancelled;
-  expect(slot.connectedBroker()).toBeUndefined(); expect(slot.status).toBe("disconnected"); expect(slot.error).toBeNull();
-});
-
-test("HubSlot optional scopes and redirect ports cannot leak from the mirrored default hub", async () => {
-  const f = await fixture(); cleanups.push(() => f.close());
-  const key = await signingKey("ES256", "scopes"), oidc = await startOidc([key.jwk]); cleanups.push(() => oidc.stop());
-  oidc.state.scopesSupported = ["openid", "email"];
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims()) };
-  const path = join(f.stateDir, "config.json"), port = await freePort();
-  const hub = { natsUrl: f.broker.url, authMode: "oidc", oidcIssuer: oidc.issuer, oidcClientId: "cito" };
-  await writeFile(path, JSON.stringify({ default_hub: "work", hubs: {
-    work: { ...hub, oidcScopes: ["openid", "custom"], oidcRedirectPort: port }, cloud: hub,
-  } }));
-  const config = loadConfig({ ...f.env, CITO_CONFIG_PATH: path });
-  expect(config.oidcScopes).toEqual(["openid", "custom"]);
-  expect(config.hubs.cloud).not.toHaveProperty("oidcScopes");
-  const requestedScopes: string[] = [];
-  const service = await CitoService.create(config, { browserOpener: async (url, signal) => {
-    requestedScopes.push(new URL(url).searchParams.get("scope")!); await browser(url, signal);
-  } }); cleanups.push(() => service.close());
-  expect(service.slots.get("cloud")!.config.oidcScopes).toBeUndefined();
-  expect(service.slots.get("cloud")!.config.oidcRedirectPort).toBeUndefined();
-  await service.slots.get("work")!.network();
-  await service.slots.get("cloud")!.network();
-  expect(requestedScopes).toEqual(["openid custom", "openid email"]);
-  expect(service.slots.get("cloud")!.principal?.owner_user).toBe("alice");
-});
-
-test("non-interactive startup never opens a browser, and authenticating as a new principal fences previous listeners before restoration", async () => {
-  const key = await signingKey("ES256", "principal"), oidc = await startOidc([key.jwk]); cleanups.push(() => oidc.stop());
-  let opened = 0;
-  const f = await fixture({ env: { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" }, service: { browserOpener: async (url, signal) => { opened++; await browser(url, signal); } } }); cleanups.push(() => f.close());
-  await f.service.connectBackground(); expect(opened).toBe(0); expect(f.service.slots.get("default")!.status).toBe("auth_required");
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims()), refresh_token: "refresh" };
-  const { listener_id: publicId } = await call(f.service, "cito_listen", { about: "old account" }, f.pi.meta);
-  const id = toCanonicalListenerId(publicId), receiver = f.service.receivers.get(`default:${id}`)!;
-  await f.service.handleUiAction({ op: "hub_action", hub: "default", action: "disconnect" });
-  const cachePath = join(f.stateDir, "oidc-token-default.json"), cache = JSON.parse(await readFile(cachePath, "utf8"));
-  cache.expires_at = 0; await writeFile(cachePath, JSON.stringify(cache));
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "other-account", preferred_username: "bob" })) };
-  await f.service.handleUiAction({ op: "hub_action", hub: "default", action: "reconnect" });
-  expect(opened).toBe(1);
-  expect(f.service.slots.get("default")!.principal?.owner_user).toBe("bob");
-  expect(f.service.state.listener(id)!.status).toBe("FENCED_INACTIVE");
-  expect(receiver.abort.signal.aborted).toBe(true);
-  expect(f.service.slots.get("default")!.receivers.get(id)?.abort.signal.aborted).toBe(true);
-  // Switch Account (action: "login") while already connected forces interactive OIDC re-login and fences bob's listener
-  const { listener_id: bobPublicId } = await call(f.service, "cito_listen", { about: "bob session" }, f.pi.meta);
-  const bobId = toCanonicalListenerId(bobPublicId), bobReceiver = f.service.receivers.get(`default:${bobId}`)!;
-  oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "third-account", preferred_username: "carol" })) };
-  await f.service.handleUiAction({ op: "hub_action", hub: "default", action: "login" });
-  expect(opened).toBe(2);
-  expect(f.service.slots.get("default")!.status).toBe("connected");
-  expect(f.service.slots.get("default")!.error).toBeNull();
-  expect(f.service.slots.get("default")!.principal?.owner_user).toBe("carol");
-  expect(f.service.state.listener(bobId)!.status).toBe("FENCED_INACTIVE");
-  expect(bobReceiver.abort.signal.aborted).toBe(true);
-});
-
-test("refresh_available and listen_session enroll discovered sessions, synchronously filter active listeners, and fence changed sessions", async () => {
-  const f = await setup();
-  const states = vi.spyOn(f.service.ui!, "state");
-  await f.service.handleUiAction({ op: "refresh_available" });
-  expect(states.mock.lastCall?.[2]).toMatchObject([
-    { harness: "pi", session_id: "pi-session-1", endpoint_pid: f.pi.meta.pi_pid, title: "Pi receiver" },
-  ]);
-  // 1-click listen_session enrolls the candidate and synchronously removes it from available in pushUiState()
-  await f.service.handleUiAction({
-    op: "listen_session",
-    harness: "pi",
-    session_id: "pi-session-1",
-    endpoint_pid: f.pi.meta.pi_pid,
-    cwd: f.stateDir,
-    title: "Multi-line\nSession Title",
-  });
-  expect(states.mock.lastCall?.[1]).toMatchObject([
-    { harness: "pi", session_id: "pi-session-1", about: "Multi-line Session Title", scope: "self" },
-  ]);
-  expect(states.mock.lastCall?.[2]).toEqual([]);
-  // Unlistening restores the live session to available
-  await f.service.handleUiAction({ op: "unlisten_all" });
-  await waitFor(() => (states.mock.lastCall?.[2]?.length ?? 0) === 1);
-  expect(states.mock.lastCall?.[2]).toMatchObject([{ harness: "pi", session_id: "pi-session-1" }]);
-  // Identity fencing: if the session switches before listen_session runs, it fails with SESSION_NOT_OPEN and refreshes available
-  f.pi.switchSession("switched-session-id");
-  await expect(f.service.handleUiAction({
-    op: "listen_session",
-    harness: "pi",
-    session_id: "pi-session-1",
-    endpoint_pid: f.pi.meta.pi_pid,
-    cwd: f.stateDir,
-    title: "Old Session",
-  })).rejects.toMatchObject({ code: "SESSION_NOT_OPEN", message: "Session changed since discovery" });
-  expect(f.service.state.db.prepare("SELECT COUNT(*) AS n FROM local_listeners WHERE status = 'ACTIVE'").get()!.n).toBe(0);
-  await waitFor(() => states.mock.lastCall?.[2]?.[0]?.session_id === "switched-session-id");
-});
-
-test("CitoService populates my_remote_listeners and evaluates query_directory across HubDirectoryIndex with prefix tokens and facets", async () => {
-  const f = await setup();
-  const slot = f.service.slots.get("default")!;
-  const broker = await slot.network();
-  const principal = await slot.identity();
-  const states = vi.spyOn(f.service.ui!, "state");
-  const directories = vi.spyOn(f.service.ui!, "directory");
-
-  // Enroll 1 real local session on this host, plus seed 1 remote self-principal session and 1 team workspace peer
-  const { listener_id: localPublicId } = await call(f.service, "cito_listen", { about: "Local Pi session", tag: "local" }, f.pi.meta);
-  const localId = toCanonicalListenerId(localPublicId);
-  const aliceRemoteReg = {
-    schema_version: 1 as const,
-    listener_id: "c_aliceremote2",
-    public_id: "cito-aliceremote2",
-    tag: "cito",
-    principal_id: principal.principal_id,
-    owner_user: principal.owner_user,
-    host_id: "11111111-1111-4111-8111-111111111111",
-    host_name: "alice-mini.local",
-    harness: "pi",
-    session_id: "remote-s1",
-    cwd: "/Users/alice/cito",
-    repo: "acme/cito",
-    branch: "main",
-    title: "Alice Remote Pi",
-    about: "Remote build check",
-    scope: "self" as const,
-    state: "ACTIVE" as const,
-    binding_generation: 1,
-    owner_token: "11111111-1111-4111-8111-222222222222",
-    lease_ttl_seconds: 60 as const,
-  };
-  const bobPeerReg = {
-    ...aliceRemoteReg,
-    listener_id: "c_bobworkspace",
-    public_id: "billing-bobworkspace",
-    tag: "billing",
-    principal_id: "none#bob",
-    owner_user: "bob",
-    host_id: "22222222-2222-4222-8222-222222222222",
-    host_name: "bob-studio",
-    harness: "codex",
-    session_id: "bob-s1",
-    repo: "acme/billing",
-    branch: "feat/payments",
-    title: "Billing Service",
-    about: "Payment webhook handler",
-    scope: "workspace" as const,
-  };
-  await broker.kv.create(aliceRemoteReg.listener_id, encode(aliceRemoteReg));
-  await broker.kv.create(bobPeerReg.listener_id, encode(bobPeerReg));
-
-  await f.service.handleUiAction({ op: "open_directory" });
-  expect(states.mock.lastCall?.[3]).toHaveLength(1);
-  expect(states.mock.lastCall?.[3]).toMatchObject([{ listener_id: "c_aliceremote2", is_self_principal: true }]);
-  expect(states.mock.lastCall?.[4]).toBe(3);
-  expect(directories.mock.lastCall).toEqual([
-    expect.arrayContaining([
-      expect.objectContaining({ listener_id: localId, host_id: f.service.hostId, is_self_principal: true }),
-      expect.objectContaining({ listener_id: "c_aliceremote2", is_self_principal: true }),
-      expect.objectContaining({ listener_id: "c_bobworkspace", is_self_principal: false }),
-    ]),
-    3,
-    3,
-  ]);
-  // Self principal sessions sort before team peers by default
-  expect(directories.mock.lastCall?.[0]?.slice(0, 2).every(p => p.is_self_principal)).toBe(true);
-  expect(directories.mock.lastCall?.[0]?.[2]?.listener_id).toBe("c_bobworkspace");
-
-  // Seed a near-miss peer (has "bob", "billing", "studio", "codex", "bobwork" in non-matching fields, plus >300-char about)
-  const longAboutPrefix = "padding_segment_".repeat(20); // 320 chars
-  const longAboutFull = `${longAboutPrefix} deep_tail_keyword_450 bob billing studio codex bobwork`;
-  expect(longAboutFull.indexOf("deep_tail_keyword_450")).toBeGreaterThan(300);
-  const nearMissReg = {
-    ...aliceRemoteReg,
-    listener_id: "c_carolnearmis",
-    public_id: "analytics-carolnearmis",
-    tag: "analytics",
-    principal_id: "none#carol",
-    owner_user: "carol",
-    host_id: "33333333-3333-4333-8333-333333333333",
-    host_name: "carol-laptop",
-    harness: "claude",
-    session_id: "carol-s1",
-    cwd: "/Users/carol/analytics",
-    repo: "acme/analytics",
-    branch: "main",
-    title: "Carol bob studio codex mention",
-    about: longAboutFull,
-    scope: "workspace" as const,
-  };
-  await broker.kv.create(nearMissReg.listener_id, encode(nearMissReg));
-  slot.directoryIndex.clear();
-
-  // Independent prefix token witnesses: each prefix filter rejects nearMissReg even though the token appears in its title/about
-  for (const prefixQuery of ["@bob", "user:bob", "repo:billing", "host:studio", "is:codex", "#bobwork"]) {
-    await f.service.handleUiAction({ op: "query_directory", query: prefixQuery, scope: "all", harness: "all" });
-    expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_bobworkspace"]);
-    expect(directories.mock.lastCall?.[1]).toBe(1);
-    expect(directories.mock.lastCall?.[2]).toBe(4);
+test("host and listener mutations reject non-object values without overwriting them", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url}},defaultHub:"work"});
+ await f.daemon();
+ const config = await readFile(f.configPath,"utf8"), id = "c_1111111111111111";
+ for (const value of [[], 42, true, "invalid"]) {
+  for (const key of ["host_hub", "hostHub"]) {
+   const raw = JSON.parse(config); raw[key] = value;
+   await writeFile(f.configPath, JSON.stringify(raw));
+   const before = await readFile(f.configPath,"utf8");
+   expect(await action(f, {op:"set_host_hub",enabled:false}, true)).toMatchObject({
+    http_status:400,error:"INVALID_INPUT: Host hub must be an object"
+   });
+   expect(await readFile(f.configPath,"utf8")).toBe(before);
   }
-
-  // Full-field search parity for >300-char about: both cito_find and query_directory match chars 301-500 while UI DTO truncates about to 300
-  const findLong = await call(f.service, "cito_find", { query: "deep_tail_keyword_450" });
-  expect(findLong.listeners.map((l: { listener_id: string }) => toCanonicalListenerId(l.listener_id))).toEqual(["c_carolnearmis"]);
-  await f.service.handleUiAction({ op: "query_directory", query: "deep_tail_keyword_450", scope: "all", harness: "all" });
-  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toEqual(["c_carolnearmis"]);
-  expect(directories.mock.lastCall?.[0]?.[0]?.about).toHaveLength(300);
-  expect(directories.mock.lastCall?.[0]?.[0]?.cwd).toBe("/Users/carol/analytics");
-
-  // Scope facet "mine" restricts to self principal across both local and remote hosts
-  await f.service.handleUiAction({ op: "query_directory", query: "", scope: "mine", harness: "all" });
-  expect(directories.mock.lastCall?.[0]?.map(p => p.listener_id)).toHaveLength(2);
-  expect(new Set(directories.mock.lastCall?.[0]?.map(p => p.listener_id))).toEqual(new Set([localId, "c_aliceremote2"]));
-  expect(directories.mock.lastCall?.[1]).toBe(2);
-  expect(directories.mock.lastCall?.[2]).toBe(4);
-  await f.service.handleUiAction({ op: "close_directory" });
+  await writeFile(f.configPath, config);
+  const data = Buffer.from(JSON.stringify(value)).toString("base64");
+  await hub.rpc("kv_put", {key:id,data_b64:data});
+  expect(await action(f, {op:"set_scope",hub:"work",listener_id:id,scope:"self"}, true)).toMatchObject({
+   http_status:400,error:"INVALID_INPUT: Listener must be an object"
+  });
+  expect(object(await hub.rpc("kv_get",{key:id})).value_b64).toBe(data);
+ }
+ // Missing maps retain the existing local-hub auto-vivification behavior.
+ await f.writeConfig({});
+ expect((await action(f,{op:"setup_toggle_hub",hub:"local",enabled:false})).http_status).toBe(200);
+ expect(JSON.parse(await readFile(f.configPath,"utf8")).hubs.local.enabled).toBe(false);
+ expect((await action(f,{op:"hub_action",hub:"local",action:"reconnect"})).http_status).toBe(200);
+ expect(JSON.parse(await readFile(f.configPath,"utf8")).hubs.local.enabled).toBe(true);
 });
 
-test("HubDirectoryIndex.syncSnapshot preserves in-flight local upsert/remove mutations and skips UNLISTENED KV records", async () => {
-  const f = await setup();
-  const slot = f.service.slots.get("default")!;
-  const broker = await slot.network();
-  const principal = await slot.identity();
-  const baseReg = {
-    schema_version: 1 as const,
-    listener_id: "c_staleactive2",
-    public_id: "stale-staleactive2",
-    tag: "stale",
-    principal_id: principal.principal_id,
-    owner_user: principal.owner_user,
-    host_id: "11111111-1111-4111-8111-111111111111",
-    host_name: "alice-mini",
-    harness: "pi",
-    session_id: "s-stale",
-    cwd: "/tmp/stale",
-    repo: "acme/cito",
-    branch: "main",
-    title: "Stale Active",
-    about: "Will be removed locally while snapshot is in flight",
-    scope: "self" as const,
-    state: "ACTIVE" as const,
-    binding_generation: 1,
-    owner_token: "11111111-1111-4111-8111-222222222222",
-    lease_ttl_seconds: 60 as const,
-  };
-  const unlistenedReg = {
-    ...baseReg,
-    listener_id: "c_unlistened23",
-    public_id: "unlistened-unlistened23",
-    state: "UNLISTENED" as const,
-  };
-  await broker.kv.create(baseReg.listener_id, encode(baseReg));
-  await broker.kv.create(unlistenedReg.listener_id, encode(unlistenedReg));
-  slot.directoryIndex.clear();
-
-  const origWatch = broker.kv.watch.bind(broker.kv);
-  const localUpsertReg = {
-    ...baseReg,
-    listener_id: "c_localupsert2",
-    public_id: "local-localupsert2",
-    title: "In-Flight Local Upsert",
-  };
-  vi.spyOn(broker.kv, "watch").mockImplementationOnce(async (...args) => {
-    const iter = await origWatch(...args);
-    // Mutate local index while watchSnapshot is in flight: remove c_staleactive2 and upsert c_localupsert2
-    slot.directoryIndex.remove(baseReg.listener_id);
-    slot.directoryIndex.upsert(localUpsertReg.listener_id, localUpsertReg, 99);
-    return iter;
+test.each([true,false])("cito_send desktop banner admission respects desktopBanner=%s",async desktopBanner=>{
+ const f=await cleanroom({desktopBanner}),p=await provider(f);
+ const log=join(f.root,"ui-frames.jsonl"),ui=join(f.root,"ui-reader.mjs");
+ await writeFile(ui,`#!${process.execPath}\nimport fs from "node:fs";import readline from "node:readline";for await(const line of readline.createInterface({input:process.stdin})){fs.appendFileSync(${JSON.stringify(log)},line+"\\n");}`,{mode:0o700});
+ await f.daemon({CITO_DISABLE_UI:"0",CITO_UI_BINARY:ui});
+ const target=await f.tool("cito_listen",{about:"Banner target",scope:"workspace"},p.meta);
+ const sent=await sendUnbound(f,String(target.listener_id),"Admission banner");
+ const frames=async()=>{try{return(await readFile(log,"utf8")).trim().split("\n").filter(Boolean).map(l=>object(JSON.parse(l)));}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return[];throw error;}};
+ await received(f,String(f.query("SELECT listener_id FROM local_listeners WHERE harness='cursor'")[0]!.listener_id));
+ const seq=Number(f.query("SELECT seq FROM local_signals WHERE signal_id=?",[String(sent.signal_id)])[0]!.seq);
+ await waitFor(()=>f.query("SELECT 1 FROM hub_consumer_acks WHERE seq=?",[seq],"hub.sqlite").length>0);
+ await action(f,{op:"open_settings"});
+ await waitFor(async()=>(await frames()).some(frame=>frame.op==="settings"));
+ const banners=(await frames()).filter(frame=>frame.op==="banner");
+ expect(banners).toHaveLength(desktopBanner?1:0);
+ if(desktopBanner)expect(banners[0]!.payload).toMatchObject({message:"Admission banner",signal_id:sent.signal_id,target_harness:"cursor",target_session_id:"session-1",from_user:"alice",hub:"local"});
+});
+test("UI send_signal validates tool arguments before persisting and reports composer results", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url,user:"alice"}},defaultHub:"work"});
+ const log = join(f.root,"composer-frames.jsonl"), ui = join(f.root,"ui-reader.mjs");
+ await writeFile(ui, `#!${process.execPath}\nimport fs from "node:fs";import readline from "node:readline";for await(const line of readline.createInterface({input:process.stdin})){const frame=JSON.parse(line);if(frame.op==="composer_result")fs.appendFileSync(${JSON.stringify(log)},line+"\\n");}`, {mode:0o700});
+ await f.daemon({CITO_DISABLE_UI:"0",CITO_UI_BINARY:ui});
+ const id = "c_1111111111111111";
+ await hub.rpc("kv_put", {key:id,data_b64:Buffer.from(JSON.stringify({
+  listener_id:id,public_id:"bob-1111111111111111",owner_user:"bob",principal_id:"none#bob",
+  harness:"human",session_id:"default",scope:"workspace",state:"ACTIVE",binding_generation:1,
+  channels:{},title:"Human target",about:"Human target",updated_at_ms:Date.now()
+ })).toString("base64")});
+ const invalid = [
+  {to:"@bob/"}, {in_reply_to:42}, {in_reply_to:""}, {idempotency_key:""},
+  {hub:42}, {hub:"BAD!"}, {extra:"unknown"}
+ ];
+ for (const args of invalid) {
+  expect(await action(f,{op:"send_signal",to:"@bob",message:"hello",...args},true)).toMatchObject({
+   http_status:400,error:expect.stringContaining("INVALID_INPUT:")
   });
-
-  const active = await slot.directoryIndex.read(broker, principal);
-  const ids = active.map(item => item.value.listener_id);
-  expect(ids).toContain(localUpsertReg.listener_id);
-  expect(ids).not.toContain(baseReg.listener_id);
-  expect(ids).not.toContain(unlistenedReg.listener_id);
+ }
+ expect(f.query("SELECT * FROM local_sent_idempotency")).toEqual([]);
+ expect(owner.query("SELECT * FROM hub_signals",[],"hub/hub.sqlite")).toEqual([]);
+ const frames = async () => {
+  try { return (await readFile(log,"utf8")).trim().split("\n").filter(Boolean).map(line=>object(JSON.parse(line))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+ };
+ await waitFor(async () => (await frames()).length === invalid.length);
+ expect(await frames()).toEqual(invalid.map(()=>({op:"composer_result",ok:false,error:expect.stringContaining("INVALID_INPUT:")})));
+ const sent = await action(f,{op:"send_signal",to:"@bob",hub:"work",message:"hello",in_reply_to:"original",idempotency_key:"valid"});
+ expect(sent).toMatchObject({http_status:200,to:"work:bob-1111111111111111"});
+ expect(f.query("SELECT signal_id,status FROM local_sent_idempotency")).toEqual([{signal_id:String(sent.signal_id).split(":").at(-1),status:"wake_accepted"}]);
+ const stored = owner.query("SELECT CAST(data AS TEXT) AS payload FROM hub_signals",[],"hub/hub.sqlite");
+ expect(stored).toHaveLength(1);
+ expect(object(JSON.parse(String(stored[0]!.payload)))).toMatchObject({to:id,message:"hello",in_reply_to:"original"});
+ await waitFor(async () => (await frames()).length === invalid.length + 1);
+ expect((await frames()).at(-1)).toEqual({op:"composer_result",ok:true,error:null});
+});
+test("UI send_reply_from_human validates recipients and scoped IDs and atomically publishes and acknowledges replies", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{personal:{url:"local://"},work:{url:hub.url,user:"alice"}},defaultHub:"personal"});
+ await f.daemon();
+ await f.tool("cito_listen",{hub:"work",about:"Human replies",scope:"self"},human);
+ const node = f.query("SELECT listener_id,binding_generation FROM local_listeners WHERE hub='work' AND harness='human'")[0]!;
+ const target = {listener_id:"c_1111111111111111",public_id:"bob-1111111111111111",owner_user:"bob",principal_id:"none#bob",
+  harness:"cursor",session_id:"target",scope:"workspace",state:"ACTIVE",binding_generation:7,channels:{},updated_at_ms:Date.now()};
+ const putTarget = async (patch = {}) => hub.rpc("kv_put",{key:target.listener_id,data_b64:Buffer.from(JSON.stringify({...target,...patch})).toString("base64")});
+ await putTarget();
+ for (const id of ["original","second"]) {
+  const source = wire(id,String(node.listener_id),"none#bob",Number(node.binding_generation),"Please reply");
+  const from = {...source.from,listener_id:"work:"+target.public_id};
+  await hub.rpc("js_publish",{subject:"cito.signal."+String(node.listener_id),data_b64:Buffer.from(JSON.stringify({...source,from})).toString("base64")});
+ }
+ const request = {op:"send_reply_from_human",hub:"work",to_listener_id:"work:"+target.public_id,message:"Approved",in_reply_to:"work:original"};
+ for (const patch of [
+  {in_reply_to:"other:original"},
+  {signal_id:"other:second"},
+  {in_reply_to:undefined,signal_id:"other:second"}
+ ]) {
+  expect(await action(f,{...request,...patch},true)).toMatchObject({
+   http_status:400,error:"INVALID_INPUT: Reply belongs to another Hub"
+  });
+ }
+ for (const patch of [
+  {hub:"other"},
+  {to_listener_id:"other:"+target.public_id}
+ ]) {
+  expect(await action(f,{...request,...patch},true)).toMatchObject({
+   http_status:400,error:"INVALID_INPUT: Conflicting hub prefixes"
+  });
+ }
+ for (const [patch,code] of [
+  [{to_listener_id:"work:missing"},"LISTENER_NOT_FOUND"],
+  [{to_listener_id:String(node.listener_id)},"SELF_SEND_FORBIDDEN"],
+  [{message:""},"INVALID_INPUT"], [{message:" \u0000 "},"INVALID_INPUT"],
+  [{message:"😀".repeat(65_537)},"INVALID_INPUT"], [{message:42},"INVALID_INPUT"],
+  [{in_reply_to:42},"INVALID_INPUT"], [{in_reply_to:""},"INVALID_INPUT"]
+ ] as const) {
+  expect(await action(f,{...request,...patch},true)).toMatchObject({http_status:400,error:expect.stringContaining(code+":")});
+ }
+ for (const patch of [{state:"UNLISTENED"},{updated_at_ms:Date.now()-1_800_001}]) {
+  await putTarget(patch);
+  expect(await action(f,request,true)).toMatchObject({http_status:400,error:expect.stringContaining("LISTENER_NOT_FOUND:")});
+ }
+ await putTarget({scope:"self"});
+ expect(await action(f,request,true)).toMatchObject({http_status:400,error:expect.stringContaining("FORBIDDEN_TARGET_SCOPE:")});
+ expect(owner.query("SELECT signal_id,acked_at_ms FROM hub_signals ORDER BY seq",[],"hub/hub.sqlite")).toEqual([
+  {signal_id:"original",acked_at_ms:null},{signal_id:"second",acked_at_ms:null}
+ ]);
+ await putTarget();
+ // The authenticated caller owns the sender; request fields cannot override it.
+ const sent = await action(f,{...request,message:undefined,text:"Approved\u0000\nnext",signal_id:"work:second",principal_id:"none#bob",owner_user:"bob"});
+ expect(sent).toMatchObject({http_status:200,ok:true,target_display:target.public_id});
+ const payload = object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(sent.signal_id)],"hub/hub.sqlite")[0]!.data)));
+ expect(payload).toMatchObject({signal_id:sent.signal_id,to:target.listener_id,target_generation:7,message:"Approved\nnext",in_reply_to:"original",
+  from:{principal_id:"none#alice",user:"alice",harness:"human",listener_id:"alice-"+String(node.listener_id).replace(/^c_/,"")}});
+ expect(owner.query("SELECT signal_id,acked_at_ms FROM hub_signals WHERE signal_id IN ('original','second') ORDER BY seq",[],"hub/hub.sqlite")).toEqual([
+  {signal_id:"original",acked_at_ms:expect.any(Number)},{signal_id:"second",acked_at_ms:null}
+ ]);
+ // A disconnected retained target remains replyable; aliases and code-point limits share the same path.
+ await putTarget({scope:"self",principal_id:"none#alice",updated_at_ms:Date.now()-61_000});
+ const text = "😀".repeat(65_536);
+ const alias = await action(f,{op:"send_reply_from_human",to:"work:"+target.listener_id,text,signal_id:"work:second"});
+ expect(alias).toMatchObject({http_status:200,ok:true});
+ expect(object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(alias.signal_id)],"hub/hub.sqlite")[0]!.data)))).toMatchObject({message:text,in_reply_to:"second"});
+ expect(owner.query("SELECT acked_at_ms FROM hub_signals WHERE signal_id='second'",[],"hub/hub.sqlite")).toEqual([{acked_at_ms:expect.any(Number)}]);
+ const unthreaded = await action(f,{op:"send_reply_from_human",hub:"work",to:target.public_id,message:"Follow-up"});
+ expect(unthreaded).toMatchObject({http_status:200,ok:true});
+ expect(object(JSON.parse(String(owner.query("SELECT CAST(data AS TEXT) AS data FROM hub_signals WHERE signal_id=?",[String(unthreaded.signal_id)],"hub/hub.sqlite")[0]!.data)))).toMatchObject({message:"Follow-up",in_reply_to:null});
+ expect(owner.query("SELECT signal_id FROM hub_signals WHERE subject=?",["cito.signal."+target.listener_id],"hub/hub.sqlite").map(row=>row.signal_id)).toEqual([sent.signal_id,alias.signal_id,unthreaded.signal_id]);
+});
+test("channel RPC failures emit card feedback for every action alias", async () => {
+ const f = await cleanroom();
+ const log = join(f.root,"channel-frames.jsonl"), ui = join(f.root,"ui-reader.mjs");
+ await writeFile(ui, `#!${process.execPath}\nimport fs from "node:fs";import readline from "node:readline";for await(const line of readline.createInterface({input:process.stdin})){const frame=JSON.parse(line);if(frame.op==="channel_test_result")fs.appendFileSync(${JSON.stringify(log)},line+"\\n");}`, {mode:0o700});
+ const daemon = await f.daemon({CITO_DISABLE_UI:"0",CITO_UI_BINARY:ui});
+ const ops = ["channel_pair","pair_human_channel","channel_test","test_human_channel","channel_save","configure_human_channel","disconnect_human_channel"];
+ const error = "INVALID_INPUT: Unknown human channel plugin: missing";
+ for (const op of ops) {
+  expect(await action(f,{op,hub:"local",channel_id:"missing"},true)).toMatchObject({http_status:400,error});
+ }
+ const frames = async () => {
+  try { return (await readFile(log,"utf8")).trim().split("\n").filter(Boolean).map(line=>object(JSON.parse(line))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+ };
+ await waitFor(async () => (await frames()).length === ops.length);
+ expect(await frames()).toEqual(ops.map(()=>({op:"channel_test_result",channel_id:"missing",hub:"local",ok:false,error,detail:error})));
+ expect(daemon.child.exitCode).toBeNull();
+});
+test("unlisten revokes local listeners even when remote KV registrations are malformed", async () => {
+ const {f,p,daemon,hub,id,row} = await remoteAgent();
+ const original = object(await hub.rpc("kv_get",{key:id}));
+ const registration = object(JSON.parse(Buffer.from(String(original.value_b64),"base64").toString()));
+ const channel = String(row.host_id) + ":" + String(row.harness);
+ for (const malformed of [[], {...registration,channels:{[channel]:[]}}]) {
+  await hub.rpc("kv_put",{key:id,data_b64:original.value_b64});
+  await f.tool("cito_listen",{about:"Native receiver",scope:"workspace"},p.meta);
+  const data = Buffer.from(JSON.stringify(malformed)).toString("base64");
+  await hub.rpc("kv_put",{key:id,data_b64:data});
+  expect((await action(f,{op:"unlisten",hub:"work",listener_id:id})).http_status).toBe(200);
+  expect(f.query("SELECT status FROM local_listeners WHERE listener_id=?",[id])).toEqual([{status:"UNLISTENED"}]);
+  expect(rows((await action(f,{op:"get_snapshot"})).listeners).some(peer=>peer.listener_id===id)).toBe(false);
+  expect(object(await hub.rpc("kv_get",{key:id})).value_b64).toBe(data);
+  expect(await f.mcp("ping")).toEqual({});
+  expect(daemon.child.exitCode).toBeNull();
+ }
+});
+test("snapshots count only active visible directory peers and keep remote ownership distinct", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ const f = await cleanroom({hubs:{work:{url:hub.url,user:"alice"}},defaultHub:"work"});
+ await f.daemon();
+ await action(f,{op:"query_directory",hub:"work"});
+ const before = await action(f,{op:"get_snapshot"});
+ const target = {listener_id:"c_1111111111111111",public_id:"active-1111111111111111",state:"ACTIVE",scope:"workspace",
+  principal_id:"none#alice",owner_user:"alice",harness:"cursor",title:"Remote",about:"Remote",channels:{remote:{state:"ACTIVE",updated_at_ms:Date.now()}}};
+ const peers = [
+  target,
+  {...target,listener_id:"c_2222222222222222",public_id:"private-2222222222222222",scope:"self"},
+  {...target,listener_id:"c_3333333333333333",public_id:"shared-3333333333333333",principal_id:"none#bob",owner_user:"bob"},
+  {...target,listener_id:"c_4444444444444444",public_id:"hidden-4444444444444444",principal_id:"none#bob",owner_user:"bob",scope:"self"},
+  {...target,listener_id:"c_5555555555555555",public_id:"revoked-5555555555555555",state:"UNLISTENED"},
+  {...target,listener_id:"c_6666666666666666",public_id:"expired-6666666666666666",channels:{remote:{state:"ACTIVE",updated_at_ms:Date.now()-1_800_001}}},
+  {...target,listener_id:"c_7777777777777777",public_id:"retained-7777777777777777",channels:{remote:{state:"ACTIVE",updated_at_ms:Date.now()-60_001}}}
+ ];
+ for (const peer of peers) await hub.rpc("kv_put",{key:peer.listener_id,data_b64:Buffer.from(JSON.stringify(peer)).toString("base64")});
+ const directory = rows((await action(f,{op:"query_directory",hub:"work"})).peers);
+ const snapshot = await action(f,{op:"get_snapshot"});
+ const active = peers.slice(0,3).map(peer=>peer.listener_id);
+ expect(directory.filter(peer=>peers.some(p=>p.public_id===peer.public_id)).map(peer=>peer.public_id).sort()).toEqual(peers.slice(0,3).map(peer=>peer.public_id).sort());
+ expect(snapshot).toMatchObject({directory_online_count:Number(before.directory_online_count)+3,total_online:Number(before.total_online)+3});
+ expect(rows(snapshot.my_remote_listeners).map(peer=>peer.listener_id).sort()).toEqual(
+  [...rows(before.my_remote_listeners).map(peer=>String(peer.listener_id)),...active.slice(0,2)].sort()
+ );
 });
 
-test("multi-hub candidate retention (listening_hubs) and atomic switch_hub migration with failure rollback", async () => {
-  const base = await fixture(); cleanups.push(() => base.close());
-  const configPath = join(base.stateDir, "multi-hub.json");
-  await writeFile(configPath, JSON.stringify({
-    default_hub: "default",
-    hubs: {
-      default: { natsUrl: base.broker.url, authMode: "none", user: "alice" },
-      work: { natsUrl: base.broker.url, authMode: "none", user: "bob" },
-    },
-  }));
-  const config = loadConfig({ ...base.env, CITO_CONFIG_PATH: configPath });
-  const service = await CitoService.create(config, base.serviceOptions); cleanups.push(() => service.close());
-  await service.startUi();
-  const states = vi.spyOn(service.ui!, "state");
-
-  // Legacy hub-less activeListeners rows exclude matching candidate even in multi-hub config
-  const legacyDiscovered = await discoverAllAvailableSessions(config, [{ harness: "pi", session_id: "pi-session-1" }]);
-  expect(legacyDiscovered).toEqual([]);
-
-  // Enroll on default hub via listen_session with explicit hub & scope
-  await service.handleUiAction({
-    op: "listen_session",
-    harness: "pi",
-    session_id: "pi-session-1",
-    endpoint_pid: base.pi.meta.pi_pid,
-    cwd: base.stateDir,
-    title: "Multi-Hub Session",
-    hub: "default",
-    scope: "workspace",
-  });
-  await waitFor(() => states.mock.lastCall?.[2]?.[0]?.listening_hubs?.includes("default") === true);
-  expect(states.mock.lastCall?.[1]).toMatchObject([
-    { hub: "default", harness: "pi", session_id: "pi-session-1", scope: "workspace", about: "Multi-Hub Session" },
-  ]);
-  expect(states.mock.lastCall?.[2]).toMatchObject([
-    { harness: "pi", session_id: "pi-session-1", listening_hubs: ["default"] },
-  ]);
-
-  const defaultListenerId = states.mock.lastCall![1]![0]!.listener_id;
-  // Set custom tag via cito_listen to verify switch_hub inherits about, scope, and tag
-  await call(service, "cito_listen", { hub: "default", about: "Tagged Session", scope: "workspace", tag: "v9tag" }, base.pi.meta);
-
-  // Failure rollback: disconnect work hub so enrollment on work fails; default hub listener must remain active!
-  await service.handleUiAction({ op: "hub_action", hub: "work", action: "disconnect" });
-  await service.handleUiAction({ op: "switch_hub", from_hub: "default", to_hub: "work", listener_id: defaultListenerId });
-  expect(service.slots.get("work")!.error).toContain("Hub 'work' is manually disconnected");
-  expect(service.state.listener(defaultListenerId, "default")?.status).toBe("ACTIVE");
-  expect(service.receivers.get(`default:${defaultListenerId}`)?.abort.signal.aborted).toBe(false);
-
-  // Reconnect work hub and switch_hub from default -> work atomically
-  await service.handleUiAction({ op: "hub_action", hub: "work", action: "reconnect" });
-  await service.handleUiAction({ op: "switch_hub", from_hub: "default", to_hub: "work", listener_id: defaultListenerId });
-  expect(service.state.listener(defaultListenerId, "default")?.status).toBe("UNLISTENED");
-  await waitFor(() => states.mock.lastCall?.[2]?.[0]?.listening_hubs?.[0] === "work");
-  const workListenerId = states.mock.lastCall![1]![0]!.listener_id;
-  expect(service.state.listener(workListenerId, "work")).toMatchObject({
-    status: "ACTIVE",
-    about: "Tagged Session",
-    scope: "workspace",
-    tag: "v9tag",
-  });
-  expect(states.mock.lastCall?.[1]).toMatchObject([{ hub: "work", listener_id: workListenerId, scope: "workspace", about: "Tagged Session" }]);
-
-  // Enrolling on default as well (so both hubs are active) excludes the candidate from available
-  await service.handleUiAction({
-    op: "listen_session",
-    harness: "pi",
-    session_id: "pi-session-1",
-    endpoint_pid: base.pi.meta.pi_pid,
-    cwd: base.stateDir,
-    title: "Tagged Session",
-    hub: "default",
-  });
-  expect(states.mock.lastCall?.[2]).toEqual([]);
-
-  // switch_hub when to_hub is already active skips duplicate listen() and unlistens from_hub
-  const listenSpy = vi.spyOn(service as unknown as { listen: (...args: unknown[]) => Promise<unknown> }, "listen");
-  await service.handleUiAction({ op: "switch_hub", from_hub: "work", to_hub: "default", listener_id: workListenerId });
-  expect(listenSpy).not.toHaveBeenCalled();
-  expect(service.state.listener(workListenerId, "work")?.status).toBe("UNLISTENED");
-  expect(service.state.listener(defaultListenerId, "default")?.status).toBe("ACTIVE");
+test("send rejects --wake before starting a daemon",async()=>{
+ const f=await cleanroom();const result=await f.command(["send","--to","@self","--message","hello","--wake"]);
+ expect(result.code).toBe(1);expect(result.stderr).toContain("--wake is not supported");
+ await expect(fetch(`http://127.0.0.1:${f.daemonPort}/health`)).rejects.toThrow();
 });
-
-test("in-process set_host_hub shares getLocalHubEngine(stateDir) over HTTP/SSE, and setup_save_hub / setup_toggle_hub / setup_remove_hub hot-reload slots live", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cito-settings-ipc-"));
-  cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const env: NodeJS.ProcessEnv = {
-    HOME: root,
-    CITO_STATE_DIR: join(root, ".cito"),
-    CITO_CODEX_HOME: join(root, ".codex"),
-    CITO_PI_HOME: join(root, ".pi/agent"),
-    CITO_CLAUDE_HOME: join(root, ".claude"),
-    CITO_USER: "alice",
-  };
-  await mkdir(join(root, ".pi/agent"), { recursive: true });
-  const cfg = loadConfig(env);
-  const pi = await piBridge(cfg.stateDir);
-  cleanups.push(() => pi.stop());
-  const service = await CitoService.create(cfg);
-  cleanups.push(() => service.close());
-
-  // Enroll a session on the in-process "local" hub
-  const enrolled = await call(service, "cito_listen", { about: "Shared local session", tag: "lan-share" }, pi.meta);
-  expect(enrolled.hub).toBe("local");
-
-  // 1. Enable in-process host_hub on an ephemeral port (port: 0)
-  await service.handleUiAction({ op: "set_host_hub", enabled: true, port: 0 });
-  const settingsAfterHost = await service.refreshSettingsState();
-  expect(settingsAfterHost.host_hub.enabled).toBe(true);
-  expect(settingsAfterHost.host_hub.running).toBe(true);
-  expect(settingsAfterHost.host_hub.port).toBeGreaterThan(0);
-  expect(settingsAfterHost.host_hub.token).toMatch(/^[0-9a-f]{64}$/);
-  expect(settingsAfterHost.host_hub.invite_command).toContain(`--token ${settingsAfterHost.host_hub.token}`);
-
-  // A second peer service connecting over HTTP with the generated token sees the exact same local listener and can message it!
-  const peerRoot = await mkdtemp(join(tmpdir(), "cito-lan-peer-"));
-  cleanups.push(() => rm(peerRoot, { recursive: true, force: true }));
-  const peerCfg = loadConfig({
-    HOME: peerRoot,
-    CITO_STATE_DIR: join(peerRoot, ".cito"),
-    CITO_HUB: "lan",
-    CITO_HUB_URL: `http://127.0.0.1:${settingsAfterHost.host_hub.port}`,
-    CITO_AUTH_MODE: "token",
-    CITO_HUB_TOKEN: settingsAfterHost.host_hub.token,
-    CITO_USER: "bob",
-  });
-  const peerService = await CitoService.create(peerCfg);
-  cleanups.push(() => peerService.close());
-
-  const foundOnLan = await call(peerService, "cito_find", { query: "Shared local session" });
-  expect(foundOnLan.listeners).toMatchObject([
-    {
-      hub: "lan",
-      listener_id: `lan:${enrolled.listener_id}`,
-      about: "Shared local session",
-    },
-  ]);
-
-  const sentFromLan = await call(peerService, "cito_send", {
-    to: enrolled.listener_id,
-    message: "Hello over in-process LAN hub!",
-  });
-  expect(sentFromLan.status).toBe("wake_accepted");
-  const canonId = toCanonicalListenerId(enrolled.listener_id);
-  await service.receivers.get(`local:${canonId}`)!.dispatch();
-  await waitFor(() => pi.messages.length === 1);
-  expect(pi.messages[0]!.content).toContain("Hello over in-process LAN hub!");
-
-  // Toggling host_hub off stops the HTTP server in < 100ms while preserving the local listener
-  const t0 = performance.now();
-  await service.handleUiAction({ op: "set_host_hub", enabled: false });
-  expect(performance.now() - t0).toBeLessThan(100);
-  expect((await service.refreshSettingsState()).host_hub).toMatchObject({ enabled: false, running: false });
-  expect(service.state.listener(canonId, "local")?.status).toBe("ACTIVE");
-
-  // 2. Dynamic hub hot-reload: setup_save_hub adds & connects a new hub slot without restarting daemon
-  const remoteHub = await startHubServer({ authMode: "token", token: "remote-tok-123" });
-  cleanups.push(() => remoteHub.stop());
-
-  await service.handleUiAction({
-    op: "setup_save_hub",
-    name: "tailnet",
-    url: remoteHub.url,
-    auth_mode: "token",
-    token: "remote-tok-123",
-    set_default: true,
-  });
-  expect(service.slots.has("tailnet")).toBe(true);
-  expect(service.slots.get("tailnet")?.status).toBe("connected");
-  expect(service.config.defaultHub).toBe("tailnet");
-
-  // setup_toggle_hub disables tailnet and removes its live slot
-  await service.handleUiAction({ op: "setup_toggle_hub", hub: "tailnet", enabled: false });
-  expect(service.slots.has("tailnet")).toBe(false);
-  expect((await service.refreshSettingsState()).hubs.find(h => h.name === "tailnet")?.enabled).toBe(false);
-
-  // setup_toggle_hub re-enables tailnet and reconnects its slot
-  await service.handleUiAction({ op: "setup_toggle_hub", hub: "tailnet", enabled: true });
-  expect(service.slots.get("tailnet")?.status).toBe("connected");
-
-  // setup_remove_hub removes tailnet completely from config and slots
-  await service.handleUiAction({ op: "setup_remove_hub", hub: "tailnet" });
-  expect(service.slots.has("tailnet")).toBe(false);
-  expect((await service.refreshSettingsState()).hubs.find(h => h.name === "tailnet")).toBeUndefined();
-
-  // 3. setup_apply configures Pi and set_launch_at_login toggles LaunchAgent
-  await service.handleUiAction({ op: "setup_apply", harness: "pi" });
-  expect((await service.refreshSettingsState()).apps.find(a => a.id === "pi")?.configured).toBe(true);
-
-  await service.handleUiAction({ op: "set_launch_at_login", enabled: true });
-  expect((await service.refreshSettingsState()).launch_at_login).toBe(true);
-  await service.handleUiAction({ op: "set_launch_at_login", enabled: false });
-  expect((await service.refreshSettingsState()).launch_at_login).toBe(false);
+test("disconnect retains ACTIVE rows, suppresses network traffic and reconnect restores receivers",async()=>{
+ const {f,p,id,proxy,enrolled}=await remoteAgent();proxy.hold("consumer_backlog");const before=proxy.calls.filter(c=>c.op==="consumer_backlog").length;await waitFor(()=>proxy.calls.filter(c=>c.op==="consumer_backlog").length>before);await action(f,{op:"hub_action",hub:"work",action:"disconnect"});proxy.release("consumer_backlog");const count=proxy.calls.length;await new Promise(r=>setTimeout(r,500));expect(proxy.calls.length).toBe(count);expect(f.query("SELECT status FROM local_listeners WHERE listener_id=?",[id])[0]!.status).toBe("ACTIVE");await action(f,{op:"hub_action",hub:"work",action:"reconnect"});await sendUnbound(f,String(enrolled.listener_id));await received(f,id);
+});
+test("KV-first scope changes preserve ownership and reconcile authoritative remote scope",async()=>{
+ const {f,p,id,row,hub,proxy}=await remoteAgent();proxy.fail("kv_update",1);expect((await action(f,{op:"set_scope",hub:"work",listener_id:id,scope:"self"},true)).http_status).toBe(400);expect(f.query("SELECT scope FROM local_listeners WHERE listener_id=?",[id])[0]!.scope).toBe("workspace");proxy.restore();await action(f,{op:"set_scope",hub:"work",listener_id:id,scope:"self"});expect(f.query("SELECT scope,owner_token,binding_generation FROM local_listeners WHERE listener_id=?",[id])[0]).toEqual({scope:"self",owner_token:row.owner_token,binding_generation:row.binding_generation});
+ const remote=object(await hub.rpc("kv_get",{key:id})),reg=object(JSON.parse(Buffer.from(String(remote.value_b64),"base64").toString()));await hub.rpc("kv_update",{key:id,revision:remote.revision,data_b64:Buffer.from(JSON.stringify({...reg,scope:"workspace"})).toString("base64")});await waitFor(()=>f.query("SELECT scope FROM local_listeners WHERE listener_id=?",[id])[0]!.scope==="workspace");
+});
+test("UI snapshots obey ownership fences and unlisten/all make pending signals passive before quit",async()=>{
+ const {f,p,row,id}=await agent();seed(f,row,"pending");await action(f,{op:"unlisten",hub:"local",listener_id:id});expect(f.query("SELECT state FROM local_signals WHERE signal_id='pending'")[0]!.state).toBe("STORED_PASSIVE");expect(rows((await action(f,{op:"get_snapshot"})).listeners).some(r=>r.listener_id===id)).toBe(false);await action(f,{op:"unlisten_all"});expect(f.query("SELECT * FROM local_listeners WHERE status='ACTIVE'")).toEqual([]);await action(f,{op:"quit"});await waitFor(async()=>{try{await fetch(`http://127.0.0.1:${f.daemonPort}/health`);return false;}catch{return true;}});
+});
+test("disconnect aborts interactive login and fences late connection completion",async()=>{
+ const x=await loginFixture();x.oidc.state.holdAuthorization=true;
+ const login=action(x.f,{op:"login_hub",hub:"work"},true,3000);await waitFor(()=>x.oidc.state.authorizationRequests===1);
+ expect((await action(x.f,{op:"get_snapshot"},false,1500)).http_status).toBe(200);
+ expect((await action(x.f,{op:"hub_action",hub:"work",action:"disconnect"},false,1500)).http_status).toBe(200);
+ const result=await login;
+ expect(result).toMatchObject({http_status:400,error:expect.stringContaining("cancelled")});
+ expect(x.oidc.state.codeRequests).toBe(0);
+ expect(rows((await action(x.f,{op:"get_snapshot"})).hubs).find(h=>h.name==="work")?.status).not.toBe("connected");
+});
+test("hub scopes and redirect ports cannot leak from the selected default hub",async()=>{
+ const a=await freePort(),b=await freePort(),f=await cleanroom({hubs:{personal:{url:"local://",scopes:["openid","email"],redirectPort:a},work:{url:"local://",scopes:["openid","profile"],redirectPort:b}},defaultHub:"personal"});await f.daemon();for(const [hub,port,scopes]of [["personal",a,["openid","email"]],["work",b,["openid","profile"]]]as const){const invite=await action(f,{op:"generate_hub_invite",hub});expect(invite.invite).toMatchObject({redirectPort:port,scopes:[...scopes]});}
+});
+test("noninteractive startup never opens a browser and changing principal fences old listeners",async()=>{
+ const x=await loginFixture();expect(x.oidc.state.authorizationRequests).toBe(0);expect((await x.login()).http_status).toBe(200);const p=await provider(x.f);await p.set({session_id:"old"});await action(x.f,{op:"listen_session",hub:"work",harness:"cursor",session_id:"old"});await x.cache(await x.key.sign(x.oidc.claims()));x.oidc.state.tokenFactory=async()=>({id_token:await x.key.sign(x.oidc.claims({sub:"new-principal"}))});await x.login();expect(x.f.query("SELECT status FROM local_listeners WHERE session_id='old'")[0]!.status).toBe("FENCED_INACTIVE");
+});
+test("available-session refresh filters active listeners synchronously and fences changed sessions",async()=>{
+ const f=await cleanroom();const p=await provider(f);await f.daemon();await waitFor(async()=>rows((await action(f,{op:"get_snapshot"})).available).some(s=>s.harness==="cursor"));await action(f,{op:"listen_session",harness:"cursor",session_id:"session-1",cwd:f.root,about:"UI"});expect(rows((await action(f,{op:"get_snapshot"})).available).some(s=>s.session_id==="session-1")).toBe(false);await p.set({session_id:"changed"});const calls=(await p.calls()).filter(c=>c.op==="discover_sessions").length;await action(f,{op:"refresh_available"});await waitFor(async()=>(await p.calls()).filter(c=>c.op==="discover_sessions").length>calls);expect((await action(f,{op:"listen_session",harness:"cursor",session_id:"session-1",cwd:f.root},true)).http_status).toBe(400);
+});
+test("directory queries expose remote peers and apply prefix tokens and facets",async()=>{
+ const {f,hub}=await remoteAgent();for(const [id,title,harness]of [["c_1111111111111111","Build API","cursor"],["c_2222222222222222","Review UI","aider"]])await hub.rpc("kv_put",{key:id,data_b64:Buffer.from(JSON.stringify({listener_id:id,public_id:title!.toLowerCase().replaceAll(" ","-")+"-"+id!.slice(2),state:"ACTIVE",scope:"workspace",owner_user:"alice",principal_id:"none#alice",host_id:"remote",host_name:"laptop",harness,title,about:title,repo:"acme/api",channels:{remote:{state:"ACTIVE"}}})).toString("base64")});const all=await action(f,{op:"query_directory",hub:"work",query:""});expect(rows(all.peers).length).toBeGreaterThanOrEqual(2);const selected=rows((await action(f,{op:"query_directory",hub:"work",query:"harness:cursor build"})).peers);expect(selected).toHaveLength(1);expect(selected[0]!.title).toBe("Build API");expect(rows((await action(f,{op:"get_snapshot"})).my_remote_listeners).length).toBeGreaterThanOrEqual(2);
+});
+test("directory queries and snapshots normalize retained OIDC identity and share token semantics", async () => {
+ const owner = await cleanroom(), hub = await owner.hub();
+ // A closed loopback issuer keeps retained-identity projection independent of login and external services.
+ const issuer = `https://127.0.0.1:${await freePort()}`, principal = `oidc:${issuer}|sub-1`;
+ const f = await cleanroom({hubs:{work:{url:hub.url,authMode:"oidc",issuer,clientId:"cito"}},defaultHub:"work"});
+ const token = "retained-identity";
+ await writeFile(join(f.stateDir,"oidc-token-work.json"), JSON.stringify({
+  issuer,client_id:"cito",id_token:token,token_sha256:createHash("sha256").update(token).digest("hex"),
+  expires_at:0,verified_principal_id:principal,verified_user:"bob"
+ }), {mode:0o600});
+ await f.daemon();
+ const id = "c_1111111111111111", publicId = "billing-1111111111111111", otherId = "ledger-2222222222222222";
+ const target = {listener_id:id,public_id:publicId,state:"ACTIVE",scope:"self",principal_id:`${issuer}#sub-1`,
+  owner_user:"bob",harness:"cursor",title:"Title-marker",about:"About-marker",repo:"acme/billing",
+  cwd:"/projects/payments",branch:"feature/invoices",host_name:"desktop",host_id:"host-remote",channels:{remote:{state:"ACTIVE"}}};
+ for (const peer of [
+  target,
+  {...target,listener_id:"c_2222222222222222",public_id:otherId,principal_id:principal,harness:"cursor-preview",repo:"acme/ledger",title:"Ledger",about:"Ledger",cwd:"/projects/ledger",branch:"main",host_name:"laptop",host_id:"host-other"},
+  {...target,listener_id:"c_3333333333333333",public_id:"private-3333333333333333",principal_id:`${issuer}#someone-else`},
+  {...target,listener_id:"c_4444444444444444",public_id:"shared-4444444444444444",principal_id:`${issuer}#someone-else`,scope:"workspace",owner_user:"alice",harness:"aider",repo:"acme/other",title:"Other",about:"Other",cwd:"/projects/other",branch:"main",host_name:"other",host_id:"host-other"}
+ ]) {
+  await hub.rpc("kv_put", {key:peer.listener_id,data_b64:Buffer.from(JSON.stringify(peer)).toString("base64")});
+ }
+ const queries: [string, string[]][] = [
+  ["@bob",[publicId,otherId]], ["user:bob",[publicId,otherId]],
+  ["is:cursor",[publicId]], ["is:cur",[]], ["harness:cur",[publicId,otherId]],
+  [`#${publicId}`,[publicId]], [`#work:${publicId}`,[publicId]], [`#${id}`,[publicId]],
+  ["repo:billing",[publicId]], ["host:desktop",[publicId]], ["host:host-remote",[publicId]],
+  ["@BOB is:cursor repo:billing",[publicId]],
+  ...["title-marker","about-marker","/projects/payments","billing","feature/invoices","desktop","host-remote",`work:${publicId}`,id].map(query => [query,[publicId]] as [string,string[]]),
+  ["bob",[publicId,otherId]], ["cursor",[publicId,otherId]],
+  ["@",[]], ["#",[]], ["is:",[]], ["repo:",[]], ["host:",[]], ["user:",[]]
+ ];
+ for (const [query, expected] of queries) {
+  const peers = rows((await action(f,{op:"query_directory",hub:"work",query})).peers);
+  const listeners = rows((await f.tool("cito_find",{hub:"work",query},human)).listeners);
+  for (const found of [peers,listeners]) {
+   expect(found.map(peer => peer.public_id).sort(), query).toEqual([...expected].sort());
+   expect(found.every(peer => peer.is_self_principal === true), query).toBe(true);
+  }
+ }
+ const mine = rows((await action(f,{op:"query_directory",hub:"work",scope:"mine"})).peers);
+ expect(mine.map(peer => peer.public_id).sort()).toEqual([publicId,otherId].sort());
+ const shared = rows((await f.tool("cito_find",{hub:"work",query:"@alice"},human)).listeners);
+ expect(shared).toHaveLength(1);
+ expect(shared[0]).toMatchObject({public_id:"shared-4444444444444444",is_self_principal:false});
+ const snapshot = rows((await action(f,{op:"get_snapshot"})).my_remote_listeners);
+ expect(snapshot.map(peer => peer.public_id).sort()).toEqual([publicId,otherId].sort());
+ expect(snapshot.every(peer => peer.is_self_principal === true)).toBe(true);
+ expect((await action(f,{op:"get_snapshot"})).directory_online_count).toBe(3);
+}, 15_000);
+test("directory facets filter exact harness and ownership before the result limit",async()=>{
+ const {f,hub,row}=await remoteAgent();
+ const own=String(row.principal_id),target="z-match-ffffffffffffffff",sameHarness="y-other-eeeeeeeeeeeeeeee",otherHarness="y-other-dddddddddddddddd";
+ for(let i=0;i<55;i++){
+  const hex=(i+1).toString(16).padStart(16,"0"),id="c_"+hex;
+  const principal=i<52?"none#bob":own,harness=i===52?"cursor-preview":i===53?"aider":"cursor";
+  const public_id=i<52?"a-decoy-"+hex:i===52?sameHarness:i===53?otherHarness:target;
+  await hub.rpc("kv_put",{key:id,data_b64:Buffer.from(JSON.stringify({listener_id:id,public_id,state:"ACTIVE",scope:"workspace",principal_id:principal,owner_user:i<52?"bob":"alice",host_id:"remote",host_name:"laptop",harness,title:"Facet fixture",about:"Facet fixture",channels:{remote:{state:"ACTIVE"}}})).toString("base64")});
+ }
+ const query={hub:"work",query:"Facet"};
+ const all=rows((await action(f,{op:"query_directory",...query,scope:"all",harness:"all"})).peers);
+ expect(all).toHaveLength(50);
+ expect(all.some(peer=>peer.public_id===target)).toBe(false);
+ for(const op of ["query_directory","open_directory"]){
+  for(const scope of ["mine","self"]){
+   const peers=rows((await action(f,{op,...query,scope,harness:"cursor"})).peers);
+   expect(peers.map(peer=>peer.public_id)).toEqual([target]);
+   expect(peers[0]).toMatchObject({harness:"cursor",is_self_principal:true});
+  }
+ }
+ const mine=rows((await action(f,{op:"query_directory",...query,scope:"mine",harness:"all"})).peers);
+ expect(mine.map(peer=>peer.public_id).sort()).toEqual([target,sameHarness,otherHarness].sort());
+ const other=rows((await action(f,{op:"query_directory",...query,scope:"all",harness:"aider"})).peers);
+ expect(other.map(peer=>peer.public_id)).toEqual([otherHarness]);
+});
+test("directory snapshots retain concurrent upserts/removals and omit revoked KV entries",async()=>{
+ const {f,hub,proxy,id}=await remoteAgent();proxy.hold("kv_snapshot");const pending=action(f,{op:"query_directory",hub:"work"});await waitFor(()=>proxy.calls.some(c=>c.op==="kv_snapshot"));const entry=object(await hub.rpc("kv_get",{key:id}));const reg=object(JSON.parse(Buffer.from(String(entry.value_b64),"base64").toString()));await hub.rpc("kv_update",{key:id,revision:entry.revision,data_b64:Buffer.from(JSON.stringify({...reg,state:"UNLISTENED"})).toString("base64")});proxy.release("kv_snapshot");await pending;expect(rows((await action(f,{op:"query_directory",hub:"work"})).peers).some(r=>r.listener_id===id||r.listener_id===reg.public_id)).toBe(false);
+});
+test("multi-hub candidate retention and atomic switch migration preserve the source on failure",async()=>{
+ const {f,p,id}=await agent({hubs:{personal:{url:"local://"},work:{url:"local://"}},defaultHub:"personal"});const before=f.query("SELECT status FROM local_listeners WHERE hub='personal' AND listener_id=?",[id])[0];expect((await action(f,{op:"switch_hub",from_hub:"personal",to_hub:"missing",listener_id:id},true)).http_status).toBe(400);expect(f.query("SELECT status FROM local_listeners WHERE hub='personal' AND listener_id=?",[id])[0]).toEqual(before);await action(f,{op:"switch_hub",from_hub:"personal",to_hub:"work",listener_id:id});expect(f.query("SELECT status FROM local_listeners WHERE hub='work' AND listener_id=?",[id])[0]!.status).toBe("ACTIVE");expect(f.query("SELECT status FROM local_listeners WHERE hub='personal' AND listener_id=?",[id])[0]!.status).toBe("UNLISTENED");
+});
+test("host sharing reuses the daemon's local Hub and setup hub mutations hot-reload live slots",async()=>{
+ const f=await cleanroom();await f.daemon();const port=await freePort();await action(f,{op:"set_host_hub",enabled:true,port,bind:"127.0.0.1",auth_mode:"none"});const remote=await fetch(`http://127.0.0.1:${port}/v1/rpc`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({op:"kv_snapshot"})});const payload=object(await remote.json());expect(rows(object(payload.result).entries).map(entry=>object(JSON.parse(Buffer.from(String(entry.value_b64),"base64").toString()))).some(node=>node.harness==="human")).toBe(true);await action(f,{op:"set_host_hub",enabled:false});await action(f,{op:"setup_save_hub",name:"work",url:"local://",auth_mode:"none"});expect(rows((await action(f,{op:"get_snapshot"})).hubs).some(h=>h.name==="work")).toBe(true);await action(f,{op:"setup_toggle_hub",hub:"work",enabled:false});expect(rows((await action(f,{op:"get_snapshot"})).hubs).some(h=>h.name==="work")).toBe(false);await action(f,{op:"setup_remove_hub",hub:"work"});expect(JSON.parse(await readFile(f.configPath,"utf8")).hubs.work).toBeUndefined();
+});
+test.each([{op:"switch_hub",from_hub:"personal",to_hub:"personal",listener_id:"c_1111111111111111"},{op:"switch_hub",from_hub:"BAD!",to_hub:"work",listener_id:"invalid"},{op:"listen_session",harness:"pi",session_id:"s1",hub:"BAD!"},{op:"listen_session",harness:"pi",session_id:"s1",scope:"invalid"},{op:"setup_apply",harness:"BAD HARNESS"},{op:"setup_remove_hub",hub:"local"},{op:"send_signal",to:"BAD TARGET",message:"hello"}])("native UI validation rejects malformed actions without persistent effects: %j",async invalid=>{
+ const f=await cleanroom();await f.daemon();const before=await readFile(f.configPath,"utf8");expect((await action(f,invalid,true)).http_status).toBe(400);expect(await readFile(f.configPath,"utf8")).toBe(before);
 });

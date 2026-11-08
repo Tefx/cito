@@ -1,0 +1,521 @@
+use crate::support::*;
+use serde_json::{json, Value};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+use toml_edit::{value, DocumentMut, Item, Table};
+fn matches_process(command: &str) -> bool {
+    let Some((program, script)) = process_entrypoint(command) else {
+        return false;
+    };
+    let entry = script.unwrap_or(program);
+    let name = Path::new(entry)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if script.is_some() {
+        return matches!(name, "codex" | "codex.js" | "codex.mjs");
+    }
+    name == "codex"
+        || (name == "Codex" && program.contains("/Codex.app/Contents/MacOS/"))
+        || (name == "ChatGPT" && program.contains("/ChatGPT.app/Contents/MacOS/"))
+}
+fn desktop_command(command: &str) -> bool {
+    process_entrypoint(command).is_some_and(|(program, script)| {
+        let entry = script.unwrap_or(program);
+        match Path::new(entry).file_name().and_then(|n| n.to_str()) {
+            Some("Codex") => entry.contains("/Codex.app/Contents/MacOS/"),
+            Some("ChatGPT") => entry.contains("/ChatGPT.app/Contents/MacOS/"),
+            _ => false,
+        }
+    })
+}
+fn desktop_running(req: &Value) -> Result<bool> {
+    if let Some(p) = pid(req) {
+        let identity = process_identity(p)?;
+        let command =
+            str_at(&identity, "command").ok_or("Desktop process command is unavailable")?;
+        if desktop_command(command) {
+            return Ok(true);
+        }
+        if !matches_process(command) {
+            return Ok(false);
+        }
+    }
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "uid=,command="])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Desktop process inspection failed".into());
+    }
+    // SAFETY: geteuid only reads this process's effective user ID.
+    let uid = unsafe { libc::geteuid() }.to_string();
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.trim_start()
+            .split_once(char::is_whitespace)
+            .is_some_and(|(owner, command)| owner == uid && desktop_command(command.trim_start()))
+    }))
+}
+fn db(req: &Value) -> PathBuf {
+    config_home(req, "CITO_CODEX_HOME", "~/.codex").join("state_5.sqlite")
+}
+fn binary(req: &Value) -> Option<PathBuf> {
+    let mut candidates = vec![];
+    if let Some(p) = env_value(req, "CITO_CODEX_BIN").filter(|s| !s.trim().is_empty()) {
+        let p = expand(req, &p);
+        return p
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .map(|_| p);
+    }
+    candidates.extend([PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),home(req).join("Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),home(req).join("Applications/Codex.app/Contents/Resources/codex")]);
+    for d in env_value(req, "PATH").unwrap_or_default().split(':') {
+        candidates.push(Path::new(d).join("codex"));
+    }
+    candidates.into_iter().find(|p| {
+        p.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+fn parse(s: Option<&str>) -> Result<DocumentMut> {
+    s.unwrap_or("")
+        .parse()
+        .map_err(|e| format!("Invalid config.toml: {e}"))
+}
+fn configured(doc: &DocumentMut, cmd: &str) -> bool {
+    doc.get("mcp_servers")
+        .and_then(|v| v.get("cito"))
+        .and_then(|v| v.get("command"))
+        .and_then(Item::as_str)
+        == Some(cmd)
+}
+fn setup(req: &Value) -> Result<Value> {
+    let path = config_home(req, "CITO_CODEX_HOME", "~/.codex").join("config.toml");
+    let command = state(req)
+        .join("bin/cito-mcp")
+        .to_string_lossy()
+        .into_owned();
+    let op = str_at(req, "op").unwrap_or("");
+    if op == "setup_inspect" {
+        let old = read_optional(&path)?;
+        let d = parse(old.as_deref())?;
+        return Ok(
+            json!({"ok":true,"installed":path.parent().map(Path::exists).unwrap_or(false)||binary(req).is_some(),"configured":configured(&d,&command),"paths":[path]}),
+        );
+    }
+    let remove = op == "setup_remove";
+    let old = read_optional(&path)?;
+    let doc = parse(old.as_deref())?;
+    if !remove {
+        if let Some(cmd) = doc
+            .get("mcp_servers")
+            .and_then(|v| v.get("cito"))
+            .and_then(|v| v.get("command"))
+            .and_then(Item::as_str)
+        {
+            if cmd != command
+                && cmd != "cito-mcp"
+                && !cmd.ends_with("/cito-mcp")
+                && req["force"] != true
+            {
+                return Ok(
+                    json!({"ok":true,"actions":[{"target":"codex","path":path,"status":"conflict","backupPath":null,"detail":"Conflicting MCP command; pass --force to replace"}]}),
+                );
+            }
+        }
+    }
+    let action = mutate(req, "codex", &path, |old| {
+        let mut d = parse(old)?;
+        if !remove && req["force"] != true {
+            if let Some(cmd) = d
+                .get("mcp_servers")
+                .and_then(|v| v.get("cito"))
+                .and_then(|v| v.get("command"))
+                .and_then(Item::as_str)
+            {
+                if cmd != command && cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") {
+                    return Err("Conflicting MCP command; pass --force to replace".into());
+                }
+            }
+        }
+        if remove {
+            if let Some(t) = d.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
+                t.remove("cito");
+            }
+        } else {
+            if !d.contains_key("mcp_servers") {
+                d["mcp_servers"] = Item::Table(Table::new());
+            }
+            if d["mcp_servers"].as_table_like().is_none() {
+                return Err("mcp_servers must be a table".into());
+            }
+            let mut t = Table::new();
+            t["command"] = value(command);
+            t["args"] = value(toml_edit::Array::new());
+            d["mcp_servers"]["cito"] = Item::Table(t);
+        }
+        let next = d.to_string();
+        Ok(if old.is_none() && next.is_empty() {
+            None
+        } else {
+            Some(next)
+        })
+    })?;
+    Ok(json!({"ok":true,"actions":[action]}))
+}
+fn rows(req: &Value) -> Vec<Value> {
+    let columns = sqlite_rows(&db(req), "PRAGMA table_info(threads)").unwrap_or_default();
+    let has = |name: &str| columns.iter().any(|c| c["name"] == name);
+    if !has("id") || !has("cwd") {
+        return vec![];
+    }
+    let archived = if has("archived") && req["cli_cmd"] != "unlisten" {
+        " WHERE archived = 0"
+    } else {
+        ""
+    };
+    let mut order = vec![];
+    if has("archived") && req["cli_cmd"] == "unlisten" {
+        order.push("archived ASC");
+    }
+    if has("recency_at_ms") {
+        order.push("recency_at_ms DESC");
+    }
+    if has("updated_at") {
+        order.push("updated_at DESC");
+    }
+    order.push("rowid DESC");
+    let rows = sqlite_rows(
+        &db(req),
+        &format!(
+            "SELECT * FROM threads{archived} ORDER BY {}",
+            order.join(", ")
+        ),
+    )
+    .unwrap_or_default();
+    rows.into_iter()
+        .filter(|r| {
+            str_at(r, "id").is_some()
+                && str_at(r, "cwd").is_some()
+                && str_at(r, "thread_source")
+                    .map(|s| s == "user")
+                    .unwrap_or(true)
+                && !str_at(r, "source")
+                    .unwrap_or("")
+                    .starts_with("{\"subagent\"")
+        })
+        .collect()
+}
+fn metadata_id(req: &Value) -> Result<Option<String>> {
+    let mut ids = vec![];
+    for source in [&req["meta"], &req["_meta"]] {
+        for key in ["openai/threadId", "threadId", "codexThreadId"] {
+            if let Some(s) = str_at(source, key) {
+                ids.push(s.to_string())
+            }
+        }
+    }
+    for source in [&req["meta"], &req["headers"]] {
+        let turn = &source["x-codex-turn-metadata"];
+        let fragments = turn
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(turn));
+        for fragment in fragments {
+            let parsed = if let Some(s) = fragment.as_str() {
+                serde_json::from_str::<Value>(s).map_err(|_| "Invalid turn metadata JSON")?
+            } else {
+                fragment.clone()
+            };
+            for key in ["thread_id", "session_id"] {
+                if let Some(s) = str_at(&parsed, key) {
+                    ids.push(s.into())
+                }
+            }
+        }
+    }
+    if let Some(s) = str_at(req, "explicit_session_id") {
+        ids.push(s.into())
+    }
+    let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
+    if explicit_pid(&public)?.is_none() && req["meta"]["expected_harness"] == "codex" {
+        if let Some(s) = str_at(&req["meta"], "expected_session_id") {
+            ids.push(s.into())
+        }
+    }
+    if let Some(s) = env_value(req, "CODEX_THREAD_ID") {
+        if !s.trim().is_empty() {
+            ids.push(s)
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    if ids.len() > 1 {
+        return Err("Conflicting caller metadata".into());
+    }
+    Ok(ids.pop())
+}
+fn row_caller(req: &Value, r: &Value) -> Value {
+    let cwd = str_at(r, "cwd")
+        .or_else(|| str_at(req, "cwd"))
+        .unwrap_or("");
+    let mut c = caller(
+        "codex",
+        str_at(r, "id").unwrap_or(""),
+        cwd,
+        pid(req),
+        str_at(r, "name").or_else(|| str_at(r, "title")),
+    );
+    if r.get("git_branch").is_some() {
+        c["branch"] = r["git_branch"].clone();
+    }
+    if r.get("git_origin_url").is_some() {
+        c["repo"] = json!(str_at(r, "git_origin_url").and_then(normalize_repo));
+    }
+    c
+}
+fn command_exit(mut command: Command, deadline: Instant) -> Result<Option<bool>> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status.success())),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+pub fn handle(req: &Value) -> Result<Value> {
+    let op = str_at(req, "op").unwrap_or("");
+    if op.starts_with("setup_") {
+        return setup(req);
+    }
+    if matches!(op, "resolve_caller" | "verify") {
+        if let Err(e) = explicit_pid(req) {
+            return Ok(error("INVALID_INPUT", e));
+        }
+    }
+    match op {
+        "discover_sessions" => {
+            let running = desktop_running(req).unwrap_or(false);
+            let sessions = if running {
+                rows(req)
+                    .iter()
+                    .take(8)
+                    .map(|r| {
+                        let mut c = row_caller(req, r);
+                        c["updated_at_ms"] = json!(str_at(r, "recency_at_ms")
+                            .or_else(|| str_at(r, "updated_at"))
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(|t| if t < 100_000_000_000 { t * 1000 } else { t }));
+                        c
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            Ok(json!({"ok":true,"sessions":sessions}))
+        }
+        "resolve_caller" | "verify" => {
+            let explicit = match metadata_id(req) {
+                Ok(v) => v,
+                Err(e) => return Ok(error("INVALID_INPUT", e)),
+            };
+            let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
+            if explicit_pid(&public)?.is_some() {
+                return Ok(error(
+                    if explicit.is_some() {
+                        "INVALID_INPUT"
+                    } else {
+                        "BINDING_REQUIRED"
+                    },
+                    "Conflicting caller metadata: explicit bridge PID cannot claim a Codex thread",
+                ));
+            }
+            let all = rows(req);
+            let known_row = explicit.as_deref().and_then(|id| {
+                sqlite_rows(
+                    &db(req),
+                    &format!(
+                        "SELECT * FROM threads WHERE id = '{}'",
+                        id.replace('\'', "''")
+                    ),
+                )
+                .ok()
+                .and_then(|rows| rows.into_iter().next())
+            });
+            let needs_cached_pid = (explicit.is_some() && known_row.is_none())
+                || (explicit.is_none() && (str_at(req, "cli_cmd").is_none() || all.is_empty()));
+            if needs_cached_pid {
+                match cached_caller(req, "codex", explicit.as_deref(), matches_process) {
+                    Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
+                    Err(e) => return Ok(e),
+                    Ok(None) => {}
+                }
+            }
+            let row = if let Some(id) = explicit.as_deref() {
+                let row = known_row;
+                if row
+                    .as_ref()
+                    .and_then(|r| str_at(r, "archived"))
+                    .map(|s| s != "0")
+                    .unwrap_or(false)
+                    && req["require_open"] != false
+                {
+                    return Ok(error("SESSION_NOT_OPEN", "Codex thread is archived"));
+                }
+                row.unwrap_or_else(|| json!({"id":id,"cwd":req["cwd"]}))
+            } else if str_at(req, "cli_cmd").is_some()
+                || (pid(req).is_none()
+                    && (req["meta"]["expected_harness"] == "codex"
+                        || (req["http_transport"] != true
+                            && req["meta"]["http_transport"] != true)))
+            {
+                match all
+                    .iter()
+                    .find(|r| r["cwd"] == req["cwd"])
+                    .or_else(|| all.first())
+                {
+                    Some(r) => r.clone(),
+                    None => {
+                        return Ok(error(
+                            "BINDING_REQUIRED",
+                            "Codex thread metadata is required",
+                        ))
+                    }
+                }
+            } else {
+                return Ok(error(
+                    "BINDING_REQUIRED",
+                    "Codex thread metadata is required",
+                ));
+            };
+            let c = row_caller(req, &row);
+            if let Err(e) = verify(&c, req) {
+                return Ok(error("INVALID_INPUT", e));
+            }
+            Ok(json!({"ok":true,"caller":remember_process(c)}))
+        }
+        "probe" => {
+            let id = str_at(req, "session_id").unwrap_or("");
+            let archived = sqlite_rows(
+                &db(req),
+                &format!(
+                    "SELECT archived FROM threads WHERE id = '{}'",
+                    id.replace('\'', "''")
+                ),
+            )
+            .ok()
+            .and_then(|r| r.first().cloned())
+            .and_then(|r| r["archived"].as_str().map(|s| s != "0"));
+            let status = if archived == Some(true) {
+                "closed_definitive"
+            } else {
+                // Thread metadata is authoritative; the MCP endpoint may be a
+                // forwarder rather than Desktop. Liveness belongs to the app.
+                let mut app_request = req.clone();
+                if let Some(request) = app_request.as_object_mut() {
+                    request.remove("endpoint_pid");
+                }
+                match desktop_running(&app_request) {
+                    Ok(true) => "alive",
+                    Ok(false) => "closed_definitive",
+                    Err(_) => "transient_error",
+                }
+            };
+            Ok(json!({"ok":true,"status":status,"current_session_id":id,"reason":null}))
+        }
+        "update_badge" => Ok(json!({"ok":true})),
+        "wake" => {
+            let sid = str_at(req, "session_id").ok_or("Session ID is required")?;
+            let text = req["text"].as_str().ok_or("Wake text is required")?;
+            let run = |mut command: Command, timeout: Duration| {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(env) = req["env"].as_object() {
+                    for (key, value) in env {
+                        if let Some(value) = value.as_str() {
+                            command.env(key, value);
+                        }
+                    }
+                }
+                command_exit(command, Instant::now() + timeout)
+            };
+            let already_queued = req["queue_written"] == true;
+            let queue_confirmed = if already_queued {
+                req["queue_confirmed"] == true
+            } else {
+                let Some(bin) = binary(req) else {
+                    return Ok(
+                        json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":"Codex binary was not found"}),
+                    );
+                };
+                let mut attempt = 0;
+                loop {
+                    let mut command = Command::new(&bin);
+                    command
+                        .args(["queue", "--resume", "--thread", sid, "--message", text])
+                        .env(
+                            "CODEX_HOME",
+                            config_home(req, "CITO_CODEX_HOME", "~/.codex"),
+                        );
+                    let failure = match run(command, Duration::from_secs(10)) {
+                        Ok(Some(true)) => break true,
+                        // A timed-out insertion may have committed. Never submit it again.
+                        Ok(None) => break false,
+                        Ok(Some(false)) => "Codex queue command failed".to_string(),
+                        Err(error) => error,
+                    };
+                    attempt += 1;
+                    if attempt >= 3 {
+                        return Ok(
+                            json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":failure}),
+                        );
+                    }
+                    thread::sleep(Duration::from_secs(attempt));
+                }
+            };
+            if !already_queued && req["checkpoint_only"] == true {
+                // Return the insertion checkpoint before requesting a separately
+                // fenced open. The host rechecks unreadness and binding ownership.
+                return Ok(
+                    json!({"ok":true,"outcome":"delivered_unconfirmed","queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":false,"continue_wake":true}),
+                );
+            }
+            let mut opened = false;
+            for attempt in 0..2 {
+                let mut command = Command::new(
+                    env_value(req, "CITO_OPEN_BIN").unwrap_or_else(|| "/usr/bin/open".into()),
+                );
+                command.args(["-g", &format!("codex://threads/wake/{sid}")]);
+                if matches!(run(command, Duration::from_secs(3)), Ok(Some(true))) {
+                    opened = true;
+                    break;
+                }
+                if attempt == 0 {
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
+            Ok(
+                json!({"ok":true,"outcome":if !already_queued && queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{None}else{Some("Codex open effect was not confirmed")}}),
+            )
+        }
+        _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
+    }
+}

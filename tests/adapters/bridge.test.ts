@@ -3,11 +3,8 @@ import { createConnection } from "node:net";
 import { stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import citoBridge, { type BridgeAPI, type BridgeCommandOptions, type BridgeContext } from "../../plugins/pi/cito-bridge.js";
-import { bridgeSocketPath, identifyBridge, requestBridge, SocketBridgeAdapter, type DeliverContext } from "../../src/adapters/index.js";
-import { startHttpServer } from "../../src/mcp/server.js";
-import { loadConfig } from "../../src/shared/index.js";
-import type { ListenerRow } from "../../src/mcp/state.js";
-import { fixture } from "../mcp/support.js";
+import { bridgeSocketPath, identifyBridge, requestBridge, SocketBridgeAdapter, type DeliverContext } from "../support/plugin-adapter.js";
+import type { JsonObject as ListenerRow } from "../support/native-harness.js";
 import { isolatedState } from "./support.js";
 
 describe("self-contained Pi bridge over real Unix sockets", () => {
@@ -24,12 +21,12 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
   const request = (value: object) => requestBridge(path(), value, 1500);
   const identify = () => identifyBridge("pi", process.pid, state);
   beforeEach(async () => {
-    state = await isolatedState(); vi.stubEnv("CITO_STATE_DIR", state.stateDir); vi.stubEnv("CITO_CODEX_HOME", state.codexHome);
+    state = await isolatedState(); for(const [key,value]of Object.entries(state.env))if(value!==undefined)vi.stubEnv(key,value);
     currentId = "session-a"; name = "Human title"; command = undefined;
     ctx = { cwd: state.root, sessionManager: { getSessionId: () => currentId, getSessionName: () => name }, ui: { setStatus: status, notify } };
     handlers = new Map(); send.mockReset(); status.mockReset(); notify.mockReset(); register.mockReset(); registerCommand.mockReset();
     api = { on: (event, handler) => handlers.set(event, handler), sendMessage: send, registerMessageRenderer: register, registerCommand };
-    citoBridge(api);
+    const entry:unknown=citoBridge;const extension=typeof entry==="function"?entry:(entry as {default:unknown}).default;if(typeof extension!=="function")throw new Error("Missing Pi extension");extension(api);
   });
   afterEach(async () => { await emit("session_shutdown"); vi.unstubAllEnvs(); await state.cleanup(); });
   it("defers socket creation until session_start; identifies and closes with private permissions", async () => {
@@ -66,7 +63,7 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
   });
   it("checks session identity before either status update or duplicate delivery", async () => {
     await emit("session_start");
-    const row = { endpoint_pid: process.pid, session_id: "session-a" } as ListenerRow, config = loadConfig(state.env);
+    const row = { endpoint_pid: process.pid, session_id: "session-a" } as ListenerRow, config = state.harness;
     const adapter = new SocketBridgeAdapter("pi");
     await adapter.updateBadge(row, "🔔 listener", config); expect(status).toHaveBeenLastCalledWith("cito", "🔔 listener");
     await adapter.updateBadge(row, undefined, config); expect(status).toHaveBeenLastCalledWith("cito", undefined);
@@ -134,8 +131,8 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
   it("wraps CJK, emoji and combining characters within narrow terminal widths and reapplies themes", () => {
     const renderer = register.mock.calls[0]![1]; let style = "";
     const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => style + text, bold: (text: string) => text };
-    const component = renderer({ content: "🔔 Cito\n你好🙂é" }, { expanded: false }, theme);
-    expect(component.render(7)).toEqual(["🔔 Cito", "│ 你好 ", "│ 🙂é  "]); expect(component.render(1)).toEqual([" ", "C", "i", "t", "o", "é"]);
+    const component = renderer({ content: "🔔 Cito\n\u4f60\u597d🙂é" }, { expanded: false }, theme);
+    expect(component.render(7)).toEqual(["🔔 Cito", "│ \u4f60\u597d ", "│ 🙂é  "]); expect(component.render(1)).toEqual([" ", "C", "i", "t", "o", "é"]);
     style = "new-theme:"; component.invalidate(); expect(component.render(7).every(line => line.startsWith("new-theme:"))).toBe(true); expect(component.render(0)).toEqual([]);
   });
   it("registers /cito command, toggles via activeBadge, resets on session switch, and notifies on errors", async () => {
@@ -148,9 +145,7 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
     expect(command!.getArgumentCompletions!("team --h")).toEqual([{ value: "team --hub ", label: "--hub <hub>" }]);
     expect(command!.getArgumentCompletions!("off --hub")).toEqual([{ value: "off --hub ", label: "--hub <hub>" }]);
     expect(command!.getArgumentCompletions!("on --other")).toEqual([]);
-    const f = await fixture({ pi: false, env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome } });
-    const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
-    vi.stubEnv("CITO_DAEMON_PORT", String(http.port));
+    const f=state.harness;const daemon=await f.daemon();
     try {
       await emit("session_start");
       await command!.handler("", ctx);
@@ -160,7 +155,7 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
       name = "   ";
       await command!.handler("on", ctx);
       expect(notify).toHaveBeenLastCalledWith(expect.stringMatching(/^Cito listening as .+ \(self\)$/), "info");
-      expect((await f.service.call("cito_find", {})).content[0]!.text).toContain(basename(state.root));
+      expect(JSON.stringify(await f.tool("cito_find",{}))).toContain(basename(state.root));
       // Switching sessions clears activeBadge so bare /cito listens for the new session instead of unlistens.
       currentId = "session-b";
       await emit("session_tree");
@@ -185,28 +180,11 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
       await command!.handler("on", ctx);
       expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("No caller socket bridge found"), "error");
     } finally {
-      await http.close();
-      await f.close();
+      await daemon.stop();
     }
   });
   it("supports /cito on|team|off with --hub <hub> and --hub=<hub>, preserving activeBadge when another hub remains active", async () => {
-    const base = await fixture({ pi: false, env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome } });
-    const configPath = join(state.stateDir, "multi-hub.json");
-    await writeFile(configPath, JSON.stringify({
-      default_hub: "default",
-      hubs: {
-        default: { natsUrl: base.broker.url, authMode: "none", user: "alice" },
-        work: { natsUrl: base.broker.url, authMode: "none", user: "bob" },
-      },
-    }));
-    const multiConfig = loadConfig({ ...base.env, CITO_CONFIG_PATH: configPath });
-    const f = await fixture({
-      broker: base.broker,
-      pi: false,
-      env: { CITO_STATE_DIR: state.stateDir, CITO_CODEX_HOME: state.codexHome, CITO_CONFIG_PATH: configPath },
-    });
-    const http = await startHttpServer({ ...multiConfig, daemonPort: 0 }, f.service);
-    vi.stubEnv("CITO_DAEMON_PORT", String(http.port));
+    const f=state.harness;await f.writeConfig({defaultHub:"default",hubs:{default:{url:"local://",authMode:"none",user:"alice"},work:{url:"local://",authMode:"none",user:"bob"}}});const daemon=await f.daemon();
     try {
       await emit("session_start");
       await command!.handler("on --hub default Default task", ctx);
@@ -226,19 +204,10 @@ describe("self-contained Pi bridge over real Unix sockets", () => {
       expect(status).toHaveBeenLastCalledWith("cito", undefined);
 
       // Session-switch fence: if sessionId switches while /cito on is awaiting callMcpTool, ignore late completion
-      const origCall = f.service.call.bind(f.service);
-      vi.spyOn(f.service, "call").mockImplementationOnce(async (...args) => {
-        currentId = "switched-mid-rpc";
-        await emit("session_tree");
-        return origCall(...args);
-      });
-      notify.mockClear();
-      await command!.handler("on Late listen", ctx);
+      notify.mockClear();const pending=command!.handler("on Late listen",ctx);currentId="switched-mid-rpc";await emit("session_tree");await pending;
       expect(notify).not.toHaveBeenCalled();
     } finally {
-      await http.close();
-      await f.close();
-      await base.close();
+      await daemon.stop();
     }
   });
 });

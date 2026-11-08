@@ -5,21 +5,32 @@
     btn.addEventListener("click", async () => {
       const command = btn.getAttribute("data-copy-command") || "brew install tefx/tap/cito";
       const badge = btn.querySelector("[data-copy-badge]");
+      if (btn.disabled) return;
+      btn.disabled = true;
+      if (badge) badge.setAttribute("aria-live", "polite");
       try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(command);
-        }
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+        await navigator.clipboard.writeText(command);
+        if (badge) badge.textContent = "Copied ✓";
       } catch {
-        // Fallback when clipboard permission is unavailable
-      }
-      if (badge) {
-        const previous = badge.textContent;
-        badge.textContent = "Copied ✓";
-        setTimeout(() => {
-          badge.textContent = previous || "Copy";
-        }, 1800);
+        if (badge) badge.textContent = "Copy failed";
+      } finally {
+        btn.disabled = false;
       }
     });
+  }
+
+  // Tabbed previews reflect the native panel labels; they never change local Cito state.
+  for (const preview of document.querySelectorAll("[data-surface-preview]")) {
+    const tabs = preview.querySelectorAll("[data-preview-tab]");
+    const panels = preview.querySelectorAll("[data-preview-panel]");
+    for (const tab of tabs) {
+      tab.addEventListener("click", () => {
+        const target = tab.getAttribute("data-preview-tab");
+        for (const item of tabs) item.setAttribute("aria-selected", String(item === tab));
+        for (const panel of panels) panel.hidden = panel.getAttribute("data-preview-panel") !== target;
+      });
+    }
   }
 
   // Interactive 2-Scene Hero Stage Switcher

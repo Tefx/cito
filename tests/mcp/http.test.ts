@@ -1,252 +1,36 @@
-import { expect, test, vi } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { startHttpServer, parseClientPid, httpMetadata, daemonHealth } from "../../src/mcp/server.js";
-import { LocalState } from "../../src/mcp/state.js";
-import { CITO_VERSION, loadConfig } from "../../src/shared/index.js";
-import { claudeProjectDir, type CallerInput } from "../../src/adapters/index.js";
-import { fixture, waitFor, freePort } from "./support.js";
+import {expect,test} from "vitest";
+import {readFile,writeFile,stat} from "node:fs/promises";
+import {join} from "node:path";
+import {DatabaseSync} from "node:sqlite";
+import {transcript,SESSION} from "../support/plugin-fixtures.js";
+import {agent,cleanroom,rows,provider,errorTool} from "../support/native-scenarios.js";
+import {freePort,waitFor,object} from "../support/native-harness.js";
 
-const exec = promisify(execFile);
-test("HTTP binds loopback, enforces Origin, attributes real client PID, rejects spoofing and merges Codex headers", async () => {
-  const f = await fixture();
-  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
-  const base = `http://127.0.0.1:${http.port}`;
-  const client = new Client({ name: "http-test", version: "1" });
-  const captured: CallerInput[] = [], original = f.service.call.bind(f.service);
-  const spy = vi.spyOn(f.service, "call").mockImplementation((name, input, meta) => { captured.push(meta ?? {}); return original(name, input, meta); });
-  try {
-    expect(http.http.address()).toMatchObject({ address: "127.0.0.1" });
-    expect(await (await fetch(base + "/health")).json()).toEqual({ ok: true, pid: process.pid, stateDir: f.stateDir, version: CITO_VERSION });
-    for (const origin of ["https://example.com", "null", "not a URL"]) expect((await fetch(base + "/mcp", { headers: { origin } })).status).toBe(403);
-    for (const origin of ["http://localhost:9999", "http://127.0.0.1"]) expect((await fetch(base + "/health", { headers: { origin } })).status).toBe(200);
-    await client.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp")));
-    const result = await client.callTool({ name: "cito_listen", arguments: { about: "OS attributed caller" }, _meta: { http_transport: false, http_client_pid: 999999 } });
-    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ status: "listening", harness: "pi" });
-    expect(captured.at(-1)).toMatchObject({ httpTransport: true, httpClientPid: process.pid });
-    const latestProtocol = await fetch(base + "/mcp", { method: "POST", headers: {
-      "content-type": "application/json", accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28",
-    }, body: JSON.stringify({ jsonrpc: "2.0", id: 101, method: "tools/list" }) });
-    expect(latestProtocol.status).toBe(200);
-    expect(await latestProtocol.text()).toContain("cito_listen");
-    await client.close();
-    const codex = new Client({ name: "header-test", version: "1" });
-    try {
-      await codex.connect(new StreamableHTTPClientTransport(new URL(base + "/mcp"), { requestInit: { headers: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "http-thread" }) } } }));
-      const success = await codex.callTool({ name: "cito_listen", arguments: { about: "header claim" }, _meta: { cwd: f.root } });
-      expect(JSON.parse((success.content as { text: string }[])[0]!.text)).toMatchObject({ status: "listening", harness: "codex", session_id: "http-thread" });
-      const conflict = await codex.callTool({ name: "cito_listen", arguments: { about: "conflict" }, _meta: { codexThreadId: "other" } });
-      expect(JSON.parse((conflict.content as { text: string }[])[0]!.text)).toMatchObject({ error: { code: "INVALID_INPUT" } });
-    } finally { await codex.close(); }
-    const events = await fetch(base + "/mcp", { headers: { accept: "text/event-stream" } });
-    expect(events.status).toBe(200); expect(events.headers.get("content-type")).toContain("text/event-stream"); await events.body?.cancel();
-    expect((await fetch(base + "/mcp", { method: "DELETE" })).status).toBe(200);
-    expect((await f.service.call("cito_find")).isError).toBe(false);
-  } finally { spy.mockRestore(); await client.close(); await http.close(); await f.close(); }
-}, 15000);
-
-test("stdio forwarder walks the HTTP forwarder PID to its parent socket bridge and leaves the daemon alive on EOF", async () => {
-  const f = await fixture();
-  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
-  const client = new Client({ name: "stdio-ancestor", version: "1" });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve("bin/cito-mcp")],
-    env: { PATH: process.env.PATH!, ...f.env, CITO_DAEMON_PORT: String(http.port), CITO_UI_HEADLESS: "1" }, stderr: "pipe" });
-  try {
-    await client.connect(transport);
-    const result = await client.callTool({ name: "cito_listen", arguments: { about: "forwarded ancestor" } });
-    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ status: "listening", harness: "pi", session_id: "pi-session-1" });
-    await client.close();
-    expect((await fetch(`http://127.0.0.1:${http.port}/health`)).status).toBe(200);
-  } finally { await client.close(); await http.close(); await f.close(); }
-}, 15000);
-
-test("PID parser matches the client side endpoint and excludes daemon PID when another owner matches", () => {
-  expect(parseClientPid(`p${process.pid}\nn127.0.0.1:5000->127.0.0.1:4290\np456\nn127.0.0.1:5000->127.0.0.1:4290\np789\nn127.0.0.1:4290->127.0.0.1:5000`, 5000, 4290)).toBe(456);
-  expect(parseClientPid("p456\nn127.0.0.1:5001->127.0.0.1:4290", 5000, 4290)).toBeUndefined();
-  expect(httpMetadata({ http_transport: false, http_client_pid: 99 }, undefined, { "trace-id": "header" })).toEqual({
-    meta: { http_transport: false, http_client_pid: 99 }, httpTransport: true, httpClientPid: undefined, headers: { "trace-id": "header" },
-  });
+test("native HTTP binds loopback, enforces Origin, merges caller headers and rejects forged identity",async()=>{
+ const {f,p}=await agent();const url=`http://127.0.0.1:${f.daemonPort}`;expect((await fetch(url+"/health")).status).toBe(200);expect((await fetch(url+"/health",{headers:{origin:"https://foreign.example"}})).status).toBe(403);
+ const spoof=await f.mcp("tools/call",{name:"cito_listen",arguments:{about:"spoof"},_meta:{...p.meta,http_client_pid:1,http_transport:true}},{"x-codex-turn-metadata":JSON.stringify({thread_id:"thread"})});expect(spoof.isError).toBe(true);expect((await p.calls()).filter(c=>c.op==="resolve_caller").at(-1)?.http_client_pid).not.toBe(1);
+});
+test("stdio forwards through its parent Pi socket and leaves the daemon alive at EOF",async()=>{
+ const f=await cleanroom();const pi=await f.piBridge();await f.daemon();const child=await f.spawn("bin/cito-mcp");child.child.stdin.write(JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"cito_listen",arguments:{about:"stdio parent"}}})+"\n");await waitFor(()=>child.stdout.includes('"id":1'));const reply=JSON.parse(child.stdout.trim().split("\n")[0]!);expect(reply.result.isError).toBe(false);expect(JSON.parse(reply.result.content[0].text)).toMatchObject({harness:"pi",session_id:"pi-session-1"});child.child.stdin.end();expect((await child.result).code).toBe(0);expect((await fetch(`http://127.0.0.1:${f.daemonPort}/health`)).status).toBe(200);
+});
+test("native HTTP caller attribution excludes its daemon PID in favor of the client endpoint",async()=>{
+ const f=await cleanroom();await f.piBridge();const daemon=await f.daemon();const result=await f.tool("cito_listen",{about:"actual client"});const row=f.query("SELECT endpoint_pid FROM local_listeners WHERE harness='pi'")[0]!;expect(row.endpoint_pid).toBe(process.pid);expect(row.endpoint_pid).not.toBe(daemon.child.pid);
+});
+test("singleton daemon returns zero on its port, rejects another port and releases ownership",async()=>{
+ const f=await cleanroom();const daemon=await f.daemon();expect((await f.command(["daemon"])).code).toBe(0);expect((await f.command(["daemon"],{env:{CITO_DAEMON_PORT:String(await freePort())}})).code).toBe(1);await daemon.stop();const restarted=await f.daemon();expect(restarted.child.pid).not.toBe(daemon.child.pid);
+});
+test("native listen/unlisten CLI preserves parent bridge discovery, harness flags and error exits",async()=>{
+ const f=await cleanroom();await f.piBridge();await f.daemon();const listening=await f.command(["listen","--tag","cli-tag","Working","on","V6"]);expect(listening.code).toBe(0);expect(listening.stdout).toMatch(/^Listening as alice-[a-f0-9]{16} \(workspace\): Working on V6\n$/);expect((await f.command(["listen","--team"])).stdout).toMatch(/\(workspace\)/);expect((await f.command(["unlisten","--hub","local"])).stdout).toBe("Unlistened (1 removed)\n");expect((await f.command(["unlisten"])).stdout).toBe("Unlistened (0 removed)\n");for(const args of [["listen","--scope","self","--team"],["listen","--scope","bad"],["listen","--codex","--claude"],["listen","--unknown"],["unlisten","positional"]]){const result=await f.command(args);expect(result.code).toBe(1);expect(result.stderr).toMatch(/\S/);}
+});
+test("version flags do not start a daemon and ensureDaemon replaces a stale owned daemon",async()=>{
+ const f=await cleanroom();for(const flag of ["--version","-v"]){const r=await f.command([flag]);expect(r.stdout.trim()).toBe("cito v0.18.0");expect(r.code).toBe(0);}await expect(stat(join(f.stateDir,"state.sqlite"))).rejects.toMatchObject({code:"ENOENT"});
+ const script=join(f.root,"stale.cjs"),log=join(f.root,"terminated");await writeFile(script,`const http=require('node:http'),fs=require('node:fs');const s=http.createServer((q,r)=>r.end(JSON.stringify({ok:true,pid:process.pid,stateDir:${JSON.stringify(f.stateDir)},version:'0.17.0'})));s.listen(${f.daemonPort},'127.0.0.1');process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(log)},'SIGTERM');s.close(()=>process.exit(0));});`);
+ const old=await f.spawn(process.execPath,[script]);await waitFor(async()=>{try{return(await fetch(`http://127.0.0.1:${f.daemonPort}/health`)).ok;}catch{return false;}});const result=await f.command(["find"]);expect(result.code).toBe(0);expect(await readFile(log,"utf8")).toBe("SIGTERM");const health=object(await(await fetch(`http://127.0.0.1:${f.daemonPort}/health`)).json());expect(health.version).toBe("0.18.0");expect(health.pid).not.toBe(old.child.pid);
 });
 
-test("singleton daemon returns zero on same port, rejects a different port and releases ownership on shutdown", async () => {
-  const root = await mkdtemp("/tmp/cito-daemon-");
-  const env = { ...process.env, CITO_STATE_DIR: join(root, "state"), CITO_CODEX_HOME: join(root, "codex"),
-    CITO_DAEMON_PORT: String(await freePort()), CITO_UI_HEADLESS: "1", CITO_NATS_URL: "nats://127.0.0.1:1" };
-  const child = spawn(process.execPath, [resolve("bin/cito-mcp"), "daemon"], { env, stdio: ["ignore", "ignore", "pipe"] });
-  let errors = ""; child.stderr.on("data", chunk => { errors += chunk; });
-  const exited = new Promise<number | null>(resolve => child.once("exit", resolve));
-  try {
-    await waitFor(async () => !!await daemonHealth(loadConfig(env)), 10000);
-    expect((await exec(process.execPath, [resolve("bin/cito-mcp"), "daemon"], { env, timeout: 10000 })).stdout).toBe("");
-    await expect(exec(process.execPath, [resolve("bin/cito-mcp"), "daemon"], { env: { ...env, CITO_DAEMON_PORT: String(await freePort()) }, timeout: 10000 }))
-      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("already owns") });
-    child.kill("SIGTERM"); expect(await exited).toBe(0);
-    expect(await daemonHealth(loadConfig(env))).toBeUndefined();
-    expect(errors).not.toContain("uncaught");
-  } finally { if (child.exitCode === null) child.kill("SIGKILL"); await exited; await rm(root, { recursive: true, force: true }); }
-}, 15000);
-
-test("CLI listen and unlisten support socket-bridge parent discovery, --codex auto/explicit resolution, flags, and error exits", async () => {
-  const f = await fixture();
-  const http = await startHttpServer({ ...f.config, daemonPort: 0 }, f.service);
-  const state = await LocalState.open(f.stateDir);
-  state.claimDaemon(process.pid, http.port);
-  const captured: CallerInput[] = [], original = f.service.call.bind(f.service);
-  const spy = vi.spyOn(f.service, "call").mockImplementation((name, input, meta) => { captured.push(meta ?? {}); return original(name, input, meta); });
-  const env = { ...process.env, ...f.env, CITO_DAEMON_PORT: String(http.port), CITO_UI_HEADLESS: "1" };
-  const realRoot = await realpath(f.root);
-  const cli = (args: string[], cwd = realRoot) => exec(process.execPath, [resolve("bin/cito-mcp"), ...args], { env, cwd, timeout: 10000 });
-  const db = new DatabaseSync(join(f.codexHome, "state_5.sqlite"));
-  const codexUuid = "01234567-89ab-4cde-8123-0123456789ab";
-  try {
-    // 1. Default mode: sends caller_pid: process.ppid (no codexThreadId) and walks parent to Pi socket bridge.
-    const defaultListen = await cli(["listen", "--tag", "cli-tag", "Working", "on", "V6"]);
-    expect(defaultListen.stdout).toMatch(/^Listening as cli-tag-[a-z0-9]+ \(self\): Working on V6\n$/);
-    expect(captured.at(-1)).toMatchObject({ meta: { caller_pid: process.pid } });
-    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("codexThreadId");
-
-    const teamListen = await cli(["listen", "--team"]);
-    expect(teamListen.stdout).toMatch(new RegExp(`^Listening as cli-tag-[a-z0-9]+ \\(workspace\\): ${basename(realRoot)}\n$`));
-
-    const defaultUnlisten = await cli(["unlisten", "--hub", "default"]);
-    expect(defaultUnlisten.stdout).toBe("Unlistened (1 removed)\n");
-    expect((await cli(["unlisten"])).stdout).toBe("Unlistened (0 removed)\n");
-
-    // 2. Codex mode: --codex auto-resolution, --codex=<id>, and --codex <uuid> (no caller_pid/endpoint_pid/pi_pid).
-    await expect(cli(["listen", "--codex"])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("Codex thread metadata is required") });
-    db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, title TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, archived INTEGER, name TEXT, updated_at INTEGER)");
-    db.prepare("INSERT INTO threads VALUES (?, 'Codex title', ?, 'https://github.com/acme/service.git', 'main', 0, 'Codex session', 100)").run(codexUuid, realRoot);
-
-    const codexAuto = await cli(["listen", "--codex", "--scope=workspace", "--hub=default", "--tag=cdx", "Codex", "review"]);
-    expect(codexAuto.stdout).toMatch(/^Listening as cdx-[a-z0-9]+ \(workspace\): Codex review\n$/);
-    expect(captured.at(-1)).toMatchObject({ meta: { codexThreadId: codexUuid, cwd: realRoot } });
-    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("caller_pid");
-    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("endpoint_pid");
-    expect((captured.at(-1) as { meta: Record<string, unknown> }).meta).not.toHaveProperty("pi_pid");
-
-    // Archive thread and verify `cito unlisten --codex` resolves archived thread via allowArchived: true.
-    db.exec("UPDATE threads SET archived = 1");
-    expect((await cli(["unlisten", "--codex"])).stdout).toBe("Unlistened (1 removed)\n");
-
-    // Explicit --codex=<id> and --codex <uuid>.
-    db.exec("UPDATE threads SET archived = 0");
-    expect((await cli(["listen", `--codex=${codexUuid}`, "--scope", "self", "Explicit", "equals"])).stdout)
-      .toMatch(/^Listening as cdx-[a-z0-9]+ \(self\): Explicit equals\n$/);
-    expect((await cli(["unlisten", "--codex", codexUuid])).stdout).toBe("Unlistened (1 removed)\n");
-
-    // 3. Claude mode: --claude auto-resolution from transcript dir, --claude=<id>, and --claude <uuid>.
-    const claudeUuid = "11111111-2222-4333-8444-555555555555";
-    const claudeDir = claudeProjectDir(realRoot, loadConfig(env));
-    await mkdir(claudeDir, { recursive: true });
-    await writeFile(join(claudeDir, claudeUuid + ".jsonl"), "{}\n");
-    const claudeAuto = await cli(["listen", "--claude", "--tag=cld", "Claude", "task"]);
-    expect(claudeAuto.stdout).toMatch(/^Listening as cld-[a-z0-9]+ \(self\): Claude task\n$/);
-    expect(captured.at(-1)).toMatchObject({ meta: { claudeSessionId: claudeUuid, cwd: realRoot } });
-    expect((await cli(["unlisten", "--claude", claudeUuid])).stdout).toBe("Unlistened (1 removed)\n");
-    expect((await cli(["listen", `--claude=${claudeUuid}`, "Explicit", "Claude"])).stdout)
-      .toMatch(/^Listening as cld-[a-z0-9]+ \(self\): Explicit Claude\n$/);
-    expect((await cli(["unlisten", "--claude"])).stdout).toBe("Unlistened (1 removed)\n");
-
-    // 4. Error exits on invalid flags / arguments.
-    for (const badArgs of [
-      ["listen", "--scope", "self", "--team"],
-      ["listen", "--scope", "invalid"],
-      ["listen", "--codex", "--claude"],
-      ["listen", "--unknown-flag"],
-      ["unlisten", "unexpected-positional"],
-    ]) {
-      await expect(cli(badArgs)).rejects.toMatchObject({ code: 1, stderr: expect.stringMatching(/\S/) });
-    }
-  } finally {
-    db.close(); spy.mockRestore(); state.releaseDaemon(process.pid); state.close(); await http.close(); await f.close();
-  }
-}, 20000);
-
-test("CLI --version / -v prints CITO_VERSION without starting a daemon, and ensureDaemon replaces a stale daemon on SIGTERM", async () => {
-  const root = await mkdtemp("/tmp/cito-version-");
-  const stateDir = join(root, "state"), codexHome = join(root, "codex"), port = await freePort();
-  const env = {
-    ...process.env,
-    CITO_STATE_DIR: stateDir,
-    CITO_CODEX_HOME: codexHome,
-    CITO_DAEMON_PORT: String(port),
-    CITO_UI_HEADLESS: "1",
-    CITO_NATS_URL: "nats://127.0.0.1:1",
-  };
-  await mkdir(join(stateDir, "bin"), { recursive: true, mode: 0o700 });
-  await writeFile(join(stateDir, "bin/cito-ui"), "#!/bin/sh\ncat >/dev/null\n", { mode: 0o755 });
-  await chmod(join(stateDir, "bin/cito-ui"), 0o755);
-  const stopActiveDaemon = async () => {
-    const health = await daemonHealth(loadConfig(env));
-    if (!health) return;
-    try { process.kill(health.pid, "SIGTERM"); } catch {}
-    await waitFor(() => { try { process.kill(health.pid, 0); return false; } catch { return true; } }, 10000);
-  };
-  try {
-    for (const flag of ["--version", "-v"]) {
-      const res = await exec(process.execPath, [resolve("bin/cito-mcp"), flag], {
-        env: { ...env, CITO_NATS_URL: "invalid-url" },
-        timeout: 10000,
-      });
-      expect(res.stdout).toBe(`cito v${CITO_VERSION}\n`);
-      expect(res.stderr).toBe("");
-    }
-    expect(await daemonHealth(loadConfig(env))).toBeUndefined();
-
-    for (const staleVersion of ["0.1.0", ""]) {
-      const staleScript = [
-        'const http = require("node:http");',
-        "const stateDir = process.env.CITO_STATE_DIR;",
-        "const port = Number(process.env.CITO_DAEMON_PORT);",
-        "const version = process.env.STALE_VERSION;",
-        "const srv = http.createServer((req, res) => {",
-        '  if (req.url === "/health") {',
-        "    const body = { ok: true, pid: process.pid, stateDir };",
-        "    if (version) body.version = version;",
-        '    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));',
-        "  } else { res.writeHead(404).end(); }",
-        "});",
-        'process.once("SIGTERM", () => srv.close(() => process.exit(0)));',
-        'srv.listen(port, "127.0.0.1");',
-      ].join("\n");
-      const stale = spawn(process.execPath, ["-e", staleScript], {
-        env: { ...env, STALE_VERSION: staleVersion },
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      const staleExited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit =>
-        stale.once("exit", (code, signal) => resolveExit({ code, signal })),
-      );
-      try {
-        await waitFor(async () => (await daemonHealth(loadConfig(env)))?.pid === stale.pid, 5000);
-        expect(await daemonHealth(loadConfig(env))).toEqual({
-          pid: stale.pid,
-          stateDir,
-          ...(staleVersion ? { version: staleVersion } : {}),
-        });
-        const unlistenRes = await exec(
-          process.execPath,
-          [resolve("bin/cito-mcp"), "unlisten", "--codex", "01234567-89ab-4cde-8123-0123456789ab"],
-          { env, timeout: 10000 },
-        );
-        expect(unlistenRes.stdout).toBe("Unlistened (0 removed)\n");
-        expect(await staleExited).toEqual({ code: 0, signal: null });
-        const replaced = await daemonHealth(loadConfig(env));
-        expect(replaced).toEqual({ pid: expect.any(Number), stateDir, version: CITO_VERSION });
-        expect(replaced!.pid).not.toBe(stale.pid);
-        await stopActiveDaemon();
-      } finally {
-        if (stale.exitCode === null && stale.signalCode === null) stale.kill("SIGKILL");
-        await staleExited;
-      }
-    }
-  } finally {
-    await stopActiveDaemon();
-    await rm(root, { recursive: true, force: true });
-  }
-}, 25000);
+test.each(["auto","equals","separate"])("Codex CLI %s metadata and archived unlisten remain native end-to-end",async mode=>{
+ const f=await cleanroom(),id="01234567-89ab-4cde-8123-0123456789ab";const db=new DatabaseSync(join(f.env.CITO_CODEX_HOME!,"state_5.sqlite"));db.exec("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,git_origin_url TEXT,git_branch TEXT,archived INTEGER,name TEXT,updated_at INTEGER)");db.prepare("INSERT INTO threads VALUES(?,'Codex title',?,'https://github.com/acme/service.git','main',0,'Codex session',100)").run(id,f.root);try{await f.daemon();const flags=mode==="auto"?["--codex"]:mode==="equals"?["--codex="+id]:["--codex",id];const listen=await f.command(["listen",...flags,"--scope","workspace","Codex","review"]);expect(listen.code).toBe(0);expect(listen.stdout).toMatch(/^Listening as alice-[a-f0-9]{16} \(workspace\): Codex review\n$/);expect(f.query("SELECT session_id,harness FROM local_listeners WHERE harness='codex'")[0]).toEqual({session_id:id,harness:"codex"});db.exec("UPDATE threads SET archived=1");expect((await f.command(["unlisten","--codex"])).stdout).toBe("Unlistened (1 removed)\n");}finally{db.close();}
+});
+test.each(["auto","equals","separate"])("Claude CLI %s metadata resolves the real transcript and supports unlisten",async mode=>{
+ const f=await cleanroom();await transcript(f,SESSION);await f.daemon();const flags=mode==="auto"?["--claude"]:mode==="equals"?["--claude="+SESSION]:["--claude",SESSION];const listen=await f.command(["listen",...flags,"Claude","task"]);expect(listen.code).toBe(0);expect(listen.stdout).toMatch(/^Listening as alice-[a-f0-9]{16} \(workspace\): Claude task\n$/);expect(f.query("SELECT session_id FROM local_listeners WHERE harness='claude'")[0]!.session_id).toBe(SESSION);expect((await f.command(["unlisten","--claude"])).stdout).toBe("Unlistened (1 removed)\n");
+});

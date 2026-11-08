@@ -1,19 +1,13 @@
 {
   "id": "codex",
-  "kind": "agent",
+  "kind": "agent-harness",
   "displayName": "Codex",
   "tier": "stable",
-  "sfSymbol": "sparkles",
-  "tint": "teal",
+  "scope": "hub",
+  "sfSymbol": "terminal.fill",
+  "tint": "blue",
   "cliFlag": true,
-  "protocol": "sqlite-cli",
-  "native": {
-    "homeEnv": "CITO_CODEX_HOME",
-    "defaultHome": "~/.codex",
-    "tomlRelPath": "config.toml",
-    "sqliteRelPath": "state_5.sqlite",
-    "metaKey": "codexThreadId",
-    "headerKey": "x-codex-turn-metadata",
-    "wakeUrlPrefix": "codex://threads/wake/"
-  }
+  "command": [
+    "./bin/cito-plugin-codex"
+  ]
 }

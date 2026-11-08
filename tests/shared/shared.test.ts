@@ -1,200 +1,74 @@
-import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, stat, readFile, writeFile, chmod } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
+import { expect, test } from "vitest";
+import { createHash } from "node:crypto";
+import { readFile, stat, writeFile, chmod } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  CITO_VERSION, listenerId, localPrincipal, oidcPrincipal, senderEndpointKey, sanitizeMessage, sanitizeSignalMessage, escapeWakeCard,
-  ERROR_RETRYABLE, errorResult, successResult, CitoError, expandHomeDir, loadConfig, getHostId,
-  evaluateLease, brokerAgeMs, localExpirationMs, parseInput, listenInputSchema,
-  sendInputSchema, findInputSchema, validateHarness,
-} from "../../src/shared/index.js";
-import { loadClaudeConfig, loadCodexConfig } from "../../src/adapters/index.js";
+import { agent, action, cleanroom, errorTool, human, received, rows, sendUnbound } from "../support/native-scenarios.js";
+import { CITO_VERSION, object, projectRoot } from "../support/native-harness.js";
+import { signingKey, startOidc } from "../auth-callout/oidc-fixture.js";
+import {loginFixture} from "../support/oidc-native.js";
 
-describe("keyless identity", () => {
-  const key = { principal_id: "local", host_id: "host", harness: "pi" as const, session_id: "session" };
-  it("uses the host-independent cito-v2 SHA256 -> RFC4648 lowercase base32 test vector", () => {
-    expect(listenerId(key)).toBe("c_xed7ffxzgir3");
-    expect(listenerId(key)).toMatch(/^c_[a-z2-7]{12}$/);
-    expect(listenerId({ ...key })).toBe(listenerId(key));
-    expect(listenerId({ ...key, host_id: "other-host" })).toBe(listenerId(key));
-    for (const changed of [
-      { principal_id: "other" }, { harness: "codex" as const }, { session_id: "other" },
-    ]) expect(listenerId({ ...key, ...changed })).not.toBe(listenerId(key));
-  });
-  it("distinguishes bound and unbound sender namespaces", () => {
-    expect(senderEndpointKey(key)).toBe("local|host|pi|session");
-    expect(senderEndpointKey({ ...key, harness: null, session_id: null })).toBe("local|host|unbound|default");
-    expect(() => senderEndpointKey({ ...key, session_id: null })).toThrow(CitoError);
-    expect(() => senderEndpointKey({ ...key, harness: null })).toThrow(CitoError);
-  });
-  it("derives a validated local principal from CITO_USER or the OS username", () => {
-    try {
-      vi.stubEnv("CITO_USER", undefined);
-      const osUser = userInfo().username.toLowerCase();
-      expect(localPrincipal()).toEqual({ principal_id: "none#" + osUser, owner_user: osUser });
-      vi.stubEnv("CITO_USER", "Alice.Example_1-2");
-      expect(localPrincipal()).toEqual({ principal_id: "none#alice.example_1-2", owner_user: "alice.example_1-2" });
-      expect(localPrincipal("Bob")).toEqual({ principal_id: "none#bob", owner_user: "bob" });
-      expect(listenerId({ ...key, ...localPrincipal("Alice") })).not.toBe(listenerId({ ...key, ...localPrincipal("Bob") }));
-      expect(localPrincipal("A".repeat(64)).owner_user).toBe("a".repeat(64));
-      for (const username of ["", " ", " Alice", "Alice ", "Alice\n", "a/b", "a@b", "é", "a".repeat(65)]) {
-        expect(() => localPrincipal(username)).toThrow(CitoError);
-      }
-    } finally { vi.unstubAllEnvs(); }
-  });
-  it("normalizes OIDC display handles while preserving immutable issuer and subject", () => {
-    const base = { iss: "https://issuer///", sub: "Stable+ID", email: " Mail@Example.COM ", name: "Display" };
-    expect(oidcPrincipal({ ...base, preferred_username: " Alice " })).toEqual({
-      principal_id: "https://issuer#Stable+ID", owner_user: "alice",
-    });
-    expect(oidcPrincipal(base).owner_user).toBe("mail");
-    expect(oidcPrincipal({ ...base, preferred_username: " A+Ü@X! " }).owner_user).toBe("a___x_");
-    expect(oidcPrincipal({ ...base, preferred_username: " A".repeat(70) }).owner_user).toHaveLength(64);
-    expect(oidcPrincipal({ ...base, preferred_username: "X".repeat(70) }).owner_user).toBe("x".repeat(64));
-    for (const email of ["", " ", "missing-at", "@example.com", " @example.com "]) {
-      expect(oidcPrincipal({ ...base, email, preferred_username: " " }).owner_user).toBe("stable_id");
-    }
-    expect(oidcPrincipal({ ...base, email: " Team+Alerts@Example.COM ", preferred_username: 42 }).owner_user).toBe("team_alerts");
-    expect(oidcPrincipal({ ...base, email: 42, preferred_username: null }).owner_user).toBe("stable_id");
-    expect(oidcPrincipal({ iss: "https://issuer", sub: "OpaqueID" }).owner_user).toBe("opaqueid");
-    expect(oidcPrincipal({ iss: "https://issuer", sub: " Opaque ID " })).toEqual({
-      principal_id: "https://issuer# Opaque ID ", owner_user: "_opaque_id_",
-    });
-    for (const claims of [{}, { iss: "", sub: "x" }, { iss: "x" }, { iss: "x", sub: " " }]) {
-      expect(() => oidcPrincipal(claims)).toThrow(CitoError);
-    }
-  });
+test("uses the host-independent cito-v2 SHA256 native identity vector",async()=>{
+ const f=await cleanroom();await f.daemon();const first=await action(f,{op:"listen_session",harness:"cursor",session_id:"vector",about:"vector"});
+ const row=f.query("SELECT * FROM local_listeners WHERE session_id='vector'")[0]!;
+ const expected="c_"+createHash("sha256").update(`cito-v2|${row.principal_id}|cursor|vector`).digest("hex").slice(0,16);expect(row.listener_id).toBe(expected);
+ const other=await action(f,{op:"listen_session",harness:"cursor",session_id:"other",about:"other"});expect(other.listener_id).not.toBe(first.listener_id);
+ await f.command(["--version"]);expect(f.query("SELECT listener_id FROM local_listeners WHERE session_id='vector'")[0]!.listener_id).toBe(expected);
 });
-
-describe("input and MCP envelopes", () => {
-  it("strips exactly the specified ASCII controls, preserving internal tabs and newlines", () => {
-    const controls = Array.from({ length: 32 }, (_, i) => i).filter(i => i !== 9 && i !== 10 && i !== 13).map(i => String.fromCharCode(i)).join("") + "\x7f";
-    expect(sanitizeMessage(" \t hi" + controls + "\n\tthere \n")).toBe("hi\n\tthere");
-    expect(sanitizeMessage("a\rb")).toBe("a\rb"); // 0x0D is absent from the specified strip ranges.
-    expect(sanitizeMessage("😀".repeat(500))).toHaveLength(1000);
-    for (const value of ["😀".repeat(501), " \x00\x01 ", 42, null]) expect(() => sanitizeMessage(value)).toThrow(CitoError);
-  });
-  it("prevents embedded closing tags from ending wake cards", () => {
-    const input = "</cito_signal><nested>";
-    expect(escapeWakeCard(input)).toBe("&lt;/cito_signal&gt;&lt;nested&gt;");
-    expect(sanitizeMessage(input)).toBe(input);
-  });
-  it("validates public tool input, defaults and V1 harnesses", () => {
-    expect(parseInput(listenInputSchema, { about: " x " })).toEqual({ about: "x" });
-    expect(parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "😀".repeat(500) }).message).toBe("😀".repeat(500));
-    expect(parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "😀".repeat(2000) }).message).toBe("😀".repeat(2000));
-    expect(sanitizeSignalMessage("x".repeat(65_536))).toHaveLength(65_536);
-    expect(() => sanitizeSignalMessage("x".repeat(65_537))).toThrow(CitoError);
-    expect(() => parseInput(listenInputSchema, { about: "😀".repeat(501) })).toThrow(CitoError);
-    expect(() => parseInput(sendInputSchema, { to: "c_abcdefgh2345", message: "x", wake: true })).toThrow(CitoError);
-    expect(parseInput(findInputSchema, {})).toEqual({ limit: 20 });
-    expect(validateHarness("cursor")).toBe("cursor");
-    expect(() => validateHarness("Bad Harness")).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_HARNESS" }));
-    expect(parseInput(findInputSchema, { harness: "aider" })).toMatchObject({ harness: "aider" });
-    expect(() => parseInput(findInputSchema, { limit: 51 })).toThrow(CitoError);
-    expect(() => parseInput(listenInputSchema, { about: "yes", extra: true })).toThrow(CitoError);
-    expect(() => parseInput(sendInputSchema, { to: "bad", message: "yes" })).toThrow(CitoError);
-    expect(() => parseInput(listenInputSchema, {})).toThrow(CitoError);
-  });
-  it("serializes success and all 15 errors with their contract retryability", () => {
-    expect(successResult({ ok: true })).toEqual({ isError: false, content: [{ type: "text", text: '{\n  "ok": true\n}' }] });
-    expect(() => successResult(undefined)).toThrow(TypeError);
-    const retryable = new Set(["PI_BRIDGE_UNAVAILABLE", "UNAUTHORIZED", "OIDC_LOGIN_TIMEOUT", "AUTH_UNAVAILABLE", "STALE_GENERATION", "NATS_UNAVAILABLE"]);
-    expect(Object.keys(ERROR_RETRYABLE)).toHaveLength(15);
-    for (const code of Object.keys(ERROR_RETRYABLE) as (keyof typeof ERROR_RETRYABLE)[]) {
-      const result = errorResult(code, "detail");
-      expect(result.isError).toBe(true);
-      expect(JSON.parse(result.content[0]!.text)).toEqual({ ok: false, error: {
-        code, message: "detail", retryable: retryable.has(code),
-      } });
-    }
-  });
+test("distinguishes bound and unbound sender namespaces",async()=>{
+ const {f,p}=await agent(),id=String(f.query("SELECT listener_id FROM local_listeners WHERE harness='human'")[0]!.listener_id);await f.tool("cito_send",{to:"@self",message:"unbound"});await f.tool("cito_send",{to:"@self",message:"agent-bound"},p.meta);
+ await received(f,id,2);const signals=f.query("SELECT CAST(data AS TEXT) AS payload FROM hub_signals WHERE subject=?",["cito.signal."+id],"hub.sqlite").map(r=>object(JSON.parse(String(r.payload))));
+ expect(new Set(signals.map(s=>s.sender_endpoint_key)).size).toBe(2);expect(signals.some(s=>String(s.sender_endpoint_key).endsWith("unbound|default"))).toBe(true);
+ expect((await errorTool(f,"cito_listen",{about:"invalid"},{expected_harness:p.id,expected_session_id:""})).ok).toBe(false);
 });
-
-describe("configuration and machine identity", () => {
-  it("keeps CITO_VERSION synchronized with package.json version (0.17.0)", async () => {
-    const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
-    expect(CITO_VERSION).toBe("0.17.0");
-    expect(CITO_VERSION).toBe(pkg.version);
-  });
-  it("loads defaults and validates OIDC, pluginDirs, expandHomeDir, and plugin configuration", () => {
-    const envObj: NodeJS.ProcessEnv = {};
-    const config = loadConfig(envObj);
-    expect(config.env).toBe(envObj);
-    expect(config.natsUrl).toBe("local://");
-    expect(config.defaultHub).toBe("local");
-    expect(config.authMode).toBe("none");
-    expect(config.user).toBe(userInfo().username);
-    expect(config.stateDir).toBe(join(process.env.HOME!, ".cito"));
-    expect(config.pluginDirs).toContain(join(process.env.HOME!, ".cito", "plugins"));
-    expect(loadConfig({ CITO_PLUGIN_PATH: "~/my-plugins:/tmp/extra-plugins" }).pluginDirs).toEqual(
-      expect.arrayContaining([join(process.env.HOME!, "my-plugins"), "/tmp/extra-plugins"]),
-    );
-    expect(expandHomeDir("~")).toBe(process.env.HOME!);
-    expect(expandHomeDir("~/sub")).toBe(join(process.env.HOME!, "sub"));
-    expect(() => expandHomeDir("   ", "CUSTOM_DIR")).toThrow("CUSTOM_DIR must not be empty");
-    expect(loadCodexConfig(config).codexBin).toBe("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
-    expect(loadCodexConfig(loadConfig({ CITO_CODEX_BIN: "/tmp/custom-codex" })).codexBin).toBe("/tmp/custom-codex");
-    expect(loadCodexConfig(config).codexHome).toBe(join(process.env.HOME!, ".codex"));
-    expect(loadClaudeConfig(config).claudeHome).toBe(join(process.env.HOME!, ".claude"));
-    expect(loadClaudeConfig(loadConfig({ CITO_CLAUDE_HOME: "/tmp/custom-claude" })).claudeHome).toBe("/tmp/custom-claude");
-    // The Claude wake channel binds a second bridge socket, so it stays strictly opt-in.
-    expect(loadClaudeConfig(config).enableClaudeChannel).toBe(false);
-    expect(loadClaudeConfig(loadConfig({ CITO_CLAUDE_CHANNEL: "1" })).enableClaudeChannel).toBe(true);
-    expect(loadClaudeConfig(loadConfig({ CITO_CLAUDE_CHANNEL: "0" })).enableClaudeChannel).toBe(false);
-    expect(loadConfig({ CITO_NATS_URL: "wss://nats.example/ws" }).natsUrl).toBe("wss://nats.example/ws");
-    expect(loadConfig({ CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: "http://127.0.0.1:9999/", CITO_OIDC_CLIENT_ID: "cito" }).oidcIssuer).toBe("http://127.0.0.1:9999");
-    for (const env of [
-      { CITO_AUTH_MODE: "bad" }, { CITO_NATS_URL: "ftp://host" }, { CITO_NATS_URL: "nats://host:999999" },
-      { CITO_AUTH_MODE: "oidc" }, { CITO_OIDC_ISSUER: "https://issuer" },
-      { CITO_OIDC_ISSUER: "http://remote", CITO_OIDC_CLIENT_ID: "cito" },
-      { CITO_OIDC_ISSUER: "https://issuer?bad", CITO_OIDC_CLIENT_ID: "cito" },
-      { CITO_STATE_DIR: "" }, { CITO_CLAUDE_HOME: " " },
-    ]) expect(() => loadConfig(env)).toThrow();
-  });
-  it("exposes a validated CITO_USER and passes it to canonical local identity", () => {
-    const config = loadConfig({ CITO_USER: "Alice.Example_1-2" });
-    expect(config.user).toBe("Alice.Example_1-2");
-    expect(localPrincipal(config.user)).toEqual({
-      principal_id: "none#alice.example_1-2", owner_user: "alice.example_1-2",
-    });
-    expect(loadConfig({ CITO_USER: "A".repeat(64) }).user).toHaveLength(64);
-    for (const user of ["", " ", " Alice", "Alice ", "Alice\n", "a/b", "a@b", "é", "a".repeat(65)]) {
-      expect(() => loadConfig({ CITO_USER: user })).toThrow("CITO_USER");
-    }
-  });
-  it("publishes one persisted UUID atomically across concurrent callers without touching host state", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cito-host-"));
-    try {
-      const config = loadConfig({ CITO_STATE_DIR: join(root, "state"), CITO_CODEX_HOME: join(root, "codex") });
-      const ids = await Promise.all(Array.from({ length: 20 }, () => getHostId(config)));
-      expect(new Set(ids).size).toBe(1);
-      expect((await readFile(join(config.stateDir, "host-id"), "utf8")).trim()).toBe(ids[0]);
-      expect((await stat(config.stateDir)).mode & 0o777).toBe(0o700);
-      expect((await stat(join(config.stateDir, "host-id"))).mode & 0o777).toBe(0o600);
-      await chmod(join(config.stateDir, "host-id"), 0o644);
-      expect(await getHostId(config)).toBe(ids[0]);
-      expect((await stat(join(config.stateDir, "host-id"))).mode & 0o777).toBe(0o600);
-      await writeFile(join(config.stateDir, "host-id"), "corrupt");
-      await expect(getHostId(config)).rejects.toThrow("Invalid persisted host-id");
-    } finally { await rm(root, { recursive: true, force: true }); }
-  });
+test("derives a validated local principal from CITO_USER or the OS username",async()=>{
+ const f=await cleanroom({hubs:{local:{url:"local://"}},defaultHub:"local"});await f.daemon();expect(f.query("SELECT principal_id,owner_user FROM local_listeners WHERE harness='human'")[0]).toEqual({principal_id:"none#alice",owner_user:"alice"});
+ for(const user of ["Alice.Example_1-2","Bob","A".repeat(64)]){const out=await f.command(["--version"],{env:{CITO_USER:user}});expect(out.code).toBe(0);}
+ for(const user of [""," "," Alice","Alice ","Alice\n","a/b","a@b","é","a".repeat(65)])expect((await f.command(["find"],{env:{CITO_USER:user}})).code).toBe(1);
 });
-
-describe("broker-clock leases", () => {
-  it("handles exact lease boundaries and ignores local host clock", () => {
-    expect(brokerAgeMs(0, 10)).toBe(0);
-    expect(evaluateLease("ACTIVE", 59_999, 0)).toBe("ACTIVE");
-    expect(evaluateLease("ACTIVE", 60_000, 0)).toBe("DISCONNECTED_RETAINED");
-    expect(evaluateLease("ACTIVE", 1_800_000, 0)).toBe("DISCONNECTED_RETAINED");
-    expect(evaluateLease("ACTIVE", 1_800_001, 0)).toBe("EXPIRED");
-    expect(evaluateLease(null, 1_800_001)).toBe("UNLISTENED");
-    expect(evaluateLease("UNLISTENED", 1_800_001)).toBe("UNLISTENED");
-    expect(() => brokerAgeMs("garbage", 0)).toThrow();
-  });
-  it("conservatively anchors expiration at request start minus RTT", () => {
-    expect(localExpirationMs(10_000, 20.1, 500, 0)).toBe(10_000 + 1_800_000 - 500 - 21);
-    expect(localExpirationMs(10_000, 20, 2_000_000, 0)).toBe(10_000);
-    expect(() => localExpirationMs(0, -1, 0, 0)).toThrow();
-  });
+test("normalizes verified OIDC display handles and fallback labels without changing immutable Node identity",async()=>{
+ const x=await loginFixture();let canonical:unknown;for(const [extra,expected]of [[{preferred_username:" Alice "},"alice"],[{preferred_username:"X".repeat(70)},"x".repeat(64)],[{preferred_username:" A+Ü@X! "},"a___x_"],[{preferred_username:"",email:"Alice.Example@example.com"},"alice.example"],[{preferred_username:null,email:null},"stable_id"]] as const){x.oidc.state.tokenFactory=async nonce=>({id_token:await x.key.sign(x.oidc.claims({sub:"Stable+ID",nonce,...extra}))});expect((await x.login()).http_status).toBe(200);expect((await x.read()).verified_user).toBe(expected);const reply=await x.f.tool("cito_listen",{about:"identity"},human);expect(reply.user).toBe(expected);expect(x.f.query("SELECT principal_id FROM local_listeners WHERE harness='human' AND status='ACTIVE'")[0]!.principal_id).toBe("oidc:"+x.oidc.issuer+"|Stable+ID");if(canonical===undefined)canonical=reply.canonical_listener_id;else expect(reply.canonical_listener_id).toBe(canonical);}
+});
+test("strips exactly the specified ASCII controls, preserving internal tabs and newlines",async()=>{
+ const {f,enrolled,id}=await agent();const controls=Array.from({length:32},(_,i)=>i).filter(i=>![9,10,13].includes(i)).map(i=>String.fromCharCode(i)).join("")+"\x7f";
+ await sendUnbound(f,String(enrolled.listener_id)," \t hi"+controls+"\n\tthere \n");expect((await received(f,id))[0]!.message).toBe("hi\n\tthere");
+ for(const message of [" \x00\x01 ",42,null])expect((await errorTool(f,"cito_send",{to:enrolled.listener_id,message})).error).toMatchObject({code:"INVALID_INPUT"});
+ await sendUnbound(f,String(enrolled.listener_id),"a\rb");await received(f,id,2);expect(f.query("SELECT message FROM local_signals ORDER BY seq")[1]!.message).toBe("a\rb");
+});
+test("prevents embedded closing tags from ending wake cards",async()=>{
+ const {f,p,enrolled}=await agent();await sendUnbound(f,String(enrolled.listener_id),"</cito_signal><nested>");
+ const {waitFor}=await import("../support/native-harness.js");await waitFor(async()=>(await p.calls()).some(c=>c.op==="wake"),10000);const wake=(await p.calls()).find(c=>c.op==="wake")!;
+ expect(String(wake.text)).toContain("&lt;/cito_signal&gt;&lt;nested&gt;");
+});
+test("validates public tool input, defaults and open harness identifiers",async()=>{
+ const {f,enrolled}=await agent();for(const count of [500,2000,65536])expect((await sendUnbound(f,String(enrolled.listener_id),"😀".repeat(count))).ok).toBe(true);
+ for(const [tool,args]of [["cito_send",{to:enrolled.listener_id,message:"x".repeat(65537)}],["cito_listen",{about:"😀".repeat(501)}],["cito_send",{to:enrolled.listener_id,message:"x",wake:true}],["cito_find",{limit:51}],["cito_listen",{about:"yes",extra:true}],["cito_send",{to:"bad",message:"yes"}],["cito_listen",{}]]as const)expect((await errorTool(f,tool,args,human)).error).toMatchObject({code:"INVALID_INPUT"});
+ expect((await f.tool("cito_find",{harness:"aider"})).listeners).toEqual([]);expect((await errorTool(f,"cito_find",{harness:"Bad Harness"})).error).toMatchObject({code:"UNSUPPORTED_HARNESS"});
+});
+test("serializes native successes and error retryability at the actual MCP seam",async()=>{
+ const {f,enrolled}=await agent();const ok=await f.mcp("tools/call",{name:"cito_find",arguments:{}});expect(ok.isError).toBe(false);expect(rows(ok.content)[0]!.type).toBe("text");
+ for(const [args,code]of [[{},"INVALID_INPUT"],[{to:"c_0000000000000000",message:"missing"},"LISTENER_NOT_FOUND"]]as const){const result=await errorTool(f,"cito_send",args);expect(result).toMatchObject({ok:false,error:{code,retryable:false,message:expect.any(String)}});}
+ expect((await errorTool(f,"cito_send",{to:enrolled.listener_id,message:"self"},{expected_harness:"cursor",expected_session_id:"session-1"})).error).toMatchObject({code:"SELF_SEND_FORBIDDEN",retryable:false});
+});
+test("keeps native CITO_VERSION synchronized with package.json version (0.18.0)",async()=>{
+ const f=await cleanroom();const pkg=JSON.parse(await readFile(join(projectRoot,"package.json"),"utf8"));for(const flag of ["--version","-v"]){const r=await f.command([flag]);expect(r.code).toBe(0);expect(r.stdout.trim()).toBe("cito v"+pkg.version);expect(r.stdout.trim()).toBe("cito v"+CITO_VERSION);}
+});
+test("loads defaults and validates OIDC, plugin paths, home expansion and plugin configuration",async()=>{
+ const f=await cleanroom();await f.daemon();const snap=await action(f,{op:"get_snapshot"});expect(rows(snap.hubs)[0]).toMatchObject({name:"local"});
+ for(const [hub,diagnostic]of [[{url:"ftp://host"},/url|scheme|http/i],[{url:"http://127.0.0.1:999999"},/port|url/i],[{url:"http://127.0.0.1:9",authMode:"bad"},/auth.mode|authMode/i],[{url:"http://127.0.0.1:9",authMode:"oidc"},/issuer/i],[{url:"http://127.0.0.1:9",authMode:"oidc",issuer:"https://id.example.com"},/client/i],[{url:"http://127.0.0.1:9",authMode:"oidc",issuer:"http://remote",clientId:"cito"},/https|loopback|issuer/i]] as const){const invalid=await cleanroom({hubs:{work:hub},defaultHub:"work"});const result=await invalid.command(["find"],{network:"deny",timeout:2000});expect(result.code).toBe(1);expect(result.stderr).toMatch(diagnostic);await expect(stat(join(invalid.stateDir,"state.sqlite"))).rejects.toMatchObject({code:"ENOENT"});}
+ const plugin=await f.plugin("claude",{op:"setup_inspect"});expect(plugin.paths).toEqual(expect.arrayContaining([expect.stringContaining(f.root)]));
+});
+test("exposes a validated CITO_USER and passes it to canonical local identity",async()=>{
+ const f=await cleanroom({hubs:{local:{url:"local://"}},defaultHub:"local"});await f.daemon({CITO_USER:"Alice.Example_1-2"});
+ const data=f.query("SELECT principal_id,owner_user FROM local_listeners WHERE harness='human'")[0]!;expect(data).toEqual({principal_id:"none#alice.example_1-2",owner_user:"alice.example_1-2"});
+});
+test("publishes one persisted UUID across concurrent callers, repairs permissions on load and rejects corrupt files",async()=>{
+ const f=await cleanroom();let daemon=await f.daemon();const path=join(f.stateDir,"host-id"),id=(await readFile(path,"utf8")).trim();expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);const results=await Promise.all(Array.from({length:20},()=>f.command(["find"])));expect(results.every(r=>r.code===0)).toBe(true);expect((await readFile(path,"utf8")).trim()).toBe(id);expect((await stat(f.stateDir)).mode&0o777).toBe(0o700);expect((await stat(path)).mode&0o777).toBe(0o600);
+ await daemon.stop();await chmod(path,0o644);await chmod(f.stateDir,0o755);daemon=await f.daemon();expect((await stat(path)).mode&0o777).toBe(0o600);expect((await stat(f.stateDir)).mode&0o777).toBe(0o700);expect((await readFile(path,"utf8")).trim()).toBe(id);await daemon.stop();await writeFile(path,"not-a-uuid\n");const rejected=await f.command(["find"]);expect(rejected.code).toBe(1);expect(rejected.stderr).toMatch(/host.*(?:invalid|corrupt|uuid)|(?:invalid|corrupt).*host/i);expect(await readFile(path,"utf8")).toBe("not-a-uuid\n");
+},20000);
+test("handles lease boundaries using the Hub clock and retains revoked state",async()=>{
+ const {f,id,hub}=await agent();const db="hub.sqlite";const original=f.query("SELECT CAST(value AS TEXT) AS payload FROM hub_kv WHERE key=?",[id],db)[0]!;const reg=object(JSON.parse(String(original.payload)));
+ for(const [age,active]of [[59000,true],[61000,false],[1800100,false]]as const){const value={...reg,updated_at_ms:Date.now()-age,channels:{}};f.mutate("UPDATE hub_kv SET value=CAST(? AS BLOB),created_ms=? WHERE key=?",[JSON.stringify(value),Date.now()-age,id],db);const found=await f.tool("cito_find",{hub});expect(rows(found.listeners).some(r=>r.listener_id===reg.public_id)).toBe(active);}
+});
+test("conservatively anchors persisted expiration to the real request interval",async()=>{
+ const {f,enrolled,id}=await agent();const began=Date.now();await sendUnbound(f,String(enrolled.listener_id));const row=(await received(f,id))[0]!;expect(Number(row.expires_at_ms)).toBeGreaterThanOrEqual(began);expect(Number(row.expires_at_ms)).toBeLessThanOrEqual(Date.now()+1_800_000);
 });

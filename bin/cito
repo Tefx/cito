@@ -1,3 +1,17 @@
 #!/bin/sh
-':' //; s="$0"; while [ -L "$s" ]; do d="$(cd -P "$(dirname "$s")" && pwd)"; t="$(readlink "$s")"; case "$t" in /*) s="$t" ;; *) s="$d/$t" ;; esac; done; b="$(cd -P "$(dirname "$s")" && pwd)"; n="$b/cito-native-darwin-arm64"; if [ "${CITO_DISABLE_NATIVE:-0}" != "1" ] && [ -x "$n" ]; then export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$b/../plugins}"; export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"; exec "$n" "$@"; fi; exec "${CITO_NODE_BIN:-node}" "$b/cito-mcp" "$@"
-import "./cito-mcp";
+set -eu
+s="$0"
+while [ -L "$s" ]; do
+  d="$(cd -P "$(dirname "$s")" && pwd)"
+  t="$(readlink "$s")"
+  case "$t" in /*) s="$t" ;; *) s="$d/$t" ;; esac
+done
+b="$(cd -P "$(dirname "$s")" && pwd)"
+n="$b/cito-native-darwin-arm64"
+if [ ! -x "$n" ]; then
+  printf '%s\n' 'Cito native binary is missing. Run npm run compile or reinstall the macOS arm64 package.' >&2
+  exit 127
+fi
+export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$b/../plugins}"
+export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
+exec "$n" "$@"

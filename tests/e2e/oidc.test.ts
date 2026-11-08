@@ -1,94 +1,18 @@
-import { expect, test } from "vitest";
-import { startHubServer, OidcVerifier } from "../../src/hub/index.js";
-import { startOidc, signingKey, browser } from "../auth-callout/oidc-fixture.js";
-import { fixture, call, payload } from "../mcp/support.js";
-import { OidcLogin } from "../../src/mcp/oidc.js";
-import { toCanonicalListenerId } from "../../src/shared/index.js";
-import { CitoService } from "../../src/mcp/service.js";
+import {expect,test} from "vitest";
+import {writeFile,readFile} from "node:fs/promises";
+import {join} from "node:path";
+import {createHash} from "node:crypto";
+import {loginFixture} from "../support/oidc-native.js";
+import {cleanroom,action,errorTool,rows,sendUnbound,human} from "../support/native-scenarios.js";
+import {proxyHub} from "../support/hub-proxy.js";
+import {waitFor,object,bareId} from "../support/native-harness.js";
 
-test("OIDC HubServer + MCP enforces private/workspace scopes and works offline with verified cached identity", async () => {
-  const key = await signingKey("ES256", "e2e"), oidc = await startOidc([key.jwk]);
-  const broker = await startHubServer({ authMode: "oidc", oidcIssuer: oidc.issuer, oidcClientId: "cito" });
-  const env = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" };
-  const alice = await fixture({ broker, env, service: { browserOpener: browser } });
-  const bob = await fixture({ broker, pi: false, env, service: { browserOpener: browser } });
-  try {
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims()), refresh_token: "alice-refresh" };
-    const { listener_id: id } = await call(alice.service, "cito_listen", { about: "OIDC private" }, alice.pi.meta);
-    expect(alice.service.state.listener(toCanonicalListenerId(id))!.principal_id).toBe(oidc.issuer + "#user-1");
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-2", preferred_username: "Bob" })), refresh_token: "bob-refresh" };
-    expect((await call(bob.service, "cito_find")).listeners).toEqual([]);
-    expect(payload(await bob.service.call("cito_send", { to: id, message: "blocked" }))).toMatchObject({ error: { code: "FORBIDDEN_TARGET_SCOPE" } });
-    await call(alice.service, "cito_listen", { about: "OIDC shared", scope: "workspace" }, alice.pi.meta);
-    expect((await call(bob.service, "cito_find")).listeners).toMatchObject([{ listener_id: id, user: "alice" }]);
-    expect(await call(bob.service, "cito_send", { to: id, message: "peer notification" })).toMatchObject({ status: "wake_accepted", held_reason: null });
-    await broker.stop(); await oidc.stop();
-    const inbox = await call(alice.service, "cito_inbox", { ack_all: true }, alice.pi.meta);
-    expect(inbox).toMatchObject({ acknowledged_count: 1, signals: [{ message: "peer notification", from: { user: "bob" } }] });
-  } finally {
-    await bob.close(); await alice.close(); await broker.stop();
-    await oidc.stop().catch(error => { if (error.code !== "ERR_SERVER_NOT_RUNNING") throw error; });
-  }
-}, 20_000);
-
-test("send authorizes and publishes as the identity authenticated after rejected-token recovery", async () => {
-  const key = await signingKey("ES256", "send-identity"), oidc = await startOidc([key.jwk]);
-  // The sender accepts its cached token locally; the HubServer rejects it at its later clock.
-  const broker = await startHubServer({
-    authMode: "oidc",
-    oidcIssuer: oidc.issuer,
-    oidcClientId: "cito",
-    verifier: new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => Date.now() + 240_000 }),
-  });
-  const env = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" };
-  const alice = await fixture({ broker, env, service: { browserOpener: browser } });
-  const sender = await fixture({ broker, pi: false, env, service: { browserOpener: browser } });
-  try {
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ exp: Math.floor(Date.now() / 1000) + 3600 })), refresh_token: "alice-refresh" };
-    const { listener_id: id } = await call(alice.service, "cito_listen", { about: "Alice private" }, alice.pi.meta);
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ exp: Math.floor(Date.now() / 1000) + 120 })), refresh_token: "sender-alice-refresh" };
-    await new OidcLogin(sender.config, browser).recover(null);
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ sub: "user-2", preferred_username: "Bob", exp: Math.floor(Date.now() / 1000) + 3600 })), refresh_token: "bob-refresh" };
-    expect(payload(await sender.service.call("cito_send", { to: id, message: "private attempt" }))).toMatchObject({ error: { code: "FORBIDDEN_TARGET_SCOPE" } });
-    const senderBroker = await sender.service.slots.get("default")!.network();
-    expect((await senderBroker.jsm.streams.info("CITO_SIGNALS")).state.messages).toBe(0);
-    expect((await new OidcLogin(sender.config, browser).cached())!.verified_principal_id).toBe(oidc.issuer + "#user-2");
-    expect(oidc.state.refreshRequests).toBe(1);
-    await call(alice.service, "cito_listen", { about: "Alice workspace", scope: "workspace" }, alice.pi.meta);
-    const sent = await call(sender.service, "cito_send", { to: id, message: "workspace message" });
-    expect(sent.status).toBe("wake_accepted");
-    const wire = (await senderBroker.jsm.streams.getMessage("CITO_SIGNALS", { seq: sent.seq })).json<{ from: { principal_id: string; user: string }; sender_endpoint_key: string }>();
-    expect(wire.from).toMatchObject({ principal_id: oidc.issuer + "#user-2", user: "bob" });
-    expect(wire.sender_endpoint_key).toBe(oidc.issuer + "#user-2|" + sender.service.hostId + "|unbound|default");
-  } finally {
-    await sender.close(); await alice.close(); await broker.stop(); await oidc.stop();
-  }
-}, 20_000);
-
-test("actual broker rejection of a locally unexpired token triggers one refresh; waiters reuse it", async () => {
-  const key = await signingKey("ES256", "rejection"), oidc = await startOidc([key.jwk]);
-  // Server clock skew creates a real JWT rejection without mocking the connection or verifier.
-  const broker = await startHubServer({
-    authMode: "oidc",
-    oidcIssuer: oidc.issuer,
-    oidcClientId: "cito",
-    verifier: new OidcVerifier({ issuer: oidc.issuer, clientId: "cito", now: () => Date.now() + 240_000 }),
-  });
-  const env = { CITO_AUTH_MODE: "oidc", CITO_OIDC_ISSUER: oidc.issuer, CITO_OIDC_CLIENT_ID: "cito" };
-  const f = await fixture({ broker, pi: false, env, service: { browserOpener: browser } });
-  let second: CitoService | undefined;
-  try {
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ exp: Math.floor(Date.now() / 1000) + 120 })), refresh_token: "refresh-old" };
-    const old = await new OidcLogin(f.config, browser).recover(null);
-    oidc.state.tokenResponse = { id_token: await key.sign(oidc.claims({ exp: Math.floor(Date.now() / 1000) + 3600 })), refresh_token: "refresh-new" };
-    second = await CitoService.create(f.config, f.serviceOptions);
-    const results = await Promise.all([call(f.service, "cito_find"), call(second, "cito_find")]);
-    expect(results.map(result => result.listeners)).toEqual([[], []]);
-    const fresh = await new OidcLogin(f.config, browser).cached();
-    expect(fresh!.token_sha256).not.toBe(old.token_sha256);
-    expect(oidc.state.refreshRequests).toBe(1);
-    expect(oidc.state.authorizationRequests).toBe(1);
-  } finally {
-    await second?.close(); await f.close(); await broker.stop(); await oidc.stop();
-  }
-}, 20_000);
+test("OIDC Hub/MCP enforce private/workspace scopes and permit offline inbox with verified identity",async()=>{
+ const x=await loginFixture();expect((await x.login()).http_status).toBe(200);await x.p.set({session_id:"target"});const reg=await action(x.f,{op:"listen_session",hub:"work",harness:"cursor",session_id:"target",about:"private",scope:"self"});const bob=await cleanroom({hubs:{work:{url:x.hub.url,authMode:"oidc",issuer:x.oidc.issuer,clientId:"cito"}},defaultHub:"work"});const claims=x.oidc.claims({sub:"bob",preferred_username:"Bob"}),token=await x.key.sign(claims);await writeFile(join(bob.stateDir,"oidc-token-work.json"),JSON.stringify({issuer:x.oidc.issuer,client_id:"cito",id_token:token,token_sha256:createHash("sha256").update(token).digest("hex"),expires_at:claims.exp,verified_principal_id:"oidc:"+x.oidc.issuer+"|bob",verified_user:"bob"}),{mode:0o600});await bob.daemon();expect(rows((await bob.tool("cito_find",{harness:"cursor"})).listeners)).toEqual([]);expect((await errorTool(bob,"cito_send",{to:reg.listener_id,message:"private"},human)).error).toMatchObject({code:"FORBIDDEN_TARGET_SCOPE"});const id=String(reg.canonical_listener_id);await action(x.f,{op:"set_scope",hub:"work",listener_id:id,scope:"workspace"});const sent=await sendUnbound(bob,String(reg.listener_id),"workspace");await waitFor(()=>x.f.query("SELECT * FROM local_signals WHERE signal_id=?",[bareId(sent.signal_id)]).length===1);await x.hub.process.stop();expect((await x.f.tool("cito_inbox",{}, {expected_harness:"cursor",expected_session_id:"target"})).signals).toHaveLength(1);
+});
+test("send authorizes and publishes as the identity authenticated after token rejection recovery",async()=>{
+ const x=await loginFixture();expect((await x.login()).http_status).toBe(200);const proxy=await proxyHub(x.hub.url);await action(x.f,{op:"setup_save_hub",name:"work",url:proxy.url,auth_mode:"oidc",issuer:x.oidc.issuer,clientId:"cito"});await x.p.set({session_id:"target"});const target=await action(x.f,{op:"listen_session",harness:"cursor",session_id:"target",about:"target",scope:"workspace"});x.oidc.state.tokenFactory=async()=>({id_token:await x.key.sign(x.oidc.claims({sub:"changed",preferred_username:"Changed"})),refresh_token:"new-refresh"});proxy.fail("kv_snapshot",1,401);const sent=await sendUnbound(x.f,String(target.listener_id),"post-refresh");expect(x.oidc.state.refreshRequests).toBe(1);const payload=object(JSON.parse(String(x.owner.query("SELECT CAST(data AS TEXT) AS payload FROM hub_signals WHERE signal_id=?",[bareId(sent.signal_id)],"hub/hub.sqlite")[0]!.payload)));expect(object(payload.from).principal_id).toContain("changed");expect(object(payload.from).user).toBe("changed");
+});
+test("one actual Hub token rejection triggers one refresh reused by concurrent waiters",async()=>{
+ const x=await loginFixture();expect((await x.login()).http_status).toBe(200);const old=(await x.read()).id_token,proxy=await proxyHub(x.hub.url);await action(x.f,{op:"setup_save_hub",name:"work",url:proxy.url,auth_mode:"oidc",issuer:x.oidc.issuer,clientId:"cito"});proxy.fail("kv_snapshot",1,401);await Promise.all([x.f.tool("cito_find",{}),x.f.tool("cito_find",{}),x.f.tool("cito_find",{})]);expect(x.oidc.state.refreshRequests).toBe(1);expect((await x.read()).id_token).not.toBe(old);expect(x.oidc.state.authorizationRequests).toBe(1);
+});

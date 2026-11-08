@@ -12,3 +12,5 @@ __pycache__/
 *.lock
 .env
 .pi/
+.scratch/
+crates/cito-native/target/

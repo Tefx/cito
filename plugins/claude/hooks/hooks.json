@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cito-claude-hook"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cito-claude-hook\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cito-claude-hook"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cito-claude-hook\""
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cito-claude-hook"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cito-claude-hook\""
           }
         ]
       }
