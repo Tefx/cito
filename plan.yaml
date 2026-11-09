@@ -7409,7 +7409,7 @@ phases:
   name: 'V25 Stage 9 (v0.20.1): Theory-Grounded UI/UX Redesign, Two-Stratum Human
     Channel Architecture (Hub Gateway vs. Personal Human Node), Configured-Only Session
     Discovery, Live Pi Process Discovery & Visual E2E Verification (U1–U11)'
-  status: pending
+  status: in_progress
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, test_inspect reports truncated_labels == [] across all surfaces/tabs/forms,
     grep -rnE -i "\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b"
@@ -7447,7 +7447,7 @@ phases:
     name: Implement V25 Stage 9 (v0.20.1) Theory-Grounded UI/UX Redesign, Two-Stratum
       Human Channel Card, Configured-Only Session Discovery, Live Pi Process Discovery
       & Visual Snapshot Renderer (U1–U11)
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 9 (`v0.20.1` — `U1`–`U11`) implementation\
       \ per `docs/DESIGN.md` §11:\n  1. **`U1` — Configured-Only Session Discovery\
@@ -7550,6 +7550,8 @@ phases:
     - README.md
     - site/index.html
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T19:58:23.487606Z'
   - id: v25.hygiene
     name: 'Multimodal Visual Snapshot Inspection (8 Core UI States), Iterative Contract-and-Simplicity
       Convergence & Live v0.20.1 Distribution Closure (GitHub Release v0.20.1 & Tefx/homebrew-tap
