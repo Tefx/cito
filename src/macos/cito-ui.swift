@@ -10,24 +10,24 @@ atexit { if usesPrivatePasteboard { appPasteboard.releaseGlobally() } }
 
 enum StatusIconState { case active, idle, warning }
 func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
-    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-        let center = NSPoint(x: 8, y: 9)
+    let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { _ in
+        let center = NSPoint(x: 9.2, y: 10.0)
         let arc = NSBezierPath()
-        arc.appendArc(withCenter: center, radius: 5.50, startAngle: 42, endAngle: 318, clockwise: false)
-        arc.lineWidth = 1.75; arc.lineCapStyle = .round
+        arc.appendArc(withCenter: center, radius: 7.45, startAngle: 42, endAngle: 318, clockwise: false)
+        arc.lineWidth = 2.15; arc.lineCapStyle = .round
         NSColor.black.setStroke(); arc.stroke()
         NSColor.black.withAlphaComponent(state == .active ? 1 : 0.40).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 6.35, y: 7.35, width: 3.3, height: 3.3)).fill()
+        NSBezierPath(ovalIn: NSRect(x: 7.05, y: 7.85, width: 4.3, height: 4.3)).fill()
         let wave = NSBezierPath()
-        wave.appendArc(withCenter: center, radius: 7.75, startAngle: -28, endAngle: 28, clockwise: false)
-        wave.lineWidth = 1.65; wave.lineCapStyle = .round
+        wave.appendArc(withCenter: center, radius: 9.55, startAngle: -28, endAngle: 28, clockwise: false)
+        wave.lineWidth = 2.00; wave.lineCapStyle = .round
         NSColor.black.withAlphaComponent(state == .active ? 1 : 0.40).setStroke(); wave.stroke()
         if state == .warning, let context = NSGraphicsContext.current?.cgContext {
             context.saveGState(); context.setBlendMode(.destinationOut)
             NSColor.black.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 10.6, y: 0.4, width: 7.2, height: 7.2)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 11.8, y: 0.4, width: 7.8, height: 7.8)).fill()
             context.setBlendMode(.normal)
-            NSBezierPath(ovalIn: NSRect(x: 11.8, y: 1.6, width: 4.8, height: 4.8)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 13.1, y: 1.7, width: 5.2, height: 5.2)).fill()
             context.restoreGState()
         }
         return true
@@ -3147,20 +3147,20 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             selectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex)
                 ? directoryFilteredPeers[directorySelectedIndex].scoped_id : ""
         }
-        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36, bitsPerSample: 8,
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 40, pixelsHigh: 40, bitsPerSample: 8,
             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
         NSGraphicsContext.current?.cgContext.scaleBy(x: 2, y: 2)
-        statusImage?.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
+        statusImage?.draw(in: NSRect(x: 0, y: 0, width: 20, height: 20))
         NSGraphicsContext.restoreGraphicsState()
         func alpha(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
             // Bitmap rows start at the top; drawing coordinates start at the bottom.
-            return bitmap.colorAt(x: Int(x * 2), y: 35 - Int(y * 2))?.alphaComponent ?? 0
+            return bitmap.colorAt(x: Int(x * 2), y: 39 - Int(y * 2))?.alphaComponent ?? 0
         }
-        let probes: [String: CGFloat] = ["arc": alpha(2.5, 9), "core": alpha(8, 9),
-            "wave": alpha(15.75, 9), "arc_gap": alpha(13.5, 9), "warning_dot": alpha(14.2, 4),
-            "warning_ring": alpha(11.3, 4), "outside_cutout": alpha(10.2, 4), "inside_dot": alpha(16, 4)]
+        let probes: [String: CGFloat] = ["arc": alpha(1.75, 10), "core": alpha(9.2, 10),
+            "wave": alpha(18.75, 10), "arc_gap": alpha(15.2, 10), "warning_dot": alpha(15.7, 4.3),
+            "warning_ring": alpha(12.5, 4.3), "outside_cutout": alpha(11.0, 4.3), "inside_dot": alpha(17.0, 4.3)]
         let button = status?.button ?? headlessStatusButton
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]

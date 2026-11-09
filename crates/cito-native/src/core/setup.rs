@@ -753,18 +753,34 @@ pub fn uninstall_setup_native(
         });
     }
 
-    if purge_data {
-        let user_app = home_dir.join("Applications").join("Cito.app");
-        if user_app.exists() {
-            fs::remove_dir_all(&user_app).map_err(|e| e.to_string())?;
+    for app_target in [
+        home_dir.join("Applications").join("Cito.app"),
+        PathBuf::from("/Applications/Cito.app"),
+    ] {
+        let is_symlink = fs::symlink_metadata(&app_target)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_symlink {
+            let _ = fs::remove_file(&app_target);
             actions.push(SetupAction {
                 target: "cito".to_string(),
-                path: user_app.to_string_lossy().to_string(),
+                path: app_target.to_string_lossy().to_string(),
                 status: "updated".to_string(),
                 backup_path: None,
-                detail: "Removed ~/Applications/Cito.app".to_string(),
+                detail: format!("Removed {} symlink", app_target.display()),
+            });
+        } else if purge_data && app_target.exists() {
+            let _ = fs::remove_dir_all(&app_target);
+            actions.push(SetupAction {
+                target: "cito".to_string(),
+                path: app_target.to_string_lossy().to_string(),
+                status: "updated".to_string(),
+                backup_path: None,
+                detail: format!("Removed {}", app_target.display()),
             });
         }
+    }
+    if purge_data {
         if state_dir.exists() {
             fs::remove_dir_all(state_dir).map_err(|e| e.to_string())?;
             actions.push(SetupAction {

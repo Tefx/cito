@@ -167,7 +167,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert_eq!(s["icon_template"], true);
-    assert_eq!(s["icon_width"], 18);
+    assert_eq!(s["icon_width"], 20);
     assert_eq!(s["button_title"], " 1");
     assert!(s["items"]
         .as_array()
