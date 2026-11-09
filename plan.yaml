@@ -6753,7 +6753,7 @@ phases:
   - id: v23.impl
     name: Implement V23 Stage 7 (v0.19.0) Root Cargo.toml Workspace, Native Rust Integration
       Suite (cargo test --workspace) & Root Node/Vitest Scaffolding Removal
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 7 (`v0.19.0`) implementation per `docs/DESIGN.md`\
       \ §9 and `docs/ROADMAP.md`:\n  1. **Root `Cargo.toml` Workspace & Unified Build\
@@ -6805,6 +6805,36 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-08T23:31:40.108994Z'
+    done_at: '2026-11-09T00:15:32.123518+00:00'
+    evidence: "Artifact:\n- Commit: 1276f8d4914af4927e0dd3f25570cf061d76a2d1 (120\
+      \ files changed, +2661 / -8097 lines)\n- Executor: rust-senior\n- Deliverables:\n\
+      \  1. Root `Cargo.toml` workspace (`members = [\"crates/cito-native\"]`, `resolver\
+      \ = \"2\"`), root `Cargo.lock`, `.cargo/config.toml` (`bin/cito-linker` + `bin/cito-test-runner`),\
+      \ and `crates/cito-native/build.rs` compiling `src/macos/cito-ui.swift` and\
+      \ staging all 6 signed Rust binaries (`bin/cito-native-darwin-arm64`, `plugins/*/bin/*`,\
+      \ `plugins/claude/bin/cito-claude-hook`) and `cito-ui` (`bin/cito-ui-darwin-arm64`,\
+      \ `plugins/human/bin/cito-ui`) at version `0.19.0`.\n  2. Native Rust integration\
+      \ & E2E test suite (`crates/cito-native/tests/native.rs`, `crates/cito-native/tests/support/{mod,daemon,distribution,plugins,ui}.rs`,\
+      \ `crates/cito-native/tests/hub/*.rs`): 175 total executed Rust tests (139 unit\
+      \ + 36 integration suites) covering HubEngine, DaemonService, SQLite V4 migrations,\
+      \ all 27 UI IPC actions, `< 256 KiB` frame cap, all 5 built-in plugins (`pi`,\
+      \ `codex`, `claude`, `human`, `telegram` + `cito-claude-hook` + `cito-bridge.ts`),\
+      \ headless `cito-ui` AppKit view-tree & interactions, static `site/` & brand\
+      \ SVG contrast, Homebrew formula syntax, and `F1`–`F64` regressions.\n  3. Complete\
+      \ removal of root Node.js / Vitest scaffolding (`package.json`, `package-lock.json`,\
+      \ `tsconfig.json`, `bin/build.mjs`, `node_modules/`, and root `tests/**/*.ts`\
+      \ deleted; only `plugins/pi/package.json` and `plugins/pi/cito-bridge.ts` retained\
+      \ for the Pi host).\n  4. Updated `.github/workflows/release.yml`, `deploy/hub/Dockerfile`,\
+      \ `README.md`, `AGENTS.md`, `docs/DESIGN.md`, `docs/ROADMAP.md`, `site/**`,\
+      \ and `packaging/homebrew/cito.rb` to `0.19.0` and pure Cargo build/test commands.\n\
+      \nVerification:\n- Run: `cargo test --workspace && cargo build --release &&\
+      \ /usr/bin/ruby -c packaging/homebrew/cito.rb` -> 175 passed (139 unit + 36\
+      \ integration), 0 failed, 0 warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\\
+      b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\b' crates/cito-native/src/core/\
+      \ src/macos/` -> 0 matches\n- Run: CJK & forbidden-name scan across tracked\
+      \ files -> 0 matches\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v23.impl`\
+      \ and `node_modules/` (`df -h`: 163 GiB available).\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§9, V23 Stage 7 v0.19.0)\n- docs/ROADMAP.md"
   - id: v23.hygiene
     name: 'Iterative Code-Hygiene Convergence on Pure Rust Workspace & Live v0.19.0
       Distribution Closure (GitHub Release v0.19.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
