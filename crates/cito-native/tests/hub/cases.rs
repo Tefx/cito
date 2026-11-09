@@ -98,6 +98,14 @@ fn oidc_admin_can_edit_redacted_service_fields() {
 fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     let dir = temp();
     let root = fixture(&dir);
+    let manifest_path = root.join("fixture/plugin.json");
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"user_credential","scope":"user","type":"secret","required":false}));
+    std::fs::write(manifest_path, manifest.to_string()).unwrap();
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[root]).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
@@ -180,7 +188,7 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     let second = pair();
     assert_ne!(first["code"], second["code"]);
     let redeem = |code: &Value| {
-        e.redeem("fixture",&json!({"code":code,"is_private_chat":true,"external_chat_id":"external","external_user_id":"user","display_label":"Alice","user_config_patch":{"address":"paired"}}))
+        e.redeem("fixture",&json!({"code":code,"is_private_chat":true,"external_chat_id":"external","external_user_id":"user","display_label":"Alice","user_config_patch":{"address":"paired","user_credential":"user-saved"}}))
     };
     assert!(redeem(&first["code"])
         .unwrap_err()
@@ -211,6 +219,27 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     assert_eq!(list()["fields"][1]["value"], "paired");
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
     assert!(list()["detail"].as_str().unwrap().contains("Alice"));
+    for value in [
+        json!(""),
+        json!("   "),
+        Value::Null,
+        json!(REDACTED_SECRET),
+        json!("user-saved"),
+    ] {
+        configure(json!({"user_config":{"user_credential":value}}));
+        let binding = e
+            .inner
+            .db
+            .query("SELECT * FROM hub_human_channels", &[])
+            .unwrap()[0]
+            .clone();
+        assert_eq!(
+            parse(&binding, "user_config_json"),
+            json!({"address":"paired","user_credential":"user-saved","_external_chat_id":"external","_external_user_id":"user"})
+        );
+        assert_eq!(binding["display_label"], "Alice");
+        assert_eq!(list()["display_label"], "Alice");
+    }
     configure(json!({"user_config":{"address":"manual"}}));
     let b = e
         .inner
@@ -218,7 +247,10 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
         .query("SELECT * FROM hub_human_channels", &[])
         .unwrap()[0]
         .clone();
-    assert_eq!(parse(&b, "user_config_json"), json!({"address":"manual"}));
+    assert_eq!(
+        parse(&b, "user_config_json"),
+        json!({"address":"manual","user_credential":"user-saved"})
+    );
     assert!(b["display_label"].is_null());
     e.inner.db.execute("UPDATE hub_plugin_services SET service_state_json='{\"cursor\":\"77\"}' WHERE plugin_id='fixture'",&[]).unwrap();
     let old_process = e.inner.processes.lock().unwrap()["fixture"].clone();

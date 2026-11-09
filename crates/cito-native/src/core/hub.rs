@@ -962,8 +962,9 @@ impl HubEngine {
                     let mut label = old.as_ref().map(|b| b["display_label"].clone()).unwrap_or(Value::Null);
                     if reset_user { config = json!({}); label = Value::Null; }
                     else if let Some(patch) = p.get("user_config") {
-                        let identity_changed = fields(&plugin).iter().any(|f| s(f,"scope") == "user" && patch.get(s(f,"key")).is_some_and(|v| *v != config[s(f,"key")]));
+                        let prev = config.clone();
                         merge_channel_config(&plugin, "user", &mut config, patch, clear_secret);
+                        let identity_changed = fields(&plugin).iter().any(|f| s(f,"scope") == "user" && prev[s(f,"key")] != config[s(f,"key")]);
                         if identity_changed {
                             if let Some(m) = config.as_object_mut() {
                                 for key in ["_external_chat_id", "_external_user_id"] {
