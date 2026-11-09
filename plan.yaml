@@ -7683,7 +7683,7 @@ phases:
   - id: v25.gate
     name: V25 Stage 9 (v0.20.1) Independent Terminal Acceptance, U1–U11 Visual/UX
       Verification & Live Distribution Gate
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v25` (`v0.20.1`) acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session.\n- **Boundary:**\
@@ -7726,3 +7726,5 @@ phases:
     depends_on:
     - v25.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-09T21:35:14.779332Z'
