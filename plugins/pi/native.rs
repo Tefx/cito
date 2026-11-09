@@ -382,7 +382,18 @@ pub fn handle(input: &Value) -> Result<Value> {
             };
             let path = state(req).join(format!("sockets/pi-pid-{p}.sock"));
             if op == "update_badge" {
-                return socket_call(&path, &request);
+                let clearing = req["badge"].is_null();
+                // An absent bridge has no status bar left to clear.
+                if clearing && !path.exists() {
+                    return Ok(json!({"ok":true}));
+                }
+                return match socket_call(&path, &request) {
+                    Err(_) if clearing && process_identity(p).is_err() => {
+                        let _ = fs::remove_file(&path);
+                        Ok(json!({"ok":true}))
+                    }
+                    reply => reply,
+                };
             }
             for attempt in 0..3 {
                 match socket_call(&path, &request) {

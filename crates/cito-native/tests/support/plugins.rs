@@ -172,6 +172,44 @@ fn socket(path: &std::path::Path, request: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 #[test]
+fn pi_badge_clear_converges_for_missing_or_departed_bridges() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let endpoint = f.spawn("/bin/cat", &[], &[]);
+    let path = f
+        .state
+        .join(format!("sockets/pi-pid-{}.sock", f.pid(endpoint)));
+    let update = |badge: Value| {
+        f.plugin(
+            PI,
+            json!({"op":"update_badge","endpoint_pid":f.pid(endpoint),"session_id":"session-a","badge":badge}),
+        )
+    };
+
+    // A process discovered before its bridge starts has nothing to clear.
+    assert!(!path.exists());
+    assert_eq!(update(Value::Null), json!({"ok":true}));
+    assert_eq!(update(json!("badge"))["ok"], false);
+
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    assert!(path.exists());
+    // A live endpoint's transport failure must remain retryable.
+    assert_eq!(update(Value::Null)["ok"], false);
+    assert!(path.exists());
+
+    f.stop(endpoint);
+    assert_eq!(update(json!("badge"))["ok"], false);
+    assert!(path.exists(), "badge writes must not clean up the socket");
+    assert_eq!(update(Value::Null), json!({"ok":true}));
+    assert!(
+        !path.exists(),
+        "a departed endpoint's stale socket is removed"
+    );
+    assert_eq!(update(Value::Null), json!({"ok":true}));
+}
+
+#[test]
 fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
