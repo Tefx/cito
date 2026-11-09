@@ -140,6 +140,36 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     }
 }
 
+fn repair_default_hub(v: &mut Value) {
+    let hubs = v["hubs"].as_object();
+    let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
+    let current = v["default_hub"]
+        .as_str()
+        .or_else(|| v["defaultHub"].as_str())
+        .filter(|name| hubs.and_then(|h| h.get(*name)).is_some_and(enabled));
+    let fallback = current
+        .or_else(|| {
+            let hubs = hubs?;
+            hubs.get_key_value("local")
+                .filter(|(_, cfg)| enabled(cfg))
+                .map(|(name, _)| name.as_str())
+                .or_else(|| {
+                    hubs.iter()
+                        .filter(|(_, cfg)| enabled(cfg))
+                        .map(|(name, _)| name.as_str())
+                        .min()
+                })
+                .or_else(|| hubs.get_key_value("local").map(|(name, _)| name.as_str()))
+                .or_else(|| hubs.keys().map(String::as_str).min())
+        })
+        .unwrap_or("local")
+        .to_string();
+    if let Some(config) = v.as_object_mut() {
+        config.insert("default_hub".into(), json!(fallback));
+        config.remove("defaultHub");
+    }
+}
+
 #[derive(Default)]
 struct UiMailbox {
     pending: Mutex<std::collections::VecDeque<(Option<String>, Vec<u8>)>>,
@@ -294,8 +324,9 @@ impl DaemonService {
         if self.closing {
             return Ok(());
         }
-        let raw = self.raw_config()?;
+        let mut raw = self.raw_config()?;
         self.config.user = self.get_effective_user()?;
+        repair_default_hub(&mut raw);
         let (default, hubs, _) =
             crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
         self.config.default_hub = std::env::var("CITO_HUB")
@@ -1722,6 +1753,9 @@ impl DaemonService {
                         return Err("INVALID_INPUT: Hub must be an object".into());
                     }
                     v["hubs"][&hub]["enabled"] = json!(enabled);
+                    if !enabled {
+                        repair_default_hub(v);
+                    }
                     Ok(())
                 })?;
             }
@@ -1733,28 +1767,7 @@ impl DaemonService {
                     if let Some(h) = v["hubs"].as_object_mut() {
                         h.remove(&hub);
                     }
-                    if v["default_hub"].as_str() == Some(&hub)
-                        || v["defaultHub"].as_str() == Some(&hub)
-                    {
-                        let fallback = v["hubs"]
-                            .as_object()
-                            .and_then(|hubs| {
-                                hubs.get_key_value("local")
-                                    .or_else(|| {
-                                        hubs.iter().find(|(_, cfg)| {
-                                            cfg["enabled"] != false && cfg["disabled"] != true
-                                        })
-                                    })
-                                    .or_else(|| hubs.iter().next())
-                                    .map(|(name, _)| name.as_str())
-                            })
-                            .unwrap_or("local")
-                            .to_string();
-                        v["default_hub"] = json!(fallback);
-                        if let Some(m) = v.as_object_mut() {
-                            m.remove("defaultHub");
-                        }
-                    }
+                    repair_default_hub(v);
                     Ok(())
                 })?;
             }
@@ -3126,6 +3139,32 @@ pub use super::cli::run_cli_command;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_hub_repair_handles_missing_defaults_and_all_disabled_hubs() {
+        for (mut config, expected) in [
+            (
+                json!({"hubs":{"alpha":{"enabled":true},"local":{"enabled":true}}}),
+                "local",
+            ),
+            (
+                json!({"defaultHub":"zeta","hubs":{"alpha":{},"local":{},"zeta":{}}}),
+                "zeta",
+            ),
+            (
+                json!({"default_hub":"missing","hubs":{"alpha":{"enabled":false},"local":{"disabled":true}}}),
+                "local",
+            ),
+            (
+                json!({"defaultHub":"missing","hubs":{"zeta":{"enabled":false},"alpha":{"disabled":true}}}),
+                "alpha",
+            ),
+            (json!({"hubs":{}}), "local"),
+        ] {
+            repair_default_hub(&mut config);
+            assert_eq!(config["default_hub"], expected);
+            assert!(config.get("defaultHub").is_none());
+        }
+    }
     #[test]
     fn config_mutation_rejects_non_objects_under_lock() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("cito-config-shape-{}", random_uuid_v4()));

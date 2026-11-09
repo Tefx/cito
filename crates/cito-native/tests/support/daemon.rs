@@ -1346,7 +1346,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     assert_eq!(config["hubs"]["other"]["url"], "local://");
 }
 #[test]
-fn removing_default_hubs_persists_a_restartable_fallback() {
+fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     for (key, op, remaining, expected) in [
@@ -1369,6 +1369,30 @@ fn removing_default_hubs_persists_a_restartable_fallback() {
             json!({"personal":{"url":"local://","enabled":false},"shared":{"url":"local://"}}),
             "shared",
         ),
+        (
+            "default_hub",
+            "remove_hub",
+            json!({"local":{"url":"local://","enabled":false},"shared":{"url":"local://","enabled":true},"zeta":{"url":"local://"}}),
+            "shared",
+        ),
+        (
+            "defaultHub",
+            "setup_remove_hub",
+            json!({"local":{"url":"local://","disabled":true},"shared":{"url":"local://"}}),
+            "shared",
+        ),
+        (
+            "default_hub",
+            "setup_toggle_hub",
+            json!({"local":{"url":"local://"},"shared":{"url":"local://"}}),
+            "local",
+        ),
+        (
+            "defaultHub",
+            "hub_action",
+            json!({"local":{"url":"local://","enabled":false},"shared":{"url":"local://","enabled":true},"zeta":{"url":"local://"}}),
+            "shared",
+        ),
     ] {
         let mut initial = json!({"hubs":remaining});
         initial["hubs"]["work"] = json!({"url":"local://"});
@@ -1376,12 +1400,18 @@ fn removing_default_hubs_persists_a_restartable_fallback() {
         fs::write(&f.config, initial.to_string()).unwrap();
         let daemon = f.daemon(&[]);
         assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
-        let (status, response) = f.action(json!({"op":op,"hub":"work"}));
-        assert_eq!(status, 200, "{response}");
+        let (status, response) =
+            f.action(json!({"op":op,"hub":"work","enabled":false,"action":"disconnect"}));
+        assert_eq!(status, 200, "{op}: {response}");
         let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
-        assert_eq!(saved["default_hub"], expected);
+        assert_eq!(saved["default_hub"], expected, "{op}: {saved}");
         assert!(saved.get("defaultHub").is_none());
-        assert!(saved["hubs"].get("work").is_none());
+        if matches!(op, "setup_toggle_hub" | "hub_action") {
+            assert_eq!(saved["hubs"]["work"]["enabled"], false);
+        } else {
+            assert!(saved["hubs"].get("work").is_none());
+        }
+        assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], expected);
         let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
         assert!(ok, "{err}");
         let inspection: Value = serde_json::from_str(&out).unwrap();
@@ -1399,6 +1429,40 @@ fn removing_default_hubs_persists_a_restartable_fallback() {
         assert_eq!(snapshot["hub"], expected);
         f.stop(restarted);
     }
+}
+#[test]
+fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"default_hub":"work","hubs":{"work":{"url":"local://"}}}));
+    let daemon = f.daemon(&[]);
+    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
+    for (key, hubs, expected) in [
+        (
+            "default_hub",
+            json!({"work":{"url":"local://","enabled":false},"local":{"url":"local://"},"alpha":{"url":"local://"}}),
+            "local",
+        ),
+        (
+            "defaultHub",
+            json!({"work":{"url":"local://","disabled":true},"local":{"url":"local://","enabled":false},"shared":{"url":"local://"},"zeta":{"url":"local://"}}),
+            "shared",
+        ),
+    ] {
+        let mut config = json!({"hubs":hubs});
+        config[key] = json!("work");
+        fs::write(&f.config, config.to_string()).unwrap();
+        let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+        assert_eq!(status, 200, "{snapshot}");
+        assert_eq!(snapshot["hub"], expected);
+        let found = f.tool("cito_find", json!({"user":"absent"}), human());
+        assert_eq!(found["ok"], true, "{found}");
+        assert_eq!(found["listeners"], json!([]));
+        assert_eq!(fs::read_to_string(&f.config).unwrap(), config.to_string());
+    }
+    f.stop(daemon);
+    let overridden = f.daemon(&[("CITO_HUB", "work")]);
+    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
+    f.stop(overridden);
 }
 #[test]
 fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
