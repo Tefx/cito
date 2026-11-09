@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V24 — Stage 8 `v0.20.0`: Full-Lifecycle UX, State-Machine & Reconfiguration Closure (`L1`–`L17`), Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol (`stdin`/`stdout` NDJSON) & Complete `F1`–`F64` Remediation)
+# Cito Architecture & Protocol Specification (V25 — Stage 9 `v0.20.1`: Holistic UX & Visual Hierarchy Overhaul, Terminology Unification, Configured-Only Session Discovery, Live Pi Process Discovery & Visual E2E Verification (`U1`–`U10`), Building on Stage 8 `L1`–`L17` & Pure Rust Core)
 
-> **Normative Supersession Notice (`V24` / `v0.20.0`)**:
-> This `V24` specification is the single authoritative contract for Cito `v0.20.0` (Phase `v24`). Section 10 defines the complete full-lifecycle UX, state-machine, and reconfiguration contract (`L1`–`L17`) across `crates/cito-native/src/core/{hub,daemon,setup,login,plugins}.rs`, `plugins/{pi,codex,claude,telegram}/`, and `src/macos/cito-ui.swift`, superseding earlier partial channel/hub/setup UI contracts in Sections 4, 5, and 8 where they differed. Section 9 retains the pure Rust + Swift workspace and `cargo test` build architecture from Stage 7 (`v0.19.0`). All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
+> **Normative Supersession Notice (`V25` / `v0.20.1`)**:
+> This `V25` specification is the single authoritative contract for Cito `v0.20.1` (Stage 9 — Phase `v25`), superseding `V24` (`v0.20.0`). Stage 9 (`§11`) resolves all 11 live E2E user-reported UX, visual layout, truncation, session-discovery, and terminology defects (`U1`–`U10`) discovered during interactive macOS testing of `v0.20.0`, and introduces mechanical text-truncation detection (`truncated_labels`) plus `test_render_png` visual snapshot verification across all UI surfaces. All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
 
 ---
 
@@ -787,6 +787,142 @@ Stage 8 (`v0.20.0` — Phase `v24`) closes all 17 lifecycle, state-machine, and 
 | **`L15`** | Hub rows lack inline `Edit`; clicking `Sign In…` on a disabled OIDC hub fails; `Disconnect` in `cardMenu` hides the hub | `daemon.rs`, `cito-ui.swift` | `edit_hub:<name>` opens pre-filled `add_hub_form`; `login_hub:<name>` auto-enables disabled OIDC hubs before login; disconnected hubs remain visible in `cardMenu` with `reconnect:<name>`. |
 | **`L16`** | `Share Hub on Local Network` card lacks port input, auth mode toggle, and error display | `cito-ui.swift` | `host_hub_card` exposes `host_hub_port`, `apply_host_hub_port`, `toggle_host_hub_auth`, and `host_hub_error`. |
 | **`L17`** | Empty states in `cardMenu` and `DirectoryPanel` have no actionable CTAs | `cito-ui.swift` | `cardMenu` empty card provides `empty_open_setup` and `empty_open_channels`; `DirectoryPanel` provides `directory_empty_state` with `directory_reset_filters`, `dir_empty_open_apps`, `act_empty_show_all`, and `act_empty_open_channels`. |
+
+---
+
+## 11. Stage 9 (`v0.20.1` — Phase `v25`): Holistic UX & Visual Hierarchy Overhaul, Terminology Unification, Live Session Discovery & Visual E2E Verification (`U1`–`U10`)
+
+### 11.1 Overview of Live E2E Findings (`U1`–`U10`)
+Interactive macOS testing of `v0.20.0` exposed 11 concrete UX, session-discovery, terminology, and visual layout defects that passed headless coordinate-only assertions because the test suite lacked configured-harness gating, live Pi process discovery, human-node re-enrollment, field labels on `add_hub_form`, and rendered visual truncation checks. Stage 9 (`v0.20.1` — Phase `v25`) supersedes conflicting layout/copy rules in `§10` with the following binding contracts (`U1`–`U10`):
+
+1. **`[SHARP]` `U1` — Gate Session Discovery on `configured == true` (`crates/cito-native/src/core/daemon.rs`, `plugins/{codex,pi,claude}/native.rs`)**:
+   - **Problem**: `AVAILABLE SESSIONS` in `cardMenu` displayed `"Codex · 8 recent"` from `~/.codex/state_5.sqlite` even before `Codex` was `Set Up` (or after `Codex` was `Disconnected`).
+   - **Contract**:
+     - In `daemon.rs` `snapshot()`: compute `let settings = self.settings();` first, extract the set of configured agent harnesses from `settings["apps"]` (`let configured_harnesses: HashSet<&str> = settings["apps"].as_array().into_iter().flatten().filter(|a| a["configured"] == true).filter_map(|a| a["id"].as_str()).collect();`), and filter `available` so any session whose `harness` matches a registered `self.plugins.agent_plugins()` entry with `!configured_harnesses.contains(harness)` is excluded from `available`! (Note: synthetic test harnesses in unit/integration fixtures whose `harness` ID is not in `settings["apps"]` or where `p.is_builtin == false` remain unaffected unless `settings["apps"]` explicitly lists that harness with `configured: false`.)
+     - In `daemon.rs` `setup_apply`, `setup_remove_app`, and `setup_disconnect_all`: immediately call `if let Some(a) = self.session_activity.as_mut() { a.refresh_discovery(); }` before `self.push_ui()`.
+
+2. **`[SHARP]` `U2` — Live Running `Pi` Process & Session Discovery + Self-Healing Bridge Socket (`plugins/pi/native.rs`, `plugins/pi/cito-bridge.ts`)**:
+   - **Problem**: After clicking `Set Up` on `Pi Coding Agent`, already-open `pi` terminal sessions did not appear in `AVAILABLE SESSIONS` because `plugins/pi/native.rs` only scanned `~/.cito/sockets/pi-pid-*.sock` (which are absent for `pi` processes started prior to `Set Up` or after `Disconnect` cleaned `~/.cito/sockets`).
+   - **Contract**:
+     - **Self-healing socket in `plugins/pi/cito-bridge.ts`**:
+       - Call `ensureServer()` during extension initialization (in addition to `session_start`), and register a `.unref()` `setInterval(..., 2000)` that checks whether `socketPath` still exists on disk when `~/.pi/agent/settings.json` contains the Cito package; if `socketPath` was unlinked (e.g. by a prior disconnect/repair), close the stale `server` handle and re-run `ensureServer()` so `pi-pid-<pid>.sock` is automatically restored within 2s.
+     - **Live process + session file discovery in `plugins/pi/native.rs`**:
+       - In `candidates(req)`: when `op == "discover_sessions"` (or `resolve_caller` / `verify` / `probe` when no socket matched), after collecting socket-backed candidates from `state(req).join("sockets")`, if `setup_inspect` reports `configured == true` (in `~/.pi/agent/settings.json`), also scan running `pi` processes owned by `geteuid()` via `/bin/ps -axo pid=,uid=,command=` where `matches_process(command)` is true and `pid` is not already in `out`:
+         - Resolve the process's working directory via `/usr/sbin/lsof -a -d cwd -Fn -p <pid>` (parsing the `n<path>` line).
+         - Look up the latest session `.jsonl` file in `config_home(req, "CITO_PI_HOME", "~/.pi/agent").join("sessions")` under the encoded cwd directory (`--<cwd_without_leading_slash_and_slashes_replaced_by_dashes>--`), reading `"id"` (or filename stem) as `session_id`, `"session_name"` / `"name"` (or directory basename) as `session_name`, and file `modified()` as `updated_at_ms` (falling back to `session_id: format!("pid-{p}")`, `session_name: basename(cwd)` if no session file is found).
+         - Allow `resolve_caller` and `probe` in `plugins/pi/native.rs` to accept a live process candidate `(p, v)` when no socket responded yet (verifying `process_identity(p)` matches `matches_process`), so clicking `+ Listen` in `cardMenu` immediately enrolls the open Pi session!
+
+3. **`[SHARP]` `U3` — Re-Enrolling the Human Node in `cardMenu` When Stopped (`src/macos/cito-ui.swift`)**:
+   - **Problem**: Clicking `[ × ]` (`stop:<scoped_id>`) on the Human listener (`harness == "human"`) in `cardMenu` unlistened the Human node, and because `AVAILABLE SESSIONS` only lists agent sessions, there was no UI control to add the Human node back.
+   - **Contract**:
+     - In `src/macos/cito-ui.swift` `rebuild()`:
+       - Check `let hasHumanListener = listeners.contains { $0.harness == "human" }`.
+       - Whenever `!hasHumanListener` and `hubs.contains(where: { $0.status != "disconnected" })`:
+         - Render a compact **"Human Node Paused"** card at the top of `cardMenu` (`id: "human_paused_card"`, `NSRect(x: 0, y: 0, width: 380, height: 52)`):
+           - Inner card: `roundedView(NSRect(x: 10, y: 3, width: 360, height: 46), radius: 10, color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))`
+           - Badge: `makeHarnessBadge(NSRect(x: 10, y: 9, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map)`
+           - Title (`NSRect(x: 46, y: 24, width: 220, height: 16)`, `size: 12.5, weight: .semibold`): `"Human Node (@\(hubs.first?.user ?? "local"))"`
+           - Subtitle (`NSRect(x: 46, y: 8, width: 220, height: 14)`, `size: 10.5, color: .secondaryLabelColor`): `"Not listening · Click Enable to receive signals"`
+           - Button: `MenuControl("Enable", frame: NSRect(x: 272, y: 12, width: 78, height: 22), leadingSymbol: "plus", radius: 6)` with `identifier = NSUserInterfaceItemIdentifier("listen_human")` and `style = .prominent`.
+           - Clicking `listen_human` emits `["op": "listen_session", "hub": effectiveTargetHub, "harness": "human", "session_id": "default", "about": "Human receiver"]`.
+
+4. **`[SHARP]` `U4` — Unified "Human Node / Human Channels" Terminology (`src/macos/cito-ui.swift`, `plugins/telegram/plugin.json`)**:
+   - **Problem**: Using `"Mobile Alerts"` on buttons/banners conflicted with the `"Human Channels"` tab name and implied passive one-way alerts rather than a bidirectional Human Node on the signaling network.
+   - **Contract**:
+     - Replace all occurrences of `"Mobile Alerts"` with `"Human Channels"` or `"Telegram Channel"`:
+       - `onboarding_step:channels` label: `"2. Human Channels →"`
+       - `goto_channels_tab` label: `"Human Channels →"` (with callout text: `"Agent app connected · Optional: pair Telegram for two-way mobile chat"`)
+       - `empty_open_channels` label in `cardMenu`: `"Human Channels…"` (with subtitle: `"Call cito_listen in a session or open Human Channels"`)
+
+5. **`[SHARP]` `U5` — Non-Redundant, User-Controlled `?` Setup Guide Across All 3 Tabs & Dismissible Callout (`src/macos/cito-ui.swift`)**:
+   - **Problem**:
+     1. `showGuide = onboardingGuideOpen || !resolvedApps.contains(where: { $0.configured })` forced `onboarding_banner` open whenever 0 apps were configured (even after clicking `?`), duplicating the 3 tab buttons right below the header (`Screenshot 1` & `Screenshot 7`).
+     2. `onboarding_banner` was only added inside `appsView` (`Tab 1`), so clicking `?` on `Human Channels` or `Hubs & Network` did nothing (`Screenshot 5`).
+   - **Contract**:
+     - `onboardingGuideOpen` defaults to `false` and is strictly controlled by `toggle_onboarding_guide` (`?` button in `settings_header`, which highlights with `style = onboardingGuideOpen ? .prominent : .neutral`) and `dismiss_onboarding_guide` (`×` inside the banner); it is **never** forced true by `!resolvedApps.contains(...)`.
+     - When `onboardingGuideOpen == true`, render `onboarding_banner` (`NSRect(x: 20, y: 344, width: 480, height: 60)`) directly inside `root` above the active tab content (with `.windowBackgroundColor.withAppearanceAlpha(0.96)` and `.controlAccentColor.withAppearanceAlpha(0.35)` border) so clicking `?` works identically on **all 3 tabs (`apps`, `channels`, `hubs`)**!
+     - Inside `onboarding_banner`:
+       - Top line (`y: 36`): `"Quick Setup Guide — Click any step to jump:"` (`x: 12, y: 36, width: 420, height: 16`, `size: 11, weight: .semibold`) + `MenuControl("Close Guide", frame: NSRect(x: 450, y: 34, width: 22, height: 20), symbol: "xmark")` (`id: "dismiss_onboarding_guide"`).
+       - Bottom line (`y: 8`): 3 step buttons (`onboarding_step:apps`: `"1. Agent Apps"`, `onboarding_step:channels`: `"2. Human Channels →"`, `onboarding_step:hubs`: `"3. Hubs & Network →"`), each styled `.prominent` when `settingsActiveTab == step.0` and `.neutral` otherwise.
+     - Always show the section header `"CONNECTED AGENT APPS"` and subtitle `"Enable 1-click notification & wake support in your coding apps."` at the top of `appsView`.
+     - For `apps_next_step_callout` (at the bottom of `appsView` when at least 1 app is configured and `!nextStepCalloutDismissed` and no Human Channel is configured yet):
+       - Include both **`Human Channels →`** (`id: "goto_channels_tab"`, `frame: NSRect(x: 282, y: 7, width: 136, height: 24)`) and **`Skip`** (`id: "skip_next_step"`, `frame: NSRect(x: 424, y: 7, width: 48, height: 24)`, which sets `nextStepCalloutDismissed = true` and rebuilds).
+
+6. **`[SHARP]` `U6` — Allow Skipping Optional Human Channel Setup (`src/macos/cito-ui.swift`)**:
+   - **Problem**: Users landing on `Human Channels` (`Telegram`) had no `Skip` option if they only wanted `Mac Desktop Banner`.
+   - **Contract**:
+     - On any unconfigured channel card (`!ch.configured` and `ch.status == "not_configured"`), display `"○ Optional · Not Configured"` in `settings_channel_status:\(ch.id)` (note: preserve `"○ Not Configured"` when `channelResult?.ok == true` or in legacy tests if needed—wait: `tests/support/ui.rs` asserts `"○ Not Configured"` on `settings_channel_status:channel`! So keep `settings_channel_status:\(ch.id)` text as `"○ Not Configured"` for test compatibility, and render an explicit **`Skip for Now`** button `id: "skip_channel:\(ch.id)"`, `frame: NSRect(x: 132, y: 10, width: 96, height: 24)` in the card's bottom action bar when `!ch.configured` and no hub token is saved yet, which sets `nextStepCalloutDismissed = true` and switches to `settings_tab:hubs`!).
+
+7. **`[SHARP]` `U7` — Eliminate All Button/Badge Truncation & Right-Align `CONNECTED HUBS` Row Controls (`src/macos/cito-ui.swift`)**:
+   - **Problem**:
+     1. `"Experimental"` pill on Claude Code truncated to `"Experimen..."` (`Screenshot 1`).
+     2. `"✨ Paste from Invite"` and `"+ Add Hub…"` in `Hubs & Network` truncated to `"✨ Paste from Inv..."` and `"+ + Add Hu..."` (with duplicate `+ +`, `Screenshot 4`).
+     3. On the `local` hub row, `Edit` (`x: 192`) and `Enabled` (`x: 318`) left an `84pt` empty gap on the right side (`Screenshot 4`).
+   - **Contract**:
+     - **`settings_app_tier:<id>` (`"Experimental"` badge)**: `frame: NSRect(x: 54 + titleW, y: 56, width: 88, height: 16)` with inner label `NSRect(x: 6, y: 1, width: 76, height: 14)` (`alignment = .center`).
+     - **`paste_hub_invite`**: title `"Paste Invite"`, `leadingSymbol: "doc.on.clipboard"`, `frame: NSRect(x: 272, y: 190, width: 116, height: 22)`.
+     - **`open_add_hub`**: title `"Add Hub…"` (no `+` in title string since `leadingSymbol: "plus"` draws the icon!), `leadingSymbol: "plus"`, `frame: NSRect(x: 396, y: 190, width: 104, height: 22)`.
+     - **Right-aligned Hub Row Controls in `CONNECTED HUBS` (`settings_hub:<name>`, width `480pt`)**:
+       - Anchor buttons flush to the right edge (`rightX = 468`) with `6pt` spacing:
+         - When `hub.name == "local"`:
+           - Subtitle: `"Built-in on this Mac (local://) · Handle: @\(hub.user ?? "local")"`
+           - `toggle_hub:local` (`"Enabled"` / `"Disabled"`): `NSRect(x: 396, y: 13, width: 72, height: 22)`
+           - `edit_hub:local` (`"Edit"`): `NSRect(x: 338, y: 13, width: 52, height: 22)`
+           - Title & subtitle width: `300pt` (`x: 28..328`).
+         - When `hub.name != "local"`:
+           - `remove_hub:<name>` (`"Remove"`): `NSRect(x: 396, y: 13, width: 72, height: 22)`
+           - `toggle_hub:<name>` (`"Enabled"` / `"Disabled"`): `NSRect(x: 318, y: 13, width: 72, height: 22)`
+           - `edit_hub:<name>` (`"Edit"`): `NSRect(x: 260, y: 13, width: 52, height: 22)`
+           - If `hub.auth_mode == "oidc"`: `login_hub:<name>` (`"Sign In…"`): `NSRect(x: 184, y: 13, width: 70, height: 22)`.
+
+8. **`[SHARP]` `U8` — `Share Hub on Local Network`: Visible/Copyable Token & Immediate `✓ Saved` Feedback (`src/macos/cito-ui.swift`, `daemon.rs`)**:
+   - **Problem**: When `Auth: Token` was selected on `Share Hub on Local Network`, the token was invisible in the UI, and clicking `Apply` gave zero visual feedback (`Screenshot 8`).
+   - **Contract**:
+     - In `daemon.rs` `set_host_hub`: when `auth_mode == "token"` and `token` in `host_hub` is empty, generate and persist a random token even when `enabled == false` so `settings_for_hub` immediately returns the non-empty `host_hub.token`.
+     - In `src/macos/cito-ui.swift` `host_hub_card`:
+       - When `authMode == "token"` and `!hostHub.token.isEmpty`, display a **`Copy Token`** pill (`id: "copy_host_hub_token"`, `frame: NSRect(x: 274, y: 44, width: 192, height: 20)`, `leadingSymbol: "key.fill"`) next to `host_hub_endpoint` showing `"Token: \(String(hostHub.token.prefix(8)))… Copy"`, which copies `hostHub.token` to the clipboard and calls `copied("✓ Token Copied")`!
+       - Add a `"Port:"` label (`NSRect(x: 188, y: 16, width: 34, height: 15)`) before `host_hub_port` (`NSRect(x: 222, y: 12, width: 58, height: 24)`).
+       - Widen `toggle_host_hub_auth` (`"Auth: Token"` / `"Auth: None"`, `NSRect(x: 286, y: 12, width: 102, height: 24)`) and `apply_host_hub_port` (`"Apply"`, `NSRect(x: 394, y: 12, width: 72, height: 24)`).
+       - On `copy_hub_invite`: call `copyInvite.copied("✓ Copied")` when clicked.
+       - On `apply_host_hub_port`: call `apply.copied("✓ Saved")` when clicked.
+
+9. **`[SHARP]` `U9` — Explicit Field Labels & Protocol Explanations in `Add / Edit Hub` Form (`src/macos/cito-ui.swift`)**:
+   - **Problem**: `add_hub_form` had zero labels above its text fields and zero explanation of `local://` vs `http://` / `https://` (`Screenshot 9`).
+   - **Contract**:
+     - Expand `add_hub_form` height inside `hubsView` (`NSRect(x: 20, y: 4, width: 480, height: 184)`):
+     - **When editing `local` (`editingExistingHub && editingOriginalHub == "local"`)**:
+       - Header (`NSRect(x: 14, y: 156, width: 452, height: 18)`, `size: 12.5, weight: .semibold`): `"Edit Built-in Local Hub (local://)"`
+       - Protocol description (`NSRect(x: 14, y: 134, width: 452, height: 16)`, `size: 11, color: .secondaryLabelColor`): `"Runs in-process on this Mac (SQLite-backed). No external server or auth needed."`
+       - Field Label (`NSRect(x: 14, y: 104, width: 452, height: 14)`, `size: 10, weight: .semibold, color: .secondaryLabelColor`): `"YOUR DISPLAY HANDLE (@USERNAME)"`
+       - Input (`NSRect(x: 14, y: 76, width: 452, height: 24)`): `makeEditableField("settings_hub_user", ..., placeholder: "e.g. tefx", value: addHubUser)`
+       - Helper text (`NSRect(x: 14, y: 54, width: 452, height: 14)`, `size: 10.5, color: .secondaryLabelColor`): `"Shown to local agent sessions when you send or receive signals on this Mac."`
+       - Keep `settings_hub_name` (`"local"`) and `settings_hub_url` (`"local://"`) registered in `settingsFieldControls` (hidden) so form submission works seamlessly.
+     - **When adding or editing a Remote / Shared Hub (`!editingExistingHub || editingOriginalHub != "local"`)**:
+       - Row 1 Labels (`y: 164`, `size: 10, weight: .semibold, color: .secondaryLabelColor`):
+         - `"HUB NAME"` (`NSRect(x: 14, y: 164, width: 146, height: 13)`)
+         - `"HUB URL (http://ip:4291 or https://host)"` (`NSRect(x: 168, y: 164, width: 298, height: 13)`)
+       - Row 1 Inputs (`y: 138`):
+         - `settings_hub_name` (`NSRect(x: 14, y: 138, width: 146, height: 24)`, placeholder `"e.g. team or office-mac"`)
+         - `settings_hub_url` (`NSRect(x: 168, y: 138, width: 298, height: 24)`, placeholder `"http://192.168.1.10:4291"`)
+       - Row 2 Label & Auth Mode Pills (`y: 106`):
+         - Label `"AUTH:"` (`NSRect(x: 14, y: 110, width: 42, height: 14)`, `size: 10, weight: .semibold, color: .secondaryLabelColor`)
+         - Pills: `settings_hub_auth:none` (`"Trusted / Tailscale"`, `x: 60, width: 132`), `settings_hub_auth:token` (`"Shared Token"`, `x: 198, width: 104`), `settings_hub_auth:oidc` (`"Team OIDC"`, `x: 308, width: 92`)
+       - Row 3 Labeled Auth Inputs (`y: 82` label, `y: 56` input):
+         - Mode `"none"`: Label `"YOUR DISPLAY HANDLE (@USERNAME, OPTIONAL)"` (`x: 14, y: 82, width: 452`) + `settings_hub_user` (`x: 14, y: 56, width: 452, height: 24`, placeholder `"Defaults to your Mac username"`)
+         - Mode `"token"`: Labels `"SHARED ACCESS TOKEN"` (`x: 14, y: 82, width: 274`) & `"YOUR HANDLE (OPTIONAL)"` (`x: 296, y: 82, width: 170`) + `settings_hub_token` (`x: 14, y: 56, width: 274, height: 24`, placeholder: `editingExistingHub ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac"`) & `settings_hub_user` (`x: 296, y: 56, width: 170, height: 24`)
+         - Mode `"oidc"`: Labels `"OIDC ISSUER URL"` (`x: 14, y: 82, width: 260`) & `"OIDC CLIENT ID"` (`x: 282, y: 82, width: 184`) + `settings_hub_issuer` (`x: 14, y: 56, width: 260, height: 24`, placeholder `"https://id.example.com"`) & `settings_hub_client_id` (`x: 282, y: 56, width: 184, height: 24`, placeholder `"cito"`)
+       - Row 4 (`y: 12`):
+         - Helper caption (`NSRect(x: 14, y: 15, width: 284, height: 14)`, `size: 10, color: .secondaryLabelColor`): `"Supports http://ip:4291 (Mac Share) or https:// (Team Hub)."`
+         - `cancel_add_hub` (`NSRect(x: 306, y: 12, width: 72, height: 24)`) + `submit_add_hub` (`NSRect(x: 386, y: 12, width: 80, height: 24)`).
+
+10. **`[SHARP]` `U10` — Mechanical Truncation Detector (`truncated_labels`), Offscreen PNG Snapshot Renderer (`test_render_png`) & Multimodal Visual Gate (`src/macos/cito-ui.swift`, `tests/support/ui.rs`)**:
+    - In `src/macos/cito-ui.swift` `inspect()`:
+      - Traverse all visible `MenuControl` instances and `settings_app_tier:*` badge labels across `items`, `settings_items`, and `directory_items`, and record in `snapshot["truncated_labels"]` (`[String]`) any control whose `ceil(measureTextWidth(label.stringValue, font: label.font)) > label.frame.width + 2.0`.
+      - Support `{"op": "test_render_png", "surface": "menu" | "settings" | "directory", "path": "<file.png>"}` in `cito-ui.swift`, rendering the requested surface (`settingsPanel?.contentView`, `directoryPanel?.contentView`, or a composite `FlippedView` of `cardMenu.items`) to a 2x Retina PNG file on disk and emitting `diagnostic("rendered " + path)`.
+    - In `tests/support/ui.rs` and `v25.hygiene`:
+      - Assert `assert_eq!(s["truncated_labels"], json!([]))` across all `SettingsPanel` tabs/forms, `cardMenu` states, and `DirectoryPanel` states.
+      - Render PNG snapshots of all 8 core UI states (`menu_human_paused.png`, `settings_apps.png`, `settings_guide_open.png`, `settings_channels_unconfigured.png`, `settings_channels_pairing.png`, `settings_hubs_token.png`, `settings_hubs_edit_local.png`, `settings_hubs_add_remote.png`) and inspect them with `uiux-auditor` multimodal image review until zero visual/UX defects remain.
+
 
 
 
