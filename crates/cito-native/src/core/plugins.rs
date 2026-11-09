@@ -644,18 +644,10 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
             ));
         };
         let (configured_default, hubs_map, _) = try_normalize_existing_config(Some(&raw))?;
-        for (name, hub) in &hubs_map {
+        for hub in hubs_map.values() {
             validate_nats_url(hub["url"].as_str().unwrap_or(""))?;
             if hub["authMode"] == "oidc" {
-                validate_https_issuer(hub["issuer"].as_str().unwrap_or(""))?;
-                if hub
-                    .get("clientId")
-                    .or_else(|| hub.get("client_id"))
-                    .and_then(Value::as_str)
-                    .is_none_or(|s| s.trim().is_empty())
-                {
-                    return Err(format!("OIDC clientId is required for hub {name}"));
-                }
+                super::login::Settings::new(hub)?;
             }
         }
         if env::var("CITO_HUB").is_err() {

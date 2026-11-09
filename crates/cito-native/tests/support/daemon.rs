@@ -1346,10 +1346,65 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     assert_eq!(config["hubs"]["other"]["url"], "local://");
 }
 #[test]
-fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
+fn removing_default_hubs_persists_a_restartable_fallback() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    f.daemon(&[]);
+    for (key, op, remaining, expected) in [
+        (
+            "default_hub",
+            "setup_remove_hub",
+            json!({"local":{"url":"local://"}}),
+            "local",
+        ),
+        (
+            "defaultHub",
+            "remove_hub",
+            json!({"local":{"url":"local://"}}),
+            "local",
+        ),
+        ("default_hub", "remove_hub", json!({}), "local"),
+        (
+            "defaultHub",
+            "setup_remove_hub",
+            json!({"personal":{"url":"local://","enabled":false},"shared":{"url":"local://"}}),
+            "shared",
+        ),
+    ] {
+        let mut initial = json!({"hubs":remaining});
+        initial["hubs"]["work"] = json!({"url":"local://"});
+        initial[key] = json!("work");
+        fs::write(&f.config, initial.to_string()).unwrap();
+        let daemon = f.daemon(&[]);
+        assert_eq!(f.action(json!({"op":"get_snapshot"})).1["hub"], "work");
+        let (status, response) = f.action(json!({"op":op,"hub":"work"}));
+        assert_eq!(status, 200, "{response}");
+        let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        assert_eq!(saved["default_hub"], expected);
+        assert!(saved.get("defaultHub").is_none());
+        assert!(saved["hubs"].get("work").is_none());
+        let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
+        assert!(ok, "{err}");
+        let inspection: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(inspection["defaultHub"], expected);
+        assert!(inspection["hubs"].get(expected).is_some());
+        let (ok, out, err) = f.command(NATIVE, &["find", "--user", "absent", "--json"], "");
+        assert!(ok, "{err}");
+        let found: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(found["ok"], true);
+        assert_eq!(found["listeners"], json!([]));
+        f.stop(daemon);
+        let restarted = f.daemon(&[]);
+        let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+        assert_eq!(status, 200, "{snapshot}");
+        assert_eq!(snapshot["hub"], expected);
+        f.stop(restarted);
+    }
+}
+#[test]
+fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"}}}));
+    let daemon = f.daemon(&[]);
     let before = fs::read(&f.config).unwrap();
     let invalid = [
         json!({"user":"alice smith"}),
@@ -1435,7 +1490,19 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         for (key, value) in fields.as_object().unwrap() {
             assert_eq!(&config["hubs"]["work"][key], value);
         }
+        let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
+        assert!(ok, "{fields}: {err}");
+        let inspection: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(inspection["hubs"]["work"]["authMode"], fields["authMode"]);
+        assert_eq!(inspection["hubs"]["work"]["enabled"], false);
+        let (ok, out, err) = f.command(NATIVE, &["find", "--user", "absent", "--json"], "");
+        assert!(ok, "{fields}: {err}");
+        let found: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(found["ok"], true);
+        assert_eq!(found["listeners"], json!([]));
     }
+    f.stop(daemon);
+    f.daemon(&[]);
     assert_eq!(
         f.action(json!({"op":"set_desktop_banner","enabled":false}))
             .0,

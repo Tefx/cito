@@ -1564,6 +1564,14 @@ impl DaemonService {
             let rendered = serde_json::to_string_pretty(&raw).map_err(|e| e.to_string())?;
             let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&rendered))
                 .map_err(|error| format!("INVALID_INPUT: {error}"))?;
+            for key in ["defaultHub", "default_hub"] {
+                if raw
+                    .get(key)
+                    .is_some_and(|value| value.as_str().is_none_or(|name| !hubs.contains_key(name)))
+                {
+                    return Err("INVALID_INPUT: Invalid defaultHub".into());
+                }
+            }
             for cfg in hubs.values().chain(std::iter::once(&raw)) {
                 if let Some(user) = cfg.get("user").filter(|user| !user.is_null()) {
                     if !user.as_str().is_some_and(crate::plugins::validate_user) {
@@ -1724,6 +1732,28 @@ impl DaemonService {
                 self.mutate_config(|v| {
                     if let Some(h) = v["hubs"].as_object_mut() {
                         h.remove(&hub);
+                    }
+                    if v["default_hub"].as_str() == Some(&hub)
+                        || v["defaultHub"].as_str() == Some(&hub)
+                    {
+                        let fallback = v["hubs"]
+                            .as_object()
+                            .and_then(|hubs| {
+                                hubs.get_key_value("local")
+                                    .or_else(|| {
+                                        hubs.iter().find(|(_, cfg)| {
+                                            cfg["enabled"] != false && cfg["disabled"] != true
+                                        })
+                                    })
+                                    .or_else(|| hubs.iter().next())
+                                    .map(|(name, _)| name.as_str())
+                            })
+                            .unwrap_or("local")
+                            .to_string();
+                        v["default_hub"] = json!(fallback);
+                        if let Some(m) = v.as_object_mut() {
+                            m.remove("defaultHub");
+                        }
                     }
                     Ok(())
                 })?;
@@ -3136,6 +3166,12 @@ mod tests {
                     json!({"hubs":{"work":[]}}),
                     json!({"hubs":{"work":{"authMode":"invalid"}}}),
                     json!({"hubs":{"work":{"enabled":false,"user":"alice smith"}}}),
+                    json!({"default_hub":"missing"}),
+                    json!({"defaultHub":"missing"}),
+                    json!({"defaultHub":"local","default_hub":"missing"}),
+                    json!({"default_hub":"local","defaultHub":"missing"}),
+                    json!({"default_hub":42}),
+                    json!({"defaultHub":null}),
                     json!({"user":"alice smith"}),
                     json!({"user":42}),
                 ] {
@@ -3156,6 +3192,15 @@ mod tests {
                     Ok(())
                 })?;
                 assert_eq!(service.raw_config()?, json!({"other":7,"user":"bob"}));
+                for key in ["defaultHub", "default_hub"] {
+                    let mut candidate = json!({"hubs":{"work":{"url":"local://"}}});
+                    candidate[key] = json!("work");
+                    service.mutate_config(|v| {
+                        *v = candidate.clone();
+                        Ok(())
+                    })?;
+                    assert_eq!(service.raw_config()?, candidate);
+                }
                 Ok(())
             })();
             service.shutdown();
