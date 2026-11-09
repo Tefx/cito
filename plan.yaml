@@ -6967,7 +6967,7 @@ phases:
   - id: v23.repair_linker
     name: 'V23 Gate Repair: Silence Informational codesign replacing existing signature
       Stderr in bin/cito-linker & Refresh v0.19.0 Release'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -7009,3 +7009,22 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-09T07:56:17.367425Z'
+    done_at: '2026-11-09T08:28:31.859170+00:00'
+    evidence: "Artifact:\n- Commit: b5bd4fca7103fa9971d5aa3c8a9922e3458a598f (5 files\
+      \ changed, +56 / -4 lines)\n- Executor: rust-senior (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T07-57-07-102Z_01a1bf4f-989d-75ee-bc3d-78e50b411617.jsonl`)\n\
+      - Closure of `V23-GATE-1`:\n  - `bin/cito-linker`: filters informational `:\
+      \ replacing existing signature` stderr from `/usr/bin/codesign --force --sign\
+      \ - \"$tmp\"` while preserving any real `codesign` error output and non-zero\
+      \ exit codes, covered by `crates/cito-native/tests/support/distribution.rs`.\n\
+      \  - GitHub Actions `Release Cito.app & Distribution Bundle` run `42585143377`\
+      \ (`macos-15-arm64`, at tag `v0.19.0` commit `1d129aa921521ae470d07cbcadaa9fa1a2adc67d`)\
+      \ succeeded with **0 `warning:` matches and 0 `linker_messages` matches** across\
+      \ the entire CI log.\n  - Published `Cito-macos-arm64.zip` (`SHA-256: 553300685bfaa711bc9dc04abfc718f641a4dc76e5ff9cd914a74b2ec228895a`)\
+      \ and synchronized to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`,\
+      \ commit `2d07e1b8029e6bb1497185bc75322c4f3e2a077e`).\n\nVerification:\n- Run:\
+      \ `cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`\
+      \ -> 199 passed, 0 failed, 0 warnings, `Syntax OK`\n- Run: GitHub Actions run\
+      \ `42585143377` -> `conclusion: \"success\"`, `0` `warning:` / `linker_messages`\
+      \ lines in log\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v23.repair_linker`\
+      \ (`df -h`: 163 GiB available).\n\nSpec link:\n- docs/DESIGN.md (§9, V23 Stage\
+      \ 7 v0.19.0)\n- bin/cito-linker, packaging/homebrew/cito.rb"
