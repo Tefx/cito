@@ -55,26 +55,26 @@
         <h1>Subprocess Plugin Authoring Guide</h1>
       </div>
       <p>
-        Cito's Rust core launches concrete agent and channel integrations as subprocesses. A declarative <code>plugin.json</code> supplies the command, UI metadata, and configuration fields. Implement the protocol in any language; no in-process adapter or TypeScript SDK is required. Write one JSON object per line to <code>stdout</code>, read requests from <code>stdin</code>, and send diagnostic logs to <code>stderr</code>.
+        Cito launches agent harness and human channel integrations as subprocesses. A declarative <code>plugin.json</code> supplies the executable command, UI metadata, and configuration fields. Implement the protocol in any language; no in-process adapter or external SDK package is required. Write one JSON object per line to <code>stdout</code>, read requests from <code>stdin</code>, and send diagnostic logs to <code>stderr</code>.
       </p>
 
       <h2 id="overview">1. Plugin Discovery &amp; Manifests</h2>
       <p>
-        Packaged plugins live in <code>plugins/&lt;id&gt;/</code>, including <code>Contents/Resources/plugins</code> inside Cito.app. <code>CITO_BUILTIN_PLUGINS_DIR</code> selects a packaged plugin directory. The desktop host also reads <code>${CITO_STATE_DIR}/plugins/&lt;id&gt;/</code> (default <code>~/.cito/plugins/&lt;id&gt;/</code>) and colon-separated roots in <code>CITO_PLUGIN_PATH</code>. Standalone <code>cito hub</code> reads channel plugins from its bundled roots, <code>CITO_PLUGIN_DIR</code>, and <code>&lt;data-dir&gt;/plugins</code>, with later roots overriding earlier manifests of the same ID.
+        On your Mac, install custom plugins under <code>${CITO_STATE_DIR}/plugins/&lt;id&gt;/</code> (default <code>~/.cito/plugins/&lt;id&gt;/</code>) or in colon-separated directories listed in <code>CITO_PLUGIN_PATH</code>. On a standalone <code>cito hub</code> server, install channel plugins under <code>&lt;data-dir&gt;/plugins/&lt;id&gt;/</code> or <code>CITO_PLUGIN_DIR</code>, with later roots overriding earlier manifests of the same ID.
       </p>
       <ul>
-        <li><code>id</code>: <code>^[a-z0-9][a-z0-9_-]{0,31}$</code>; external plugin directory names must match the ID. <code>displayName</code> must be nonempty.</li>
-        <li><code>kind</code>: <code>agent-harness</code> or <code>human-channel</code>. The aliases <code>agent</code> and <code>human</code> normalize to those names.</li>
+        <li><code>id</code>: <code>^[a-z0-9][a-z0-9_-]{0,31}$</code>; external plugin directory names must match the ID. <code>displayName</code> must be non-empty.</li>
+        <li><code>kind</code>: <code>agent-harness</code> or <code>human-channel</code> (the shorthand values <code>agent</code> and <code>human</code> normalize to those names).</li>
         <li><code>tier</code>: <code>stable</code> or <code>experimental</code> (default <code>stable</code>).</li>
-        <li><code>command</code>: a nonempty array of executable and arguments. Executables starting with <code>./</code> or <code>../</code> resolve relative to the plugin directory. Provide the executable and set its executable permission.</li>
+        <li><code>command</code>: a non-empty array of <code>[executable, ...args]</code>. Executables starting with <code>./</code> or <code>../</code> resolve relative to the plugin directory.</li>
         <li><code>sfSymbol</code>, <code>tint</code>, and <code>cliFlag</code> control presentation and CLI enrollment. <code>scope</code> defaults to <code>hub</code>; <code>fields</code> and <code>pairing</code> declare configuration and account binding.</li>
       </ul>
       <p>
-        External plugins that omit <code>command</code> can use an <code>index.js</code> entrypoint, or <code>index.ts</code> with Node's <code>--experimental-strip-types</code>. These entrypoints still speak the subprocess protocol and require a compatible Node installation. An explicit command avoids that runtime dependency for native plugins.
+        External plugins that omit <code>command</code> can provide an <code>index.js</code> entrypoint (or <code>index.ts</code> with Node's <code>--experimental-strip-types</code>) when a local Node runtime is installed. Specifying an explicit <code>command</code> allows native executables, Python scripts, or shell scripts with zero Node dependency.
       </p>
 
       <h2 id="agent-plugins">2. Contract 1: <code>agent-harness</code></h2>
-      <p>Create <code>~/.cito/plugins/sample-agent/plugin.json</code> and install your executable at <code>bin/cito-plugin-sample-agent</code>:</p>
+      <p>Create <code>~/.cito/plugins/sample-agent/plugin.json</code> and place your executable at <code>bin/cito-plugin-sample-agent</code>:</p>
       <pre><code data-plugin-manifest>{
   "id": "sample-agent",
   "kind": "agent-harness",
@@ -86,34 +86,34 @@
   "command": ["./bin/cito-plugin-sample-agent"]
 }</code></pre>
       <p>
-        For a one-shot operation, the host writes a JSON request followed by a newline and closes stdin. The subprocess returns one JSON response line and exits. Requests include <code>state_dir</code> and <code>env</code>; setup requests also include <code>plugin_dir</code>. The host enforces a 10-second deadline and kills timed-out children. Nonzero exits or invalid JSON produce <code>PLUGIN_EXEC_FAILED</code>.
+        For each one-shot operation, Cito writes a single JSON line to <code>stdin</code> and closes <code>stdin</code>; the plugin writes a single JSON response line to <code>stdout</code> and exits. Requests include <code>state_dir</code> and <code>env</code> (except <code>probe</code>, which receives <code>session_id</code>, <code>endpoint_pid</code>, <code>cwd</code>, and <code>state_dir</code>; setup requests also include <code>plugin_dir</code>). Timeouts are <code>1.5s</code> for <code>discover_sessions</code> and <code>update_badge</code>, <code>10s</code> for <code>setup_*</code>, <code>resolve_caller</code>, and <code>probe</code>, and <code>120s</code> for <code>wake</code>. Non-zero exits or invalid JSON produce <code>PLUGIN_EXEC_FAILED</code>.
       </p>
-      <table>
-        <thead><tr><th>Operation</th><th>Request / response contract</th></tr></thead>
+      <table class="docs-table">
+        <thead><tr><th>Operation</th><th>Request / Response Contract</th></tr></thead>
         <tbody>
           <tr><td><code>setup_inspect</code></td><td>Inspect installed configuration. Return <code>{"ok":true,"installed":true,"configured":true,"paths":["..."]}</code>.</td></tr>
           <tr><td><code>setup_apply</code></td><td>Honor <code>dry_run</code> and <code>force</code>. Return <code>actions</code> with <code>target</code>, <code>path</code>, <code>status</code> (<code>created</code>, <code>updated</code>, <code>unchanged</code>, or <code>conflict</code>), <code>backupPath</code>, and <code>detail</code>.</td></tr>
           <tr><td><code>setup_remove</code></td><td>Honor <code>dry_run</code>; remove only owned configuration and return <code>actions</code>.</td></tr>
           <tr><td><code>discover_sessions</code></td><td>Return <code>{"ok":true,"sessions":[...]}</code>. Each session carries <code>harness</code>, <code>session_id</code>, <code>cwd</code>, <code>repo</code>, <code>branch</code>, <code>title</code>, <code>endpoint_pid</code>, and <code>updated_at_ms</code>.</td></tr>
-          <tr><td><code>resolve_caller</code></td><td>Resolve <code>meta</code>, <code>headers</code>, <code>cwd</code>, <code>http_client_pid</code>, <code>http_transport</code>, <code>require_open</code>, <code>cli_cmd</code>, and <code>explicit_session_id</code>. Return <code>{"ok":true,"caller":{...}}</code> with the session fields, or <code>{"ok":false,"error_code":"BINDING_REQUIRED","message":"..."}</code>.</td></tr>
+          <tr><td><code>resolve_caller</code></td><td>Resolve <code>meta</code>, <code>headers</code>, <code>cwd</code>, <code>http_client_pid</code>, <code>http_transport</code>, <code>require_open</code>, <code>cli_cmd</code>, and <code>explicit_session_id</code>. Return <code>{"ok":true,"caller":{...}}</code> or <code>{"ok":false,"error_code":"BINDING_REQUIRED","message":"..."}</code>.</td></tr>
           <tr><td><code>probe</code></td><td>Check <code>session_id</code>, <code>cwd</code>, and <code>endpoint_pid</code>. Return <code>ok</code>, <code>status</code> (<code>alive</code>, <code>switched</code>, <code>closed_definitive</code>, or <code>transient_error</code>), <code>current_session_id</code>, and <code>reason</code>.</td></tr>
           <tr><td><code>update_badge</code></td><td>Set or clear <code>badge</code> for the session and endpoint. Return <code>{"ok":true}</code>.</td></tr>
           <tr><td><code>wake</code></td><td>Deliver the rendered <code>text</code> and <code>signals</code> for <code>batch_id</code>; honor the <code>wake</code> flag. Return <code>outcome</code>: <code>delivered</code>, <code>delivered_unconfirmed</code>, <code>session_switched</code>, or <code>driver_unavailable</code>, plus <code>ok</code> and <code>reason</code>.</td></tr>
         </tbody>
       </table>
-      <pre><code>{"op":"wake","session_id":"session-1","cwd":"/Users/alice/repo","endpoint_pid":1234,"batch_id":"b_1","wake":true,"text":"Review needed","signals":[{"signal_id":"s_1","from_listener_id":"bob-sample-agent-session-2","from_user":"bob","from_harness":"sample-agent","from_title":"Review","message":"Please review","created_at":"2026-09-01T00:00:00Z","in_reply_to":null}],"state_dir":"/Users/alice/.cito","env":{}}
+      <pre><code>{"op":"wake","session_id":"session-1","cwd":"/Users/alice/repo","endpoint_pid":1234,"batch_id":"b_1","wake":true,"checkpoint_only":true,"queue_written":false,"queue_confirmed":false,"text":"Review needed","signals":[{"signal_id":"s_1","from_listener_id":"bob-8a4f2c9011b4e3d2","from_user":"bob","from_harness":"sample-agent","from_title":"Review","message":"Please review","created_at":"2026-09-01T00:00:00Z","in_reply_to":null}],"state_dir":"/Users/alice/.cito","env":{}}
 {"ok":true,"outcome":"delivered","reason":null}</code></pre>
       <p>
-        Multi-effect wake handlers support <code>checkpoint_only</code>, <code>queue_written</code>, and <code>queue_confirmed</code>. Return the insertion checkpoint with <code>queue_written: true</code>, its actual <code>queue_confirmed</code> value, and <code>continue_wake: true</code> before a separate wake effect. The host persists the checkpoint and revalidates unreadness, binding, generation, owner, and Hub claim. On the next request, skip insertion when <code>queue_written</code> is true; an unknown insertion (<code>queue_confirmed: false</code>) must never be resubmitted. Omitting <code>continue_wake</code> completes the operation. Single-effect plugins may ignore <code>checkpoint_only</code>. A process death before the checkpoint response retains an at-least-once delivery limitation.
+        Single-step wake plugins can ignore <code>checkpoint_only</code> and return <code>{"ok":true,"outcome":"delivered"}</code> directly. Two-step wake plugins (which write to a local queue before triggering an external resume command) can return an intermediate checkpoint response with <code>queue_written: true</code>, <code>queue_confirmed: true</code>, and <code>continue_wake: true</code>, then complete the resume command on the follow-up invocation (returning <code>open_confirmed: true</code> or <code>insertion_unknown: true</code> when applicable).
       </p>
       <h3>Optional streaming sidecar</h3>
       <p>
-        Set <code>channelEnv</code> to the environment variable that enables your streaming integration in <code>cito mcp-stdio</code>. The host sends <code>{"op":"stdio_sidecar","endpoint_pid":1234,"cwd":"...","state_dir":"...","env":{}}</code> and keeps stdin open. Emit <code>{"op":"ready","capabilities_patch":{...}}</code> first, then JSON-RPC notification frames on stdout. Monitor stdin EOF and exit when the parent closes it.
+        Set <code>channelEnv</code> to the environment variable that enables your streaming integration in <code>cito mcp-stdio</code>. When that variable is set, <code>cito mcp-stdio</code> spawns the plugin with <code>{"op":"stdio_sidecar","endpoint_pid":1234,"cwd":"...","state_dir":"...","env":{}}</code> and keeps <code>stdin</code> open. Emit <code>{"op":"ready","capabilities_patch":{...}}</code> first, then JSON-RPC notification frames on <code>stdout</code>. Monitor <code>stdin</code> for EOF and exit when the parent closes it.
       </p>
 
       <h2 id="human-plugins">3. Contract 2: <code>human-channel</code></h2>
       <p>
-        Hub-scoped human channels run as persistent subprocesses owned by <code>HubEngine</code>. The Hub starts a process when required Hub configuration is present or an on-demand pairing/test RPC arrives. It sends <code>shutdown</code> and terminates the process when all bindings are disabled and Hub configuration is cleared. Monitor stdin on a dedicated reader and exit within 100 ms of EOF to avoid orphan processes. The local desktop UI uses the separate UI IPC contract with <code>scope: "user"</code>.
+        Hub-scoped human channels run as persistent subprocesses managed by the Hub. The Hub starts the subprocess when required Hub configuration is present or an on-demand pairing/test request arrives, and sends <code>{"op":"shutdown"}</code> when all bindings are disabled and Hub configuration is cleared. Monitor <code>stdin</code> on a dedicated reader thread and exit within 100 ms of EOF to prevent orphan polling processes.
       </p>
       <pre><code data-plugin-manifest>{
   "id": "sample-chat",
@@ -133,20 +133,20 @@
       <h3>Hub → plugin (stdin NDJSON)</h3>
       <ul>
         <li><code>configure</code>: <code>hub_config</code>, <code>bindings</code> (each with <code>principal_id</code>, <code>user</code>, <code>config</code>), and persisted <code>cursor</code>.</li>
-        <li><code>deliver</code>: <code>delivery_id</code>, <code>principal_id</code>, <code>user</code>, recipient <code>config</code>, and <code>signal</code> (ID, sender, recipient, kind, summary, message, and creation time).</li>
+        <li><code>deliver</code>: <code>delivery_id</code>, <code>principal_id</code>, <code>user</code>, recipient <code>config</code>, and <code>signal</code> (<code>signal_id</code>, <code>from</code> with <code>principal_id</code>, <code>user</code>, <code>host_id</code>, <code>host_name</code>, <code>harness</code>, <code>listener_id</code>, <code>title</code>, and <code>about</code>, <code>to.listener_id</code>, <code>message</code>, <code>in_reply_to</code>, and <code>created_at_ms</code>).</li>
         <li><code>on_acked</code>: <code>principal_id</code>, <code>signal_ids</code>, <code>acked_at_ms</code>, <code>external_msg_ids</code>, and <code>user_config</code>, for synchronizing external read state.</li>
         <li><code>format_pair</code> / <code>test</code>: correlated RPC requests with <code>req_id</code> and <code>hub_config</code>. Pair formatting includes <code>code</code>; testing includes <code>user</code> and <code>user_config</code>.</li>
-        <li><code>pair_ack</code>: <code>code</code>, <code>ok</code>, <code>owner_user</code>, and <code>error</code>. <code>reply_ack</code>: <code>update_id</code>, <code>ok</code>, <code>target_display</code>, and <code>error</code>.</li>
+        <li><code>pair_ack</code>: <code>code</code>, <code>ok</code>, <code>owner_user</code>, and <code>error</code>. <code>reply_ack</code>: <code>update_id</code>, <code>ok</code>, <code>signal_id</code>, <code>target_display</code>, optional <code>duplicate</code>, and <code>error</code>.</li>
         <li><code>{"op":"shutdown"}</code>: release external connections and exit.</li>
       </ul>
       <pre><code>{"op":"configure","hub_config":{"apiToken":"example-token"},"bindings":[{"principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"}}],"cursor":"100"}
-{"op":"deliver","delivery_id":"d_1","principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"},"signal":{"signal_id":"s_1","from":{"listener_id":"bob-sample-agent-session-2","canonical_id":"c_sender","harness":"sample-agent","title":"Review"},"to":{"listener_id":"alice-human-default"},"kind":"NeedInput","summary":"Review needed","message":"Please review","created_at_ms":1700000000000}}</code></pre>
+{"op":"deliver","delivery_id":"d_1","principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"},"signal":{"signal_id":"s_1","from":{"principal_id":"none#bob","user":"bob","host_id":"mac-1","host_name":"Bob-Mac","harness":"sample-agent","listener_id":"bob-8a4f2c9011b4e3d2","title":"Review","about":"Release check"},"to":{"listener_id":"c_9f0e1d2c3b4a5968"},"target_generation":1,"sender_endpoint_key":"ep_1","message":"Please review","in_reply_to":null,"created_at_ms":1700000000000}}</code></pre>
       <h3>Plugin → Hub (stdout NDJSON)</h3>
       <ul>
         <li><code>delivered</code>: report <code>delivery_id</code>, <code>ok</code>, <code>external_msg_id</code>, all <code>external_msg_ids</code>, and <code>error</code> after the external delivery result is known.</li>
         <li><code>pair_redeem</code>: provide <code>code</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>is_private_chat</code>, <code>display_label</code>, and <code>user_config_patch</code>.</li>
         <li><code>inbound_reply</code>: provide <code>update_id</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>reply_to_external_msg_id</code>, and <code>text</code>. The Hub resolves the reply target and routes a regular signal.</li>
-        <li><code>cursor_save</code>: persist the channel's external update <code>cursor</code>.</li>
+        <li><code>cursor_save</code>: persist the channel's external update <code>cursor</code> after receiving <code>reply_ack</code>.</li>
         <li><code>rpc_result</code>: echo <code>req_id</code>, <code>ok</code>, and <code>error</code>; pair formatting returns <code>instruction</code> and optionally <code>bot_username</code>, while testing returns <code>detail</code>.</li>
       </ul>
       <pre><code>{"op":"delivered","delivery_id":"d_1","ok":true,"external_msg_id":"102","external_msg_ids":["101","102"],"error":null}
@@ -158,14 +158,14 @@
 
       <h2 id="two-scope-fields">4. Configuration &amp; Pairing</h2>
       <p>
-        The UI renders manifest fields automatically: <code>fields[].scope: "hub"</code> holds shared credentials, while <code>fields[].scope: "user"</code> holds each user's recipient binding. This field scope is independent of the plugin's process scope. With <code>pairing.supported: true</code>, the Hub generates a 10-character Base32 pairing token displayed with the <code>cito-</code> prefix. Implement this exchange:
+        The Settings UI renders manifest fields automatically: <code>fields[].scope: "hub"</code> holds shared Hub credentials, while <code>fields[].scope: "user"</code> holds each user's recipient binding. With <code>pairing.supported: true</code>, the Hub generates a 10-character Base32 pairing token displayed with the <code>cito-</code> prefix:
       </p>
       <pre><code>{"op":"format_pair","req_id":"r_1","code":"cito-a1b2c3d4e5","hub_config":{"apiToken":"example-token"}}
 {"op":"rpc_result","req_id":"r_1","ok":true,"instruction":"Send /start cito-a1b2c3d4e5 in a private chat","error":null}
 {"op":"pair_redeem","code":"cito-a1b2c3d4e5","external_chat_id":"room-1","external_user_id":"user-1","is_private_chat":true,"display_label":"alice","user_config_patch":{"recipientId":"room-1"}}
 {"op":"pair_ack","code":"cito-a1b2c3d4e5","ok":true,"owner_user":"alice","error":null}</code></pre>
       <p>
-        The Hub validates the pairing code and ownership before accepting the binding. Human replies and agent messages use the same Hub signaling path; plugins must not bypass it with external window jumps.
+        The Hub validates the pairing code and ownership before accepting the binding. Human replies and agent messages use the same Hub signaling path.
       </p>
     </main>
   </div>

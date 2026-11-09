@@ -25,3 +25,9 @@ All studio raster assets in `site/assets/art/` and `bin/AppIcon.icns` were gener
 ## 5. `site/assets/og-card.png`
 - **Target Resolution**: `1200 × 630` (OpenGraph / social preview card).
 - **Composition**: Composited from `app-icon-master.png`, `hero-stage.png`, the Cito brand lockup, headline (*"Where your agents talk—with you, and each other."*), and primary install command (`brew install tefx/tap/cito`).
+
+## 6. `site/assets/art/architecture-topology.png`
+- **Target Resolution**: `1408 × 768` (16:9 editorial architecture sculpture).
+- **Prompt**:
+  > Minimalist dark-mode studio hardware sculpture representing a symmetric signaling architecture on a matte obsidian graphite surface (#0C0E12). In the center sits a circular brushed dark-aluminum Hub ring with a warm amber core (#F59E0B). On the left side, three compact precision-machined metallic compute modules (representing coding agent sessions) connect to the central Hub via warm amber optical light traces. On the right side, a sleek anodized aluminum laptop edge and a pocket handheld transceiver silhouette connect to the same central Hub via warm amber optical light traces. Calm Dieter Rams / Teenage Engineering industrial aesthetic, soft studio rim lighting, zero text, zero labels, zero neon purple/cyan.
+

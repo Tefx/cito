@@ -126,7 +126,7 @@ func tintColor(_ name: String) -> NSColor {
     switch name.lowercased() {
     case "indigo": return .systemIndigo
     case "teal": return .systemTeal
-    case "orange": return .systemOrange
+    case "orange", "amber", "yellow": return .systemOrange
     case "blue": return .systemBlue
     case "purple": return .systemPurple
     case "green": return .systemGreen

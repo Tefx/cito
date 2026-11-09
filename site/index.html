@@ -91,7 +91,7 @@
                   After updating the response schema in <code>acme/service</code>, Claude Code discovers your open Codex frontend session on the same workspace and sends a direct wake signal.
                 </p>
                 <div class="stage-signal-box">
-                  to: "codex-web#8a4f"<br />
+                  to: "alice-8a4f2c9011b4e3d2"<br />
                   "Updated /v2/billing response fields. Ready for client sync."
                 </div>
               </div>
@@ -105,15 +105,10 @@
                 <p class="stage-card-body">
                   Cito wakes the waiting Codex thread and delivers the incoming signal card directly into its turn—zero terminal switching or manual copy-pasting.
                 </p>
-                <div class="stage-signal-box" data-sim-a2a-output>
-                  ⚡ Signal delivered — Codex session is now awake and updating the frontend client.
+                <div class="stage-signal-box">
+                  ⚡ Signal delivered — Codex session woke immediately, pulled the updated schema, and verified client types.
                 </div>
               </div>
-            </div>
-
-            <div class="stage-interactive-bar">
-              <span class="stage-card-body">Try replaying the cross-harness wake sequence:</span>
-              <button type="button" class="stage-action-btn" data-sim-a2a>Replay Agent Wake</button>
             </div>
           </div>
 
@@ -144,15 +139,10 @@
                 <p class="stage-card-body">
                   Click the macOS notification banner to focus the inline reply bar, send a one-line decision, and watch Cito wake the agent while marking Telegram read.
                 </p>
-                <div class="stage-signal-box" data-sim-human-output>
-                  💬 Waiting for your one-line reply from the Mac menu bar or Telegram…
+                <div class="stage-signal-box">
+                  ↩ Reply ("Ship v2.4 now") delivered to pi · release-audit — Telegram alert marked read automatically.
                 </div>
               </div>
-            </div>
-
-            <div class="stage-interactive-bar">
-              <span class="stage-card-body">Simulate sending an inline reply from the menu bar composer:</span>
-              <button type="button" class="stage-action-btn" data-sim-human>Send Inline Reply ("Ship it now")</button>
             </div>
           </div>
         </div>
@@ -167,13 +157,13 @@
           <article class="surface-card" data-native-surface="menu">
             <h3>Menu Bar</h3>
             <div class="native-panel">
-              <div class="native-row"><strong>Cito · local</strong><span class="native-pill">● Connected</span></div>
-              <p class="native-muted">personal · Active listeners</p>
-              <div class="native-row"><span>@alice (Me)</span><span class="native-pill">👥 Team</span></div>
-              <div class="native-row"><span>API contract · Agent Session</span><span class="native-pill">🔒 Self</span></div>
-              <p class="native-muted">AVAILABLE SESSIONS</p>
-              <div class="native-row"><span>Web client</span><span class="native-pill">Listen</span></div>
-              <div class="native-row"><span class="native-pill">Search Network Directory…</span><span class="native-pill">Settings…</span></div>
+              <div class="native-row"><strong>Cito · 2 listening</strong><span class="native-pill">● work</span></div>
+              <div class="native-row"><span>@alice (Me) · Desktop · Telegram</span><span class="native-pill">👥 Team · ×</span></div>
+              <div class="native-row"><span>API contract · ~/acme/service</span><span class="native-pill">🔒 Self · ×</span></div>
+              <p class="native-muted">AVAILABLE SESSIONS · ▾ Codex · 1 open</p>
+              <div class="native-row"><span>Web client · ~/acme/web · main</span><span class="native-pill">+ Listen</span></div>
+              <div class="native-row"><span>Search Network Directory…</span><span class="native-pill">2 online</span></div>
+              <div class="native-row"><span class="native-muted">Stop All</span><span class="native-pill">Settings…</span><span class="native-muted">Quit Cito ⌘Q</span></div>
             </div>
           </article>
           <article class="surface-card" data-native-surface="directory" data-surface-preview>
@@ -185,16 +175,17 @@
               </div>
               <div data-preview-panel="directory">
                 <p class="native-field">Search by user, repo, title, host, or #id…</p>
-                <div class="native-row"><span>All · My Hosts</span><span>All Harnesses</span></div>
-                <div class="native-row"><strong>Web client · acme/service</strong><span class="native-pill">Message</span></div>
-                <p class="native-muted">alice · personal · 🔒 Self</p>
-                <p class="native-muted">↵ Copy Selected ID &nbsp; ⎋ Close</p>
+                <div class="native-row"><span>All · My Hosts</span><span>All Harnesses · Codex · Pi Coding Agent · Claude Code</span></div>
+                <div class="native-row"><strong>Web client · acme/service</strong><span class="native-pill">Message · 📋 alice#8a4f</span></div>
+                <p class="native-muted">@alice @mac-studio · Frontend sync</p>
+                <div class="native-row"><span class="native-muted">↵ Copy Selected ID &nbsp; ⎋ Close</span><span class="native-muted">2 of 2 online</span></div>
               </div>
               <div data-preview-panel="activity" hidden>
                 <div class="native-row"><span>For Me · All Activity · Unread</span><span class="native-pill">✓ Read All</span></div>
-                <p><strong>API contract</strong> → @alice</p><p>Ready for review. Ship the update?</p>
-                <p class="native-field">↩ Reply &nbsp; Ship it after the docs check.</p>
-                <div class="native-row"><span class="native-pill">Send ⏎</span><span class="native-muted">↵ Send &nbsp; ⎋ Cancel Reply</span></div>
+                <div class="native-row"><strong>● @alice → @alice (Me)</strong><span class="native-pill">↩ Reply</span></div>
+                <p>Ready for review. Ship the update?</p>
+                <p class="native-field">To: alice#4c91 &nbsp; Ship it after the docs check.</p>
+                <div class="native-row"><span class="native-pill">Send ⏎ · Cancel</span><span class="native-muted">↵ Send &nbsp; ⎋ Cancel Reply · 1 signals · 1 unread</span></div>
               </div>
             </div>
           </article>
@@ -207,22 +198,23 @@
                 <button type="button" role="tab" aria-selected="false" data-preview-tab="hubs">Hubs &amp; Network</button>
               </div>
               <div data-preview-panel="apps">
-                <div class="native-row"><strong>Codex</strong><span class="native-pill">Set Up</span></div>
-                <div class="native-row"><strong>Pi · ● Connected</strong><span class="native-pill">Disconnect</span></div>
-                <div class="native-row"><strong>Claude Code</strong><span class="native-pill">Set Up</span></div>
+                <div class="native-row"><strong>Codex · ○ Not Set Up</strong><span class="native-pill">Set Up</span></div>
+                <div class="native-row"><strong>Pi Coding Agent · ● Connected</strong><span class="native-pill">Re-check · Disconnect</span></div>
+                <div class="native-row"><strong>Claude Code · Experimental · ○ Not Set Up</strong><span class="native-pill">Set Up</span></div>
               </div>
               <div data-preview-panel="channels" hidden>
                 <div class="native-row"><span class="native-pill">local</span><span class="native-pill">work</span></div>
                 <p>Mac Desktop Banner · ● Enabled</p>
                 <p><strong>Telegram</strong> · Hub Service: ● Ready</p>
                 <p class="native-field">Bot Token &nbsp; ••••••••</p>
+                <p class="native-field">Chat ID &nbsp; Paired via /start or enter Chat ID</p>
                 <p class="native-muted">Follow the account-specific pairing instruction shown here.</p>
                 <div class="native-row"><span class="native-pill">Pair Account…</span><span class="native-pill">Send Test</span><span class="native-pill">Save</span></div>
               </div>
               <div data-preview-panel="hubs" hidden>
-                <div class="native-row"><strong>Share Hub on Local Network</strong><span class="native-pill">Off</span></div>
-                <div class="native-row"><span class="native-pill">✨ Paste from Invite</span><span class="native-pill">+ Add Hub…</span></div>
-                <div class="native-row"><span>local · local://</span><span class="native-pill">Enabled</span></div>
+                <div class="native-row"><strong>Share Hub on Local Network · http://127.0.0.1:4291</strong><span class="native-pill">Off · Copy 1-Click Join Code</span></div>
+                <div class="native-row"><span class="native-muted">CONNECTED HUBS</span><span class="native-pill">✨ Paste from Invite · + Add Hub…</span></div>
+                <div class="native-row"><span>local · local:// · none</span><span class="native-pill">Enabled</span></div>
               </div>
               <div class="native-row"><span>Start Cito at Login</span><span class="native-pill">Remove All Integrations…</span></div>
             </div>
@@ -230,7 +222,7 @@
           <article class="surface-card" data-native-surface="banner">
             <h3>Wake Banner</h3>
             <div class="native-panel native-banner">
-              <div class="native-row"><strong>Cito · API contract</strong><span>1 signal</span></div>
+              <div class="native-row"><strong>Cito · API contract</strong><span class="native-pill">Notification</span></div>
               <p class="native-muted">alice@personal · Web client</p>
               <p>Client checks passed. Ready for your review.</p>
               <p class="native-pill">Click to reply in Cito ↩</p>
@@ -332,7 +324,7 @@
         <span class="eyebrow">Ecosystem &amp; Extensibility</span>
         <h2 id="harnesses-heading" class="section-title">Built for your favorite harnesses.</h2>
         <p class="section-subtitle">
-          First-class plugins for today's leading coding agents and human channels, backed by an open Plugin SDK.
+          First-class plugins for today's leading coding agents and human channels, backed by an open subprocess plugin protocol.
         </p>
       </div>
 
@@ -350,10 +342,10 @@
 
         <div class="harness-card">
           <div>
-            <span class="harness-tag">Agent App · Hook Channel</span>
+            <span class="harness-tag">Agent App · Experimental</span>
             <h3 class="harness-name">Claude Code</h3>
             <p class="harness-desc">
-              Delivers queued signals across turn boundaries through a fast native hook binary and displays unread signal badges in your status line.
+              Delivers queued signals across turn boundaries through a fast native hook binary and displays unread signal badges in your session.
             </p>
           </div>
           <a class="text-link" href="./docs/guide.html#agent-apps">View Claude Code setup →</a>
@@ -362,9 +354,9 @@
         <div class="harness-card">
           <div>
             <span class="harness-tag">Agent App · Stable</span>
-            <h3 class="harness-name">Pi</h3>
+            <h3 class="harness-name">Pi Coding Agent</h3>
             <p class="harness-desc">
-              Includes a live bridge extension with an interactive <code>/cito</code> slash command, footer status indicator, and instant session wake delivery.
+              Installs as a standard Pi package with live socket wake delivery, a footer status badge, and the interactive <code>/cito</code> slash command.
             </p>
           </div>
           <a class="text-link" href="./docs/guide.html#agent-apps">View Pi setup →</a>
@@ -372,38 +364,36 @@
 
         <div class="harness-card">
           <div>
-            <span class="harness-tag">Human Channel · Built-In</span>
-            <h3 class="harness-name">Telegram</h3>
+            <span class="harness-tag">Human Channel · Built-in</span>
+            <h3 class="harness-name">Telegram &amp; Custom Plugins</h3>
             <p class="harness-desc">
-              Pair your phone with a one-click <code>/start</code> code in <code>Settings…</code> (<code>⌘,</code>) and reply directly from Telegram with swipe-to-reply support.
+              Pair your phone with a 10-character code in <code>Settings…</code>, or build your own Agent App and Human Channel plugins over <code>stdin</code>/<code>stdout</code> NDJSON.
             </p>
           </div>
-          <a class="text-link" href="./docs/guide.html#telegram-pairing">View Telegram pairing →</a>
+          <a class="text-link" href="./docs/plugins.html">Explore Plugin Protocol →</a>
         </div>
-      </div>
-
-      <div class="section-links-row">
-        <a class="text-link" href="./docs/guide.html">Read the Getting Started Guide →</a>
-        <a class="text-link" href="./docs/plugins.html">Build a Custom Subprocess Plugin →</a>
       </div>
     </section>
 
-    <!-- Section 4: Ready in Under a Minute -->
+    <!-- Section 4: Get Started in 30 Seconds -->
     <section class="section" aria-labelledby="cta-heading">
-      <div class="closing-card">
-        <span class="eyebrow">Get Started</span>
-        <h2 id="cta-heading" class="section-title">Ready in under a minute.</h2>
+      <div class="cta-banner">
+        <span class="eyebrow">Ready on macOS Apple Silicon</span>
+        <h2 id="cta-heading" class="section-title">Get started in 30 seconds.</h2>
         <p class="section-subtitle">
-          Install via Homebrew or download the native macOS app bundle. Your local sessions and menu bar control plane come online automatically.
+          Install via Homebrew or download the standalone <code>Cito.app</code> bundle. Your local hub starts automatically—no external broker or cloud account required.
         </p>
-        <div class="install-actions" style="margin-top: 2rem;">
+        <div class="install-actions">
           <button type="button" class="copy-command-pill" data-copy-command="brew install tefx/tap/cito" aria-label="Copy Homebrew install command">
             <span class="prompt-dollar">$</span>
             <code>brew install tefx/tap/cito</code>
             <span class="copy-badge" data-copy-badge>Copy</span>
           </button>
           <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest">
-            Download Cito.app for macOS
+            Download Cito.app
+          </a>
+          <a class="secondary-button" href="./docs/guide.html">
+            Read the Guide →
           </a>
         </div>
       </div>
@@ -412,12 +402,13 @@
 
   <footer class="site-footer">
     <div>
-      <strong>Cito</strong> · Cross-harness signaling for coding agents and humans on macOS.
+      <strong>Cito</strong> · Cross-harness agent and human signaling network for macOS.
     </div>
     <div class="footer-links">
       <a href="./docs/guide.html">Getting Started</a>
-      <a href="./docs/plugins.html">Plugin SDK</a>
+      <a href="./docs/plugins.html">Plugins</a>
       <a href="./docs/architecture.html">Architecture</a>
+      <a href="https://github.com/Tefx/cito/releases/latest">Releases</a>
       <a href="https://github.com/Tefx/cito">GitHub</a>
     </div>
   </footer>

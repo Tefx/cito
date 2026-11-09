@@ -37,7 +37,7 @@
       <div class="docs-nav-group">
         <div class="docs-nav-title">Documentation</div>
         <a class="docs-nav-link" href="./guide.html" aria-current="page">Getting Started Guide</a>
-        <a class="docs-nav-link" href="./plugins.html">Plugin SDK Authoring</a>
+        <a class="docs-nav-link" href="./plugins.html">Subprocess Plugin Authoring</a>
         <a class="docs-nav-link" href="./architecture.html">Architecture &amp; Protocol</a>
       </div>
       <div class="docs-nav-group">
@@ -56,7 +56,7 @@
         <h1>Getting Started with Cito</h1>
       </div>
       <p>
-        Cito connects your coding agent sessions (<strong>Codex</strong>, <strong>Claude Code</strong>, and <strong>Pi</strong>) and your own human presence (macOS Menu Bar and <strong>Telegram</strong>) on a shared signaling network. <code>Cito.app</code> and <code>cito</code> run natively on macOS with zero Node.js runtime dependency, and open the visual <code>Settings…</code> (<code>⌘,</code>) window on first launch so you can choose which Agent Apps to connect.
+        Cito connects your coding agent sessions (<strong>Codex</strong>, <strong>Claude Code</strong>, and <strong>Pi Coding Agent</strong>) and your own human presence (macOS Menu Bar and <strong>Telegram</strong>) on a shared signaling network. <code>Cito.app</code> and <code>cito</code> run natively on macOS with zero Node.js runtime dependency, and open the visual <code>Settings…</code> (<code>⌘,</code>) window on first launch so you can choose which Agent Apps to connect.
       </p>
 
       <h2 id="installation">1. One-Step Installation</h2>
@@ -88,38 +88,38 @@
         Click the Cito icon in your macOS menu bar and select <strong><code>Settings…</code></strong> (or press <code>⌘,</code>) to open the 3-tab configuration window:
       </p>
       <ul>
-        <li><strong>Tab 1 — <code>Agent Apps</code></strong>: Displays every installed or available coding harness plugin (<code>Codex</code>, <code>Pi</code>, and experimental <code>Claude Code</code>) with live status badges and a one-click <strong><code>Set Up</code></strong> button and <strong><code>Disconnect</code></strong> control, plus the <strong><code>Start Cito at Login</code></strong> toggle in the footer.</li>
-        <li><strong>Tab 2 — <code>Human Channels</code></strong>: Configure external human notification channels such as <strong>Telegram</strong> for any Hub, select the target Hub, enter credentials in masked fields, click <strong><code>Pair Account…</code></strong> to pair your personal chat, or click <strong><code>Send Test</code></strong>. The footer also provides <strong><code>Remove All Integrations…</code></strong> with a separate confirmation.</li>
-        <li><strong>Tab 3 — <code>Hubs &amp; Network</code></strong>: Enable <strong><code>Share Hub on Local Network</code></strong> to link multiple Macs, copy a 1-click invite code, or join a remote team Hub (<code>none</code>, <code>token</code>, or <code>oidc</code>).</li>
+        <li><strong>Tab 1 — <code>Agent Apps</code></strong>: Displays every installed or available coding harness (<code>Codex</code>, <code>Pi Coding Agent</code>, and experimental <code>Claude Code</code>) with live status badges (<code>● Connected</code> / <code>○ Not Set Up</code>) and one-click <strong><code>Set Up</code></strong>, <strong><code>Re-check</code></strong>, and <strong><code>Disconnect</code></strong> controls.</li>
+        <li><strong>Tab 2 — <code>Human Channels</code></strong>: Select your target Hub at the top, toggle <strong><code>Mac Desktop Banner</code></strong>, enter channel credentials (such as your Telegram <strong>Bot Token</strong> and <strong>Chat ID</strong>), click <strong><code>Pair Account…</code></strong> to pair your personal chat, or click <strong><code>Send Test</code></strong> and <strong><code>Save</code></strong>.</li>
+        <li><strong>Tab 3 — <code>Hubs &amp; Network</code></strong>: Toggle <strong><code>Share Hub on Local Network</code></strong> (<code>:4291</code>), click <strong><code>Copy 1-Click Join Code</code></strong>, or click <strong><code>✨ Paste from Invite</code></strong> / <strong><code>+ Add Hub…</code></strong> to join a LAN, Tailscale, or Team OIDC Hub.</li>
+        <li><strong>Window Footer</strong>: Toggle <strong><code>Start Cito at Login</code></strong> on the left or click <strong><code>Remove All Integrations…</code></strong> on the right (with an optional checkbox to also delete <code>~/.cito</code> local data and hub settings).</li>
       </ul>
 
       <h2 id="agent-apps">3. Agent Apps Setup Reference</h2>
       <p>
-        While <code>Cito.app</code> and the <strong><code>Agent Apps</code></strong> tab in <code>Settings…</code> (<code>⌘,</code>) manage these configuration files automatically, you can also inspect what gets registered for each harness:
+        While <code>Cito.app</code> and the <strong><code>Agent Apps</code></strong> tab in <code>Settings…</code> (<code>⌘,</code>) manage these configuration files automatically (writing the expanded absolute path for your macOS account), you can also inspect what gets registered for each harness:
       </p>
 
       <h3>Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
       <pre><code>[mcp_servers.cito]
-command = "~/.cito/bin/cito-mcp"
+command = "/Users/&lt;you&gt;/.cito/bin/cito-mcp"
 args = []</code></pre>
 
       <h3>Pi Coding Agent (<code>~/.pi/agent/settings.json</code>)</h3>
       <pre><code>{
-  "packages": ["~/.cito/plugins/pi"]
+  "packages": ["/Users/&lt;you&gt;/.cito/plugins/pi"]
 }</code></pre>
-      <p>The installed plugin package registers <code>~/.cito/bin/cito-mcp</code> and the session bridge automatically.</p>
       <p>
-        Inside any Pi session, use the <code>/cito</code> slash command (<code>/cito on</code>, <code>/cito team</code>, <code>/cito off</code>) or click <strong><code>+ Listen</code></strong> under <code>AVAILABLE SESSIONS</code> in the menu bar dropdown.
+        The installed Pi package registers <code>/Users/&lt;you&gt;/.cito/bin/cito-mcp</code> and the live session wake bridge automatically on package load. Inside any Pi session, use the <code>/cito</code> slash command (<code>/cito on</code>, <code>/cito team</code>, <code>/cito off</code>) or click <strong><code>+ Listen</code></strong> under <code>AVAILABLE SESSIONS</code> in the menu bar dropdown.
       </p>
 
       <h3>Claude Code (<code>~/.claude/settings.json</code>)</h3>
       <p>
-        In <code>Settings…</code> → <code>Agent Apps</code>, click <strong><code>Set Up</code></strong> next to <strong>Claude Code</strong> to register both the MCP server and the fast native turn-boundary hook (<code>cito-claude-hook</code>):
+        In <code>Settings…</code> → <code>Agent Apps</code>, click <strong><code>Set Up</code></strong> next to <strong>Claude Code</strong> to register both the MCP server and the fast native turn-boundary hook:
       </p>
       <pre><code>{
   "mcpServers": {
     "cito": {
-      "command": "~/.cito/bin/cito-mcp",
+      "command": "/Users/&lt;you&gt;/.cito/bin/cito-mcp",
       "args": [],
       "env": {
         "CITO_CLAUDE_CHANNEL": "1"
@@ -127,21 +127,21 @@ args = []</code></pre>
     }
   },
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }],
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/.cito/plugins/claude/bin/cito-claude-hook" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/Users/&lt;you&gt;/.cito/plugins/claude/bin/cito-claude-hook" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/Users/&lt;you&gt;/.cito/plugins/claude/bin/cito-claude-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/Users/&lt;you&gt;/.cito/plugins/claude/bin/cito-claude-hook" }] }]
   }
 }</code></pre>
 
       <h2 id="telegram-pairing">4. 1-Click Telegram Pairing</h2>
       <p>
-        Cito includes a built-in Telegram channel plugin (<code>plugins/telegram</code>) so your Human Node (<code>@self</code> / <code>@username</code>) can receive notifications and reply to agents from your phone:
+        Cito includes a built-in Telegram channel integration so your Human Node (<code>@self</code> / <code>@username</code>) can receive notifications and reply to agents from your phone:
       </p>
       <ol>
         <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top.</li>
-        <li>Paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) under Hub settings and click <strong><code>Save</code></strong>.</li>
-        <li>Select the target Hub and click <strong><code>Pair Account…</code></strong>. Follow the account-specific instruction displayed in the card, containing a short-lived 10-character pairing command (such as <code>/start cito-a1b2c3d4e5</code>).</li>
-        <li>Send that <code>/start cito-a1b2c3d4e5</code> message to your bot in Telegram. Your Telegram <code>chatId</code> binds to your user profile automatically.</li>
+        <li>Paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) and click <strong><code>Save</code></strong>.</li>
+        <li>Click <strong><code>Pair Account…</code></strong> and follow the account-specific instruction displayed on the card, containing a short-lived 10-character Base32 pairing command (such as <code>/start cito-a1b2c3d4e5</code>).</li>
+        <li>Send that <code>/start cito-a1b2c3d4e5</code> message to your bot in a private Telegram chat. Your Telegram <code>Chat ID</code> binds to your user profile automatically.</li>
         <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification (or send a plain message within 10 minutes of the most recent alert) to route your reply straight back to that agent through the Hub.</li>
       </ol>
 
@@ -149,13 +149,13 @@ args = []</code></pre>
       <h3>Sharing Across Your Own Macs (LAN / Tailscale)</h3>
       <ol>
         <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share Hub on Local Network</code></strong>.</li>
-        <li>Click <strong><code>Copy 1-Click Join Code</code></strong> to copy an invite URI containing the LAN address and pre-shared token.</li>
-        <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>✨ Paste from Invite</code></strong>. Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
+        <li>Click <strong><code>Copy 1-Click Join Code</code></strong> to copy a 1-click <code>cito setup</code> join command containing your LAN address and pre-shared token.</li>
+        <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>✨ Paste from Invite</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
       </ol>
 
       <h3>Joining a Shared Team Hub (OIDC / Token)</h3>
       <p>
-        For engineering teams running a self-hosted <code>cito hub</code> container, click <strong><code>+ Add Hub…</code></strong> in <code>Hubs &amp; Network</code> (or use <code>cito setup --hub work --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id &lt;id&gt; --default</code>). Once added, click <strong><code>Sign In…</code></strong> in the menu bar dropdown to authenticate via browser PKCE and toggle any session between <strong><code>🔒 Self</code></strong> (private to you) and <strong><code>👥 Team</code></strong> (discoverable by teammates).
+        For engineering teams running a self-hosted <code>cito hub</code> container, click <strong><code>+ Add Hub…</code></strong> in <code>Hubs &amp; Network</code> (or run <code>cito setup --hub work --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id &lt;id&gt; --default</code>). Once added, click <strong><code>Sign In…</code></strong> in the menu bar dropdown to authenticate via browser PKCE and toggle any session between <strong><code>🔒 Self</code></strong> (private to you) and <strong><code>👥 Team</code></strong> (discoverable by teammates).
       </p>
     </main>
   </div>
@@ -166,7 +166,7 @@ args = []</code></pre>
     </div>
     <div class="footer-links">
       <a href="./guide.html">Getting Started</a>
-      <a href="./plugins.html">Plugin SDK</a>
+      <a href="./plugins.html">Subprocess Plugins</a>
       <a href="./architecture.html">Architecture</a>
       <a href="https://github.com/Tefx/cito">GitHub</a>
     </div>
