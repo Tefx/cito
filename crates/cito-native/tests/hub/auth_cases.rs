@@ -114,62 +114,109 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
 }
 #[test]
 fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
-    use std::io::Write;
+    use base64::engine::general_purpose::STANDARD;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let dir = std::env::temp_dir().join(format!("cito-oidc-{}-{port}", std::process::id()));
-    std::fs::create_dir_all(dir.join(".well-known")).unwrap();
-    let issuer = format!("https://localhost:{port}");
-    std::fs::write(
-        dir.join(".well-known/openid-configuration"),
-        json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys.json")}).to_string(),
-    )
-    .unwrap();
+    let issuer = format!(
+        "https://localhost:{}",
+        listener.local_addr().unwrap().port()
+    );
+    listener.set_nonblocking(true).unwrap();
+    let discovery = json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys.json")}).to_string();
     let (seed, key) = verifier(Algorithm::RS256);
-    let cache = seed.cache.lock().unwrap();
-    let mut keys = serde_json::to_value(cache.keys.as_ref().unwrap()).unwrap();
-    drop(cache);
-    std::fs::write(dir.join("keys.json"), keys.to_string()).unwrap();
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hub/fixtures");
-    let mut server = std::process::Command::new("openssl")
-        .args([
-            "s_server",
-            "-quiet",
-            "-WWW",
-            "-accept",
-            &format!("127.0.0.1:{port}"),
-            "-cert",
-        ])
-        .arg(fixture.join("localhost-cert.pem"))
-        .arg("-key")
-        .arg(fixture.join("localhost-key.pem"))
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    struct Cleanup<'a>(&'a mut std::process::Child, std::path::PathBuf);
-    impl Drop for Cleanup<'_> {
+    let keys = Arc::new(Mutex::new(
+        serde_json::to_value(seed.cache.lock().unwrap().keys.as_ref().unwrap()).unwrap(),
+    ));
+    let cert = rustls::pki_types::CertificateDer::from(
+        include_bytes!("fixtures/localhost-cert.der").to_vec(),
+    );
+    let pem = include_str!("fixtures/localhost-key.pem")
+        .lines()
+        .filter(|line| !line.starts_with("---"))
+        .collect::<String>();
+    let tls_key = rustls::pki_types::PrivatePkcs8KeyDer::from(STANDARD.decode(pem).unwrap());
+    let config = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], tls_key.into())
+            .unwrap(),
+    );
+    struct TlsServer {
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for TlsServer {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-            let _ = std::fs::remove_dir_all(&self.1);
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(worker) = self.worker.take() {
+                let result = worker.join();
+                if !std::thread::panicking() {
+                    result.unwrap();
+                }
+            }
         }
     }
-    let _cleanup = Cleanup(&mut server, dir.clone());
-    let until = Instant::now() + Duration::from_secs(3);
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < until);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
+    let served_keys = keys.clone();
+    let worker = std::thread::spawn(move || {
+        while !stopped.load(Ordering::SeqCst) {
+            let socket = match listener.accept() {
+                Ok((socket, _)) => socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut tls = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(config.clone()).unwrap(),
+                socket,
+            );
+            let mut reader = BufReader::new(&mut tls);
+            let mut request = String::new();
+            assert!(reader.read_line(&mut request).unwrap() > 0);
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            drop(reader);
+            let body = match request.split_whitespace().nth(1).unwrap() {
+                "/.well-known/openid-configuration" => discovery.clone(),
+                "/keys.json" => served_keys.lock().unwrap().to_string(),
+                path => panic!("Unexpected OIDC request path: {path}"),
+            };
+            write!(
+                tls,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            tls.conn.send_close_notify();
+            tls.flush().unwrap();
+        }
+    });
+    let _server = TlsServer {
+        stop,
+        worker: Some(worker),
+    };
     let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls::pki_types::CertificateDer::from(
-            include_bytes!("fixtures/localhost-cert.der").to_vec(),
-        ))
-        .unwrap();
+    roots.add(cert).unwrap();
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -187,10 +234,7 @@ fn https_discovery_jwks_fetch_and_unknown_kid_refresh() {
     header.kid = Some("test-key".into());
     let token = encode(&header, &claims, &key).unwrap();
     verifier.verify(&token).unwrap();
-    keys["keys"][0]["kid"] = json!("rotated-key");
-    let mut file = std::fs::File::create(dir.join("keys.json")).unwrap();
-    file.write_all(keys.to_string().as_bytes()).unwrap();
-    drop(file);
+    keys.lock().unwrap()["keys"][0]["kid"] = json!("rotated-key");
     header.kid = Some("rotated-key".into());
     let token = encode(&header, &claims, &key).unwrap();
     assert!(verifier
@@ -333,7 +377,7 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
     let error = verifier
         .verify(&encode(&header, &claims, &key).unwrap())
         .unwrap_err();
-    assert!(error.contains("jwks_uri must use HTTPS"));
+    assert!(error.contains("jwks_uri must use HTTPS"), "{error}");
     assert!(
         verifier.verify(&token).is_ok(),
         "a failed refresh must preserve cached keys"

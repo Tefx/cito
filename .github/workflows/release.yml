@@ -19,7 +19,7 @@ jobs:
 
       - name: Build & verify native Rust workspace and Homebrew formula
         run: |
-          cargo test --workspace
+          cargo test --workspace -- --test-threads=4
           cargo build --release
           /usr/bin/ruby -c packaging/homebrew/cito.rb
 
