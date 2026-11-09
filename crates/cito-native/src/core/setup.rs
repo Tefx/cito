@@ -1139,12 +1139,14 @@ pub fn run_setup_cli(args: &[String]) {
                 let Some(Value::Object(ref mut m)) = hubs.get_mut(n) else {
                     return Err(format!("Unknown hub: {n}"));
                 };
+                m.remove("disabled");
                 m.insert("enabled".to_string(), json!(true));
             }
             for n in &disable_hubs {
                 let Some(Value::Object(ref mut m)) = hubs.get_mut(n) else {
                     return Err(format!("Unknown hub: {n}"));
                 };
+                m.remove("disabled");
                 m.insert("enabled".to_string(), json!(false));
             }
             for n in &remove_hubs {

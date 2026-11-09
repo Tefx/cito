@@ -161,7 +161,9 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));
         hm.insert("authMode".to_string(), json!(auth));
-        let enabled = hm.get("enabled").and_then(Value::as_bool) != Some(false);
+        let enabled = hm.get("enabled").and_then(Value::as_bool) != Some(false)
+            && hm.get("disabled").and_then(Value::as_bool) != Some(true);
+        hm.remove("disabled");
         hm.insert("enabled".to_string(), json!(enabled));
     }
     let default_hub = obj
@@ -191,6 +193,25 @@ mod tests {
         assert!(hubs["cloud"].get("auth").is_none());
         assert_eq!(hubs["cloud"]["user"], "bob");
         assert_eq!(rest["other"], 7);
+    }
+    #[test]
+    fn disabled_hub_alias_is_folded_into_enabled() {
+        for (cfg, enabled) in [
+            (json!({}), true),
+            (json!({"enabled":true}), true),
+            (json!({"enabled":false}), false),
+            (json!({"disabled":false}), true),
+            (json!({"disabled":true}), false),
+            (json!({"enabled":true,"disabled":false}), true),
+            (json!({"enabled":true,"disabled":true}), false),
+            (json!({"enabled":false,"disabled":false}), false),
+            (json!({"enabled":false,"disabled":true}), false),
+        ] {
+            let raw = json!({"hubs":{"work":cfg}}).to_string();
+            let (_, hubs, _) = try_normalize_existing_config(Some(&raw)).unwrap();
+            assert_eq!(hubs["work"]["enabled"], enabled, "{raw}");
+            assert!(hubs["work"].get("disabled").is_none(), "{raw}");
+        }
     }
     #[test]
     fn concurrent_mutations_preserve_all_updates() {

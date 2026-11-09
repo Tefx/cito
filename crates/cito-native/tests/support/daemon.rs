@@ -1465,6 +1465,114 @@ fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
     f.stop(overridden);
 }
 #[test]
+fn disabled_hub_alias_reenable_paths_activate_slots_across_restart() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    for op in ["setup_toggle_hub", "hub_action", "cli"] {
+        let initial = json!({"defaultHub":"local","hubs":{
+            "local":{"url":"local://","disabled":true},
+            "work":{"url":"local://","enabled":true,"disabled":true}
+        }});
+        fs::write(&f.config, initial.to_string()).unwrap();
+        let daemon = f.daemon(&[]);
+        let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+        assert_eq!(status, 200, "{snapshot}");
+        let work = snapshot["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hub| hub["name"] == "work")
+            .unwrap();
+        assert_eq!(work["enabled"], false, "{op}: {work}");
+        let unavailable =
+            f.tool_result("cito_find", json!({"hub":"work","user":"absent"}), human());
+        assert_eq!(unavailable["isError"], true, "{unavailable}");
+        if op == "cli" {
+            let (ok, out, err) = f.command(
+                NATIVE,
+                &["setup", "--enable-hub", "work", "--json", "--no-login-item"],
+                "",
+            );
+            assert!(ok, "{out}\n{err}");
+        } else {
+            let (status, response) =
+                f.action(json!({"op":op,"hub":"work","enabled":true,"action":"reconnect"}));
+            assert_eq!(status, 200, "{op}: {response}");
+        }
+        let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        assert_eq!(saved["hubs"]["work"]["enabled"], true, "{op}: {saved}");
+        assert!(
+            saved["hubs"]["work"].get("disabled").is_none(),
+            "{op}: {saved}"
+        );
+        assert_eq!(saved["default_hub"], "work", "{op}: {saved}");
+        assert!(saved.get("defaultHub").is_none());
+        for restart in [false, true] {
+            let running = if restart { f.daemon(&[]) } else { daemon };
+            let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+            assert_eq!(status, 200, "{snapshot}");
+            assert_eq!(snapshot["hub"], "work", "{op}: {snapshot}");
+            let work = snapshot["settings"]["hubs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hub| hub["name"] == "work")
+                .unwrap();
+            assert_eq!(work["enabled"], true, "{op}: {work}");
+            let found = f.tool("cito_find", json!({"hub":"work","user":"absent"}), human());
+            assert_eq!(found["ok"], true, "{op}: {found}");
+            assert_eq!(found["listeners"], json!([]));
+            f.stop(running);
+        }
+    }
+}
+#[test]
+fn disabled_hub_alias_saves_preserve_effective_enablement() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"}}}));
+    f.daemon(&[]);
+    for op in ["setup_save_hub", "save_hub"] {
+        for (fields, enabled) in [
+            (json!({"disabled":true}), false),
+            (json!({"enabled":true,"disabled":true}), false),
+            (json!({"enabled":false,"disabled":false}), false),
+            (json!({"enabled":true,"disabled":false}), true),
+        ] {
+            let mut cfg = fields;
+            cfg["url"] = json!("local://");
+            let action = if op == "setup_save_hub" {
+                cfg["op"] = json!(op);
+                cfg["name"] = json!("work");
+                cfg
+            } else {
+                json!({"op":op,"name":"work","config":cfg})
+            };
+            let (status, response) = f.action(action.clone());
+            assert_eq!(status, 200, "{action}: {response}");
+            let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+            assert_eq!(
+                saved["hubs"]["work"]["enabled"], enabled,
+                "{action}: {saved}"
+            );
+            assert!(
+                saved["hubs"]["work"].get("disabled").is_none(),
+                "{action}: {saved}"
+            );
+            let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+            assert_eq!(status, 200, "{snapshot}");
+            let work = snapshot["settings"]["hubs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hub| hub["name"] == "work")
+                .unwrap();
+            assert_eq!(work["enabled"], enabled, "{action}: {work}");
+            let result = f.tool_result("cito_find", json!({"hub":"work","user":"absent"}), human());
+            assert_eq!(result["isError"] == true, !enabled, "{action}: {result}");
+        }
+    }
+}
+#[test]
 fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"local":{"url":"local://"}}}));

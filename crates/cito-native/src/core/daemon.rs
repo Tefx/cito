@@ -335,7 +335,7 @@ impl DaemonService {
             .unwrap_or(default);
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
-            if hub["enabled"] == false || hub["disabled"] == true {
+            if hub["enabled"] == false {
                 continue;
             }
             if self.logins.contains_key(&name)
@@ -1710,6 +1710,11 @@ impl DaemonService {
                 }
                 let set_default = cfg["set_default"].as_bool().unwrap_or(false);
                 if let Some(m) = cfg.as_object_mut() {
+                    if let Some(disabled) = m.remove("disabled") {
+                        let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
+                            && disabled.as_bool() != Some(true);
+                        m.insert("enabled".to_string(), json!(enabled));
+                    }
                     for k in ["op", "name", "hub", "auth", "auth_mode", "set_default"] {
                         m.remove(k);
                     }
@@ -1753,9 +1758,10 @@ impl DaemonService {
                         return Err("INVALID_INPUT: Hub must be an object".into());
                     }
                     v["hubs"][&hub]["enabled"] = json!(enabled);
-                    if !enabled {
-                        repair_default_hub(v);
+                    if let Some(m) = v["hubs"][&hub].as_object_mut() {
+                        m.remove("disabled");
                     }
+                    repair_default_hub(v);
                     Ok(())
                 })?;
             }
