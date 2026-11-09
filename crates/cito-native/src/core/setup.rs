@@ -126,6 +126,29 @@ pub fn ensure_cli_shims_native(
             .map_err(|e| e.to_string())?;
         written.push(shim_path);
     }
+    if let Ok(exe_path) = env::current_exe() {
+        let exe_s = exe_path.to_string_lossy();
+        if (exe_s.contains("/Cellar/cito/") || exe_s.contains("/opt/cito/"))
+            && state_dir
+                .to_str()
+                .is_some_and(|s| s.ends_with("/.cito"))
+        {
+            let opt_app = PathBuf::from(resolve_stable_package_root(&exe_s))
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf());
+            if let Some(src_app) = opt_app.filter(|p| p.ends_with("Cito.app") && p.is_dir()) {
+                let dst_app = PathBuf::from("/Applications/Cito.app");
+                if !dst_app.exists() || dst_app.join("Contents/Info.plist").is_file() {
+                    let _ = copy_dir_recursive(&src_app, &dst_app);
+                    let _ = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+                        .args(["-f", "/Applications/Cito.app"])
+                        .status();
+                }
+            }
+        }
+    }
     Ok(written)
 }
 

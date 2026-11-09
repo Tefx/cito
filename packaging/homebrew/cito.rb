@@ -3,7 +3,7 @@ class Cito < Formula
   homepage "https://tefx.github.io/cito/"
   url "https://github.com/Tefx/cito/releases/download/v0.19.0/Cito-macos-arm64.zip"
   version "0.19.0"
-  sha256 "4a0f0ab818f9debbc158a88f1dd2dc249ff10c1a83a9c257f352cf521895c468"
+  sha256 "4a42962b9668a74bf69d27b70f2b715bff85b7abf73a383fb909905bca158fa2"
   license "MIT"
 
   depends_on arch: :arm64
@@ -35,28 +35,13 @@ class Cito < Formula
     chmod 0755, [bin/"cito", bin/"cito-mcp"]
   end
 
-  def post_install
-    user_apps = Pathname.new(Dir.home)/"Applications"
-    user_apps.mkpath
-    target = user_apps/"Cito.app"
-    if target.symlink? || !target.exist?
-      FileUtils.rm_f(target)
-      FileUtils.ln_s(opt_prefix/"Cito.app", target)
-    end
-    system "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
-           "-f", (opt_prefix/"Cito.app").to_s
-  rescue StandardError
-    nil
-  end
-
   def caveats
     <<~EOS
       Cito.app has been installed to:
         #{opt_prefix}/Cito.app
-        ~/Applications/Cito.app (available in Spotlight)
 
-      To launch the menu bar app:
-        open -a Cito
+      To launch the menu bar app (or install the cask `brew install --cask tefx/tap/cito` for /Applications & Spotlight):
+        open "#{opt_prefix}/Cito.app"
     EOS
   end
 
