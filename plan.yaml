@@ -7586,7 +7586,7 @@ phases:
     name: 'Multimodal Visual Snapshot Inspection (8 Core UI States), Iterative Contract-and-Simplicity
       Convergence & Live v0.20.1 Distribution Closure (GitHub Release v0.20.1 & Tefx/homebrew-tap
       Formula/Cask) [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -7647,6 +7647,39 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-09T20:38:44.140807Z'
+    done_at: '2026-11-09T21:34:54.167324+00:00'
+    evidence: "Artifact:\n- Commit: 5ad5cc3b8200d0648353132d251222bd218f9402 (18 files\
+      \ changed, +116 / -9 lines across iterative convergence rounds + Homebrew checksum\
+      \ sync; annotated release tag `v0.20.1` at build commit `1fcf264a7ea45554d7edf6316edd5a9bd60dffca`)\n\
+      - Executor: rust-senior (writable consolidation & v0.20.1 live distribution\
+      \ closure) + fresh-context `uiux-auditor` (multimodal Retina PNG review), `pathway-auditor`,\
+      \ and `structural-auditor` rounds (`[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ `[GATE_MODE: ITERATIVE_CONVERGENCE]`).\n- Convergence Summary:\n  - 3 fresh-context\
+      \ iterative audit rounds inspected all 12 rendered 2x Retina PNG snapshots in\
+      \ `/tmp/cito-v25-snapshots/` and closed all admitted findings (`V25-R1-P1` unchanged-port\
+      \ `Apply` acknowledgement + `README.md`/`site/` prose parity in `64e6e573`,\
+      \ and `V25-R2-P1` convergent badge clear for missing/departed Pi bridge sockets\
+      \ in `1fcf264a`).\n  - Round 3 fresh-context verdicts:\n    - `uiux-auditor`\
+      \ (`2026-11-09T21-13-51-410Z_01a1c229-0831-77ca-be6c-ee031f98e721.jsonl`): `Completeness:\
+      \ CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `structural-auditor` (`2026-11-09T21-13-51-331Z_01a1c229-07e2-70a7-a406-76bb92b42f23.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `pathway-auditor`\
+      \ (`2026-11-09T21-13-51-501Z_01a1c229-088c-75ea-b631-75211e598ef7.jsonl`): `Completeness:\
+      \ CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n- Live Distribution Closure (`v0.20.1`):\n\
+      \  - GitHub Release `v0.20.1` (`https://github.com/Tefx/cito/releases/tag/v0.20.1`,\
+      \ built on `macos-15` in Actions run `42701878316` with `0` `warning:` and `0`\
+      \ `linker_messages` lines): published `Cito-macos-arm64.zip` and `Cito-macos-arm64.zip.sha256`\
+      \ with SHA-256 `ee0c82bebda11ce621cbc7b81fcfeb6e5e5d4c01799a10e33a0b4107511cfc47`.\n\
+      \  - Synchronized SHA-256 `ee0c82bebda11ce621cbc7b81fcfeb6e5e5d4c01799a10e33a0b4107511cfc47`\
+      \ to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`, commit `edc4aa09cfee23701c1cb134429e4e2b5b0f7e72`).\n \
+      \ - GitHub Pages `https://tefx.github.io/cito/`: HTTP/2 `200` (Actions run `42703588283`\
+      \ success).\n\nVerification:\n- Run: `cargo test --workspace && cargo build\
+      \ --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` -> 223 passed, 0\
+      \ failed, 0 compiler/linker warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\\
+      b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\b' crates/cito-native/src/core/\
+      \ src/macos/` -> 0 matches\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v25.hygiene`.\n\
+      \nSpec link:\n- docs/DESIGN.md (§11, V25 Stage 9 v0.20.1 U1–U11)\n- docs/ROADMAP.md\n\
+      - .github/workflows/release.yml, packaging/homebrew/cito.rb"
   - id: v25.gate
     name: V25 Stage 9 (v0.20.1) Independent Terminal Acceptance, U1–U11 Visual/UX
       Verification & Live Distribution Gate
