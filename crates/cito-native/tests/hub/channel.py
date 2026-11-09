@@ -25,7 +25,10 @@ for line in sys.stdin:
         reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True,
                  "instruction": "Send " + request["code"] + " to fixture-account"}
     elif op == "test":
-        reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True, "detail": "Fixture test succeeded"}
+        if request.get("hub_config", {}).get("credential") == "invalid":
+            reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": False, "error": "Invalid token"}
+        else:
+            reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True, "detail": "Fixture test succeeded"}
     else:
         continue
     print(json.dumps(reply), flush=True)

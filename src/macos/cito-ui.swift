@@ -844,7 +844,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var selectedChannelHub = ""
     var channelSettingsByHub: [String: [ChannelSetupItem]] = [:]
     var channelInstructions: [String: String] = [:]
-    var channelResults: [String: String] = [:]
+    var channelResults: [String: (ok: Bool, detail: String)] = [:]
     var settingsScrollOffsets: [String: CGFloat] = [:]
     var pendingOnboardingMarker: String?
     var settingsKeyMonitor: Any?
@@ -864,7 +864,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let key=target + "|" + channel.id
             if let instruction=channel.pairing_instruction, !instruction.isEmpty { channelInstructions[key]=instruction }
             else { channelInstructions.removeValue(forKey:key) }
-            if channel.configured { channelResults.removeValue(forKey:key) }
+            if channel.status == "not_configured" { channelResults.removeValue(forKey:key) }
         }
     }
     var uninstallConfirmOpen = false
@@ -1096,7 +1096,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return
         }
         if frame.op == "channel_test_result", let id = frame.channel_id {
-            channelResults["\(frame.hub ?? effectiveChannelHub)|\(id)"] = frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed")
+            channelResults["\(frame.hub ?? effectiveChannelHub)|\(id)"] = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
@@ -1189,6 +1189,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func emit(_ action: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: action, options: [.sortedKeys]) else { return }
+        if let op = action["op"] as? String,
+           ["channel_save", "channel_pair", "channel_toggle", "channel_unpair", "channel_cancel_pair", "disconnect_human_channel"].contains(op),
+           let id = action["channel_id"] as? String {
+            let key = "\(action["hub"] as? String ?? effectiveChannelHub)|\(id)"
+            if channelResults.removeValue(forKey: key) != nil, settingsPanel != nil { rebuildSettingsPanel() }
+        }
         FileHandle.standardOutput.write(data + Data([10]))
     }
     func rebuild() {
@@ -2107,9 +2113,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             chCard.addSubview(chBadge)
 
             chCard.addSubview(textLabel(ch.display_name, NSRect(x: 48, y: cardHeight - 26, width: 180, height: 17), size: 13, weight: .semibold))
+            let channelResult = channelResults["\(effectiveChannelHub)|\(ch.id)"]
             let chStatusText:String
             let chStatusColor:NSColor
-            switch ch.status {
+            switch channelResult?.ok == false ? "error" : ch.status {
             case "ready": chStatusText = ch.display_label.flatMap { $0.isEmpty ? nil : "● Connected (\($0))" } ?? "● Connected"; chStatusColor = .systemGreen
             case "paused": chStatusText = "⏸ Paused"; chStatusColor = .systemOrange
             case "pairing_pending": chStatusText = "◌ Pairing…"; chStatusColor = .systemBlue
@@ -2121,7 +2128,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             chStatusLabel.identifier = NSUserInterfaceItemIdentifier("settings_channel_status:\(ch.id)")
             chCard.addSubview(chStatusLabel)
 
-            let chDetail = textLabel(channelResults["\(effectiveChannelHub)|\(ch.id)"] ?? ch.detail, NSRect(x: 48, y: cardHeight - 43, width: 418, height: 15), size: 11, color: .secondaryLabelColor)
+            let chDetail = textLabel(channelResult?.detail ?? ch.detail, NSRect(x: 48, y: cardHeight - 43, width: 418, height: 15), size: 11, color: .secondaryLabelColor)
             chDetail.identifier = NSUserInterfaceItemIdentifier("settings_channel_detail:\(ch.id)")
             chCard.addSubview(chDetail)
 

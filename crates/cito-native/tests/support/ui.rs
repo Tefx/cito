@@ -3,6 +3,93 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+
+    for action in [
+        "save_channel",
+        "pair_channel",
+        "toggle_channel",
+        "unpair_channel",
+        "clear_channel_service",
+    ] {
+        let configured = action != "clear_channel_service";
+        cfg["channels"][0]["configured"] = json!(configured);
+        cfg["channels"][0]["status"] = json!(if configured { "ready" } else { "hub_ready" });
+        f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":false,"error":"Invalid token"}));
+        f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        frame["settings"]["desktop_banner_enabled"] = json!(false);
+        f.send(p, frame);
+        control(&f, p, "test_channel:channel");
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+            "Invalid token",
+            "{action}"
+        );
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_status:channel")["text"],
+            "⚠ Error",
+            "{action}"
+        );
+        control(&f, p, &format!("{action}:channel"));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+            "Ready",
+            "{action} must clear the previous result"
+        );
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_status:channel")["text"],
+            if configured {
+                "● Connected"
+            } else {
+                "Hub Service: ● Ready"
+            }
+        );
+    }
+
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":true,"detail":"Test sent"}));
+    f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        "Test sent"
+    );
+    f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":false,"error":"Invalid token"}));
+    cfg["channels"][0]["configured"] = json!(false);
+    cfg["channels"][0]["status"] = json!("not_configured");
+    f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+        "Ready"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "settings_channel_status:channel")["text"],
+        "○ Not Configured"
+    );
+}
+
+#[test]
 fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

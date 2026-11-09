@@ -4,6 +4,109 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let ui = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    assert_eq!(f.action(json!({"op":"channel_save","channel_id":"channel","enabled":true,"values":{"credential":"saved","address":"room"}})).0, 200);
+    let frames = || -> Vec<Value> {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    for op in ["channel_test", "test_human_channel"] {
+        for (id, expected_error, expected_status) in [
+            ("channel", "Invalid token", 200),
+            (
+                "missing",
+                "INVALID_INPUT: Unknown human channel plugin: missing",
+                400,
+            ),
+        ] {
+            let before = frames().len();
+            let mut action = json!({"op":op,"channel_id":id});
+            if id == "channel" {
+                action["values"] = json!({"credential":"invalid"});
+            }
+            let (status, result) = f.action(action);
+            assert_eq!(status, expected_status, "{result}");
+            assert_eq!(result["ok"], false);
+            assert_eq!(result["error"], expected_error);
+            wait(|| {
+                let frames = frames();
+                let Some(index) = frames.iter().enumerate().skip(before).find_map(|(i, v)| {
+                    (v["op"] == "channel_test_result" && v["channel_id"] == id).then_some(i)
+                }) else {
+                    return false;
+                };
+                assert_eq!(frames[index]["ok"], false);
+                assert_eq!(frames[index]["error"], expected_error);
+                assert_eq!(frames[index]["hub"], "local");
+                let subsequent = &frames[index + 1..];
+                for op in ["settings", "state"] {
+                    let Some(refresh) = subsequent.iter().find(|v| v["op"] == op) else {
+                        return false;
+                    };
+                    let channel = refresh["settings"]["channels"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|ch| ch["id"] == "channel")
+                        .unwrap();
+                    assert_eq!(channel["configured"], true);
+                    assert_eq!(channel["status"], "ready");
+                }
+                true
+            });
+        }
+    }
+}
+
+#[test]
+fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let daemon = f.daemon(&[]);
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    f.stop(daemon);
+    f.env.insert(
+        "CITO_BUILTIN_PLUGINS_DIR".into(),
+        f.state.join("plugins").display().to_string(),
+    );
+    f.daemon(&[]);
+    let app = || {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "pi")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(app()["status"], "ready");
+    // A partial deletion must also use the bundled executable and working directory.
+    fs::remove_file(f.state.join("plugins/pi/bin/cito-plugin-pi")).unwrap();
+    assert_eq!(app()["status"], "ready");
+    fs::remove_dir_all(f.state.join("plugins/pi")).unwrap();
+    assert_eq!(app()["status"], "repair_needed");
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    assert!(f.state.join("plugins/pi/bin/cito-plugin-pi").is_file());
+    assert_eq!(app()["status"], "ready");
+    assert_eq!(app()["configured"], true);
+}
+
+#[test]
 fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     let _lock = serial();
     let host = Fixture::new(json!({}));

@@ -2001,29 +2001,30 @@ impl DaemonService {
                             Ok(result)
                         }
                     });
-                let result = match result {
-                    Ok(result) => result,
+                match &result {
+                    Ok(result)
+                        if matches!(rpc, "human_channel_pair_start" | "human_channels_test") =>
+                    {
+                        let mut frame = result.clone();
+                        frame["op"] = json!(if rpc == "human_channel_pair_start" {
+                            "pair_code"
+                        } else {
+                            "channel_test_result"
+                        });
+                        frame["channel_id"] = json!(id);
+                        frame["hub"] = json!(hub);
+                        self.emit(frame);
+                    }
                     Err(error) => {
                         self.emit(json!({"op":"channel_test_result","channel_id":id,"hub":hub,"ok":false,"error":error,"detail":error}));
-                        return Err(error);
                     }
-                };
-                if matches!(rpc, "human_channel_pair_start" | "human_channels_test") {
-                    let mut frame = result.clone();
-                    frame["op"] = json!(if rpc == "human_channel_pair_start" {
-                        "pair_code"
-                    } else {
-                        "channel_test_result"
-                    });
-                    frame["channel_id"] = json!(id);
-                    frame["hub"] = json!(hub);
-                    self.emit(frame);
+                    _ => {}
                 }
                 self.emit(
                     json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
                 );
                 self.push_ui();
-                return Ok(result);
+                return result;
             }
             "send_signal" | "send_reply_from_human" => {
                 let meta = json!({"expected_harness":"human","expected_session_id":"default"});

@@ -724,8 +724,19 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
         .command
         .first()
         .ok_or("PLUGIN_LOAD_ERROR: empty command")?;
-    let executable = if executable.starts_with("./") || executable.starts_with("../") {
-        plugin.plugin_dir.join(executable)
+    let relative = executable.starts_with("./") || executable.starts_with("../");
+    let plugin_dir = if plugin.is_builtin
+        && (!plugin.plugin_dir.is_dir()
+            || (relative && !plugin.plugin_dir.join(executable).is_file()))
+    {
+        super::setup::resolve_package_root()
+            .join("plugins")
+            .join(&plugin.id)
+    } else {
+        plugin.plugin_dir.clone()
+    };
+    let executable = if relative {
+        plugin_dir.join(executable)
     } else if executable.starts_with('~') {
         expand_home_dir(
             executable,
@@ -736,9 +747,7 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
         PathBuf::from(executable)
     };
     let mut command = Command::new(executable);
-    command
-        .args(&plugin.command[1..])
-        .current_dir(&plugin.plugin_dir);
+    command.args(&plugin.command[1..]).current_dir(plugin_dir);
     Ok(command)
 }
 
