@@ -343,6 +343,11 @@ impl Fixture {
     pub fn rows(&self, sql: &str) -> Vec<Value> {
         self.db("state.sqlite").query(sql, &[]).unwrap()
     }
+    pub fn recording_ui(&self) -> PathBuf {
+        let path = self.dir.join("ui.py");
+        script(&path, "#!/usr/bin/env python3\nimport os,sys\nopen(os.environ['HOME']+'/ui-pid','w').write(str(os.getpid()))\nwith open(os.environ['HOME']+'/ui-frames','a') as out:\n for line in sys.stdin:\n  out.write(line); out.flush()\n");
+        path
+    }
     pub fn provider(&self, outcome: &str) -> Value {
         let d = self.state.join("plugins/fixture");
         fs::create_dir_all(&d).unwrap();

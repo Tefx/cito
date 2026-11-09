@@ -199,7 +199,7 @@ Each request is a single JSON object written to `stdin` followed by `\n` (and `s
   - `{"op":"pair_code","channel_id":"telegram","code":"cito-a1b2c3d4e5","instruction":"Send \"/start cito-a1b2c3d4e5\" to @my_bot","expires_at_ms":...}`
   - `{"op":"channel_test_result","channel_id":"telegram","ok":true,"detail":"..."}`
   - `{"op":"composer_result","ok":true,"error":null}` (when `ok: false`, `cito-ui` preserves the user's typed text in `composer_input` and displays `error`, `F32, F57`)
-  - Test observation frames: `test_inspect`, `test_action`, `test_directory_key`, `test_directory_query`, `test_settings_hub_draft`, `test_channel_draft`, `test_clipboard`.
+  - Headless test hooks: `test_inspect`, `test_control`, `test_settings_input`, `test_composer_input`, `test_settings_key`, `test_directory_key`, `test_clipboard`.
 - **UI $\to$ Daemon (`stdout` NDJSON — All 27 Actions Handled in `daemon.rs`, `F1`)**:
   - Session & Scope: `listen_session`, `unlisten`, `unlisten_all`, `set_scope`, `refresh_available`, `copy_id`
   - Hub & Network: `switch_hub`, `hub_action`, `set_host_hub`, `setup_save_hub`, `setup_toggle_hub`, `setup_remove_hub`

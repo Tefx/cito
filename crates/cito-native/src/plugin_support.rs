@@ -340,6 +340,9 @@ pub fn caller_pid_roots(req: &Value) -> Result<Vec<u32>> {
     // SAFETY: getppid only reads the current process's parent ID.
     Ok(vec![unsafe { libc::getppid() } as u32])
 }
+pub fn process_start(pid: u32) -> Option<String> {
+    ps_field(pid, "lstart=").ok()
+}
 pub fn process_parent(p: u32) -> Option<u32> {
     ps_field(p, "ppid=")
         .ok()?

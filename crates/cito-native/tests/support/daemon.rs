@@ -231,12 +231,27 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
 fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     let _lock = serial();
     let owner = Fixture::new(json!({}));
+    let manifest = json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "pairing":{"supported":true},"fields":[
+            {"key":"credential","scope":"hub","type":"secret","required":true},
+            {"key":"address","scope":"user","type":"string","required":true}]});
+    let remote_plugin = owner.state.join("hub/plugins/channel");
+    fs::create_dir_all(&remote_plugin).unwrap();
+    fs::write(remote_plugin.join("plugin.json"), manifest.to_string()).unwrap();
     let (_, hub_port) = owner.hub();
     let f = Fixture::new(
         json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{hub_port}")}},"defaultHub":"local"}),
     );
     f.provider("delivered_unconfirmed");
-    let daemon = f.daemon(&[]);
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    let ui = f.recording_ui();
+    let daemon = f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
     for op in [
         "refresh_available",
         "open_settings",
@@ -250,11 +265,6 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     assert_eq!(f.action(json!({"op":"listen_session","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"})).0,200);
     let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     let id = row["listener_id"].clone();
-    assert_eq!(
-        f.action(json!({"op":"set_scope","hub":"local","listener_id":id,"scope":"workspace"}))
-            .0,
-        200
-    );
     assert_eq!(
         f.action(json!({"op":"switch_hub","from_hub":"local","to_hub":"work","listener_id":id}))
             .0,
@@ -270,6 +280,40 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
             ["status"],
         "ACTIVE"
     );
+    let hub_db = owner.db("hub/hub.sqlite");
+    assert_eq!(
+        f.rows("SELECT scope FROM local_listeners WHERE hub='work' AND harness='fixture'")[0]
+            ["scope"],
+        "workspace"
+    );
+    assert_eq!(
+        hub_db
+            .query("SELECT scope FROM hub_kv WHERE key=?", &[id.clone()])
+            .unwrap()[0]["scope"],
+        "workspace"
+    );
+    for scope in ["self", "workspace"] {
+        assert_eq!(
+            f.action(json!({"op":"set_scope","hub":"work","listener_id":id,"scope":scope}))
+                .0,
+            200
+        );
+        assert_eq!(
+            f.rows("SELECT scope FROM local_listeners WHERE hub='work' AND harness='fixture'")[0]
+                ["scope"],
+            scope
+        );
+        let registration = hub_db
+            .query(
+                "SELECT scope,CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
+                &[id.clone()],
+            )
+            .unwrap();
+        assert_eq!(registration[0]["scope"], scope);
+        let value: Value =
+            serde_json::from_str(registration[0]["value"].as_str().unwrap()).unwrap();
+        assert_eq!(value["scope"], scope);
+    }
     for op in ["setup_apply", "setup_remove_app"] {
         assert_eq!(f.action(json!({"op":op,"harness":"fixture"})).0, 200);
     }
@@ -285,6 +329,74 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
             "INVALID_INPUT: Unknown human channel plugin: missing"
         );
     }
+    let (status, saved) = f.action(
+        json!({"op":"channel_save","hub":"work","channel_id":"channel",
+        "enabled":true,"values":{"credential":"fixture-secret","address":"fixture-account"}}),
+    );
+    assert_eq!(status, 200, "{saved}");
+    let channel = saved["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "channel")
+        .unwrap();
+    assert_eq!(channel["configured"], true);
+    let service = hub_db
+        .query(
+            "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(service[0]["config_json"].as_str().unwrap()).unwrap(),
+        json!({"credential":"fixture-secret"})
+    );
+    let binding = hub_db.query("SELECT enabled,user_config_json FROM hub_human_channels WHERE plugin_id='channel' AND principal_id='none#alice'", &[]).unwrap();
+    assert_eq!(binding[0]["enabled"], 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(binding[0]["user_config_json"].as_str().unwrap()).unwrap(),
+        json!({"address":"fixture-account"})
+    );
+    let (status, tested) =
+        f.action(json!({"op":"channel_test","hub":"work","channel_id":"channel"}));
+    assert_eq!(status, 200, "{tested}");
+    assert_eq!(tested["ok"], true);
+    assert_eq!(tested["detail"], "Fixture test succeeded");
+    let (status, paired) =
+        f.action(json!({"op":"channel_pair","hub":"work","channel_id":"channel"}));
+    assert_eq!(status, 200, "{paired}");
+    let code = paired["code"].as_str().unwrap();
+    assert!(code.starts_with("cito-"));
+    assert_eq!(
+        paired["instruction"],
+        format!("Send {code} to fixture-account")
+    );
+    let pairing = hub_db.query("SELECT code,instruction,expires_ms,consumed_ms FROM hub_pairing_codes WHERE plugin_id='channel' AND principal_id='none#alice'", &[]).unwrap();
+    assert_eq!(pairing[0]["code"], paired["code"]);
+    assert_eq!(pairing[0]["instruction"], paired["instruction"]);
+    assert_eq!(pairing[0]["expires_ms"], paired["expires_at_ms"]);
+    assert!(pairing[0]["consumed_ms"].is_null());
+    wait(|| {
+        let frames: Vec<Value> = fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        frames.iter().any(|v| {
+            v["op"] == "channel_test_result"
+                && v["hub"] == "work"
+                && v["channel_id"] == "channel"
+                && v["ok"] == true
+                && v["detail"] == "Fixture test succeeded"
+        }) && frames.iter().any(|v| {
+            v["op"] == "pair_code"
+                && v["hub"] == "work"
+                && v["channel_id"] == "channel"
+                && v["code"] == paired["code"]
+                && v["instruction"] == paired["instruction"]
+                && v["expires_at_ms"] == paired["expires_at_ms"]
+        })
+    });
     assert_eq!(
         f.action(json!({"op":"set_launch_at_login","enabled":true}))
             .0,
@@ -311,6 +423,12 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     let p = port();
     assert_eq!(f.action(json!({"op":"set_host_hub","enabled":true,"port":p,"bind":"127.0.0.1","auth_mode":"none"})).0,200);
     assert!(rpc(p, "kv_snapshot", json!({}))["entries"].is_array());
+    let configured: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    let token = configured["host_hub"]["token"].as_str().unwrap();
+    assert_eq!(token.len(), 64);
+    assert!(token
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
     assert_eq!(
         f.action(json!({"op":"set_host_hub","enabled":false})).0,
         200

@@ -599,14 +599,7 @@ impl DaemonService {
                         .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
                     {
                         if let Ok(mut cache) = self.caller_cache.lock() {
-                            cache.retain(|pid, _| {
-                                // SAFETY: signal zero only observes the process.
-                                unsafe {
-                                    libc::kill(*pid as i32, 0) == 0
-                                        || std::io::Error::last_os_error().raw_os_error()
-                                            == Some(libc::EPERM)
-                                }
-                            });
+                            cache.retain(|pid, _| crate::plugins::pid_alive(*pid as i32));
                             cache.insert(pid, caller.clone());
                             if let Some(requested_pid) = requested_pid {
                                 cache.insert(requested_pid, caller.clone());
@@ -1981,10 +1974,7 @@ impl DaemonService {
                         }
                     }
                     if host["enabled"] == true && string(&host, "token").is_empty() {
-                        let mut bytes = [0u8; 32];
-                        getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
-                        host["token"] =
-                            json!(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                        host["token"] = json!(crate::plugins::try_random_hex(32)?);
                     }
                     v["host_hub"] = host;
                     if let Some(m) = v.as_object_mut() {

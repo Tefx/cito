@@ -211,15 +211,6 @@ fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
         .join("projects")
         .join(slug)
 }
-fn process_start(p: u32) -> Option<String> {
-    std::process::Command::new("/bin/ps")
-        .args(["-p", &p.to_string(), "-o", "lstart="])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
 fn hook_endpoint(req: &Value) -> u32 {
     if let Some(p) = env_value(req, "CITO_ENDPOINT_PID").and_then(|s| s.parse().ok()) {
         return p;
@@ -247,16 +238,7 @@ fn hook_endpoint(req: &Value) -> u32 {
         {
             return p;
         }
-        let next = std::process::Command::new("/bin/ps")
-            .args(["-p", &p.to_string(), "-o", "ppid="])
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            });
+        let next = process_parent(p);
         match next {
             Some(n) if n > 1 && n != p => p = n,
             _ => break,

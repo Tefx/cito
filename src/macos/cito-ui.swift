@@ -747,7 +747,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var timer: DispatchWorkItem?
     var clickSource: DispatchSourceSignal?
     var hoverEventMonitor: Any?
-    var menuActions: [() -> Void] = []
     let cardMenu = NSMenu()
     var selectedHubs = Set<String>()
     var statusImage: NSImage?
@@ -1047,9 +1046,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 return
             }
-            if op == "test_action", let index = object["index"] as? Int, menuActions.indices.contains(index) {
-                menuActions[index](); return
-            }
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.op == "composer_result" {
@@ -1178,7 +1174,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func rebuild() {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
         rebuildCount += 1
-        menuActions.removeAll()
         let count = uniqueSessionCount
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
         statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
@@ -1191,7 +1186,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             view.identifier = NSUserInterfaceItemIdentifier(id)
             let item = NSMenuItem(); item.view = view; menu.addItem(item); return item
         }
-        func register(_ action: @escaping () -> Void) { menuActions.append(action) }
         let header = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 40))
         header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 32, height: 18), size: 13, weight: .bold))
         let subtitleText: String
@@ -1206,15 +1200,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         header.addSubview(subLabel)
         _ = host(header, id: "header")
         var drawerItems: [String: NSMenuItem] = [:]
-        var hubActions: [() -> Void] = []
         let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         for hub in hubs {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 32))
             let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "login"]) }
             let reconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "reconnect"]) }
             let disconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "disconnect"]) }
-            if hub.auth_mode == "oidc" { hubActions.append(loginRun) }
-            hubActions.append(reconnectRun); hubActions.append(disconnectRun)
             let buttons: [(String, String, Bool, () -> Void)]
             switch hub.status {
             case "connected" where hub.error != nil:
@@ -1398,7 +1389,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 card.addSubview(hubPill)
             }
             var x: CGFloat = scopeX
-            var toggle: MenuControl? = nil
             if showScopeToggle {
                 var scope = listener.scope
                 let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
@@ -1418,17 +1408,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
                 }
                 card.addSubview(scopeBtn); x += 66
-                toggle = scopeBtn
-            }
-            register { [weak copy] in copy?.pressed?() }
-            if let toggle = toggle {
-                register { [weak toggle] in toggle?.pressed?() }
             }
             let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
             stop.toolTip = "Stop listening"; stop.style = .destructiveHover
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
-            stop.pressed = unlisten; card.addSubview(stop); register(unlisten); register(unlisten)
+            stop.pressed = unlisten; card.addSubview(stop)
         }
         if activeRows.count <= 4 {
             for (id, row) in activeRows { _ = host(row, id: id) }
@@ -1536,7 +1521,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
         }
         // Zone 3 — Available Sessions with Per-Hub Target Selector & Collapsible Harness Groups
-        var candidateActions: [() -> Void] = []
         if !available.isEmpty {
             let targetHub = effectiveTargetHub
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
@@ -1660,7 +1644,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             self.emit(action)
                         }
                         listenBtn.pressed = listenRun; row.addSubview(listenBtn)
-                        candidateActions.append({ [weak listenBtn] in listenBtn?.pressed?() })
                         candidateRows.append((id: rowId, view: row))
                     }
                     if candidateRows.count <= 4 {
@@ -1716,9 +1699,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let stopAll = MenuControl("Stop All", frame: NSRect(x: 12, y: 6, width: 82, height: 24), leadingSymbol: "stop.fill")
             stopAll.identifier = NSUserInterfaceItemIdentifier("stop_all")
             stopAll.pressed = { self.emit(["op": "unlisten_all"]) }
-            footer.addSubview(stopAll); register { [weak stopAll] in stopAll?.pressed?() }
+            footer.addSubview(stopAll)
         }
-        hubActions.forEach { register($0) }
         let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: 88, height: 24), leadingSymbol: "gearshape")
         openSettings.identifier = NSUserInterfaceItemIdentifier("open_settings")
         openSettings.pressed = { [weak self, weak menu] in
@@ -1736,8 +1718,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let quit = MenuControl("Quit Cito ⌘Q", frame: NSRect(x: 262, y: 6, width: 106, height: 24))
         quit.identifier = NSUserInterfaceItemIdentifier("quit")
         quit.pressed = { self.emit(["op": "quit"]) }
-        footer.addSubview(quit); register { [weak quit] in quit?.pressed?() }
-        candidateActions.forEach { register($0) }
+        footer.addSubview(quit)
         let footerItem = host(footer, id: "footer")
         footerItem.target = self; footerItem.action = #selector(quitMenu)
         footerItem.keyEquivalent = "q"; footerItem.keyEquivalentModifierMask = [.command]
@@ -3180,7 +3161,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
-        let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "actions": menuActions.count, "count": uniqueSessionCount,
+        let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "count": uniqueSessionCount,
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),

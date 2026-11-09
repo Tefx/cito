@@ -10,6 +10,149 @@ fn website_clipboard_promises_failure_retry_and_duplicate_suppression() {
     assert!(ok, "{out}\n{err}");
 }
 #[test]
+fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let package = f.dir.join("package");
+    let bin = package.join("bin");
+    let release = package.join("target/release");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(release.join("deps")).unwrap();
+    let linker = bin.join("cito-linker");
+    fs::copy(root().join("bin/cito-linker"), &linker).unwrap();
+    let source = package.join("main.c");
+    fs::write(
+        &source,
+        "#include <stdio.h>\nint main(void) { puts(\"production\"); return 0; }\n",
+    )
+    .unwrap();
+    let object = package.join("main.o");
+    let archive = package.join("libtest-fixture.rlib");
+    for (program, args) in [
+        (
+            "/usr/bin/cc",
+            vec![
+                "-c",
+                source.to_str().unwrap(),
+                "-o",
+                object.to_str().unwrap(),
+            ],
+        ),
+        (
+            "/usr/bin/ar",
+            vec!["-crs", archive.to_str().unwrap(), object.to_str().unwrap()],
+        ),
+    ] {
+        let (ok, out, err) = f.command(program, &args, "");
+        assert!(ok, "{out}\n{err}");
+    }
+    let linked = release.join("deps/cito_native-fixture");
+    let staged = bin.join("cito-native-darwin-arm64");
+    let (ok, out, err) = f.command(
+        linker.to_str().unwrap(),
+        &[
+            source.to_str().unwrap(),
+            archive.to_str().unwrap(),
+            "-o",
+            linked.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    assert!(linked.is_file());
+    assert!(
+        !staged.exists(),
+        "libtest invocation staged a production executable"
+    );
+
+    // An older canonical release must never replace the newly linked executable.
+    let canonical = release.join("cito-native");
+    fs::write(&canonical, "stale canonical release").unwrap();
+    let (ok, out, err) = f.command(
+        linker.to_str().unwrap(),
+        &[source.to_str().unwrap(), "-o", linked.to_str().unwrap()],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    assert_eq!(
+        f.command(staged.to_str().unwrap(), &[], ""),
+        (true, "production\n".into(), String::new())
+    );
+    assert!(
+        f.command(
+            "/usr/bin/codesign",
+            &["--verify", staged.to_str().unwrap()],
+            ""
+        )
+        .0
+    );
+    fs::copy(&linked, &canonical).unwrap();
+    let (ok, out, err) = f.command(
+        linker.to_str().unwrap(),
+        &[source.to_str().unwrap(), "-o", linked.to_str().unwrap()],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    assert_eq!(
+        f.command(staged.to_str().unwrap(), &[], "").1,
+        "production\n"
+    );
+    let production = fs::read(&staged).unwrap();
+    fs::write(&source, "int main(void) { return 7; }\n").unwrap();
+    let (ok, out, err) = f.command(
+        linker.to_str().unwrap(),
+        &[
+            source.to_str().unwrap(),
+            archive.to_str().unwrap(),
+            "-o",
+            linked.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    assert_eq!(
+        fs::read(&staged).unwrap(),
+        production,
+        "libtest invocation overwrote staged production binary"
+    );
+
+    // Fat LTO absorbs libtest into an object, so its archive is absent from linker arguments.
+    let rustc = std::path::Path::new(env!("CARGO")).with_file_name("rustc");
+    let rust_source = package.join("harness.rs");
+    fs::write(
+        &rust_source,
+        "#[test] fn passes() { assert_eq!(2 + 2, 4); }\n",
+    )
+    .unwrap();
+    let (ok, out, err) = f.command(
+        rustc.to_str().unwrap(),
+        &[
+            "--test",
+            "-C",
+            "lto=true",
+            "-C",
+            "opt-level=z",
+            "-C",
+            "strip=symbols",
+            "-C",
+            &format!("linker={}", linker.display()),
+            rust_source.to_str().unwrap(),
+            "-o",
+            linked.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    let (ok, out, err) = f.command(linked.to_str().unwrap(), &["--list"], "");
+    assert!(ok, "{out}\n{err}");
+    assert!(out.contains("passes: test"));
+    assert_eq!(
+        fs::read(&staged).unwrap(),
+        production,
+        "LTO test harness overwrote staged production binary"
+    );
+}
+#[test]
 fn distribution_versions_native_manifests_formula_and_signed_ui() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -121,6 +264,10 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
     ] {
         let file = site.join(page);
         let html = fs::read_to_string(&file).unwrap();
+        assert!(
+            html.contains("name=\"application-version\" content=\"0.19.0\""),
+            "{page}"
+        );
         for attr in ["href=\"", "src=\""] {
             for tail in html.split(attr).skip(1) {
                 let reference = tail.split('"').next().unwrap();
@@ -154,6 +301,15 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
             u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
             height
         );
+    }
+    let css = fs::read_to_string(site.join("styles/main.css")).unwrap();
+    for rule in [
+        "@media (max-width: 640px)",
+        ".nav-inner",
+        ".nav-links",
+        "minmax(min(100%, 19rem), 1fr)",
+    ] {
+        assert!(css.contains(rule), "Missing mobile layout rule: {rule}");
     }
     assert!(site.join(".nojekyll").exists());
     assert!(!site.join("CNAME").exists());

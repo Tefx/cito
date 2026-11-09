@@ -2,14 +2,22 @@
 # Cargo's linker hook stages completed release executables after linking.
 set -eu
 /usr/bin/cc "$@"
+# libtest harnesses share Cargo binary prefixes but are never distributable apps.
+for arg in "$@"; do
+  case "$arg" in *libtest-*) exit 0 ;; esac
+done
 out=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then shift; out="$1"; break; fi
   shift
 done
 case "$out" in */release/deps/*) ;; *) exit 0 ;; esac
+# LTO can absorb libtest into an object before this hook sees any archive arguments.
+compiler_args="$(/bin/ps -p "$PPID" -o command=)"
+case " $compiler_args " in *" --test "*) exit 0 ;; esac
 root="$(cd "$(dirname "$0")/.." && pwd)"
-case "$(basename "$out")" in
+name="$(basename "$out")"
+case "$name" in
   cito_native-*) dest="$root/bin/cito-native-darwin-arm64" ;;
   cito_plugin_pi-*) dest="$root/plugins/pi/bin/cito-plugin-pi" ;;
   cito_plugin_codex-*) dest="$root/plugins/codex/bin/cito-plugin-codex" ;;
@@ -18,6 +26,12 @@ case "$(basename "$out")" in
   cito_plugin_telegram-*) dest="$root/plugins/telegram/bin/cito-plugin-telegram" ;;
   *) exit 0 ;;
 esac
+# Cargo may not have promoted this link to its canonical release path yet.
+bin_name="$(printf '%s' "${name%-*}" | tr '_' '-')"
+canonical="$(dirname "$(dirname "$out")")/$bin_name"
+if [ -f "$canonical" ] && /usr/bin/cmp -s "$out" "$canonical"; then
+  out="$canonical"
+fi
 # Replace atomically so an interrupted link/sign never exposes a partial binary.
 mkdir -p "$(dirname "$dest")"
 tmp="$dest.tmp.$$"

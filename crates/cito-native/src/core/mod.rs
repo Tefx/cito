@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cli;
+pub mod config;
 pub mod daemon;
 pub mod database;
 pub mod hub;
@@ -7,8 +8,10 @@ pub mod hub_plugins;
 pub mod identity;
 pub mod lease;
 pub mod login;
+pub mod plugins;
 pub mod receiver;
 pub mod registration;
 pub mod session_activity;
+pub mod setup;
 pub mod state;
 pub mod transport;

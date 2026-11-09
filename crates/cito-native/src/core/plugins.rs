@@ -1,9 +1,7 @@
+pub use super::config::*;
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-#[path = "config.rs"]
-mod config;
-pub use config::*;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
@@ -128,16 +126,20 @@ pub fn random_uuid_v4() -> String {
     )
 }
 
-pub fn random_hex(bytes_len: usize) -> String {
+/// Generates cryptographic tokens without masking an entropy-source failure.
+pub fn try_random_hex(bytes_len: usize) -> Result<String, String> {
     let mut bytes = vec![0u8; bytes_len];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = ((now_ms() as usize).wrapping_add(i * 31)) as u8;
-        }
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Best-effort identifiers for temporary paths; use try_random_hex for secrets.
+pub fn random_hex(bytes_len: usize) -> String {
+    try_random_hex(bytes_len).unwrap_or_else(|_| {
+        (0..bytes_len)
+            .map(|i| format!("{:02x}", ((now_ms() as usize).wrapping_add(i * 31)) as u8))
+            .collect()
+    })
 }
 
 pub fn system_home_dir() -> String {

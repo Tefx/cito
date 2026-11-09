@@ -160,9 +160,6 @@ fn pair_code() -> Result<String, String> {
     getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
     Ok(format!("cito-{}", encode_pair_token(bytes)))
 }
-fn slug(user: &str) -> String {
-    super::identity::normalize_slug(user)
-}
 fn matches(subject: &str, filter: &str) -> bool {
     filter.is_empty()
         || filter == ">"
@@ -1168,7 +1165,7 @@ fn publish_human_reply(
     }
     let in_reply_to = in_reply_to.map(|raw| raw.rsplit_once(':').map(|(_, id)| id).unwrap_or(raw));
     let sig = random_id("sig_")?;
-    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|hub|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":"hub","host_name":channel,"harness":"human","listener_id":format!("{}-{}",slug(owner),human.trim_start_matches("c_")),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
+    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|hub|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":"hub","host_name":channel,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
     publish(
         c,
         &format!("cito.signal.{target_id}"),
@@ -1569,7 +1566,7 @@ fn attach(c: &Connection, b: &Value, enabled: bool, remote: bool) -> Result<(), 
     let pid = required(b, "principal_id")?;
     let id = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let old = kv_row(c, &id)?;
-    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":format!("{}-{}",slug(s(b,"owner_user")),id.trim_start_matches("c_")),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":format!("@{} (Me)",s(b,"owner_user")),"about":"Human node","scope":if remote{"self"}else{"workspace"},"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
+    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(b,"owner_user"), &id),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":format!("@{} (Me)",s(b,"owner_user")),"about":"Human node","scope":if remote{"self"}else{"workspace"},"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
     if !reg.is_object() {
         return Err("INVALID_INPUT: Listener must be an object".into());
     }

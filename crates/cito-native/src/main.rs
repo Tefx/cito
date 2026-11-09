@@ -1,9 +1,6 @@
-mod core;
-mod daemon;
-mod hub;
-mod oidc_constants;
-mod plugins;
-mod setup;
+use cito_native::core;
+use cito_native::extract_jsonrpc_from_http_body;
+pub use core::{daemon, hub, plugins, setup};
 
 use plugins::{ensure_daemon, http_post_mcp, load_native_config, CITO_VERSION};
 use serde_json::{json, Value};
@@ -14,25 +11,6 @@ use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-pub fn extract_jsonrpc_from_http_body(body: &str) -> Option<Value> {
-    body.lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .filter(|s| !s.trim().is_empty())
-        .last()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .or_else(|| serde_json::from_str(body.trim()).ok())
-}
-// Generic UUID validation is also used by legacy CLI argument parsing.
-pub fn is_valid_transcript_uuid(s: &str) -> bool {
-    s.len() == 36
-        && s.bytes().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        })
-}
 fn merge(target: &mut Value, patch: &Value) {
     if let (Some(t), Some(p)) = (target.as_object_mut(), patch.as_object()) {
         for (k, v) in p {

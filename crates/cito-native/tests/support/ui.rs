@@ -262,7 +262,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(inspect(&f, p)["directory_open"], false);
 }
 fn settings() -> Value {
-    json!({"apps":[],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"desktop_banner_enabled":true,"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"local://","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
+    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"desktop_banner_enabled":true,"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"local://","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
 }
 #[test]
 fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_overlay() {
@@ -273,7 +273,42 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     initial["settings"] = settings();
     f.send(p, initial);
     f.send(p, json!({"op":"test_settings_key","key":"command-comma"}));
-    assert_eq!(inspect(&f, p)["settings_open"], true);
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_open"], true);
+    assert_eq!(s["settings_tab"], "apps");
+    for (id, configured) in [("pi", true), ("codex", false), ("cursor", false)] {
+        assert!(!node(&s, "settings_items", &format!("settings_app:{id}")).is_null());
+        assert_eq!(
+            node(&s, "settings_items", &format!("settings_app_status:{id}"))["text"],
+            if configured {
+                "● Connected"
+            } else {
+                "○ Not Set Up"
+            }
+        );
+        assert_eq!(
+            node(&s, "settings_items", &format!("setup_app:{id}"))["text"],
+            if configured { "Re-check" } else { "Set Up" }
+        );
+        assert_eq!(
+            node(&s, "settings_items", &format!("remove_app:{id}")).is_null(),
+            !configured
+        );
+        control(&f, p, &format!("setup_app:{id}"));
+        wait(|| {
+            f.frames(p)
+                .iter()
+                .any(|v| v["op"] == "setup_apply" && v["harness"] == id)
+        });
+    }
+    assert!(!node(&s, "settings_items", "settings_app_tier:cursor").is_null());
+    assert!(node(&s, "settings_items", "settings_app_tier:pi").is_null());
+    control(&f, p, "remove_app:pi");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "setup_remove_app" && v["harness"] == "pi")
+    });
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
     assert_eq!(s["settings_open"], true);
@@ -381,8 +416,7 @@ fn appkit_fragmented_utf8_invalid_frames_wake_banner_and_eof() {
 fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let fake = f.dir.join("ui.py");
-    script(&fake,"#!/usr/bin/env python3\nimport os,sys\nopen(os.environ['HOME']+'/ui-pid','w').write(str(os.getpid()))\nwith open(os.environ['HOME']+'/ui-frames','a') as out:\n for line in sys.stdin:\n  out.write(line); out.flush()\n");
+    let fake = f.recording_ui();
     let daemon = f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
         ("CITO_UI_BINARY", fake.to_str().unwrap()),

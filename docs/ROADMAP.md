@@ -7,8 +7,8 @@ Cito's evolution from `v0.11.3` through `v0.19.0` is organized into **eight `0.x
 - **Stage 3 (`v0.15.0` — Completed)**: Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`, `HumanChannelPlugin` (`cito-ui` + `plugins/telegram`), `Directory | Activity` Feed & Inline Hub Reply Composer
 - **Stage 4 (`v0.16.0` — Completed)**: Project Website, Visual Architecture Showcase, Plugin SDK Authoring Guide & Onboarding Docs
 - **Stage 5 (`v0.17.0` — Completed)**: Initial Native Packaging, First-Launch Consent & Surgical Disconnect/Uninstall
-- **Stage 6 (`v0.18.0` — Active / Phase `v22`)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
-- **Stage 7 (`v0.19.0` — Implementation / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
+- **Stage 6 (`v0.18.0` — Completed)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
+- **Stage 7 (`v0.19.0` — Active / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
 
 ---
 
@@ -72,7 +72,7 @@ Completed in Phase `v18` (`2ade0a7`, tag `v0.14.0`).
 
 ---
 
-## Stage 5 & Stage 6 (`v0.18.0` — Active): Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol, Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of `src/*.ts` & Complete `F1`–`F64` Remediation
+## Stage 5 & Stage 6 (`v0.18.0` — Completed): Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol, Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of `src/*.ts` & Complete `F1`–`F64` Remediation
 
 1. **Pure Rust Core (`libsqlite3`) & Complete Retirement of Duplicate TypeScript Engine (`src/*.ts`)**:
    - `bin/cito` and `bin/cito-mcp` run `daemon`, `hub`, `mcp-stdio`, `setup`, and all CLI subcommands natively in Rust backed by system `libsqlite3` (`state.sqlite` and `hub.sqlite`), real OIDC JWKS (`RS256`/`ES256`) verification, `principal_id` RLS, SSE auto-reconnect, atomic `signal_claim_dispatch`, and all 27 UI actions (`F1, F6–F19, F24, F30, F31, F37, F39–F41, F52, F54, F55, F60, F61, F63, F64`).
@@ -86,7 +86,7 @@ Completed in Phase `v18` (`2ade0a7`, tag `v0.14.0`).
 
 ---
 
-## Stage 7 (`v0.19.0` — Implementation / Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
+## Stage 7 (`v0.19.0` — Active / Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
 
 1. **Remove Root Node.js / Vitest Scaffolding**:
    - Delete root `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, and `tests/**/*.ts` (`tests/support/native-harness.ts`), keeping only `plugins/pi/{package.json, cito-bridge.ts}` for the Pi host.

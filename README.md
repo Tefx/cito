@@ -202,12 +202,14 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
 
 ## Custom Agent & Human Channel Plugins (`~/.cito/plugins/`)
 
-Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and Human Channel plugins (`human` [Desktop UI], `telegram` [Telegram Bot API]). To integrate another coding agent (`kind: "agent"`) or external human messaging channel (`kind: "human"`) without modifying Cito core, create `~/.cito/plugins/<id>/plugin.json` (and an optional `index.ts` or `index.js` implementing `HarnessAdapter` or `HumanChannelPlugin` from `@tefx/cito/plugin-sdk`). See the **[Plugin SDK Guide](https://tefx.github.io/cito/docs/plugins.html)** for full examples:
+Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and Human Channel plugins (`human` [Desktop UI], `telegram` [Telegram Bot API]). To integrate another coding agent (`kind: "agent-harness"`) or external human messaging channel (`kind: "human-channel"`) without modifying Cito core, create `~/.cito/plugins/<id>/plugin.json` and provide an executable that exchanges NDJSON requests and responses over `stdin`/`stdout`. The manifest `command` launches the subprocess; paths starting with `./` resolve relative to the plugin directory. See the **[Subprocess Plugin Guide](https://tefx.github.io/cito/docs/plugins.html)** for protocol details and examples:
 
 ```json
 {
   "id": "cursor",
-  "kind": "agent",
+  "kind": "agent-harness",
+  "tier": "experimental",
+  "command": ["./bin/cito-plugin-cursor"],
   "displayName": "Cursor",
   "sfSymbol": "cursorarrow.rays",
   "tint": "purple",

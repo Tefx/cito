@@ -640,8 +640,8 @@ fn build_mac_app_bundle_from_root(
     let sign_id = env::var("CITO_CODESIGN_IDENTITY")
         .or_else(|_| env::var("APPLE_SIGNING_IDENTITY"))
         .unwrap_or_default();
-    if !sign_id.trim().is_empty() {
-        let _ = Command::new("/usr/bin/codesign")
+    let status = if !sign_id.trim().is_empty() {
+        Command::new("/usr/bin/codesign")
             .args([
                 "--force",
                 "--options",
@@ -652,11 +652,18 @@ fn build_mac_app_bundle_from_root(
                 sign_id.trim(),
                 &app_path.to_string_lossy(),
             ])
-            .status();
+            .status()
     } else {
-        let _ = Command::new("/usr/bin/codesign")
+        Command::new("/usr/bin/codesign")
             .args(["-s", "-", "--force", "--deep", &app_path.to_string_lossy()])
-            .status();
+            .status()
+    }
+    .map_err(|e| format!("Cannot run codesign for {}: {e}", app_path.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "codesign failed for {}: {status}",
+            app_path.display()
+        ));
     }
 
     let bytes = dir_bytes(&app_path);
@@ -1370,7 +1377,13 @@ mod tests {
         let args: Vec<String> =
             serde_json::from_str(&env::var("CITO_SETUP_TEST_ARGS").expect("worker arguments"))
                 .unwrap();
-        if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
+        if args == ["test-codesign-failure"] {
+            env::set_var("CITO_CODESIGN_IDENTITY", "nonexistent-identity-cito-test");
+            let root = PathBuf::from(env::var("HOME").unwrap());
+            let plugins = crate::plugins::load_plugins(&root);
+            let error = build_mac_app_bundle_native(None, &root, &plugins).unwrap_err();
+            assert!(error.contains("codesign failed"), "{error}");
+        } else if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
             let root = PathBuf::from(env::var("HOME").unwrap());
             let plugins = crate::plugins::load_plugins(&root);
             set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
@@ -1403,6 +1416,18 @@ mod tests {
             .env("CITO_SETUP_TEST_ARGS", serde_json::to_string(args).unwrap())
             .output()
             .unwrap()
+    }
+
+    #[test]
+    fn app_bundle_rejects_invalid_signing_identity() {
+        let (root, _) = fixture();
+        let result = cli_child(&root, &["test-codesign-failure"]);
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 
     #[test]
@@ -1696,7 +1721,7 @@ mod tests {
         // Keep process-global environment immutable while other unit tests run.
         if env::var_os("CITO_UNINSTALL_TEST_WORKER").is_none() {
             let output = Command::new(env::current_exe().unwrap())
-                .args(["setup::implementation::tests::uninstall_uses_configured_port_unlistens_and_waits_before_removal", "--exact", "--nocapture"])
+                .args(["core::setup::tests::uninstall_uses_configured_port_unlistens_and_waits_before_removal", "--exact", "--nocapture"])
                 .env("CITO_UNINSTALL_TEST_WORKER", "1")
                 .env_remove("CITO_DAEMON_PORT")
                 .output().unwrap();
