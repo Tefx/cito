@@ -10,7 +10,13 @@ class Cito < Formula
   depends_on :macos
 
   def install
-    prefix.install "Cito.app" if File.directory?("Cito.app")
+    if File.directory?("Cito.app")
+      prefix.install "Cito.app"
+    elsif File.directory?("Contents")
+      (prefix/"Cito.app").install "Contents"
+    else
+      odie "Cito.app bundle Contents not found in archive"
+    end
 
     (bin/"cito").write <<~EOS
       #!/bin/sh

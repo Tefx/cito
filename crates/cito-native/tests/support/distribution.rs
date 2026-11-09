@@ -206,6 +206,10 @@ fn distribution_versions_native_manifests_formula_and_signed_ui() {
     assert!(text.contains("version \"0.19.0\""));
     assert!(text.contains("v0.19.0"));
     assert!(!text.contains("depends_on \"node\""));
+    assert!(
+        text.contains("(prefix/\"Cito.app\").install \"Contents\""),
+        "Formula must handle Homebrew's single-top-level-directory stripping when unpacking Cito.app"
+    );
     for path in [
         ".agents/plugins/marketplace.json",
         "plugins/codex/.codex-plugin/plugin.json",
