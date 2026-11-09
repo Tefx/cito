@@ -877,7 +877,7 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     put(&e, "target", "none#bob", "workspace");
     send(&e, &human, "original");
     let events = e.subscribe(None).unwrap();
-    let request = json!({"to":"work:target","message":"Approved","in_reply_to":"work:original","msg_id":"desktop-reply","host_id":"desktop","host_name":"Desktop"});
+    let request = json!({"to":"work:target","message":" \u{0081}Approv\u{0081}ed\t ","in_reply_to":"work:original","msg_id":"desktop-reply","host_id":"desktop","host_name":"Desktop"});
     e.inner.db.execute("CREATE TRIGGER fail_reply_ack BEFORE UPDATE OF acked_at_ms ON hub_signals WHEN OLD.signal_id='original' BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
     assert!(e
         .rpc("send_reply_from_human", &request, Some(&sender))

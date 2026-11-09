@@ -228,6 +228,72 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
 }
 
 #[test]
+fn agent_and_human_sends_share_unicode_control_sanitization() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let target = enroll(&f, meta.clone());
+    let hub = f.db("hub.sqlite");
+    let error = "INVALID_INPUT: message must contain 1..65,536 characters";
+    let agent = f.tool_result(
+        "cito_send",
+        json!({"to":"@self","message":"\u{0081}"}),
+        meta.clone(),
+    );
+    assert_eq!(agent["isError"], true);
+    let agent_error: Value =
+        serde_json::from_str(agent["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        agent_error,
+        json!({"ok":false,"error":{"code":"INVALID_INPUT","message":"message must contain 1..65,536 characters","retryable":false}})
+    );
+    let (status, human) = f.action(
+        json!({"op":"send_reply_from_human","to_listener_id":target["listener_id"],"text":"\u{0081}"}),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(human["error"], error);
+    assert_eq!(
+        hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+            .unwrap(),
+        vec![json!({"n":0})]
+    );
+    for (message, expected) in [
+        ("a\u{0081}b", "ab"),
+        (" \ta\u{0081}b\u{2003}", "ab"),
+        (
+            "a\n\r\t\u{000b}\u{000c}\u{0085}b",
+            "a\n\r\t\u{000b}\u{000c}\u{0085}b",
+        ),
+    ] {
+        let agent = f.tool(
+            "cito_send",
+            json!({"to":"@self","message":message}),
+            meta.clone(),
+        );
+        let (status, human) = f.action(
+            json!({"op":"send_reply_from_human","to_listener_id":target["listener_id"],"text":message}),
+        );
+        assert_eq!(status, 200, "{human}");
+        for sent in [agent, human] {
+            let id = sent["signal_id"]
+                .as_str()
+                .unwrap()
+                .rsplit(':')
+                .next()
+                .unwrap();
+            assert_eq!(
+                hub.query(
+                    "SELECT json_extract(CAST(data AS TEXT),'$.message') AS message FROM hub_signals WHERE signal_id=?",
+                    &[json!(id)],
+                ).unwrap(),
+                vec![json!({"message":expected})]
+            );
+        }
+    }
+}
+
+#[test]
 fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_local_state() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"work":{"url":"local://"}},"defaultHub":"work"}));

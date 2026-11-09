@@ -1150,13 +1150,7 @@ fn publish_human_reply(
     {
         return Err("FORBIDDEN_TARGET_SCOPE: reply target is private".into());
     }
-    let text: String = text
-        .chars()
-        .filter(|c| !c.is_control() || c.is_whitespace())
-        .collect();
-    if text.trim().is_empty() || text.chars().count() > 65_536 {
-        return Err("INVALID_INPUT: reply must contain 1..65536 code points".into());
-    }
+    let text = super::identity::sanitize_message(text)?;
     let human = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let target_id = s(&target_row, "key");
     if human == target_id {
