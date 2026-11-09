@@ -2,6 +2,376 @@ use super::support::*;
 use serde_json::{json, Value};
 use std::fs;
 
+fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
+    let path = f.dir.join(name);
+    f.send(
+        p,
+        json!({"op":"test_render_png","surface":surface,"path":path}),
+    );
+    wait(|| {
+        f.output(p, true)
+            .contains(&format!("rendered {}", path.display()))
+    });
+    let data = fs::read(&path).unwrap();
+    assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n");
+    assert!(data.len() > 1000);
+    let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
+    assert_eq!(
+        width,
+        if surface == "settings" {
+            1040
+        } else if surface == "directory" {
+            1120
+        } else {
+            760
+        }
+    );
+    if surface == "settings" {
+        assert_eq!(height, 920);
+    }
+    assert!(height > 100);
+    // Opt-in temporary visual-review artifacts; normal test runs leave no residue.
+    if let Some(dir) = std::env::var_os("CITO_TEST_SNAPSHOT_DIR") {
+        fs::create_dir_all(&dir).unwrap();
+        fs::copy(&path, std::path::Path::new(&dir).join(name)).unwrap();
+    }
+}
+
+#[test]
+fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("local");
+    cfg["channels"][0]["status"] = json!("not_configured");
+    cfg["channels"][0]["fields"][0]["configured"] = json!(false);
+    cfg["channels"][0]["fields"][0]["value"] = json!("");
+    cfg["channels"][0]["setup_guide"] = json!([
+        "1. Create a gateway credential with your provider.",
+        "2. Save it once for every human on this Hub."
+    ]);
+    cfg["hubs"][0]["name"] = json!("local");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    frame["listeners"] = json!([]);
+    frame["available"] =
+        json!([{"harness":"fixture","session_id":"s1","title":"Work session","cwd":"/tmp"}]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(node(&s, "items", "human_paused_card")["height"], 52);
+    assert_eq!(node(&s, "items", "listen_human")["text"], "Enable");
+    render_png(&f, p, "menu", "menu_human_paused.png");
+    let rendered = inspect(&f, p);
+    for item in nodes(&s["items"]) {
+        if let Some(id) = item["id"].as_str().filter(|s| !s.is_empty()) {
+            let restored = node(&rendered, "items", id);
+            for coordinate in ["x", "y", "width", "height"] {
+                assert_eq!(
+                    restored[coordinate], item[coordinate],
+                    "Rendering must restore {id}.{coordinate}"
+                );
+            }
+        }
+    }
+    control(&f, p, "listen_human");
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "listen_session"
+                && v["hub"] == "personal"
+                && v["harness"] == "human"
+                && v["session_id"] == "default"
+        })
+    });
+    control(&f, p, "target_hub:work");
+    control(&f, p, "listen_human");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "listen_session" && v["harness"] == "human" && v["hub"] == "work")
+    });
+    control(&f, p, "open_settings");
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "onboarding_banner").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "goto_channels_tab")["text"],
+        "Human Channels →"
+    );
+    assert_eq!(node(&s, "settings_items", "skip_next_step")["text"], "Skip");
+    assert_eq!(
+        node(&s, "settings_items", "settings_app_tier:cursor")["width"],
+        88
+    );
+    render_png(&f, p, "settings", "settings_apps.png");
+    control(&f, p, "toggle_onboarding_guide");
+    for tab in ["apps", "channels", "hubs"] {
+        control(&f, p, &format!("settings_tab:{tab}"));
+        let s = inspect(&f, p);
+        let guide = node(&s, "settings_items", "onboarding_banner");
+        let viewport = node(&s, "settings_items", &format!("settings_{tab}_tab"));
+        assert_eq!(guide["y"], 348);
+        assert_eq!(guide["height"], 58);
+        assert_eq!(viewport["y"], 44);
+        assert_eq!(viewport["height"], 300);
+        assert!(
+            viewport["y"].as_f64().unwrap() + viewport["height"].as_f64().unwrap()
+                < guide["y"].as_f64().unwrap()
+        );
+    }
+    render_png(&f, p, "settings", "settings_guide_open.png");
+    control(&f, p, "dismiss_onboarding_guide");
+    control(&f, p, "settings_tab:channels");
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "onboarding_banner").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "settings_channel_status:channel")["text"],
+        "○ Not Configured"
+    );
+    let hub = node(&s, "settings_items", "stratum_hub:channel");
+    let user = node(&s, "settings_items", "stratum_user:channel");
+    assert!(
+        hub["y"].as_f64().unwrap() > user["y"].as_f64().unwrap() + user["height"].as_f64().unwrap()
+    );
+    assert!(nodes(&hub["children"])
+        .iter()
+        .any(|n| n["id"] == "channel_field:channel:secret"));
+    assert!(!nodes(&hub["children"])
+        .iter()
+        .any(|n| n["id"] == "channel_field:channel:account"));
+    assert!(nodes(&user["children"])
+        .iter()
+        .any(|n| n["id"] == "skip_channel:channel"));
+    assert_eq!(
+        node(&s, "settings_items", "stratum_hub_title:channel")["text"],
+        "1. HUB GATEWAY · ONCE PER HUB"
+    );
+    assert!(
+        node(&s, "settings_items", "stratum_user_title:channel")["text"]
+            .as_str()
+            .unwrap()
+            .contains("@alice")
+    );
+    render_png(&f, p, "settings", "settings_channels_unconfigured.png");
+    f.send(p, json!({"op":"test_settings_scroll","offset":0}));
+    render_png(&f, p, "settings", "settings_channels_unconfigured_node.png");
+    f.send(p, json!({"op":"test_settings_scroll","offset":100000}));
+    let before = f.frames(p).len();
+    control(&f, p, "skip_channel:channel");
+    assert_eq!(inspect(&f, p)["settings_tab"], "hubs");
+    assert_eq!(f.frames(p).len(), before, "Skip must not mutate Hub state");
+    control(&f, p, "settings_tab:apps");
+    assert!(node(&inspect(&f, p), "settings_items", "apps_next_step_callout").is_null());
+    cfg["channels"][0]["status"] = json!("pairing_pending");
+    cfg["channels"][0]["fields"][0]["configured"] = json!(true);
+    cfg["channels"][0]["pairing_instruction"] =
+        json!("Send /start cito-abc123def4 to your account provider.");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "settings_tab:channels");
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "stratum_hub_status:channel")["text"],
+        "● Hub Gateway Active"
+    );
+    assert!(!node(&s, "settings_items", "clear_channel_service:channel").is_null());
+    assert!(
+        nodes(&node(&s, "settings_items", "stratum_user:channel")["children"])
+            .iter()
+            .any(|n| n["id"] == "pairing_instruction:channel")
+    );
+    let copy = node(&s, "settings_items", "copy_pair_command:channel");
+    assert!(
+        copy["label_measured_width"].as_f64().unwrap() <= copy["label_width"].as_f64().unwrap()
+    );
+    render_png(&f, p, "settings", "settings_channels_pairing.png");
+    f.send(p, json!({"op":"test_settings_scroll","offset":0}));
+    render_png(&f, p, "settings", "settings_channels_pairing_node.png");
+    f.send(p, json!({"op":"test_settings_scroll","offset":100000}));
+    control(&f, p, "copy_pair_command:channel");
+    assert_eq!(inspect(&f, p)["clipboard"], "/start cito-abc123def4");
+    // Non-admin schemas keep ownership explanation but never reveal gateway fields.
+    cfg["channels"][0]["hub_provided"] = json!(true);
+    cfg["channels"][0]["fields"][0]["hidden"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
+    assert!(node(&s, "settings_items", "clear_channel_service:channel").is_null());
+    assert!(
+        nodes(&node(&s, "settings_items", "stratum_hub:channel")["children"])
+            .iter()
+            .any(|n| n["text"]
+                .as_str()
+                .is_some_and(|s| s.contains("administrator")))
+    );
+    cfg["host_hub"]["auth_mode"] = json!("token");
+    cfg["host_hub"]["token"] = json!("12345678abcdef0123456789");
+    cfg["hubs"][1]["auth_mode"] = json!("oidc");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "settings_tab:hubs");
+    let s = inspect(&f, p);
+    assert_eq!(node(&s, "settings_items", "toggle_hub:local")["x"], 396);
+    assert_eq!(node(&s, "settings_items", "edit_hub:local")["x"], 338);
+    assert_eq!(node(&s, "settings_items", "remove_hub:work")["x"], 396);
+    assert_eq!(node(&s, "settings_items", "edit_hub:work")["x"], 260);
+    assert_eq!(node(&s, "settings_items", "login_hub:work")["x"], 184);
+    assert_eq!(
+        node(&s, "settings_items", "copy_host_hub_token")["text"],
+        "Token: 12345678… Copy"
+    );
+    render_png(&f, p, "settings", "settings_hubs_token.png");
+    control(&f, p, "copy_host_hub_token");
+    let s = inspect(&f, p);
+    assert_eq!(s["clipboard"], cfg["host_hub"]["token"]);
+    assert_eq!(
+        node(&s, "settings_items", "copy_host_hub_token")["text"],
+        "✓ Token Copied"
+    );
+    for invalid in ["0", "65536", "word", ""] {
+        let before = f.frames(p).len();
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":invalid}),
+        );
+        control(&f, p, "apply_host_hub_port");
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "apply_host_hub_port")["text"],
+            "Apply"
+        );
+        assert!(!node(&s, "settings_items", "host_hub_error").is_null());
+        assert_eq!(f.frames(p).len(), before);
+    }
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":" 5301 "}),
+    );
+    control(&f, p, "apply_host_hub_port");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "set_host_hub" && v["port"] == 5301)
+    });
+    cfg["host_hub"]["port"] = json!(5301);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+        "✓ Saved"
+    );
+    control(&f, p, "apply_host_hub_port");
+    cfg["host_hub"]["error"] = json!("Port already in use");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "apply_host_hub_port")["text"],
+        "Apply"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "host_hub_error")["text"],
+        "Port already in use"
+    );
+    cfg["host_hub"]["error"] = Value::Null;
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "edit_hub:local");
+    let s = inspect(&f, p);
+    assert!(
+        node(&s, "settings_items", "host_hub_error").is_null(),
+        "A cleared daemon error must not linger locally"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_user")["placeholder"],
+        "e.g. alice"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_name")["hidden"],
+        true
+    );
+    render_png(&f, p, "settings", "settings_hubs_edit_local.png");
+    control(&f, p, "cancel_add_hub");
+    control(&f, p, "open_add_hub");
+    render_png(&f, p, "settings", "settings_hubs_add_remote.png");
+    for mode in ["none", "token", "oidc"] {
+        control(&f, p, &format!("settings_hub_auth:{mode}"));
+        let s = inspect(&f, p);
+        let labels: Vec<_> = nodes(&node(&s, "settings_items", "add_hub_form")["children"])
+            .into_iter()
+            .filter_map(|n| n["text"].as_str().map(String::from))
+            .collect();
+        assert!(labels.contains(&"HUB NAME".to_owned()));
+        assert!(labels.contains(&"HUB URL (http://ip:4291 or https://host)".to_owned()));
+        assert!(labels.contains(&"AUTH:".to_owned()));
+    }
+    control(&f, p, "open_directory");
+    for mode in ["directory", "activity"] {
+        control(&f, p, &format!("dir_mode:{mode}"));
+        inspect(&f, p);
+        render_png(&f, p, "directory", &format!("directory_{mode}.png"));
+        for appearance in ["light", "dark"] {
+            f.send(p, json!({"op":"test_appearance","appearance":appearance}));
+            inspect(&f, p);
+        }
+    }
+}
+
+#[test]
+fn u3_paused_human_card_is_per_hub_and_excludes_offline_targets() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    let mut human = listener();
+    human["harness"] = json!("human");
+    human["session_id"] = json!("default");
+    frame["listeners"] = json!([human]);
+    frame["available"] =
+        json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
+    f.send(p, frame.clone());
+    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    control(&f, p, "target_hub:work");
+    assert!(!node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    frame["hubs"][1]["status"] = json!("disconnected");
+    f.send(p, frame.clone());
+    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    frame["listeners"] = json!([]);
+    f.send(p, frame.clone());
+    assert!(!node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    frame["hubs"][0]["status"] = json!("disconnected");
+    f.send(p, frame);
+    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+}
+
+#[test]
+fn u4_u6_guide_is_user_controlled_even_without_apps_and_callout_skip_is_local() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    for app in cfg["apps"].as_array_mut().unwrap() {
+        app["configured"] = json!(false);
+    }
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    for tab in ["apps", "channels", "hubs"] {
+        control(&f, p, &format!("settings_tab:{tab}"));
+        assert!(node(&inspect(&f, p), "settings_items", "onboarding_banner").is_null());
+        control(&f, p, "toggle_onboarding_guide");
+        assert!(!node(&inspect(&f, p), "settings_items", "onboarding_banner").is_null());
+        control(&f, p, "dismiss_onboarding_guide");
+        assert!(node(&inspect(&f, p), "settings_items", "onboarding_banner").is_null());
+    }
+    cfg["apps"][0]["configured"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "settings_tab:apps");
+    let s = inspect(&f, p);
+    assert!(!node(&s, "settings_items", "apps_next_step_callout").is_null());
+    assert!(!s.to_string().contains("Mobile Alerts"));
+    let before = f.frames(p).len();
+    control(&f, p, "skip_next_step");
+    assert!(node(&inspect(&f, p), "settings_items", "apps_next_step_callout").is_null());
+    assert_eq!(f.frames(p).len(), before);
+}
+
 #[test]
 fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
     let _lock = serial();
@@ -474,14 +844,16 @@ fn inspect(f: &Fixture, p: usize) -> Value {
             > count
     });
     let output = f.output(p, true);
-    serde_json::from_str(
+    let snapshot: Value = serde_json::from_str(
         output
             .lines()
             .rev()
             .find_map(|l| l.strip_prefix("cito-ui: menu "))
             .unwrap(),
     )
-    .unwrap()
+    .unwrap();
+    assert_eq!(snapshot["truncated_labels"], json!([]));
+    snapshot
 }
 fn nodes(tree: &Value) -> Vec<Value> {
     let mut result = Vec::new();

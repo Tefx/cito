@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {createConnection} from 'node:net';
 import {createServer} from 'node:http';
-import {mkdirSync, writeFileSync, existsSync, statSync} from 'node:fs';
+import {mkdirSync, writeFileSync, existsSync, statSync, unlinkSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
 import bridge from '../../../../plugins/pi/cito-bridge.ts';
@@ -17,8 +17,11 @@ const api={on:(n,f)=>handlers.set(n,f),registerMcpServer:(name,config)=>{if(++at
 function request(value,fragment=false){return new Promise((resolve,reject)=>{const s=createConnection(path);let data='';s.setTimeout(2000,()=>s.destroy(Error('Timeout')));s.on('error',reject);s.on('connect',()=>{const raw=JSON.stringify(value)+'\n';if(fragment){s.write(raw.slice(0,5));s.end(raw.slice(5));}else s.write(raw);});s.on('data',c=>{data+=c;if(data.includes('\n')){s.destroy();resolve(JSON.parse(data));}});});}
 const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;calls.push(JSON.parse(body));res.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'alice-agent',scope:'self'})}]}}));});
 try {
- bridge(api);assert.equal(existsSync(path),false);
  mkdirSync(join(state,'sockets'),{recursive:true});execFileSync('python3',['-c','import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()',path]);
+ bridge(api);
+ // Startup must recover an F58 stale socket, even before session_start.
+ for(let i=0;i<100;i++){try{if((await request({op:'ping'})).ok)break;}catch{}await new Promise(r=>setTimeout(r,10));}
+ assert.equal((await request({op:'identify'})).error,'SESSION_NOT_OPEN');
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
  assert.equal(attempts,2);assert.deepEqual(registrations,[{name:'cito',config:{command:join(state,'bin/cito-mcp'),args:[]}}]);assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(join(state,'sockets')).mode&0o777,0o700);
  assert.deepEqual(await request({op:'ping'}),{ok:true});assert.equal((await request({op:'identify'})).session_id,'session-a');
@@ -38,6 +41,14 @@ try {
  process.env.CITO_DAEMON_PORT=String(port);writeFileSync(join(state,'config.json'),JSON.stringify({daemonPort:false}));await command.handler('on',context);assert.equal(calls.length,4);
  await command.handler('on --hub INVALID!',context);assert.equal(calls.length,4);assert.equal(notices.at(-1).t,'warning');
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
+ // U2: recover an unlinked socket only while the package remains configured.
+ const home=join(process.env.HOME,'.pi','agent');mkdirSync(home,{recursive:true});
+ writeFileSync(join(home,'settings.json'),JSON.stringify({packages:[join(state,'plugins','pi')]}));
+ unlinkSync(path);
+ for(let i=0;i<80&&!existsSync(path);i++)await new Promise(r=>setTimeout(r,50));
+ assert.equal((await request({op:'identify'})).session_id,session);
+ writeFileSync(join(home,'settings.json'),JSON.stringify({packages:[]}));unlinkSync(path);
+ await new Promise(r=>setTimeout(r,2200));assert.equal(existsSync(path),false);
 } finally {await handlers.get('session_shutdown')?.({},context);server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}
 assert.equal(existsSync(path),false);
 const broken=new Map();bridge({...api,on:(n,f)=>broken.set(n,f),registerMcpServer:()=>{throw Error('Registry failed')}});await assert.rejects(()=>broken.get('session_start')({},context),/Registry failed/);await broken.get('session_shutdown')({},context);

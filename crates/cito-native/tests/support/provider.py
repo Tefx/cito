@@ -29,7 +29,7 @@ elif op == "probe":
 elif op == "wake":
     result["outcome"] = options["outcome"]
 elif op == "setup_inspect":
-    result.update(installed=True, configured=False, paths=[])
+    result.update(installed=True, configured=options.get('configured', True), paths=[])
 elif op in ["setup_apply", "setup_remove"]:
     result["actions"] = []
 print(json.dumps(result), flush=True)

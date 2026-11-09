@@ -10,16 +10,18 @@ Cito's evolution from `v0.11.3` through `v0.20.1` is organized into **ten `0.x` 
 - **Stage 6 (`v0.18.0` — Completed)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
 - **Stage 7 (`v0.19.0` — Completed / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
 - **Stage 8 (`v0.20.0` — Completed / Phase `v24`)**: Full Lifecycle UX State Machine & Reconfiguration Contract (`L1`–`L17`)
-- **Stage 9 (`v0.20.1` — Phase `v25`)**: Theory-Grounded UI/UX Redesign, Two-Stratum Human Channel Architecture (`Hub Gateway` vs. `Personal Human Node`), Configured-Only Session Discovery, Live `Pi` Process Discovery & Multimodal Visual E2E Verification (`U1`–`U11`)
+- **Stage 9 (`v0.20.1` — Implemented / Phase `v25`)**: Theory-Grounded UI/UX Redesign, Two-Stratum Human Channel Architecture (`Hub Gateway` vs. `Personal Human Node`), Configured-Only Session Discovery, Live `Pi` Process Discovery & Multimodal Visual E2E Verification (`U1`–`U11`)
 
 ---
 
-## Stage 9 (`v0.20.1` — Phase `v25`)
+## Stage 9 (`v0.20.1` — Implemented / Phase `v25`)
 
 Stage 9 implements the holistic UI/UX and session-discovery contracts in [DESIGN §11](DESIGN.md#11-stage-9-v0201--phase-v25-theory-grounded-uiux-redesign-two-stratum-human-channel-architecture-hub-gateway-vs-personal-human-node-holistic-layout-grid--live-visual-e2e-verification-u1u11):
 - **U1–U3**: Configured-only session discovery (`configured == true` gate in `daemon.rs` `snapshot()`), self-healing `pi-pid-<pid>.sock` extension bridge plus live `Pi` process & `.jsonl` session discovery (`CITO_PI_PROCESS_DISCOVERY` hermetic sandbox isolation and `pid-<p>` collision fallback), and per-Hub `human_paused_card` (`listen_human`) re-enrollment in `cardMenu`.
 - **U4–U6 & U11**: Vendor-neutral `"Human Channels"` terminology (`zero` concrete agent/channel hardcoding in `src/macos/cito-ui.swift`), user-controlled `?` `onboarding_banner` across all 3 tabs with non-overlapping `300pt` tab scroll viewport, `skip_channel:<id>` (`"Skip for Now"`), `"TARGET HUB:"` label, and Two-Stratum Human Channel cards separating `stratum_hub:<id>` (`1. HUB GATEWAY · ONCE PER HUB`, `scope: "hub"`) from `stratum_user:<id>` (`2. YOUR PERSONAL NODE · EACH HUMAN ON HUB`, `scope: "user"`).
 - **U7–U10**: Right-aligned `CONNECTED HUBS` row controls (`x = 468`) with full untruncated button/badge frames, visible/copyable LAN Hub token (`copy_host_hub_token`) with validated port `"✓ Saved"` feedback, persistent field labels and protocol descriptions in `add_hub_form` (`edit_hub:local` vs. remote Hub), mechanical `truncated_labels` inspection, and `test_render_png` 8-state Retina PNG visual gate.
+
+The native regression suite covers these contracts in isolated homes and state directories, including all eight core Retina snapshots, scrolled personal-node cards, and Directory/Activity rendering. Snapshot generation restores live menu ownership and geometry after rendering. Independent visual acceptance and release publication (including the published archive checksum, Homebrew tap, and website deployment) remain separate follow-up gates.
 
 ---
 

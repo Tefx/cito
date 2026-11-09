@@ -97,6 +97,132 @@ fn identify(req: &Value, p: u32) -> Result<Value> {
         &json!({"op":"identify"}),
     )
 }
+// Session files are hints for live, same-user processes, never evidence of liveness.
+fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
+    if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0")
+        || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"]}))
+            .is_ok_and(|v| v["configured"] == true)
+    {
+        return;
+    }
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,uid=,command="])
+        .output()
+    else {
+        return;
+    };
+    // SAFETY: geteuid takes no pointers and has no caller obligations.
+    let uid = unsafe { libc::geteuid() };
+    let mut processes: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            let p = columns.next()?.parse().ok()?;
+            (columns.next()?.parse::<u32>().ok()? == uid
+                && !out.iter().any(|(pid, _)| *pid == p)
+                && matches_process(&columns.collect::<Vec<_>>().join(" ")))
+            .then_some(p)
+        })
+        .collect();
+    // Stable ordering makes the shared-cwd session assignment consistent across requests.
+    processes.sort_unstable();
+    for p in processes {
+        let Ok(identity) = process_identity(p) else {
+            continue;
+        };
+        if !matches_process(str_at(&identity, "command").unwrap_or("")) {
+            continue;
+        }
+        let Ok(cwd_output) = std::process::Command::new("/usr/sbin/lsof")
+            .args(["-a", "-d", "cwd", "-Fn", "-p", &p.to_string()])
+            .output()
+        else {
+            continue;
+        };
+        let cwd_text = String::from_utf8_lossy(&cwd_output.stdout);
+        let Some(cwd) = cwd_text.lines().find_map(|l| l.strip_prefix('n')) else {
+            continue;
+        };
+        let basename = Path::new(cwd)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(cwd);
+        let encoded = format!("--{}--", cwd.trim_start_matches('/').replace('/', "-"));
+        let directory = paths(req).0.join("sessions").join(encoded);
+        let latest = fs::read_dir(directory)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|s| s == "jsonl"))
+            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let mut v = json!({"session_id":format!("pid-{p}"),"session_name":basename,"cwd":cwd});
+        if let Some((modified, path)) = latest {
+            use std::io::BufRead;
+            v["session_id"] = json!(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
+            if let Ok(file) = fs::File::open(path) {
+                for line in std::io::BufReader::new(file)
+                    .lines()
+                    .map_while(std::result::Result::ok)
+                {
+                    let Ok(row) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if row["type"] == "session" || row.get("type").is_none() {
+                        if let Some(id) = str_at(&row, "id") {
+                            v["session_id"] = json!(id);
+                        }
+                    }
+                    if let Some(name) =
+                        str_at(&row, "session_name").or_else(|| str_at(&row, "name"))
+                    {
+                        v["session_name"] = json!(name);
+                    }
+                }
+            }
+            v["updated_at_ms"] = json!(modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0));
+        }
+        if out
+            .iter()
+            .any(|(_, earlier)| earlier["session_id"] == v["session_id"])
+        {
+            v["session_id"] = json!(format!("pid-{p}"));
+            v["session_name"] = json!(basename);
+        }
+        // Fence PID reuse while lsof and session metadata were read.
+        if process_identity(p).is_ok_and(|current| current == identity) {
+            out.push((p, v));
+        }
+    }
+}
+fn socket_candidates(req: &Value) -> Vec<(u32, Value)> {
+    let mut out = vec![];
+    if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if let Some(p) = n
+                .strip_prefix("pi-pid-")
+                .and_then(|s| s.strip_suffix(".sock"))
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                if let Ok(v) = identify(req, p) {
+                    if v["ok"] == true
+                        && str_at(&v, "session_id").is_some()
+                        && str_at(&v, "cwd").is_some()
+                    {
+                        out.push((p, v));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by_key(|(pid, _)| *pid);
+    out
+}
 fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
     let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
     if resolve || pid(req).is_some() {
@@ -106,8 +232,10 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
             pid(req).into_iter().collect()
         };
         let mut responded = false;
+        let mut searched = Vec::new();
         for mut p in roots {
             for _ in 0..=if resolve { 5 } else { 0 } {
+                searched.push(p);
                 if let Ok(v) = identify(req, p) {
                     responded = true;
                     if v["ok"] == true
@@ -127,28 +255,23 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
                 p = parent;
             }
         }
-        return (vec![], responded);
-    }
-    let mut out = vec![];
-    if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
-        for e in entries.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if let Some(p) = n
-                .strip_prefix("pi-pid-")
-                .and_then(|s| s.strip_suffix(".sock"))
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                if let Ok(v) = identify(req, p) {
-                    if v["ok"] == true
-                        && str_at(&v, "session_id").is_some()
-                        && str_at(&v, "cwd").is_some()
-                    {
-                        out.push((p, v))
-                    }
-                }
-            }
+        // A responding bridge with no open session must not be bypassed.
+        let mut live = vec![];
+        if !responded {
+            live = socket_candidates(req);
+            process_candidates(req, &mut live);
+            // Prefer the nearest caller ancestor, just as socket resolution does.
+            // An explicit endpoint must not become ambiguous with its host ancestors.
+            live = searched
+                .iter()
+                .find_map(|p| live.iter().find(|(pid, _)| pid == p).cloned())
+                .into_iter()
+                .collect();
         }
+        return (live, responded);
     }
+    let mut out = socket_candidates(req);
+    process_candidates(req, &mut out);
     (out, false)
 }
 fn as_caller(p: u32, v: &Value) -> Value {

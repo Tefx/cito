@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -114,6 +114,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   const connections = new Set<Socket>();
   const directory = join(resolvedStateDir, "sockets");
   const socketPath = join(directory, `pi-pid-${process.pid}.sock`);
+  const rawHome = process.env.CITO_PI_HOME ?? join(homedir(), ".pi", "agent");
+  const piHome = rawHome === "~" ? homedir() : rawHome.startsWith("~/") ? join(homedir(), rawHome.slice(2)) : resolve(rawHome);
   const subcommands = ["on", "team", "off"];
   const hubPattern = /^[a-z0-9][a-z0-9_-]{0,31}$/;
   const usage = "Usage: /cito [on [about...] | team [about...] | off]";
@@ -215,11 +217,13 @@ export default function citoBridge(pi: BridgeAPI): void {
     return { ok: true, delivered: true, deduplicated: false };
   }
 
-  pi.on("session_start", async (_event, ctx) => {
-    registerMcpServer();
-    lastActiveMs = Date.now();
-    update(ctx);
-    if (server) return;
+  let serverReady: Promise<void> | undefined;
+  let shuttingDown = false;
+  function ensureServer(): Promise<void> {
+    return serverReady ??= startServer().catch(error => { serverReady = undefined; throw error; });
+  }
+  async function startServer(): Promise<void> {
+    if (server || shuttingDown) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
     const instance = createServer(socket => {
@@ -291,7 +295,6 @@ export default function citoBridge(pi: BridgeAPI): void {
         await listen();
       }
       chmodSync(socketPath, 0o600);
-      process.once("exit", unlinkSocket);
       // Listen errors after startup must not become unhandled process errors.
       instance.on("error", () => { for (const socket of connections) socket.destroy(); });
     } catch (error) {
@@ -300,6 +303,37 @@ export default function citoBridge(pi: BridgeAPI): void {
       unlinkSocket();
       throw error;
     }
+  }
+  process.once("exit", unlinkSocket);
+  // Load-time startup also serves hosts that loaded the extension after session_start.
+  void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
+  let repairing = false;
+  const repairTimer = setInterval(() => {
+    if (shuttingDown || repairing || existsSync(socketPath)) return;
+    let configured = false;
+    try {
+      const settings = JSON.parse(readFileSync(join(piHome, "settings.json"), "utf8")) as { packages?: unknown[] };
+      configured = settings.packages?.includes(join(resolvedStateDir, "plugins", "pi")) === true;
+    } catch {} // Disconnected packages must not recreate their sockets.
+    if (!configured) return;
+    repairing = true;
+    void (async () => {
+      await serverReady?.catch(() => {});
+      if (shuttingDown || existsSync(socketPath)) return;
+      const stale = server;
+      server = undefined;
+      ownsSocket = false;
+      for (const socket of connections) socket.destroy();
+      if (stale) await new Promise<void>(resolve => stale.close(() => resolve()));
+      serverReady = undefined;
+      await ensureServer();
+    })().catch(() => {}).finally(() => { repairing = false; }); // Retry transient bind failures on the next tick.
+  }, 2000).unref();
+  pi.on("session_start", async (_event, ctx) => {
+    registerMcpServer();
+    lastActiveMs = Date.now();
+    update(ctx);
+    await ensureServer();
   });
   pi.registerCommand?.("cito", {
     description: "Toggle or configure Cito session listening",
@@ -396,6 +430,9 @@ export default function citoBridge(pi: BridgeAPI): void {
   pi.on("session_info_changed", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
+    shuttingDown = true;
+    clearInterval(repairTimer);
+    await serverReady?.catch(() => {});
     context = undefined;
     activeBadge = undefined;
     for (const socket of connections) socket.destroy();

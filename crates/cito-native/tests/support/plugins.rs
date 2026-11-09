@@ -1,6 +1,120 @@
 use super::support::*;
 
 #[test]
+fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let script = f.dir.join("pi.mjs");
+    fs::write(
+        &script,
+        "console.log('ready'); setInterval(() => {}, 1000);",
+    )
+    .unwrap();
+    let first = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    let second = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(first, false).contains("ready") && f.output(second, false).contains("ready"));
+    let cwd = fs::canonicalize(&f.dir).unwrap();
+    let encoded = format!(
+        "--{}--",
+        cwd.to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('/', "-")
+    );
+    let sessions = f.home.join(".pi/agent/sessions").join(encoded);
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("latest.jsonl"),
+        "{\"type\":\"session\",\"id\":\"live-session\",\"name\":\"Live work\"}\n",
+    )
+    .unwrap();
+    let discover = |f: &Fixture| f.plugin(PI, json!({"op":"discover_sessions"}));
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+    assert_eq!(
+        discover(&f)["sessions"],
+        json!([]),
+        "fixture disables ambient process discovery"
+    );
+    f.env.insert("CITO_PI_PROCESS_DISCOVERY".into(), "1".into());
+    let found = discover(&f);
+    let own: Vec<_> = found["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| {
+            [u64::from(f.pid(first)), u64::from(f.pid(second))]
+                .contains(&v["endpoint_pid"].as_u64().unwrap())
+        })
+        .collect();
+    assert_eq!(own.len(), 2, "{found}");
+    assert_ne!(own[0]["session_id"], own[1]["session_id"]);
+    assert!(own
+        .iter()
+        .any(|v| v["session_id"] == "live-session" && v["title"] == "Live work"));
+    assert!(own
+        .iter()
+        .any(|v| v["session_id"] == format!("pid-{}", v["endpoint_pid"])));
+    for row in own {
+        let resolved = f.plugin(
+            PI,
+            json!({"op":"resolve_caller","endpoint_pid":row["endpoint_pid"],"cwd":cwd}),
+        );
+        assert_eq!(resolved["ok"], true, "{resolved}");
+        // Caller resolution scans the same complete candidate set before selecting a PID.
+        assert_eq!(resolved["caller"]["session_id"], row["session_id"]);
+        let probe = f.plugin(
+            PI,
+            json!({"op":"probe","endpoint_pid":row["endpoint_pid"],"session_id":row["session_id"]}),
+        );
+        assert_eq!(probe["status"], "alive", "{probe}");
+    }
+    // Socket-backed identities take precedence, including when resolving a process-only PID.
+    let endpoint_script = f.dir.join("endpoint.cjs");
+    fs::write(&endpoint_script, include_str!("endpoint.cjs")).unwrap();
+    let socket_owner = f.spawn(
+        "node",
+        &[endpoint_script.to_str().unwrap()],
+        &[("FIXTURE_HARNESS", "pi")],
+    );
+    wait(|| f.frames(socket_owner).iter().any(|v| v["op"] == "ready"));
+    fs::write(
+        sessions.join("latest.jsonl"),
+        "{\"type\":\"session\",\"id\":\"session-a\"}\n",
+    )
+    .unwrap();
+    for process in [first, second] {
+        let response = f.plugin(
+            PI,
+            json!({"op":"resolve_caller","endpoint_pid":f.pid(process)}),
+        );
+        assert_eq!(
+            response["caller"]["session_id"],
+            format!("pid-{}", f.pid(process)),
+            "{response}"
+        );
+    }
+    f.stop(socket_owner);
+    fs::remove_file(sessions.join("latest.jsonl")).unwrap();
+    let response = f.plugin(
+        PI,
+        json!({"op":"resolve_caller","endpoint_pid":f.pid(first),"cwd":cwd}),
+    );
+    assert_eq!(
+        response["caller"]["session_id"],
+        format!("pid-{}", f.pid(first))
+    );
+    assert_eq!(f.plugin(PI, json!({"op":"setup_remove"}))["ok"], true);
+    assert_eq!(discover(&f)["sessions"], json!([]));
+    assert_eq!(
+        f.plugin(
+            PI,
+            json!({"op":"probe","endpoint_pid":f.pid(first),"session_id":"live-session"})
+        )["status"],
+        "closed_definitive"
+    );
+}
+
+#[test]
 fn cached_fingerprint_does_not_authorize_an_unrelated_process_command() {
     let _lock = serial();
     for (id, bin) in [("pi", PI), ("codex", CODEX), ("claude", CLAUDE)] {

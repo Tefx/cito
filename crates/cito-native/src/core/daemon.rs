@@ -13,7 +13,7 @@ use crate::setup::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
@@ -1543,6 +1543,14 @@ impl DaemonService {
             .collect())
     }
     pub fn snapshot(&self) -> Result<Value, String> {
+        let settings = self.settings();
+        let unconfigured_harnesses: HashSet<&str> = settings["apps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|app| app["configured"] == false)
+            .filter_map(|app| app["id"].as_str())
+            .collect();
         let (activity, unread) = self.state.activity()?;
         let mut sessions: Vec<Value> = self
             .state
@@ -1557,7 +1565,10 @@ impl DaemonService {
             .session_activity
             .as_ref()
             .map(|activity| activity.available(&sessions, self.slots.len()))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| !unconfigured_harnesses.contains(string(session, "harness")))
+            .collect::<Vec<_>>();
         let activity = self.activity_dto(activity);
         let mut remote = Vec::new();
         let mut online = 0;
@@ -1584,7 +1595,6 @@ impl DaemonService {
             }
         }
         let harnesses:Vec<Value>=self.plugins.plugins.iter().enumerate().map(|(order,p)|json!({"id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order})).collect();
-        let settings = self.settings();
         let enabled_hubs: Vec<Value> = settings["hubs"]
             .as_array()
             .into_iter()
@@ -1706,6 +1716,9 @@ impl DaemonService {
                 ensure_cli_shims_native(&self.config.state_dir, &self.plugins)?;
                 apply_plugin_setup(p, true, false)?;
                 self.last_app_action.insert(id.to_owned(), "setup".into());
+                if let Some(activity) = self.session_activity.as_mut() {
+                    activity.refresh_discovery();
+                }
             }
             "setup_remove_app" | "disable_app" => {
                 let id = action["harness"]
@@ -1735,6 +1748,9 @@ impl DaemonService {
                     .retain(|_, v| v["harness"] != id);
                 self.last_app_action
                     .insert(id.to_owned(), "disconnect".into());
+                if let Some(activity) = self.session_activity.as_mut() {
+                    activity.refresh_discovery();
+                }
                 self.push_ui();
                 return Ok(json!({"ok":true,"notice":notice}));
             }
@@ -2249,7 +2265,7 @@ impl DaemonService {
                             host[key] = value.clone();
                         }
                     }
-                    if host["enabled"] == true
+                    if (host["enabled"] == true || host_hub_auth_mode(&host) == "token")
                         && host
                             .get("token")
                             .is_none_or(|token| token.as_str() == Some(""))
@@ -2317,6 +2333,9 @@ impl DaemonService {
                     &self.config.home_dir,
                     &self.plugins,
                 )?;
+                if let Some(activity) = self.session_activity.as_mut() {
+                    activity.refresh_discovery();
+                }
                 self.emit(json!({"op":"settings","settings":self.settings()}));
             }
             "setup_uninstall_all" | "uninstall_cito" => {
