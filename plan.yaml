@@ -7586,7 +7586,7 @@ phases:
     name: 'Multimodal Visual Snapshot Inspection (8 Core UI States), Iterative Contract-and-Simplicity
       Convergence & Live v0.20.1 Distribution Closure (GitHub Release v0.20.1 & Tefx/homebrew-tap
       Formula/Cask) [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: '```yaml
 
       step_type: implementation
@@ -7645,6 +7645,8 @@ phases:
     depends_on:
     - v25.impl
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T20:38:44.140807Z'
   - id: v25.gate
     name: V25 Stage 9 (v0.20.1) Independent Terminal Acceptance, U1–U11 Visual/UX
       Verification & Live Distribution Gate
