@@ -71,22 +71,27 @@ pub fn with_config_lock_mode<T>(
     }
     let mut name = path.as_os_str().to_os_string();
     name.push(".lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(PathBuf::from(name))
-        .map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
-    // SAFETY: the descriptor remains open until after operation returns; close releases flock.
-    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error.to_string());
+    let lock_path = PathBuf::from(name);
+    let result = {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
+        // SAFETY: the descriptor remains open until after operation returns; close releases flock.
+        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error.to_string());
+            }
         }
-    }
-    operation()
+        operation()
+    };
+    let _ = fs::remove_file(&lock_path);
+    result
 }
 
 pub fn read_config_text(path: &Path) -> Result<Option<String>, String> {

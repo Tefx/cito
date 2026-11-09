@@ -764,16 +764,27 @@ pub fn uninstall_setup_native(
         });
     }
 
-    let bin_dir = state_dir.join("bin");
-    if bin_dir.exists() {
-        fs::remove_dir_all(&bin_dir).map_err(|e| e.to_string())?;
-        actions.push(SetupAction {
-            target: "cito".to_string(),
-            path: bin_dir.to_string_lossy().to_string(),
-            status: "updated".to_string(),
-            backup_path: None,
-            detail: "Removed CLI shims directory".to_string(),
-        });
+    for (sub, label) in [
+        ("bin", "Removed CLI shims directory"),
+        ("plugins", "Removed staged plugins directory"),
+        ("sockets", "Removed local sockets directory"),
+        ("claude", "Removed Claude wake queue and endpoint cache"),
+    ] {
+        let dir = state_dir.join(sub);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+            actions.push(SetupAction {
+                target: "cito".to_string(),
+                path: dir.to_string_lossy().to_string(),
+                status: "updated".to_string(),
+                backup_path: None,
+                detail: label.to_string(),
+            });
+        }
+    }
+    let lock_file = state_dir.join("daemon.lock");
+    if lock_file.exists() {
+        let _ = fs::remove_file(&lock_file);
     }
 
     for app_target in [
@@ -804,6 +815,23 @@ pub fn uninstall_setup_native(
         }
     }
     if purge_data {
+        if let Some(parent) = config_path.parent() {
+            if let Some(cname) = config_path.file_name().and_then(|s| s.to_str()) {
+                let lock_name = format!("{cname}.lock");
+                let bak_prefix = format!("{cname}.bak.");
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let fname = entry.file_name().to_string_lossy().into_owned();
+                        if fname == lock_name || fname.starts_with(&bak_prefix) {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+        if config_path.exists() && !config_path.starts_with(state_dir) {
+            let _ = fs::remove_file(config_path);
+        }
         if state_dir.exists() {
             fs::remove_dir_all(state_dir).map_err(|e| e.to_string())?;
             actions.push(SetupAction {
@@ -1780,8 +1808,11 @@ mod tests {
         use std::io::{Read, Write};
         let (root, plugins) = fixture();
         let state = root.join("installed");
-        fs::create_dir_all(state.join("bin")).unwrap();
-        fs::write(state.join("bin/sentinel"), "present until shutdown").unwrap();
+        for sub in ["bin", "plugins", "sockets", "claude"] {
+            fs::create_dir_all(state.join(sub)).unwrap();
+            fs::write(state.join(sub).join("sentinel"), "present until shutdown").unwrap();
+        }
+        fs::write(state.join("daemon.lock"), "lock").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         match env::var("CITO_UNINSTALL_TEST_WORKER").unwrap().as_str() {
@@ -1852,7 +1883,10 @@ mod tests {
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
         assert!(!crate::plugins::pid_alive(pid as i32));
-        assert!(!state.join("bin").exists());
+        for sub in ["bin", "plugins", "sockets", "claude"] {
+            assert!(!state.join(sub).exists(), "{sub} should be removed on uninstall");
+        }
+        assert!(!state.join("daemon.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

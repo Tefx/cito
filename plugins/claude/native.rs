@@ -127,6 +127,20 @@ fn setup(req: &Value) -> Result<Value> {
                 groups.push(json!({"hooks":[{"type":"command","command":hook}]}));
             }
         }
+        if remove {
+            let _ = fs::remove_dir_all(state(req).join("claude"));
+            if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("claude-pid-")
+                    {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
         Ok(())
     })?;
     Ok(json!({"ok":true,"actions":[action]}))

@@ -119,6 +119,21 @@ impl Drop for FileLock {
         }
     }
 }
+pub fn clean_sidecars(path: &Path) {
+    let Some(parent) = path.parent() else { return };
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else { return };
+    let lock_name = format!("{name}.cito.lock");
+    let bak_prefix = format!("{name}.bak.");
+    let tmp_prefix = format!("{name}.tmp-");
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().into_owned();
+            if fname == lock_name || fname.starts_with(&bak_prefix) || fname.starts_with(&tmp_prefix) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(p) = path.parent() {
         fs::create_dir_all(p).map_err(|e| e.to_string())?;
@@ -167,45 +182,60 @@ pub fn mutate(
     transform: impl FnOnce(Option<&str>) -> Result<Option<String>>,
 ) -> Result<Value> {
     let dry = req["dry_run"] == true;
-    let _lock = if dry {
-        None
-    } else {
-        let mut lock_path = path.as_os_str().to_os_string();
-        lock_path.push(".cito.lock");
-        Some(FileLock::acquire(&PathBuf::from(lock_path))?)
+    let remove = req["op"] == "setup_remove";
+    let lock_path = {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(".cito.lock");
+        PathBuf::from(s)
     };
-    let old = read_optional(path)?;
-    let next = transform(old.as_deref())?;
-    let changed = next.as_deref() != old.as_deref();
-    let status = if !changed {
-        "unchanged"
-    } else if old.is_none() && next.is_some() {
-        "created"
-    } else {
-        "updated"
-    };
-    let mut backup = None;
-    if changed && !dry {
-        if let Some(ref content) = old {
-            let mut backup_name = path.as_os_str().to_os_string();
-            backup_name.push(format!(".bak.{}-{}", now_ms(), std::process::id()));
-            let p = PathBuf::from(backup_name);
-            fs::write(&p, content).map_err(|e| e.to_string())?;
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-            backup = Some(p);
-        }
-        match next {
-            Some(ref s) => atomic_write(path, s.as_bytes())?,
-            None => {
-                if path.exists() {
-                    fs::remove_file(path).map_err(|e| e.to_string())?
+    let old = {
+        let _lock = if dry {
+            None
+        } else {
+            Some(FileLock::acquire(&lock_path)?)
+        };
+        let old = read_optional(path)?;
+        let next = transform(old.as_deref())?;
+        let changed = next.as_deref() != old.as_deref();
+        let status = if !changed {
+            "unchanged"
+        } else if old.is_none() && next.is_some() {
+            "created"
+        } else {
+            "updated"
+        };
+        let mut backup = None;
+        if changed && !dry {
+            if !remove {
+                if let Some(ref content) = old {
+                    let mut backup_name = path.as_os_str().to_os_string();
+                    backup_name.push(format!(".bak.{}-{}", now_ms(), std::process::id()));
+                    let p = PathBuf::from(backup_name);
+                    fs::write(&p, content).map_err(|e| e.to_string())?;
+                    fs::set_permissions(&p, fs::Permissions::from_mode(0o600))
+                        .map_err(|e| e.to_string())?;
+                    backup = Some(p);
+                }
+            }
+            match next {
+                Some(ref s) => atomic_write(path, s.as_bytes())?,
+                None => {
+                    if path.exists() {
+                        fs::remove_file(path).map_err(|e| e.to_string())?
+                    }
                 }
             }
         }
+        (status, backup)
+    };
+    if !dry {
+        let _ = fs::remove_file(&lock_path);
+        if remove {
+            clean_sidecars(path);
+        }
     }
     Ok(
-        json!({"target":id,"path":path,"status":status,"backupPath":backup,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
+        json!({"target":id,"path":path,"status":old.0,"backupPath":old.1,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
     )
 }
 pub fn json_mutate(
