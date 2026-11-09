@@ -6967,7 +6967,7 @@ phases:
   - id: v23.repair_linker
     name: 'V23 Gate Repair: Silence Informational codesign replacing existing signature
       Stderr in bin/cito-linker & Refresh v0.19.0 Release'
-    status: pending
+    status: claimed
     description: '```yaml
 
       step_type: implementation
@@ -7007,3 +7007,5 @@ phases:
     depends_on:
     - v23.hygiene
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T07:56:17.367425Z'
