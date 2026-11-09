@@ -623,9 +623,15 @@ pub fn hook_main() {
             .map(|s| expand(&req, &s))
             .unwrap_or_else(|| state(&req).join("config.json"));
         let cfg = read_json(&config_path).unwrap_or(json!({}));
-        let port = cfg["daemonPort"]
-            .as_u64()
-            .or_else(|| env_value(&req, "CITO_DAEMON_PORT").and_then(|s| s.parse().ok()))
+        let port = env_value(&req, "CITO_DAEMON_PORT")
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|p| *p > 0)
+            .or_else(|| {
+                cfg["daemonPort"]
+                    .as_u64()
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|p| *p > 0)
+            })
             .unwrap_or(4290);
         let ack_session = alias.as_deref().unwrap_or(&sid);
         let ack = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":wakes.iter().map(|r|r["batch_id"].clone()).collect::<Vec<_>>()},"_meta":{"claudeSessionId":ack_session,"cwd":req["cwd"]}}});

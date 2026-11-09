@@ -2,12 +2,42 @@ use super::support::*;
 
 #[test]
 fn cached_fingerprint_does_not_authorize_an_unrelated_process_command() {
-    let _lock=serial();for (id,bin) in [("pi",PI),("codex",CODEX),("claude",CLAUDE)] {
-        let f=Fixture::new(json!({}));let path=f.dir.join("unrelated.cjs");fs::write(&path,include_str!("endpoint.cjs")).unwrap();let p=f.spawn("node",&[path.to_str().unwrap()],&[("FIXTURE_HARNESS",id)]);wait(||f.frames(p).iter().any(|v|v["op"]=="ready"));
-        if id=="codex" {let db=cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,updated_at INTEGER);INSERT INTO threads VALUES('session-a','/repo',0,1)",&[]).unwrap();}
-        let mut request=json!({"op":"resolve_caller","endpoint_pid":f.pid(p),"cwd":"/repo","require_open":true});if id=="codex"{request["meta"]=json!({"threadId":"session-a"});}
-        let response=f.plugin(bin,request.clone());assert_eq!(response["ok"],true,"{response}");f.send(p,json!({"op":"offline"}));wait(||f.frames(p).iter().any(|v|v["op"]=="offline"));if id=="codex"{fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();}
-        request["require_open"]=json!(false);request["cached_caller"]=response["caller"].clone();request["meta"]=json!({"expected_harness":id,"expected_session_id":"session-a"});let denied=f.plugin(bin,request);assert_eq!(denied["error_code"],"BINDING_REQUIRED");assert!(denied["message"].as_str().unwrap().contains("process command does not match"));
+    let _lock = serial();
+    for (id, bin) in [("pi", PI), ("codex", CODEX), ("claude", CLAUDE)] {
+        let f = Fixture::new(json!({}));
+        let path = f.dir.join("unrelated.cjs");
+        fs::write(&path, include_str!("endpoint.cjs")).unwrap();
+        let p = f.spawn(
+            "node",
+            &[path.to_str().unwrap()],
+            &[("FIXTURE_HARNESS", id)],
+        );
+        wait(|| f.frames(p).iter().any(|v| v["op"] == "ready"));
+        if id == "codex" {
+            let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite"))
+                .unwrap();
+            db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,updated_at INTEGER);INSERT INTO threads VALUES('session-a','/repo',0,1)",&[]).unwrap();
+        }
+        let mut request = json!({"op":"resolve_caller","endpoint_pid":f.pid(p),"cwd":"/repo","require_open":true});
+        if id == "codex" {
+            request["meta"] = json!({"threadId":"session-a"});
+        }
+        let response = f.plugin(bin, request.clone());
+        assert_eq!(response["ok"], true, "{response}");
+        f.send(p, json!({"op":"offline"}));
+        wait(|| f.frames(p).iter().any(|v| v["op"] == "offline"));
+        if id == "codex" {
+            fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();
+        }
+        request["require_open"] = json!(false);
+        request["cached_caller"] = response["caller"].clone();
+        request["meta"] = json!({"expected_harness":id,"expected_session_id":"session-a"});
+        let denied = f.plugin(bin, request);
+        assert_eq!(denied["error_code"], "BINDING_REQUIRED");
+        assert!(denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("process command does not match"));
     }
 }
 use serde_json::{json, Value};
@@ -286,6 +316,92 @@ fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
         ),
         json!({})
     );
+}
+#[test]
+fn claude_hook_ack_prefers_environment_daemon_port_over_config() {
+    use std::{io::Read, net::TcpListener, time::Duration};
+
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let environment = TcpListener::bind("127.0.0.1:0").unwrap();
+    let configured = TcpListener::bind("127.0.0.1:0").unwrap();
+    environment.set_nonblocking(true).unwrap();
+    configured.set_nonblocking(true).unwrap();
+    f.env.insert(
+        "CITO_DAEMON_PORT".into(),
+        environment.local_addr().unwrap().port().to_string(),
+    );
+    fs::write(
+        &f.config,
+        json!({"daemonPort":configured.local_addr().unwrap().port()}).to_string(),
+    )
+    .unwrap();
+    f.plugin(CLAUDE, json!({"op":"wake","session_id":"session-a","batch_id":"ack-port","text":"pending","wake":false}));
+    let hook = f.spawn(HOOK, &[], &[]);
+    f.send(
+        hook,
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"}),
+    );
+    f.eof(hook);
+    let mut connection = None;
+    wait(|| match environment.accept() {
+        Ok((stream, _)) => {
+            connection = Some(stream);
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            assert!(
+                !f.exited(hook),
+                "hook exited without acknowledging to CITO_DAEMON_PORT: {}",
+                f.output(hook, true)
+            );
+            false
+        }
+        Err(e) => panic!("environment listener: {e}"),
+    });
+    let stream = connection.unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "POST /mcp HTTP/1.1\r\n");
+    let mut length = None;
+    loop {
+        line.clear();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = Some(value.trim().parse::<u64>().unwrap());
+            }
+        }
+    }
+    let ack: Value = serde_json::from_reader(reader.by_ref().take(length.unwrap())).unwrap();
+    assert_eq!(
+        ack,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":["ack-port"]},"_meta":{"claudeSessionId":"session-a","cwd":"/repo"}}})
+    );
+    reader
+        .get_mut()
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        .unwrap();
+    wait(|| f.exited(hook));
+    f.stop(hook);
+    assert_eq!(
+        f.frames(hook),
+        vec![
+            json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"pending"}})
+        ]
+    );
+    assert_eq!(f.output(hook, true), "");
+    assert!(matches!(configured.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
 }
 #[test]
 fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
