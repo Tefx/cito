@@ -7101,7 +7101,7 @@ phases:
   - id: v24.impl
     name: Implement V24 Stage 8 (v0.20.0) Full-Lifecycle UX, State-Machine & Reconfiguration
       Closure (L1–L17) & Remote Host Verification
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 8 (`v0.20.0`) Full-Lifecycle UX, State-Machine\
       \ & Reconfiguration Closure (`L1`–`L17`) per `docs/DESIGN.md` §10 (`§10.1`–`§10.7`):\n\
@@ -7202,6 +7202,49 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-09T14:27:22.305583Z'
+    done_at: '2026-11-09T15:57:22.390468+00:00'
+    evidence: "Artifact:\n- Commit: f18e6bb2d5e7d31d45a6428c93db92634227829b (47 files\
+      \ changed, +1754 / -219 lines)\n- Executor: rust-senior (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T14-54-12-964Z_01a1c0cd-75e3-735a-b713-1d2fee9c2263.jsonl`)\n\
+      - Delivered (`docs/DESIGN.md` §10 `L1`–`L17` & `v0.20.0` version bump):\n  1.\
+      \ `L1`, `L10`: Declarative `postSetupHint`/`postDisconnectHint` in `plugins/{pi,codex,claude}/plugin.json`,\
+      \ `setupGuide`/`configuredPlaceholder`/`helpText`/`pairing.helpText` in `plugins/telegram/plugin.json`,\
+      \ and separated `hidden` (`hub && !is_admin`) vs. `redacted` (`hidden || is_secret`)\
+      \ in `hub.rs` `channel_list()`.\n  2. `L2`: Dirty-only secret submission (`channelSecretOriginal`)\
+      \ in `cito-ui.swift`, `merge_channel_config` retain/replace/explicit-reset semantics\
+      \ and `hub_patch_guard` in `hub.rs`, non-mutating `human_channels_test`, and\
+      \ `human_channel_pair_start` pre-persisting non-empty `hub_config`.\n  3. `L3`–`L8`:\
+      \ 5-state Human Channel model (`ready`, `paused`, `pairing_pending`, `hub_ready`,\
+      \ `not_configured`) + `detail`, atomic `channel_toggle` (`Pause`/`Resume`),\
+      \ `channel_unpair` (`reset_user: true`), `clear_channel_service` (`reset_hub:\
+      \ true`), manual `chatId` identity reconciliation, strict `attach()` readiness\
+      \ gate (`active = enabled && hub_ready && user_ready`), pairing code superseding\
+      \ and `channel_cancel_pair`, `active_settings_hub` tracking and pairing instruction\
+      \ persistence across refreshes, Bot Token rotation cursor/state reset (`channel_plugin_state`,\
+      \ `channel_delivery_mappings`, `human_channel_pairings`), remote Hub channel\
+      \ schema forwarding, and full `SettingsPanel -> Human Channels` UI card controls.\n\
+      \  4. `L9`–`L13`: `?` toggle (`toggle_onboarding_guide`), 3-step `onboarding_banner`,\
+      \ `apps_next_step_callout`, `ensure_cli_shims_native` during `setup_apply`,\
+      \ `repair_needed` detection + `\"Repair\"` button, out-of-tree plugin cleanup\
+      \ in `uninstall_setup_native`, automatic active session unlisten + `postDisconnectHint`\
+      \ on `setup_remove_app`, and non-destructive `setup_disconnect_all` alongside\
+      \ `confirm_uninstall_all`.\n  5. `L14`–`L17`: Interactive OIDC `switch_account`\
+      \ (`force_account_select`, `prompt=select_account`, bypassing cached JWT/refresh\
+      \ token), auto-enabling disabled OIDC hubs on `login_hub`, retaining disconnected\
+      \ hubs in `state[\"hubs\"]` with `\"Connect\"` in `cardMenu`, inline `edit_hub:<name>`,\
+      \ LAN share port/auth controls (`host_hub_port`, `toggle_host_hub_auth`, `apply_host_hub_port`,\
+      \ `host_hub_error`) with rollback on bind failure, and context-aware empty states\
+      \ in `cardMenu` and `DirectoryPanel`.\n  6. Bumped version to `0.20.0` across\
+      \ workspace, manifests, docs, and site, and added `L1`–`L17` regression tests\
+      \ across `crates/cito-native/tests/{support/ui.rs,support/daemon.rs,support/plugins.rs,support/distribution.rs,hub/cases.rs,hub/login_cases.rs}`.\n\
+      \nVerification:\n- Run: `cargo test --workspace && cargo build --release &&\
+      \ /usr/bin/ruby -c packaging/homebrew/cito.rb` -> 211 passed, 0 failed (4 subprocess-worker\
+      \ entrypoints ignored and invoked by owning tests), 0 compiler warnings, `Syntax\
+      \ OK`\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v24.impl` (`df -h`: 163 GiB available);\
+      \ verified host `/Users/tefx/.cito`, `~/Library/LaunchAgents/com.cito.*`, and\
+      \ `/Applications/Cito.app` are absent.\n\nSpec link:\n- docs/DESIGN.md (§10,\
+      \ V24 Stage 8 v0.20.0 L1–L17)\n- docs/ROADMAP.md"
   - id: v24.hygiene
     name: 'Iterative Code-Hygiene Convergence on Stage 8 (v0.20.0) & Live Distribution
       Closure (GitHub Release v0.20.0 & Tefx/homebrew-tap Formula/Cask) [REQUIRES_SKILL:
