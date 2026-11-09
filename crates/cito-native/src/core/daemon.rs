@@ -1,6 +1,6 @@
 use super::{
     auth::HubAuth,
-    hub::HubEngine,
+    hub::{HubEngine, HubServer},
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
     receiver::{detach_channel_expected, plugin_request, poll_listener},
     state::LocalState,
@@ -16,7 +16,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
@@ -2010,7 +2010,12 @@ impl DaemonService {
                 }
             }
             "set_host_hub" => {
-                self.mutate_config(|v| {
+                let mut server = self.host_server.take();
+                let previous = server
+                    .as_ref()
+                    .map(|server| (server.address.ip(), server.port(), server.auth.clone()));
+                let mut applied = false;
+                let result = self.mutate_config(|v| {
                     let mut host = v
                         .get("host_hub")
                         .or_else(|| v.get("hostHub"))
@@ -2034,14 +2039,30 @@ impl DaemonService {
                     {
                         host["token"] = json!(crate::plugins::try_random_hex(32)?);
                     }
-                    host_hub_server_config(&host)?;
+                    let settings = host_hub_server_config(&host)?;
+                    if !self.closing {
+                        replace_host_hub_server(&self.local, &mut server, settings)?;
+                        applied = true;
+                    }
                     v["host_hub"] = host;
                     if let Some(m) = v.as_object_mut() {
                         m.remove("hostHub");
                     }
                     Ok(())
-                })?;
-                self.sync_host_hub()?;
+                });
+                // A failed config write must also undo a successful listener change.
+                let rollback = if result.is_err() && applied {
+                    replace_host_hub_server(&self.local, &mut server, previous)
+                } else {
+                    Ok(())
+                };
+                self.host_server = server;
+                if let Err(error) = result {
+                    rollback.map_err(|rollback| {
+                        format!("{error}; failed to restore host hub listener: {rollback}")
+                    })?;
+                    return Err(error);
+                }
             }
             "set_launch_at_login" => {
                 set_launch_at_login(
@@ -2093,16 +2114,7 @@ impl DaemonService {
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
         let settings = host_hub_server_config(host)?;
-        self.host_server.take();
-        if let Some((bind, port, auth)) = settings {
-            let server = self.local.start_server(bind, port, auth)?;
-            if self.closing {
-                drop(server);
-            } else {
-                self.host_server = Some(server);
-            }
-        }
-        Ok(())
+        replace_host_hub_server(&self.local, &mut self.host_server, settings)
     }
     fn shutdown(&mut self) {
         // The caller sets closing while holding the service mutex after all calls drain.
@@ -2133,7 +2145,51 @@ impl DaemonService {
     }
 }
 
-fn host_hub_server_config(host: &Value) -> Result<Option<(&str, u16, HubAuth)>, String> {
+fn replace_host_hub_server(
+    local: &HubEngine,
+    current: &mut Option<HubServer>,
+    settings: Option<(IpAddr, u16, Arc<HubAuth>)>,
+) -> Result<(), String> {
+    let Some((bind, port, auth)) = settings else {
+        current.take();
+        return Ok(());
+    };
+    // Validation has already resolved the IP. Port zero always requests a new socket.
+    let same_socket = current.as_ref().is_some_and(|server| {
+        port != 0 && server.address.port() == port && server.address.ip() == bind
+    });
+    let previous = if same_socket {
+        let previous = current
+            .as_ref()
+            .map(|server| (server.address, server.auth.clone()));
+        current.take();
+        previous
+    } else {
+        None
+    };
+    match local.start_server(&bind.to_string(), port, auth) {
+        Ok(server) => {
+            *current = Some(server);
+            Ok(())
+        }
+        Err(error) => {
+            if let Some((address, auth)) = previous {
+                *current = Some(
+                    local
+                        .start_server(&address.ip().to_string(), address.port(), auth)
+                        .map_err(|rollback| {
+                            format!("{error}; failed to restore host hub listener: {rollback}")
+                        })?,
+                );
+            }
+            Err(format!(
+                "INVALID_INPUT: Cannot bind host hub listener: {error}"
+            ))
+        }
+    }
+}
+
+fn host_hub_server_config(host: &Value) -> Result<Option<(IpAddr, u16, Arc<HubAuth>)>, String> {
     if !host.is_null() && !host.is_object() {
         return Err("INVALID_INPUT: Host hub must be an object".into());
     }
@@ -2150,6 +2206,9 @@ fn host_hub_server_config(host: &Value) -> Result<Option<(&str, u16, HubAuth)>, 
             .ok_or("INVALID_INPUT: Host hub bind must be a non-empty string")?,
         None => "0.0.0.0",
     };
+    let bind = bind
+        .parse::<IpAddr>()
+        .map_err(|_| "INVALID_INPUT: Invalid host hub bind address")?;
     let port = match host.get("port") {
         Some(value) => value
             .as_u64()
@@ -2165,7 +2224,7 @@ fn host_hub_server_config(host: &Value) -> Result<Option<(&str, u16, HubAuth)>, 
         return Ok(None);
     }
     let auth = HubAuth::new(mode, host["token"].as_str().map(str::to_string), None, None)?;
-    Ok(Some((bind, port, auth)))
+    Ok(Some((bind, port, Arc::new(auth))))
 }
 
 fn host_hub_auth_mode(host: &Value) -> &str {
@@ -3096,33 +3155,96 @@ mod tests {
             };
             let mut service = DaemonService::open(&config, &plugins)?;
             let result = (|| {
-                let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"none"});
-                fs::write(&config.config_path, json!({"host_hub":host}).to_string())
-                    .map_err(|e| e.to_string())?;
+                let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"token","token":"previous-token"});
+                let committed = json!({"host_hub":host,"other":7}).to_string();
+                fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
                 service.sync_host_hub()?;
                 let address = service.host_server.as_ref().unwrap().address;
-                for (key, value) in [
-                    ("auth_mode", json!("invalid")),
-                    ("auth_mode", json!("token")),
-                    ("port", json!(70000)),
-                    ("bind", json!("")),
-                ] {
-                    let mut invalid = host.clone();
-                    invalid[key] = value;
-                    fs::write(&config.config_path, json!({"host_hub":invalid}).to_string())
-                        .map_err(|e| e.to_string())?;
-                    let error = service.sync_host_hub().unwrap_err();
-                    assert!(error.starts_with("INVALID_INPUT:"), "{error}");
-                    assert_eq!(service.host_server.as_ref().unwrap().address, address);
-                    let health: Value = ureq::get(&format!("http://{address}/health"))
+                let rpc = |address, token| -> Result<(), String> {
+                    let response: Value = ureq::post(&format!("http://{address}/v1/rpc"))
+                        .set("Authorization", &format!("Bearer {token}"))
                         .timeout(Duration::from_secs(2))
-                        .call()
+                        .send_json(json!({"op":"kv_snapshot"}))
                         .map_err(|e| e.to_string())?
                         .into_json()
                         .map_err(|e| e.to_string())?;
-                    assert_eq!(health["ok"], true);
-                    assert_eq!(health["auth_mode"], "none");
+                    assert_eq!(response["ok"], true);
+                    assert!(response["result"]["entries"].is_array());
+                    Ok(())
+                };
+                let occupied = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+                let occupied_port = occupied.local_addr().map_err(|e| e.to_string())?.port();
+                for (key, value) in [
+                    ("auth_mode", json!("invalid")),
+                    ("token", json!(" ")),
+                    ("port", json!(70000)),
+                    ("bind", json!("")),
+                    ("bind", json!("127.0.0.1\u{0000}")),
+                    ("bind", json!("invalid-bind-host")),
+                    ("bind", json!("not:an:ip:address")),
+                    ("port", json!(occupied_port)),
+                ] {
+                    let mut invalid = host.clone();
+                    invalid[key] = value.clone();
+                    let reload = json!({"host_hub":invalid}).to_string();
+                    fs::write(&config.config_path, &reload).map_err(|e| e.to_string())?;
+                    let error = service.sync_host_hub().unwrap_err();
+                    assert!(error.starts_with("INVALID_INPUT:"), "{error}");
+                    assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                    assert_eq!(
+                        fs::read(&config.config_path).map_err(|e| e.to_string())?,
+                        reload.as_bytes()
+                    );
+                    rpc(address, "previous-token")?;
+
+                    fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
+                    let mut action = json!({"op":"set_host_hub","enabled":true});
+                    action[key] = value;
+                    assert!(service.action(&action).is_err(), "{action}");
+                    assert_eq!(
+                        fs::read(&config.config_path).map_err(|e| e.to_string())?,
+                        committed.as_bytes()
+                    );
+                    assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                    rpc(address, "previous-token")?;
                 }
+
+                // A write failure after binding must restore the old socket and credentials.
+                let tmp = config
+                    .config_path
+                    .with_extension(format!("json.{}.tmp", std::process::id()));
+                fs::create_dir(&tmp).map_err(|e| e.to_string())?;
+                let result = service
+                    .action(&json!({"op":"set_host_hub","port":0,"token":"uncommitted-token"}));
+                fs::remove_dir(&tmp).map_err(|e| e.to_string())?;
+                assert!(result.is_err());
+                assert_eq!(
+                    fs::read(&config.config_path).map_err(|e| e.to_string())?,
+                    committed.as_bytes()
+                );
+                assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                rpc(address, "previous-token")?;
+
+                // Updating credentials on the same socket must release and rebind that port.
+                service.action(
+                    &json!({"op":"set_host_hub","port":address.port(),"token":"replacement-token"}),
+                )?;
+                assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                rpc(address, "replacement-token")?;
+                let rejected = ureq::post(&format!("http://{address}/v1/rpc"))
+                    .set("Authorization", "Bearer previous-token")
+                    .timeout(Duration::from_secs(2))
+                    .send_json(json!({"op":"kv_snapshot"}));
+                assert!(matches!(rejected, Err(ureq::Error::Status(401, _))));
+
+                // Port zero requests a distinct listener while the old socket is still held.
+                service.action(&json!({"op":"set_host_hub","port":0}))?;
+                let replacement = service.host_server.as_ref().unwrap().address;
+                assert_ne!(replacement, address);
+                rpc(replacement, "replacement-token")?;
+                service.action(&json!({"op":"set_host_hub","enabled":false}))?;
+                assert!(service.host_server.is_none());
+                assert!(TcpStream::connect(replacement).is_err());
                 Ok(())
             })();
             service.shutdown();

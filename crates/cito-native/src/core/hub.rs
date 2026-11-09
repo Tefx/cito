@@ -1605,6 +1605,7 @@ fn attach(c: &Connection, b: &Value, enabled: bool, remote: bool) -> Result<(), 
 /// Stopping the listener never closes its shared engine. The daemon closes the engine last.
 pub struct HubServer {
     pub address: SocketAddr,
+    pub(super) auth: Arc<HubAuth>,
     stop: Arc<AtomicBool>,
     sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -1635,13 +1636,20 @@ impl Drop for HubServer {
     }
 }
 impl HubEngine {
-    pub fn start_server(&self, bind: &str, port: u16, auth: HubAuth) -> Result<HubServer, String> {
+    pub fn start_server(
+        &self,
+        bind: &str,
+        port: u16,
+        auth: impl Into<Arc<HubAuth>>,
+    ) -> Result<HubServer, String> {
         let listener = TcpListener::bind((bind, port)).map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
-        let (engine, st, ss, auth) = (self.clone(), stop.clone(), sockets.clone(), Arc::new(auth));
+        let auth = auth.into();
+        let (engine, st, ss, worker_auth) =
+            (self.clone(), stop.clone(), sockets.clone(), auth.clone());
         let handle = thread::spawn(move || {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
             let mut next_socket = 0u64;
@@ -1674,7 +1682,7 @@ impl HubEngine {
                             }
                         }
                         let (e, a, s, connections) =
-                            (engine.clone(), auth.clone(), st.clone(), ss.clone());
+                            (engine.clone(), worker_auth.clone(), st.clone(), ss.clone());
                         workers.push(thread::spawn(move || {
                             handle_http(stream, e, a, s);
                             if let Ok(mut list) = connections.lock() {
@@ -1702,6 +1710,7 @@ impl HubEngine {
         });
         Ok(HubServer {
             address,
+            auth,
             stop,
             sockets,
             thread: Mutex::new(Some(handle)),

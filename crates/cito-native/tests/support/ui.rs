@@ -418,6 +418,8 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     );
 
     let committed = fs::read(&host.config).unwrap();
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
     for patch in [
         json!({"auth_mode":"invalid"}),
         json!({"auth_mode":"oidc"}),
@@ -434,6 +436,10 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         json!({"bind":" "}),
         json!({"bind":false}),
         json!({"bind":null}),
+        json!({"bind":"127.0.0.1\u{0000}"}),
+        json!({"bind":"invalid-bind-host"}),
+        json!({"bind":"not:an:ip:address"}),
+        json!({"port":occupied_port,"token":"rejected-token"}),
         json!({"token":42}),
         json!({"token":null}),
         json!({"token":" "}),
