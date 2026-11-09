@@ -7405,3 +7405,215 @@ phases:
       \ packaging/homebrew/cito.rb` -> 215 passed, 0 failed, 0 warnings, `Syntax OK`\n\
       \nSpec link:\n- docs/DESIGN.md (§10, V24 Stage 8 v0.20.0 L1–L17)\n- docs/ROADMAP.md\n\
       - .github/workflows/release.yml, packaging/homebrew/cito.rb"
+- id: v25
+  name: 'V25 Stage 9 (v0.20.1): Holistic UX & Visual Hierarchy Overhaul, Terminology
+    Unification, Configured-Only Session Discovery, Live Pi Process Discovery & Visual
+    E2E Verification (U1–U10)'
+  status: pending
+  gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
+    pass 100%, test_inspect reports truncated_labels == [] across all surfaces/tabs/forms,
+    grep -rnE -i "\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b"
+    crates/cito-native/src/core/ src/macos/ exits with 0 matches, all 8 core UI state
+    PNG snapshots rendered via test_render_png pass multimodal uiux-auditor + pathway-auditor
+    + structural-auditor code-hygiene convergence (Completeness: CLEAN, Simplicity:
+    ZERO_NEW_ISSUES), and GitHub Release v0.20.1 (Tefx/cito) + Tefx/homebrew-tap (Formula/cito.rb
+    & Casks/cito.rb) + GitHub Pages (https://tefx.github.io/cito/) are live.'
+  context: 'Resolve all 10 live interactive macOS UX, session-discovery, terminology,
+    and visual layout findings (U1–U10) in Stage 9 (v0.20.1) per docs/DESIGN.md §11:
+    gate available session discovery on configured == true and refresh discovery on
+    setup_apply/setup_remove_app/setup_disconnect_all (U1); add live running pi process
+    + ~/.pi/agent/sessions discovery in plugins/pi/native.rs and self-healing socket
+    re-bind in plugins/pi/cito-bridge.ts (U2); render human_paused_card with listen_human
+    (+ Enable) in cardMenu when no human listener is active (U3); unify Human Channels
+    terminology, make onboardingGuideOpen strictly user-controlled via ? across all
+    3 tabs, and add skip_next_step and skip_channel:<id> (U4–U6); eliminate all button/badge
+    truncations, right-align CONNECTED HUBS row controls, show copy_host_hub_token
+    with ✓ Saved feedback, and add explicit uppercase field labels and protocol explanations
+    to add_hub_form (U7–U9); add truncated_labels detection and test_render_png Retina
+    PNG snapshot rendering for multimodal visual & code-hygiene verification (U10);
+    and publish v0.20.1 to GitHub Releases (Tefx/cito) and Tefx/homebrew-tap (Formula/cito.rb
+    & Casks/cito.rb).'
+  depends_on:
+  - v24
+  steps:
+  - id: v25.impl
+    name: Implement V25 Stage 9 (v0.20.1) Holistic UX & Visual Hierarchy Overhaul,
+      Configured-Only Session Discovery, Live Pi Process Discovery & Visual Snapshot
+      Renderer (U1–U10)
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      ```\n\n- **Deliver:** Complete Stage 9 (`v0.20.1` — `U1`–`U10`) implementation\
+      \ per `docs/DESIGN.md` §11:\n  1. **`U1` — Configured-Only Session Discovery\
+      \ (`crates/cito-native/src/core/daemon.rs`)**: Gate `available` session discovery\
+      \ in `daemon.rs` `snapshot()` on `configured == true` (`settings[\"apps\"]`),\
+      \ and trigger `refresh_discovery()` on `setup_apply`, `setup_remove_app`, and\
+      \ `setup_disconnect_all` before `push_ui()`.\n  2. **`U2` — Live Running `Pi`\
+      \ Process & Session Discovery + Self-Healing Bridge Socket (`plugins/pi/native.rs`,\
+      \ `plugins/pi/cito-bridge.ts`)**: Add live running `pi` process (`/bin/ps -axo\
+      \ pid=,uid=,command=` + `/usr/sbin/lsof -a -d cwd -Fn -p <pid>`) and `~/.pi/agent/sessions`\
+      \ `.jsonl` discovery in `plugins/pi/native.rs` (`candidates`/`discover_sessions`/`resolve_caller`/`probe`)\
+      \ when Pi is configured, and add self-healing socket re-bind in `plugins/pi/cito-bridge.ts`.\n\
+      \  3. **`U3` — Re-Enrolling the Human Node in `cardMenu` (`src/macos/cito-ui.swift`)**:\
+      \ Render `human_paused_card` (`NSRect(x: 0, y: 0, width: 380, height: 52)`)\
+      \ with `listen_human` (`+ Enable`) in `cardMenu` when no `harness == \"human\"\
+      ` listener is active and a connected hub exists.\n  4. **`U4`–`U6` — Terminology\
+      \ Unification, Non-Redundant User-Controlled `?` Setup Guide & Optional Channel\
+      \ Skip (`src/macos/cito-ui.swift`, `plugins/telegram/plugin.json`)**: Replace\
+      \ `\"Mobile Alerts\"` with `\"Human Channels\"` (`onboarding_step:channels`,\
+      \ `goto_channels_tab`, `empty_open_channels`); make `onboardingGuideOpen` default\
+      \ to `false` and strictly user-controlled via `?` (`toggle_onboarding_guide`)\
+      \ and `dismiss_onboarding_guide` across all 3 tabs (`apps`, `channels`, `hubs`)\
+      \ without forcing it open on `0` configured apps; add `skip_next_step` (`\"\
+      Skip\"`) on `apps_next_step_callout`; and add `skip_channel:<id>` (`\"Skip for\
+      \ Now\"`) on unconfigured Human Channel cards while keeping `settings_channel_status:<id>`\
+      \ as `\"○ Not Configured\"`.\n  5. **`U7`–`U9` — Zero Label Truncation, Right-Aligned\
+      \ Hub Row Controls, LAN Share Token/Feedback & Labeled `add_hub_form` (`src/macos/cito-ui.swift`,\
+      \ `daemon.rs`)**: Widen `settings_app_tier:<id>` (`\"Experimental\"` badge width\
+      \ `88pt`), set `paste_hub_invite` (`\"Paste Invite\"`) and `open_add_hub` (`\"\
+      Add Hub…\"` without duplicate `+`); right-align `CONNECTED HUBS` row controls\
+      \ (`edit_hub:local` at `x: 338`, `toggle_hub:local` at `x: 396`, and remote\
+      \ hub `login_hub`/`edit_hub`/`toggle_hub`/`remove_hub`); generate a random token\
+      \ on `set_host_hub` when `auth_mode == \"token\"`, display `copy_host_hub_token`\
+      \ (`\"Token: <prefix>… Copy\"`) when `auth_mode == \"token\"`, and flash `\"\
+      ✓ Copied\"` / `\"✓ Saved\"` on `copy_hub_invite` and `apply_host_hub_port`;\
+      \ and add explicit uppercase field labels and protocol explanations (`local://`\
+      \ vs `http://`/`https://`) to `add_hub_form`.\n  6. **`U10` — Mechanical Truncation\
+      \ Detector (`truncated_labels`), `test_render_png` Snapshot Renderer & `v0.20.1`\
+      \ Version Bump (`src/macos/cito-ui.swift`, `crates/cito-native/tests/support/{ui,daemon,plugins,distribution}.rs`)**:\
+      \ Report `truncated_labels` in `test_inspect`, support `test_render_png` (`\"\
+      menu\" | \"settings\" | \"directory\"`) in `src/macos/cito-ui.swift`, add `U1`–`U10`\
+      \ regression tests asserting `truncated_labels == []`, bump version to `0.20.1`\
+      \ across `Cargo.toml`, `crates/cito-native/src/lib.rs`, `plugins/*/plugin.json`,\
+      \ `packaging/homebrew/cito.rb`, `README.md`, `site/index.html`, and `docs/ROADMAP.md`,\
+      \ and verify `cargo test --workspace && cargo build --release`.\n- **Boundary:**\
+      \ Owner `rust-senior`; modifies `/Users/tefx/Projects/cito` (`plan.yaml` managed\
+      \ exclusively by Vectl).\n- **Admit:** Completed Phase `v24` and `docs/DESIGN.md`\
+      \ §11 (`U1`–`U10`); `cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` and the zero-hardcoding check (`grep -rnE -i\
+      \ '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` == 0 matches) pass with `truncated_labels\
+      \ == []`.\n- **Recovery:** Reconcile compilation, test, or UI layout/truncation\
+      \ failures in place within the step worktree and clean up any temporary test\
+      \ artifacts or processes.\n"
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/core/daemon.rs
+    - plugins/pi/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/plugin.json
+    - plugins/codex/plugin.json
+    - plugins/claude/plugin.json
+    - plugins/telegram/plugin.json
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - Cargo.toml
+    - crates/cito-native/src/lib.rs
+    - packaging/homebrew/cito.rb
+    - README.md
+    - site/index.html
+    agent: rust-senior
+  - id: v25.hygiene
+    name: 'Multimodal Visual Snapshot Inspection (8 Core UI States), Iterative Code-Hygiene
+      Convergence & Live v0.20.1 Distribution Closure (GitHub Release v0.20.1 & Tefx/homebrew-tap
+      Formula/Cask) [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** `[REQUIRES_SKILL: code-hygiene]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`
+      Render 2x Retina PNG snapshots via `test_render_png` for all 8 core UI states
+      (`menu_human_paused.png`, `settings_apps.png`, `settings_guide_open.png`, `settings_channels_unconfigured.png`,
+      `settings_channels_pairing.png`, `settings_hubs_token.png`, `settings_hubs_edit_local.png`,
+      `settings_hubs_add_remote.png`), run multimodal visual & code-hygiene review
+      (`uiux-auditor` inspecting actual PNG images + `pathway-auditor` and `structural-auditor`),
+      fix any visual, truncation, alignment, wiring, or code-simplicity issues until
+      a fresh audit round returns `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`
+      with zero matches on the core/UI hardcoding grep gate, and publish `v0.20.1`
+      to GitHub Releases (`Tefx/cito`), GitHub Pages (`https://tefx.github.io/cito/`),
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Boundary:** Owner `rust-senior`; repository changes in `/Users/tefx/Projects/cito`
+      plus authorized distribution effects on `Tefx/cito` (GitHub Release `v0.20.1`
+      & GitHub Pages) and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`)
+      after multimodal visual review, code-hygiene convergence, and `cargo test --workspace`
+      pass.
+
+      - **Admit:** Completed `v25.impl`, 8 rendered 2x Retina PNG snapshots inspected
+      by `uiux-auditor` alongside `pathway-auditor` and `structural-auditor` reaching
+      `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`, `truncated_labels ==
+      []`, zero matches on `grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/core/ src/macos/`, `cargo test --workspace && cargo build
+      --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exiting `0`, and verified
+      SHA-256 parity across GitHub Release `v0.20.1`, `packaging/homebrew/cito.rb`,
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Recovery:** If any multimodal visual check, audit round, or release/tap
+      update reports actionable findings, repair in place, re-render the affected
+      PNG snapshots, re-run checks and fresh-context delta verification until `ZERO_NEW_ISSUES`,
+      and reconcile release tags and Homebrew tap Formula/Cask SHA-256 values.
+
+      '
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v25.impl
+    agent: rust-senior
+  - id: v25.gate
+    name: V25 Stage 9 (v0.20.1) Independent Terminal Acceptance, U1–U10 Visual/UX
+      Verification & Live Distribution Gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
+      \n- **Deliver:** Independent terminal Phase `v25` (`v0.20.1`) acceptance decision\
+      \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session.\n- **Boundary:**\
+      \ Owner `gate-reviewer`; strictly read-only (`repo_change_policy: no_repo_change`)\
+      \ over the immutable integrated Git HEAD in `/Users/tefx/Projects/cito` and\
+      \ live public endpoints.\n- **Admit:**\n  - Included phase and terminal outcomes:\
+      \ Phase `v25` (`v25.impl` and `v25.hygiene`) bound to the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence and checks:\n\
+      \    1. `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` exits `0` with 100% pass rate across all native\
+      \ Rust unit, integration, `F1`–`F64`, `L1`–`L17`, and `U1`–`U10` tests, with\
+      \ `truncated_labels == []`.\n    2. Zero hardcoded agent/channel names or forbidden\
+      \ strings: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` returns `0` matches; `[\\p{Script=Han}]`\
+      \ and `\\b(rda|casdoor|rcatwin|keppel|mingchen)\\b` return `0` matches across\
+      \ repository files (excluding the policy rule line in `docs/DESIGN.md`).\n \
+      \   3. Multimodal visual & code-hygiene convergence: fresh-context `uiux-auditor`\
+      \ (over all 8 rendered PNG snapshots), `pathway-auditor`, and `structural-auditor`\
+      \ reports verify closure of all admitted findings with `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`.\n    4. Live distribution verification:\
+      \ `https://tefx.github.io/cito/` returns HTTP `200`, GitHub Release `v0.20.1`\
+      \ publishes `Cito-macos-arm64.zip` + `.sha256` at `0.20.1`, and `packaging/homebrew/cito.rb`\
+      \ and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`) match the published\
+      \ `v0.20.1` SHA-256.\n- **Recovery:** If any acceptance check fails, record\
+      \ concrete counterexamples and route a cohesive writable repair to `rust-senior`\
+      \ before re-running this gate in Delta mode.\n"
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v25.hygiene
+    agent: gate-reviewer
