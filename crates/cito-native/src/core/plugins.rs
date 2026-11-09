@@ -31,6 +31,8 @@ pub struct PluginDescriptor {
     pub command: Vec<String>,
     pub channel_env: Option<String>,
     pub fields: Vec<Value>,
+    pub post_setup_hint: Option<String>,
+    pub post_disconnect_hint: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -459,6 +461,14 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         command,
         channel_env,
         fields,
+        post_setup_hint: map
+            .get("postSetupHint")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        post_disconnect_hint: map
+            .get("postDisconnectHint")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -467,7 +477,21 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
     let mut builtin_ids = HashSet::new();
     let mut rejected_ids = HashSet::new();
 
-    if let Some(builtin_root) = resolve_builtin_plugins_dir() {
+    let staged_root = state_dir.join("plugins");
+    let mut builtin_roots: Vec<_> = resolve_builtin_plugins_dir().into_iter().collect();
+    let using_staged_root = builtin_roots.first().is_some_and(|root| {
+        root == &staged_root
+            || fs::canonicalize(root)
+                .ok()
+                .zip(fs::canonicalize(&staged_root).ok())
+                .is_some_and(|(builtin, staged)| builtin == staged)
+    });
+    if using_staged_root {
+        // Installed shims point at staged files; recover deleted descriptors from
+        // the distribution so a new process can still offer Repair.
+        builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
+    }
+    for builtin_root in builtin_roots {
         if let Ok(rd) = fs::read_dir(&builtin_root) {
             let mut subdirs: Vec<PathBuf> = rd
                 .flatten()
@@ -476,9 +500,21 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
                 .collect();
             subdirs.sort();
             for sub in subdirs {
+                // The staged directory also hosts custom plugins. Only bundled
+                // IDs belong here; leave the rest for external discovery below.
+                if using_staged_root
+                    && !sub.file_name().and_then(|s| s.to_str()).is_some_and(|id| {
+                        super::setup::resolve_bundled_plugin_dir(id)
+                            .join("plugin.json")
+                            .is_file()
+                    })
+                {
+                    continue;
+                }
                 if let Ok(desc) = parse_manifest_dir(&sub, true) {
-                    builtin_ids.insert(desc.id.clone());
-                    plugins.push(desc);
+                    if builtin_ids.insert(desc.id.clone()) {
+                        plugins.push(desc);
+                    }
                 }
             }
         }
@@ -714,8 +750,15 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
         .command
         .first()
         .ok_or("PLUGIN_LOAD_ERROR: empty command")?;
-    let executable = if executable.starts_with("./") || executable.starts_with("../") {
-        plugin.plugin_dir.join(executable)
+    let relative = executable.starts_with("./") || executable.starts_with("../");
+    let plugin_dir =
+        if plugin.is_builtin && !super::setup::is_plugin_dir_intact(&plugin.plugin_dir, plugin) {
+            super::setup::resolve_bundled_plugin_dir(&plugin.id)
+        } else {
+            plugin.plugin_dir.clone()
+        };
+    let executable = if relative {
+        plugin_dir.join(executable)
     } else if executable.starts_with('~') {
         expand_home_dir(
             executable,
@@ -726,9 +769,7 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
         PathBuf::from(executable)
     };
     let mut command = Command::new(executable);
-    command
-        .args(&plugin.command[1..])
-        .current_dir(&plugin.plugin_dir);
+    command.args(&plugin.command[1..]).current_dir(plugin_dir);
     Ok(command)
 }
 

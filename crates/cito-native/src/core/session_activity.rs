@@ -642,6 +642,8 @@ print(json.dumps(response), flush=True)
                 is_builtin: false,
                 channel_env: None,
                 fields: Vec::new(),
+                post_setup_hint: None,
+                post_disconnect_hint: None,
                 command: vec![
                     "/usr/bin/env".into(),
                     format!("HOME={}", self.config.home_dir.display()),

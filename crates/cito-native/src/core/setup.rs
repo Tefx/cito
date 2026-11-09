@@ -74,6 +74,70 @@ pub fn resolve_package_root() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
+pub fn resolve_bundled_plugin_dir(id: &str) -> PathBuf {
+    bundled_plugin_dir(&resolve_package_root(), id)
+}
+
+fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
+    [
+        root.join("Resources/plugins"),
+        root.join("plugins"),
+        root.join("share/cito/plugins"),
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
+    ]
+}
+
+pub(super) fn resolve_bundled_plugins_root() -> Option<PathBuf> {
+    bundled_plugin_roots(&resolve_package_root())
+        .into_iter()
+        .find(|dir| dir.is_dir())
+}
+
+fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
+    bundled_plugin_roots(root)
+        .into_iter()
+        .map(|dir| dir.join(id))
+        .find(|dir| dir.join("plugin.json").is_file())
+        .unwrap_or_else(|| {
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")).join(id)
+        })
+}
+
+pub fn is_staged_plugin_intact(state_dir: &Path, plugin: &PluginDescriptor) -> bool {
+    is_plugin_dir_intact(&state_dir.join("plugins").join(&plugin.id), plugin)
+}
+
+pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> bool {
+    if !dir.join("plugin.json").is_file() {
+        return false;
+    }
+    if let Some(cmd) = plugin.command.first() {
+        if (cmd.starts_with("./") || cmd.starts_with("../")) && !dir.join(cmd).is_file() {
+            return false;
+        }
+    }
+    !plugin.is_builtin || contains_plugin_files(&resolve_bundled_plugin_dir(&plugin.id), dir)
+}
+
+fn contains_plugin_files(source: &Path, target: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(source) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        let Ok(kind) = entry.file_type() else {
+            return false;
+        };
+        let staged = target.join(entry.file_name());
+        if (kind.is_file() && !staged.is_file())
+            || (kind.is_dir() && !contains_plugin_files(&entry.path(), &staged))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn resolve_state_and_config_paths() -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let home_env = env::var("HOME").ok();
     let home_dir = expand_home_dir("~", "HOME", home_env.as_deref())?;
@@ -99,10 +163,24 @@ pub fn ensure_cli_shims_native(
     let mut written = Vec::new();
     for plugin in &plugins.plugins {
         let target = plugins_dir.join(&plugin.id);
-        if fs::canonicalize(&plugin.plugin_dir).ok() != fs::canonicalize(&target).ok()
-            || !target.exists()
+        let bundled = resolve_bundled_plugin_dir(&plugin.id);
+        let source = if plugin.is_builtin
+            && bundled.join("plugin.json").is_file()
+            && fs::canonicalize(&bundled).ok() != fs::canonicalize(&target).ok()
         {
-            copy_dir_recursive(&plugin.plugin_dir, &target)?;
+            &bundled
+        } else if plugin.plugin_dir.is_dir() {
+            &plugin.plugin_dir
+        } else {
+            // A deleted external plugin cannot be reconstructed. It must not block
+            // repairs of bundled plugins; applying that missing target still fails.
+            continue;
+        };
+        if !target.exists()
+            || !is_staged_plugin_intact(state_dir, plugin)
+            || fs::canonicalize(source).ok() != fs::canonicalize(&target).ok()
+        {
+            copy_dir_recursive(source, &target)?;
             written.push(target);
         }
     }
@@ -129,9 +207,7 @@ pub fn ensure_cli_shims_native(
     if let Ok(exe_path) = env::current_exe() {
         let exe_s = exe_path.to_string_lossy();
         if (exe_s.contains("/Cellar/cito/") || exe_s.contains("/opt/cito/"))
-            && state_dir
-                .to_str()
-                .is_some_and(|s| s.ends_with("/.cito"))
+            && state_dir.to_str().is_some_and(|s| s.ends_with("/.cito"))
         {
             let opt_app = PathBuf::from(resolve_stable_package_root(&exe_s))
                 .parent()
@@ -768,7 +844,6 @@ pub fn uninstall_setup_native(
         ("bin", "Removed CLI shims directory"),
         ("plugins", "Removed staged plugins directory"),
         ("sockets", "Removed local sockets directory"),
-        ("claude", "Removed Claude wake queue and endpoint cache"),
     ] {
         let dir = state_dir.join(sub);
         if dir.exists() {
@@ -779,6 +854,19 @@ pub fn uninstall_setup_native(
                 status: "updated".to_string(),
                 backup_path: None,
                 detail: label.to_string(),
+            });
+        }
+    }
+    for p in &plugins.plugins {
+        let dir = state_dir.join(&p.id);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+            actions.push(SetupAction {
+                target: p.id.clone(),
+                path: dir.to_string_lossy().into_owned(),
+                status: "updated".into(),
+                backup_path: None,
+                detail: "Removed plugin runtime data".into(),
             });
         }
     }
@@ -1442,6 +1530,29 @@ mod tests {
     }
 
     #[test]
+    fn bundled_plugin_resolution_covers_distribution_layouts() {
+        let (root, _) = fixture();
+        fs::remove_file(root.join("plugins/sample/plugin.json")).unwrap();
+        for (package, relative) in [
+            (root.join("Cito.app/Contents"), "Resources/plugins/sample"),
+            (root.join("prefix"), "share/cito/plugins/sample"),
+            (root.clone(), "plugins/sample"),
+        ] {
+            let bundled = package.join(relative);
+            fs::create_dir_all(&bundled).unwrap();
+            // A directory left behind without its manifest is not a distribution.
+            assert_ne!(bundled_plugin_dir(&package, "sample"), bundled);
+            fs::write(bundled.join("plugin.json"), "{}").unwrap();
+            assert_eq!(bundled_plugin_dir(&package, "sample"), bundled);
+        }
+        assert_eq!(
+            bundled_plugin_dir(&root.join("missing"), "sample"),
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins/sample"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[ignore = "isolated CLI subprocess invoked by setup regression tests"]
     fn setup_cli_process_worker() {
         let args: Vec<String> =
@@ -1808,7 +1919,7 @@ mod tests {
         use std::io::{Read, Write};
         let (root, plugins) = fixture();
         let state = root.join("installed");
-        for sub in ["bin", "plugins", "sockets", "claude"] {
+        for sub in ["bin", "plugins", "sockets", "sample"] {
             fs::create_dir_all(state.join(sub)).unwrap();
             fs::write(state.join(sub).join("sentinel"), "present until shutdown").unwrap();
         }
@@ -1883,8 +1994,11 @@ mod tests {
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
         assert!(!crate::plugins::pid_alive(pid as i32));
-        for sub in ["bin", "plugins", "sockets", "claude"] {
-            assert!(!state.join(sub).exists(), "{sub} should be removed on uninstall");
+        for sub in ["bin", "plugins", "sockets", "sample"] {
+            assert!(
+                !state.join(sub).exists(),
+                "{sub} should be removed on uninstall"
+            );
         }
         assert!(!state.join("daemon.lock").exists());
         fs::remove_dir_all(root).unwrap();

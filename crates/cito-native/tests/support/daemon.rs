@@ -4,6 +4,410 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let ui = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    assert_eq!(f.action(json!({"op":"channel_save","channel_id":"channel","enabled":true,"values":{"credential":"saved","address":"room"}})).0, 200);
+    let frames = || -> Vec<Value> {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    for op in ["channel_test", "test_human_channel"] {
+        for (id, expected_error, expected_status) in [
+            ("channel", "Invalid token", 200),
+            (
+                "missing",
+                "INVALID_INPUT: Unknown human channel plugin: missing",
+                400,
+            ),
+        ] {
+            let before = frames().len();
+            let action = json!({"op":op,"channel_id":id,"values":if id == "channel" {
+                json!({"credential":"invalid"})
+            } else {
+                json!({"botToken":"x"})
+            }});
+            let (status, result) = f.action(action);
+            assert_eq!(status, expected_status, "{result}");
+            assert_eq!(result["ok"], false);
+            assert_eq!(result["error"], expected_error);
+            wait(|| {
+                let frames = frames();
+                let Some(index) = frames.iter().enumerate().skip(before).find_map(|(i, v)| {
+                    (v["op"] == "channel_test_result" && v["channel_id"] == id).then_some(i)
+                }) else {
+                    return false;
+                };
+                assert_eq!(frames[index]["ok"], false);
+                assert_eq!(frames[index]["error"], expected_error);
+                assert_eq!(frames[index]["hub"], "local");
+                let subsequent = &frames[index + 1..];
+                for op in ["settings", "state"] {
+                    let Some(refresh) = subsequent.iter().find(|v| v["op"] == op) else {
+                        return false;
+                    };
+                    let channel = refresh["settings"]["channels"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|ch| ch["id"] == "channel")
+                        .unwrap();
+                    assert_eq!(channel["configured"], true);
+                    assert_eq!(channel["status"], "ready");
+                }
+                true
+            });
+        }
+    }
+}
+
+#[test]
+fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
+    if std::env::var_os("CITO_TEST_STAGED_PLUGINS").is_some() {
+        // Re-enter under the fixture environment without changing process-global
+        // variables in the parent test runner.
+        let (config, plugins) = cito_native::plugins::load_native_config().unwrap();
+        let custom = plugins.find_by_id("custom-agent").unwrap();
+        let custom_dir = config.state_dir.join("plugins/custom-agent");
+        let cwd = fs::canonicalize(&custom_dir).unwrap();
+        assert!(!custom.is_builtin);
+        assert_eq!(custom.plugin_dir, custom_dir);
+        let response =
+            cito_native::plugins::plugin_request(custom, &json!({"op":"setup_inspect"})).unwrap();
+        assert_eq!(response["cwd"], json!(cwd));
+        assert_eq!(response["executable"], json!(custom_dir.join("./run.sh")));
+        assert_eq!(
+            cito_native::setup::inspect_plugin_setup(custom),
+            (true, true, vec![cwd.display().to_string()])
+        );
+        assert!(plugins.find_by_id("pi").unwrap().is_builtin);
+        return;
+    }
+
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let daemon = f.daemon(&[]);
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    f.stop(daemon);
+    let custom = f.state.join("plugins/custom-agent");
+    fs::create_dir_all(&custom).unwrap();
+    fs::write(
+        custom.join("plugin.json"),
+        json!({"id":"custom-agent","kind":"agent","displayName":"Custom Agent","command":["./run.sh"]}).to_string(),
+    ).unwrap();
+    script(
+        &custom.join("run.sh"),
+        "#!/bin/sh\nread -r request\nprintf '{\"ok\":true,\"installed\":true,\"configured\":true,\"paths\":[\"%s\"],\"cwd\":\"%s\",\"executable\":\"%s\"}\\n' \"$(pwd -P)\" \"$(pwd -P)\" \"$0\"\n",
+    );
+    let check_plugins = |f: &mut Fixture| {
+        f.env.insert("CITO_TEST_STAGED_PLUGINS".into(), "1".into());
+        let (ok, out, err) = f.command(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            &[
+                "--exact",
+                "daemon::lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins",
+                "--nocapture",
+            ],
+            "",
+        );
+        f.env.remove("CITO_TEST_STAGED_PLUGINS");
+        assert!(ok, "{out}\n{err}");
+    };
+    f.env.insert(
+        "CITO_BUILTIN_PLUGINS_DIR".into(),
+        f.state.join("plugins").display().to_string(),
+    );
+    check_plugins(&mut f);
+    let mut daemon = f.daemon(&[]);
+    let app = |f: &Fixture, id: &str| {
+        let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+        let apps: Vec<_> = snapshot["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["id"] == id)
+            .collect();
+        assert_eq!(apps.len(), 1, "descriptor must remain unique: {id}");
+        apps[0].clone()
+    };
+    assert_eq!(app(&f, "pi")["status"], "ready");
+    assert_eq!(app(&f, "custom-agent")["status"], "ready");
+    // Repairs must use the distribution even though the loaded descriptor is staged.
+    for asset in [
+        "cito-bridge.ts",
+        "package.json",
+        "plugin.json",
+        "bin/cito-plugin-pi",
+    ] {
+        let staged = f.state.join("plugins/pi").join(asset);
+        fs::remove_file(&staged).unwrap();
+        assert_eq!(app(&f, "pi")["status"], "repair_needed", "{asset}");
+        assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+        assert_eq!(
+            fs::read(&staged).unwrap(),
+            fs::read(root().join("plugins/pi").join(asset)).unwrap()
+        );
+        assert_eq!(app(&f, "pi")["status"], "ready", "{asset}");
+    }
+    let alias = f.dir.join("staged-plugins");
+    std::os::unix::fs::symlink(f.state.join("plugins"), &alias).unwrap();
+    for builtin_root in [f.state.join("plugins"), alias] {
+        f.env.insert(
+            "CITO_BUILTIN_PLUGINS_DIR".into(),
+            builtin_root.display().to_string(),
+        );
+        for missing_manifest in [true, false] {
+            f.stop(daemon);
+            let staged = f.state.join("plugins/pi");
+            if missing_manifest {
+                fs::remove_file(staged.join("plugin.json")).unwrap();
+            } else {
+                fs::remove_dir_all(&staged).unwrap();
+            }
+            // A new process must rediscover the descriptor, including through an alias.
+            check_plugins(&mut f);
+            daemon = f.daemon(&[]);
+            assert_eq!(app(&f, "pi")["status"], "repair_needed");
+            let custom_app = app(&f, "custom-agent");
+            assert_eq!(custom_app["status"], "ready");
+            assert_eq!(
+                custom_app["paths"],
+                json!([fs::canonicalize(&custom).unwrap()])
+            );
+            assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+            for asset in ["plugin.json", "bin/cito-plugin-pi", "cito-bridge.ts"] {
+                assert_eq!(
+                    fs::read(staged.join(asset)).unwrap(),
+                    fs::read(root().join("plugins/pi").join(asset)).unwrap()
+                );
+            }
+            assert_eq!(app(&f, "pi")["status"], "ready");
+            assert_eq!(app(&f, "pi")["configured"], true);
+        }
+    }
+}
+
+#[test]
+fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let plugin = host.state.join("hub/plugins/remote-channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"),json!({"id":"remote-channel","kind":"human-channel","displayName":"Remote channel","scope":"hub",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"setupGuide":["Configure service, then pair."],"pairing":{"supported":true},
+        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let (_, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"shared":{"url":format!("http://127.0.0.1:{port}")}},"default_hub":"local"}),
+    );
+    f.daemon(&[]);
+    assert!(!f.state.join("plugins/remote-channel").exists());
+    let (status,result)=f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}}));
+    assert_eq!(status, 200, "{result}");
+    let db = cito_native::database::Database::open(&host.state.join("hub/hub.sqlite")).unwrap();
+    let before = db.query("SELECT * FROM hub_plugin_services", &[]).unwrap();
+    assert_eq!(f.action(json!({"op":"channel_test","hub":"shared","channel_id":"remote-channel","values":{"credential":"candidate","address":"test-room"}})).0,200);
+    assert_eq!(
+        db.query("SELECT * FROM hub_plugin_services", &[]).unwrap(),
+        before
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["settings"]["settings_hub"], "shared");
+    let ch = &snapshot["settings"]["channels"][0];
+    assert_eq!(ch["status"], "ready");
+    assert_eq!(ch["fields"][0]["hidden"], false);
+    assert_eq!(ch["setup_guide"], json!(["Configure service, then pair."]));
+    assert_eq!(f.action(json!({"op":"channel_toggle","hub":"shared","channel_id":"remote-channel","enabled":false})).1["channels"][0]["status"],"paused");
+    assert_eq!(
+        f.action(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"channel_cancel_pair","hub":"shared","channel_id":"remote-channel"}))
+            .0,
+        200
+    );
+    assert!(db
+        .query(
+            "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        f.action(json!({"op":"channel_unpair","hub":"shared","channel_id":"remote-channel"}))
+            .1["channels"][0]["status"],
+        "hub_ready"
+    );
+    assert_eq!(f.action(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true})).1["channels"][0]["status"],"not_configured");
+}
+#[test]
+fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    let ui = f.recording_ui();
+    let daemon = f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    wait(|| f.home.join("ui-pid").exists());
+    enroll(&f, meta.clone());
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    let app = |snapshot: Value| {
+        snapshot["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "pi")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        app(f.action(json!({"op":"get_snapshot"})).1)["status"],
+        "ready"
+    );
+    fs::remove_dir_all(f.state.join("bin")).unwrap();
+    fs::remove_dir_all(f.state.join("plugins")).unwrap();
+    assert_eq!(
+        app(f.action(json!({"op":"get_snapshot"})).1)["status"],
+        "repair_needed"
+    );
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    assert!(f.state.join("bin/cito-mcp").is_file());
+    assert!(f.state.join("plugins/pi/plugin.json").is_file());
+    assert!(app(f.action(json!({"op":"get_snapshot"})).1)["detail"]
+        .as_str()
+        .unwrap()
+        .contains("/reload"));
+    // Restore the test-owned external source after intentionally deleting all staging.
+    f.provider("delivered_unconfirmed");
+    enroll(&f, meta.clone());
+    assert_eq!(
+        f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
+            .0,
+        200
+    );
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    enroll(&f, meta);
+    assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE status='ACTIVE'")
+        .is_empty());
+    assert!(!f.exited(daemon));
+    let ui_pid = fs::read_to_string(f.home.join("ui-pid"))
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    assert!(cito_native::plugins::pid_alive(ui_pid));
+    assert_eq!(http(f.port, "/health", None).0, 200);
+    assert!(f.state.join("bin/cito-mcp").is_file());
+    assert!(f.state.join("plugins/pi").is_dir());
+    let host: Value =
+        serde_json::from_str(&fs::read_to_string(f.home.join(".pi/agent/settings.json")).unwrap())
+            .unwrap();
+    assert!(
+        host["packages"].is_null() || host["packages"] == json!([]),
+        "{host}"
+    );
+}
+#[test]
+fn lifecycle_sign_in_enables_disabled_hub_before_bounded_discovery_failure() {
+    let _lock = serial();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let server = std::thread::spawn(move || {
+        use std::io::Write;
+        while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    });
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}"),"enabled":false,"authMode":"oidc","issuer":format!("http://127.0.0.1:{port}"),"clientId":"client"}},"default_hub":"local"}),
+    );
+    f.daemon(&[]);
+    let result = f.action(json!({"op":"login_hub","hub":"work"}));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().unwrap();
+    assert_eq!(result.0, 400, "{result:?}");
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert_eq!(raw["hubs"]["work"]["enabled"], true);
+    assert!(
+        !f.home.join("mock-calls").exists(),
+        "discovery failure must never open a browser"
+    );
+}
+#[test]
+fn lifecycle_hub_edit_preserves_secrets_disabled_state_default_and_host_error_rollback() {
+    let _lock = serial();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"token","token":"saved","enabled":false,"clientSecret":"retained"}},"default_hub":"local"}),
+    );
+    f.daemon(&[]);
+    assert_eq!(f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"renamed","url":"http://127.0.0.1:2","auth_mode":"token","token":"","clientSecret":""})).0,200);
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert_eq!(raw["default_hub"], "local");
+    assert!(raw["hubs"].get("work").is_none());
+    assert_eq!(raw["hubs"]["renamed"]["token"], "saved");
+    assert_eq!(raw["hubs"]["renamed"]["clientSecret"], "retained");
+    assert_eq!(raw["hubs"]["renamed"]["enabled"], false);
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let h = snapshot["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "renamed")
+        .unwrap();
+    assert_eq!(h["status"], "disconnected");
+    assert_eq!(h["connected"], false);
+    assert_eq!(f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1","auth_mode":"none"})).0,200);
+    let running = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    let blocked = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = blocked.local_addr().unwrap().port();
+    assert_eq!(
+        f.action(json!({"op":"set_host_hub","enabled":true,"port":port}))
+            .0,
+        400
+    );
+    let failed = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    assert_eq!(failed["port"], running["port"]);
+    assert!(failed["error"].is_string());
+    assert_eq!(failed["running"], true);
+    assert_eq!(
+        f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"auth_mode":"token"}))
+            .0,
+        200
+    );
+    let success = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    assert!(success["error"].is_null());
+    assert_eq!(success["auth_mode"], "token");
+}
+#[test]
 fn inbox_ordered_pages_explicit_ack_union_and_no_background_wake() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -947,6 +1351,15 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         f.action(json!({"op":"set_host_hub","enabled":false})).0,
         200
     );
+    // Disconnect now revokes this harness's listeners. Reconnect explicitly before testing delivery.
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"listen_session","hub":"work","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"})).0,200);
     let sent = f.action(json!({"op":"send_signal","hub":"work","to":id,"message":"Agent inbox"}));
     assert_eq!(sent.0, 200, "{}", sent.1);
     wait(|| !f.rows("SELECT * FROM local_signals").is_empty());
@@ -1075,7 +1488,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.19.0");
+    assert_eq!(init["serverInfo"]["version"], "0.20.0");
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1196,7 +1609,7 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.19.0");
+    assert_eq!(http(p, "/health", None).1["version"], "0.20.0");
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -1780,6 +2193,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.19.0"
+        "cito v0.20.0"
     );
 }

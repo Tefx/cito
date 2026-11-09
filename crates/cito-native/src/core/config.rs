@@ -90,7 +90,8 @@ pub fn with_config_lock_mode<T>(
         }
         operation()
     };
-    let _ = fs::remove_file(&lock_path);
+    // Keep one inode for waiting and newly arriving writers. Unlinking here lets
+    // them lock different files and enter the read-modify-write section together.
     result
 }
 
@@ -297,13 +298,24 @@ mod tests {
                         "--test-threads=1",
                     ])
                     .env("CITO_CONFIG_LOCK_TEST_PATH", &path)
-                    .stdout(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
                     .spawn()
                     .unwrap(),
             );
         }
-        for mut child in children {
-            assert!(child.wait().unwrap().success());
+        let results: Vec<_> = children
+            .into_iter()
+            .map(|child| child.wait_with_output().unwrap())
+            .collect();
+        for result in results {
+            assert!(
+                result.status.success(),
+                "{}: {} {}",
+                result.status,
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
         }
         assert_eq!(fs::read_to_string(path).unwrap(), "100");
         fs::remove_dir_all(dir).unwrap();

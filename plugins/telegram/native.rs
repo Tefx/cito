@@ -212,11 +212,17 @@ impl Runtime {
         match str_at(&r, "op").unwrap_or("") {
             "shutdown" => return false,
             "configure" => {
+                let old_token = str_at(&self.config, "botToken").unwrap_or("");
+                let token_changed = !old_token.is_empty()
+                    && Some(old_token) != str_at(&r["hub_config"], "botToken");
                 self.config = r["hub_config"].clone();
-                if self.pending.is_empty() {
-                    self.cursor = id(&r["cursor"])
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(self.cursor);
+                if token_changed {
+                    self.cursor = 0;
+                    self.pending.clear();
+                    self.reply_chats.clear();
+                    self.pair_chats.clear();
+                } else if self.pending.is_empty() {
+                    self.cursor = id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0);
                 }
             }
             "format_pair" | "test" => emit(&rpc(&self.config, &r)),

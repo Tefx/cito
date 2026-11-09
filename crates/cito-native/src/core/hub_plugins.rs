@@ -140,6 +140,7 @@ pub struct ChannelProcess {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     alive: Arc<AtomicBool>,
     pending: Pending,
+    reader: Mutex<Option<thread::JoinHandle<()>>>,
 }
 impl ChannelProcess {
     pub fn spawn(
@@ -177,7 +178,7 @@ impl ChannelProcess {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let (si, p, a) = (stdin.clone(), pending.clone(), alive.clone());
-        thread::spawn(move || {
+        let reader = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
                 let mut line = Vec::new();
@@ -203,9 +204,11 @@ impl ChannelProcess {
                             }
                         }
                     }
-                } else if let Some(reply) = callback(frame) {
-                    if send_line(&si, &reply).is_err() {
-                        break;
+                } else if a.load(Ordering::SeqCst) {
+                    if let Some(reply) = callback(frame) {
+                        if send_line(&si, &reply).is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -224,6 +227,7 @@ impl ChannelProcess {
             stdin,
             alive,
             pending,
+            reader: Mutex::new(Some(reader)),
         })
     }
     pub fn alive(&self) -> bool {
@@ -282,7 +286,7 @@ impl ChannelProcess {
             let until = Instant::now() + Duration::from_millis(200);
             loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => return,
+                    Ok(Some(_)) => break,
                     Err(_) => break,
                     _ => {}
                 }
@@ -293,6 +297,15 @@ impl ChannelProcess {
             }
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // No cursor, pairing, or delivery callback may outlive a stopped process.
+        // Callers release the process registry and database locks before shutdown.
+        if let Ok(mut reader) = self.reader.lock() {
+            if let Some(handle) = reader.take() {
+                if handle.thread().id() != thread::current().id() {
+                    let _ = handle.join();
+                }
+            }
         }
     }
 }

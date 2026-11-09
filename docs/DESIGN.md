@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V23 — Stage 7 `v0.19.0`: Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol (`stdin`/`stdout` NDJSON), `cito-claude-hook` Inside `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts` & Complete `F1`–`F64` Remediation)
+# Cito Architecture & Protocol Specification (V24 — Stage 8 `v0.20.0`: Full-Lifecycle UX, State-Machine & Reconfiguration Closure (`L1`–`L17`), Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol (`stdin`/`stdout` NDJSON) & Complete `F1`–`F64` Remediation)
 
-> **Normative Supersession Notice (`V23` / `v0.19.0`)**:
-> This `V23` specification is the single authoritative contract for Cito `v0.19.0`. Section 9 replaces the transitional root Node/Vitest build and test contracts from Stage 6. Where earlier stage notes referred to TypeScript core modules (`src/{mcp,hub,setup,ui,shared,adapters,auth-callout}/*.ts`), 6-character pairing codes (`cito-xxxxxx`), in-process Node.js `plugins/telegram`, or top-level `bin/cito-claude-hook`, Section 8 and the updated sections below supersede them in full. All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
+> **Normative Supersession Notice (`V24` / `v0.20.0`)**:
+> This `V24` specification is the single authoritative contract for Cito `v0.20.0` (Phase `v24`). Section 10 defines the complete full-lifecycle UX, state-machine, and reconfiguration contract (`L1`–`L17`) across `crates/cito-native/src/core/{hub,daemon,setup,login,plugins}.rs`, `plugins/{pi,codex,claude,telegram}/`, and `src/macos/cito-ui.swift`, superseding earlier partial channel/hub/setup UI contracts in Sections 4, 5, and 8 where they differed. Section 9 retains the pure Rust + Swift workspace and `cargo test` build architecture from Stage 7 (`v0.19.0`). All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
 
 ---
 
@@ -423,5 +423,370 @@ cito/
 3. **CI Workflow & Documentation Alignment (`.github/workflows/release.yml`, `README.md`, `AGENTS.md`)**:
    - Update `.github/workflows/release.yml` to remove `actions/setup-node@v4` and `npm ci` / `npm run ...`, running pure `cargo test --workspace`, `cargo build --release`, `./bin/cito setup --build-app ./build`, and `/usr/bin/ruby -c packaging/homebrew/cito.rb`.
    - Bump `CITO_VERSION` to `"0.19.0"`, publish GitHub Release `v0.19.0`, and sync `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap`.
+
+---
+
+## 10. Stage 8 (`v0.20.0` — Phase `v24`): Full-Lifecycle UX, State-Machine & Reconfiguration Contract (`L1`–`L17`)
+
+### 10.1 Overview & Design Guardrails (`[SHARP]` vs. `[FLEXIBLE]`)
+Stage 8 (`v0.20.0` — Phase `v24`) closes all 17 lifecycle, state-machine, and reconfiguration gaps (`L1`–`L17`) across the Human Channel setup/pairing/reconfiguration flow (`L1`–`L8`), the Agent App onboarding/verify/repair/disconnect/reset flow (`L9`–`L13`), and the Multi-Hub / LAN Share / Directory empty-state lifecycle (`L14`–`L17`):
+- **`[SHARP]` Zero Concrete Agent or Channel Strings in Core & UI**:
+  - `crates/cito-native/src/core/` and `src/macos/cito-ui.swift` MUST NOT contain any hardcoded branches, identifiers, or UI strings for `pi`, `codex`, `claude`, `telegram`, `webhook`, `slack`, `teams`, `email`, `discord`, or `feishu`.
+  - Mechanical gate: `grep -rnE -i '\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b' crates/cito-native/src/core/ src/macos/` MUST exit with `0` matches.
+  - All harness- or channel-specific setup instructions, placeholders, field help texts, and post-setup/post-disconnect hints MUST be declared in `plugins/<id>/plugin.json` and projected generically through `daemon.rs` and `hub.rs` DTOs.
+- **`[SHARP]` Backward-Compatible Headless Inspection Contract**:
+  - All existing `NSUserInterfaceItemIdentifier` values and `test_inspect` top-level keys (`items`, `directory_items`, `settings_items`, `settings_open`, `settings_tab`, `directory_open`, `directory_mode`, `composer_open`) in `src/macos/cito-ui.swift` MUST remain intact so all existing `ui::*`, `daemon::*`, `hub::*`, and `plugins::*` tests continue to pass alongside new `L1`–`L17` regression tests.
+- **`[FLEXIBLE]` Scrollable Card Containers**:
+  - Card heights in `SettingsPanel` (`Agent Apps`, `Human Channels`, `Hubs & Network`) may expand dynamically to accommodate setup guides, pairing instructions, and inline edit forms because `mountSettingsCards(_:in:)` wraps each tab's content in an `NSScrollView` and shifts coordinates so `minY >= 8`.
+
+---
+
+### 10.2 Declarative `plugin.json` Lifecycle Metadata & Separation of Secret Redaction vs. UI Visibility (`L1`, `L10`)
+
+1. **`[SHARP]` Extended `plugin.json` Manifest Schema (`plugins/{pi,codex,claude,telegram}/plugin.json`)**:
+   - **`agent-harness` plugins (`plugins/{pi,codex,claude}/plugin.json`)** add declarative lifecycle hints:
+     - `postSetupHint` (`string`, optional):
+       - `plugins/pi/plugin.json`: `"Connected · Run /reload in open Pi sessions, then click + Listen"`
+       - `plugins/codex/plugin.json`: `"Connected · Start a new Codex session, then click + Listen"`
+       - `plugins/claude/plugin.json`: `"Connected · Restart open Claude Code sessions, then click + Listen"`
+     - `postDisconnectHint` (`string`, optional):
+       - `plugins/pi/plugin.json`: `"Disconnected · Active Pi listeners stopped"`
+       - `plugins/codex/plugin.json`: `"Disconnected · Active Codex listeners stopped"`
+       - `plugins/claude/plugin.json`: `"Disconnected · Active Claude Code listeners stopped"`
+   - **`human-channel` plugins (`plugins/telegram/plugin.json`)** add declarative setup guidance and field metadata:
+     ```json
+     {
+       "id": "telegram",
+       "kind": "human-channel",
+       "displayName": "Telegram",
+       "tier": "stable",
+       "scope": "hub",
+       "sfSymbol": "paperplane.fill",
+       "tint": "blue",
+       "cliFlag": false,
+       "command": ["./bin/cito-plugin-telegram"],
+       "setupGuide": [
+         "1. Message @BotFather on Telegram (/newbot) to create a bot and copy its Bot Token.",
+         "2. Paste the Bot Token below and click Pair Account… to generate a 1-time /start command.",
+         "3. Send the /start command to your bot in Telegram — Chat ID fills in automatically."
+       ],
+       "fields": [
+         {
+           "key": "botToken",
+           "scope": "hub",
+           "label": "Bot Token",
+           "type": "secret",
+           "required": true,
+           "placeholder": "123456:ABC-DEF...",
+           "configuredPlaceholder": "•••••••• (Saved — enter new token to replace)",
+           "helpText": "From @BotFather on Telegram"
+         },
+         {
+           "key": "chatId",
+           "scope": "user",
+           "label": "Chat ID",
+           "type": "string",
+           "required": true,
+           "placeholder": "Paired via /start or enter Chat ID",
+           "helpText": "Auto-filled when you pair via /start, or enter your numeric Chat ID"
+         }
+       ],
+       "pairing": {
+         "supported": true,
+         "actionLabel": "Pair Account…",
+         "helpText": "Generates a 10-minute /start command to link your private Telegram chat."
+       }
+     }
+     ```
+2. **`[SHARP]` Separation of Wire Secret Redaction (`redacted`) vs. UI Field Visibility (`hidden`) (`hub.rs` `channel_list()`, `L1`)**:
+   - In `crates/cito-native/src/core/hub.rs` `channel_list(&self, caller: &Value)`:
+     - Compute `let is_admin = admin(Some(caller)).is_ok();` once per `channel_list` call.
+     - For each field `f` in `fields(&plugin)`:
+       - `let hub = s(f, "scope") == "hub";`
+       - `let val = if hub { &cfg[s(f, "key")] } else { &user[s(f, "key")] };`
+       - `let is_secret = s(f, "type") == "secret";`
+       - **`hidden: bool`**: `hub && !is_admin` — ONLY non-admin OIDC callers hide `scope: "hub"` fields. Local/token callers and OIDC Hub administrators receive `hidden: false` so `cito-ui.swift` renders the `NSSecureTextField` (`channel_field:<channel_id>:<key>`) in `SettingsPanel → Human Channels`.
+       - **`redacted: bool`**: `hidden || is_secret` — Secret values (`type == "secret"`) and non-admin hub-scoped values are NEVER sent in cleartext over the wire.
+       - **`value: String`**: `""` whenever `redacted` is `true`; otherwise the stored string representation (`val.as_str()`, `""` if `null`, or `val.to_string()`).
+       - **`configured: bool`**: `configured(val)` (`true` when the stored value in `hub_plugin_services` or `hub_human_channels` is non-empty, even when `value` on the wire is `""` due to `redacted == true`).
+       - **`configured_placeholder: String`**: `f["configuredPlaceholder"].as_str().unwrap_or(if is_secret { "•••••••• (Saved — enter new value to replace)" } else { f["placeholder"].as_str().unwrap_or("") })`.
+       - **`help_text: Option<String>`**: `f["helpText"].as_str()`.
+     - On each channel item in `channel_list()`, include:
+       - `"setup_guide"`: `plugin.manifest.get("setupGuide").cloned().unwrap_or(Value::Null)` (array of strings or null).
+       - `"pairing_help_text"`: `plugin.manifest["pairing"]["helpText"].as_str()`.
+
+---
+
+### 10.3 Secret Patch Semantics (`Retain` vs. `Replace` vs. `Clear`) & Non-Mutating `channel_test` (`L2`)
+
+1. **`[SHARP]` UI `collectValues()` Dirty-Only Secret Submission (`src/macos/cito-ui.swift`, `L2`)**:
+   - In `SettingsPanel → Human Channels`, iterate only over visible fields (`for f in ch.fields where f.hidden != true`) so non-admin callers never submit hidden `scope: "hub"` fields:
+     - Let `fid = "channel_field:\(chId):\(f.key)"` and `draft = self.channelFieldDrafts[self.draftKey(fid)]`.
+     - When `f.type == "secret"` and `f.configured == true`:
+       - If `let d = draft, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty`: include `vals[f.key] = d` (user explicitly typed a replacement secret).
+       - Else if `draft == nil`, `let fv = f.value, !fv.isEmpty`: include `vals[f.key] = fv` (preserves compatibility with synthetic headless UI test fixtures that pass a non-redacted `value` in mock `settings` frames).
+       - Otherwise (`draft == nil` or `draft == ""`, and `f.value` is `nil` or `""`): **omit `f.key` from `vals`** so `Save`, `Pair Account…`, and `Send Test` retain the Hub's stored secret credential without overwriting it with `""`.
+     - When `f.type != "secret"` or `f.configured == false`:
+       - Include `vals[f.key] = draft ?? self.settingsFieldControls[fid]?.stringValue ?? f.value ?? ""`.
+2. **`[SHARP]` Hub-Side Secret Merge Guard (`crates/cito-native/src/core/hub.rs`, `L2`)**:
+   - Replace blind `merge(&mut cfg, patch)` on channel configs with `merge_channel_config(&plugin, scope, &mut cfg, patch, allow_clear_secret)`:
+     - `allow_clear_secret` is `p["clear_hub_config"] == true || p["reset_hub"] == true || p["reset"] == true`.
+     - For each `(k, v)` in `patch.as_object()`:
+       - Look up the field descriptor `f` in `fields(&plugin)` with `s(f, "key") == k && s(f, "scope") == scope`.
+       - If `s(f, "type") == "secret"` and `(v.is_null() || v.as_str() == Some(""))` and `!allow_clear_secret`: skip inserting empty/null so the existing stored secret in `base[k]` is preserved.
+       - Otherwise set `base[k] = v.clone()`.
+3. **`[SHARP]` Non-Mutating `human_channels_test` (`crates/cito-native/src/core/hub.rs`, `L2`)**:
+   - In `HubEngine::human_rpc`:
+     - Enforce `hub_patch_guard(p, Some(caller))?` before both `human_channels_test` and `human_channel_pair_start` (non-admin OIDC callers supplying a non-empty `hub_config` still receive `FORBIDDEN: Hub administrator required`).
+     - When `op == "human_channels_test"`:
+       - Validate `p["hub_config"]` and `p["user_config"]` via `validate_config`, load `(mut cfg, _)` from `service(c, id)` and `mut user` from `hub_human_channels`, and apply `merge_channel_config` **in memory only** without calling `save_service(c, id, &cfg)` or mutating SQLite.
+       - Ensure the plugin subprocess is running (`self.ensure_process(&plugin)?`) and invoke `process.request(json!({"op":"test","user":caller["owner_user"],"hub_config":cfg,"user_config":user}))`.
+     - When `op == "human_channel_pair_start"`:
+       - If `p.get("hub_config")` is present, validate and merge via `merge_channel_config(&plugin, "hub", &mut cfg, patch, false)` and persist via `save_service(c, id, &cfg)` before calling `ensure_process(&plugin)` and `configure_process(id, &process)`, enabling 1-click `Pair Account…` immediately after pasting a new `botToken`.
+
+---
+
+### 10.4 Complete Human Channel State Model & Lifecycle Actions (`L3`, `L4`, `L5`, `L6`, `L7`, `L8`)
+
+1. **`[SHARP]` Human Channel Status Model (`hub.rs` `channel_list()`, `L3`)**:
+   - In `channel_list(&self, caller: &Value)`:
+     - `let has_binding = !binding.is_null();`
+     - `let binding_enabled = has_binding && n(&binding, "enabled") == 1;`
+     - `let enabled = binding_enabled && user_ready;` (never report `enabled: true` when `binding.is_null()` or `!user_ready`).
+     - `let configured = hub_ready && user_ready;`
+     - `let has_active_pair = !pair.is_null();`
+     - `let status = if hub_ready && has_active_pair && !user_ready { "pairing_pending" } else if hub_ready && user_ready && enabled { "ready" } else if hub_ready && user_ready && !enabled { "paused" } else if hub_ready { "hub_ready" } else { "not_configured" };`
+     - `let label_opt = binding["display_label"].as_str().filter(|s| !s.is_empty());`
+     - `let detail = match status {`
+       - `"ready"` => `if let Some(lbl) = label_opt { format!("Connected as {lbl} · Ready for notifications") } else { "Connected and ready for notifications".into() }`,
+       - `"paused"` => `if let Some(lbl) = label_opt { format!("Paused ({lbl}) · Enable to resume notifications") } else { "Paused · Enable to resume notifications".into() }`,
+       - `"pairing_pending"` => `"Pairing in progress · Send the /start command below".into()`,
+       - `"hub_ready"` => `"Service ready · Pair your account or enter Chat ID".into()`,
+       - `_` => `"Configure service credentials and pair your account".into()`,
+       `};`
+2. **`[SHARP]` Atomic Channel Lifecycle Transitions (`Pause/Resume`, `Unpair`, `Clear Service`, Manual `chatId` Override & `attach()` Gate, `L4`)**:
+   - **Pause / Resume (`op: "channel_toggle"` or `op: "channel_save"` with `enabled: bool`)**:
+     - Updates `hub_human_channels.enabled` (`1` or `0`), sets `last_delivered_seq = max_seq(c)?` when transitioning `0 -> 1`, preserves `user_config_json` (`chatId`, `_external_chat_id`, `_external_user_id`) and `display_label`, and updates the Human Node channel attachment (`attach(c, &binding, active, remote)`).
+   - **Unpair Account (`op: "channel_unpair"` or `op: "disconnect_human_channel"` with `reset_user: true` / default)**:
+     - In `hub.rs` `human_channels_configure`, when `p["reset_user"] == true`:
+       - Resets the caller's row in `hub_human_channels` for `(principal_id, plugin_id)`: `enabled = 0`, `user_config_json = "{}"`, `display_label = NULL`, `updated_ms = now_ms()`.
+       - Marks all unconsumed `hub_pairing_codes` for `(principal_id, plugin_id)` as consumed (`consumed_ms = now_ms()`).
+       - Calls `attach(c, &binding, false, remote)` so `reg["channels"]["hub:<plugin_id>"]["state"]` becomes `"UNLISTENED"`.
+   - **Clear Service / Change Bot (`op: "disconnect_human_channel"` or `op: "channel_save"` with `reset_hub: true`, Admin-Only)**:
+     - Requires `admin(Some(caller))?`.
+     - Resets `hub_plugin_services` for `plugin_id` (`config_json = "{}"`, `service_state_json = "{}"`, `updated_ms = now_ms()`).
+     - Marks all unconsumed `hub_pairing_codes` for `plugin_id` as consumed (`consumed_ms = now_ms()`).
+     - If `p["reset_user"] != false`, also resets the caller's `hub_human_channels` binding (`enabled = 0`, `user_config_json = "{}"`, `display_label = NULL`) and detaches `hub:<plugin_id>`.
+     - Stops and removes the running `ChannelProcess` for `plugin_id`.
+   - **Manual `chatId` Override Identity Reconciliation**:
+     - In `human_channels_configure`, when `p.get("user_config")` changes a user-scoped field (such as `chatId`) to a value different from `old_config[key]`, automatically strip `_external_chat_id` and `_external_user_id` from `config` (unless explicitly provided in `patch`) and reset `display_label = Value::Null` (unless `p.get("display_label")` is explicitly provided), preventing stale paired identity metadata from conflicting with the new manual `chatId`.
+   - **Strict `attach()` Readiness Invariant**:
+     - `attach(c: &Connection, b: &Value, enabled: bool, remote: bool)` continues to write/update the `hub_kv` Human Node record (`listener_id(pid, "human", "default")`), setting `reg["channels"]["hub:<plugin_id>"]["state"] = if enabled { "ACTIVE" } else { "UNLISTENED" }`.
+     - Callers of `attach()` in `human_channels_configure` and `restore_attachments` compute `let active = enabled && hub_ready && user_ready;` and pass `active` as the `enabled` parameter to `attach(c, &binding, active, remote)` so an unconfigured or half-configured channel never marks the Human Node `ACTIVE`.
+3. **`[SHARP]` Pairing Code Superseding & Cancellation (`L5`)**:
+   - In `hub.rs` `human_channel_pair_start`:
+     - Before inserting a new row into `hub_pairing_codes`, execute:
+       `UPDATE hub_pairing_codes SET consumed_ms=? WHERE principal_id=? AND plugin_id=? AND consumed_ms IS NULL`
+       with `now_ms()`, immediately invalidating any previous unredeemed pairing code for `(principal_id, plugin_id)`.
+   - Support `op: "channel_cancel_pair"` in `daemon.rs` $\to$ `human_channels_configure` with `cancel_pair: true` in `hub.rs`, which marks all unconsumed `hub_pairing_codes` for `(principal_id, plugin_id)` as consumed (`consumed_ms = now_ms()`) and returns the refreshed `channel_list(caller)`.
+4. **`[SHARP]` Active Settings Hub Live Refresh & Pairing Instruction Persistence (`L6`)**:
+   - In `DaemonService` (`crates/cito-native/src/core/daemon.rs`):
+     - Add `active_settings_hub: Option<String>` to `DaemonService`.
+     - Whenever `open_settings`, `channel_save`, `configure_human_channel`, `channel_toggle`, `channel_unpair`, `channel_cancel_pair`, `disconnect_human_channel`, `channel_test`, `test_human_channel`, `channel_pair`, or `pair_human_channel` executes with target `hub`, set `self.active_settings_hub = Some(hub.clone())`.
+     - In `DaemonService::settings(&self)`, resolve the target hub as:
+       `let hub = self.active_settings_hub.as_deref().filter(|h| self.slots.contains_key(*h)).unwrap_or(&self.config.default_hub);`
+       and call `self.settings_for_hub(hub)`.
+     - In `settings_for_hub(&self, channel_hub: &str)`, include both `"channel_hub": channel_hub` and `"settings_hub": channel_hub` in the returned JSON object.
+     - After `channel_save`, `configure_human_channel`, `channel_toggle`, `channel_unpair`, `channel_cancel_pair`, or `disconnect_human_channel` succeeds in `daemon.rs`, emit `json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)})` so `cito-ui` updates immediately.
+   - In `src/macos/cito-ui.swift` `acceptSettings(_ value: SettingsPayload, hub: String? = nil)`:
+     - Resolve `let target = value.settings_hub ?? value.channel_hub ?? hub ?? effectiveChannelHub`.
+     - For each `channel` in `value.channels ?? []`:
+       - Let `instrKey = target + "|" + channel.id`.
+       - If `let serverInstr = channel.pairing_instruction, !serverInstr.isEmpty`:
+         `channelInstructions[instrKey] = serverInstr`
+       - Else:
+         `channelInstructions.removeValue(forKey: instrKey)`
+       - When `channel.configured == true`, also clear any stale transient error in `channelResults[instrKey]`.
+5. **`[SHARP]` Bot Token Rotation Resets Cursor & Subprocess Polling State (`L7`)**:
+   - In `hub.rs` `save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String>`:
+     - Compare the incoming `cfg` with the previously stored `config_json` in `hub_plugin_services`.
+     - If `old_cfg != *cfg`, reset `service_state_json = "{}"` (clearing the stored `cursor`) when updating `hub_plugin_services`, and return `Ok(true)`.
+   - In `plugins/telegram/native.rs` `Runtime::request` (`"configure"` branch):
+     - Let `old_token = str_at(&self.config, "botToken").unwrap_or("");`
+     - Let `token_changed = !old_token.is_empty() && Some(old_token) != str_at(&r["hub_config"], "botToken");`
+     - Update `self.config = r["hub_config"].clone();`
+     - If `token_changed`: reset `self.cursor = 0; self.pending.clear(); self.reply_chats.clear(); self.pair_chats.clear();`
+     - Else if `self.pending.is_empty()`: set `self.cursor = id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0);`
+6. **`[SHARP]` Remote Hub Channel Schema Forwarding (`daemon.rs`, `L8`)**:
+   - In `daemon.rs` (`channel_save` / `channel_test` / `channel_pair` / `channel_toggle` / `channel_unpair` / `channel_cancel_pair`):
+     - When partitioning `action["values"]` into `hub_config` and `user_config`:
+       - First check `self.plugins.find_by_id(id)` for local field definitions;
+       - If `self.plugins.find_by_id(id)` is `None` (or has empty `fields`), query `self.slot(&hub)?.rpc("human_channels_list", &json!({}))` and extract `fields` from the matching channel descriptor (`ch["id"] == id`) on the target Hub.
+       - If neither local plugins nor the target Hub's `human_channels_list` contains `id`, return `"INVALID_INPUT: Unknown human channel plugin: {id}"`.
+7. **`[SHARP]` `SettingsPanel → Human Channels` Card Layout & Control Identifiers (`src/macos/cito-ui.swift`, `L1`–`L6`)**:
+   - On each channel card (`id: "settings_channel:\(ch.id)"`, `width: 480`):
+     - **Status Badge (`id: "settings_channel_status:\(ch.id)"`, `NSRect(x: 240, y: cardHeight - 25, width: 226, height: 16)`)**:
+       - `ch.status == "ready"`: `"● Connected"` (or `"● Connected (\(label))"` when `display_label` is non-empty), color `.systemGreen`.
+       - `ch.status == "paused"`: `"⏸ Paused"`, color `.systemOrange`.
+       - `ch.status == "pairing_pending"`: `"◌ Pairing…"`, color `.systemBlue`.
+       - `ch.hub_provided || ch.status == "hub_ready"`: `"Hub Service: ● Ready"`, color `.secondaryLabelColor`.
+       - `ch.status == "error"`: `"⚠ Error"`, color `.systemRed`.
+       - Otherwise: `"○ Not Configured"`, color `.secondaryLabelColor`.
+     - **Setup Guide Box (`id: "channel_setup_guide:\(ch.id)"`)**:
+       - Rendered when `!(ch.setup_guide ?? []).isEmpty && !ch.configured` at `NSRect(x: 14, y: guideY, width: 452, height: guideHeight)` using `(ch.setup_guide ?? []).joined(separator: "\n")`.
+     - **Fields (`id: "channel_field:\(ch.id):\(f.key)"`)**:
+       - Rendered for all `f` in `ch.fields.filter { $0.hidden != true }` at `NSRect(x: 170, y: fieldY, width: 296, height: 24)` (`NSSecureTextField` when `f.type == "secret"`), with `placeholderString = (f.type == "secret" && f.configured) ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder`.
+     - **Pairing Instruction & Copy/Cancel Bar (`!instruction.isEmpty`)**:
+       - `pairing_instruction:\(ch.id)` (`NSRect(x: 14, y: 40, width: 300, height: instructionHeight)`).
+       - `copy_pair_command:\(ch.id)` (`MenuControl("Copy Command")`, `leadingSymbol: "doc.on.doc"`, `frame: NSRect(x: 320, y: 42, width: 92, height: 22)`): extracts the `/start cito-...` substring (or copies `instruction`) to `appPasteboard` and `clipboardString`.
+       - `cancel_pair_channel:\(ch.id)` (`MenuControl("Cancel")`, `frame: NSRect(x: 416, y: 42, width: 50, height: 22)`): clears `channelInstructions[instrKey]` and emits `["op": "channel_cancel_pair", "hub": effectiveChannelHub, "channel_id": chId]`.
+     - **Bottom Action Row (`y: 10, height: 24`)**:
+       - `pair_channel:\(ch.id)` (`NSRect(x: 14, y: 10, width: 112, height: 24)`): `"Pair Account…"` (or `ch.pairing_action_label`) when `!ch.configured`, `"Re-pair…"` when `ch.configured`.
+       - When `ch.configured` (`status == "ready"` or `"paused"`):
+         - `toggle_channel:\(ch.id)` (`MenuControl(ch.enabled ? "Pause" : "Resume")`, `frame: NSRect(x: 132, y: 10, width: 64, height: 24)`): emits `["op": "channel_toggle", "hub": effectiveChannelHub, "channel_id": chId, "enabled": !ch.enabled]`.
+         - `unpair_channel:\(ch.id)` (`MenuControl("Unpair")`, `style: .destructiveHover`, `frame: NSRect(x: 202, y: 10, width: 62, height: 24)`): emits `["op": "channel_unpair", "hub": effectiveChannelHub, "channel_id": chId, "reset_user": true]`.
+       - When `!ch.configured` and `ch.fields.contains(where: { $0.scope == "hub" && $0.configured && $0.hidden != true })`:
+         - `clear_channel_service:\(ch.id)` (`MenuControl("Clear Token")`, `style: .destructiveHover`, `frame: NSRect(x: 132, y: 10, width: 84, height: 24)`): emits `["op": "disconnect_human_channel", "hub": effectiveChannelHub, "channel_id": chId, "reset_hub": true, "reset_user": true]`.
+       - `test_channel:\(ch.id)` (`MenuControl("Send Test")`, `frame: NSRect(x: 312, y: 10, width: 80, height: 24)`).
+       - `save_channel:\(ch.id)` (`MenuControl("Save")`, `style: .prominent`, `frame: NSRect(x: 398, y: 10, width: 68, height: 24)`).
+
+---
+
+### 10.5 Guided Onboarding Banner, Agent App Verify/Repair/Disconnect Lifecycle & Non-Destructive `Disconnect All` (`L9`, `L10`, `L11`, `L12`, `L13`)
+
+1. **`[SHARP]` 3-Step Guided Onboarding Strip & Continuation Callout (`src/macos/cito-ui.swift`, `L9`)**:
+   - In `settings_header` (`520 × 48 pt, y: 412`), add a `?` guide toggle button (`id: "toggle_onboarding_guide"`, `frame: NSRect(x: 460, y: 12, width: 22, height: 24)`, `symbol: "questionmark.circle"`, `toolTip: "Toggle Setup Guide"`) to the left of `close_settings` (`x: 486, y: 12, width: 24, height: 24`), and narrow `hubsTab` to `NSRect(x: 334, y: 12, width: 122, height: 24)` so all header controls have non-overlapping frames.
+   - In `SettingsPanel → Agent Apps` (`settings_apps_tab`), render a 3-step onboarding banner (`id: "onboarding_banner"`, `frame: NSRect(x: 20, y: 316, width: 480, height: 44)`) whenever `onboardingGuideOpen == true` OR no Agent App is configured yet (`!(resolvedApps.contains(where: { $0.configured }))`):
+     - Step 1 button (`id: "onboarding_step:apps"`, `"1. Agent Apps"`): switches to `apps` tab.
+     - Step 2 button (`id: "onboarding_step:channels"`, `"2. Mobile Alerts →"`): switches to `channels` tab.
+     - Step 3 button (`id: "onboarding_step:hubs"`, `"3. Hubs & Network →"`): switches to `hubs` tab.
+   - When at least one Agent App is `configured == true`, render a continuation callout (`id: "apps_next_step_callout"`, `frame: NSRect(x: 20, y: nextCalloutY, width: 480, height: 38)`) below the Agent App cards with label `"Agent app connected · Next: get wake alerts on your phone"` and CTA button `Set Up Mobile Alerts →` (`id: "goto_channels_tab"`, `frame: NSRect(x: 318, y: 7, width: 150, height: 24)`) that switches `settingsActiveTab = "channels"`.
+2. **`[SHARP]` Restoring Staged Shims/Plugins on `setup_apply` & Detecting `repair_needed` (`daemon.rs`, `setup.rs`, `L10`, `L12`)**:
+   - In `daemon.rs` (`"setup_apply" | "enable_app"`):
+     - Always call `ensure_cli_shims_native(&self.config.state_dir, &self.plugins)?` **before** calling `apply_plugin_setup(p, true, false)?` so that if `~/.cito/bin/cito`, `~/.cito/bin/cito-mcp`, or `~/.cito/plugins/<id>` was removed (e.g. by a prior disconnect/uninstall or manual deletion), clicking `Set Up`, `Re-check`, or `Repair` in `SettingsPanel` restores the shims and staged plugin directory before writing host config files.
+     - Track `last_app_action: HashMap<String, String>` on `DaemonService` (`"setup"` on `setup_apply`, `"disconnect"` on `setup_remove_app`).
+   - In `setup.rs` `uninstall_setup_native`:
+     - Replace any literal plugin directory name in `state_dir` cleanup by iterating `&plugins.plugins` (`state_dir.join(&p.id)`) so `crates/cito-native/src/core/setup.rs` contains zero hardcoded plugin names.
+   - In `daemon.rs` `settings_for_hub`:
+     - When `inspect_plugin_setup(p)` reports `configured == true`, check if `self.config.state_dir.join("bin").exists()` or `self.config.state_dir.join("plugins").exists()`: if staging has occurred in `state_dir`, verify that `self.config.state_dir.join("bin/cito-mcp").exists()` and `self.config.state_dir.join("plugins").join(&p.id).exists()`.
+     - If host config is present (`configured_in_host == true`) but staged files under `state_dir` were deleted after setup:
+       - Report `configured: false`, `status: "repair_needed"`, `detail: "Staged Cito files missing — click Repair to restore"`.
+     - When `configured == true` and healthy:
+       - Report `configured: true`, `status: "ready"`, and `detail`: `p.post_setup_hint.as_deref().unwrap_or("Connected and ready")`.
+     - When `!configured` and `self.last_app_action.get(&p.id).map(String::as_str) == Some("disconnect")`:
+       - Report `detail`: `p.post_disconnect_hint.as_deref().unwrap_or("Disconnected · Click Set Up to reconnect")`.
+   - In `src/macos/cito-ui.swift` (`SettingsPanel → Agent Apps`):
+     - `settings_app_status:\(app.id)` text:
+       - `"● Connected"` (`.systemGreen`) when `app.configured == true`
+       - `"⚠ Repair Needed"` (`.systemOrange`) when `!app.configured && app.status == "repair_needed"`
+       - `"○ Not Set Up"` (`.secondaryLabelColor`) otherwise.
+     - `setup_app:\(app.id)` button title:
+       - `"Re-check"` when `app.configured == true`
+       - `"Repair"` when `!app.configured && app.status == "repair_needed"`
+       - `"Set Up"` otherwise.
+3. **`[SHARP]` `setup_remove_app` Automatically Unlistens Active Sessions of That Harness (`daemon.rs`, `L11`)**:
+   - In `daemon.rs` (`"setup_remove_app" | "disable_app"`):
+     - Before/after calling `remove_plugin_setup(p)?`, query `self.state.active()?` for all active local listener rows where `string(&row, "harness") == id`, and invoke `let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"));` for each matching row.
+     - Clear any cached caller PID entries for `harness == id` in `self.caller_cache`.
+4. **`[SHARP]` Decoupling `Disconnect All Integrations` from `Uninstall & Quit` (`daemon.rs`, `setup.rs`, `cito-ui.swift`, `L13`)**:
+   - **New UI IPC Action `op: "setup_disconnect_all"` in `daemon.rs`**:
+     - Unlistens all active local listeners across all hubs (`for row in self.state.active()? { let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id")); }`).
+     - Calls `remove_plugin_setup(plugin)` for every `plugin` in `self.plugins.agent_plugins()`.
+     - Disables `LaunchAgent` (`let _ = set_launch_at_login(false, &self.config.state_dir, &self.config.home_dir, &self.plugins);`).
+     - **Keeps `cito-daemon` and `cito-ui` running**, preserves `~/.cito/bin` and `~/.cito/plugins` (so subsequent `Set Up` is instant), and emits refreshed `settings` and `state` frames.
+   - **Existing `op: "setup_uninstall_all"` in `daemon.rs`**:
+     - Performs full uninstallation and daemon shutdown (`request_shutdown()`), removing shims/staged plugins and (when `purge_data: true`) `~/.cito` and `Cito.app`.
+   - **Updated `uninstall_confirm_box` in `src/macos/cito-ui.swift` (`NSRect(x: 20, y: 48, width: 480, height: 96)`)**:
+     - Header label: `"Reset or Uninstall Cito"` (`NSRect(x: 12, y: 68, width: 456, height: 18)`, `size: 12.5, weight: .semibold`).
+     - `uninstall_purge_data` checkbox (`"Also delete ~/.cito local data & hub settings on full uninstall"`, `frame: NSRect(x: 12, y: 40, width: 420, height: 22)`).
+     - `cancel_uninstall_all` button (`"Cancel"`, `frame: NSRect(x: 112, y: 8, width: 72, height: 24)`).
+     - `confirm_disconnect_all` button (`"Disconnect All"`, `frame: NSRect(x: 192, y: 8, width: 116, height: 24)`): emits `["op": "setup_disconnect_all"]` and closes `uninstallConfirmOpen` while keeping `SettingsPanel` open.
+     - `confirm_uninstall_all` button (`"Confirm Uninstall"`, `style: .destructiveHover`, `frame: NSRect(x: 316, y: 8, width: 152, height: 24)`): emits `["op": "setup_uninstall_all", "purge_data": purge]`.
+
+---
+
+### 10.6 Hub Lifecycle: OIDC `Switch Account`, Inline `Edit Hub`, Disabled Hub `Sign In`, `cardMenu` Offline Visibility, LAN Share Controls & Actionable Empty States (`L14`, `L15`, `L16`, `L17`)
+
+1. **`[SHARP]` OIDC `Switch Account` Forces Interactive Account Selection (`login.rs`, `daemon.rs`, `cito-ui.swift`, `L14`)**:
+   - In `src/macos/cito-ui.swift` (`cardMenu` hub drawer):
+     - When `hub.status == "connected"` and `hub.auth_mode == "oidc"`, the `"Switch Account"` button (`id: "login:\(hub.name)"`) emits `["op": "hub_action", "hub": hub.name, "action": "switch_account"]` (or `"action": "login", "force_interactive": true`).
+   - In `crates/cito-native/src/core/daemon.rs`:
+     - Update `interactive_login(action: &Value) -> bool` to match `action["op"] == "login_hub" || (action["op"] == "hub_action" && matches!(action["action"].as_str(), Some("login" | "switch_account")))`.
+     - If `action["op"] == "hub_action" && matches!(action["action"].as_str(), Some("login" | "switch_account"))`, automatically enable the hub in `config.json` (`v["hubs"][&hub]["enabled"] = json!(true)`) before `s.reload_slots()?` so clicking `Sign In…` on a disabled OIDC hub in `SettingsPanel` (`login_hub:\(hub.name)`) enables the hub and launches the OIDC flow in 1 click (`L15`).
+     - Pass `force_account_select = action["action"] == "switch_account" || action["force_interactive"] == true` into `login::recover_cancellable_with_options`.
+   - In `crates/cito-native/src/core/login.rs`:
+     - When `force_account_select == true`:
+       - Bypass cached token freshness reuse (`if !force_account_select { if let Some(cache) = old.as_ref().filter(...) { return verify_cache(...); } }`).
+       - Bypass silent `refresh_token` exchange (`let old_refresh = if force_account_select { None } else { ... };`).
+       - Append `("prompt", "select_account")` to the authorization URL query parameters so the OIDC provider prompts the user to choose an account.
+2. **`[SHARP]` Inline `Edit Hub`, `cardMenu` Disconnected Hub Retention & LAN Share Port/Auth Controls (`daemon.rs`, `cito-ui.swift`, `L15`, `L16`)**:
+   - **`HubConfigItem` & `settings_for_hub` (`daemon.rs`, `cito-ui.swift`)**:
+     - Include `"issuer": cfg.get("issuer").or_else(|| cfg.get("oidcIssuer"))` and `"client_id": cfg.get("clientId").or_else(|| cfg.get("client_id")).or_else(|| cfg.get("oidcClientId"))` and `"auth_mode"` on each hub item in `settings["hubs"]`.
+     - In `daemon.rs` `snapshot()`:
+       - Include all configured hubs in `state["hubs"]` (with `status: "disconnected"` when `enabled == false` in `config.json`) OR when `hub_action` with `action == "disconnect"` is invoked from `cardMenu`, keep the hub visible in `state["hubs"]` with `status: "disconnected"` so the user can click `"Connect"` (`reconnect:<hub>`) in `cardMenu` without opening `SettingsPanel`!
+       - Specifically: in `daemon.rs` `snapshot()`, build `state["hubs"]` from `settings["hubs"]` (where enabled hubs report their live slot status and disabled hubs report `"status": "disconnected"`, `"enabled": false`), while `self.slots` continues to contain only `enabled != false` hubs (so `cito_find` / `reload_slots` / default hub fallback behavior on disabled hubs remains 100% unchanged!).
+       - In `src/macos/cito-ui.swift`, `available_header` target hub strip and session `switch_hub` ring filter `hubs.filter { $0.status != "disconnected" }` when selecting active target hubs, while the top `cardMenu` hub pill strip (`hub:\(hub.name)`) and drawer (`drawer:\(hub.name)`) show all hubs so a disconnected hub remains visible with its `"Connect"` (`reconnect:\(hub.name)`) button!
+   - **Inline `Edit` Button on Hub Rows in `SettingsPanel → Hubs & Network` (`cito-ui.swift`, `daemon.rs`)**:
+     - On each hub row (`settings_hub:\(hub.name)`), add an `Edit` button (`id: "edit_hub:\(hub.name)"`, `frame: NSRect(x: 192, y: 13, width: 46, height: 22)`, `radius: 6`) that populates `addHubName = hub.name`, `addHubUrl = hub.url`, `addHubAuth = hub.auth_mode`, `addHubUser = hub.user ?? ""`, `addHubIssuer = hub.issuer ?? ""`, `addHubClientId = hub.client_id ?? ""`, sets `editingExistingHub = true`, and opens `add_hub_form` (with submit button label `"Save Hub"` while keeping `id: "submit_add_hub"`).
+     - When `editingExistingHub == true`, submitting `submit_add_hub` sends `"edit": true` (without forcing `set_default: true`); in `daemon.rs` `setup_save_hub`, when `action["edit"] == true`, merge updated fields into the existing `v["hubs"][&name]` object (retaining the existing stored `token` if the submitted `token` is empty, and preserving `enabled` and `default_hub`).
+   - **LAN Share Port & Token Auth Controls in `host_hub_card` (`cito-ui.swift`, `daemon.rs`, `L16`)**:
+     - Include `"auth_mode": self.host_hub_auth_mode(&raw)` and `"error": self.last_host_hub_error` on `host_hub` in `settings_for_hub` (recording `last_host_hub_error` on `DaemonService` when `set_host_hub` fails and clearing it when `set_host_hub` succeeds).
+     - Inside `host_hub_card` (`NSRect(x: 20, y: 232, width: 480, height: 124)`):
+       - Keep `toggle_host_hub` (`NSRect(x: 396, y: 88, width: 70, height: 24)`), `host_hub_endpoint` (`NSRect(x: 14, y: 46, width: 452, height: 16)`), and `copy_hub_invite` (`NSRect(x: 14, y: 12, width: 168, height: 24)`).
+       - Add port input field (`id: "host_hub_port"`, `frame: NSRect(x: 192, y: 12, width: 64, height: 24)`, `value: "\(hostHub.port)"`) and `Apply Port` / `Token Auth` controls:
+         - `toggle_host_hub_auth` (`MenuControl((hostHub.auth_mode ?? (hostHub.token.isEmpty ? "none" : "token")) == "none" ? "Auth: None" : "Auth: Token")`, `frame: NSRect(x: 262, y: 12, width: 96, height: 24)`, `radius: 6`): toggles `auth_mode` between `"token"` and `"none"` via `emit(["op": "set_host_hub", "enabled": hostHub.enabled, "port": portVal, "auth_mode": nextAuthMode])`.
+         - `apply_host_hub_port` (`MenuControl("Apply")`, `frame: NSRect(x: 364, y: 12, width: 56, height: 24)`, `radius: 6`): parses `settingsFieldControls["host_hub_port"]?.stringValue` and emits `["op": "set_host_hub", "enabled": hostHub.enabled, "port": portVal]`.
+       - When `let err = hostHub.error, !err.isEmpty`, display `err` in `host_hub_error` (`NSRect(x: 14, y: 62, width: 452, height: 14)`, `.systemRed`).
+3. **`[SHARP]` Actionable Context-Aware Empty States in `cardMenu` & `DirectoryPanel` (`cito-ui.swift`, `L17`)**:
+   - **`cardMenu` Empty State (`id: "empty"`)**:
+     - When `listeners.isEmpty && available.isEmpty`:
+       - Preserve container `id: "empty"` (`NSRect(x: 0, y: 0, width: 380, height: 92)`).
+       - Inside the card (`NSRect(x: 10, y: 3, width: 360, height: 86)`), display `"No active listeners"` and subtitle:
+         - If `!(settings?.apps.contains(where: { $0.configured }) ?? true)`: `"Connect your coding apps in Settings to start"`
+         - Else: `"Call cito_listen in a session or configure Mobile Alerts"`
+       - Add two quick-action buttons at `y: 8`:
+         - `empty_open_setup` (`MenuControl("Set Up Agent Apps…")`, `frame: NSRect(x: 44, y: 8, width: 148, height: 22)`): opens `SettingsPanel` on `apps` tab.
+         - `empty_open_channels` (`MenuControl("Mobile Alerts…")`, `frame: NSRect(x: 198, y: 8, width: 118, height: 22)`): opens `SettingsPanel` on `channels` tab.
+   - **`DirectoryPanel` Empty State Overlay (`id: "directory_empty_state"`, `NSRect(x: 20, y: 110, width: 520, height: 140)`)**:
+     - Added as a child of `directory_panel` above `directory_scroll`, shown (`isHidden = false`) ONLY when the active mode's filtered list is empty (`directoryMode == "directory" ? directoryFilteredPeers.isEmpty : activityFilteredItems.isEmpty`), and hidden (`isHidden = true`) whenever rows exist.
+     - In `Directory` mode (`directoryFilteredPeers.isEmpty`):
+       - When filters/query are active (`!directoryQuery.isEmpty || directoryScopeFilter != "all" || directoryHarnessFilter != "all"`):
+         - Title: `"No matching nodes"`, subtitle: `"No active listeners match your current search or filter."`
+         - CTA button `directory_reset_filters` (`"Reset Filters"`, `frame: NSRect(x: 196, y: 18, width: 128, height: 26)`): resets `directoryQuery = ""`, `directoryScopeFilter = "all"`, `directoryHarnessFilter = "all"`, refreshes the filter bar, and emits `query_directory`.
+       - When no filters are active:
+         - Title: `"No active nodes on this Hub"`, subtitle: `"Enroll a coding session with + Listen or connect an Agent App."`
+         - CTA button `dir_empty_open_apps` (`"Open Agent Apps Settings…"`, `frame: NSRect(x: 166, y: 18, width: 188, height: 26)`): opens `SettingsPanel` (`apps` tab).
+     - In `Activity` mode (`activityFilteredItems.isEmpty`):
+       - When `activityFilter == "unread"` and `!activityAllItems.isEmpty`:
+         - Title: `"All caught up"`, subtitle: `"You have no unread signals."`
+         - CTA button `act_empty_show_all` (`"Show All Activity"`, `frame: NSRect(x: 186, y: 18, width: 148, height: 26)`): switches `activityFilter = "all"` and calls `applyActivityFilter()`.
+       - Otherwise:
+         - Title: `"No recent signal activity"`, subtitle: `"Signals sent between your sessions and channels will appear here."`
+         - CTA button `act_empty_open_channels` (`"Configure Human Channels…"`, `frame: NSRect(x: 166, y: 18, width: 188, height: 26)`): opens `SettingsPanel` (`channels` tab).
+
+---
+
+### 10.7 Complete `L1`–`L17` Verification & Acceptance Matrix
+
+| ID | Lifecycle Gap | Authoritative Modules | Required Verification / Regression Test |
+| :--- | :--- | :--- | :--- |
+| **`L1`** | Secret wire redaction (`redacted`) conflated with UI visibility (`hidden`); missing inline setup guide | `hub.rs`, `plugins/telegram/plugin.json`, `cito-ui.swift` | Local/token & OIDC admin callers receive `hidden: false, redacted: true, value: "", configured: true` for `botToken`; non-admin OIDC callers receive `hidden: true, redacted: true`; `channel_field:telegram:botToken` is visible in `SettingsPanel` with `configured_placeholder` and `channel_setup_guide:telegram`. |
+| **`L2`** | Empty secret field overwrites saved `botToken` on `Save` / `Pair`; `channel_test` mutates DB | `cito-ui.swift`, `hub.rs` | `collectValues()` omits clean configured secret keys; `hub.rs` ignores `""` for secret fields unless `clear_hub_config`/`reset_hub` is set; `human_channels_test` merges transient config in memory without mutating `hub_plugin_services`. |
+| **`L3`** | Incomplete Human Channel state machine (`enabled: true` when `binding.is_null()`) | `hub.rs`, `cito-ui.swift` | `channel_list()` reports `enabled: false` when unbound, and transitions deterministically across `not_configured`, `hub_ready`, `pairing_pending`, `ready`, `paused`, and `error` with `display_label` in `detail`. |
+| **`L4`** | Missing `Pause/Resume`, `Unpair`, `Clear Token`, manual `chatId` identity reset, & `attach()` readiness gate | `hub.rs`, `daemon.rs`, `cito-ui.swift` | `channel_toggle` pauses/resumes without losing `chatId`; `channel_unpair` clears `user_config_json`, `display_label`, and pairing codes; `reset_hub: true` clears `hub_plugin_services` and stops subprocess; changing `chatId` clears stale `_external_chat_id`/`_external_user_id`; `attach()` sets `ACTIVE` iff `enabled && hub_ready && user_ready`. |
+| **`L5`** | Old unconsumed pairing codes remain redeemable after re-pairing or unpairing | `hub.rs`, `daemon.rs`, `cito-ui.swift` | Starting a new pair, cancelling pairing (`channel_cancel_pair`), or unpairing marks prior unconsumed `hub_pairing_codes` as consumed (`consumed_ms = now_ms()`); redeeming a superseded code fails with `INVALID_INPUT`. |
+| **`L6`** | `DaemonService::settings()` only polls `default_hub`; `acceptSettings()` wipes `channelInstructions` | `daemon.rs`, `cito-ui.swift` | `active_settings_hub` tracks the selected Settings hub and includes `settings_hub` in `settings` payload; `acceptSettings` preserves active pairing instructions until paired or cancelled; `copy_pair_command:<id>` copies the `/start cito-...` command. |
+| **`L7`** | Changing `botToken` retains stale Telegram `cursor` and in-memory maps | `hub.rs`, `plugins/telegram/native.rs` | Changing `botToken` in `save_service` resets `service_state_json = "{}"` and resets `cursor = 0`, `pending`, `reply_chats`, and `pair_chats` in `cito-plugin-telegram`. |
+| **`L8`** | `daemon.rs` fails `channel_save`/`channel_pair`/`channel_test` when channel plugin is only on remote Hub | `daemon.rs` | `daemon.rs` resolves field `scope` (`"hub"` vs `"user"`) from the target Hub's `human_channels_list` schema when `self.plugins.find_by_id(id)` is `None`. |
+| **`L9`** | First-time onboarding lacks step progression and post-setup guidance | `cito-ui.swift` | `SettingsPanel` renders `onboarding_banner` (`onboarding_step:apps`, `onboarding_step:channels`, `onboarding_step:hubs`), `?` toggle (`toggle_onboarding_guide`), and `apps_next_step_callout` (`goto_channels_tab`). |
+| **`L10`** | `Set Up` / `Re-check` lacks harness-specific reload hints and `Repair` state | `plugins/*/plugin.json`, `daemon.rs`, `cito-ui.swift` | `plugin.json` supplies `postSetupHint` / `postDisconnectHint`; missing staged files report `status: "repair_needed"` with `"Repair"` button in `SettingsPanel`. |
+| **`L11`** | Clicking `Disconnect` on an Agent App leaves its active sessions listening in `cardMenu` | `daemon.rs` | `setup_remove_app` unlistens all active `local_listeners` rows with `row["harness"] == id` and clears `caller_cache` for that harness. |
+| **`L12`** | Clicking `Set Up` after deleting `~/.cito/bin` or `~/.cito/plugins` fails to restore shims | `daemon.rs`, `setup.rs` | `setup_apply` in `daemon.rs` invokes `ensure_cli_shims_native(&self.config.state_dir, &self.plugins)` before `apply_plugin_setup`. |
+| **`L13`** | `Remove All Integrations…` unconditionally quits `Cito.app` and `cito-daemon` | `daemon.rs`, `cito-ui.swift` | `uninstall_confirm_box` offers both `confirm_disconnect_all` (`op: "setup_disconnect_all"`, keeping daemon & UI alive) and `confirm_uninstall_all` (`op: "setup_uninstall_all"`, full uninstall & quit). |
+| **`L14`** | OIDC `Switch Account` silently reuses cached JWT or refresh token without account picker | `login.rs`, `daemon.rs`, `cito-ui.swift` | `switch_account` passes `force_account_select = true`, skips cache/refresh token reuse, and appends `prompt=select_account` to the authorization URL. |
+| **`L15`** | Hub rows lack inline `Edit`; clicking `Sign In…` on a disabled OIDC hub fails; `Disconnect` in `cardMenu` hides the hub | `daemon.rs`, `cito-ui.swift` | `edit_hub:<name>` opens pre-filled `add_hub_form`; `login_hub:<name>` auto-enables disabled OIDC hubs before login; disconnected hubs remain visible in `cardMenu` with `reconnect:<name>`. |
+| **`L16`** | `Share Hub on Local Network` card lacks port input, auth mode toggle, and error display | `cito-ui.swift` | `host_hub_card` exposes `host_hub_port`, `apply_host_hub_port`, `toggle_host_hub_auth`, and `host_hub_error`. |
+| **`L17`** | Empty states in `cardMenu` and `DirectoryPanel` have no actionable CTAs | `cito-ui.swift` | `cardMenu` empty card provides `empty_open_setup` and `empty_open_channels`; `DirectoryPanel` provides `directory_empty_state` with `directory_reset_filters`, `dir_empty_open_apps`, `act_empty_show_all`, and `act_empty_open_channels`. |
+
 
 

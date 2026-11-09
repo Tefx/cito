@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="application-version" content="0.19.0" />
+  <meta name="application-version" content="0.20.0" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Subprocess Plugin Guide — Cito Documentation</title>
   <meta name="description" content="Author agent-harness and human-channel plugins with plugin.json and the stdin/stdout NDJSON subprocess protocol." />
@@ -165,7 +165,13 @@
 {"op":"pair_redeem","code":"cito-a1b2c3d4e5","external_chat_id":"room-1","external_user_id":"user-1","is_private_chat":true,"display_label":"alice","user_config_patch":{"recipientId":"room-1"}}
 {"op":"pair_ack","code":"cito-a1b2c3d4e5","ok":true,"owner_user":"alice","error":null}</code></pre>
       <p>
-        The Hub validates the pairing code and ownership before accepting the binding. Human replies and agent messages use the same Hub signaling path.
+        The Hub validates the pairing code and ownership before accepting the binding. Starting another pair, cancelling, or unpairing consumes old codes. Human replies and agent messages use the same Hub signaling path.
+      </p>
+      <p>
+        Agent manifests may provide <code>postSetupHint</code> and <code>postDisconnectHint</code>. Channel manifests may provide <code>setupGuide</code> (an array of instructions), <code>fields[].configuredPlaceholder</code>, <code>fields[].helpText</code>, and <code>pairing.helpText</code>. The Hub projects these as <code>setup_guide</code>, <code>configured_placeholder</code>, <code>help_text</code>, and <code>pairing_help_text</code>.
+      </p>
+      <p>
+        Field <code>hidden</code> is an access-control visibility flag: non-admin OIDC users cannot edit Hub-scoped fields. <code>redacted</code> independently suppresses secret values on the wire; <code>configured</code> reports whether a saved value exists. Omitted or blank configured secrets retain saved credentials unless an explicit clear/reset flag is provided. A channel <code>test</code> request receives merged candidate values without persisting them. Handle changed credentials or an empty cursor by resetting polling state; callbacks from a stopped process cannot outlive its shutdown.
       </p>
     </main>
   </div>

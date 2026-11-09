@@ -26,6 +26,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = dict(message_id=100 + len(sent))
         elif method == 'getUpdates':
             polls += 1
+            with (pathlib.Path(os.environ['HOME']) / 'api-polls.jsonl').open('a') as log:
+                log.write(json.dumps(dict(path=self.path, **body)) + '\n')
             result = [dict(update_id=12, message=dict(chat=dict(id=9, type='private'), **{'from': dict(id=9)}, text='/start cito-abcdefghij')),dict(update_id=15,message=dict(chat=dict(id=9,type='private'),**{'from':dict(id=9)},text='ship',reply_to_message=dict(message_id=101)))] if polls == 1 else []
         data = json.dumps(dict(ok=True,result=result)).encode()
         self.send_response(200)

@@ -10,5 +10,8 @@
   "command": [
     "./bin/cito-plugin-claude"
   ],
-  "channelEnv": "CITO_CLAUDE_CHANNEL"
+  "channelEnv": "CITO_CLAUDE_CHANNEL",
+  "version": "0.20.0",
+  "postSetupHint": "Connected · Restart open Claude Code sessions, then click + Listen",
+  "postDisconnectHint": "Disconnected · Active Claude Code listeners stopped"
 }

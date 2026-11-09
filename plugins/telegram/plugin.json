@@ -17,7 +17,9 @@
       "label": "Bot Token",
       "type": "secret",
       "required": true,
-      "placeholder": "123456:ABC-DEF..."
+      "placeholder": "123456:ABC-DEF...",
+      "configuredPlaceholder": "•••••••• (Saved — enter new token to replace)",
+      "helpText": "From @BotFather on Telegram"
     },
     {
       "key": "chatId",
@@ -25,11 +27,19 @@
       "label": "Chat ID",
       "type": "string",
       "required": true,
-      "placeholder": "Paired via /start or enter Chat ID"
+      "placeholder": "Paired via /start or enter Chat ID",
+      "helpText": "Auto-filled when you pair via /start, or enter your numeric Chat ID"
     }
   ],
   "pairing": {
     "supported": true,
-    "actionLabel": "Pair Account…"
-  }
+    "actionLabel": "Pair Account…",
+    "helpText": "Generates a 10-minute /start command to link your private Telegram chat."
+  },
+  "version": "0.20.0",
+  "setupGuide": [
+    "1. Message @BotFather on Telegram (/newbot) to create a bot and copy its Bot Token.",
+    "2. Paste the Bot Token below and click Pair Account… to generate a 1-time /start command.",
+    "3. Send the /start command to your bot in Telegram — Chat ID fills in automatically."
+  ]
 }

@@ -9,5 +9,8 @@
   "cliFlag": false,
   "command": [
     "./bin/cito-plugin-pi"
-  ]
+  ],
+  "version": "0.20.0",
+  "postSetupHint": "Connected · Run /reload in open Pi sessions, then click + Listen",
+  "postDisconnectHint": "Disconnected · Active Pi listeners stopped"
 }
