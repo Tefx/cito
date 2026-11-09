@@ -71,22 +71,27 @@ pub fn with_config_lock_mode<T>(
     }
     let mut name = path.as_os_str().to_os_string();
     name.push(".lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(PathBuf::from(name))
-        .map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
-    // SAFETY: the descriptor remains open until after operation returns; close releases flock.
-    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error.to_string());
+    let lock_path = PathBuf::from(name);
+    let result = {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
+        // SAFETY: the descriptor remains open until after operation returns; close releases flock.
+        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error.to_string());
+            }
         }
-    }
-    operation()
+        operation()
+    };
+    let _ = fs::remove_file(&lock_path);
+    result
 }
 
 pub fn read_config_text(path: &Path) -> Result<Option<String>, String> {
@@ -107,6 +112,14 @@ pub fn parse_config_object(raw: &str) -> Result<Map<String, Value>, String> {
         Value::Object(map) => Ok(map),
         _ => Err("Expected JSON object in config.json".to_string()),
     }
+}
+
+pub fn validate_user(user: &str) -> bool {
+    !user.is_empty()
+        && user.len() <= 64
+        && user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
@@ -153,12 +166,15 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));
         hm.insert("authMode".to_string(), json!(auth));
-        let enabled = hm.get("enabled").and_then(Value::as_bool) != Some(false);
+        let enabled = hm.get("enabled").and_then(Value::as_bool) != Some(false)
+            && hm.get("disabled").and_then(Value::as_bool) != Some(true);
+        hm.remove("disabled");
         hm.insert("enabled".to_string(), json!(enabled));
     }
-    let default_hub = obj
-        .remove("defaultHub")
-        .or_else(|| obj.remove("default_hub"))
+    let camel = obj.remove("defaultHub");
+    let snake = obj.remove("default_hub");
+    let default_hub = camel
+        .or(snake)
         .and_then(|v| v.as_str().map(str::to_owned))
         .filter(|name| hubs.contains_key(name))
         .or_else(|| hubs.keys().next().cloned())
@@ -183,6 +199,40 @@ mod tests {
         assert!(hubs["cloud"].get("auth").is_none());
         assert_eq!(hubs["cloud"]["user"], "bob");
         assert_eq!(rest["other"], 7);
+    }
+    #[test]
+    fn dual_default_hub_aliases_are_removed_from_rest() {
+        for snake in ["work", "local"] {
+            let raw = json!({
+                "defaultHub":"work",
+                "default_hub":snake,
+                "hubs":{"local":{"url":"local://"},"work":{"url":"local://"}},
+                "other":7
+            })
+            .to_string();
+            let (default, _, rest) = try_normalize_existing_config(Some(&raw)).unwrap();
+            assert_eq!(default, "work", "{raw}");
+            assert_eq!(Value::Object(rest), json!({"other":7}));
+        }
+    }
+    #[test]
+    fn disabled_hub_alias_is_folded_into_enabled() {
+        for (cfg, enabled) in [
+            (json!({}), true),
+            (json!({"enabled":true}), true),
+            (json!({"enabled":false}), false),
+            (json!({"disabled":false}), true),
+            (json!({"disabled":true}), false),
+            (json!({"enabled":true,"disabled":false}), true),
+            (json!({"enabled":true,"disabled":true}), false),
+            (json!({"enabled":false,"disabled":false}), false),
+            (json!({"enabled":false,"disabled":true}), false),
+        ] {
+            let raw = json!({"hubs":{"work":cfg}}).to_string();
+            let (_, hubs, _) = try_normalize_existing_config(Some(&raw)).unwrap();
+            assert_eq!(hubs["work"]["enabled"], enabled, "{raw}");
+            assert!(hubs["work"].get("disabled").is_none(), "{raw}");
+        }
     }
     #[test]
     fn concurrent_mutations_preserve_all_updates() {

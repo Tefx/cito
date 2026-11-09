@@ -1,9 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 36" width="132" height="36" fill="none" role="img" aria-label="Cito">
-  <rect x="1" y="1" width="130" height="34" rx="9" fill="#14171F" stroke="#262B38" stroke-width="1" />
-  <g transform="translate(9, 9)">
-    <path d="M 12.09 5.32 A 5.50 5.50 0 1 0 12.09 12.68" stroke="#F3F4F6" stroke-width="1.75" stroke-linecap="round" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 118 36" width="118" height="36" fill="none" role="img" aria-label="Cito">
+  <rect x="1" y="1" width="34" height="34" rx="8.5" fill="#14171F" stroke="#262B38" stroke-width="1" />
+  <circle cx="18" cy="18" r="13.5" fill="#0C0E12" stroke="#1E2330" stroke-width="0.75" />
+  <g transform="translate(3.6, 3.6) scale(1.6)">
+    <path d="M 12.09 5.32 A 5.50 5.50 0 1 0 12.09 12.68" stroke="#F3F4F6" stroke-width="1.65" stroke-linecap="round" />
     <circle cx="8" cy="9" r="1.65" fill="#F59E0B" />
-    <path d="M 14.84 5.36 A 7.75 7.75 0 0 1 14.84 12.64" stroke="#F59E0B" stroke-width="1.65" stroke-linecap="round" />
+    <path d="M 14.84 5.36 A 7.75 7.75 0 0 1 14.84 12.64" stroke="#F59E0B" stroke-width="1.55" stroke-linecap="round" />
   </g>
-  <text x="46" y="25" fill="#F3F4F6" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', system-ui, sans-serif" font-size="22" font-weight="650" letter-spacing="-0.4">Cito</text>
+  <text x="45" y="25.5" fill="#14171F" stroke="#F3F4F6" stroke-width="3" paint-order="stroke fill" stroke-linejoin="round" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', system-ui, sans-serif" font-size="22" font-weight="650" letter-spacing="-0.4">Cito</text>
 </svg>

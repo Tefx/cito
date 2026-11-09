@@ -3,26 +3,31 @@ import Foundation
 import Darwin
 import QuartzCore
 
+// Headless tests use a real private pasteboard without changing the user clipboard.
+let usesPrivatePasteboard = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
+let appPasteboard = usesPrivatePasteboard ? NSPasteboard.withUniqueName() : NSPasteboard.general
+atexit { if usesPrivatePasteboard { appPasteboard.releaseGlobally() } }
+
 enum StatusIconState { case active, idle, warning }
 func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
-    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-        let center = NSPoint(x: 8, y: 9)
+    let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { _ in
+        let center = NSPoint(x: 9.2, y: 10.0)
         let arc = NSBezierPath()
-        arc.appendArc(withCenter: center, radius: 5.50, startAngle: 42, endAngle: 318, clockwise: false)
-        arc.lineWidth = 1.75; arc.lineCapStyle = .round
+        arc.appendArc(withCenter: center, radius: 7.45, startAngle: 42, endAngle: 318, clockwise: false)
+        arc.lineWidth = 2.15; arc.lineCapStyle = .round
         NSColor.black.setStroke(); arc.stroke()
         NSColor.black.withAlphaComponent(state == .active ? 1 : 0.40).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 6.35, y: 7.35, width: 3.3, height: 3.3)).fill()
+        NSBezierPath(ovalIn: NSRect(x: 7.05, y: 7.85, width: 4.3, height: 4.3)).fill()
         let wave = NSBezierPath()
-        wave.appendArc(withCenter: center, radius: 7.75, startAngle: -28, endAngle: 28, clockwise: false)
-        wave.lineWidth = 1.65; wave.lineCapStyle = .round
+        wave.appendArc(withCenter: center, radius: 9.55, startAngle: -28, endAngle: 28, clockwise: false)
+        wave.lineWidth = 2.00; wave.lineCapStyle = .round
         NSColor.black.withAlphaComponent(state == .active ? 1 : 0.40).setStroke(); wave.stroke()
         if state == .warning, let context = NSGraphicsContext.current?.cgContext {
             context.saveGState(); context.setBlendMode(.destinationOut)
             NSColor.black.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 10.6, y: 0.4, width: 7.2, height: 7.2)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 11.8, y: 0.4, width: 7.8, height: 7.8)).fill()
             context.setBlendMode(.normal)
-            NSBezierPath(ovalIn: NSRect(x: 11.8, y: 1.6, width: 4.8, height: 4.8)).fill()
+            NSBezierPath(ovalIn: NSRect(x: 13.1, y: 1.7, width: 5.2, height: 5.2)).fill()
             context.restoreGState()
         }
         return true
@@ -121,7 +126,7 @@ func tintColor(_ name: String) -> NSColor {
     switch name.lowercased() {
     case "indigo": return .systemIndigo
     case "teal": return .systemTeal
-    case "orange": return .systemOrange
+    case "orange", "amber", "yellow": return .systemOrange
     case "blue": return .systemBlue
     case "purple": return .systemPurple
     case "green": return .systemGreen
@@ -475,7 +480,7 @@ struct ChannelFieldItem: Decodable, Equatable {
     let type: String
     let required: Bool
     let placeholder: String
-    let value: String
+    let value: String?
     let configured: Bool
     let hidden: Bool?
 }
@@ -637,8 +642,8 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.toolTip = peer.scoped_id
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
         copyControl.pressed = { [weak copyControl] in
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+            appPasteboard.clearContents()
+            appPasteboard.setString(peer.scoped_id, forType: .string)
             copyControl?.copied()
         }
 
@@ -742,7 +747,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var timer: DispatchWorkItem?
     var clickSource: DispatchSourceSignal?
     var hoverEventMonitor: Any?
-    var menuActions: [() -> Void] = []
     let cardMenu = NSMenu()
     var selectedHubs = Set<String>()
     var statusImage: NSImage?
@@ -842,7 +846,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         for channel in value.channels ?? [] {
             for field in channel.fields {
                 let key = target + "|channel_field:\(channel.id):\(field.key)"
-                if channelFieldDrafts[key] == field.value { channelFieldDrafts.removeValue(forKey: key) }
+                if channelFieldDrafts[key] == (field.value ?? "") { channelFieldDrafts.removeValue(forKey: key) }
             }
             channelInstructions.removeValue(forKey: target + "|" + channel.id)
         }
@@ -882,6 +886,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         else {
             status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             status?.menu = cardMenu
+            statusImage = makeCitoStatusIcon(.idle)
+            if let button = status?.button {
+                formatStatusButton(button, count: 0, image: statusImage)
+            }
             hoverEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
                 MenuControl.reconcileActiveHover()
                 return event
@@ -1001,11 +1009,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if op == "test_clipboard", let text = object["text"] as? String {
                 if object["system_only"] as? Bool != true { clipboardString = text }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                appPasteboard.clearContents()
+                appPasteboard.setString(text, forType: .string)
                 return
             }
             if op == "test_settings_key", let key = object["key"] as? String {
+                if key.lowercased() == "command-comma", let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43) {
+                    _ = cardMenu.performKeyEquivalent(with: event)
+                }
                 if key.lowercased() == "escape" {
                     closeSettingsPanel(emitAction: true)
                 }
@@ -1038,9 +1049,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     }
                 }
                 return
-            }
-            if op == "test_action", let index = object["index"] as? Int, menuActions.indices.contains(index) {
-                menuActions[index](); return
             }
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
@@ -1170,7 +1178,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func rebuild() {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
         rebuildCount += 1
-        menuActions.removeAll()
         let count = uniqueSessionCount
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
         statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
@@ -1183,7 +1190,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             view.identifier = NSUserInterfaceItemIdentifier(id)
             let item = NSMenuItem(); item.view = view; menu.addItem(item); return item
         }
-        func register(_ action: @escaping () -> Void) { menuActions.append(action) }
         let header = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 40))
         header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 32, height: 18), size: 13, weight: .bold))
         let subtitleText: String
@@ -1198,15 +1204,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         header.addSubview(subLabel)
         _ = host(header, id: "header")
         var drawerItems: [String: NSMenuItem] = [:]
-        var hubActions: [() -> Void] = []
         let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         for hub in hubs {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 32))
             let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "login"]) }
             let reconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "reconnect"]) }
             let disconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "disconnect"]) }
-            if hub.auth_mode == "oidc" { hubActions.append(loginRun) }
-            hubActions.append(reconnectRun); hubActions.append(disconnectRun)
             let buttons: [(String, String, Bool, () -> Void)]
             switch hub.status {
             case "connected" where hub.error != nil:
@@ -1349,7 +1352,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             copy.toolTip = listener.scoped_id; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
             copy.pressed = { [weak self, weak copy] in
                 self?.clipboardString = listener.scoped_id
-                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(listener.scoped_id, forType: .string)
+                appPasteboard.clearContents(); appPasteboard.setString(listener.scoped_id, forType: .string)
                 copy?.copied()
             }
             card.addSubview(copy)
@@ -1390,7 +1393,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 card.addSubview(hubPill)
             }
             var x: CGFloat = scopeX
-            var toggle: MenuControl? = nil
             if showScopeToggle {
                 var scope = listener.scope
                 let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
@@ -1410,17 +1412,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
                 }
                 card.addSubview(scopeBtn); x += 66
-                toggle = scopeBtn
-            }
-            register { [weak copy] in copy?.pressed?() }
-            if let toggle = toggle {
-                register { [weak toggle] in toggle?.pressed?() }
             }
             let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
             stop.toolTip = "Stop listening"; stop.style = .destructiveHover
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
-            stop.pressed = unlisten; card.addSubview(stop); register(unlisten); register(unlisten)
+            stop.pressed = unlisten; card.addSubview(stop)
         }
         if activeRows.count <= 4 {
             for (id, row) in activeRows { _ = host(row, id: id) }
@@ -1495,8 +1492,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
                     copy.pressed = { [weak self, weak copy] in
                         self?.clipboardString = peer.scoped_id
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+                        appPasteboard.clearContents()
+                        appPasteboard.setString(peer.scoped_id, forType: .string)
                         copy?.copied()
                     }
                     row.addSubview(copy)
@@ -1528,7 +1525,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
         }
         // Zone 3 — Available Sessions with Per-Hub Target Selector & Collapsible Harness Groups
-        var candidateActions: [() -> Void] = []
         if !available.isEmpty {
             let targetHub = effectiveTargetHub
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
@@ -1652,7 +1648,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             self.emit(action)
                         }
                         listenBtn.pressed = listenRun; row.addSubview(listenBtn)
-                        candidateActions.append({ [weak listenBtn] in listenBtn?.pressed?() })
                         candidateRows.append((id: rowId, view: row))
                     }
                     if candidateRows.count <= 4 {
@@ -1708,9 +1703,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let stopAll = MenuControl("Stop All", frame: NSRect(x: 12, y: 6, width: 82, height: 24), leadingSymbol: "stop.fill")
             stopAll.identifier = NSUserInterfaceItemIdentifier("stop_all")
             stopAll.pressed = { self.emit(["op": "unlisten_all"]) }
-            footer.addSubview(stopAll); register { [weak stopAll] in stopAll?.pressed?() }
+            footer.addSubview(stopAll)
         }
-        hubActions.forEach { register($0) }
         let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: 88, height: 24), leadingSymbol: "gearshape")
         openSettings.identifier = NSUserInterfaceItemIdentifier("open_settings")
         openSettings.pressed = { [weak self, weak menu] in
@@ -1728,8 +1722,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let quit = MenuControl("Quit Cito ⌘Q", frame: NSRect(x: 262, y: 6, width: 106, height: 24))
         quit.identifier = NSUserInterfaceItemIdentifier("quit")
         quit.pressed = { self.emit(["op": "quit"]) }
-        footer.addSubview(quit); register { [weak quit] in quit?.pressed?() }
-        candidateActions.forEach { register($0) }
+        footer.addSubview(quit)
         let footerItem = host(footer, id: "footer")
         footerItem.target = self; footerItem.action = #selector(quitMenu)
         footerItem.keyEquivalent = "q"; footerItem.keyEquivalentModifierMask = [.command]
@@ -1781,7 +1774,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func handlePasteHubInvite() {
-        let systemText = NSPasteboard.general.string(forType: .string) ?? ""
+        let systemText = appPasteboard.string(forType: .string) ?? ""
         let raw = (systemText.isEmpty && headless ? clipboardString : systemText)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
@@ -2078,7 +2071,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let labelView = textLabel(f.label, NSRect(x: 14, y: fieldY + 4, width: 150, height: 16), size: 11.5, weight: .medium)
                 labelView.toolTip = f.label
                 chCard.addSubview(labelView)
-                let initialVal = channelFieldDrafts[draftKey(fieldId)] ?? f.value
+                let initialVal = channelFieldDrafts[draftKey(fieldId)] ?? (f.value ?? "")
                 let inputField = makeEditableField(fieldId, frame: NSRect(x: 170, y: fieldY, width: 296, height: 24),
                     placeholder: f.placeholder, value: initialVal, secret: f.type == "secret")
                 chCard.addSubview(inputField)
@@ -2105,8 +2098,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let fid = "channel_field:\(chId):\(f.key)"
                     if let v = self.channelFieldDrafts[self.draftKey(fid)] ?? self.settingsFieldControls[fid]?.stringValue {
                         vals[f.key] = v
-                    } else if !f.value.isEmpty {
-                        vals[f.key] = f.value
+                    } else if let fv = f.value, !fv.isEmpty {
+                        vals[f.key] = fv
                     }
                 }
                 return vals
@@ -2184,8 +2177,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         copyInvite.pressed = { [weak self, weak copyInvite] in
             guard let self = self else { return }
             self.clipboardString = inviteCmd
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(inviteCmd, forType: .string)
+            appPasteboard.clearContents()
+            appPasteboard.setString(inviteCmd, forType: .string)
             copyInvite?.copied()
         }
         hostCard.addSubview(copyInvite)
@@ -2996,8 +2989,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard directoryFilteredPeers.indices.contains(directorySelectedIndex) else { return }
             let peer = directoryFilteredPeers[directorySelectedIndex]
             clipboardString = peer.scoped_id
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+            appPasteboard.clearContents()
+            appPasteboard.setString(peer.scoped_id, forType: .string)
             if let table = directoryTableView,
                let cell = table.view(atColumn: 0, row: directorySelectedIndex, makeIfNecessary: true) as? DirectoryPeerCellView {
                 cell.copyControl.copied()
@@ -3154,25 +3147,25 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             selectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex)
                 ? directoryFilteredPeers[directorySelectedIndex].scoped_id : ""
         }
-        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36, bitsPerSample: 8,
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 40, pixelsHigh: 40, bitsPerSample: 8,
             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
         NSGraphicsContext.current?.cgContext.scaleBy(x: 2, y: 2)
-        statusImage?.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
+        statusImage?.draw(in: NSRect(x: 0, y: 0, width: 20, height: 20))
         NSGraphicsContext.restoreGraphicsState()
         func alpha(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
             // Bitmap rows start at the top; drawing coordinates start at the bottom.
-            return bitmap.colorAt(x: Int(x * 2), y: 35 - Int(y * 2))?.alphaComponent ?? 0
+            return bitmap.colorAt(x: Int(x * 2), y: 39 - Int(y * 2))?.alphaComponent ?? 0
         }
-        let probes: [String: CGFloat] = ["arc": alpha(2.5, 9), "core": alpha(8, 9),
-            "wave": alpha(15.75, 9), "arc_gap": alpha(13.5, 9), "warning_dot": alpha(14.2, 4),
-            "warning_ring": alpha(11.3, 4), "outside_cutout": alpha(10.2, 4), "inside_dot": alpha(16, 4)]
+        let probes: [String: CGFloat] = ["arc": alpha(1.75, 10), "core": alpha(9.2, 10),
+            "wave": alpha(18.75, 10), "arc_gap": alpha(15.2, 10), "warning_dot": alpha(15.7, 4.3),
+            "warning_ring": alpha(12.5, 4.3), "outside_cutout": alpha(11.0, 4.3), "inside_dot": alpha(17.0, 4.3)]
         let button = status?.button ?? headlessStatusButton
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
-        let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (NSPasteboard.general.string(forType: .string) ?? "")
-        let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "actions": menuActions.count, "count": uniqueSessionCount,
+        let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
+        let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "count": uniqueSessionCount,
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),

@@ -80,6 +80,15 @@ fn setup(req: &Value) -> Result<Value> {
         })?);
     }
     actions.push(mutate(req, "pi", &legacy, |_| Ok(None))?);
+    if remove {
+        if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("pi-pid-") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
     Ok(json!({"ok":true,"actions":actions}))
 }
 fn identify(req: &Value, p: u32) -> Result<Value> {

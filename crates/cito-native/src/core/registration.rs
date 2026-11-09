@@ -31,6 +31,15 @@ pub fn local_node_id(
         .unwrap_or_else(|| listener_id(string(&client.identity, "principal_id"), harness, session)))
 }
 
+pub(super) fn remote_matches_listener(remote: &Value, row: &Value, channel: &str) -> bool {
+    remote["binding_generation"] == row["binding_generation"]
+        && remote["channels"][channel]["owner_token"]
+            .as_str()
+            // Registrations written before channel-scoped ownership use the Node token.
+            .or_else(|| remote["owner_token"].as_str())
+            .is_some_and(|owner| row["owner_token"] == owner)
+}
+
 pub fn register_listener(
     state: &LocalState,
     client: &HubClient,
@@ -169,17 +178,15 @@ fn register_locked(
                 .iter()
                 .any(|(key, value)| key != &channel && value["state"] == "ACTIVE")
         });
-        let same_binding = local.as_ref().is_some_and(|row| {
+        let same_binding = local.as_ref().filter(|row| {
             row["status"] == "ACTIVE"
-                && row["binding_generation"] == previous["binding_generation"]
-                && row["owner_token"] == previous["owner_token"]
+                && remote_matches_listener(&previous, row, &channel)
                 && row["endpoint_pid"] == caller["endpoint_pid"]
         });
-        let retain = (sibling || same_binding)
+        let retain = (sibling || same_binding.is_some())
             && previous["binding_generation"]
                 .as_u64()
-                .is_some_and(|v| v > 0)
-            && !string(&previous, "owner_token").is_empty();
+                .is_some_and(|v| v > 0);
         let generation = if retain {
             previous["binding_generation"].as_u64().unwrap_or(0)
         } else {
@@ -196,17 +203,21 @@ fn register_locked(
                 .filter(|v| *v <= i64::MAX as u64)
                 .ok_or("STALE_GENERATION: Binding generation exhausted")?
         };
-        let owner = if retain {
-            string(&previous, "owner_token").to_string()
+        let owner = same_binding
+            .map(|row| string(row, "owner_token").to_string())
+            .unwrap_or_else(random_uuid_v4);
+        // Keep legacy sibling owners valid while replacing only this channel's token.
+        let node_owner = if sibling {
+            previous["owner_token"].clone()
         } else {
-            random_uuid_v4()
+            json!(owner)
         };
         let mut channels = previous["channels"]
             .as_object()
             .cloned()
             .unwrap_or_default();
-        channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":if harness=="human"{"notify_fanout"}else{"wake_exclusive"},"priority":100,"state":"ACTIVE","updated_at_ms":now_ms()}));
-        let value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":string(caller,"title"),"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":owner,"channels":channels});
+        channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":if harness=="human"{"notify_fanout"}else{"wake_exclusive"},"priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":now_ms()}));
+        let value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":string(caller,"title"),"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
         if client.kv_save(&id, &value, remote.map(|r| r.1)).is_err() {
             continue;
         }
@@ -258,6 +269,16 @@ mod tests {
                     &json!({"about":"Human","scope":scope}),
                     &caller,
                 )?;
+                let id = string(&initial, "canonical_listener_id");
+                let first_row = first
+                    .listener("work", id)?
+                    .ok_or("Missing first-host row")?;
+                let (mut legacy, revision) = client.kv_get(id)?.ok_or("Missing registration")?;
+                legacy["channels"]["first-host:human"]
+                    .as_object_mut()
+                    .ok_or("Missing first-host channel")?
+                    .remove("owner_token");
+                client.kv_save(id, &legacy, Some(revision))?;
                 let attached = register_automatic_human(
                     &second,
                     &client,
@@ -265,7 +286,6 @@ mod tests {
                     &json!({"about":"Human"}),
                     &caller,
                 )?;
-                let id = string(&initial, "canonical_listener_id");
                 assert_eq!(attached["canonical_listener_id"], id);
                 assert_eq!(attached["scope"], scope);
                 assert_eq!(
@@ -282,6 +302,36 @@ mod tests {
                 assert_eq!(remote["scope"], scope);
                 assert_eq!(remote["channels"]["first-host:human"]["state"], "ACTIVE");
                 assert_eq!(remote["channels"]["second-host:human"]["state"], "ACTIVE");
+                let second_row = second
+                    .listener("work", id)?
+                    .ok_or("Missing second-host row")?;
+                assert_eq!(remote["owner_token"], legacy["owner_token"]);
+                assert_ne!(first_row["owner_token"], second_row["owner_token"]);
+                assert!(remote_matches_listener(
+                    &remote,
+                    &first_row,
+                    "first-host:human"
+                ));
+                assert!(remote_matches_listener(
+                    &remote,
+                    &second_row,
+                    "second-host:human"
+                ));
+                register_automatic_human(
+                    &second,
+                    &client,
+                    "second-host",
+                    &json!({"about":"Human"}),
+                    &caller,
+                )?;
+                let refreshed = second
+                    .listener("work", id)?
+                    .ok_or("Missing refreshed row")?;
+                assert_eq!(
+                    refreshed["binding_generation"],
+                    second_row["binding_generation"]
+                );
+                assert_eq!(refreshed["owner_token"], second_row["owner_token"]);
                 Ok(())
             })();
             engine.shutdown();

@@ -9,7 +9,7 @@ done
 b="$(cd -P "$(dirname "$s")" && pwd)"
 n="$b/cito-native-darwin-arm64"
 if [ ! -x "$n" ]; then
-  printf '%s\n' 'Cito native binary is missing. Run npm run compile or reinstall the macOS arm64 package.' >&2
+  printf '%s\n' 'Cito native binary is missing. Run cargo build --release or reinstall the macOS arm64 package.' >&2
   exit 127
 fi
 export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$b/../plugins}"

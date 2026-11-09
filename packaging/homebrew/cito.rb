@@ -1,16 +1,22 @@
 class Cito < Formula
   desc "Cross-harness agent and human notification network for macOS"
   homepage "https://tefx.github.io/cito/"
-  url "https://github.com/Tefx/cito/releases/download/v0.18.0/Cito-macos-arm64.zip"
-  version "0.18.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  url "https://github.com/Tefx/cito/releases/download/v0.19.0/Cito-macos-arm64.zip"
+  version "0.19.0"
+  sha256 "e941f611f25f5f0889f2aaccc912b5a7748a607a19dff9499759858657d8fdcc"
   license "MIT"
 
   depends_on arch: :arm64
   depends_on :macos
 
   def install
-    prefix.install "Cito.app" if File.directory?("Cito.app")
+    if File.directory?("Cito.app")
+      prefix.install "Cito.app"
+    elsif File.directory?("Contents")
+      (prefix/"Cito.app").install "Contents"
+    else
+      odie "Cito.app bundle Contents not found in archive"
+    end
 
     (bin/"cito").write <<~EOS
       #!/bin/sh
@@ -34,7 +40,7 @@ class Cito < Formula
       Cito.app has been installed to:
         #{opt_prefix}/Cito.app
 
-      To launch the menu bar app:
+      To launch the menu bar app (or install the cask `brew install --cask tefx/tap/cito` for /Applications & Spotlight):
         open "#{opt_prefix}/Cito.app"
     EOS
   end

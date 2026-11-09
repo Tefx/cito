@@ -414,35 +414,25 @@ code, pre {
   color: var(--text-primary);
 }
 
-.stage-interactive-bar {
-  margin-top: 1.25rem;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.95rem 1.25rem;
-  border-radius: var(--radius-md);
-  background: rgba(12, 14, 18, 0.88);
-  border: 1px solid var(--border-subtle);
+.docs-figure {
+  margin: 0.5rem 0;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
 }
 
-.stage-action-btn {
-  appearance: none;
-  border: 1px solid var(--border-amber);
-  background: var(--accent-amber-soft);
-  color: var(--accent-amber);
-  font-family: var(--font-sans);
+.docs-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.docs-figcaption {
+  padding: 0.75rem 1.1rem;
   font-size: 0.85rem;
-  font-weight: 560;
-  padding: 0.48rem 0.95rem;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.stage-action-btn:hover {
-  background: var(--accent-amber);
-  color: var(--bg-canvas);
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* Section 2: Three Everyday Moments */
@@ -793,7 +783,7 @@ code, pre {
   .surface-grid { grid-template-columns: minmax(0, 1fr); }
   .section { padding: 3rem 1rem; }
   .moment-card { padding: 1.25rem; }
-  .topology-tier, .hero-stage-toolbar, .stage-interactive-bar { flex-wrap: wrap; }
+  .topology-tier, .hero-stage-toolbar { flex-wrap: wrap; }
   .copy-command-pill { flex-wrap: wrap; justify-content: center; width: 100%; }
   .copy-command-pill code { font-size: 0.78rem; }
   .moment-topology-panel { padding: 1rem; }

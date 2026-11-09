@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V22 — Stage 6 `v0.18.0`: Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol (`stdin`/`stdout` NDJSON), `cito-claude-hook` Inside `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts` & Complete `F1`–`F64` Remediation)
+# Cito Architecture & Protocol Specification (V23 — Stage 7 `v0.19.0`: Pure Rust Core (`libsqlite3`), Symmetric Subprocess Plugin Protocol (`stdin`/`stdout` NDJSON), `cito-claude-hook` Inside `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts` & Complete `F1`–`F64` Remediation)
 
-> **Normative Supersession Notice (`V22` / `v0.18.0`)**:
-> This `V22` specification is the single authoritative contract for Cito `v0.18.0`. Where earlier stage notes referred to TypeScript core modules (`src/{mcp,hub,setup,ui,shared,adapters,auth-callout}/*.ts`), 6-character pairing codes (`cito-xxxxxx`), in-process Node.js `plugins/telegram`, or top-level `bin/cito-claude-hook`, Section 8 and the updated sections below supersede them in full. All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
+> **Normative Supersession Notice (`V23` / `v0.19.0`)**:
+> This `V23` specification is the single authoritative contract for Cito `v0.19.0`. Section 9 replaces the transitional root Node/Vitest build and test contracts from Stage 6. Where earlier stage notes referred to TypeScript core modules (`src/{mcp,hub,setup,ui,shared,adapters,auth-callout}/*.ts`), 6-character pairing codes (`cito-xxxxxx`), in-process Node.js `plugins/telegram`, or top-level `bin/cito-claude-hook`, Section 8 and the updated sections below supersede them in full. All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
 
 ---
 
@@ -70,7 +70,8 @@
 
 ### 3.2 Multi-Channel Registration & Lease Aggregation (`crates/cito-native/src/core/lease.rs`, `hub.rs`)
 - **`Registration` Schema**:
-  - Includes `channels: BTreeMap<String, ChannelAttachment>` where each `ChannelAttachment` has `{ channel_id, kind, host_id, host_name, delivery_mode: "notify_fanout" | "wake_exclusive", priority, state: "ACTIVE" | "UNLISTENED", updated_at_ms }`.
+  - Includes `channels: BTreeMap<String, ChannelAttachment>` where each `ChannelAttachment` has `{ channel_id, kind, host_id, host_name, delivery_mode: "notify_fanout" | "wake_exclusive", priority, state: "ACTIVE" | "UNLISTENED", owner_token?, updated_at_ms }`.
+  - **Channel Ownership**: Local registrations store an `owner_token` on their channel attachment. Refreshing the same local binding retains its token; replacing that channel's owner rotates only its token. An active sibling channel preserves the Node's `binding_generation` and top-level `owner_token`, keeping pending signal generations and legacy sibling owners valid. Heartbeats, wake preflight/renewal, and captured-owner detach compare the local row against its channel token and Node generation, falling back to the top-level token only when the channel token is absent. With no active sibling, a replacement also advances the Node generation and replaces its top-level token.
   - **Lease Evaluation (`evaluate_node_lease`, `F13`)**:
     - A channel attachment with `state == "ACTIVE"` and `host_id == "hub"` (an enabled Hub-hosted Human Channel such as Telegram) is treated as **permanently active** while its binding remains enabled in `hub_human_channels` (never expiring at the 60s `ACTIVE_LEASE_MS` or 30m `RETENTION_MS` thresholds).
     - A host-attached channel (`host_id != "hub"`) is `ACTIVE` when `now - updated_at_ms < 60_000`, `DISCONNECTED_RETAINED` when `60_000 <= age <= 1_800_000`, and `EXPIRED` when `age > 1_800_000`.
@@ -199,7 +200,7 @@ Each request is a single JSON object written to `stdin` followed by `\n` (and `s
   - `{"op":"pair_code","channel_id":"telegram","code":"cito-a1b2c3d4e5","instruction":"Send \"/start cito-a1b2c3d4e5\" to @my_bot","expires_at_ms":...}`
   - `{"op":"channel_test_result","channel_id":"telegram","ok":true,"detail":"..."}`
   - `{"op":"composer_result","ok":true,"error":null}` (when `ok: false`, `cito-ui` preserves the user's typed text in `composer_input` and displays `error`, `F32, F57`)
-  - Test observation frames: `test_inspect`, `test_action`, `test_directory_key`, `test_directory_query`, `test_settings_hub_draft`, `test_channel_draft`, `test_clipboard`.
+  - Headless test hooks: `test_inspect`, `test_control`, `test_settings_input`, `test_composer_input`, `test_settings_key`, `test_directory_key`, `test_clipboard`.
 - **UI $\to$ Daemon (`stdout` NDJSON — All 27 Actions Handled in `daemon.rs`, `F1`)**:
   - Session & Scope: `listen_session`, `unlisten`, `unlisten_all`, `set_scope`, `refresh_available`, `copy_id`
   - Hub & Network: `switch_hub`, `hub_action`, `set_host_hub`, `setup_save_hub`, `setup_toggle_hub`, `setup_remove_hub`
@@ -227,6 +228,7 @@ Each request is a single JSON object written to `stdin` followed by `\n` (and `s
      1. **Field-level UTF-8 byte caps**: truncate `activity[i].message` to `512` UTF-8 bytes, `about` to `256` UTF-8 bytes, and `title` / `cwd` / `summary` to `128` UTF-8 bytes (on valid UTF-8 char boundaries, appending `"…"`).
      2. **Collection-level caps (preserving authoritative total counts in `unread_count` and `total_online`)**: cap `activity` at `80` items, `peers` at `100` items, `sessions` / `listeners` at `64` items, `my_remote_listeners` at `64` items, and `available` at `32` items.
      3. **Progressive Shedding Loop & Final Guard**: if `serde_json::to_vec(&frame).len() > 262_144`, progressively trim trailing items from `activity`, then `peers` / `my_remote_listeners` / `available`, and finally `sessions` / `listeners` (setting `"truncated": true` on the frame) until the serialized byte length is strictly `<= 262,144` bytes (verified by a regression test with `activity: []` and 150 multibyte-emoji listeners, `F26`).
+   - Inbound `cito-ui -> daemon` action lines use a separate **`1,048,576`-byte (`1 MiB`) limit**, excluding the newline delimiter, matching HTTP `/ui` request bodies. This admits a 65,536-code-point message plus its JSON envelope. Drain oversized lines through the next newline or EOF without growing the buffer, emit `composer_result` (`ok: false`) and `error` with `INVALID_INPUT: UI action exceeds 1 MiB`, and continue processing subsequent actions on the same stream.
 
 ---
 
@@ -267,7 +269,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 4. **`F31` (`deploy/hub/Dockerfile`, `docker-compose.yml` & `/health` Contract)**:
    - `deploy/hub/Dockerfile` uses `rust:1-bookworm` builder $\to$ `debian:bookworm-slim` runtime running `cito hub`.
    - `cito hub` treats blank environment variables (`CITO_HUB_TOKEN=""`, `CITO_OIDC_ISSUER=""`, `CITO_OIDC_CLIENT_ID=""`) as unset (`None`), while still rejecting an explicit empty CLI flag (`--token ""`), so `docker compose -f deploy/hub/docker-compose.yml up` boots cleanly in all 3 modes (`none`, `token`, `oidc`). `docker-compose.yml` forwards `CITO_PLUGIN_TELEGRAM_BOT_TOKEN: ${CITO_PLUGIN_TELEGRAM_BOT_TOKEN:-}`.
-   - `GET /health` on `cito hub` returns `{"ok": true, "pid": <u32>, "version": "0.18.0", "auth_mode": "none"|"token"|"oidc"}`.
+   - `GET /health` on `cito hub` returns `{"ok": true, "pid": <u32>, "version": "0.19.0", "auth_mode": "none"|"token"|"oidc"}`.
 5. **`F39` & `F40` (Hub Auth Alias Canonicalization & Live `user` Reload)**:
    - When `setup` writes or updates a Hub entry in `config.json`, it writes `"authMode"` and deletes any legacy `"auth"` property on that entry (`F39`).
    - `reload_hub_slots_from_config` compares `(nats_url, auth_mode, token, issuer, client_id, user, disabled)`: if `user` changed on a `none` or `token` hub, the slot is torn down and recreated with the new `user` identity immediately (`F40`).
@@ -295,7 +297,9 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 - Both `site/assets/brand/cito-logo-dark.svg` and `site/assets/brand/cito-logo-light.svg` render the full `[C) Cito` lockup inside a self-contained dark graphite anodized pill (`<rect x="1" y="1" width="130" height="34" rx="9" fill="#14171F" stroke="#262B38" stroke-width="1"/>`) with `#F3F4F6` wordmark text and `#F59E0B` amber core (`contrast ratio = 14.8:1` against `#14171F`), guaranteeing complete legibility on `#0d1117` dark backgrounds, `#ffffff` light backgrounds, and mismatched `(OS Light + GitHub Dark)` or `(OS Dark + GitHub Light)` combinations.
 - `site/assets/brand/cito-mark.svg` includes its `<rect x="1" y="1" width="34" height="34" rx="8" fill="#14171F" stroke="#262B38" stroke-width="1"/>` squircle backing so the `#F3F4F6` C-arc is visible on any background (`F3`).
 
-### 7.2 Root `package.json` & Native Test Suite Architecture (`F1, F43, F46, F50`)
+### 7.2 Historical Stage 6 Transition (`F1, F43, F46, F50`)
+
+The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints.
 1. **Root `package.json` Contract**:
    - `"version": "0.18.0"`, `"license": "MIT"`, `"type": "module"`.
    - `"bin": { "cito": "bin/cito", "cito-mcp": "bin/cito-mcp" }` (`cito-claude-hook` removed from top-level `bin`).
@@ -321,7 +325,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 1. **Pi Plugin (`plugins/pi/` — Standard Pi Package Mode, `F2, F29, F58`)**:
    - Directory layout:
      - `plugins/pi/plugin.json`: `{"id":"pi","kind":"agent-harness","displayName":"Pi Coding Agent","tier":"stable","sfSymbol":"terminal.fill","tint":"amber","cliFlag":false,"command":["./bin/cito-plugin-pi"]}`
-     - `plugins/pi/package.json`: `{"name":"@tefx/cito-pi","version":"0.18.0","private":true,"pi":{"extensions":["./cito-bridge.ts"]}}`
+     - `plugins/pi/package.json`: `{"name":"@tefx/cito-pi","version":"0.19.0","private":true,"pi":{"extensions":["./cito-bridge.ts"]}}`
      - `plugins/pi/cito-bridge.ts`: Loaded in-process by Pi (`packages` in `~/.pi/agent/settings.json`). On load, calls `pi.registerMcpServer("cito", { command: "<stateDir>/bin/cito-mcp", args: [] })` (mandatory registration when `registerMcpServer` is provided on `pi`; no-op only on older test mocks without `registerMcpServer`). Reads `daemonPort` from `${stateDir}/config.json` (falling back to `CITO_DAEMON_PORT` or `4290`, `F29`). When binding `${stateDir}/sockets/pi-pid-<pid>.sock`, if `listen()` fails with `EADDRINUSE`, connects to the existing socket with a `250 ms` timeout: if the peer fails to respond to `{"op":"ping"}`, unlinks the stale socket file and retries `listen()` (`F58`).
    - `setup_apply`: registers the resolved absolute path of the installed `plugins/pi` directory (`<stateDir>/plugins/pi`) in `~/.pi/agent/settings.json` `"packages"`, removes any legacy `~/.pi/agent/extensions/cito-bridge.ts` file, removes any legacy `"npm:@tefx/cito"` package entry, and removes any duplicate `mcpServers.cito` entry from `~/.pi/agent/mcp/global.mcp.json` (`F2`).
    - `setup_remove`: removes `<stateDir>/plugins/pi` (and legacy `"npm:@tefx/cito"`) from `~/.pi/agent/settings.json` `"packages"` (deleting the `"packages"` key if empty while preserving all other keys).
@@ -379,7 +383,7 @@ cito/
 ├── crates/
 │   └── cito-native/                  # Core + plugin binaries & native integration test suite
 │       ├── Cargo.toml
-│       ├── build.rs                  # Compiles src/macos/cito-ui.swift & stages bin/ + plugins/*/bin/
+│       ├── build.rs                  # Compiles and signs src/macos/cito-ui.swift
 │       ├── src/
 │       └── tests/                    # Full Rust integration & E2E test suite (`cargo test`)
 ├── src/macos/
@@ -404,7 +408,11 @@ cito/
    - Delete root `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, and `tests/**/*.ts` (including `tests/support/native-harness.ts`).
    - Only `plugins/pi/package.json` (`"private": true`, zero `dependencies` / `devDependencies`) and `plugins/pi/cito-bridge.ts` remain in the repository because Pi itself is a TypeScript host that loads `plugins/pi` as a standard Pi Package.
 2. **Unified Build & Test via `cargo build --release` & `cargo test`**:
-   - Promote/add a root `Cargo.toml` workspace (`members = ["crates/cito-native"]`).
+   - The root `Cargo.toml` workspace uses `members = ["crates/cito-native"]` and `resolver = "2"`, with one root `Cargo.lock`.
+   - `build.rs` compiles and ad-hoc signs the Swift UI for both test and release profiles. `.cargo/config.toml` installs `bin/cito-linker` as the macOS linker hook: it calls the system linker and atomically stages completed release binaries into `bin/` and `plugins/*/bin/`. A build script runs before the final Rust link, so Rust staging happens in this post-link hook rather than a recursive Cargo invocation.
+   - `crates/cito-native/tests/native.rs` owns the integration target; its support modules exercise Cargo-provided `CARGO_BIN_EXE_*` executables. Existing private Hub/Auth/Login cases and TLS fixtures live in `crates/cito-native/tests/hub/` and remain wired to their unit-test modules.
+   - `bin/cito-test-runner` isolates unit-test processes. Integration fixtures clear inherited environment, allocate temporary homes and private state/config paths, reserve ephemeral ports, mock host launch/browser commands, and run the AppKit companion headlessly. A shared mutex serializes subprocess scenarios, including multi-hub scenarios. Keep incremental `target/` until verification finishes.
+   - Local Node.js with type stripping is needed only for the dependency-free Pi bridge contract and website JavaScript behavior tests; there is no npm install or root Node toolchain.
    - `cargo test --workspace` executes the complete behavioral test suite in Rust (`crates/cito-native/tests/*.rs`), covering:
      - All `HubEngine` (`local://`, LAN `:4291`, standalone `cito hub` HTTP/SSE, `none`/`token`/`oidc` RSA/ECDSA JWKS verification, RLS, 30m retention/dedup pruning, `signal_claim_dispatch` atomicity, `signal_ack` offline reconciliation, and `HumanChannel` subprocess lifecycle) contracts;
      - All `DaemonService` (`state.sqlite` persistence, `cito_listen`/`cito_unlisten`/`cito_find`/`cito_send`/`cito_inbox`, stale-daemon handover, and all 27 `cito-ui` NDJSON IPC actions + `< 256 KiB` frame bounding) contracts;

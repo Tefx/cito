@@ -127,6 +127,20 @@ fn setup(req: &Value) -> Result<Value> {
                 groups.push(json!({"hooks":[{"type":"command","command":hook}]}));
             }
         }
+        if remove {
+            let _ = fs::remove_dir_all(state(req).join("claude"));
+            if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("claude-pid-")
+                    {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
         Ok(())
     })?;
     Ok(json!({"ok":true,"actions":[action]}))
@@ -211,15 +225,6 @@ fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
         .join("projects")
         .join(slug)
 }
-fn process_start(p: u32) -> Option<String> {
-    std::process::Command::new("/bin/ps")
-        .args(["-p", &p.to_string(), "-o", "lstart="])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
 fn hook_endpoint(req: &Value) -> u32 {
     if let Some(p) = env_value(req, "CITO_ENDPOINT_PID").and_then(|s| s.parse().ok()) {
         return p;
@@ -247,16 +252,7 @@ fn hook_endpoint(req: &Value) -> u32 {
         {
             return p;
         }
-        let next = std::process::Command::new("/bin/ps")
-            .args(["-p", &p.to_string(), "-o", "ppid="])
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            });
+        let next = process_parent(p);
         match next {
             Some(n) if n > 1 && n != p => p = n,
             _ => break,
@@ -641,9 +637,15 @@ pub fn hook_main() {
             .map(|s| expand(&req, &s))
             .unwrap_or_else(|| state(&req).join("config.json"));
         let cfg = read_json(&config_path).unwrap_or(json!({}));
-        let port = cfg["daemonPort"]
-            .as_u64()
-            .or_else(|| env_value(&req, "CITO_DAEMON_PORT").and_then(|s| s.parse().ok()))
+        let port = env_value(&req, "CITO_DAEMON_PORT")
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .filter(|p| *p > 0)
+            .or_else(|| {
+                cfg["daemonPort"]
+                    .as_u64()
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|p| *p > 0)
+            })
             .unwrap_or(4290);
         let ack_session = alias.as_deref().unwrap_or(&sid);
         let ack = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":wakes.iter().map(|r|r["batch_id"].clone()).collect::<Vec<_>>()},"_meta":{"claudeSessionId":ack_session,"cwd":req["cwd"]}}});

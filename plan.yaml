@@ -6394,7 +6394,7 @@ phases:
     Plugin Architecture, Relocation of cito-claude-hook to plugins/claude/, Standard
     Pi Package Mode, Retirement of Duplicate src/*.ts, Complete F1–F64 Remediation
     & Live Distribution Closure'
-  status: in_progress
+  status: done
   gate: 'npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, src/{mcp,hub,setup,ui,shared,adapters,auth-callout}, bin/loader.js,
     bin/cito-claude-hook, and legacy plugins/{index.ts,*/index.ts,claude/channel.ts,claude/hook-cli.ts}
@@ -6569,7 +6569,7 @@ phases:
     name: 'Iterative Code-Hygiene Convergence Across Full Repository & Live v0.18.0
       Distribution Closure (GitHub Pages, Release v0.18.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
       code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -6623,10 +6623,40 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-08T18:11:37.263140Z'
+    done_at: '2026-11-08T23:01:35.269330+00:00'
+    evidence: "Artifact:\n- Commit: ecdc3b18043eb0be20f59b2c12cd27f0b489dbfc (61 files\
+      \ changed, +3374 / -1444 lines across iterative convergence rounds)\n- Executor:\
+      \ rust-senior (writable consolidation & F4 live distribution closure) + fresh-context\
+      \ `pathway-auditor`, `structural-auditor`, and `uiux-auditor` rounds (`[REQUIRES_SKILL:\
+      \ code-hygiene]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`).\n- Convergence Summary:\n\
+      \  - 12 fresh-context iterative audit rounds closed 40 cumulative findings (`L1`–`L17`,\
+      \ `R2-1`–`R2-5`, `R3-1`–`R3-4`, `R4-1`–`R4-2`, `R5-P1`–`R5-P2`, `R6-P1`–`R6-P2`,\
+      \ `R7-P1`, `R8-P1`–`R8-P2`, `R9-P1`–`R9-P3`, `R10-P1`, `R11-P1`–`R11-P2`).\n\
+      \  - Round 12 fresh-context verdicts:\n    - `pathway-auditor` (`2026-11-08T22-29-54-171Z_01a1bd48-4b7a-76ed-b0b5-ecd400c8af22.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `structural-auditor`\
+      \ (`2026-11-08T22-29-54-345Z_01a1bd48-4c28-7220-affc-c8570f5135c1.jsonl`): `Completeness:\
+      \ CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `uiux-auditor` (`2026-11-08T22-29-54-253Z_01a1bd48-4bcc-7591-9eb0-3af4fd38728a.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n- Live Distribution\
+      \ Closure (`F4`):\n  - GitHub Pages (`https://tefx.github.io/cito/`): HTTP/2\
+      \ `200` (Actions run `42532872929` success).\n  - GitHub Release `v0.18.0` (`https://github.com/Tefx/cito/releases/tag/v0.18.0`,\
+      \ built on `macos-15` in Actions run `42532281170` success): published `Cito-macos-arm64.zip`\
+      \ and `Cito-macos-arm64.zip.sha256` with SHA-256 `b912475e603b92c8ef1133b34cc228b6f723750d9ade93a31e4f11495b369a85`.\n\
+      \  - Synced SHA-256 `b912475e603b92c8ef1133b34cc228b6f723750d9ade93a31e4f11495b369a85`\
+      \ to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`,\
+      \ commit `818a3e8d43c9032e8241c1186daefd8c4fd02d14`).\n\nVerification:\n- Run:\
+      \ `npm run typecheck && npm run compile && npm test && /usr/bin/ruby -c packaging/homebrew/cito.rb`\
+      \ -> 0 errors, 0 compiler warnings, 35 test files / 344 tests passed 100%, `Syntax\
+      \ OK`\n- Run: `cargo test --locked --manifest-path crates/cito-native/Cargo.toml`\
+      \ -> 136 passed, 0 failed\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v22.hygiene` (`df -h`: 163 GiB\
+      \ available).\n\nSpec link:\n- docs/DESIGN.md (§§1–8, V22 Stage 6 v0.18.0)\n\
+      - docs/ROADMAP.md\n- .github/workflows/pages.yml, .github/workflows/release.yml,\
+      \ packaging/homebrew/cito.rb"
   - id: v22.gate
     name: V22 Stage 6 (v0.18.0) Independent Terminal Acceptance, Zero-TS-Core Residue,
       F1–F64 Conformance & Live Distribution Gate
-    status: pending
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v22` and `v0.18.0` acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session (never resuming\
@@ -6665,10 +6695,40 @@ phases:
     depends_on:
     - v22.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-08T23:02:02.697273Z'
+    done_at: '2026-11-08T23:12:03.655304+00:00'
+    evidence: 'Artifact:
+
+      - Gate Report: `/Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-08T23-11-31-010Z-2026-11-08T23-03-50-523Z_01a1bd67-5dfa-7687-a7ba-ca87693d77ce.js-480323cd31204b5d.txt`
+      (`gate.report.v2`, `status: "PASS"`, `evidence_disposition: "POSITIVE_GATE_EVIDENCE"`,
+      `valid: true`, `binding_checked: true`).
+
+      - Reviewer: fresh-context `gate-reviewer` session `2026-11-08T23-03-50-523Z_01a1bd67-5dfa-7687-a7ba-ca87693d77ce.jsonl`
+      bound to `git:747b681a4d39ef7f5df2c868693a8c051196306b` (code commit `ecdc3b18043eb0be20f59b2c12cd27f0b489dbfc`).
+
+
+      Verification:
+
+      - Run: `python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v22-gate/delta-binding.json <report>` -> `{"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}`
+
+      - All 5 bound requirements (`REQ-V22-1-TESTS-AND-RUBY-PASS`, `REQ-V22-2-ZERO-TS-CORE-RESIDUE-AND-NATIVE-PLUGINS`,
+      `REQ-V22-3-ZERO-HARDCODING-AND-LANGUAGE-POLICY`, `REQ-V22-4-HYGIENE-LEDGER-CLOSURE-AND-ZERO-REGRESSION`,
+      `REQ-V22-5-LIVE-DISTRIBUTION-F4`) verified `PROVEN`.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1–8, V22 Stage 6 v0.18.0)
+
+      - docs/ROADMAP.md
+
+      - packaging/homebrew/cito.rb'
 - id: v23
   name: 'V23 Stage 7 (v0.19.0): Pure Rust Workspace Consolidation, Removal of Root
     Node/Vitest Scaffolding & Unified cargo test Native Test Suite'
-  status: locked
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, root package.json, package-lock.json, tsconfig.json, vitest.config.ts,
     node_modules/, and tests/**/*.ts are absent, only plugins/pi/{package.json, cito-bridge.ts}
@@ -6693,7 +6753,7 @@ phases:
   - id: v23.impl
     name: Implement V23 Stage 7 (v0.19.0) Root Cargo.toml Workspace, Native Rust Integration
       Suite (cargo test --workspace) & Root Node/Vitest Scaffolding Removal
-    status: pending
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 7 (`v0.19.0`) implementation per `docs/DESIGN.md`\
       \ §9 and `docs/ROADMAP.md`:\n  1. **Root `Cargo.toml` Workspace & Unified Build\
@@ -6743,11 +6803,43 @@ phases:
     - README.md
     - AGENTS.md
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-08T23:31:40.108994Z'
+    done_at: '2026-11-09T00:15:32.123518+00:00'
+    evidence: "Artifact:\n- Commit: 1276f8d4914af4927e0dd3f25570cf061d76a2d1 (120\
+      \ files changed, +2661 / -8097 lines)\n- Executor: rust-senior\n- Deliverables:\n\
+      \  1. Root `Cargo.toml` workspace (`members = [\"crates/cito-native\"]`, `resolver\
+      \ = \"2\"`), root `Cargo.lock`, `.cargo/config.toml` (`bin/cito-linker` + `bin/cito-test-runner`),\
+      \ and `crates/cito-native/build.rs` compiling `src/macos/cito-ui.swift` and\
+      \ staging all 6 signed Rust binaries (`bin/cito-native-darwin-arm64`, `plugins/*/bin/*`,\
+      \ `plugins/claude/bin/cito-claude-hook`) and `cito-ui` (`bin/cito-ui-darwin-arm64`,\
+      \ `plugins/human/bin/cito-ui`) at version `0.19.0`.\n  2. Native Rust integration\
+      \ & E2E test suite (`crates/cito-native/tests/native.rs`, `crates/cito-native/tests/support/{mod,daemon,distribution,plugins,ui}.rs`,\
+      \ `crates/cito-native/tests/hub/*.rs`): 175 total executed Rust tests (139 unit\
+      \ + 36 integration suites) covering HubEngine, DaemonService, SQLite V4 migrations,\
+      \ all 27 UI IPC actions, `< 256 KiB` frame cap, all 5 built-in plugins (`pi`,\
+      \ `codex`, `claude`, `human`, `telegram` + `cito-claude-hook` + `cito-bridge.ts`),\
+      \ headless `cito-ui` AppKit view-tree & interactions, static `site/` & brand\
+      \ SVG contrast, Homebrew formula syntax, and `F1`–`F64` regressions.\n  3. Complete\
+      \ removal of root Node.js / Vitest scaffolding (`package.json`, `package-lock.json`,\
+      \ `tsconfig.json`, `bin/build.mjs`, `node_modules/`, and root `tests/**/*.ts`\
+      \ deleted; only `plugins/pi/package.json` and `plugins/pi/cito-bridge.ts` retained\
+      \ for the Pi host).\n  4. Updated `.github/workflows/release.yml`, `deploy/hub/Dockerfile`,\
+      \ `README.md`, `AGENTS.md`, `docs/DESIGN.md`, `docs/ROADMAP.md`, `site/**`,\
+      \ and `packaging/homebrew/cito.rb` to `0.19.0` and pure Cargo build/test commands.\n\
+      \nVerification:\n- Run: `cargo test --workspace && cargo build --release &&\
+      \ /usr/bin/ruby -c packaging/homebrew/cito.rb` -> 175 passed (139 unit + 36\
+      \ integration), 0 failed, 0 warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\\
+      b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\b' crates/cito-native/src/core/\
+      \ src/macos/` -> 0 matches\n- Run: CJK & forbidden-name scan across tracked\
+      \ files -> 0 matches\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v23.impl`\
+      \ and `node_modules/` (`df -h`: 163 GiB available).\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§9, V23 Stage 7 v0.19.0)\n- docs/ROADMAP.md"
   - id: v23.hygiene
     name: 'Iterative Code-Hygiene Convergence on Pure Rust Workspace & Live v0.19.0
       Distribution Closure (GitHub Release v0.19.0 & Tefx/homebrew-tap) [REQUIRES_SKILL:
       code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -6796,10 +6888,43 @@ phases:
     depends_on:
     - v23.impl
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T00:15:48.463867Z'
+    done_at: '2026-11-09T07:42:04.922349+00:00'
+    evidence: "Artifact:\n- Commit: db0585768e50326573150e333e2c3ae58424af6a (46 files\
+      \ changed, +2740 / -459 lines across iterative convergence rounds)\n- Executor:\
+      \ rust-senior (writable consolidation & v0.19.0 live distribution closure) +\
+      \ fresh-context `pathway-auditor`, `structural-auditor`, and `uiux-auditor`\
+      \ rounds (`[REQUIRES_SKILL: code-hygiene]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`).\n\
+      - Convergence Summary:\n  - 20 fresh-context iterative audit rounds closed all\
+      \ 29 cumulative findings (`V23-L1`–`V23-L10`, `V23-R2-P1`–`V23-R2-P2`, `V23-R3-P1`–`V23-R3-P2`,\
+      \ `V23-R4-P1`, `V23-R5-P1`, `V23-R6-P1`, `V23-R7-P1`, `V23-R8-P1`, `V23-R9-P1`,\
+      \ `V23-R10-P1`, `V23-R11-P1`, `V23-R12-P1`, `V23-R13-P1`, `V23-R14-P1`–`V23-R14-P2`,\
+      \ `V23-R15-P1`, `V23-R16-P1`, `V23-R17-P1`, `V23-R18-P1`, `V23-R19-P1`).\n \
+      \ - Round 20 fresh-context verdicts:\n    - `pathway-auditor` (`2026-11-09T07-06-37-189Z_01a1bf21-5d04-74ae-a630-aa9d212f88c0.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `structural-auditor`\
+      \ (`2026-11-09T07-06-37-393Z_01a1bf21-5dd0-73be-924c-6c21c0ffa87b.jsonl`): `Completeness:\
+      \ CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `uiux-auditor` (`2026-11-09T07-06-37-306Z_01a1bf21-5d79-77d0-a6ec-fada5807e2f2.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n- Live Distribution\
+      \ Closure (`v0.19.0`):\n  - GitHub Pages (`https://tefx.github.io/cito/`): HTTP/2\
+      \ `200` (Actions run `42580779504` success).\n  - GitHub Release `v0.19.0` (`https://github.com/Tefx/cito/releases/tag/v0.19.0`,\
+      \ built on `macos-15` in Actions run `42580261594` success at tag commit `ff0e8dc7d90affdc72300656615261161de83c3e`):\
+      \ published `Cito-macos-arm64.zip` and `Cito-macos-arm64.zip.sha256` with SHA-256\
+      \ `f52a8047d71aecbc17f31b6d5d7641ae1dca155bb6faa6c09a70bc8ab73a7398`.\n  - Synced\
+      \ SHA-256 `f52a8047d71aecbc17f31b6d5d7641ae1dca155bb6faa6c09a70bc8ab73a7398`\
+      \ to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`,\
+      \ commit `8106f20bade7babe91b2c5c81df01488bd2257e6`).\n\nVerification:\n- Run:\
+      \ `cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`\
+      \ -> 199 passed, 0 failed, 0 compiler warnings, `Syntax OK`\n- Run: `grep -rnE\
+      \ -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v23.hygiene` (`df -h`: 163 GiB\
+      \ available).\n\nSpec link:\n- docs/DESIGN.md (§9, V23 Stage 7 v0.19.0)\n- docs/ROADMAP.md\n\
+      - .github/workflows/release.yml, packaging/homebrew/cito.rb"
   - id: v23.gate
     name: V23 Stage 7 (v0.19.0) Independent Terminal Acceptance, Pure Rust Workspace
       Verification & Live Distribution Gate
-    status: pending
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v23` and `v0.19.0` acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session (never resuming\
@@ -6835,5 +6960,109 @@ phases:
     - .github/workflows/release.yml
     - packaging/homebrew/cito.rb
     depends_on:
+    - v23.impl
     - v23.hygiene
+    - v23.repair_linker
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-09T08:28:42.504489Z'
+    done_at: '2026-11-09T08:32:51.439488+00:00'
+    evidence: "Artifact:\n- Commit: dced89090c4264250aeb54ef83f8651760c0e708 (code\
+      \ commit `b5bd4fca7103fa9971d5aa3c8a9922e3458a598f`, annotated tag `v0.19.0`\
+      \ at release build commit `1d129aa921521ae470d07cbcadaa9fa1a2adc67d`)\n- Independent\
+      \ Gate Reviewer: `gate-reviewer` (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T07-43-17-355Z_01a1bf42-ef6a-76c1-aaee-86ad28a18500.jsonl`)\n\
+      - Validator Result: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v23-gate/binding-delta.json /tmp/cito-v23-gate/report-delta.json`\
+      \ -> `{\"valid\":true,\"binding_checked\":true,\"kind\":\"gate\",\"schema_version\"\
+      :\"gate.report.v2\",\"evidence_disposition\":\"POSITIVE_GATE_EVIDENCE\",\"errors\"\
+      :[]}`\n- Requirements Proven (`5/5 PROVEN`, `0` findings, `0` warnings):\n \
+      \ 1. `REQ-V23-1-CARGO-WORKSPACE-AND-RUBY-PASS`: `PROVEN` (`cargo test --workspace\
+      \ && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` passed\
+      \ 100% locally and on `macos-15` in GitHub Actions run `42585143377` with 199\
+      \ tests passed, 0 failed, 0 compiler/linker warnings, and `Syntax OK`).\n  2.\
+      \ `REQ-V23-2-ZERO-ROOT-NODE-VITEST-SCAFFOLDING`: `PROVEN` (zero root `package.json`,\
+      \ `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `bin/build.mjs`,\
+      \ `node_modules/`, or `tests/**/*.ts`; only `plugins/pi/package.json` and `plugins/pi/cito-bridge.ts`\
+      \ remain).\n  3. `REQ-V23-3-ZERO-HARDCODING-AND-LANGUAGE-POLICY`: `PROVEN` (zero\
+      \ hardcoded agent/channel identifiers in `crates/cito-native/src/core/` and\
+      \ `src/macos/`, English-only UI/docs/comments, zero company-specific names).\n\
+      \  4. `REQ-V23-4-HYGIENE-LEDGER-CLOSURE-AND-ZERO-REGRESSION`: `PROVEN` (all\
+      \ 31 cumulative finding IDs + `V23-GATE-1` closed; Round 20 fresh-context `pathway-auditor`,\
+      \ `structural-auditor`, and `uiux-auditor` all returned `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`).\n  5. `REQ-V23-5-LIVE-DISTRIBUTION-V0-19-0`:\
+      \ `PROVEN` (`https://tefx.github.io/cito/` HTTP 200 via run `42585867710`; GitHub\
+      \ Release `v0.19.0` via `macos-15` run `42585143377` with `Cito-macos-arm64.zip`\
+      \ SHA-256 `553300685bfaa711bc9dc04abfc718f641a4dc76e5ff9cd914a74b2ec228895a`\
+      \ synchronized in `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` commit\
+      \ `2d07e1b8029e6bb1497185bc75322c4f3e2a077e`).\n\nVerification:\n- Run: `python3\
+      \ ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding /tmp/cito-v23-gate/binding-delta.json\
+      \ /tmp/cito-v23-gate/report-delta.json` -> `valid: true, binding_checked: true,\
+      \ evidence_disposition: POSITIVE_GATE_EVIDENCE`\n- Run: `cargo test --workspace\
+      \ && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` ->\
+      \ 199 passed, 0 failed, 0 warnings, `Syntax OK`\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§§1–9, V23 Stage 7 v0.19.0)\n- docs/ROADMAP.md\n- .github/workflows/release.yml,\
+      \ packaging/homebrew/cito.rb"
+  - id: v23.repair_linker
+    name: 'V23 Gate Repair: Silence Informational codesign replacing existing signature
+      Stderr in bin/cito-linker & Refresh v0.19.0 Release'
+    status: done
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** Close `V23-GATE-1` by filtering informational `replacing existing
+      signature` stderr from `/usr/bin/codesign --force --sign - "$tmp"` in `bin/cito-linker:41`
+      while preserving real `codesign` errors and non-zero exit codes, re-running
+      the `v0.19.0` release workflow on `macos-15` with zero `linker_messages` warnings,
+      and syncing the updated `Cito-macos-arm64.zip` SHA-256 to `packaging/homebrew/cito.rb`
+      and `Tefx/homebrew-tap`.
+
+      - **Boundary:** Owner `rust-senior`; modifies `bin/cito-linker` and `packaging/homebrew/cito.rb`
+      in `/Users/tefx/Projects/cito`, refreshes annotated tag/release `v0.19.0` on
+      `Tefx/cito`, and updates `Formula/cito.rb` on `Tefx/homebrew-tap`.
+
+      - **Admit:** Completed `v23.hygiene` and `v23.gate` finding `V23-GATE-1`; `cargo
+      test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`
+      exiting `0` locally with zero compiler or linker warnings; GitHub Release `v0.19.0`
+      workflow on `macos-15` completing with zero `linker_messages` warnings; and
+      matching `Cito-macos-arm64.zip` SHA-256 across GitHub Release `v0.19.0`, `packaging/homebrew/cito.rb`,
+      and `Tefx/homebrew-tap` `Formula/cito.rb` for `v23.gate` Delta re-review.
+
+      - **Recovery:** Revert or refine `bin/cito-linker` in place if real `codesign`
+      errors or exit codes are masked, and reconcile tag `v0.19.0` and Homebrew Formula
+      SHA-256 before completing.'
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - bin/cito-linker
+    - packaging/homebrew/cito.rb
+    - .github/workflows/release.yml
+    depends_on:
+    - v23.hygiene
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T07:56:17.367425Z'
+    done_at: '2026-11-09T08:28:31.859170+00:00'
+    evidence: "Artifact:\n- Commit: b5bd4fca7103fa9971d5aa3c8a9922e3458a598f (5 files\
+      \ changed, +56 / -4 lines)\n- Executor: rust-senior (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T07-57-07-102Z_01a1bf4f-989d-75ee-bc3d-78e50b411617.jsonl`)\n\
+      - Closure of `V23-GATE-1`:\n  - `bin/cito-linker`: filters informational `:\
+      \ replacing existing signature` stderr from `/usr/bin/codesign --force --sign\
+      \ - \"$tmp\"` while preserving any real `codesign` error output and non-zero\
+      \ exit codes, covered by `crates/cito-native/tests/support/distribution.rs`.\n\
+      \  - GitHub Actions `Release Cito.app & Distribution Bundle` run `42585143377`\
+      \ (`macos-15-arm64`, at tag `v0.19.0` commit `1d129aa921521ae470d07cbcadaa9fa1a2adc67d`)\
+      \ succeeded with **0 `warning:` matches and 0 `linker_messages` matches** across\
+      \ the entire CI log.\n  - Published `Cito-macos-arm64.zip` (`SHA-256: 553300685bfaa711bc9dc04abfc718f641a4dc76e5ff9cd914a74b2ec228895a`)\
+      \ and synchronized to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`,\
+      \ commit `2d07e1b8029e6bb1497185bc75322c4f3e2a077e`).\n\nVerification:\n- Run:\
+      \ `cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`\
+      \ -> 199 passed, 0 failed, 0 warnings, `Syntax OK`\n- Run: GitHub Actions run\
+      \ `42585143377` -> `conclusion: \"success\"`, `0` `warning:` / `linker_messages`\
+      \ lines in log\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v23.repair_linker`\
+      \ (`df -h`: 163 GiB available).\n\nSpec link:\n- docs/DESIGN.md (§9, V23 Stage\
+      \ 7 v0.19.0)\n- bin/cito-linker, packaging/homebrew/cito.rb"

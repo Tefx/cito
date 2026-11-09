@@ -67,29 +67,4 @@
       if (target) activateScene(target);
     });
   }
-
-  // Interactive simulation actions inside the two scenes
-  const simTriggerA2A = document.querySelector("[data-sim-a2a]");
-  const simOutputA2A = document.querySelector("[data-sim-a2a-output]");
-  if (simTriggerA2A && simOutputA2A) {
-    let replayed = false;
-    simTriggerA2A.addEventListener("click", () => {
-      replayed = !replayed;
-      simOutputA2A.textContent = replayed
-        ? "✓ Codex session woke immediately, pulled the updated schema, and verified client types."
-        : "⚡ Signal delivered — Codex session is now awake and updating the frontend client.";
-    });
-  }
-
-  const simTriggerHuman = document.querySelector("[data-sim-human]");
-  const simOutputHuman = document.querySelector("[data-sim-human-output]");
-  if (simTriggerHuman && simOutputHuman) {
-    let sent = false;
-    simTriggerHuman.addEventListener("click", () => {
-      sent = !sent;
-      simOutputHuman.textContent = sent
-        ? "✓ Reply delivered to Claude Code · Telegram notification marked read automatically."
-        : "💬 Waiting for your one-line reply from the Mac menu bar or Telegram…";
-    });
-  }
 })();

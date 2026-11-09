@@ -1,9 +1,7 @@
+pub use super::config::*;
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-#[path = "config.rs"]
-mod config;
-pub use config::*;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
@@ -87,12 +85,7 @@ impl NativeConfig {
             .and_then(|h| h.get("user"))
             .and_then(Value::as_str)
             .unwrap_or(&global_user);
-        if user.is_empty()
-            || user.len() > 64
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        {
+        if !validate_user(user) {
             return Err(format!("Invalid user for hub {hub}"));
         }
         Ok(user.to_string())
@@ -128,16 +121,20 @@ pub fn random_uuid_v4() -> String {
     )
 }
 
-pub fn random_hex(bytes_len: usize) -> String {
+/// Generates cryptographic tokens without masking an entropy-source failure.
+pub fn try_random_hex(bytes_len: usize) -> Result<String, String> {
     let mut bytes = vec![0u8; bytes_len];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = ((now_ms() as usize).wrapping_add(i * 31)) as u8;
-        }
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Best-effort identifiers for temporary paths; use try_random_hex for secrets.
+pub fn random_hex(bytes_len: usize) -> String {
+    try_random_hex(bytes_len).unwrap_or_else(|_| {
+        (0..bytes_len)
+            .map(|i| format!("{:02x}", ((now_ms() as usize).wrapping_add(i * 31)) as u8))
+            .collect()
+    })
 }
 
 pub fn system_home_dir() -> String {
@@ -564,12 +561,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
     }
     let mut user = match env::var("CITO_USER") {
         Ok(u) => {
-            if u.is_empty()
-                || u.len() > 64
-                || !u
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-            {
+            if !validate_user(&u) {
                 return Err(
                     "CITO_USER must contain 1-64 letters, numbers, dots, underscores or hyphens"
                         .to_string(),
@@ -652,18 +644,10 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
             ));
         };
         let (configured_default, hubs_map, _) = try_normalize_existing_config(Some(&raw))?;
-        for (name, hub) in &hubs_map {
+        for hub in hubs_map.values() {
             validate_nats_url(hub["url"].as_str().unwrap_or(""))?;
             if hub["authMode"] == "oidc" {
-                validate_https_issuer(hub["issuer"].as_str().unwrap_or(""))?;
-                if hub
-                    .get("clientId")
-                    .or_else(|| hub.get("client_id"))
-                    .and_then(Value::as_str)
-                    .is_none_or(|s| s.trim().is_empty())
-                {
-                    return Err(format!("OIDC clientId is required for hub {name}"));
-                }
+                super::login::Settings::new(hub)?;
             }
         }
         if env::var("CITO_HUB").is_err() {
@@ -682,12 +666,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
         }
         if env::var("CITO_USER").is_err() {
             if let Some(config_user) = map.get("user").and_then(Value::as_str) {
-                if config_user.is_empty()
-                    || config_user.len() > 64
-                    || !config_user
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-                {
+                if !validate_user(config_user) {
                     return Err("Invalid user in config.json".to_string());
                 }
                 user = config_user.to_string();

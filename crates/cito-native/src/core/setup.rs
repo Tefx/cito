@@ -53,6 +53,14 @@ pub fn resolve_stable_package_root(raw: &str) -> String {
 
 pub fn resolve_package_root() -> PathBuf {
     if let Ok(exe) = env::current_exe() {
+        // Cargo executables live under a profile directory, not the package bin/.
+        // OUT_DIR also covers an explicitly configured Cargo target directory.
+        let checkout = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        if let Some(profile) = Path::new(env!("OUT_DIR")).ancestors().nth(3) {
+            if exe.starts_with(profile) && checkout.join("Cargo.toml").is_file() {
+                return checkout;
+            }
+        }
         if let Some(exe_dir) = exe.parent() {
             let parent = exe_dir.parent().unwrap_or(exe_dir);
             let raw = parent.to_string_lossy().to_string();
@@ -117,6 +125,29 @@ pub fn ensure_cli_shims_native(
         fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
         written.push(shim_path);
+    }
+    if let Ok(exe_path) = env::current_exe() {
+        let exe_s = exe_path.to_string_lossy();
+        if (exe_s.contains("/Cellar/cito/") || exe_s.contains("/opt/cito/"))
+            && state_dir
+                .to_str()
+                .is_some_and(|s| s.ends_with("/.cito"))
+        {
+            let opt_app = PathBuf::from(resolve_stable_package_root(&exe_s))
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf());
+            if let Some(src_app) = opt_app.filter(|p| p.ends_with("Cito.app") && p.is_dir()) {
+                let dst_app = PathBuf::from("/Applications/Cito.app");
+                if !dst_app.exists() || dst_app.join("Contents/Info.plist").is_file() {
+                    let _ = copy_dir_recursive(&src_app, &dst_app);
+                    let _ = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+                        .args(["-f", "/Applications/Cito.app"])
+                        .status();
+                }
+            }
+        }
     }
     Ok(written)
 }
@@ -525,6 +556,15 @@ pub fn build_mac_app_bundle_native(
     state_dir: &Path,
     plugins: &LoadedPlugins,
 ) -> Result<(PathBuf, u64), String> {
+    build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
+}
+
+fn build_mac_app_bundle_from_root(
+    dest_dir: Option<&str>,
+    state_dir: &Path,
+    plugins: &LoadedPlugins,
+    pkg_root: &Path,
+) -> Result<(PathBuf, u64), String> {
     let home = system_home_dir();
     let base_dest = match dest_dir {
         Some(d) => expand_home_dir(d, "destDir", Some(&home))?,
@@ -582,7 +622,6 @@ pub fn build_mac_app_bundle_native(
     fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
     let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));
 
-    let pkg_root = resolve_package_root();
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let helper_native = helpers_dir.join("cito-native");
     fs::copy(&exe, &helper_native).map_err(|e| e.to_string())?;
@@ -624,8 +663,8 @@ pub fn build_mac_app_bundle_native(
     let sign_id = env::var("CITO_CODESIGN_IDENTITY")
         .or_else(|_| env::var("APPLE_SIGNING_IDENTITY"))
         .unwrap_or_default();
-    if !sign_id.trim().is_empty() {
-        let _ = Command::new("/usr/bin/codesign")
+    let status = if !sign_id.trim().is_empty() {
+        Command::new("/usr/bin/codesign")
             .args([
                 "--force",
                 "--options",
@@ -636,11 +675,18 @@ pub fn build_mac_app_bundle_native(
                 sign_id.trim(),
                 &app_path.to_string_lossy(),
             ])
-            .status();
+            .status()
     } else {
-        let _ = Command::new("/usr/bin/codesign")
+        Command::new("/usr/bin/codesign")
             .args(["-s", "-", "--force", "--deep", &app_path.to_string_lossy()])
-            .status();
+            .status()
+    }
+    .map_err(|e| format!("Cannot run codesign for {}: {e}", app_path.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "codesign failed for {}: {status}",
+            app_path.display()
+        ));
     }
 
     let bytes = dir_bytes(&app_path);
@@ -657,12 +703,13 @@ pub fn uninstall_setup_native(
     let raw = crate::plugins::read_config_text(config_path)?;
     let (default_hub, _, rest) = try_normalize_existing_config(raw.as_deref())?;
     let daemon_port = match env::var("CITO_DAEMON_PORT") {
-        Ok(value) => value
+        Ok(value) if !value.trim().is_empty() => value
+            .trim()
             .parse::<u16>()
             .ok()
             .filter(|p| *p > 0)
             .ok_or("Invalid CITO_DAEMON_PORT")?,
-        Err(_) => rest
+        _ => rest
             .get("daemonPort")
             .and_then(Value::as_u64)
             .map(|p| {
@@ -717,29 +764,73 @@ pub fn uninstall_setup_native(
         });
     }
 
-    let bin_dir = state_dir.join("bin");
-    if bin_dir.exists() {
-        fs::remove_dir_all(&bin_dir).map_err(|e| e.to_string())?;
-        actions.push(SetupAction {
-            target: "cito".to_string(),
-            path: bin_dir.to_string_lossy().to_string(),
-            status: "updated".to_string(),
-            backup_path: None,
-            detail: "Removed CLI shims directory".to_string(),
-        });
-    }
-
-    if purge_data {
-        let user_app = home_dir.join("Applications").join("Cito.app");
-        if user_app.exists() {
-            fs::remove_dir_all(&user_app).map_err(|e| e.to_string())?;
+    for (sub, label) in [
+        ("bin", "Removed CLI shims directory"),
+        ("plugins", "Removed staged plugins directory"),
+        ("sockets", "Removed local sockets directory"),
+        ("claude", "Removed Claude wake queue and endpoint cache"),
+    ] {
+        let dir = state_dir.join(sub);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
             actions.push(SetupAction {
                 target: "cito".to_string(),
-                path: user_app.to_string_lossy().to_string(),
+                path: dir.to_string_lossy().to_string(),
                 status: "updated".to_string(),
                 backup_path: None,
-                detail: "Removed ~/Applications/Cito.app".to_string(),
+                detail: label.to_string(),
             });
+        }
+    }
+    let lock_file = state_dir.join("daemon.lock");
+    if lock_file.exists() {
+        let _ = fs::remove_file(&lock_file);
+    }
+
+    for app_target in [
+        home_dir.join("Applications").join("Cito.app"),
+        PathBuf::from("/Applications/Cito.app"),
+    ] {
+        let is_symlink = fs::symlink_metadata(&app_target)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_symlink {
+            let _ = fs::remove_file(&app_target);
+            actions.push(SetupAction {
+                target: "cito".to_string(),
+                path: app_target.to_string_lossy().to_string(),
+                status: "updated".to_string(),
+                backup_path: None,
+                detail: format!("Removed {} symlink", app_target.display()),
+            });
+        } else if purge_data && app_target.exists() {
+            let _ = fs::remove_dir_all(&app_target);
+            actions.push(SetupAction {
+                target: "cito".to_string(),
+                path: app_target.to_string_lossy().to_string(),
+                status: "updated".to_string(),
+                backup_path: None,
+                detail: format!("Removed {}", app_target.display()),
+            });
+        }
+    }
+    if purge_data {
+        if let Some(parent) = config_path.parent() {
+            if let Some(cname) = config_path.file_name().and_then(|s| s.to_str()) {
+                let lock_name = format!("{cname}.lock");
+                let bak_prefix = format!("{cname}.bak.");
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let fname = entry.file_name().to_string_lossy().into_owned();
+                        if fname == lock_name || fname.starts_with(&bak_prefix) {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+        if config_path.exists() && !config_path.starts_with(state_dir) {
+            let _ = fs::remove_file(config_path);
         }
         if state_dir.exists() {
             fs::remove_dir_all(state_dir).map_err(|e| e.to_string())?;
@@ -1116,12 +1207,14 @@ pub fn run_setup_cli(args: &[String]) {
                 let Some(Value::Object(ref mut m)) = hubs.get_mut(n) else {
                     return Err(format!("Unknown hub: {n}"));
                 };
+                m.remove("disabled");
                 m.insert("enabled".to_string(), json!(true));
             }
             for n in &disable_hubs {
                 let Some(Value::Object(ref mut m)) = hubs.get_mut(n) else {
                     return Err(format!("Unknown hub: {n}"));
                 };
+                m.remove("disabled");
                 m.insert("enabled".to_string(), json!(false));
             }
             for n in &remove_hubs {
@@ -1354,7 +1447,13 @@ mod tests {
         let args: Vec<String> =
             serde_json::from_str(&env::var("CITO_SETUP_TEST_ARGS").expect("worker arguments"))
                 .unwrap();
-        if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
+        if args == ["test-codesign-failure"] {
+            env::set_var("CITO_CODESIGN_IDENTITY", "nonexistent-identity-cito-test");
+            let root = PathBuf::from(env::var("HOME").unwrap());
+            let plugins = crate::plugins::load_plugins(&root);
+            let error = build_mac_app_bundle_native(None, &root, &plugins).unwrap_err();
+            assert!(error.contains("codesign failed"), "{error}");
+        } else if env::var("CITO_SETUP_TEST_LAUNCH_CONFIG").is_ok() {
             let root = PathBuf::from(env::var("HOME").unwrap());
             let plugins = crate::plugins::load_plugins(&root);
             set_launch_at_login(true, &root.join("installed"), &root, &plugins).unwrap();
@@ -1390,13 +1489,25 @@ mod tests {
     }
 
     #[test]
+    fn app_bundle_rejects_invalid_signing_identity() {
+        let (root, _) = fixture();
+        let result = cli_child(&root, &["test-codesign-failure"]);
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
     fn app_bundle_rejects_ui_copy_failure() {
         let (root, plugins) = fixture();
         fs::create_dir_all(root.join("bin")).unwrap();
         let ui = root.join("bin/cito-ui");
         fs::write(&ui, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&ui, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = build_mac_app_bundle_native(None, &root, &plugins);
+        let result = build_mac_app_bundle_from_root(None, &root, &plugins, &root);
         let copied_native = root
             .join("Applications/Cito.app/Contents/Helpers/cito-native")
             .is_file();
@@ -1677,13 +1788,38 @@ mod tests {
 
     #[test]
     fn uninstall_uses_configured_port_unlistens_and_waits_before_removal() {
+        // Keep process-global environment immutable while other unit tests run.
+        if env::var_os("CITO_UNINSTALL_TEST_WORKER").is_none() {
+            for mode in ["unset", "padded", "blank"] {
+                let output = Command::new(env::current_exe().unwrap())
+                    .args(["core::setup::tests::uninstall_uses_configured_port_unlistens_and_waits_before_removal", "--exact", "--nocapture"])
+                    .env("CITO_UNINSTALL_TEST_WORKER", mode)
+                    .env_remove("CITO_DAEMON_PORT")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            }
+            return;
+        }
         use std::io::{Read, Write};
         let (root, plugins) = fixture();
         let state = root.join("installed");
-        fs::create_dir_all(state.join("bin")).unwrap();
-        fs::write(state.join("bin/sentinel"), "present until shutdown").unwrap();
+        for sub in ["bin", "plugins", "sockets", "claude"] {
+            fs::create_dir_all(state.join(sub)).unwrap();
+            fs::write(state.join(sub).join("sentinel"), "present until shutdown").unwrap();
+        }
+        fs::write(state.join("daemon.lock"), "lock").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        match env::var("CITO_UNINSTALL_TEST_WORKER").unwrap().as_str() {
+            "padded" => env::set_var("CITO_DAEMON_PORT", format!(" {port} ")),
+            "blank" => env::set_var("CITO_DAEMON_PORT", " \t "),
+            _ => {}
+        }
         let config_path = root.join("config.json");
         fs::write(
             &config_path,
@@ -1747,7 +1883,10 @@ mod tests {
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
         assert!(!crate::plugins::pid_alive(pid as i32));
-        assert!(!state.join("bin").exists());
+        for sub in ["bin", "plugins", "sockets", "claude"] {
+            assert!(!state.join(sub).exists(), "{sub} should be removed on uninstall");
+        }
+        assert!(!state.join("daemon.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

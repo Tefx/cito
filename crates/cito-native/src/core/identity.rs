@@ -136,7 +136,7 @@ pub fn hash(raw: &str) -> String {
 pub fn sanitize_message(raw: &str) -> Result<String, String> {
     let clean: String = raw
         .chars()
-        .filter(|c| !c.is_ascii_control() || matches!(c, '\n' | '\r' | '\t'))
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t') || c.is_whitespace())
         .collect();
     if clean.trim().is_empty() || clean.chars().count() > 65_536 {
         Err("INVALID_INPUT: message must contain 1..65,536 characters".into())
@@ -182,8 +182,23 @@ mod tests {
     }
     #[test]
     fn message_validation() {
-        assert!(sanitize_message("\u{0}").is_err());
-        assert_eq!(sanitize_message("a\u{0}\nb").ok(), Some("a\nb".into()));
+        for raw in ["\u{0}", "\u{0081}", " \u{0081}\t\u{0085}"] {
+            assert_eq!(
+                sanitize_message(raw),
+                Err("INVALID_INPUT: message must contain 1..65,536 characters".into())
+            );
+        }
+        for (raw, expected) in [
+            ("a\u{0}\nb", "a\nb"),
+            ("a\u{0081}b", "ab"),
+            (" \ta\u{0081}b\u{2003}", "ab"),
+            (
+                "a\n\r\t\u{000b}\u{000c}\u{0085}b",
+                "a\n\r\t\u{000b}\u{000c}\u{0085}b",
+            ),
+        ] {
+            assert_eq!(sanitize_message(raw).as_deref(), Ok(expected));
+        }
         assert!(sanitize_message(&"x".repeat(65537)).is_err());
     }
 }

@@ -2,7 +2,7 @@
 use super::auth::{env_value, local_principal, principal_ids_equal, principal_matches, HubAuth};
 use super::database::{Connection, Database};
 use super::hub_plugins::{self, ChannelPlugin, ChannelProcess};
-use super::identity::listener_id;
+use super::identity::{hash, listener_id};
 use super::lease::evaluate_node_lease;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
@@ -159,9 +159,6 @@ fn pair_code() -> Result<String, String> {
     let mut bytes = [0u8; 6];
     getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
     Ok(format!("cito-{}", encode_pair_token(bytes)))
-}
-fn slug(user: &str) -> String {
-    super::identity::normalize_slug(user)
 }
 fn matches(subject: &str, filter: &str) -> bool {
     filter.is_empty()
@@ -725,25 +722,7 @@ impl HubEngine {
             }
             "send_reply_from_human" => {
                 let sender = caller.ok_or("FORBIDDEN: Human identity required")?;
-                let target = p["to_listener_id"]
-                    .as_str()
-                    .or_else(|| p["to"].as_str())
-                    .ok_or("INVALID_INPUT: to_listener_id is required")?;
-                let text = p["message"]
-                    .as_str()
-                    .or_else(|| p["text"].as_str())
-                    .ok_or("INVALID_INPUT: message is required")?;
-                let in_reply_to = p
-                    .get("in_reply_to")
-                    .filter(|v| !v.is_null())
-                    .or_else(|| p.get("signal_id").filter(|v| !v.is_null()))
-                    .map(|v| {
-                        v.as_str()
-                            .filter(|s| !s.is_empty())
-                            .ok_or("INVALID_INPUT: in_reply_to must be a non-empty string")
-                    })
-                    .transpose()?;
-                return publish_human_reply(c, sender, "human", target, text, in_reply_to, events);
+                return publish_human_reply(c, sender, "human", p, events);
             }
             "signal_claim_dispatch" => claim(c, p, caller),
             "signal_ack" => ack(c, p, caller, events),
@@ -959,7 +938,7 @@ impl HubEngine {
             .lock()
             .map_err(|_| "Registry lock poisoned")?
             .clone();
-        self.inner.db.transaction(|c|{let mut channels=Vec::new();for plugin in plugins{let(cfg,_)=service(c,&plugin.id)?;let binding=one(c,"SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",&[caller["principal_id"].clone(),json!(plugin.id)])?.unwrap_or(Value::Null);let user=parse(&binding,"user_config_json");let hub_ready=ready(&plugin,&cfg,"hub");let user_ready=ready(&plugin,&user,"user");let provided=hub_ready&&fields(&plugin).iter().any(|f|s(f,"scope")=="hub");let fs=fields(&plugin).iter().map(|f|{let hub=s(f,"scope")=="hub";let val=if hub{&cfg[s(f,"key")]}else{&user[s(f,"key")]};let hidden=hub&&(oidc(Some(caller))||s(f,"type")=="secret");json!({"key":f["key"],"scope":f["scope"],"label":f["label"],"type":f["type"],"required":f["required"].as_bool().unwrap_or(false),"placeholder":f["placeholder"].as_str().unwrap_or(""),"value":if hidden{Value::String(String::new())}else{val.clone()},"configured":configured(val),"hidden":hidden})}).collect::<Vec<_>>();let pair=one(c,"SELECT code,instruction FROM hub_pairing_codes WHERE principal_id=? AND plugin_id=? AND consumed_ms IS NULL AND expires_ms>? ORDER BY created_ms DESC LIMIT 1",&[caller["principal_id"].clone(),json!(plugin.id),json!(now_ms())])?.unwrap_or(Value::Null);channels.push(json!({"id":plugin.id,"display_name":plugin.manifest["displayName"],"sf_symbol":plugin.manifest["sfSymbol"].as_str().unwrap_or("paperplane.fill"),"tint":plugin.manifest["tint"].as_str().unwrap_or("blue"),"enabled":binding.is_null()||n(&binding,"enabled")==1,"configured":hub_ready&&user_ready,"status":if hub_ready&&user_ready{"ready"}else if hub_ready{"hub_ready"}else{"not_configured"},"detail":if hub_ready&&user_ready{"Connected and ready for notifications"}else{"Configure or pair this channel"},"display_label":binding["display_label"],"hub_provided":provided,"pairing_supported":plugin.manifest["pairing"]["supported"]==true,"pairing_action_label":plugin.manifest["pairing"]["actionLabel"].as_str().unwrap_or("Pair Account…"),"pairing_code":pair["code"],"pairing_instruction":pair["instruction"],"fields":fs}));}Ok(json!({"channels":channels}))})
+        self.inner.db.transaction(|c|{let mut channels=Vec::new();for plugin in plugins{let(cfg,_)=service(c,&plugin.id)?;let binding=one(c,"SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",&[caller["principal_id"].clone(),json!(plugin.id)])?.unwrap_or(Value::Null);let user=parse(&binding,"user_config_json");let hub_ready=ready(&plugin,&cfg,"hub");let user_ready=ready(&plugin,&user,"user");let provided=hub_ready&&fields(&plugin).iter().any(|f|s(f,"scope")=="hub");let fs=fields(&plugin).iter().map(|f|{let hub=s(f,"scope")=="hub";let val=if hub{&cfg[s(f,"key")]}else{&user[s(f,"key")]};let hidden=hub&&(oidc(Some(caller))||s(f,"type")=="secret");let value=if hidden{Value::String(String::new())}else if let Some(s)=val.as_str(){Value::String(s.to_owned())}else if val.is_null(){Value::String(String::new())}else{Value::String(val.to_string())};json!({"key":f["key"],"scope":f["scope"],"label":f["label"],"type":f["type"],"required":f["required"].as_bool().unwrap_or(false),"placeholder":f["placeholder"].as_str().unwrap_or(""),"value":value,"configured":configured(val),"hidden":hidden})}).collect::<Vec<_>>();let pair=one(c,"SELECT code,instruction FROM hub_pairing_codes WHERE principal_id=? AND plugin_id=? AND consumed_ms IS NULL AND expires_ms>? ORDER BY created_ms DESC LIMIT 1",&[caller["principal_id"].clone(),json!(plugin.id),json!(now_ms())])?.unwrap_or(Value::Null);channels.push(json!({"id":plugin.id,"display_name":plugin.manifest["displayName"],"sf_symbol":plugin.manifest["sfSymbol"].as_str().unwrap_or("paperplane.fill"),"tint":plugin.manifest["tint"].as_str().unwrap_or("blue"),"enabled":binding.is_null()||n(&binding,"enabled")==1,"configured":hub_ready&&user_ready,"status":if hub_ready&&user_ready{"ready"}else if hub_ready{"hub_ready"}else{"not_configured"},"detail":if hub_ready&&user_ready{"Connected and ready for notifications"}else{"Configure or pair this channel"},"display_label":binding["display_label"],"hub_provided":provided,"pairing_supported":plugin.manifest["pairing"]["supported"]==true,"pairing_action_label":plugin.manifest["pairing"]["actionLabel"].as_str().unwrap_or("Pair Account…"),"pairing_code":pair["code"],"pairing_instruction":pair["instruction"],"fields":fs}));}Ok(json!({"channels":channels}))})
     }
     fn tick(&self) -> Result<(), String> {
         if self.inner.closed.load(Ordering::SeqCst) {
@@ -1113,7 +1092,8 @@ impl HubEngine {
         let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;
         let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?;let binding=bindings.into_iter().find(|b|{let cfg=parse(b,"user_config_json");s(&cfg,"_external_chat_id")==chat&&s(&cfg,"_external_user_id")==user}).ok_or("FORBIDDEN: external account is not bound")?;let pid=s(&binding,"principal_id");
         let target=if let Some(ext)=f["reply_to_external_msg_id"].as_str(){one(c,"SELECT signal_id,from_listener_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND external_msg_id=?",&[json!(id),json!(pid),json!(ext)])?}else{one(c,"SELECT signal_id,from_listener_id FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND status='delivered' AND delivered_ms>=? AND from_listener_id IS NOT NULL ORDER BY delivered_ms DESC,seq DESC LIMIT 1",&[json!(id),json!(pid),json!(now_ms()-600_000)])?}.ok_or("LISTENER_NOT_FOUND: no recent sender to reply to")?;
-        let (reply, request)=publish_human_reply(c,&binding,id,required(&target,"from_listener_id")?,required(f,"text")?,target["signal_id"].as_str(),&mut events)?;
+        let request=json!({"to":required(&target,"from_listener_id")?,"message":required(f,"text")?,"in_reply_to":target["signal_id"]});
+        let (reply, request)=publish_human_reply(c,&binding,id,&request,&mut events)?;
         ack_request=request;
         c.execute("INSERT INTO hub_processed_replies(plugin_id,update_id,processed_at_ms) VALUES(?,?,?)",&[json!(id),json!(update),json!(now_ms())])?;
         Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"signal_id":reply["signal_id"],"target_display":reply["target_display"],"error":null}))
@@ -1132,11 +1112,27 @@ fn publish_human_reply(
     c: &Connection,
     sender: &Value,
     channel: &str,
-    target: &str,
-    text: &str,
-    in_reply_to: Option<&str>,
+    p: &Value,
     events: &mut Vec<Value>,
 ) -> Result<(Value, Option<Value>), String> {
+    let target = p["to_listener_id"]
+        .as_str()
+        .or_else(|| p["to"].as_str())
+        .ok_or("INVALID_INPUT: to_listener_id is required")?;
+    let text = p["message"]
+        .as_str()
+        .or_else(|| p["text"].as_str())
+        .ok_or("INVALID_INPUT: message is required")?;
+    let in_reply_to = p
+        .get("in_reply_to")
+        .filter(|v| !v.is_null())
+        .or_else(|| p.get("signal_id").filter(|v| !v.is_null()))
+        .map(|v| {
+            v.as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("INVALID_INPUT: in_reply_to must be a non-empty string")
+        })
+        .transpose()?;
     let pid = required(sender, "principal_id")?;
     let owner = required(sender, "owner_user")?;
     let raw = target.rsplit_once(':').map(|(_, s)| s).unwrap_or(target);
@@ -1154,39 +1150,52 @@ fn publish_human_reply(
     {
         return Err("FORBIDDEN_TARGET_SCOPE: reply target is private".into());
     }
-    let text: String = text
-        .chars()
-        .filter(|c| !c.is_control() || c.is_whitespace())
-        .collect();
-    if text.trim().is_empty() || text.chars().count() > 65_536 {
-        return Err("INVALID_INPUT: reply must contain 1..65536 code points".into());
-    }
+    let text = super::identity::sanitize_message(text)?;
     let human = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let target_id = s(&target_row, "key");
     if human == target_id {
         return Err("SELF_SEND_FORBIDDEN: cannot reply to the same node".into());
     }
     let in_reply_to = in_reply_to.map(|raw| raw.rsplit_once(':').map(|(_, id)| id).unwrap_or(raw));
-    let sig = random_id("sig_")?;
-    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|hub|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":"hub","host_name":channel,"harness":"human","listener_id":format!("{}-{}",slug(owner),human.trim_start_matches("c_")),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
-    publish(
+    // The daemon reserves the reply ID durably before its first publication attempt.
+    let sig = match p.get("reply_signal_id").filter(|v| !v.is_null()) {
+        Some(id) => id
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("INVALID_INPUT: reply_signal_id must be a non-empty string")?
+            .to_owned(),
+        None => random_id("sig_")?,
+    };
+    let host_id = p["host_id"].as_str().unwrap_or("hub");
+    let host_name = p["host_name"].as_str().unwrap_or(channel);
+    let msg_id = p["msg_id"]
+        .as_str()
+        .map(|key| hash(&format!("{pid}|{host_id}|human|{target_id}|{key}")));
+    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
+    let published = publish(
         c,
         &format!("cito.signal.{target_id}"),
         &payload,
-        Some(&sig),
+        msg_id.as_deref().or(Some(&sig)),
         None,
         events,
     )?;
-    let ack_request = if let Some(source) = in_reply_to {
-        let request =
-            json!({"node_id":human,"signal_ids":[source],"channel_id":format!("hub:{channel}")});
-        ack(c, &request, None, events)?;
-        Some(request)
+    // A retry must return the committed signal ID, not the newly generated candidate.
+    let stored = one(
+        c,
+        "SELECT signal_id FROM hub_signals WHERE seq=?",
+        &[published["seq"].clone()],
+    )?
+    .ok_or("Published reply missing")?;
+    let (ack_request, acked_at_ms) = if let Some(source) = in_reply_to {
+        let request = json!({"node_id":human,"signal_ids":[source],"channel_id":format!("{host_id}:{channel}")});
+        let acked = ack(c, &request, None, events)?;
+        (Some(request), acked["acked_at_ms"].clone())
     } else {
-        None
+        (None, Value::Null)
     };
     Ok((
-        json!({"ok":true,"signal_id":sig,"target_display":registration["public_id"],"error":null}),
+        json!({"ok":true,"seq":published["seq"],"signal_id":stored["signal_id"],"target_display":registration["public_id"],"acked_at_ms":acked_at_ms,"error":null}),
         ack_request,
     ))
 }
@@ -1569,7 +1578,7 @@ fn attach(c: &Connection, b: &Value, enabled: bool, remote: bool) -> Result<(), 
     let pid = required(b, "principal_id")?;
     let id = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let old = kv_row(c, &id)?;
-    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":format!("{}-{}",slug(s(b,"owner_user")),id.trim_start_matches("c_")),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":format!("@{} (Me)",s(b,"owner_user")),"about":"Human node","scope":if remote{"self"}else{"workspace"},"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
+    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(b,"owner_user"), &id),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":format!("@{} (Me)",s(b,"owner_user")),"about":"Human node","scope":if remote{"self"}else{"workspace"},"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
     if !reg.is_object() {
         return Err("INVALID_INPUT: Listener must be an object".into());
     }
@@ -1596,6 +1605,7 @@ fn attach(c: &Connection, b: &Value, enabled: bool, remote: bool) -> Result<(), 
 /// Stopping the listener never closes its shared engine. The daemon closes the engine last.
 pub struct HubServer {
     pub address: SocketAddr,
+    pub(super) auth: Arc<HubAuth>,
     stop: Arc<AtomicBool>,
     sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -1626,13 +1636,20 @@ impl Drop for HubServer {
     }
 }
 impl HubEngine {
-    pub fn start_server(&self, bind: &str, port: u16, auth: HubAuth) -> Result<HubServer, String> {
+    pub fn start_server(
+        &self,
+        bind: &str,
+        port: u16,
+        auth: impl Into<Arc<HubAuth>>,
+    ) -> Result<HubServer, String> {
         let listener = TcpListener::bind((bind, port)).map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
-        let (engine, st, ss, auth) = (self.clone(), stop.clone(), sockets.clone(), Arc::new(auth));
+        let auth = auth.into();
+        let (engine, st, ss, worker_auth) =
+            (self.clone(), stop.clone(), sockets.clone(), auth.clone());
         let handle = thread::spawn(move || {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
             let mut next_socket = 0u64;
@@ -1665,7 +1682,7 @@ impl HubEngine {
                             }
                         }
                         let (e, a, s, connections) =
-                            (engine.clone(), auth.clone(), st.clone(), ss.clone());
+                            (engine.clone(), worker_auth.clone(), st.clone(), ss.clone());
                         workers.push(thread::spawn(move || {
                             handle_http(stream, e, a, s);
                             if let Ok(mut list) = connections.lock() {
@@ -1693,6 +1710,7 @@ impl HubEngine {
         });
         Ok(HubServer {
             address,
+            auth,
             stop,
             sockets,
             thread: Mutex::new(Some(handle)),
@@ -1842,7 +1860,7 @@ fn handle_http(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/native-hub/cases.rs"]
+#[path = "../../tests/hub/cases.rs"]
 mod tests;
 
 static HUB_STOP: AtomicBool = AtomicBool::new(false);

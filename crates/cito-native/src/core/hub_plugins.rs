@@ -131,7 +131,7 @@ fn roots_for_executable(data_dir: &Path, executable: Option<&Path>) -> Vec<PathB
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/native-hub/hub_plugin_cases.rs"]
+#[path = "../../tests/hub/hub_plugin_cases.rs"]
 mod tests;
 
 type Pending = Arc<Mutex<HashMap<String, mpsc::SyncSender<Value>>>>;

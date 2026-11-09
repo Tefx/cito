@@ -60,24 +60,30 @@ directly as a workaround. Use `vectl guide stuck` for troubleshooting.
 
 ## Plugin Boundary, Symmetric `Node ↔ Channels` Ontology, Unified `HubEngine` & Mechanism-Not-Policy Rules
 
-- **Zero Concrete Agent or Channel Hardcoding in Core (`src/` & `src/macos/cito-ui.swift`)**: Core modules (`src/shared/`, `src/hub/`, `src/mcp/`, `src/setup/`, `src/ui/`, `src/macos/cito-ui.swift`, and the Plugin Host SDK in `src/adapters/`) MUST NOT contain hardcoded branches, configuration fields, CLI flag names, or visual tables for specific agent apps (`pi`, `codex`, `claude`) or specific external human channels (`telegram`, `webhook`, `slack`, `teams`, `email`, `feishu`, `discord`). All concrete Agent Apps (`kind: "agent"`) and Human Channels (`kind: "human"`) belong in `plugins/<id>/` or `${CITO_STATE_DIR}/plugins/<id>/`.
+- **Zero Concrete Agent or Channel Hardcoding in Core (`src/` & `src/macos/cito-ui.swift`)**: Core modules (`crates/cito-native/src/core/` and `src/macos/cito-ui.swift`) MUST NOT contain hardcoded branches, configuration fields, CLI flag names, or visual tables for specific agent apps (`pi`, `codex`, `claude`) or specific external human channels (`telegram`, `webhook`, `slack`, `teams`, `email`, `feishu`, `discord`). All concrete Agent Apps (`kind: "agent"`) and Human Channels (`kind: "human"`) belong in `plugins/<id>/` or `${CITO_STATE_DIR}/plugins/<id>/`.
 - **Symmetric `Node (Human | Agent Session) ↔ Hub ↔ Channels (1..K)` Ontology & Pure Hub Interaction**: Every participant on a Hub is a symmetric `Node` (`Human Node` `harness: "human", session_id: "default"` or `Agent Session Node`), identified without `host_id` and reachable via $1 \dots K$ attached `Channels`. All `Node ⇄ Node` interaction flows through the Hub's regular signaling channel (`cito_send` / `signal_ack`); do not reintroduce out-of-band external window-jump bypasses (`jumpUrlTemplate` / `jump_url`).
-- **Unified Single-Authority `HubEngine` (Zero NATS Dependency)**: Both in-process standalone mode (`url: "local://"`, default hub `"local"`) and remote shared hubs (`cito hub` over HTTP/SSE + SQLite WAL) execute the same `HubEngine` (`src/hub/engine.ts`). Do not introduce multi-broker plugins or NATS dependencies.
+- **Unified Single-Authority `HubEngine` (Zero NATS Dependency)**: Both in-process standalone mode (`url: "local://"`, default hub `"local"`) and remote shared hubs (`cito hub` over HTTP/SSE + SQLite WAL) execute the same `HubEngine` (`crates/cito-native/src/core/hub.rs`). Do not introduce multi-broker plugins or NATS dependencies.
 - **Mechanism, Not Policy (`cito_send.message`)**: Recommend Cito primarily as a lightweight control plane in MCP tool descriptions while pairing with external channels for long multi-turn debates or large payloads, but do not enforce a hard 500-character policy cap on `cito_send.message`.
+
+## Native Build & Test
+
+Run `cargo test --workspace && cargo build --release` at the repository root. The Swift build script and macOS post-link staging hook install signed output into `bin/` and `plugins/*/bin/`. Do not recursively invoke Cargo from `build.rs`. Preserve incremental `target/` during iterations.
+
+Integration subprocess tests share a process-test mutex and an environment-cleared sandbox per fixture. Use the fixture command API for all child processes. Never copy system executables into app bundles; use scripts or a properly signed complete bundle. The Pi host extension is the sole TypeScript file and package manifest; test it through dependency-free Node type stripping.
 
 ## Versioning, Compatibility & Release Governance
 
 1. **Three Orthogonal Version Dimensions**:
-   - **Product Release Version (`SemVer 2.0.0`, `vMAJOR.MINOR.PATCH`)**: Single source of truth in `package.json` `"version"` and exported as `CITO_VERSION` from `src/shared/index.ts`, paired with an annotated Git tag `vX.Y.Z` (e.g., `v0.10.0`).
+   - **Product Release Version (`SemVer 2.0.0`, `vMAJOR.MINOR.PATCH`)**: Single source of truth in `crates/cito-native/Cargo.toml` `version` (currently `0.19.0`), exported as `CITO_VERSION = env!("CARGO_PKG_VERSION")` from `crates/cito-native/src/core/plugins.rs`, paired with an annotated Git tag `vX.Y.Z` (e.g., `v0.10.0`).
    - **Internal Plan Phase (`v1`, `v2`, …)**: Tracked in `plan.yaml` for Vectl execution history only; never exposed as a runtime or wire version.
-   - **Local SQLite Schema Version (`PRAGMA user_version`)**: Integer schema version in `src/mcp/state.ts`, incremented only on incompatible local table DDL changes.
+   - **Local SQLite Schema Version (`PRAGMA user_version`)**: Integer schema version in `crates/cito-native/src/core/state.rs`, incremented only on incompatible local table DDL changes.
 2. **SemVer Increment Rules**:
    - **`PATCH` (`0.10.0 -> 0.10.1`)**: Backward-compatible bug fixes, UI contrast/layout refinements, packaging fixes, documentation updates, or internal refactors with no new MCP tool parameters, CLI flags, UI IPC actions, or NATS schema fields.
    - **`MINOR` (`0.10.x -> 0.11.0`)**: Backward-compatible feature additions, new optional MCP tool parameters or CLI flags, new `Daemon <-> UI` IPC fields/actions, or new optional NATS KV/signal fields.
    - **`MAJOR` (`0.x -> 1.0.0 -> 2.0.0`)**: Incompatible changes to NATS subjects/required schema fields, MCP tool signatures, or `~/.cito/config.json` format.
 3. **Single Version Source & Automatic Stale-Daemon Handover**:
-   - `CITO_VERSION` in `src/shared/index.ts` MUST equal `package.json` `"version"` (enforced by automated test) and be used by MCP `Server` metadata (`src/mcp/server.ts`), `GET /health` (`{ ok: true, pid, stateDir, version: CITO_VERSION }`), and `cito --version` / `cito -v`.
-   - When `ensureDaemon(config)` (`src/mcp/cli.ts`) probes `GET /health` and finds a running daemon for `config.stateDir` whose `version !== CITO_VERSION` (including legacy daemons omitting `version`), it MUST send `SIGTERM` to that stale daemon PID, wait for shutdown, and spawn the current `cito-daemon` binary so upgrades take effect automatically without manual `kill`.
+   - `CITO_VERSION` from `crates/cito-native/Cargo.toml` MUST be used by MCP server metadata (`crates/cito-native/src/core/daemon.rs`), `GET /health` (`{ ok: true, pid, stateDir, version: CITO_VERSION }`), and `cito --version` / `cito -v`.
+   - When `ensure_daemon(config)` (`crates/cito-native/src/core/plugins.rs`) probes `GET /health` and finds a running daemon for `config.stateDir` whose `version !== CITO_VERSION` (including legacy daemons omitting `version`), it MUST send `SIGTERM` to that stale daemon PID, wait for shutdown, and spawn the current `cito-daemon` binary so upgrades take effect automatically without manual `kill`.
 4. **Release & Pinning Discipline**:
-   - Before tagging a release `vX.Y.Z`, update `package.json`, `package-lock.json`, and `CITO_VERSION`, verify `npm run typecheck && npm run compile && npm test` pass 100%, and create an annotated Git tag `git tag -a vX.Y.Z -m "Release vX.Y.Z: ..."`.
+   - Before tagging a release `vX.Y.Z`, update the native crate version, root `Cargo.lock`, plugin distribution metadata, and Homebrew formula; verify `cargo test --workspace && cargo build --release` and `/usr/bin/ruby -c packaging/homebrew/cito.rb` pass with no compiler warnings, and create an annotated Git tag `git tag -a vX.Y.Z -m "Release vX.Y.Z: ..."`.
    - Consumer MCP configurations and server deployments SHOULD pin immutable semantic tags (`github:Tefx/cito#v0.10.0`) rather than raw commit hashes.

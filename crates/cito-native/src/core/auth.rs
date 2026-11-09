@@ -14,8 +14,7 @@ pub fn env_value(key: &str) -> Option<String> {
 }
 
 pub fn local_principal(user: &str) -> Value {
-    let user = user.to_ascii_lowercase();
-    json!({"principal_id": format!("none#{user}"), "owner_user": user})
+    super::identity::principal(user)
 }
 
 pub fn principal_ids_equal(a: &str, b: &str) -> bool {
@@ -351,7 +350,7 @@ impl OidcVerifier {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/native-hub/auth_cases.rs"]
+#[path = "../../tests/hub/auth_cases.rs"]
 mod tests;
 
 pub struct HubAuth {
