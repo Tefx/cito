@@ -7069,7 +7069,7 @@ phases:
 - id: v24
   name: 'V24 Stage 8 (v0.20.0): Full-Lifecycle UX, State-Machine & Reconfiguration
     Closure (L1–L17)'
-  status: pending
+  status: in_progress
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100% locally and on remote host tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito
     (leaving remote host clean of ~/.cito, LaunchAgents, and /Applications/Cito.app),
@@ -7101,7 +7101,7 @@ phases:
   - id: v24.impl
     name: Implement V24 Stage 8 (v0.20.0) Full-Lifecycle UX, State-Machine & Reconfiguration
       Closure (L1–L17) & Remote Host Verification
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 8 (`v0.20.0`) Full-Lifecycle UX, State-Machine\
       \ & Reconfiguration Closure (`L1`–`L17`) per `docs/DESIGN.md` §10 (`§10.1`–`§10.7`):\n\
@@ -7200,6 +7200,8 @@ phases:
     - README.md
     - site/index.html
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T14:27:22.305583Z'
   - id: v24.hygiene
     name: 'Iterative Code-Hygiene Convergence on Stage 8 (v0.20.0) & Live Distribution
       Closure (GitHub Release v0.20.0 & Tefx/homebrew-tap Formula/Cask) [REQUIRES_SKILL:
