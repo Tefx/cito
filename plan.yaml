@@ -7066,3 +7066,230 @@ phases:
       \ lines in log\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v23.repair_linker`\
       \ (`df -h`: 163 GiB available).\n\nSpec link:\n- docs/DESIGN.md (§9, V23 Stage\
       \ 7 v0.19.0)\n- bin/cito-linker, packaging/homebrew/cito.rb"
+- id: v24
+  name: 'V24 Stage 8 (v0.20.0): Full-Lifecycle UX, State-Machine & Reconfiguration
+    Closure (L1–L17)'
+  status: pending
+  gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
+    pass 100% locally and on remote host tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito
+    (leaving remote host clean of ~/.cito, LaunchAgents, and /Applications/Cito.app),
+    grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+    crates/cito-native/src/core/ src/macos/ exits with 0 matches, all L1–L17 regression
+    tests pass, [REQUIRES_SKILL: code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]
+    converges to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES, and GitHub Release
+    v0.20.0 (Tefx/cito) + Tefx/homebrew-tap (Formula/cito.rb & Casks/cito.rb) + GitHub
+    Pages (https://tefx.github.io/cito/) are live.'
+  context: 'Close all 17 full-lifecycle UX, state-machine, and reconfiguration gaps
+    (L1–L17) in Stage 8 (v0.20.0) per docs/DESIGN.md §10 (§10.1–§10.7) and docs/ROADMAP.md:
+    declarative plugin.json setup guides, field metadata, and post-setup/post-disconnect
+    hints (L1, L10); separation of wire secret redaction (redacted) from UI field
+    visibility (hidden) and dirty-only secret patch semantics + non-mutating human_channels_test
+    (L1, L2); complete 5-state Human Channel model, atomic Pause/Resume, Unpair, Clear
+    Service, manual chatId identity reconciliation, pairing code superseding/cancellation,
+    active Settings hub live refresh, Bot Token rotation cursor reset, and remote
+    Hub channel schema forwarding (L3–L8); 3-step guided onboarding strip, Agent App
+    Verify/Repair/Disconnect lifecycle, and non-destructive setup_disconnect_all (L9–L13);
+    OIDC Switch Account interactive picker, inline Edit Hub, disabled hub 1-click
+    Sign In, cardMenu disconnected hub retention, LAN Share port/auth controls, and
+    actionable empty states in cardMenu and DirectoryPanel (L14–L17); remote host
+    verification on tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito; iterative
+    code-hygiene convergence; and live v0.20.0 distribution to GitHub Releases (Tefx/cito)
+    and Tefx/homebrew-tap (Formula/cito.rb & Casks/cito.rb).'
+  depends_on:
+  - v23
+  steps:
+  - id: v24.impl
+    name: Implement V24 Stage 8 (v0.20.0) Full-Lifecycle UX, State-Machine & Reconfiguration
+      Closure (L1–L17) & Remote Host Verification
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      ```\n\n- **Deliver:** Complete Stage 8 (`v0.20.0`) Full-Lifecycle UX, State-Machine\
+      \ & Reconfiguration Closure (`L1`–`L17`) per `docs/DESIGN.md` §10 (`§10.1`–`§10.7`):\n\
+      \  1. **Declarative `plugin.json` Lifecycle Metadata & Separation of Secret\
+      \ Redaction vs. UI Visibility (`L1`, `L10`, `§10.2`)**: Add `postSetupHint`\
+      \ and `postDisconnectHint` to `plugins/{pi,codex,claude}/plugin.json`; add `setupGuide`,\
+      \ field `configuredPlaceholder`/`helpText`, and `pairing.helpText` to `plugins/telegram/plugin.json`;\
+      \ separate `hidden` (`hub && !is_admin`) from `redacted` (`hidden || is_secret`)\
+      \ in `hub.rs` `channel_list()` with `configured`, `configured_placeholder`,\
+      \ `help_text`, `setup_guide`, and `pairing_help_text`.\n  2. **Secret Patch\
+      \ Semantics & Non-Mutating `human_channels_test` (`L2`, `§10.3`)**: Implement\
+      \ dirty-only secret submission in `src/macos/cito-ui.swift` `collectValues()`;\
+      \ replace blind `merge` on channel configs with `merge_channel_config` in `hub.rs`;\
+      \ enforce `hub_patch_guard` and make `human_channels_test` merge in memory only\
+      \ without mutating SQLite while allowing `human_channel_pair_start` to persist\
+      \ `hub_config` before starting pairing.\n  3. **Complete Human Channel State\
+      \ Model & Lifecycle Actions (`L3`–`L8`, `§10.4`)**: Implement the deterministic\
+      \ Human Channel status model (`ready`, `paused`, `pairing_pending`, `hub_ready`,\
+      \ `not_configured`) and `detail` in `hub.rs`; atomic `channel_toggle` (`Pause`/`Resume`),\
+      \ `channel_unpair` (`reset_user: true`), `clear_channel_service` (`reset_hub:\
+      \ true`), manual `chatId` override identity reconciliation, and strict `attach()`\
+      \ readiness gate (`active = enabled && hub_ready && user_ready`); pairing code\
+      \ superseding and `channel_cancel_pair`; `active_settings_hub` tracking in `DaemonService`\
+      \ and pairing instruction persistence in `cito-ui.swift` `acceptSettings`; Bot\
+      \ Token rotation cursor/state reset in `hub.rs` `save_service` and `plugins/telegram/native.rs`;\
+      \ remote Hub channel schema forwarding in `daemon.rs`; and full `SettingsPanel\
+      \ -> Human Channels` card layout and controls (`settings_channel_status:<id>`,\
+      \ `channel_setup_guide:<id>`, `channel_field:<id>:<key>`, `pairing_instruction:<id>`,\
+      \ `copy_pair_command:<id>`, `cancel_pair_channel:<id>`, `pair_channel:<id>`,\
+      \ `toggle_channel:<id>`, `unpair_channel:<id>`, `clear_channel_service:<id>`,\
+      \ `test_channel:<id>`, `save_channel:<id>`).\n  4. **Guided Onboarding Banner,\
+      \ Agent App Verify/Repair/Disconnect Lifecycle & Non-Destructive `Disconnect\
+      \ All` (`L9`–`L13`, `§10.5`)**: Add `?` toggle (`toggle_onboarding_guide`),\
+      \ 3-step `onboarding_banner` (`onboarding_step:apps`, `onboarding_step:channels`,\
+      \ `onboarding_step:hubs`), and `apps_next_step_callout` (`goto_channels_tab`)\
+      \ in `cito-ui.swift`; restore staged shims/plugins via `ensure_cli_shims_native`\
+      \ on `setup_apply`, detect `status: \"repair_needed\"` with `\"Repair\"` button\
+      \ in `daemon.rs` and `cito-ui.swift`, and iterate `&plugins.plugins` in `setup.rs`\
+      \ `uninstall_setup_native`; automatically unlisten active sessions of a disconnected\
+      \ harness in `setup_remove_app`; add `op: \"setup_disconnect_all\"` in `daemon.rs`\
+      \ and `confirm_disconnect_all` alongside `confirm_uninstall_all` in `uninstall_confirm_box`.\n\
+      \  5. **Hub Lifecycle, LAN Share Controls & Actionable Empty States (`L14`–`L17`,\
+      \ `§10.6`)**: Force interactive account selection (`force_account_select = true`,\
+      \ `prompt=select_account`, bypassing cached JWT/refresh token) on `switch_account`\
+      \ in `login.rs`/`daemon.rs`/`cito-ui.swift`; auto-enable disabled OIDC hubs\
+      \ on `login_hub:<name>`; retain disconnected hubs in `state[\"hubs\"]` so `cardMenu`\
+      \ shows `\"Connect\"` (`reconnect:<hub>`); add inline `edit_hub:<name>` in `SettingsPanel\
+      \ -> Hubs & Network` (`setup_save_hub` with `\"edit\": true`); add `host_hub_port`,\
+      \ `toggle_host_hub_auth`, `apply_host_hub_port`, and `host_hub_error` to `host_hub_card`;\
+      \ and render context-aware empty states in `cardMenu` (`empty_open_setup`, `empty_open_channels`)\
+      \ and `DirectoryPanel` (`directory_empty_state` with `directory_reset_filters`,\
+      \ `dir_empty_open_apps`, `act_empty_show_all`, `act_empty_open_channels`).\n\
+      \  6. **`L1`–`L17` Regression Suite, `v0.20.0` Version Bump & Remote Host Verification\
+      \ (`§10.7`)**: Add comprehensive `L1`–`L17` regression tests across `crates/cito-native/tests/{support/ui.rs,support/daemon.rs,support/plugins.rs,support/distribution.rs,hub/cases.rs}`;\
+      \ bump release version to `0.20.0` (`Cargo.toml`, `crates/cito-native/src/lib.rs`,\
+      \ `plugins/*/plugin.json`, `packaging/homebrew/cito.rb`, `README.md`, `site/index.html`,\
+      \ `docs/ROADMAP.md`); and verify `cargo test --workspace && cargo build --release`\
+      \ on remote host `tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito` (leaving\
+      \ the remote host clean of `~/.cito`, `LaunchAgents`, and `/Applications/Cito.app`\
+      \ after verification).\n- **Boundary:** Owner `rust-senior`; modifies `/Users/tefx/Projects/cito`\
+      \ and runs remote build/test verification on `tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito`\
+      \ (cleaning up any `~/.cito`, `LaunchAgents`, and `/Applications/Cito.app` residue\
+      \ on the remote host before finishing).\n- **Admit:** Completed Phase `v23`\
+      \ and `docs/DESIGN.md` §10 (`§10.1`–`§10.7`); `cargo test --workspace && cargo\
+      \ build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` and the zero-hardcoding\
+      \ check (`grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` == 0 matches) pass locally and on\
+      \ `tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito`.\n- **Recovery:** Reconcile\
+      \ compilation, test, or UI layout failures in place within the step worktree,\
+      \ and ensure any test or remote-host state (`~/.cito`, `LaunchAgents`, `/Applications/Cito.app`,\
+      \ or background processes) is cleaned up.\n"
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - plugins/pi/plugin.json
+    - plugins/codex/plugin.json
+    - plugins/claude/plugin.json
+    - plugins/telegram/plugin.json
+    - plugins/telegram/native.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/plugins.rs
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/hub/cases.rs
+    - Cargo.toml
+    - crates/cito-native/src/lib.rs
+    - packaging/homebrew/cito.rb
+    - README.md
+    - site/index.html
+    agent: rust-senior
+  - id: v24.hygiene
+    name: 'Iterative Code-Hygiene Convergence on Stage 8 (v0.20.0) & Live Distribution
+      Closure (GitHub Release v0.20.0 & Tefx/homebrew-tap Formula/Cask) [REQUIRES_SKILL:
+      code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** `[REQUIRES_SKILL: code-hygiene]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`
+      Audit and fix any completeness, wiring, simplicity, interface orthogonality,
+      test authenticity, or UI/UX issues across the `v0.20.0` (`L1`–`L17`) implementation
+      via fresh-context `pathway-auditor`, `structural-auditor`, and `uiux-auditor`
+      rounds until a fresh audit round returns `Completeness: CLEAN` and `Simplicity:
+      ZERO_NEW_ISSUES`; verify the zero-hardcoding gate (`grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/core/ src/macos/` == 0 matches) and full `cargo test
+      --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`;
+      and publish `v0.20.0` to GitHub Releases (`Tefx/cito`), GitHub Pages (`https://tefx.github.io/cito/`),
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Boundary:** Owner `rust-senior`; repository changes in `/Users/tefx/Projects/cito`
+      plus authorized distribution effects on `Tefx/cito` (GitHub Release `v0.20.0`
+      & GitHub Pages) and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`)
+      after code-hygiene convergence and `cargo test --workspace` pass.
+
+      - **Admit:** Completed `v24.impl`, fresh-context `pathway-auditor`, `structural-auditor`,
+      and `uiux-auditor` reports reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`,
+      zero matches on the core/UI agent-and-channel hardcoding grep gate, `cargo test
+      --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`
+      exiting `0`, and verified SHA-256 parity across GitHub Release `v0.20.0`, `packaging/homebrew/cito.rb`,
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Recovery:** If any audit round reports actionable findings or a release/tap
+      update fails, repair in place, re-run affected checks and fresh-context delta
+      verification until `ZERO_NEW_ISSUES`, and reconcile release tags and Homebrew
+      tap Formula/Cask SHA-256 values.
+
+      '
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v24.impl
+    agent: rust-senior
+  - id: v24.gate
+    name: V24 Stage 8 (v0.20.0) Independent Terminal Acceptance, L1–L17 Lifecycle
+      Verification & Live Distribution Gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
+      \n- **Deliver:** Independent terminal Phase `v24` (`v0.20.0`) acceptance decision\
+      \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session.\n- **Boundary:**\
+      \ Owner `gate-reviewer`; strictly read-only (`repo_change_policy: no_repo_change`)\
+      \ over the immutable integrated Git HEAD in `/Users/tefx/Projects/cito` and\
+      \ live public endpoints.\n- **Admit:**\n  - Included phase and terminal outcomes:\
+      \ Phase `v24` (`v24.impl` and `v24.hygiene`) bound to the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence and checks:\n\
+      \    1. `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` exits `0` with 100% pass rate across all native\
+      \ Rust unit, integration, `F1`–`F64`, and `L1`–`L17` lifecycle regression tests,\
+      \ plus verified remote execution on `tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito`\
+      \ with clean post-test remote host state.\n    2. Zero hardcoded agent/channel\
+      \ names or forbidden strings: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` returns `0` matches; `[\\p{Script=Han}]`\
+      \ and `\\b(rda|casdoor|rcatwin|keppel|mingchen)\\b` return `0` matches across\
+      \ repository files (excluding the policy rule line in `docs/DESIGN.md`).\n \
+      \   3. Code-hygiene convergence: fresh-context `pathway-auditor`, `structural-auditor`,\
+      \ and `uiux-auditor` reports verify closure of all admitted findings with `Completeness:\
+      \ CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n    4. Live distribution verification:\
+      \ `https://tefx.github.io/cito/` returns HTTP `200`, GitHub Release `v0.20.0`\
+      \ publishes `Cito-macos-arm64.zip` + `.sha256` at `0.20.0`, and `packaging/homebrew/cito.rb`\
+      \ and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`) match the published\
+      \ `v0.20.0` SHA-256.\n- **Recovery:** If any acceptance check fails, record\
+      \ concrete counterexamples and route a cohesive writable repair to `rust-senior`\
+      \ before re-running this gate in Delta mode.\n"
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v24.hygiene
+    agent: gate-reviewer
