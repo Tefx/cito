@@ -383,6 +383,117 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     assert!(!f.state.join("onboarding-shown").exists());
 }
 #[test]
+fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
+    let _lock = serial();
+    let host = Fixture::new(json!({"host_hub":{"token":"lan-test-token"}}));
+    host.daemon(&[]);
+    let port = port();
+    assert_eq!(
+        host.action(json!({"op":"set_host_hub","enabled":true,"port":port,"bind":"127.0.0.1"}))
+            .0,
+        200
+    );
+    let (status, snapshot) = host.action(json!({"op":"get_snapshot"}));
+    assert_eq!(status, 200);
+    let hosted = &snapshot["settings"]["host_hub"];
+    assert_eq!(hosted["running"], true);
+    let endpoint = hosted["endpoint_url"].as_str().unwrap();
+    assert!(!endpoint.contains("0.0.0.0"));
+    assert_eq!(
+        hosted["invite_command"],
+        format!(
+            "cito setup --hub lan --url {endpoint} --auth token --token lan-test-token --default"
+        )
+    );
+    let anonymous = ureq::get(&format!("{endpoint}/v1/rpc"))
+        .timeout(std::time::Duration::from_secs(2))
+        .call();
+    assert!(
+        matches!(anonymous, Err(ureq::Error::Status(401, _))),
+        "{endpoint}: {anonymous:?}"
+    );
+
+    let client = Fixture::new(json!({}));
+    client.daemon(&[]);
+    let ui = start(&client);
+    let mut initial = state();
+    initial["settings"] = settings();
+    client.send(ui, initial);
+    client.send(ui, json!({"op":"test_settings_key","key":"command-comma"}));
+    control(&client, ui, "settings_tab:hubs");
+    client.send(
+        ui,
+        json!({"op":"test_clipboard","text":hosted["invite_command"]}),
+    );
+    control(&client, ui, "paste_hub_invite");
+    wait(|| {
+        client
+            .frames(ui)
+            .iter()
+            .any(|v| v["op"] == "setup_save_hub")
+    });
+    let action = client
+        .frames(ui)
+        .into_iter()
+        .find(|v| v["op"] == "setup_save_hub")
+        .unwrap();
+    assert_eq!(action["url"], endpoint);
+    assert_eq!(action["auth_mode"], "token");
+    assert_eq!(action["token"], "lan-test-token");
+    assert_eq!(action["set_default"], true);
+    let (status, result) = client.action(action);
+    assert_eq!(status, 200, "{result}");
+    let (status, result) = client.action(json!({"op":"test_hub","hub":"lan"}));
+    assert_eq!(status, 200, "{result}");
+    assert!(result["streams"].is_number());
+    let configured: Value =
+        serde_json::from_str(&fs::read_to_string(&client.config).unwrap()).unwrap();
+    assert_eq!(configured["default_hub"], "lan");
+    let (status, exported) = client.action(json!({"op":"generate_hub_invite","hub":"lan"}));
+    assert_eq!(status, 200);
+    assert_eq!(exported["invite"]["url"], endpoint);
+    assert_eq!(exported["invite"]["authMode"], "token");
+    assert_eq!(exported["invite"]["token"], "lan-test-token");
+
+    // Inspect documentation-range binds without opening non-loopback test sockets.
+    // Explicit no-auth must override a retained token.
+    for (bind, authority) in [
+        ("192.0.2.35", "192.0.2.35"),
+        ("2001:db8::35", "[2001:db8::35]"),
+    ] {
+        assert_eq!(host.action(json!({"op":"set_host_hub","enabled":false,"port":port,"bind":bind,"auth_mode":"none"})).0, 200);
+        let (_, snapshot) = host.action(json!({"op":"get_snapshot"}));
+        assert_eq!(
+            snapshot["settings"]["host_hub"]["endpoint_url"],
+            format!("http://{authority}:{port}")
+        );
+        assert_eq!(
+            snapshot["settings"]["host_hub"]["invite_command"],
+            format!("cito setup --hub lan --url http://{authority}:{port} --default")
+        );
+    }
+    for bind in ["0.0.0.0", "::", ""] {
+        assert_eq!(
+            host.action(json!({"op":"set_host_hub","enabled":true,"bind":bind}))
+                .0,
+            200
+        );
+        let (_, snapshot) = host.action(json!({"op":"get_snapshot"}));
+        assert_eq!(snapshot["settings"]["host_hub"]["running"], true);
+        let url = url::Url::parse(
+            snapshot["settings"]["host_hub"]["endpoint_url"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(url
+            .host_str()
+            .is_some_and(|host| !host.is_empty() && host != "0.0.0.0" && host != "[::]"));
+        assert_eq!(url.port(), Some(port));
+    }
+}
+
+#[test]
 fn appkit_fragmented_utf8_invalid_frames_wake_banner_and_eof() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

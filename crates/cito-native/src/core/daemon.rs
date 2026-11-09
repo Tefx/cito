@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
@@ -1129,6 +1129,35 @@ impl DaemonService {
             seq = published["seq"].as_u64().unwrap_or(0);
             self.state.db.execute("UPDATE local_sent_idempotency SET seq=?,status='wake_accepted' WHERE hub=? AND dedup_id=?",&[json!(seq),json!(hub),json!(dedup)])?;
         }
+        if caller.as_ref().is_some_and(|c| c["harness"] == "human") {
+            if let Some(source) = reply_to.as_str() {
+                let node = self
+                    .state
+                    .db
+                    .query(
+                        "SELECT listener_id FROM local_signals WHERE hub=? AND signal_id=?",
+                        &[json!(hub), json!(source)],
+                    )?
+                    .into_iter()
+                    .next()
+                    .map(|row| string(&row, "listener_id").to_owned());
+                let node = match node {
+                    Some(node) => node,
+                    None => {
+                        super::registration::local_node_id(&self.state, slot, "human", "default")?
+                    }
+                };
+                // Publish first: rejected replies must leave the source unread. The
+                // durable acknowledgment queue retries Hub/channel fan-out after outages.
+                self.state.acknowledge(
+                    hub,
+                    &node,
+                    &[json!(source)],
+                    &format!("{}:human", self.host_id),
+                )?;
+                self.flush_acks();
+            }
+        }
         Ok(
             json!({"ok":true,"signal_id":self.scoped(hub,signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"]}),
         )
@@ -1390,7 +1419,19 @@ impl DaemonService {
             .unwrap_or(&Value::Null);
         let port = host["port"].as_u64().unwrap_or(4291);
         let token = string(host, "token");
-        json!({"apps":apps,"channel_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":format!("http://127.0.0.1:{port}"),"token":token,"invite_command":format!("cito setup --hub lan --url http://127.0.0.1:{port}"),"error":null},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
+        let advertised = advertised_hub_host(string(host, "bind"));
+        let authority = if advertised.contains(':') {
+            format!("[{advertised}]")
+        } else {
+            advertised
+        };
+        let endpoint_url = format!("http://{authority}:{port}");
+        let mut invite_command = format!("cito setup --hub lan --url {endpoint_url}");
+        if host_hub_auth_mode(host) == "token" && !token.is_empty() {
+            invite_command.push_str(&format!(" --auth token --token {token}"));
+        }
+        invite_command.push_str(" --default");
+        json!({"apps":apps,"channel_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"error":null},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
     fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
         rows.into_iter()
@@ -1768,35 +1809,38 @@ impl DaemonService {
                 }
                 return Ok(result);
             }
-            "send_reply_from_human" => {
-                let target = action["to_listener_id"]
-                    .as_str()
-                    .or_else(|| action["to"].as_str())
-                    .ok_or("INVALID_INPUT: to_listener_id is required")?;
-                let (target_hub, _) = target.split_once(':').unwrap_or((&hub, target));
-                if action["hub"].is_string() && target_hub != hub {
-                    return Err("INVALID_INPUT: Conflicting hub prefixes".into());
-                }
-                let mut normalized = action.clone();
-                for key in ["in_reply_to", "signal_id"] {
-                    if let Some((reply_hub, id)) =
-                        action[key].as_str().and_then(|v| v.split_once(':'))
-                    {
-                        if reply_hub != target_hub {
-                            return Err("INVALID_INPUT: Reply belongs to another Hub".into());
-                        }
-                        normalized[key] = json!(id);
-                    }
-                }
-                return self
-                    .slot(target_hub)?
-                    .rpc("send_reply_from_human", &normalized);
-            }
-            "send_signal" => {
+            "send_signal" | "send_reply_from_human" => {
                 let meta = json!({"expected_harness":"human","expected_session_id":"default"});
                 let mut send_args = action.clone();
                 if let Some(args) = send_args.as_object_mut() {
                     args.remove("op");
+                    if op == "send_reply_from_human" {
+                        args.insert(
+                            "to".into(),
+                            action["to_listener_id"]
+                                .as_str()
+                                .or_else(|| action["to"].as_str())
+                                .map_or(Value::Null, |v| json!(v)),
+                        );
+                        args.insert(
+                            "message".into(),
+                            action["message"]
+                                .as_str()
+                                .or_else(|| action["text"].as_str())
+                                .map_or(Value::Null, |v| json!(v)),
+                        );
+                        args.remove("in_reply_to");
+                        if let Some(source) = action
+                            .get("in_reply_to")
+                            .filter(|v| !v.is_null())
+                            .or_else(|| action.get("signal_id").filter(|v| !v.is_null()))
+                        {
+                            args.insert("in_reply_to".into(), source.clone());
+                        }
+                        for key in ["to_listener_id", "text", "signal_id"] {
+                            args.remove(key);
+                        }
+                    }
                 }
                 let result = validate_tool_input("cito_send", &send_args)
                     .and_then(|()| self.send(&hub, &send_args, &meta));
@@ -1804,7 +1848,15 @@ impl DaemonService {
                     Ok(_) => json!({"op":"composer_result","ok":true,"error":null}),
                     Err(e) => json!({"op":"composer_result","ok":false,"error":e}),
                 });
-                return result;
+                return result.map(|result| {
+                    if op == "send_reply_from_human" {
+                        // Keep the reply action's response shape while sharing send/ack semantics.
+                        let unscoped = |key| string(&result, key).rsplit(':').next().unwrap_or("");
+                        json!({"ok":true,"signal_id":unscoped("signal_id"),"target_display":unscoped("to"),"error":null})
+                    } else {
+                        result
+                    }
+                });
             }
             "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
                 let ids = action["signal_ids"].as_array().cloned().unwrap_or_default();
@@ -2037,13 +2089,7 @@ impl DaemonService {
             self.host_server.take();
         }
         if host["enabled"] == true {
-            let mode = if let Some(mode) = host["auth_mode"].as_str() {
-                mode
-            } else if string(host, "token").is_empty() {
-                "none"
-            } else {
-                "token"
-            };
+            let mode = host_hub_auth_mode(host);
             let auth = super::auth::HubAuth::new(
                 mode,
                 host["token"].as_str().map(str::to_string),
@@ -2051,7 +2097,10 @@ impl DaemonService {
                 None,
             )?;
             let server = self.local.start_server(
-                host["bind"].as_str().unwrap_or("0.0.0.0"),
+                host["bind"]
+                    .as_str()
+                    .filter(|bind| !bind.is_empty())
+                    .unwrap_or("0.0.0.0"),
                 host["port"].as_u64().unwrap_or(4291) as u16,
                 auth,
             )?;
@@ -2090,6 +2139,42 @@ impl DaemonService {
             &[json!(std::process::id())],
         );
     }
+}
+
+fn host_hub_auth_mode(host: &Value) -> &str {
+    host["auth_mode"].as_str().unwrap_or_else(|| {
+        if string(host, "token").is_empty() {
+            "none"
+        } else {
+            "token"
+        }
+    })
+}
+
+fn advertised_hub_host(bind: &str) -> String {
+    if !matches!(bind, "" | "0.0.0.0" | "::") {
+        return bind.into();
+    }
+    // A UDP connect selects the default route's source IPv4 without sending traffic.
+    let routed_ip = UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|socket| {
+            socket.connect("192.0.2.1:9").ok()?;
+            socket.local_addr().ok().map(|address| address.ip())
+        })
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified());
+    if let Some(ip) = routed_ip {
+        return ip.to_string();
+    }
+    let hostname = local_host_name();
+    if !hostname.is_empty()
+        && (hostname.as_str(), 0)
+            .to_socket_addrs()
+            .is_ok_and(|mut addresses| addresses.next().is_some())
+    {
+        return hostname;
+    }
+    "127.0.0.1".into()
 }
 
 fn login_cache_snapshot(path: &std::path::Path) -> Option<(Value, Value)> {

@@ -228,6 +228,244 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
 }
 
 #[test]
+fn human_desktop_replies_acknowledge_local_hub_and_channel_only_after_publish() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"work":{"url":"local://"}},"defaultHub":"work"}));
+    let meta = f.provider("delivered_unconfirmed");
+    let channel = f.state.join("plugins/channel");
+    fs::create_dir_all(&channel).unwrap();
+    fs::write(channel.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let ui = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    let target = enroll(&f, meta.clone());
+    assert_eq!(f.action(json!({"op":"channel_save","hub":"work","channel_id":"channel","enabled":true,"values":{"credential":"test-only","address":"reply-test"}})).0, 200);
+    let hub = f.db("hub.sqlite");
+    let channel_frames = || -> Vec<Value> {
+        fs::read_to_string(channel.join("frames.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let ui_results = || -> Vec<Value> {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["op"] == "composer_result")
+            .collect()
+    };
+    let source = || -> String {
+        let sent = f.tool(
+            "cito_send",
+            json!({"hub":"work","to":"@self","message":"Approve this change?"}),
+            meta.clone(),
+        );
+        let id = sent["signal_id"]
+            .as_str()
+            .unwrap()
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .to_owned();
+        wait(|| {
+            !f.rows(&format!("SELECT signal_id FROM local_signals WHERE signal_id='{id}' AND acknowledged_at_ms IS NULL")).is_empty()
+            && hub.query("SELECT signal_id FROM hub_channel_deliveries WHERE signal_id=? AND status='delivered'", &[json!(id)]).unwrap().len() == 1
+        });
+        id
+    };
+    let assert_unread = |id: &str| {
+        assert!(f.rows(&format!(
+            "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='{id}'"
+        ))[0]["acknowledged_at_ms"]
+            .is_null());
+        assert!(hub
+            .query(
+                "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+                &[json!(id)]
+            )
+            .unwrap()[0]["acked_at_ms"]
+            .is_null());
+    };
+    let untouched = source();
+    for op in ["send_signal", "send_reply_from_human", "cito_send"] {
+        let id = source();
+        let results_before = ui_results().len();
+        let result = if op == "cito_send" {
+            f.tool("cito_send", json!({"hub":"work","to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")}), human())
+        } else {
+            let action = if op == "send_signal" {
+                json!({"op":op,"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
+            } else {
+                json!({"op":op,"to_listener_id":target["listener_id"],"text":"Approved","in_reply_to":null,"signal_id":format!("work:{id}")})
+            };
+            let (status, result) = f.action(action);
+            assert_eq!(status, 200, "{result}");
+            wait(|| ui_results().len() == results_before + 1);
+            assert_eq!(ui_results().last().unwrap()["ok"], true);
+            result
+        };
+        if op == "send_reply_from_human" {
+            assert!(!result["signal_id"].as_str().unwrap().contains(':'));
+            assert_eq!(
+                result["target_display"],
+                target["listener_id"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit(':')
+                    .next()
+                    .unwrap()
+            );
+            assert_eq!(result["error"], Value::Null);
+        }
+        let reply = result["signal_id"]
+            .as_str()
+            .unwrap()
+            .rsplit(':')
+            .next()
+            .unwrap();
+        wait(|| {
+            !f.rows(&format!(
+                "SELECT signal_id FROM local_signals WHERE signal_id='{reply}'"
+            ))
+            .is_empty()
+        });
+        let delivered = &f.rows(&format!(
+            "SELECT message,in_reply_to FROM local_signals WHERE signal_id='{reply}'"
+        ))[0];
+        assert_eq!(delivered["message"], "Approved");
+        assert_eq!(delivered["in_reply_to"], id);
+        assert!(f.rows(&format!(
+            "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='{id}'"
+        ))[0]["acknowledged_at_ms"]
+            .is_number());
+        wait(|| {
+            hub.query(
+                "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+                &[json!(id)],
+            )
+            .unwrap()[0]["acked_at_ms"]
+                .is_number()
+        });
+        wait(|| {
+            channel_frames()
+                .iter()
+                .any(|frame| frame["op"] == "on_acked" && frame["signal_ids"] == json!([id]))
+        });
+        let ack = channel_frames()
+            .into_iter()
+            .find(|frame| frame["op"] == "on_acked" && frame["signal_ids"] == json!([id]))
+            .unwrap();
+        assert_eq!(ack["principal_id"], "none#alice");
+        let mut external = ack["external_msg_ids"].as_array().unwrap().clone();
+        external.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        assert_eq!(
+            external,
+            json!([format!("{id}-1"), format!("{id}-2")])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        assert_unread(&untouched);
+    }
+
+    let retried = source();
+    hub.execute("CREATE TRIGGER reject_ack BEFORE UPDATE OF acked_at_ms ON hub_signals BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
+    let count = ui_results().len();
+    assert_eq!(f.action(json!({"op":"send_signal","to":target["listener_id"],"message":"Retry acknowledgment","in_reply_to":format!("work:{retried}")})).0, 200);
+    wait(|| ui_results().len() == count + 1);
+    assert_eq!(ui_results().last().unwrap()["ok"], true);
+    assert!(f.rows(&format!(
+        "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='{retried}'"
+    ))[0]["acknowledged_at_ms"]
+        .is_number());
+    assert!(!f
+        .rows(&format!(
+            "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
+        ))
+        .is_empty());
+    assert!(hub
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+            &[json!(retried)]
+        )
+        .unwrap()[0]["acked_at_ms"]
+        .is_null());
+    hub.execute("DROP TRIGGER reject_ack", &[]).unwrap();
+    wait(|| {
+        f.rows(&format!(
+            "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
+        ))
+        .is_empty()
+            && hub
+                .query(
+                    "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+                    &[json!(retried)],
+                )
+                .unwrap()[0]["acked_at_ms"]
+                .is_number()
+            && channel_frames()
+                .iter()
+                .any(|frame| frame["op"] == "on_acked" && frame["signal_ids"] == json!([retried]))
+    });
+
+    let failed = source();
+    let before = hub
+        .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+        .unwrap();
+    for op in ["send_signal", "send_reply_from_human"] {
+        for (message, reply_to) in [
+            ("   ", format!("work:{failed}")),
+            ("Wrong hub", format!("elsewhere:{failed}")),
+        ] {
+            let count = ui_results().len();
+            let (status, result) = f.action(json!({"op":op,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
+            assert_eq!(status, 400, "{result}");
+            wait(|| ui_results().len() == count + 1);
+            assert_eq!(ui_results().last().unwrap()["ok"], false);
+            assert_unread(&failed);
+        }
+    }
+    hub.execute("CREATE TRIGGER reject_reply BEFORE INSERT ON hub_signals BEGIN SELECT RAISE(ABORT,'injected reply failure'); END", &[]).unwrap();
+    let count = ui_results().len();
+    assert_eq!(f.action(json!({"op":"send_signal","to":target["listener_id"],"message":"Rejected publish","in_reply_to":format!("work:{failed}")})).0, 400);
+    wait(|| ui_results().len() == count + 1);
+    assert_eq!(ui_results().last().unwrap()["ok"], false);
+    hub.execute("DROP TRIGGER reject_reply", &[]).unwrap();
+    assert_unread(&failed);
+    f.tool("cito_unlisten", json!({"hub":"work"}), meta);
+    for op in ["send_signal", "send_reply_from_human"] {
+        let count = ui_results().len();
+        assert_eq!(f.action(json!({"op":op,"to":target["listener_id"],"message":"Revoked target","in_reply_to":format!("work:{failed}")})).0, 400);
+        wait(|| ui_results().len() == count + 1);
+        assert_eq!(ui_results().last().unwrap()["ok"], false);
+        assert_unread(&failed);
+    }
+    assert_eq!(
+        hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+            .unwrap(),
+        before
+    );
+    // A request/response barrier drains the channel's stdin before checking absence.
+    assert_eq!(
+        f.action(json!({"op":"channel_test","hub":"work","channel_id":"channel"}))
+            .0,
+        200
+    );
+    assert!(!channel_frames()
+        .iter()
+        .any(|frame| frame["op"] == "on_acked"
+            && frame["signal_ids"].as_array().is_some_and(
+                |ids| ids.contains(&json!(failed)) || ids.contains(&json!(untouched))
+            )));
+}
+
+#[test]
 fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     let _lock = serial();
     let owner = Fixture::new(json!({}));

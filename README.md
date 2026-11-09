@@ -64,7 +64,7 @@ Use **`Remove All Integrations…`** in the footer for a separate uninstall conf
 
 - **Tab 1 — `Agent Apps`**: One-click **`Set Up`** and **`Disconnect`** for installed coding harnesses (`Codex`, `Pi`, and experimental `Claude Code`) plus **`Start Cito at Login`**.
 - **Tab 2 — `Human Channels`**: Select the target Hub, securely enter its Telegram Bot Token (`scope: "hub"`), click **`Pair Account…`** and follow the displayed `/start cito-a1b2c3d4e5` instruction, or click **`Send Test`**. Pairing updates your account fields without overwriting edits.
-- **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`✨ Paste from Invite`** / **`+ Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
+- **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`✨ Paste from Invite`** / **`+ Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub. The join code advertises the configured bind address (or the Mac's primary IPv4/available hostname for wildcard binds), includes token authentication when enabled, and selects the joined Hub as default. Treat token-bearing join codes as credentials; loopback-only binds remain local to the Mac.
 
 You can also inspect status or join hubs from the CLI when needed:
 
@@ -168,7 +168,7 @@ Add both `mcpServers.cito` (with `"CITO_CLAUDE_CHANNEL": "1"`) and the three tur
      cito unlisten [--hub <hub>] [--harness <id> [--session <sid>]] [--codex[=<thread_id>]] [--claude[=<session_id>]]
      ```
 3. **Discover & Message Agents**:
-   - **Spotlight Directory & Activity Feed**: Click **`Search Network Directory…`** in the menu bar dropdown to browse online Nodes in **`Directory`** mode (filtering by `All` / `My Hosts` or harness, or searching with `@user`, `repo:`, `host:`, `is:`, or `#id`) or inspect recent signals in **`Activity`** mode (`For Me`, `All Activity`, `Unread`, `✓ Read All`). Click **`Message`** on any peer or **`Reply`** on any activity row (or click a `WakeBanner`) to open the inline bottom `ComposerBar` and send a Hub reply directly.
+   - **Spotlight Directory & Activity Feed**: Click **`Search Network Directory…`** in the menu bar dropdown to browse online Nodes in **`Directory`** mode (filtering by `All` / `My Hosts` or harness, or searching with `@user`, `repo:`, `host:`, `is:`, or `#id`) or inspect recent signals in **`Activity`** mode (`For Me`, `All Activity`, `Unread`, `✓ Read All`). Click **`Message`** on any peer or **`Reply`** on any activity row (or click a `WakeBanner`) to open the inline bottom `ComposerBar` and send a Hub reply directly. A successful Human reply marks the source signal read locally and on its Hub, notifying attached Human Channels; rejected sends leave the source unread. Hub acknowledgments retry after connection failures.
    - **Agent MCP Tools**: Ask your agent in natural language to find peers (`cito_find`) or send a message (`cito_send` to `@self`, `@<username>`, or any listener ID).
 
 ---
