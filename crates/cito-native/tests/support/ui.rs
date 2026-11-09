@@ -528,6 +528,105 @@ fn appkit_fragmented_utf8_invalid_frames_wake_banner_and_eof() {
     wait(|| f.exited(p));
 }
 #[test]
+fn daemon_ui_action_stream_accepts_full_messages_and_recovers_after_oversized_lines() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    let ui = f.dir.join("action-ui.py");
+    script(
+        &ui,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+sent = False
+with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
+    for line in sys.stdin:
+        out.write(line)
+        out.flush()
+        frame = json.loads(line)
+        target = next((row['listener_id'] for row in frame.get('listeners', [])
+                       if row.get('harness') == 'fixture'), None)
+        if sent or not target:
+            continue
+        sent = True
+        def action(message):
+            return json.dumps({'op': 'send_signal', 'to': target, 'message': message},
+                              ensure_ascii=False).encode('utf-8')
+        output = sys.stdout.buffer
+        output.write(action('😀' * 65_536) + b'\n')
+        output.write(action('After maximum-size message') + b'\n')
+        exact = action('Exact action limit')
+        output.write(exact + b' ' * (1_048_576 - len(exact)) + b'\n')
+        oversized = action('😀' * 262_144)
+        # Force the bounded read to end inside a UTF-8 sequence.
+        padding = (2 - oversized.index('😀'.encode('utf-8'))) % 4
+        output.write(b' ' * padding + oversized + b'\n')
+        output.write(action('After oversized action') + b'\n')
+        output.flush()
+"#,
+    );
+    let daemon = f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    f.tool(
+        "cito_listen",
+        json!({"about":"UI action receiver","scope":"workspace"}),
+        meta,
+    );
+    let frames = || -> Vec<Value> {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    wait(|| {
+        frames()
+            .iter()
+            .filter(|frame| frame["op"] == "composer_result")
+            .count()
+            == 5
+    });
+    let frames = frames();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["op"] == "composer_result")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"op":"composer_result","ok":true,"error":null}),
+            json!({"op":"composer_result","ok":true,"error":null}),
+            json!({"op":"composer_result","ok":true,"error":null}),
+            json!({"op":"composer_result","ok":false,"error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+            json!({"op":"composer_result","ok":true,"error":null}),
+        ]
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["op"] == "error")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"})]
+    );
+    assert_eq!(
+        f.db("hub.sqlite")
+            .query(
+                "SELECT json_extract(CAST(data AS TEXT),'$.message') AS message FROM hub_signals ORDER BY seq",
+                &[],
+            )
+            .unwrap(),
+        vec![
+            json!({"message":"😀".repeat(65_536)}),
+            json!({"message":"After maximum-size message"}),
+            json!({"message":"Exact action limit"}),
+            json!({"message":"After oversized action"}),
+        ]
+    );
+    assert!(!f.exited(daemon));
+}
+#[test]
 fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

@@ -25,6 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const FRAME_LIMIT: usize = 262_144;
+const REQUEST_LIMIT: usize = 1_048_576;
 fn wire_status(raw: &str) -> &str {
     match raw {
         "reconnecting" | "connecting" => "connecting",
@@ -2527,7 +2528,7 @@ fn handle_http(mut stream: TcpStream, service: Arc<Mutex<DaemonService>>) {
         respond(&mut stream, 403, &json!({"error":"Forbidden Origin"}));
         return;
     }
-    if length > 1_048_576 {
+    if length > REQUEST_LIMIT {
         respond(
             &mut stream,
             413,
@@ -2752,17 +2753,32 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
         let mut reader = BufReader::new(output);
         let mut logins: Vec<thread::JoinHandle<()>> = Vec::new();
         loop {
-            let mut line = String::new();
+            let mut line = Vec::new();
             match reader
                 .by_ref()
-                .take(FRAME_LIMIT as u64)
-                .read_line(&mut line)
+                .take((REQUEST_LIMIT + 1) as u64)
+                .read_until(b'\n', &mut line)
             {
                 Ok(0) | Err(_) => break,
-                Ok(_) if line.len() >= FRAME_LIMIT => break,
                 _ => {}
             }
-            if let Ok(action) = serde_json::from_str::<Value>(&line) {
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.len() > REQUEST_LIMIT {
+                // Discard the rest without allocating or interpreting a partial UTF-8 action.
+                let drained = reader.skip_until(b'\n');
+                if let Ok(s) = service.lock() {
+                    let error = "INVALID_INPUT: UI action exceeds 1 MiB";
+                    s.emit(json!({"op":"composer_result","ok":false,"error":error}));
+                    s.emit(json!({"op":"error","error":error}));
+                }
+                if drained.is_err() {
+                    break;
+                }
+                continue;
+            }
+            if let Ok(action) = serde_json::from_slice::<Value>(&line) {
                 let is_login = interactive_login(&action);
                 let service = service.clone();
                 let run = move || {

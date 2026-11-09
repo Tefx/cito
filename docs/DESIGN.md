@@ -227,6 +227,7 @@ Each request is a single JSON object written to `stdin` followed by `\n` (and `s
      1. **Field-level UTF-8 byte caps**: truncate `activity[i].message` to `512` UTF-8 bytes, `about` to `256` UTF-8 bytes, and `title` / `cwd` / `summary` to `128` UTF-8 bytes (on valid UTF-8 char boundaries, appending `"…"`).
      2. **Collection-level caps (preserving authoritative total counts in `unread_count` and `total_online`)**: cap `activity` at `80` items, `peers` at `100` items, `sessions` / `listeners` at `64` items, `my_remote_listeners` at `64` items, and `available` at `32` items.
      3. **Progressive Shedding Loop & Final Guard**: if `serde_json::to_vec(&frame).len() > 262_144`, progressively trim trailing items from `activity`, then `peers` / `my_remote_listeners` / `available`, and finally `sessions` / `listeners` (setting `"truncated": true` on the frame) until the serialized byte length is strictly `<= 262,144` bytes (verified by a regression test with `activity: []` and 150 multibyte-emoji listeners, `F26`).
+   - Inbound `cito-ui -> daemon` action lines use a separate **`1,048,576`-byte (`1 MiB`) limit**, excluding the newline delimiter, matching HTTP `/ui` request bodies. This admits a 65,536-code-point message plus its JSON envelope. Drain oversized lines through the next newline or EOF without growing the buffer, emit `composer_result` (`ok: false`) and `error` with `INVALID_INPUT: UI action exceeds 1 MiB`, and continue processing subsequent actions on the same stream.
 
 ---
 
