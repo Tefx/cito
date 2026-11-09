@@ -1069,6 +1069,20 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
             "cito_inbox"
         ]
     );
+    let find = list["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "cito_find")
+        .unwrap();
+    assert_eq!(
+        find["inputSchema"]["properties"]["harness"]["pattern"],
+        "^[a-z0-9][a-z0-9_-]{0,31}$"
+    );
+    assert_eq!(
+        f.tool("cito_find", json!({"harness":"1agent"}), human())["listeners"],
+        json!([])
+    );
     for v in [
         json!([]),
         json!(42),
