@@ -7447,7 +7447,7 @@ phases:
     name: Implement V25 Stage 9 (v0.20.1) Theory-Grounded UI/UX Redesign, Two-Stratum
       Human Channel Card, Configured-Only Session Discovery, Live Pi Process Discovery
       & Visual Snapshot Renderer (U1–U11)
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 9 (`v0.20.1` — `U1`–`U11`) implementation\
       \ per `docs/DESIGN.md` §11:\n  1. **`U1` — Configured-Only Session Discovery\
@@ -7552,6 +7552,36 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-09T19:58:23.487606Z'
+    done_at: '2026-11-09T20:38:27.501319+00:00'
+    evidence: "Artifact:\n- Commit: 1d8b7c35cb1db6f8a309ad0564e8db5b31a98478 (40 files\
+      \ changed, +1171 / -199 lines)\n- Executor: rust-senior (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T19-59-19-728Z_01a1c1e4-ccaf-70c5-917e-a07cec34b619.jsonl`)\n\
+      - Delivered (`docs/DESIGN.md` §11 `U1`–`U11` & `v0.20.1` version bump):\n  1.\
+      \ `U1`: Gated `available` session discovery in `daemon.rs` `snapshot()` on `configured\
+      \ == true` (`settings[\"apps\"]`), and triggered `refresh_discovery()` immediately\
+      \ on `setup_apply`, `setup_remove_app`, and `setup_disconnect_all` before `push_ui()`.\n\
+      \  2. `U2`: Added live running `pi` process discovery (`/bin/ps` + `/usr/sbin/lsof`)\
+      \ and `~/.pi/agent/sessions` `.jsonl` lookup in `plugins/pi/native.rs` (hermetically\
+      \ gated via `CITO_PI_PROCESS_DISCOVERY`), plus self-healing socket re-bind in\
+      \ `plugins/pi/cito-bridge.ts`.\n  3. `U3`: Rendered per-Hub `human_paused_card`\
+      \ (`NSRect(x: 0, y: 0, width: 380, height: 52)`) with `listen_human` (`+ Enable`)\
+      \ in `cardMenu`.\n  4. `U4`–`U6`: Unified `\"Human Channels\"` terminology,\
+      \ user-controlled `?` `onboarding_banner` across all 3 tabs with disjoint `300pt`\
+      \ scroll viewport, `skip_next_step`, and `skip_channel:<id>` (`\"Skip for Now\"\
+      `).\n  5. `U7`–`U9`: Eliminated all badge/button truncations, right-aligned\
+      \ `CONNECTED HUBS` row controls flush to `x = 468`, added `copy_host_hub_token`\
+      \ (`\"Token: <prefix>… Copy\"`) and validated `\"✓ Saved\"` feedback, and added\
+      \ uppercase field labels and protocol descriptions (`local://` vs `http://`/`https://`)\
+      \ to `add_hub_form`.\n  6. `U10` & `U11`: Implemented the two-stratum Human\
+      \ Channel card (`stratum_hub:<id>` `1. HUB GATEWAY · ONCE PER HUB` + `stratum_user:<id>`\
+      \ `2. YOUR PERSONAL NODE`) and `\"TARGET HUB:\"` label, `truncated_labels` detector,\
+      \ `test_render_png` 2x Retina PNG snapshot renderer (generating 12 snapshots\
+      \ in `/tmp/cito-v25-snapshots/`), and `v0.20.1` version bump.\n\nVerification:\n\
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` -> 222 passed, 0 failed, 0 compiler warnings,\
+      \ `Syntax OK`\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v25.impl`.\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§11, V25 Stage 9 v0.20.1 U1–U11)\n- docs/ROADMAP.md"
   - id: v25.hygiene
     name: 'Multimodal Visual Snapshot Inspection (8 Core UI States), Iterative Contract-and-Simplicity
       Convergence & Live v0.20.1 Distribution Closure (GitHub Release v0.20.1 & Tefx/homebrew-tap
