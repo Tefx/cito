@@ -2047,7 +2047,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             card.addSubview(makeHarnessBadge(NSRect(x: 12, y: 43, width: 28, height: 28), radius: 7, iconInset: 6, harness: app.id, harnesses: map))
 
             let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
-            let titleW = min(app.tier == "experimental" ? 80 : 210, ceil(measureTextWidth(app.display_name, font: titleFont)) + 4)
+            let titleW = min(app.tier == "experimental" ? 136 : 210, ceil(measureTextWidth(app.display_name, font: titleFont)) + 6)
             card.addSubview(textLabel(app.display_name, NSRect(x: 50, y: 55, width: titleW, height: 17), size: 13, weight: .semibold))
             if app.tier == "experimental" {
                 let expPill = roundedView(NSRect(x: 54 + titleW, y: 56, width: 88, height: 16), radius: 8, color: .systemOrange.withAppearanceAlpha(0.18))
@@ -2100,12 +2100,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         channelsView.isHidden = settingsActiveTab != "channels"
 
         let bannerEnabled = settings?.desktop_banner_enabled ?? true
-        let bannerCard = roundedView(NSRect(x: 20, y: 274, width: 480, height: 54), radius: 10,
+        let bannerCard = roundedView(NSRect(x: 20, y: 282, width: 480, height: 48), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.11))
         bannerCard.identifier = NSUserInterfaceItemIdentifier("settings_desktop_banner_card")
-        bannerCard.addSubview(textLabel("Mac Desktop Banner", NSRect(x: 14, y: 28, width: 240, height: 17), size: 13, weight: .semibold))
-        bannerCard.addSubview(textLabel("Show floating HUD wake banners on this Mac when signals arrive.", NSRect(x: 14, y: 9, width: 350, height: 15), size: 11, color: .secondaryLabelColor))
-        let toggleBanner = MenuControl(bannerEnabled ? "● Enabled" : "Off", frame: NSRect(x: 386, y: 15, width: 80, height: 24), radius: 12)
+        bannerCard.addSubview(textLabel("Mac Desktop Banner", NSRect(x: 14, y: 25, width: 240, height: 17), size: 13, weight: .semibold))
+        bannerCard.addSubview(textLabel("Show floating HUD wake banners on this Mac when signals arrive.", NSRect(x: 14, y: 7, width: 350, height: 15), size: 11, color: .secondaryLabelColor))
+        let toggleBanner = MenuControl(bannerEnabled ? "● Enabled" : "Off", frame: NSRect(x: 386, y: 12, width: 80, height: 24), radius: 12)
         toggleBanner.identifier = NSUserInterfaceItemIdentifier("toggle_desktop_banner")
         toggleBanner.style = bannerEnabled ? .prominent : .neutral
         toggleBanner.pressed = { [weak self] in
@@ -2140,44 +2140,43 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         channelsView.addSubview(selector)
 
         let resolvedChannels = channelSettingsByHub[effectiveChannelHub] ?? []
-        var chCursorY: CGFloat = 260
+        var chCursorY: CGFloat = 274
         for ch in resolvedChannels {
             let visibleFields = ch.fields.filter { $0.hidden != true }
             let instruction = channelInstructions["\(effectiveChannelHub)|\(ch.id)"] ?? ch.pairing_instruction ?? ""
-            let instructionHeight = instruction.isEmpty ? CGFloat(0) : max(36, ceil((instruction as NSString).boundingRect(with: NSSize(width: 278, height: CGFloat.greatestFiniteMagnitude), options: [.usesLineFragmentOrigin], attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold)]).height) + 4)
+            let instructionHeight = instruction.isEmpty ? CGFloat(0) : max(32, ceil((instruction as NSString).boundingRect(with: NSSize(width: 278, height: CGFloat.greatestFiniteMagnitude), options: [.usesLineFragmentOrigin], attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)]).height) + 4)
             let guide=(ch.setup_guide ?? []).joined(separator:"\n")
             let hubFields = visibleFields.filter { $0.scope == "hub" }
             let userFields = visibleFields.filter { $0.scope != "hub" }
             let hasHubScopeFields = ch.fields.contains { $0.scope == "hub" }
-            let hubFieldsH = hubFields.reduce(CGFloat(0)) { $0 + ($1.help_text?.isEmpty == false ? 48 : 32) }
-            let userFieldsH = userFields.reduce(CGFloat(0)) { $0 + ($1.help_text?.isEmpty == false ? 48 : 32) }
-            let guideH: CGFloat = !ch.configured && !guide.isEmpty && !hubFields.isEmpty ? max(56,ceil((guide as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height)+8) : 0
+            let hubFieldsH = hubFields.reduce(CGFloat(0)) { $0 + ($1.help_text?.isEmpty == false ? 38 : 26) }
+            let userFieldsH = userFields.reduce(CGFloat(0)) { $0 + ($1.help_text?.isEmpty == false ? 38 : 26) }
+            let guideH: CGFloat = !ch.configured && !guide.isEmpty && !hubFields.isEmpty ? max(30,ceil((guide as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height)+2) : 0
             let currentUser=settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? "local"
-            let gatewayRole = !hubFields.isEmpty ? "Configured once by the Hub owner. Shared by all human nodes on '\(effectiveChannelHub)'." :
+            let gatewayRole = !hubFields.isEmpty ? (guideH > 0 ? "" : "Configured once by the Hub owner. Shared by all human nodes on '\(effectiveChannelHub)'.") :
                 (hasHubScopeFields ? (ch.hub_provided ? "Provided by '\(effectiveChannelHub)' Hub administrator — no gateway setup needed on your Mac." : "Not yet configured by the '\(effectiveChannelHub)' Hub administrator.") : "No shared gateway credentials required for this channel.")
-            let personalRole="Bind your personal \(ch.display_name) account to receive agent wakes and send/reply to agents on '\(effectiveChannelHub)'."
+            let personalRole="Bind your personal \(ch.display_name) chat to receive wakes and reply on '\(effectiveChannelHub)'."
             func roleHeight(_ text: String) -> CGFloat {
-                max(14,ceil((text as NSString).boundingRect(with:NSSize(width:428,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height))
+                text.isEmpty ? 0 : max(13,ceil((text as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height))
             }
             let gatewayRoleH=roleHeight(gatewayRole), personalRoleH=roleHeight(personalRole)
-            // Preserve the grid while allowing localized/runtime names and system fonts to wrap.
-            let hubStratumH: CGFloat = 52 + guideH + hubFieldsH + gatewayRoleH - 14
-            let userStratumH: CGFloat = 88 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 8 : 0) + personalRoleH - 14
-            let cardHeight: CGFloat = 60 + hubStratumH + 8 + userStratumH + 8
+            let hubStratumH: CGFloat = 26 + gatewayRoleH + guideH + hubFieldsH + 6
+            let userStratumH: CGFloat = 26 + personalRoleH + userFieldsH + (instructionHeight > 0 ? instructionHeight + 6 : 0) + 34
+            let cardHeight: CGFloat = 42 + hubStratumH + 6 + userStratumH + 6
             chCursorY -= cardHeight
             let chCard = roundedView(NSRect(x: 20, y: chCursorY, width: 480, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.12))
             chCard.identifier = NSUserInterfaceItemIdentifier("settings_channel:\(ch.id)")
 
-            let chBadge = roundedView(NSRect(x: 12, y: cardHeight - 40, width: 28, height: 28), radius: 7,
+            let chBadge = roundedView(NSRect(x: 12, y: cardHeight - 34, width: 24, height: 24), radius: 6,
                 color: tintColor(ch.tint).withAppearanceAlpha(0.88), border: .white.withAlphaComponent(0.18))
-            let chIcon = NSImageView(frame: NSRect(x: 6, y: 6, width: 16, height: 16))
+            let chIcon = NSImageView(frame: NSRect(x: 5, y: 5, width: 14, height: 14))
             chIcon.image = NSImage(systemSymbolName: ch.sf_symbol, accessibilityDescription: ch.display_name)
             chIcon.contentTintColor = .white
             chBadge.addSubview(chIcon)
             chCard.addSubview(chBadge)
 
-            chCard.addSubview(textLabel(ch.display_name, NSRect(x: 48, y: cardHeight - 26, width: 180, height: 17), size: 13, weight: .semibold))
+            chCard.addSubview(textLabel(ch.display_name, NSRect(x: 44, y: cardHeight - 21, width: 180, height: 16), size: 12.5, weight: .semibold))
             let channelResult = channelResults["\(effectiveChannelHub)|\(ch.id)"]
             let chStatusText:String
             let chStatusColor:NSColor
@@ -2188,73 +2187,75 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             case "error": chStatusText = "⚠ Error"; chStatusColor = .systemRed
             default: chStatusText = ch.hub_provided || ch.status == "hub_ready" ? "Hub Service: ● Ready" : "○ Not Configured"; chStatusColor = .secondaryLabelColor
             }
-            let chStatusLabel = textLabel(chStatusText, NSRect(x: 240, y: cardHeight - 25, width: 226, height: 16), size: 11, weight: .medium, color: chStatusColor)
+            let chStatusLabel = textLabel(chStatusText, NSRect(x: 240, y: cardHeight - 20, width: 226, height: 15), size: 11, weight: .medium, color: chStatusColor)
             chStatusLabel.alignment = .right
             chStatusLabel.identifier = NSUserInterfaceItemIdentifier("settings_channel_status:\(ch.id)")
             chCard.addSubview(chStatusLabel)
 
-            let chDetail = textLabel(channelResult?.detail ?? ch.detail, NSRect(x: 48, y: cardHeight - 43, width: 418, height: 15), size: 11, color: .secondaryLabelColor)
+            let chDetail = textLabel(channelResult?.detail ?? ch.detail, NSRect(x: 44, y: cardHeight - 36, width: 422, height: 14), size: 10.5, color: .secondaryLabelColor)
             chDetail.identifier = NSUserInterfaceItemIdentifier("settings_channel_detail:\(ch.id)")
             chCard.addSubview(chDetail)
 
-            let hubStratum = roundedView(NSRect(x:12,y:8+userStratumH+8,width:456,height:hubStratumH),radius:8,
+            let hubStratum = roundedView(NSRect(x:12,y:6+userStratumH+6,width:456,height:hubStratumH),radius:8,
                 color:.controlAccentColor.withAppearanceAlpha(0.06),border:.controlAccentColor.withAppearanceAlpha(0.14))
             hubStratum.identifier=NSUserInterfaceItemIdentifier("stratum_hub:\(ch.id)")
-            let hubTitle=textLabel("1. HUB GATEWAY · ONCE PER HUB",NSRect(x:12,y:hubStratumH-22,width:220,height:14),size:10,weight:.bold,color:.secondaryLabelColor)
+            let hubTitle=textLabel("1. HUB GATEWAY · ONCE PER HUB",NSRect(x:12,y:hubStratumH-19,width:220,height:13),size:9.5,weight:.bold,color:.secondaryLabelColor)
             hubTitle.identifier=NSUserInterfaceItemIdentifier("stratum_hub_title:\(ch.id)")
             hubStratum.addSubview(hubTitle)
             let gatewayActive=ch.hub_provided || ch.status != "not_configured"
             let gatewayStatus=textLabel(gatewayActive ? "● Hub Gateway Active" : "○ Gateway Token Required",
-                gatewayActive ? NSRect(x:236,y:hubStratumH-22,width:132,height:14) : NSRect(x:280,y:hubStratumH-22,width:164,height:14),size:10,weight:.medium,color:gatewayActive ? .systemGreen : .secondaryLabelColor)
+                gatewayActive ? NSRect(x:236,y:hubStratumH-19,width:132,height:13) : NSRect(x:280,y:hubStratumH-19,width:164,height:13),size:9.5,weight:.medium,color:gatewayActive ? .systemGreen : .secondaryLabelColor)
             gatewayStatus.alignment = gatewayActive ? .left : .right
             gatewayStatus.identifier=NSUserInterfaceItemIdentifier("stratum_hub_status:\(ch.id)")
             hubStratum.addSubview(gatewayStatus)
             if ch.fields.contains(where:{$0.scope=="hub" && $0.configured && $0.hidden != true}) {
-                let clear=MenuControl("Clear Token",frame:NSRect(x:372,y:hubStratumH-25,width:76,height:20),radius:6)
+                let clear=MenuControl("Clear Token",frame:NSRect(x:372,y:hubStratumH-22,width:76,height:19),radius:6)
                 clear.style = .destructiveHover
                 clear.identifier=NSUserInterfaceItemIdentifier("clear_channel_service:\(ch.id)")
                 clear.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":true]) }
                 hubStratum.addSubview(clear)
             }
-            let gatewayDescription=textLabel(gatewayRole,NSRect(x:12,y:hubStratumH-26-gatewayRoleH,width:432,height:gatewayRoleH),size:10.5,color:.secondaryLabelColor)
-            gatewayDescription.maximumNumberOfLines=0; gatewayDescription.lineBreakMode = .byWordWrapping
-            hubStratum.addSubview(gatewayDescription)
+            if gatewayRoleH > 0 {
+                let gatewayDescription=textLabel(gatewayRole,NSRect(x:12,y:hubStratumH-21-gatewayRoleH,width:432,height:gatewayRoleH),size:10,color:.secondaryLabelColor)
+                gatewayDescription.maximumNumberOfLines=0; gatewayDescription.lineBreakMode = .byWordWrapping
+                hubStratum.addSubview(gatewayDescription)
+            }
             if guideH>0 {
-                let box=textLabel(guide,NSRect(x:12,y:8+hubFieldsH,width:432,height:guideH),size:10.5,color:.secondaryLabelColor)
+                let box=textLabel(guide,NSRect(x:12,y:hubStratumH-21-gatewayRoleH-guideH,width:432,height:guideH),size:10,color:.secondaryLabelColor)
                 box.identifier=NSUserInterfaceItemIdentifier("channel_setup_guide:\(ch.id)")
                 box.maximumNumberOfLines=0; box.lineBreakMode = .byWordWrapping
                 hubStratum.addSubview(box)
             }
-            let userStratum=roundedView(NSRect(x:12,y:8,width:456,height:userStratumH),radius:8,
+            let userStratum=roundedView(NSRect(x:12,y:6,width:456,height:userStratumH),radius:8,
                 color:.labelColor.withAppearanceAlpha(0.04),border:.labelColor.withAppearanceAlpha(0.10))
             userStratum.identifier=NSUserInterfaceItemIdentifier("stratum_user:\(ch.id)")
-            let userTitle=textLabel("2. YOUR PERSONAL NODE (@\(currentUser)) · EACH HUMAN ON '\(effectiveChannelHub.uppercased())'",NSRect(x:12,y:userStratumH-22,width:432,height:14),size:10,weight:.bold,color:.secondaryLabelColor)
+            let userTitle=textLabel("2. YOUR PERSONAL NODE (@\(currentUser)) · EACH HUMAN ON '\(effectiveChannelHub.uppercased())'",NSRect(x:12,y:userStratumH-19,width:432,height:13),size:9.5,weight:.bold,color:.secondaryLabelColor)
             userTitle.identifier=NSUserInterfaceItemIdentifier("stratum_user_title:\(ch.id)")
             userStratum.addSubview(userTitle)
-            let personalDescription=textLabel(personalRole,NSRect(x:12,y:userStratumH-26-personalRoleH,width:432,height:personalRoleH),size:10.5,color:.secondaryLabelColor)
+            let personalDescription=textLabel(personalRole,NSRect(x:12,y:userStratumH-21-personalRoleH,width:432,height:personalRoleH),size:10,color:.secondaryLabelColor)
             personalDescription.maximumNumberOfLines=0; personalDescription.lineBreakMode = .byWordWrapping
             userStratum.addSubview(personalDescription)
-            for (container, fields, top) in [(hubStratum,hubFields,hubStratumH-52-guideH-(gatewayRoleH-14)),(userStratum,userFields,userStratumH-48-(personalRoleH-14))] {
-                var fieldY=top-24
+            for (container, fields, top) in [(hubStratum,hubFields,hubStratumH-23-gatewayRoleH-guideH),(userStratum,userFields,userStratumH-23-personalRoleH)] {
+                var fieldY=top-22
                 for f in fields {
                     let fieldId="channel_field:\(ch.id):\(f.key)"
-                    let labelView=textLabel(f.label,NSRect(x:12,y:fieldY+4,width:140,height:16),size:11.5,weight:.medium)
+                    let labelView=textLabel(f.label,NSRect(x:12,y:fieldY+3,width:140,height:15),size:11,weight:.medium)
                     labelView.toolTip=f.label; container.addSubview(labelView)
                     let initialVal=channelFieldDrafts[draftKey(fieldId)] ?? (f.value ?? "")
-                    let inputField=makeEditableField(fieldId,frame:NSRect(x:158,y:fieldY,width:286,height:24),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret")
+                    let inputField=makeEditableField(fieldId,frame:NSRect(x:158,y:fieldY,width:286,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret")
                     if f.type=="secret" { channelSecretOriginal[draftKey(fieldId)]=f.value ?? "" }
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     if let help=f.help_text, !help.isEmpty {
-                        container.addSubview(textLabel(help,NSRect(x:158,y:fieldY-16,width:286,height:14),size:10,color:.secondaryLabelColor))
-                        fieldY-=16
+                        container.addSubview(textLabel(help,NSRect(x:158,y:fieldY-13,width:286,height:12),size:9.5,color:.secondaryLabelColor))
+                        fieldY-=12
                     }
-                    fieldY-=32
+                    fieldY-=26
                 }
             }
             chCard.addSubview(hubStratum); chCard.addSubview(userStratum)
             // Action and instruction coordinates are anchored to the outer card's grid.
             func addPersonalControl(_ view: NSView) {
-                view.frame = view.frame.offsetBy(dx:-12,dy:-8)
+                view.frame = view.frame.offsetBy(dx:-12,dy:-4)
                 userStratum.addSubview(view)
             }
             if !instruction.isEmpty {
@@ -2454,10 +2455,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         addBtn.identifier = NSUserInterfaceItemIdentifier("open_add_hub")
         addBtn.pressed = { [weak self] in
             guard let self = self else { return }
+            let wasEditing = self.editingExistingHub
             self.editingExistingHub=false
             self.editingOriginalHub=""
-            self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubAuth="none"
-            self.addHubFormOpen = !self.addHubFormOpen
+            self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubAuth="none"
+            self.addHubFormOpen = wasEditing ? true : !self.addHubFormOpen
             self.rebuildSettingsPanel()
         }
         hubsView.addSubview(addBtn)
