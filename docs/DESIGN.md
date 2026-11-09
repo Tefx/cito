@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V25 — Stage 9 `v0.20.1`: Holistic UX & Visual Hierarchy Overhaul, Terminology Unification, Configured-Only Session Discovery, Live Pi Process Discovery & Visual E2E Verification (`U1`–`U11`), Building on Stage 8 `L1`–`L17` & Pure Rust Core)
+# Cito Architecture & Protocol Specification (V26 — Stage 10 `v0.20.2`: Root-Cause Equivalence-Class Closure (`R1`–`R5`), True Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop Error Surfacing, Bridge Readiness & `Daemon<->UI` Closed-Loop Verification, Building on Stage 9 `U1`–`U11` & Stage 8 `L1`–`L17`)
 
-> **Normative Supersession Notice (`V25` / `v0.20.1`)**:
-> This `V25` specification is the single authoritative contract for Cito `v0.20.1` (Stage 9 — Phase `v25`), superseding `V24` (`v0.20.0`). Stage 9 (`§11`) resolves all 11 live E2E user-reported UX, visual layout, truncation, session-discovery, state-stratum, and terminology defects (`U1`–`U11`) discovered during interactive macOS testing of `v0.20.0`, and introduces mechanical text-truncation detection (`truncated_labels`) plus `test_render_png` visual snapshot verification across all UI surfaces. All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
+> **Normative Supersession Notice (`V26` / `v0.20.2`)**:
+> This `V26` specification is the single authoritative contract for Cito `v0.20.2` (Stage 10 — Phase `v26`), superseding `V25` (`v0.20.1`). Stage 10 (`§12`) resolves all 5 root-cause equivalence classes (`R1`–`R5`) identified across the three-agent root-cause audit (`pathway-auditor`, `uiux-auditor`, and `structural-auditor`): true two-stratum progressive disclosure and independent scope saving (`R1`), full mechanical geometry invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`) and 8 coordinate fixes (`R2`), closed-loop UI action error surfacing and form/invite validation (`R3`), bridge socket readiness vs. `needs_reload` UX and bounded exponential retry backoff (`R4`), and real `DaemonService <-> Headless cito-ui` closed-loop integration plus 2x Retina PNG multimodal verification (`R5`). All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
 
 ---
 
@@ -982,7 +982,105 @@ Interactive macOS testing of `v0.20.0` exposed 11 concrete UX, session-discovery
                - When `!ch.configured`: `skip_channel:\(ch.id)` (`"Skip for Now"`, `frame: NSRect(x: 132, y: 10, width: 96, height: 24)`)
                - Right-aligned: `test_channel:\(ch.id)` (`"Send Test"`, `NSRect(x: 312, y: 10, width: 80, height: 24)`) + `save_channel:\(ch.id)` (`"Save"`, `NSRect(x: 398, y: 10, width: 68, height: 24)`, `.prominent`).
 
+---
 
+## 12. Stage 10 (`v0.20.2` — Phase `v26`): Root-Cause Equivalence-Class Closure (`R1`–`R5`), True Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop Error Surfacing, Bridge Readiness & `Daemon<->UI` Closed-Loop Verification
 
+Stage 10 (`v0.20.2` — Phase `v26`) supersedes any conflicting layout, coordinate, or action rules in `§10`–`§11` and closes the five systemic root-cause equivalence classes (`R1`–`R5`) identified by the multi-perspective root-cause audit (`pathway-auditor`, `uiux-auditor`, and `structural-auditor`):
 
+### 12.1 `R1` — True Two-Stratum Progressive Disclosure, Independent Scope Saving (`save_hub_service:<id>`, `edit_hub_service:<id>`) & Prerequisite Gating (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, `hub.rs`)
+
+1. **`[SHARP]` Independent Scope Collection & RPC Routing**:
+   - Split `collectValues()` in `src/macos/cito-ui.swift` into scope-filtered collection (`collectValues(scopeFilter: "hub")` vs. `collectValues(scopeFilter: "user")`), and clear acknowledged secret drafts in `channelFieldDrafts` upon successful channel save so saved secrets are never stale-resubmitted.
+   - In `crates/cito-native/src/core/daemon.rs`, support `"save_hub_service"` (alongside `"channel_save" | "channel_pair" | "channel_test"`): when `op == "save_hub_service"` (or `"scope": "hub"`), populate **only** `params["hub_config"]` and omit `"user_config"` and `"enabled"` so `hub.rs` updates `hub_plugin_services` without creating/modifying a row in `hub_human_channels` or resuming a paused personal binding. Also partition `values` against the target Hub's schema when a remote schema is present.
+2. **`[SHARP]` Progressive Collapse of `stratum_hub:<id>` (`1. HUB GATEWAY · ONCE PER HUB`)**:
+   - Track `var editingHubGateway = Set<String>()` keyed by `"\(effectiveChannelHub)|\(ch.id)"`.
+   - Define:
+     - `let gatewayActive = ch.hub_provided || ch.status != "not_configured" || (hasHubScopeFields && ch.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })`
+     - `let hubGatewayExpanded = !gatewayActive || editingHubGateway.contains(channelKey)`
+   - **When Collapsed (`!hubGatewayExpanded`)**: render a compact single-row bar (`height: 36pt` for admin/local, `50pt` for non-admin with role caption) with:
+     - `stratum_hub_title:\(ch.id)` (`"1. HUB GATEWAY · ONCE PER HUB"`, `NSRect(x: 10, y: hubStratumH - 25, width: 168, height: 14)`)
+     - `stratum_hub_status:\(ch.id)` (`"● Hub Gateway Active"`, `NSRect(x: 182, y: hubStratumH - 25, width: 106, height: 14)`, `.systemGreen`)
+     - When `!hubFields.isEmpty`: `edit_hub_service:\(ch.id)` (`"Change Token…"`, `NSRect(x: 292, y: hubStratumH - 28, width: 82, height: 20)`) and `clear_channel_service:\(ch.id)` (`"Clear Token"`, `NSRect(x: 378, y: hubStratumH - 28, width: 70, height: 20)`, `.destructiveHover`).
+   - **When Expanded (`hubGatewayExpanded`)**: render `stratum_hub_title:\(ch.id)`, `stratum_hub_status:\(ch.id)`, `gatewayDescription`, `channel_setup_guide:\(ch.id)` (when `!gatewayActive`), `hubFields`, and the Step-1 action bar (`y: 6, height: 24`) containing:
+     - `save_hub_service:\(ch.id)` (`"Save Gateway Token"`, `NSRect(x: 304, y: 6, width: 140, height: 24)`, `.prominent`)
+     - When `gatewayActive`: `cancel_edit_hub_service:\(ch.id)` (`"Cancel"`, `NSRect(x: 232, y: 6, width: 66, height: 24)`) and `clear_channel_service:\(ch.id)` (`"Clear Token"`, `NSRect(x: 12, y: 6, width: 84, height: 24)`).
+     - When `acceptSettings` confirms `gatewayActive == true`, automatically remove `channelKey` from `editingHubGateway` so Step 1 collapses.
+3. **`[SHARP]` Step-2 Prerequisite Gating in `stratum_user:<id>` (`2. YOUR PERSONAL NODE`)**:
+   - Express all subviews in `stratum_user:<id>` directly in `userStratum`'s `456pt` coordinate space (`x: 12..444`, removing the negative-offset `addPersonalControl` hack).
+   - In `MenuControl`, guard `mouseDown` and `accessibilityPerformPress` with `guard isEnabled else { return }` so `isEnabled = false` genuinely blocks invocation.
+   - When `!gatewayActive`: set `isEnabled = false` (and `alphaValue = 0.55`) on `userFields` inputs, `pair_channel:\(ch.id)`, `test_channel:\(ch.id)`, and `save_channel:\(ch.id)`, while keeping `skip_channel:\(ch.id)` (`"Skip for Now"`) enabled (`isEnabled = true, alphaValue = 1.0`), and display `"Complete Step 1 (Hub Gateway Token) above to enable personal pairing on '\(effectiveChannelHub)'."` in `personalRole`.
+
+---
+
+### 12.2 `R2` — Full Mechanical Geometry Invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`) & Coordinate Fixes (`src/macos/cito-ui.swift`, `crates/cito-native/tests/support/ui.rs`)
+
+1. **`[SHARP]` Three Mechanical Geometry Invariants in `inspectMenu()` (`src/macos/cito-ui.swift`)**:
+   - Upgrade `inspectMenu()` in `src/macos/cito-ui.swift` to compute and emit all 3 geometry arrays across `items` (`cardMenu`), `settings_items` (`SettingsPanel`), and `directory_items` (`DirectoryPanel`):
+     1. `truncated_labels`: checks every visible `MenuControl.label`, every `settings_app_tier:*` label, AND every visible non-editable `NSTextField` chrome label (checking single-line width when `maximumNumberOfLines == 1` and wrapped bounding height when `maximumNumberOfLines != 1`, excluding dynamic user-data fields with `.byTruncatingMiddle` or data-row prefixes `dir_`/`act_`).
+     2. `overlapping_siblings`: for every visible container (`doc` for `NSScrollView`, row cells for `NSTableView`, or `view` otherwise), checks all pairs of visible non-`NSVisualEffectView` direct subviews `(a, b)` for `a.frame.insetBy(dx: 0.5, dy: 0.5).intersects(b.frame.insetBy(dx: 0.5, dy: 0.5))`.
+     3. `clipped_views`: for every visible container (`doc.bounds` for `NSScrollView` document children, or `view.bounds` otherwise), checks every visible child for `minX < -0.5 || minY < -0.5 || maxX > parentBounds.width + 0.5 || maxY > parentBounds.height + 0.5`.
+2. **`[SHARP]` Resolution of All 8 Discovered Geometry Defects (`G1`–`G8`)**:
+   - **`G1`**: `open_directory` label width `180pt` vs `directory_online_badge` at `x: 208` (preventing horizontal overlap inside `open_directory`).
+   - **`G2`**: `stratum_hub` header vs description vertical spacing and single-row collapsed header coordinates.
+   - **`G3`**: `stratum_user` `pairing_instruction` spacing and direct `userStratum` (`456pt`) coordinate system (`x: 12..444`).
+   - **`G4`**: `settings_app` `titleW` cap so `settings_app_tier:<id>` never overlaps `settings_app_status:<id>`.
+   - **`G5`**: `host_hub_card` disjoint Y rows with expanded card `height: 128pt`.
+   - **`G6`**: `settings_desktop_banner_card` subtitle sized to `10.5pt, width: 366pt` so single-line text never truncates.
+   - **`G7`**: `directoryScrollView?.isHidden = empty` when `directory_empty_state` is visible so `directory_empty_state` and `directory_scroll` never overlap.
+   - **`G8`**: `cardMenu` `"Cito"` header title widened to `width: 36pt`.
+
+---
+
+### 12.3 `R3` — Closed-Loop UI Actions, Visible Error Surfacing (`settings_error_banner`, `add_hub_error`, `menu_error_row`, `hub.error`) & Invite/Form Validation (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`)
+
+1. **`[SHARP]` Daemon Error & Hub Error Propagation (`crates/cito-native/src/core/daemon.rs`)**:
+   - Track `last_hub_errors: HashMap<String, String>` on `DaemonService` (`daemon.rs`), recording errors from `login_hub` / `hub_action` / `test_hub` and surfacing `"error": self.last_hub_errors.get(&name)` in `settings_for_hub` (instead of hardcoded `null`), clearing it on successful connection/action.
+   - When `dispatch_action` fails in `spawn_ui` (`daemon.rs:3155`), emit `{"op": "error", "error": e, "source_op": action["op"], "hub": action["hub"]}` followed by `s.push_ui()`.
+   - Unify `"paste_hub_invite"` in `daemon.rs` to accept JSON invites, `http(s)://` URLs, and `cito setup --hub ...` CLI strings.
+2. **`[SHARP]` UI Error Surfacing & Closed-Loop Form/Button State (`src/macos/cito-ui.swift`)**:
+   - Handle `frame.op == "error"` in `src/macos/cito-ui.swift` by resetting `pendingMutation = false` and `hostHubPortPending = false`, routing the error to:
+     - `composerErrorLabel` (if composer pending),
+     - `addHubError` (`id: "add_hub_error"` inside `add_hub_form` if `addHubFormOpen`),
+     - `settingsBannerError` (`id: "settings_error_banner"` with `settings_error_label` and `dismiss_settings_error` in `SettingsPanel`, shifting scroll viewport height down by `36pt` so zero overlap occurs), or
+     - `menuBannerError` (`id: "menu_error_row"` in `cardMenu`),
+     and rebuilding immediately.
+   - In `submit_add_hub`: validate required fields (`name`, `url` starting with `http://`, `https://`, or `local://`, `token` when `!editingExistingHub && addHubAuth == "token"`, `issuer` and `client_id` when `addHubAuth == "oidc"`); on validation error, keep `addHubFormOpen = true` and display `add_hub_error` (`NSRect(x: 14, y: 36, width: 452, height: 15)`, `.systemRed`). When valid, set `addHubSaving = true` and close `addHubFormOpen` only when the resulting `settings`/`state` frame confirms the saved hub without error.
+   - In `paste_hub_invite`: on empty/invalid clipboard, set `settingsBannerError = "Clipboard does not contain a valid Hub invite or http(s):// URL."` and rebuild; on valid invite, emit `paste_hub_invite` / `setup_save_hub` and show `"✓ Pasted"`.
+   - Preserve `hostHubPortDraft` across unrelated refreshes and only transition `apply_host_hub_port` to `"✓ Saved"` when the acknowledged `host_hub.port` matches the submitted port and `host_hub.error == nil`.
+   - Validate `selectedChannelHub` against the current `settings.hubs` inventory in `effectiveChannelHub` so removing a Hub falls back to `"local"` cleanly.
+
+---
+
+### 12.4 `R4` — Process Discovery vs. Bridge Socket Readiness, `needs_reload` UX in `cardMenu`, & Bounded Exponential Retry Backoff (`plugins/pi/{native.rs,cito-bridge.ts}`, `crates/cito-native/src/core/session_activity.rs`, `src/macos/cito-ui.swift`)
+
+1. **`[SHARP]` Bridge Socket Identification & `needs_reload` Discovery (`plugins/pi/cito-bridge.ts`, `plugins/pi/native.rs`)**:
+   - In `plugins/pi/cito-bridge.ts`: when `identify` is called before `session_start` has populated `ctx` (e.g. immediately after `/reload`), fall back to `process.cwd()` and the latest `.jsonl` session file in `~/.pi/agent/sessions` (or `pid-${process.pid}`) so an active `.sock` bridge always returns `ok: true` with a valid session identity.
+   - In `plugins/pi/native.rs`: when `process_candidates` discovers a running `pi` process that has **no** responding `sockets/pi-pid-<p>.sock` (unless `CITO_PI_PROCESS_DISCOVERY == "1"` test mode is active without reload gating), mark the candidate session in `discover_sessions` with `"needs_reload": true` and `"reload_hint": "Run /reload in Pi to enable 1-click listen"`, and do NOT allow `resolve_caller` / `probe` to enroll a socket-less `needs_reload` process as an active listener. In `update_badge`, if `!path.exists()` or `SESSION_MISMATCH` occurs on a clear, return `ok: true` (and when `!path.exists()` on a non-null badge for an unbridged process, return a non-spamming result or rely on `SessionActivity` backoff).
+2. **`[SHARP]` Vendor-Neutral `needs_reload` Row in `cardMenu` (`src/macos/cito-ui.swift`)**:
+   - Decode `let needs_reload: Bool?` and `let reload_hint: String?` on `Candidate`.
+   - When `c.needs_reload == true`, render a `46pt`-tall row in `available_scroll` (using cumulative `y` offsets for variable row heights) showing `candidate_title:\(c.harness):\(c.session_id)`, orange subtitle `candidate_hint:\(c.harness):\(c.session_id)` (`c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen"`), and button `reload:\(c.harness):\(c.session_id)` (`"/reload"`, `leadingSymbol: "doc.on.doc"`, copying `"/reload"` to the clipboard, flashing `"✓ Copied"`, and emitting `refresh_available`).
+3. **`[SHARP]` Bounded Exponential Backoff in `SessionActivity` (`crates/cito-native/src/core/session_activity.rs`)**:
+   - Add `failures: u32` to `Badge` in `session_activity.rs`, resetting to `0` on success or intent change, and backing off `250ms -> 500ms -> 1s -> 2s -> 4s -> 8s -> 15s` (`BADGE_RETRY * 2^(failures-1)` capped at `15s`), and retire inactive historical badge entries once cleared or after bounded failure.
+
+---
+
+### 12.5 `R5` — Real `DaemonService <-> Headless cito-ui` Closed-Loop Integration Suite & Multimodal Retina PNG Verification (`crates/cito-native/tests/support/ui.rs`)
+
+1. **`[SHARP]` Closed-Loop `DaemonService <-> Headless cito-ui` Integration Harness & Retina Snapshot Verification (`crates/cito-native/tests/support/ui.rs`)**:
+   - Add a real closed-loop test harness in `crates/cito-native/tests/support/ui.rs` that wires `cito-ui` stdout actions directly into a real `DaemonService` (`dispatch_action` / `action`) and feeds the daemon's real emitted `state`, `settings`, `directory`, `pair_code`, `channel_test_result`, `composer_result`, and `error` frames back into `cito-ui` stdin.
+   - Assert all three mechanical geometry invariants (`truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views == []`) on every step of the closed-loop workflows.
+   - Render 2x Retina PNG snapshots of all core states (including collapsed vs. expanded `stratum_hub:<id>`, `settings_error_banner`, `add_hub_error`, and `needs_reload` candidate row) for multimodal `uiux-auditor` verification.
+
+---
+
+### 12.6 Complete `R1`–`R5` Verification & Acceptance Matrix
+
+| ID | Equivalence Class | Authoritative Modules | Required Verification / Regression Test |
+| :--- | :--- | :--- | :--- |
+| **`R1`** | Two-stratum progressive disclosure, independent scope saving (`save_hub_service:<id>`, `edit_hub_service:<id>`) & Step-2 prerequisite gating | `src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, `hub.rs` | `collectValues(scopeFilter: "hub" \| "user")` isolates strata; `save_hub_service` updates `hub_plugin_services` without touching `hub_human_channels`; `stratum_hub:<id>` collapses to a `36pt`/`50pt` single-row summary when `gatewayActive` with `edit_hub_service:<id>` (`"Change Token…"`) and `clear_channel_service:<id>`; Step 2 (`stratum_user:<id>`) disables personal inputs/actions (`isEnabled = false`, `alphaValue = 0.55`) except `skip_channel:<id>` when `!gatewayActive`. |
+| **`R2`** | Mechanical geometry invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`) & coordinate fixes (`G1`–`G8`) | `src/macos/cito-ui.swift`, `crates/cito-native/tests/support/ui.rs` | `inspectMenu()` reports `truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views == []` across `cardMenu`, `SettingsPanel`, and `DirectoryPanel`, resolving all 8 coordinate defects (`G1`–`G8`). |
+| **`R3`** | Closed-loop UI actions, visible error surfacing (`settings_error_banner`, `add_hub_error`, `menu_error_row`, `hub.error`) & invite/form validation | `src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs` | `DaemonService` tracks `last_hub_errors`, emits `{"op": "error", ...}` on action failure, and unifies `paste_hub_invite`; `cito-ui` surfaces errors in `add_hub_error`, `settings_error_banner` (shifting scroll viewport by `36pt`), `menu_error_row`, and `composerErrorLabel`, validates `submit_add_hub` before closing, preserves `hostHubPortDraft`, and falls back `effectiveChannelHub` to `"local"` on Hub removal. |
+| **`R4`** | Process discovery vs. bridge socket readiness, vendor-neutral `needs_reload` UX in `cardMenu`, & bounded exponential retry backoff | `plugins/pi/{native.rs,cito-bridge.ts}`, `crates/cito-native/src/core/session_activity.rs`, `src/macos/cito-ui.swift` | `cito-bridge.ts` `identify` falls back to `process.cwd()` / latest `.jsonl` before `session_start`; unbridged processes emit `needs_reload: true` and cannot be enrolled by `resolve_caller`/`probe`; `cardMenu` renders a `46pt` `needs_reload` row with `reload:<harness>:<sid>` (`"/reload"`); `SessionActivity` backs off `250ms..15s` and retires inactive badge entries. |
+| **`R5`** | Real `DaemonService <-> Headless cito-ui` closed-loop integration suite & multimodal Retina PNG verification | `crates/cito-native/tests/support/ui.rs` | Closed-loop harness pipes `cito-ui` stdout actions through a real `DaemonService` and feeds real daemon frames back to `cito-ui` stdin, asserting `truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views == []` at every step and rendering 2x Retina PNG snapshots of all core states. |
 
