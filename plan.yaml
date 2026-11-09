@@ -7765,7 +7765,7 @@ phases:
   name: 'V26 Stage 10 (v0.20.2): Root-Cause Equivalence-Class Closure (R1–R5), True
     Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop Error
     Surfacing, Bridge Readiness & Daemon<->UI Closed-Loop Verification'
-  status: pending
+  status: in_progress
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, test_inspect reports truncated_labels == [], overlapping_siblings ==
     [], and clipped_views == [] across all surfaces/tabs/forms, grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
@@ -7796,7 +7796,7 @@ phases:
     name: Implement V26 Stage 10 (v0.20.2) Root-Cause Equivalence-Class Closure (R1–R5),
       True Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop
       Error Surfacing, Bridge Readiness & Daemon<->UI Closed-Loop Suite
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 10 (`v0.20.2` — `R1`–`R5`) implementation\
       \ per `docs/DESIGN.md` §12:\n  1. **`R1` — True Two-Stratum Progressive Disclosure,\
@@ -7869,6 +7869,8 @@ phases:
     - README.md
     - site/index.html
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T23:42:14.447385Z'
   - id: v26.hygiene
     name: 'Multimodal Visual Snapshot Inspection, Iterative Contract-and-Simplicity
       Convergence & Live v0.20.2 Distribution Closure (GitHub Release v0.20.2 & Tefx/homebrew-tap
