@@ -280,7 +280,7 @@ pub fn probe_listener(
     })?;
     if revoke {
         let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
-        let _ = detach_channel_expected(client, string(row, "listener_id"), &channel, Some(row));
+        let _ = detach_channel_expected(client, string(row, "listener_id"), &channel, row);
     }
     Ok(())
 }
@@ -419,7 +419,7 @@ fn dispatch_listener(
                 }
                 "session_switched" => {
                     // Detach failure must still release the local dispatch lease.
-                    let detached = detach_channel_expected(client, id, &channel, Some(row));
+                    let detached = detach_channel_expected(client, id, &channel, row);
                     local.finish_wake_batch(
                         row,
                         first,
@@ -517,18 +517,11 @@ fn dispatch_listener(
     }
     Ok(())
 }
-pub fn detach_channel_from_other_sessions(
+pub fn detach_channel_expected(
     client: &HubClient,
     id: &str,
     channel: &str,
-) -> Result<(), String> {
-    detach_channel_expected(client, id, channel, None)
-}
-fn detach_channel_expected(
-    client: &HubClient,
-    id: &str,
-    channel: &str,
-    captured: Option<&Value>,
+    captured: &Value,
 ) -> Result<(), String> {
     for _ in 0..3 {
         let Some((mut remote, revision)) = client.kv_get(id)? else {
@@ -537,7 +530,7 @@ fn detach_channel_expected(
         if !remote.is_object() {
             return Err("INVALID_INPUT: Listener must be an object".into());
         }
-        if captured.is_some_and(|row| !remote_matches_listener(&remote, row, channel)) {
+        if !remote_matches_listener(&remote, captured, channel) {
             return Err("STALE_GENERATION: Listener changed during channel detach".into());
         }
         if let Some(ch) = remote["channels"]

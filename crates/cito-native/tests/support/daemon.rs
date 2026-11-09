@@ -199,26 +199,87 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
     let winner_row = b.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     let old_row = a.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     assert_ne!(winner_row["owner_token"], old_row["owner_token"]);
-    let remote: Value = serde_json::from_str(
-        host.db("hub/hub.sqlite")
-            .query(
-                "SELECT CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
-                &[winner_row["listener_id"].clone()],
+    let assert_channels_active = || {
+        let remote: Value = serde_json::from_str(
+            host.db("hub/hub.sqlite")
+                .query(
+                    "SELECT CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
+                    &[winner_row["listener_id"].clone()],
+                )
+                .unwrap()[0]["value"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remote["state"], "ACTIVE");
+        for row in [&winner_row, &sibling_row] {
+            let channel = format!("{}:fixture", row["host_id"].as_str().unwrap());
+            assert_eq!(remote["channels"][&channel]["state"], "ACTIVE");
+            assert_eq!(
+                remote["channels"][&channel]["owner_token"],
+                row["owner_token"]
+            );
+        }
+    };
+    assert_channels_active();
+    let mut sent_signals = vec![sent];
+    for operation in ["unlisten", "reload"] {
+        if operation == "unlisten" {
+            assert_eq!(
+                a.tool(
+                    "cito_unlisten",
+                    json!({"hub":"work"}),
+                    json!({"expected_harness":"fixture","expected_session_id":"session-1"}),
+                )["status"],
+                "not_listening"
+            );
+            assert_eq!(
+                a.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
+                "UNLISTENED"
+            );
+        } else {
+            // Recreate a reload that captured A's ACTIVE row before heartbeat fencing.
+            // Defer background fencing so the reload must exercise remote detach.
+            let db = a.db("state.sqlite");
+            db.execute(
+                "CREATE TRIGGER defer_fencing BEFORE UPDATE OF status ON local_listeners WHEN OLD.harness='fixture' AND NEW.status='FENCED_INACTIVE' BEGIN SELECT RAISE(IGNORE); END",
+                &[],
+            ).unwrap();
+            db.execute(
+                "UPDATE local_listeners SET status='ACTIVE' WHERE harness='fixture'",
+                &[],
             )
-            .unwrap()[0]["value"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    for row in [&winner_row, &sibling_row] {
-        let channel = format!("{}:fixture", row["host_id"].as_str().unwrap());
-        assert_eq!(remote["channels"][&channel]["state"], "ACTIVE");
+            .unwrap();
+            let mut config: Value = serde_json::from_slice(&fs::read(&a.config).unwrap()).unwrap();
+            let url = format!("http://localhost:{p}");
+            config["hubs"]["work"]["url"] = json!(url);
+            fs::write(&a.config, config.to_string()).unwrap();
+            let (status, snapshot) = a.action(json!({"op":"get_snapshot"}));
+            // Finish the local fence deferred by the fixture's race injection.
+            db.execute(
+                "DROP TRIGGER defer_fencing; UPDATE local_listeners SET status='FENCED_INACTIVE' WHERE harness='fixture'",
+                &[],
+            ).unwrap();
+            assert_eq!(status, 200, "{snapshot}");
+            assert_eq!(snapshot["settings"]["hubs"][0]["url"], url);
+        }
+        assert_channels_active();
+        sent_signals.push(b.tool(
+            "cito_send",
+            json!({"to":winner["listener_id"],"message":format!("Winner after {operation}")}),
+            human(),
+        ));
+        wait(|| {
+            b.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
+                .len()
+                == sent_signals.len()
+        });
         assert_eq!(
-            remote["channels"][&channel]["owner_token"],
-            row["owner_token"]
+            b.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
+            "ACTIVE"
         );
     }
-    for (fixture, expected) in [(&a, 0), (&b, 1), (&sibling, 0)] {
+    for (fixture, expected) in [(&a, 0), (&b, sent_signals.len()), (&sibling, 0)] {
         let calls = fs::read_to_string(fixture.state.join("plugins/fixture/calls.jsonl")).unwrap();
         let wakes: Vec<Value> = calls
             .lines()
@@ -226,7 +287,7 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
             .filter(|call| call["op"] == "wake")
             .collect();
         assert_eq!(wakes.len(), expected);
-        if let Some(wake) = wakes.first() {
+        for (wake, sent) in wakes.iter().zip(&sent_signals) {
             assert_eq!(
                 wake["signals"][0]["signal_id"],
                 sent["signal_id"]

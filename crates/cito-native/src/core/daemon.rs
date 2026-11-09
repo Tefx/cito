@@ -1,7 +1,7 @@
 use super::{
     hub::HubEngine,
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
-    receiver::{detach_channel_from_other_sessions, plugin_request, poll_listener},
+    receiver::{detach_channel_expected, plugin_request, poll_listener},
     state::LocalState,
     transport::HubClient,
 };
@@ -382,10 +382,11 @@ impl DaemonService {
                         .filter(|r| r["hub"] == name)
                     {
                         let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
-                        let _ = detach_channel_from_other_sessions(
+                        let _ = detach_channel_expected(
                             &old,
                             string(&row, "listener_id"),
                             &channel,
+                            &row,
                         );
                     }
                 }
@@ -699,7 +700,7 @@ impl DaemonService {
             if let Some(client) = client {
                 let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
                 // Local revocation is durable even while the Hub is unavailable.
-                let _ = detach_channel_from_other_sessions(client, id, &channel);
+                let _ = detach_channel_expected(client, id, &channel, &row);
             }
             return Ok(active);
         }

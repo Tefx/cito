@@ -168,17 +168,19 @@ fn child_gone(f: &Fixture) -> Result<(), String> {
 fn malformed_remote_registrations_return_errors_without_overwriting_kv() -> Result<(), String> {
     let f = Fixture::new()?;
     let id = string(&f.row, "listener_id");
+    let mut malformed_channel = f.client.kv_get(id)?.ok_or("Missing registration")?.0;
+    malformed_channel["channels"]["host:fixture"] = json!([]);
     for remote in [
         json!([]),
         json!(42),
         json!(true),
         json!("invalid"),
         Value::Null,
-        json!({"channels":{"host:fixture":[]}}),
+        malformed_channel,
     ] {
         let revision = f.client.kv_get(id)?.ok_or("Missing registration")?.1;
         f.client.kv_save(id, &remote, Some(revision))?;
-        let error = detach_channel_from_other_sessions(&f.client, id, "host:fixture")
+        let error = detach_channel_expected(&f.client, id, "host:fixture", &f.row)
             .expect_err("Malformed registrations must reject detach");
         assert!(error.starts_with("INVALID_INPUT: Listener"));
         assert_eq!(
@@ -724,7 +726,7 @@ fn channel_takeover_blocks_stale_detach_and_fences_before_spawn() -> Result<(), 
     remote["channels"]["host:fixture"]["owner_token"] = json!("winner-owner");
     remote["channels"]["sibling:fixture"] = json!({"state":"ACTIVE"});
     f.client.kv_save(id, &remote, Some(revision))?;
-    let error = detach_channel_expected(&f.client, id, "host:fixture", Some(&f.row))
+    let error = detach_channel_expected(&f.client, id, "host:fixture", &f.row)
         .expect_err("Stale owner must not detach the winner");
     assert!(error.starts_with("STALE_GENERATION:"));
     assert_eq!(
