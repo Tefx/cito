@@ -477,7 +477,20 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
     let mut builtin_ids = HashSet::new();
     let mut rejected_ids = HashSet::new();
 
-    if let Some(builtin_root) = resolve_builtin_plugins_dir() {
+    let staged_root = state_dir.join("plugins");
+    let mut builtin_roots: Vec<_> = resolve_builtin_plugins_dir().into_iter().collect();
+    if builtin_roots.first().is_some_and(|root| {
+        root == &staged_root
+            || fs::canonicalize(root)
+                .ok()
+                .zip(fs::canonicalize(&staged_root).ok())
+                .is_some_and(|(builtin, staged)| builtin == staged)
+    }) {
+        // Installed shims point at staged files; recover deleted descriptors from
+        // the distribution so a new process can still offer Repair.
+        builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
+    }
+    for builtin_root in builtin_roots {
         if let Ok(rd) = fs::read_dir(&builtin_root) {
             let mut subdirs: Vec<PathBuf> = rd
                 .flatten()
@@ -487,8 +500,9 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
             subdirs.sort();
             for sub in subdirs {
                 if let Ok(desc) = parse_manifest_dir(&sub, true) {
-                    builtin_ids.insert(desc.id.clone());
-                    plugins.push(desc);
+                    if builtin_ids.insert(desc.id.clone()) {
+                        plugins.push(desc);
+                    }
                 }
             }
         }

@@ -3190,7 +3190,16 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let listener =
         TcpListener::bind(("127.0.0.1", config.daemon_port)).map_err(|e| e.to_string())?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    ensure_cli_shims_native(&config.state_dir, plugins)?;
+    // Configured, damaged built-ins remain visible for explicit Repair after a
+    // restart. Fresh installs and healthy integrations still receive staged updates.
+    let mut startup_plugins = plugins.clone();
+    startup_plugins.plugins.retain(|plugin| {
+        !plugin.is_builtin
+            || plugin.kind != "agent-harness"
+            || super::setup::is_staged_plugin_intact(&config.state_dir, plugin)
+            || !inspect_plugin_setup(plugin).1
+    });
+    ensure_cli_shims_native(&config.state_dir, &startup_plugins)?;
     let service = Arc::new(Mutex::new(DaemonService::open(config, plugins)?));
     {
         let mut s = service.lock().map_err(|_| "Service lock poisoned")?;

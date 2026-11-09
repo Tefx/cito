@@ -74,19 +74,66 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
         )["text"],
         "Test sent"
     );
-    f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":false,"error":"Invalid token"}));
-    cfg["channels"][0]["configured"] = json!(false);
-    cfg["channels"][0]["status"] = json!("not_configured");
-    f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
-    let s = inspect(&f, p);
-    assert_eq!(
-        node(&s, "settings_items", "settings_channel_detail:channel")["text"],
-        "Ready"
-    );
-    assert_eq!(
-        node(&s, "settings_items", "settings_channel_status:channel")["text"],
-        "○ Not Configured"
-    );
+    for action in ["save_channel", "clear_channel_service"] {
+        for ok in [false, true] {
+            cfg["channels"][0]["configured"] = json!(false);
+            cfg["channels"][0]["status"] = json!("not_configured");
+            cfg["channels"][0]["fields"][0]["configured"] = json!(false);
+            cfg["channels"][0]["fields"][0]["value"] = json!("");
+            f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
+            control(&f, p, "test_channel:channel");
+            let detail = if ok { "Test sent" } else { "Invalid token" };
+            f.send(p, json!({"op":"channel_test_result","hub":"personal","channel_id":"channel","ok":ok,"detail":detail}));
+            f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
+            let mut frame = state();
+            frame["settings"] = cfg.clone();
+            frame["settings"]["desktop_banner_enabled"] = json!(false);
+            f.send(p, frame);
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+                detail,
+                "{action}, ok={ok}"
+            );
+            assert_eq!(
+                node(&s, "settings_items", "settings_channel_status:channel")["text"],
+                if ok {
+                    "○ Not Configured"
+                } else {
+                    "⚠ Error"
+                }
+            );
+            if action == "clear_channel_service" {
+                // Clear Token becomes available once the hub service is configured.
+                cfg["channels"][0]["status"] = json!("hub_ready");
+                cfg["channels"][0]["fields"][0]["configured"] = json!(true);
+                f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
+                assert_eq!(
+                    node(
+                        &inspect(&f, p),
+                        "settings_items",
+                        "settings_channel_detail:channel"
+                    )["text"],
+                    detail
+                );
+            }
+            control(&f, p, &format!("{action}:channel"));
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+                "Ready",
+                "{action} must clear the candidate test result, ok={ok}"
+            );
+            assert_eq!(
+                node(&s, "settings_items", "settings_channel_status:channel")["text"],
+                if action == "clear_channel_service" {
+                    "Hub Service: ● Ready"
+                } else {
+                    "○ Not Configured"
+                }
+            );
+        }
+    }
 }
 
 #[test]

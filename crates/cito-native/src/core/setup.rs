@@ -78,10 +78,25 @@ pub fn resolve_bundled_plugin_dir(id: &str) -> PathBuf {
     bundled_plugin_dir(&resolve_package_root(), id)
 }
 
-fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
-    ["Resources/plugins", "plugins", "share/cito/plugins"]
+fn bundled_plugin_roots(root: &Path) -> [PathBuf; 4] {
+    [
+        root.join("Resources/plugins"),
+        root.join("plugins"),
+        root.join("share/cito/plugins"),
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")),
+    ]
+}
+
+pub(super) fn resolve_bundled_plugins_root() -> Option<PathBuf> {
+    bundled_plugin_roots(&resolve_package_root())
         .into_iter()
-        .map(|relative| root.join(relative).join(id))
+        .find(|dir| dir.is_dir())
+}
+
+fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
+    bundled_plugin_roots(root)
+        .into_iter()
+        .map(|dir| dir.join(id))
         .find(|dir| dir.join("plugin.json").is_file())
         .unwrap_or_else(|| {
             PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")).join(id)

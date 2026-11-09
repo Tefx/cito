@@ -864,7 +864,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let key=target + "|" + channel.id
             if let instruction=channel.pairing_instruction, !instruction.isEmpty { channelInstructions[key]=instruction }
             else { channelInstructions.removeValue(forKey:key) }
-            if channel.status == "not_configured" { channelResults.removeValue(forKey:key) }
         }
     }
     var uninstallConfirmOpen = false

@@ -85,15 +85,17 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         "CITO_BUILTIN_PLUGINS_DIR".into(),
         f.state.join("plugins").display().to_string(),
     );
-    f.daemon(&[]);
+    let mut daemon = f.daemon(&[]);
     let app = || {
-        f.action(json!({"op":"get_snapshot"})).1["settings"]["apps"]
+        let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+        let apps: Vec<_> = snapshot["settings"]["apps"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["id"] == "pi")
-            .unwrap()
-            .clone()
+            .filter(|p| p["id"] == "pi")
+            .collect();
+        assert_eq!(apps.len(), 1, "built-in descriptor must remain unique");
+        apps[0].clone()
     };
     assert_eq!(app()["status"], "ready");
     // Repairs must use the distribution even though the loaded descriptor is staged.
@@ -113,12 +115,31 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         );
         assert_eq!(app()["status"], "ready", "{asset}");
     }
-    fs::remove_dir_all(f.state.join("plugins/pi")).unwrap();
-    assert_eq!(app()["status"], "repair_needed");
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
-    assert!(f.state.join("plugins/pi/bin/cito-plugin-pi").is_file());
-    assert_eq!(app()["status"], "ready");
-    assert_eq!(app()["configured"], true);
+    let alias = f.dir.join("staged-plugins");
+    std::os::unix::fs::symlink(f.state.join("plugins"), &alias).unwrap();
+    for builtin_root in [f.state.join("plugins"), alias] {
+        for missing_manifest in [true, false] {
+            f.stop(daemon);
+            let staged = f.state.join("plugins/pi");
+            if missing_manifest {
+                fs::remove_file(staged.join("plugin.json")).unwrap();
+            } else {
+                fs::remove_dir_all(&staged).unwrap();
+            }
+            // A new process must rediscover the descriptor, including through an alias.
+            daemon = f.daemon(&[("CITO_BUILTIN_PLUGINS_DIR", builtin_root.to_str().unwrap())]);
+            assert_eq!(app()["status"], "repair_needed");
+            assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+            for asset in ["plugin.json", "bin/cito-plugin-pi", "cito-bridge.ts"] {
+                assert_eq!(
+                    fs::read(staged.join(asset)).unwrap(),
+                    fs::read(root().join("plugins/pi").join(asset)).unwrap()
+                );
+            }
+            assert_eq!(app()["status"], "ready");
+            assert_eq!(app()["configured"], true);
+        }
+    }
 }
 
 #[test]
