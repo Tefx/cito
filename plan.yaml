@@ -7249,7 +7249,7 @@ phases:
     name: 'Iterative Code-Hygiene Convergence on Stage 8 (v0.20.0) & Live Distribution
       Closure (GitHub Release v0.20.0 & Tefx/homebrew-tap Formula/Cask) [REQUIRES_SKILL:
       code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -7300,6 +7300,36 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-09T15:57:33.557309Z'
+    done_at: '2026-11-09T18:09:12.217528+00:00'
+    evidence: "Artifact:\n- Commit: 0ca5a18cbed3b384b0e3097372bb6a9b47b2b710 (19 files\
+      \ changed, +653 / -94 lines across iterative convergence rounds + Homebrew checksum\
+      \ sync; annotated release tag `v0.20.0` at build commit `83a3279bd7d827b10cfbb7466aa1e7e782c14750`)\n\
+      - Executor: rust-senior (writable consolidation & v0.20.0 live distribution\
+      \ closure) + fresh-context `pathway-auditor`, `structural-auditor`, and `uiux-auditor`\
+      \ rounds (`[REQUIRES_SKILL: code-hygiene]` / `contract-and-simplicity`, `[GATE_MODE:\
+      \ ITERATIVE_CONVERGENCE]`).\n- Convergence Summary:\n  - 6 fresh-context iterative\
+      \ audit rounds closed all 10 cumulative findings (`V24-R1-P1`–`V24-R1-P2`, `V24-R2-P1`–`V24-R2-P4`,\
+      \ `V24-R3-P1`–`V24-R3-P2`, `V24-R4-P1`, `V24-R5-P1`).\n  - Round 6 fresh-context\
+      \ verdicts:\n    - `pathway-auditor` (`2026-11-09T17-48-29-860Z_01a1c16d-0523-75a2-a3f7-39f0b7822799.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `structural-auditor`\
+      \ (`2026-11-09T17-48-29-951Z_01a1c16d-057e-74fc-b7d8-18ff432c6ac9.jsonl`): `Completeness:\
+      \ CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n    - `uiux-auditor` (`2026-11-09T17-48-29-777Z_01a1c16d-04cf-77bf-b0f7-dca47bdfee92.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES`\n- Live Distribution\
+      \ Closure (`v0.20.0`):\n  - GitHub Release `v0.20.0` (`https://github.com/Tefx/cito/releases/tag/v0.20.0`,\
+      \ built on `macos-15` in Actions run `42669367533` with `0` `warning:` and `0`\
+      \ `linker_messages` lines): published `Cito-macos-arm64.zip` and `Cito-macos-arm64.zip.sha256`\
+      \ with SHA-256 `8bd15ad2826b91cdadb83b165a0f44b061a6884ac7bf98fe5937b4abfcbefa01`.\n\
+      \  - Synchronized SHA-256 `8bd15ad2826b91cdadb83b165a0f44b061a6884ac7bf98fe5937b4abfcbefa01`\
+      \ to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`, commit `cbc806bae34d1a496b11757573bc5ddd7796d698`).\n \
+      \ - GitHub Pages `https://tefx.github.io/cito/`: HTTP/2 `200` (Actions run `42671071884`\
+      \ success).\n\nVerification:\n- Run: `cargo test --workspace && cargo build\
+      \ --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` -> 215 passed, 0\
+      \ failed, 0 compiler/linker warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\\
+      b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\b' crates/cito-native/src/core/\
+      \ src/macos/` -> 0 matches\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v24.hygiene`\
+      \ (`df -h`: 162 GiB available).\n\nSpec link:\n- docs/DESIGN.md (§10, V24 Stage\
+      \ 8 v0.20.0 L1–L17)\n- docs/ROADMAP.md\n- .github/workflows/release.yml, packaging/homebrew/cito.rb"
   - id: v24.gate
     name: V24 Stage 8 (v0.20.0) Independent Terminal Acceptance, L1–L17 Lifecycle
       Verification & Live Distribution Gate
