@@ -7069,7 +7069,7 @@ phases:
 - id: v24
   name: 'V24 Stage 8 (v0.20.0): Full-Lifecycle UX, State-Machine & Reconfiguration
     Closure (L1–L17)'
-  status: in_progress
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100% locally and on remote host tefx-mbp-personal.platy-atlas.ts.net:~/Projects/cito
     (leaving remote host clean of ~/.cito, LaunchAgents, and /Applications/Cito.app),
@@ -7333,7 +7333,7 @@ phases:
   - id: v24.gate
     name: V24 Stage 8 (v0.20.0) Independent Terminal Acceptance, L1–L17 Lifecycle
       Verification & Live Distribution Gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v24` (`v0.20.0`) acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session.\n- **Boundary:**\
@@ -7372,3 +7372,36 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-09T18:09:26.485585Z'
+    done_at: '2026-11-09T18:14:49.372195+00:00'
+    evidence: "Artifact:\n- Commit: 2d1b0c7e29a2a3af88e083d5d86ee16d8388469e (code\
+      \ commit `0ca5a18cbed3b384b0e3097372bb6a9b47b2b710`, annotated tag `v0.20.0`\
+      \ at release build commit `83a3279bd7d827b10cfbb7466aa1e7e782c14750`)\n- Independent\
+      \ Gate Reviewer: `gate-reviewer` (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T18-10-05-030Z_01a1c180-c865-7519-b2f2-5921ddd7c15b.jsonl`)\n\
+      - Validator Result: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v24-gate/binding.json /tmp/cito-v24-gate/report.json`\
+      \ -> `{\"valid\":true,\"binding_checked\":true,\"kind\":\"gate\",\"schema_version\"\
+      :\"gate.report.v2\",\"evidence_disposition\":\"POSITIVE_GATE_EVIDENCE\",\"errors\"\
+      :[]}`\n- Requirements Proven (`4/4 PROVEN`, `0` findings, `0` warnings):\n \
+      \ 1. `REQ-V24-1-CARGO-WORKSPACE-AND-L1-L17-PASS`: `PROVEN` (`cargo test --workspace\
+      \ && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` passed\
+      \ 100% locally on `tefx-mbp-personal` and on `macos-15` in GitHub Actions run\
+      \ `42669367533` with 215 tests passed, 0 failed, 0 compiler/linker warnings,\
+      \ `Syntax OK`, and clean post-test host state).\n  2. `REQ-V24-2-ZERO-HARDCODING-AND-LANGUAGE-POLICY`:\
+      \ `PROVEN` (zero hardcoded agent/channel identifiers in `crates/cito-native/src/core/`\
+      \ and `src/macos/`, English-only UI/docs/comments, zero company-specific names).\n\
+      \  3. `REQ-V24-3-HYGIENE-LEDGER-CLOSURE-AND-ZERO-REGRESSION`: `PROVEN` (all\
+      \ 10 cumulative finding IDs closed across Rounds 1–5; Round 6 fresh-context\
+      \ `pathway-auditor`, `structural-auditor`, and `uiux-auditor` all returned `Completeness:\
+      \ CLEAN` and `Simplicity: ZERO_NEW_ISSUES`).\n  4. `REQ-V24-4-LIVE-DISTRIBUTION-V0-20-0`:\
+      \ `PROVEN` (`https://tefx.github.io/cito/` HTTP 200 via run `42671071884`; GitHub\
+      \ Release `v0.20.0` via `macos-15` run `42669367533` with `Cito-macos-arm64.zip`\
+      \ SHA-256 `8bd15ad2826b91cdadb83b165a0f44b061a6884ac7bf98fe5937b4abfcbefa01`\
+      \ synchronized in `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` `Formula/cito.rb`\
+      \ & `Casks/cito.rb` at commit `cbc806bae34d1a496b11757573bc5ddd7796d698`).\n\
+      \nVerification:\n- Run: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v24-gate/binding.json /tmp/cito-v24-gate/report.json`\
+      \ -> `valid: true, binding_checked: true, evidence_disposition: POSITIVE_GATE_EVIDENCE`\n\
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` -> 215 passed, 0 failed, 0 warnings, `Syntax OK`\n\
+      \nSpec link:\n- docs/DESIGN.md (§10, V24 Stage 8 v0.20.0 L1–L17)\n- docs/ROADMAP.md\n\
+      - .github/workflows/release.yml, packaging/homebrew/cito.rb"
