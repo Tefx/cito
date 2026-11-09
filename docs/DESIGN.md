@@ -790,10 +790,25 @@ Stage 8 (`v0.20.0` — Phase `v24`) closes all 17 lifecycle, state-machine, and 
 
 ---
 
-## 11. Stage 9 (`v0.20.1` — Phase `v25`): Holistic UX & Visual Hierarchy Overhaul, Terminology Unification, Live Session Discovery & Visual E2E Verification (`U1`–`U10`)
+## 11. Stage 9 (`v0.20.1` — Phase `v25`): Theory-Grounded UI/UX Redesign, Two-Stratum Human Channel Architecture (`Hub Gateway` vs. `Personal Human Node`), Holistic Layout Grid & Live Visual E2E Verification (`U1`–`U11`)
 
-### 11.1 Overview of Live E2E Findings (`U1`–`U10`)
-Interactive macOS testing of `v0.20.0` exposed 11 concrete UX, session-discovery, terminology, and visual layout defects that passed headless coordinate-only assertions because the test suite lacked configured-harness gating, live Pi process discovery, human-node re-enrollment, field labels on `add_hub_form`, and rendered visual truncation checks. Stage 9 (`v0.20.1` — Phase `v25`) supersedes conflicting layout/copy rules in `§10` with the following binding contracts (`U1`–`U10`):
+### 11.1 Theoretical & Normative UX Foundation (4 Governing Laws)
+Every layout, grouping, label, and interaction rule in Stage 9 (`v0.20.1` — Phase `v25`) is governed by four explicit HCI and Apple macOS Human Interface Guidelines (HIG) laws:
+1. **Law 1 — State-Strata Isomorphism (Don Norman's *Conceptual Model & Mapping Principle* + Domain-Driven State Ownership)**:
+   - Controls with different state owners, cardinalities, and blast radii MUST NOT be rendered as flat peer inputs in a single undifferentiated form.
+   - In Cito's ontology (`Node (1) ↔ Hub ↔ Channels (1..K)`), Human Channel configuration spans three distinct state strata:
+     - **Device Stratum (`This Mac`)**: `Mac Desktop Banner` (`desktopBannerEnabled` in local `config.json`), affecting only local AppKit HUD banners on this Mac.
+     - **Hub Gateway Stratum (`scope: "hub"`, stored in `hub_plugin_services`)**: Shared channel infrastructure (e.g., Telegram `@BotFather` `Bot Token`), configured **once per Hub** by the Hub Owner/Admin and shared by every Human Node connected to that Hub.
+     - **Personal Human Node Stratum (`scope: "user"`, stored in `hub_human_channels`)**: Per-user enrollment (e.g., `/start` account pairing & personal `Chat ID`), configured **once per Human Principal (`@user`)** on that Hub.
+2. **Law 2 — Progressive Disclosure & Prerequisite Staging (Apple macOS HIG — *Settings* & *Grouping Controls*)**:
+   - Separate `scope: "hub"` gateway infrastructure (`stratum_hub:<id>`) from `scope: "user"` personal node enrollment (`stratum_user:<id>`) into two visually distinct sub-containers inside each Hub-routed channel card (`settings_channel:<id>`), so users immediately understand what belongs to the Hub (set up once) versus what every joining Human Node configures for themselves.
+3. **Law 3 — Single Navigation Locus & User-Invoked Contextual Help (Apple macOS HIG — *Toolbars & Tab Views*)**:
+   - The window header (`settings_header`: `Agent Apps` | `Human Channels` | `Hubs & Network`) is the sole primary navigation bar; never render a duplicate 3-button tab bar underneath it by default. Contextual help (`?` `toggle_onboarding_guide`) is strictly user-toggled and works identically across all 3 tabs.
+4. **Law 4 — Persistent Field Labels, Right-Edge Action Alignment & Zero Truncation Invariant (Apple macOS HIG — *Labels*, *Forms*, & *Layout*)**:
+   - Because `placeholderString` disappears once an `NSTextField` has a value, every editable input in `add_hub_form`, `host_hub_card`, and `settings_channel:*` MUST have a persistent visible label. Every button and badge frame width must accommodate its full text (`truncated_labels == []`), and list-row action buttons (`CONNECTED HUBS`, `Agent Apps`) must right-align flush to `x = 468`.
+
+### 11.2 Binding Requirements (`U1`–`U11`)
+Interactive macOS testing of `v0.20.0` exposed 11 concrete UX, session-discovery, terminology, state-stratum, and visual layout defects (`U1`–`U11`). Stage 9 (`v0.20.1` — Phase `v25`) supersedes conflicting layout/copy rules in `§10` with the following binding contracts:
 
 1. **`[SHARP]` `U1` — Gate Session Discovery on `configured == true` (`crates/cito-native/src/core/daemon.rs`, `plugins/{codex,pi,claude}/native.rs`)**:
    - **Problem**: `AVAILABLE SESSIONS` in `cardMenu` displayed `"Codex · 8 recent"` from `~/.codex/state_5.sqlite` even before `Codex` was `Set Up` (or after `Codex` was `Disconnected`).
@@ -922,6 +937,32 @@ Interactive macOS testing of `v0.20.0` exposed 11 concrete UX, session-discovery
     - In `tests/support/ui.rs` and `v25.hygiene`:
       - Assert `assert_eq!(s["truncated_labels"], json!([]))` across all `SettingsPanel` tabs/forms, `cardMenu` states, and `DirectoryPanel` states.
       - Render PNG snapshots of all 8 core UI states (`menu_human_paused.png`, `settings_apps.png`, `settings_guide_open.png`, `settings_channels_unconfigured.png`, `settings_channels_pairing.png`, `settings_hubs_token.png`, `settings_hubs_edit_local.png`, `settings_hubs_add_remote.png`) and inspect them with `uiux-auditor` multimodal image review until zero visual/UX defects remain.
+
+11. **`[SHARP]` `U11` — Two-Stratum Human Channel Card (`stratum_hub:<id>` vs. `stratum_user:<id>`) Separating Hub Bot Gateway (`scope: "hub"`) from Personal Human Node Binding (`scope: "user"`) (`src/macos/cito-ui.swift`, `plugins/telegram/plugin.json`)**:
+    - **Problem**: `settings_channel:telegram` rendered `Bot Token` (`scope: "hub"`, configured once per Hub by the Hub Owner/Admin) and `Chat ID` / `Pair Account…` (`scope: "user"`, configured by each Human Node joining the Hub) as flat sibling rows inside one box, failing to distinguish Hub Gateway infrastructure from personal Human Node enrollment.
+    - **Contract**:
+      - On `SettingsPanel → Human Channels` (`settings_channels_tab`):
+        - Add a persistent `"TARGET HUB:"` label (`NSRect(x: 20, y: 342, width: 78, height: 14)`, `size: 10, weight: .semibold, color: .secondaryLabelColor`) to the left of the Hub selector scroll view (`x: 102, y: 336, width: 398, height: 28`).
+        - Inside each Hub-routed channel card (`settings_channel:\(ch.id)`), partition `visibleFields` into `hubFields = visibleFields.filter { $0.scope == "hub" }` and `userFields = visibleFields.filter { $0.scope != "hub" }`, and render **two visually distinct sub-containers** separated by a `1pt` divider:
+          1. **Upper Sub-Container — `stratum_hub:\(ch.id)` (`1. HUB BOT GATEWAY · ONCE PER HUB`)**:
+             - Header label (`id: "stratum_hub_title:\(ch.id)"`): `"1. HUB BOT GATEWAY · SHARED BY HUB '\(effectiveChannelHub.uppercased())' (ONCE PER HUB)"` (`size: 10, weight: .bold, color: .secondaryLabelColor`)
+             - Status badge on the right of `stratum_hub:\(ch.id)`:
+               - When `ch.hub_provided || ch.status != "not_configured"`: `"● Bot Gateway Active"` (`.systemGreen`) + (when `!hubFields.isEmpty`) **`Clear Token`** button (`id: "clear_channel_service:\(ch.id)"`, `.destructiveHover`).
+               - When `ch.status == "not_configured"`: `"○ Bot Token Required"` (`.secondaryLabelColor`).
+             - Role description:
+               - If `!hubFields.isEmpty`: `"Configured once by the Hub owner (@BotFather /newbot). Shared by all human nodes on '\(effectiveChannelHub)'."` + `hubFields` (`channel_field:\(ch.id):\(f.key)` with left label, secure input, and `f.help_text`).
+               - If `hubFields.isEmpty` (non-admin OIDC user on a shared Hub):
+                 - When `ch.hub_provided`: `"Provided by '\(effectiveChannelHub)' Hub administrator — no bot setup needed on your Mac."`
+                 - When `!ch.hub_provided`: `"Not yet configured by the '\(effectiveChannelHub)' Hub administrator."`
+          2. **Lower Sub-Container — `stratum_user:\(ch.id)` (`2. YOUR PERSONAL HUMAN NODE · EACH USER ON THIS HUB`)**:
+             - Header label (`id: "stratum_user_title:\(ch.id)"`): `"2. YOUR PERSONAL NODE (@\(currentUser)) · EACH HUMAN ON '\(effectiveChannelHub.uppercased())'"` (`size: 10, weight: .bold, color: .secondaryLabelColor`)
+             - Role description: `"Bind your personal Telegram chat to receive agent wakes and send/reply to agents on '\(effectiveChannelHub)'."`
+             - Renders `userFields` (`channel_field:\(ch.id):\(f.key)`, e.g. `Chat ID`), the active pairing instruction box (`pairing_instruction:\(ch.id)` + `copy_pair_command:\(ch.id)` + `cancel_pair_channel:\(ch.id)`), and the personal node action bar:
+               - `pair_channel:\(ch.id)` (`"Pair Account…"` / `"Re-pair…"`)
+               - When `ch.configured`: `toggle_channel:\(ch.id)` (`"Pause"` / `"Resume"`) + `unpair_channel:\(ch.id)` (`"Unpair"`, `.destructiveHover`)
+               - When `!ch.configured`: `skip_channel:\(ch.id)` (`"Skip for Now"`)
+               - Right-aligned: `test_channel:\(ch.id)` (`"Send Test"`) + `save_channel:\(ch.id)` (`"Save"`, `.prominent`).
+
 
 
 
