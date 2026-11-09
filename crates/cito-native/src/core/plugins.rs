@@ -31,6 +31,8 @@ pub struct PluginDescriptor {
     pub command: Vec<String>,
     pub channel_env: Option<String>,
     pub fields: Vec<Value>,
+    pub post_setup_hint: Option<String>,
+    pub post_disconnect_hint: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -459,6 +461,14 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         command,
         channel_env,
         fields,
+        post_setup_hint: map
+            .get("postSetupHint")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        post_disconnect_hint: map
+            .get("postDisconnectHint")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 

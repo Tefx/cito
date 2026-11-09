@@ -7,5 +7,8 @@
   "sfSymbol": "person.crop.circle.fill",
   "tint": "green",
   "cliFlag": false,
-  "command": ["./bin/cito-ui"]
+  "command": [
+    "./bin/cito-ui"
+  ],
+  "version": "0.20.0"
 }

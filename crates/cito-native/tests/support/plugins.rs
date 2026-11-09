@@ -507,6 +507,51 @@ fn explicit_pid_claims_reject_invalid_conflicting_and_unreachable_endpoints() {
 }
 
 #[test]
+fn telegram_token_rotation_discards_pending_updates_and_restarts_offset_zero() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let api = root().join("crates/cito-native/tests/support/telegram-api.py");
+    let server = f.spawn("python3", &[api.to_str().unwrap()], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap();
+    let p = f.spawn(TELEGRAM, &[], &[]);
+    let config =
+        |token: &str| json!({"botToken":token,"apiBaseUrl":format!("http://127.0.0.1:{port}")});
+    f.send(
+        p,
+        json!({"op":"configure","hub_config":config("old"),"cursor":"10"}),
+    );
+    wait(|| f.frames(p).iter().any(|v| v["op"] == "inbound_reply"));
+    // Both pairing and reply updates await acknowledgments; a new token must discard them.
+    f.send(
+        p,
+        json!({"op":"configure","hub_config":config("rotated"),"cursor":"999"}),
+    );
+    wait(|| {
+        fs::read_to_string(f.home.join("api-polls.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .any(|v| v["path"] == "/botrotated/getUpdates" && v["offset"] == 0)
+    });
+    f.send(
+        p,
+        json!({"op":"pair_ack","code":"cito-abcdefghij","ok":true,"owner_user":"alice"}),
+    );
+    f.send(
+        p,
+        json!({"op":"reply_ack","update_id":"15","ok":true,"target_display":"sender"}),
+    );
+    f.send(p,json!({"op":"format_pair","req_id":"barrier","code":"cito-new","hub_config":config("rotated")}));
+    wait(|| f.frames(p).iter().any(|v| v["req_id"] == "barrier"));
+    assert!(
+        !f.home.join("api-sends.jsonl").exists(),
+        "stale identity maps must not send confirmations for the previous token"
+    );
+    f.eof(p);
+    wait(|| f.exited(p));
+}
+#[test]
 fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

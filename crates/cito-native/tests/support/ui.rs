@@ -3,6 +3,222 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    let ch = &mut cfg["channels"][0];
+    ch["enabled"] = json!(false);
+    ch["status"] = json!("hub_ready");
+    ch["setup_guide"] = json!(["Create a service credential.", "Pair your private account."]);
+    ch["fields"][0]["value"] = json!("");
+    ch["fields"][0]["hidden"] = json!(false);
+    ch["fields"][0]["redacted"] = json!(true);
+    ch["fields"][0]["configured_placeholder"] = json!("Saved — enter replacement");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:secret")["secure"],
+        true
+    );
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:secret")["placeholder"],
+        "Saved — enter replacement"
+    );
+    assert!(!node(&s, "settings_items", "channel_setup_guide:channel").is_null());
+    for (button, op) in [
+        ("save_channel:channel", "channel_save"),
+        ("test_channel:channel", "channel_test"),
+        ("pair_channel:channel", "channel_pair"),
+    ] {
+        control(&f, p, button);
+        wait(|| f.frames(p).iter().any(|v| v["op"] == op));
+        let action = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == op)
+            .unwrap();
+        assert!(action["values"].get("secret").is_none(), "{action}");
+    }
+    cfg["channels"][0]["pairing_code"] = json!("cito-ABCDEFGHIJ");
+    cfg["channels"][0]["pairing_instruction"] =
+        json!("Send /start cito-ABCDEFGHIJ to your account");
+    cfg["channels"][0]["status"] = json!("pairing_pending");
+    for _ in 0..2 {
+        f.send(p, json!({"op":"settings","settings":cfg}));
+    }
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "settings_channel_status:channel")["text"],
+        "◌ Pairing…"
+    );
+    assert!(!node(&s, "settings_items", "pairing_instruction:channel").is_null());
+    control(&f, p, "copy_pair_command:channel");
+    assert_eq!(inspect(&f, p)["clipboard"], "/start cito-ABCDEFGHIJ");
+    control(&f, p, "cancel_pair_channel:channel");
+    wait(|| f.frames(p).iter().any(|v| v["op"] == "channel_cancel_pair"));
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("paused");
+    cfg["channels"][0]["pairing_instruction"] = Value::Null;
+    cfg["channels"][0]["pairing_code"] = Value::Null;
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "settings_channel_status:channel")["text"],
+        "⏸ Paused"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "toggle_channel:channel")["text"],
+        "Resume"
+    );
+    control(&f, p, "toggle_channel:channel");
+    control(&f, p, "unpair_channel:channel");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "channel_toggle" && v["enabled"] == true)
+    });
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "channel_unpair" && v["reset_user"] == true)
+    });
+}
+#[test]
+fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["apps"][1]["status"] = json!("repair_needed");
+    cfg["hubs"][1]["auth_mode"] = json!("oidc");
+    cfg["hubs"][1]["issuer"] = json!("https://id.example.com");
+    cfg["hubs"][1]["client_id"] = json!("client");
+    cfg["host_hub"]["error"] = json!("Port already in use");
+    cfg["host_hub"]["auth_mode"] = json!("none");
+    let mut frame = state();
+    frame["listeners"] = json!([]);
+    frame["available"] = json!([]);
+    frame["settings"] = cfg.clone();
+    frame["hubs"][1]["status"] = json!("disconnected");
+    f.send(p, frame);
+    control(&f, p, "empty_open_setup");
+    let s = inspect(&f, p);
+    assert_eq!(s["settings_open"], true);
+    assert_eq!(
+        node(&s, "settings_items", "setup_app:codex")["text"],
+        "Repair"
+    );
+    control(&f, p, "toggle_onboarding_guide");
+    let s = inspect(&f, p);
+    assert!(!node(&s, "settings_items", "onboarding_banner").is_null());
+    control(&f, p, "onboarding_step:channels");
+    assert_eq!(inspect(&f, p)["settings_tab"], "channels");
+    control(&f, p, "settings_tab:apps");
+    control(&f, p, "goto_channels_tab");
+    assert_eq!(inspect(&f, p)["settings_tab"], "channels");
+    control(&f, p, "settings_tab:hubs");
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "host_hub_error")["text"],
+        "Port already in use"
+    );
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5300"}),
+    );
+    control(&f, p, "apply_host_hub_port");
+    control(&f, p, "toggle_host_hub_auth");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "set_host_hub" && v["port"] == 5300 && v["auth_mode"] == "token")
+    });
+    control(&f, p, "edit_hub:work");
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_issuer")["text"],
+        "https://id.example.com"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "submit_add_hub")["text"],
+        "Save Hub"
+    );
+    control(&f, p, "submit_add_hub");
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "setup_save_hub"
+                && v["edit"] == true
+                && v.get("set_default").is_none()
+                && v["original_name"] == "work"
+        })
+    });
+    control(&f, p, "open_uninstall_confirm");
+    control(&f, p, "confirm_disconnect_all");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "setup_disconnect_all")
+    });
+    assert_eq!(inspect(&f, p)["settings_open"], true);
+    control(&f, p, "close_settings");
+    control(&f, p, "login:personal");
+    control(&f, p, "reconnect:work");
+    wait(|| f.frames(p).iter().any(|v| v["action"] == "switch_account"));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["action"] == "reconnect" && v["hub"] == "work")
+    });
+    control(&f, p, "empty_open_channels");
+    assert_eq!(inspect(&f, p)["settings_tab"], "channels");
+    control(&f, p, "close_settings");
+    control(&f, p, "open_directory");
+    control(&f, p, "dir_mode:directory");
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "directory_items", "directory_empty_state")["hidden"],
+        false
+    );
+    assert!(!node(&s, "directory_items", "dir_empty_open_apps").is_null());
+    f.send(p, json!({"op":"test_directory_query","query":"missing"}));
+    let s = inspect(&f, p);
+    assert!(!node(&s, "directory_items", "directory_reset_filters").is_null());
+    control(&f, p, "directory_reset_filters");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "query_directory" && v["query"] == "")
+    });
+    control(&f, p, "dir_mode:activity");
+    assert!(!node(
+        &inspect(&f, p),
+        "directory_items",
+        "act_empty_open_channels"
+    )
+    .is_null());
+    f.send(p,json!({"op":"directory","peers":[peer("one")],"activity":[{"hub":"personal","signal_id":"read","listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Sender","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Done","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}]}));
+    control(&f, p, "act_filter:unread");
+    assert!(!node(&inspect(&f, p), "directory_items", "act_empty_show_all").is_null());
+    control(&f, p, "act_empty_show_all");
+    assert_eq!(inspect(&f, p)["activity_filter"], "all");
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_empty_state")["hidden"],
+        true
+    );
+    control(&f, p, "dir_mode:directory");
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_empty_state")["hidden"],
+        true
+    );
+}
+#[test]
 fn appkit_activity_reply_filters_navigation_and_read_all() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

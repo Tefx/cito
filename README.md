@@ -48,7 +48,7 @@ This installs `Cito.app` and places `cito` and `cito-mcp` on your `PATH`:
 
 ```sh
 cito --version
-# -> cito v0.19.0
+# -> cito v0.20.0
 ```
 
 ### Option 2: Download `Cito.app` for macOS
@@ -68,7 +68,10 @@ Open **`Settings…` (`⌘,`)** from the Cito menu bar dropdown to configure:
 - **Tab 1 — `Agent Apps`**: One-click **`Set Up`**, **`Re-check`**, and **`Disconnect`** for installed coding harnesses (`Codex`, `Pi Coding Agent`, and experimental `Claude Code`).
 - **Tab 2 — `Human Channels`**: Select the target Hub, toggle **`Mac Desktop Banner`**, enter channel credentials (such as your Telegram **Bot Token** and **Chat ID**), click **`Pair Account…`** and follow the displayed `/start cito-a1b2c3d4e5` instruction, or click **`Send Test`** and **`Save`**.
 - **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`✨ Paste from Invite`** / **`+ Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
-- **Window Footer**: Toggle **`Start Cito at Login`** or click **`Remove All Integrations…`** (with an optional checkbox to also delete `~/.cito` local data and hub settings).
+- **Window Footer**: Toggle **`Start Cito at Login`** or click **`Remove All Integrations…`**. Choose **`Disconnect All`** to stop listeners and remove app registrations while keeping Cito running and staged files available, or **`Confirm Uninstall`** to remove Cito and quit (optionally deleting local data).
+- **Guided setup and repair**: Use the **`?`** guide to move from Agent Apps to mobile alerts and shared hubs. App cards show reload/restart instructions; **`Repair`** restores missing CLI shims or staged plugins.
+- **Channel lifecycle**: Saved secret fields stay blank with a saved-value placeholder. Leave them blank to retain credentials; type a new value to replace them. **`Send Test`** uses unsaved candidate values without saving them. **`Pause`** retains your account binding, **`Unpair`** removes your binding, and **`Clear Token`** removes service credentials. Pairing commands expire after ten minutes; starting another pairing, cancelling, or unpairing invalidates earlier commands.
+- **Hub lifecycle**: Edit hub settings inline without re-entering saved secrets. Disconnected hubs remain in the menu with **`Connect`**; OIDC **`Switch Account`** opens the account picker. LAN sharing supports port changes and token-auth controls, retaining the previous listener if a new port cannot bind.
 
 You can also inspect status or manage hubs from the CLI:
 

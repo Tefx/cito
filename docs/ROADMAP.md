@@ -1,6 +1,6 @@
 # Cito Product & Architecture Roadmap
 
-Cito's evolution from `v0.11.3` through `v0.19.0` is organized into **eight `0.x` stages (`Stage 0` through `Stage 7`)**:
+Cito's evolution from `v0.11.3` through `v0.20.0` is organized into **nine `0.x` stages (`Stage 0` through `Stage 8`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
@@ -8,9 +8,18 @@ Cito's evolution from `v0.11.3` through `v0.19.0` is organized into **eight `0.x
 - **Stage 4 (`v0.16.0` — Completed)**: Project Website, Visual Architecture Showcase, Plugin SDK Authoring Guide & Onboarding Docs
 - **Stage 5 (`v0.17.0` — Completed)**: Initial Native Packaging, First-Launch Consent & Surgical Disconnect/Uninstall
 - **Stage 6 (`v0.18.0` — Completed)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
-- **Stage 7 (`v0.19.0` — Active / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
+- **Stage 7 (`v0.19.0` — Completed / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
 
 ---
+
+## Stage 8 (`v0.20.0` — Implementation Candidate / Phase `v24`; Acceptance and Distribution Pending)
+
+Stage 8 closes the lifecycle contracts in [DESIGN §10](DESIGN.md#10-stage-8-v0200--phase-v24-full-lifecycle-ux-state-machine--reconfiguration-contract-l1l17):
+- **L1–L8**: Declarative channel guidance, independent field visibility and secret redaction, retain/replace/explicit-clear patches, non-persisting tests, readiness-gated attachments, pause/unpair/service reset, superseded/cancelled pairing, selected-Hub refresh, token-rotation process/cursor reset, and remote-only channel schemas.
+- **L9–L13**: Guided setup, app-specific lifecycle hints, missing-file repair, listener/cache cleanup on disconnect, and separate Disconnect All versus full uninstall actions.
+- **L14–L17**: Interactive OIDC account switching, disabled-Hub sign-in, inline Hub edits, visible disconnected Hubs, LAN port/auth controls with bind-failure rollback, and actionable Directory/Activity empty states.
+
+Implementation verification runs on the target Mac using isolated HOME and Cito state directories. Acceptance requires reconciling the dispatch with DESIGN §10.3–§10.4 on empty-secret patches, manual identity representation, and service-reset binding scope. The current candidate follows DESIGN. Release publication, the published archive checksum, the Homebrew tap, and live website deployment remain distribution tasks.
 
 ## Architectural Guardrails (Applicable to All Stages)
 
@@ -86,7 +95,7 @@ Completed in Phase `v18` (`2ade0a7`, tag `v0.14.0`).
 
 ---
 
-## Stage 7 (`v0.19.0` — Active / Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
+## Stage 7 (`v0.19.0` — Completed / Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
 
 1. **Remove Root Node.js / Vitest Scaffolding**:
    - Delete root `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, and `tests/**/*.ts` (`tests/support/native-harness.ts`), keeping only `plugins/pi/{package.json, cito-bridge.ts}` for the Pi host.

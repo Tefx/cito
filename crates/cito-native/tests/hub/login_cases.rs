@@ -33,6 +33,7 @@ struct ProviderState {
     bad_nonce: bool,
     scopes_supported: Option<Vec<String>>,
     requested_scopes: String,
+    requested_prompt: Option<String>,
     challenge: String,
     redirect: String,
     nonce: String,
@@ -130,6 +131,7 @@ impl Provider {
                                     let mut state = state.lock().unwrap();
                                     state.authorization_requests += 1;
                                     state.requested_scopes = params["scope"].clone();
+                                    state.requested_prompt = params.get("prompt").cloned();
                                     state.challenge = params["code_challenge"].clone();
                                     state.redirect = params["redirect_uri"].clone();
                                     state.nonce = params["nonce"].clone();
@@ -267,12 +269,24 @@ fn login_worker() {
     };
     let rejected = std::env::var("CITO_LOGIN_TEST_REJECTED").ok();
     let current = read_cache(&cache_path(&dir, "work").unwrap(), &settings).unwrap();
-    let hash = rejected.as_deref().or_else(|| {
-        current
-            .as_ref()
-            .and_then(|value| value["token_sha256"].as_str())
-    });
-    let outcome = recover_inner(&dir, "work", &settings, hash, true, &deadline);
+    let hash = if config["reuse_fresh"] == true {
+        None
+    } else {
+        rejected.as_deref().or_else(|| {
+            current
+                .as_ref()
+                .and_then(|value| value["token_sha256"].as_str())
+        })
+    };
+    let outcome = recover_inner(
+        &dir,
+        "work",
+        &settings,
+        hash,
+        true,
+        config["force_account_select"] == true,
+        &deadline,
+    );
     let value = match outcome {
         Ok((token, identity)) => json!({"token":token,"identity":identity}),
         Err(error) => json!({"error":error}),
@@ -280,6 +294,23 @@ fn login_worker() {
     fs::write(dir.join("result.json"), value.to_string()).unwrap();
 }
 
+#[test]
+fn switch_account_bypasses_fresh_cache_and_refresh_and_requests_account_picker() {
+    for expires in [0, crate::plugins::now_ms() / 1000 + 600] {
+        let dir = Temp::new();
+        let provider = Provider::new();
+        provider.seed(&dir.0, expires);
+        let mut config = provider.config();
+        config["force_account_select"] = json!(true);
+        config["reuse_fresh"] = json!(true);
+        let value = result(&dir.0, worker(&dir.0, &config, None, 3000));
+        assert!(value.get("error").is_none(), "{value}");
+        let state = provider.state.lock().unwrap();
+        assert_eq!(state.refresh_requests, 0);
+        assert_eq!(state.authorization_requests, 1);
+        assert_eq!(state.requested_prompt.as_deref(), Some("select_account"));
+    }
+}
 #[test]
 fn real_pkce_scopes_signature_nonce_and_private_publication() {
     for (scopes, expected) in [

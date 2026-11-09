@@ -255,6 +255,9 @@ pub struct DaemonService {
     host_id: String,
     host_server: Option<super::hub::HubServer>,
     uninstall: Option<bool>,
+    active_settings_hub: Option<String>,
+    last_app_action: HashMap<String, String>,
+    last_host_hub_error: Option<String>,
 }
 impl DaemonService {
     pub fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
@@ -297,6 +300,9 @@ impl DaemonService {
             host_id,
             host_server: None,
             uninstall: None,
+            active_settings_hub: None,
+            last_app_action: HashMap::new(),
+            last_host_hub_error: None,
         };
         service.reload_slots()?;
         Ok(service)
@@ -1408,10 +1414,25 @@ impl DaemonService {
         Ok(())
     }
     pub fn settings(&self) -> Value {
-        self.settings_for_hub(&self.config.default_hub)
+        let hub = self
+            .active_settings_hub
+            .as_deref()
+            .filter(|h| self.slots.contains_key(*h))
+            .unwrap_or(&self.config.default_hub);
+        self.settings_for_hub(hub)
     }
     fn settings_for_hub(&self, channel_hub: &str) -> Value {
-        let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p|{let(installed,configured,paths)=inspect_plugin_setup(p);json!({"id":p.id,"display_name":p.display_name,"tier":p.tier,"installed":installed,"configured":configured,"paths":paths,"status":if configured{"ready"}else{"not_configured"},"detail":if configured{"Connected and ready"}else if installed{"Click Set Up to connect"}else{"Not detected; Set Up to pre-configure"}})}).collect();
+        let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p| {
+            let (installed,configured_in_host,paths)=inspect_plugin_setup(p);
+            let repair=configured_in_host && (!self.config.state_dir.join("bin/cito-mcp").is_file() || !self.config.state_dir.join("plugins").join(&p.id).is_dir());
+            let configured=configured_in_host && !repair;
+            let detail=if repair { "Staged Cito files missing — click Repair to restore" }
+                else if configured { p.post_setup_hint.as_deref().unwrap_or("Connected and ready") }
+                else if self.last_app_action.get(&p.id).map(String::as_str)==Some("disconnect") { p.post_disconnect_hint.as_deref().unwrap_or("Disconnected · Click Set Up to reconnect") }
+                else if installed { "Click Set Up to connect" } else { "Not detected; Set Up to pre-configure" };
+            json!({"id":p.id,"display_name":p.display_name,"tier":p.tier,"installed":installed,"configured":configured,"paths":paths,
+                "status":if repair{"repair_needed"}else if configured{"ready"}else{"not_configured"},"detail":detail})
+        }).collect();
         let mut hubs = Vec::new();
         let mut channels = Vec::new();
         for (name, slot) in &self.slots {
@@ -1443,6 +1464,27 @@ impl DaemonService {
             .as_ref()
             .map(|server| u64::from(server.port()))
             .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
+        for item in &mut hubs {
+            let cfg = self
+                .slots
+                .get(string(item, "name"))
+                .map(|s| &s.config)
+                .or_else(|| raw["hubs"].get(string(item, "name")));
+            if let Some(cfg) = cfg {
+                item["issuer"] = cfg
+                    .get("issuer")
+                    .or_else(|| cfg.get("oidcIssuer"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                item["client_id"] = cfg
+                    .get("clientId")
+                    .or_else(|| cfg.get("client_id"))
+                    .or_else(|| cfg.get("oidcClientId"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            }
+            item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
+        }
         let token = string(host, "token");
         let advertised = advertised_hub_host(string(host, "bind"));
         let authority = if advertised.contains(':') {
@@ -1456,7 +1498,7 @@ impl DaemonService {
             invite_command.push_str(&format!(" --auth token --token {token}"));
         }
         invite_command.push_str(" --default");
-        json!({"apps":apps,"channel_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"error":null},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
     fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
         rows.into_iter()
@@ -1547,7 +1589,6 @@ impl DaemonService {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|h| h["enabled"] != false)
             .cloned()
             .collect();
         Ok(
@@ -1662,7 +1703,9 @@ impl DaemonService {
                     .plugins
                     .find_by_id(id)
                     .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
+                ensure_cli_shims_native(&self.config.state_dir, &self.plugins)?;
                 apply_plugin_setup(p, true, false)?;
+                self.last_app_action.insert(id.to_owned(), "setup".into());
             }
             "setup_remove_app" | "disable_app" => {
                 let id = action["harness"]
@@ -1674,6 +1717,26 @@ impl DaemonService {
                     .find_by_id(id)
                     .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
                 remove_plugin_setup(p)?;
+                let notice = p
+                    .post_disconnect_hint
+                    .clone()
+                    .unwrap_or("Disconnected · Active listeners stopped".into());
+                for row in self
+                    .state
+                    .active()?
+                    .into_iter()
+                    .filter(|r| r["harness"] == id)
+                {
+                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                }
+                self.caller_cache
+                    .lock()
+                    .map_err(|_| "Caller cache lock poisoned")?
+                    .retain(|_, v| v["harness"] != id);
+                self.last_app_action
+                    .insert(id.to_owned(), "disconnect".into());
+                self.push_ui();
+                return Ok(json!({"ok":true,"notice":notice}));
             }
             "setup_save_hub" | "save_hub" => {
                 let name = action["name"].as_str().unwrap_or(&hub).to_string();
@@ -1685,43 +1748,109 @@ impl DaemonService {
                     .cloned()
                     .map(Value::Object)
                     .unwrap_or_else(|| action.clone());
-                let auth = cfg
-                    .get("authMode")
-                    .or_else(|| cfg.get("auth_mode"))
-                    .or_else(|| cfg.get("auth"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("none")
-                    .to_ascii_lowercase();
-                if !matches!(auth.as_str(), "none" | "token" | "oidc") {
-                    return Err("INVALID_INPUT: Invalid authMode".into());
-                }
-                cfg["authMode"] = json!(auth);
-                crate::plugins::validate_nats_url(string(&cfg, "url"))
-                    .map_err(|error| format!("INVALID_INPUT: {error}"))?;
-                if auth == "token"
-                    && cfg["token"]
-                        .as_str()
-                        .is_none_or(|token| token.trim().is_empty())
-                {
-                    return Err("INVALID_INPUT: Hub token is required in token mode".into());
-                }
-                if auth == "oidc" {
-                    super::login::Settings::new(&cfg)?;
-                }
-                let set_default = cfg["set_default"].as_bool().unwrap_or(false);
-                if let Some(m) = cfg.as_object_mut() {
-                    if let Some(disabled) = m.remove("disabled") {
-                        let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
-                            && disabled.as_bool() != Some(true);
-                        m.insert("enabled".to_string(), json!(enabled));
-                    }
-                    for k in ["op", "name", "hub", "auth", "auth_mode", "set_default"] {
-                        m.remove(k);
+                // Normalize submitted aliases before merging with existing canonical keys.
+                for (canonical, aliases) in [
+                    ("authMode", &["auth_mode", "auth"][..]),
+                    ("clientId", &["client_id", "oidcClientId"][..]),
+                    ("issuer", &["oidcIssuer"][..]),
+                ] {
+                    if cfg.get(canonical).is_none() {
+                        if let Some(value) = aliases.iter().find_map(|key| cfg.get(*key)).cloned() {
+                            cfg[canonical] = value;
+                        }
                     }
                 }
+                let editing = action["edit"] == true;
+                let original = action["original_name"]
+                    .as_str()
+                    .unwrap_or(&name)
+                    .to_string();
                 self.mutate_config(|v| {
                     if !v["hubs"].is_object() {
                         v["hubs"] = json!({});
+                    }
+                    if editing {
+                        let mut base = v["hubs"][&original].clone();
+                        if !base.is_object() {
+                            return Err("INVALID_INPUT: Unknown hub to edit".into());
+                        }
+                        if original == "local" && name != "local" {
+                            return Err("INVALID_INPUT: Cannot rename the local hub".into());
+                        }
+                        if let Some(patch) = cfg.as_object() {
+                            for (key, value) in patch {
+                                if matches!(
+                                    key.as_str(),
+                                    "token" | "clientSecret" | "client_secret" | "oidcClientSecret"
+                                ) && value.as_str().is_none_or(|s| s.is_empty())
+                                {
+                                    continue;
+                                }
+                                base[key] = value.clone();
+                            }
+                        }
+                        cfg = base;
+                    }
+                    let auth = cfg
+                        .get("authMode")
+                        .or_else(|| cfg.get("auth_mode"))
+                        .or_else(|| cfg.get("auth"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("none")
+                        .to_ascii_lowercase();
+                    if !matches!(auth.as_str(), "none" | "token" | "oidc") {
+                        return Err("INVALID_INPUT: Invalid authMode".into());
+                    }
+                    cfg["authMode"] = json!(auth);
+                    crate::plugins::validate_nats_url(string(&cfg, "url"))
+                        .map_err(|error| format!("INVALID_INPUT: {error}"))?;
+                    if auth == "token"
+                        && cfg["token"]
+                            .as_str()
+                            .is_none_or(|token| token.trim().is_empty())
+                    {
+                        return Err("INVALID_INPUT: Hub token is required in token mode".into());
+                    }
+                    if auth == "oidc" {
+                        super::login::Settings::new(&cfg)?;
+                    }
+                    let set_default = cfg["set_default"].as_bool().unwrap_or(false);
+                    if let Some(m) = cfg.as_object_mut() {
+                        if let Some(disabled) = m.remove("disabled") {
+                            let enabled = m.get("enabled").and_then(Value::as_bool) != Some(false)
+                                && disabled.as_bool() != Some(true);
+                            m.insert("enabled".to_string(), json!(enabled));
+                        }
+                        for k in [
+                            "op",
+                            "name",
+                            "hub",
+                            "auth",
+                            "auth_mode",
+                            "set_default",
+                            "edit",
+                            "original_name",
+                        ] {
+                            m.remove(k);
+                        }
+                    }
+                    if editing && original != name {
+                        if !v["hubs"][&name].is_null() {
+                            return Err("INVALID_INPUT: Hub name already exists".into());
+                        }
+                        if let Some(h) = v["hubs"].as_object_mut() {
+                            h.remove(&original);
+                        }
+                        let default = v
+                            .get("default_hub")
+                            .or_else(|| v.get("defaultHub"))
+                            .and_then(Value::as_str);
+                        if default == Some(original.as_str()) {
+                            v["default_hub"] = json!(name);
+                            if let Some(m) = v.as_object_mut() {
+                                m.remove("defaultHub");
+                            }
+                        }
                     }
                     v["hubs"][&name] = cfg;
                     if set_default {
@@ -1794,6 +1923,10 @@ impl DaemonService {
             "channel_save"
             | "configure_human_channel"
             | "disconnect_human_channel"
+            | "channel_toggle"
+            | "channel_unpair"
+            | "channel_cancel_pair"
+            | "clear_channel_service"
             | "channel_test"
             | "test_human_channel"
             | "channel_pair"
@@ -1802,6 +1935,7 @@ impl DaemonService {
                     .as_str()
                     .or_else(|| action["plugin_id"].as_str())
                     .ok_or("INVALID_INPUT: channel_id required")?;
+                self.active_settings_hub = Some(hub.clone());
                 let rpc = match op {
                     "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
                     "channel_test" | "test_human_channel" => "human_channels_test",
@@ -1810,13 +1944,27 @@ impl DaemonService {
                 let mut params = action.clone();
                 params["plugin_id"] = json!(id);
                 if let Some(values) = action["values"].as_object() {
-                    let plugin = self
+                    let local = self
                         .plugins
                         .find_by_id(id)
-                        .ok_or("INVALID_INPUT: Unknown channel")?;
+                        .map(|p| p.fields.clone())
+                        .filter(|f| !f.is_empty());
+                    let fields = if let Some(fields) = local {
+                        fields
+                    } else {
+                        let schema = self.slot(&hub)?.rpc("human_channels_list", &json!({}))?;
+                        schema["channels"]
+                            .as_array()
+                            .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
+                            .and_then(|ch| ch["fields"].as_array())
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!("INVALID_INPUT: Unknown human channel plugin: {id}")
+                            })?
+                    };
                     let mut hub_config = Map::new();
                     let mut user_config = Map::new();
-                    for field in &plugin.fields {
+                    for field in &fields {
                         let key = string(field, "key");
                         if let Some(value) = values.get(key) {
                             if field["scope"] == "hub" {
@@ -1829,8 +1977,17 @@ impl DaemonService {
                     params["hub_config"] = Value::Object(hub_config);
                     params["user_config"] = Value::Object(user_config);
                 }
-                if op == "disconnect_human_channel" {
-                    params["enabled"] = json!(false);
+                if op == "channel_cancel_pair" {
+                    params["cancel_pair"] = json!(true);
+                }
+                if op == "channel_unpair"
+                    || (op == "disconnect_human_channel" && action["reset_hub"] != true)
+                {
+                    params["reset_user"] = json!(action["reset_user"] != false);
+                }
+                if op == "clear_channel_service" {
+                    params["reset_hub"] = json!(true);
+                    params["reset_user"] = json!(true);
                 }
                 let result = self
                     .slot(&hub)
@@ -1862,6 +2019,10 @@ impl DaemonService {
                     frame["hub"] = json!(hub);
                     self.emit(frame);
                 }
+                self.emit(
+                    json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
+                );
+                self.push_ui();
                 return Ok(result);
             }
             "send_signal" | "send_reply_from_human" => {
@@ -2114,11 +2275,14 @@ impl DaemonService {
                 };
                 self.host_server = server;
                 if let Err(error) = result {
+                    self.last_host_hub_error = Some(error.clone());
+                    self.emit(json!({"op":"settings","settings":self.settings()}));
                     rollback.map_err(|rollback| {
                         format!("{error}; failed to restore host hub listener: {rollback}")
                     })?;
                     return Err(error);
                 }
+                self.last_host_hub_error = None;
             }
             "set_launch_at_login" => {
                 set_launch_at_login(
@@ -2134,6 +2298,27 @@ impl DaemonService {
                     Ok(())
                 })?;
             }
+            "setup_disconnect_all" => {
+                for row in self.state.active()? {
+                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                }
+                for p in self.plugins.agent_plugins() {
+                    remove_plugin_setup(p)?;
+                    self.last_app_action
+                        .insert(p.id.clone(), "disconnect".into());
+                }
+                self.caller_cache
+                    .lock()
+                    .map_err(|_| "Caller cache lock poisoned")?
+                    .clear();
+                set_launch_at_login(
+                    false,
+                    &self.config.state_dir,
+                    &self.config.home_dir,
+                    &self.plugins,
+                )?;
+                self.emit(json!({"op":"settings","settings":self.settings()}));
+            }
             "setup_uninstall_all" | "uninstall_cito" => {
                 for row in self.state.active()? {
                     let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"));
@@ -2142,7 +2327,8 @@ impl DaemonService {
                 request_shutdown();
             }
             "quit" | "quit_daemon" => request_shutdown(),
-            "open_settings" => {
+            "open_settings" | "settings_select_hub" => {
+                self.active_settings_hub = Some(hub.clone());
                 self.emit(
                     json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
                 );
@@ -2536,7 +2722,9 @@ fn http_client_pid(stream: &TcpStream) -> Option<u32> {
     }
 }
 fn interactive_login(action: &Value) -> bool {
-    action["op"] == "login_hub" || (action["op"] == "hub_action" && action["action"] == "login")
+    action["op"] == "login_hub"
+        || (action["op"] == "hub_action"
+            && matches!(action["action"].as_str(), Some("login" | "switch_account")))
 }
 fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Result<Value, String> {
     let (hub, config, state_dir, attempt, snapshot) = {
@@ -2552,6 +2740,17 @@ fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Resul
             .as_str()
             .unwrap_or(&s.config.default_hub)
             .to_string();
+        s.mutate_config(|v| {
+            if !v["hubs"].is_object() || !v["hubs"][&hub].is_object() {
+                return Err("INVALID_INPUT: Unknown hub".into());
+            }
+            v["hubs"][&hub]["enabled"] = json!(true);
+            if let Some(m) = v["hubs"][&hub].as_object_mut() {
+                m.remove("disabled");
+            }
+            Ok(())
+        })?;
+        s.reload_slots()?;
         let config = s.slot(&hub)?.config.clone();
         let snapshot =
             login_cache_snapshot(&s.config.state_dir.join(format!("oidc-token-{hub}.json")));
@@ -2573,9 +2772,15 @@ fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Resul
                 .as_ref()
                 .and_then(|(cache, _)| cache["token_sha256"].as_str())
         };
-        super::login::recover_cancellable(&state_dir, &hub, &config, rejected, true, &|| {
-            shutdown_requested() || attempt.cancelled.load(Ordering::SeqCst)
-        })
+        super::login::recover_cancellable_with_options(
+            &state_dir,
+            &hub,
+            &config,
+            rejected,
+            true,
+            action["action"] == "switch_account" || action["force_interactive"] == true,
+            &|| shutdown_requested() || attempt.cancelled.load(Ordering::SeqCst),
+        )
     };
     let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
     let current = s.logins.get(&hub).is_some_and(|c| Arc::ptr_eq(c, &attempt));

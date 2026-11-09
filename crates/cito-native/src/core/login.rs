@@ -405,6 +405,25 @@ pub fn recover_cancellable(
     interactive: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<LoginResult, String> {
+    recover_cancellable_with_options(
+        dir,
+        hub,
+        config,
+        rejected_hash,
+        interactive,
+        false,
+        cancelled,
+    )
+}
+pub fn recover_cancellable_with_options(
+    dir: &Path,
+    hub: &str,
+    config: &Value,
+    rejected_hash: Option<&str>,
+    interactive: bool,
+    force_account_select: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<LoginResult, String> {
     let deadline = Deadline {
         at: Instant::now() + LOGIN_TIMEOUT,
         cancelled,
@@ -415,6 +434,7 @@ pub fn recover_cancellable(
         &Settings::new(config)?,
         rejected_hash,
         interactive,
+        force_account_select,
         &deadline,
     )
 }
@@ -424,6 +444,7 @@ fn recover_inner(
     settings: &Settings<'_>,
     rejected: Option<&str>,
     interactive: bool,
+    force_account_select: bool,
     deadline: &Deadline<'_>,
 ) -> Result<LoginResult, String> {
     deadline.remaining()?;
@@ -431,10 +452,9 @@ fn recover_inner(
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let _cache_lock = FileLock::acquire(&path.with_extension("json.lock"), deadline)?;
     let old = read_cache(&path, settings)?;
-    if let Some(cache) = old
-        .as_ref()
-        .filter(|cache| fresh(cache) && cache["token_sha256"].as_str() != rejected)
-    {
+    if let Some(cache) = old.as_ref().filter(|cache| {
+        !force_account_select && fresh(cache) && cache["token_sha256"].as_str() != rejected
+    }) {
         return verify_cache(cache, settings, deadline);
     }
     let verifier = OidcVerifier::new(settings.issuer, settings.client)?;
@@ -457,6 +477,7 @@ fn recover_inner(
     let authorization = endpoint(&discovery, "authorization_endpoint")?;
     let old_refresh = old
         .as_ref()
+        .filter(|_| !force_account_select)
         .and_then(|cache| cache["refresh_token"].as_str())
         .filter(|s| !s.is_empty());
     let refreshed = if let Some(refresh) = old_refresh {
@@ -519,6 +540,10 @@ fn recover_inner(
             ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
         ]);
+        if force_account_select {
+            url.query_pairs_mut()
+                .append_pair("prompt", "select_account");
+        }
         let opener = std::env::var("CITO_BROWSER_BIN").unwrap_or_else(|_| {
             if cfg!(target_os = "macos") {
                 "/usr/bin/open".into()

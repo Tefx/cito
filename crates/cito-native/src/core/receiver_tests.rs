@@ -98,6 +98,8 @@ impl Fixture {
             command: vec!["/usr/bin/python3".into(), "-c".into(), script],
             channel_env: None,
             fields: vec![],
+            post_setup_hint: None,
+            post_disconnect_hint: None,
         }
     }
     fn dispatch(&self, plugin: &PluginDescriptor) -> Result<(), String> {

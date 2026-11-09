@@ -99,10 +99,18 @@ pub fn ensure_cli_shims_native(
     let mut written = Vec::new();
     for plugin in &plugins.plugins {
         let target = plugins_dir.join(&plugin.id);
-        if fs::canonicalize(&plugin.plugin_dir).ok() != fs::canonicalize(&target).ok()
-            || !target.exists()
-        {
-            copy_dir_recursive(&plugin.plugin_dir, &target)?;
+        let bundled = resolve_package_root().join("plugins").join(&plugin.id);
+        let source = if plugin.plugin_dir.is_dir() {
+            &plugin.plugin_dir
+        } else if plugin.is_builtin && bundled.join("plugin.json").is_file() {
+            &bundled
+        } else {
+            // A deleted external plugin cannot be reconstructed. It must not block
+            // repairs of bundled plugins; applying that missing target still fails.
+            continue;
+        };
+        if fs::canonicalize(source).ok() != fs::canonicalize(&target).ok() || !target.exists() {
+            copy_dir_recursive(source, &target)?;
             written.push(target);
         }
     }
@@ -129,9 +137,7 @@ pub fn ensure_cli_shims_native(
     if let Ok(exe_path) = env::current_exe() {
         let exe_s = exe_path.to_string_lossy();
         if (exe_s.contains("/Cellar/cito/") || exe_s.contains("/opt/cito/"))
-            && state_dir
-                .to_str()
-                .is_some_and(|s| s.ends_with("/.cito"))
+            && state_dir.to_str().is_some_and(|s| s.ends_with("/.cito"))
         {
             let opt_app = PathBuf::from(resolve_stable_package_root(&exe_s))
                 .parent()
@@ -768,7 +774,6 @@ pub fn uninstall_setup_native(
         ("bin", "Removed CLI shims directory"),
         ("plugins", "Removed staged plugins directory"),
         ("sockets", "Removed local sockets directory"),
-        ("claude", "Removed Claude wake queue and endpoint cache"),
     ] {
         let dir = state_dir.join(sub);
         if dir.exists() {
@@ -779,6 +784,19 @@ pub fn uninstall_setup_native(
                 status: "updated".to_string(),
                 backup_path: None,
                 detail: label.to_string(),
+            });
+        }
+    }
+    for p in &plugins.plugins {
+        let dir = state_dir.join(&p.id);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+            actions.push(SetupAction {
+                target: p.id.clone(),
+                path: dir.to_string_lossy().into_owned(),
+                status: "updated".into(),
+                backup_path: None,
+                detail: "Removed plugin runtime data".into(),
             });
         }
     }
@@ -1808,7 +1826,7 @@ mod tests {
         use std::io::{Read, Write};
         let (root, plugins) = fixture();
         let state = root.join("installed");
-        for sub in ["bin", "plugins", "sockets", "claude"] {
+        for sub in ["bin", "plugins", "sockets", "sample"] {
             fs::create_dir_all(state.join(sub)).unwrap();
             fs::write(state.join(sub).join("sentinel"), "present until shutdown").unwrap();
         }
@@ -1883,8 +1901,11 @@ mod tests {
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
         assert!(!crate::plugins::pid_alive(pid as i32));
-        for sub in ["bin", "plugins", "sockets", "claude"] {
-            assert!(!state.join(sub).exists(), "{sub} should be removed on uninstall");
+        for sub in ["bin", "plugins", "sockets", "sample"] {
+            assert!(
+                !state.join(sub).exists(),
+                "{sub} should be removed on uninstall"
+            );
         }
         assert!(!state.join("daemon.lock").exists());
         fs::remove_dir_all(root).unwrap();

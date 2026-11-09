@@ -12,6 +12,259 @@ fn send(e: &HubEngine, id: &str, sig: &str) {
     e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data_b64":encoded(&json!({"signal_id":sig,"from":{"principal_id":"oidc:https://id.example.com|sender","listener_id":"sender","user":"bob"},"message":"hello"})),"opts":{"msgID":sig}}),None).unwrap();
 }
 #[test]
+fn stopped_channel_process_waits_for_its_reader_callback() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let mut plugin = hub_plugins::discover(&[root]).unwrap().remove(0);
+    plugin.command = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "printf '%s\\n' '{\"op\":\"cursor_save\",\"cursor\":\"old\"}'; read line".into(),
+    ];
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release = Mutex::new(release_rx);
+    let process = Arc::new(
+        ChannelProcess::spawn(
+            &plugin,
+            Arc::new(move |_| {
+                started_tx.send(()).unwrap();
+                release.lock().unwrap().recv().unwrap();
+                None
+            }),
+        )
+        .unwrap(),
+    );
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let stopping = process.clone();
+    let worker = thread::spawn(move || {
+        stopping.shutdown();
+        done_tx.send(()).unwrap();
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(30)).is_err(),
+        "shutdown returned before the callback quiesced"
+    );
+    release_tx.send(()).unwrap();
+    done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    worker.join().unwrap();
+    drop(process);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn oidc_admin_can_edit_redacted_service_fields() {
+    if std::env::var_os("CITO_TEST_ADMIN_WORKER").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "core::hub::tests::oidc_admin_can_edit_redacted_service_fields",
+                "--nocapture",
+            ])
+            .env("CITO_TEST_ADMIN_WORKER", "1")
+            .env("CITO_OIDC_ADMIN_USERS", "lifecycle-admin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[root]).unwrap();
+    let admin = json!({"principal_id":"oidc:https://id.example.com|admin","owner_user":"lifecycle-admin","sub":"admin","oidc":true});
+    e.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"secret"}}),
+        Some(&admin),
+    )
+    .unwrap();
+    let list = e
+        .rpc("human_channels_list", &json!({}), Some(&admin))
+        .unwrap();
+    let f = &list["channels"][0]["fields"][0];
+    assert_eq!(f["hidden"], false);
+    assert_eq!(f["redacted"], true);
+    assert_eq!(f["value"], "");
+    assert_eq!(f["configured"], true);
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[root]).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let list = || {
+        e.rpc("human_channels_list", &json!({}), Some(&owner))
+            .unwrap()["channels"][0]
+            .clone()
+    };
+    let configure = |mut patch: Value| {
+        patch["plugin_id"] = json!("fixture");
+        e.rpc("human_channels_configure", &patch, Some(&owner))
+            .unwrap()
+    };
+    let reg = || {
+        e.inner
+            .db
+            .transaction(|c| {
+                let b = one(
+                    c,
+                    "SELECT * FROM hub_human_channels WHERE plugin_id='fixture'",
+                    &[],
+                )?
+                .ok_or("missing binding")?;
+                let id = find_human(c, s(&b, "principal_id"))?.ok_or("missing node")?;
+                Ok(parse(&kv_row(c, &id)?.ok_or("missing row")?, "value"))
+            })
+            .unwrap()
+    };
+    assert_eq!(list()["status"], "not_configured");
+    assert_eq!(list()["enabled"], false);
+    configure(json!({"enabled":true,"user_config":{"address":"room"}}));
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    configure(json!({"hub_config":{"credential":"saved"}}));
+    assert_eq!(list()["status"], "ready");
+    let field = list()["fields"][0].clone();
+    assert_eq!(field["hidden"], false);
+    assert_eq!(field["redacted"], true);
+    assert_eq!(field["configured"], true);
+    assert_eq!(field["value"], "");
+    let non_admin = json!({"principal_id":"oidc:https://id.example.com|ordinary","owner_user":"ordinary","sub":"ordinary","oidc":true});
+    let hidden = e
+        .rpc("human_channels_list", &json!({}), Some(&non_admin))
+        .unwrap();
+    assert_eq!(hidden["channels"][0]["fields"][0]["hidden"], true);
+    for value in [json!(""), json!("   "), Value::Null, json!(REDACTED_SECRET)] {
+        configure(json!({"hub_config":{"credential":value}}));
+        assert_eq!(
+            e.inner.db.transaction(|c| service(c, "fixture")).unwrap().0["credential"],
+            "saved"
+        );
+    }
+    configure(json!({"enabled":false}));
+    assert_eq!(list()["status"], "paused");
+    assert_eq!(list()["fields"][1]["value"], "room");
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    send(&e, "other", "boundary");
+    configure(json!({"enabled":true}));
+    assert_eq!(list()["status"], "ready");
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT last_delivered_seq FROM hub_human_channels", &[])
+            .unwrap()[0]["last_delivered_seq"],
+        1
+    );
+    configure(json!({"reset_user":true}));
+    assert_eq!(list()["status"], "hub_ready");
+    assert_eq!(list()["enabled"], false);
+    assert_eq!(list()["fields"][1]["value"], "");
+    let pair = || {
+        e.rpc(
+            "human_channel_pair_start",
+            &json!({"plugin_id":"fixture"}),
+            Some(&owner),
+        )
+        .unwrap()
+    };
+    let first = pair();
+    assert_eq!(list()["status"], "pairing_pending");
+    let second = pair();
+    assert_ne!(first["code"], second["code"]);
+    let redeem = |code: &Value| {
+        e.redeem("fixture",&json!({"code":code,"is_private_chat":true,"external_chat_id":"external","external_user_id":"user","display_label":"Alice","user_config_patch":{"address":"paired"}}))
+    };
+    assert!(redeem(&first["code"])
+        .unwrap_err()
+        .starts_with("INVALID_INPUT"));
+    configure(json!({"cancel_pair":true}));
+    assert!(redeem(&second["code"]).is_err());
+    let third = pair();
+    assert_eq!(redeem(&third["code"]).unwrap()["ok"], true);
+    assert!(list()["detail"].as_str().unwrap().contains("Alice"));
+    configure(json!({"user_config":{"address":"manual"}}));
+    let b = e
+        .inner
+        .db
+        .query("SELECT * FROM hub_human_channels", &[])
+        .unwrap()[0]
+        .clone();
+    assert_eq!(parse(&b, "user_config_json"), json!({"address":"manual"}));
+    assert!(b["display_label"].is_null());
+    e.inner.db.execute("UPDATE hub_plugin_services SET service_state_json='{\"cursor\":\"77\"}' WHERE plugin_id='fixture'",&[]).unwrap();
+    let old_process = e.inner.processes.lock().unwrap()["fixture"].clone();
+    configure(json!({"hub_config":{"credential":"rotated"}}));
+    assert!(!old_process.alive());
+    assert_eq!(
+        e.inner.db.transaction(|c| service(c, "fixture")).unwrap().1,
+        json!({})
+    );
+    configure(json!({"reset_hub":true}));
+    assert_eq!(list()["status"], "not_configured");
+    assert_eq!(list()["enabled"], false);
+    assert!(!e.inner.processes.lock().unwrap().contains_key("fixture"));
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_service() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[root.clone()]).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":false,"hub_config":{"credential":"saved"},"user_config":{"address":"saved-room"}}),Some(&owner)).unwrap();
+    let before = e
+        .inner
+        .db
+        .query("SELECT * FROM hub_plugin_services", &[])
+        .unwrap();
+    let binding = e
+        .inner
+        .db
+        .query("SELECT * FROM hub_human_channels", &[])
+        .unwrap();
+    let live = e.inner.processes.lock().unwrap()["fixture"].clone();
+    assert_eq!(e.rpc("human_channels_test",&json!({"plugin_id":"fixture","hub_config":{"credential":"candidate"},"user_config":{"address":"candidate-room"}}),Some(&owner)).unwrap()["ok"],true);
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_plugin_services", &[])
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_human_channels", &[])
+            .unwrap(),
+        binding
+    );
+    assert!(Arc::ptr_eq(
+        &live,
+        &e.inner.processes.lock().unwrap()["fixture"]
+    ));
+    let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
+    let request: Value = frames
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["op"] == "test")
+        .unwrap();
+    assert_eq!(request["hub_config"]["credential"], "candidate");
+    assert_eq!(request["user_config"]["address"], "candidate-room");
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
 fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<(), String> {
     let dir = temp();
     let e = HubEngine::open(&dir)?;
@@ -1514,7 +1767,10 @@ fn reservations_renew_while_process_is_live_and_replay_after_exit() {
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "concurrent");
     let plugin = e.plugin("fixture").unwrap();
-    let process = e.ensure_process(&plugin).unwrap();
+    let process = {
+        let _lifecycle = e.inner.lifecycle.lock().unwrap();
+        e.ensure_process(&plugin, true).unwrap()
+    };
     let barrier = Arc::new(std::sync::Barrier::new(5));
     let mut handles = Vec::new();
     for _ in 0..4 {
@@ -1546,7 +1802,10 @@ fn reservations_renew_while_process_is_live_and_replay_after_exit() {
     assert_eq!(row["status"], "in_flight");
     assert!(n(&row, "delivered_ms") > now_ms() - 1000);
     process.shutdown();
-    let replacement = e.ensure_process(&plugin).unwrap();
+    let replacement = {
+        let _lifecycle = e.inner.lifecycle.lock().unwrap();
+        e.ensure_process(&plugin, true).unwrap()
+    };
     e.replay(&plugin, &replacement).unwrap();
     wait_for(|| {
         e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
