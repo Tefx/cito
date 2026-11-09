@@ -680,12 +680,13 @@ pub fn uninstall_setup_native(
     let raw = crate::plugins::read_config_text(config_path)?;
     let (default_hub, _, rest) = try_normalize_existing_config(raw.as_deref())?;
     let daemon_port = match env::var("CITO_DAEMON_PORT") {
-        Ok(value) => value
+        Ok(value) if !value.trim().is_empty() => value
+            .trim()
             .parse::<u16>()
             .ok()
             .filter(|p| *p > 0)
             .ok_or("Invalid CITO_DAEMON_PORT")?,
-        Err(_) => rest
+        _ => rest
             .get("daemonPort")
             .and_then(Value::as_u64)
             .map(|p| {
@@ -1722,17 +1723,19 @@ mod tests {
     fn uninstall_uses_configured_port_unlistens_and_waits_before_removal() {
         // Keep process-global environment immutable while other unit tests run.
         if env::var_os("CITO_UNINSTALL_TEST_WORKER").is_none() {
-            let output = Command::new(env::current_exe().unwrap())
-                .args(["core::setup::tests::uninstall_uses_configured_port_unlistens_and_waits_before_removal", "--exact", "--nocapture"])
-                .env("CITO_UNINSTALL_TEST_WORKER", "1")
-                .env_remove("CITO_DAEMON_PORT")
-                .output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            for mode in ["unset", "padded", "blank"] {
+                let output = Command::new(env::current_exe().unwrap())
+                    .args(["core::setup::tests::uninstall_uses_configured_port_unlistens_and_waits_before_removal", "--exact", "--nocapture"])
+                    .env("CITO_UNINSTALL_TEST_WORKER", mode)
+                    .env_remove("CITO_DAEMON_PORT")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            }
             return;
         }
         use std::io::{Read, Write};
@@ -1742,6 +1745,11 @@ mod tests {
         fs::write(state.join("bin/sentinel"), "present until shutdown").unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        match env::var("CITO_UNINSTALL_TEST_WORKER").unwrap().as_str() {
+            "padded" => env::set_var("CITO_DAEMON_PORT", format!(" {port} ")),
+            "blank" => env::set_var("CITO_DAEMON_PORT", " \t "),
+            _ => {}
+        }
         let config_path = root.join("config.json");
         fs::write(
             &config_path,

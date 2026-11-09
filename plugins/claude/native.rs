@@ -624,7 +624,7 @@ pub fn hook_main() {
             .unwrap_or_else(|| state(&req).join("config.json"));
         let cfg = read_json(&config_path).unwrap_or(json!({}));
         let port = env_value(&req, "CITO_DAEMON_PORT")
-            .and_then(|s| s.parse::<u16>().ok())
+            .and_then(|s| s.trim().parse::<u16>().ok())
             .filter(|p| *p > 0)
             .or_else(|| {
                 cfg["daemonPort"]

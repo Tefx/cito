@@ -329,7 +329,7 @@ fn claude_hook_ack_prefers_environment_daemon_port_over_config() {
     configured.set_nonblocking(true).unwrap();
     f.env.insert(
         "CITO_DAEMON_PORT".into(),
-        environment.local_addr().unwrap().port().to_string(),
+        format!(" {} ", environment.local_addr().unwrap().port()),
     );
     fs::write(
         &f.config,
