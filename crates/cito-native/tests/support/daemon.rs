@@ -752,6 +752,30 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     ] {
         assert_eq!(f.action(json!({"op":op})).0, 200, "{op}");
     }
+    for (harness, session_id, error) in [
+        ("missing", "s1", "UNSUPPORTED_HARNESS: Unknown harness"),
+        ("channel", "s1", "UNSUPPORTED_HARNESS: Unknown harness"),
+        (
+            "fixture",
+            "closed-session",
+            "BINDING_REQUIRED: Caller session mismatch",
+        ),
+    ] {
+        let (status, result) = f.action(json!({"op":"listen_session","hub":"local","harness":harness,"session_id":session_id,"about":"bad"}));
+        assert_eq!(status, 400, "{result}");
+        assert_eq!(result["error"], error);
+        assert!(f
+            .rows("SELECT * FROM local_listeners WHERE harness <> 'human'")
+            .is_empty());
+        assert!(f
+            .db("hub.sqlite")
+            .query(
+                "SELECT * FROM hub_kv WHERE json_extract(CAST(value AS TEXT),'$.harness') <> 'human'",
+                &[],
+            )
+            .unwrap()
+            .is_empty());
+    }
     assert_eq!(f.action(json!({"op":"listen_session","harness":"fixture","session_id":"session-1","about":"IPC receiver","scope":"workspace"})).0,200);
     let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     let id = row["listener_id"].clone();

@@ -1896,12 +1896,15 @@ impl DaemonService {
                 if caller["session_id"].is_null() {
                     caller["session_id"] = json!("default");
                 }
-                if caller["harness"] != "human"
-                    && self
+                if caller["harness"] != "human" {
+                    if !self
                         .plugins
-                        .find_by_id(string(&caller, "harness"))
-                        .is_some()
-                {
+                        .agent_plugins()
+                        .iter()
+                        .any(|p| p.id == string(&caller, "harness"))
+                    {
+                        return Err("UNSUPPORTED_HARNESS: Unknown harness".into());
+                    }
                     let mut meta = json!({"expected_harness":caller["harness"],"expected_session_id":caller["session_id"],"cwd":caller["cwd"]});
                     if caller["endpoint_pid"].is_number() {
                         meta["endpoint_pid"] = caller["endpoint_pid"].clone();
