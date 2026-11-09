@@ -4,6 +4,101 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let script = f.dir.join("endpoint.cjs");
+    fs::write(&script, include_str!("endpoint.cjs")).unwrap();
+    let endpoint = f.spawn(
+        "node",
+        &[script.to_str().unwrap()],
+        &[("FIXTURE_HARNESS", "pi")],
+    );
+    wait(|| f.frames(endpoint).iter().any(|v| v["op"] == "ready"));
+    assert_eq!(
+        f.plugin(PI, json!({"op":"discover_sessions"}))["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.daemon(&[]);
+    let available = || f.action(json!({"op":"get_snapshot"})).1["available"].clone();
+    assert_eq!(available(), json!([]));
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    wait(|| {
+        available()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["harness"] == "pi")
+    });
+    assert_eq!(
+        f.action(json!({"op":"setup_remove_app","harness":"pi"})).0,
+        200
+    );
+    assert_eq!(available(), json!([]));
+    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    assert_eq!(available(), json!([]));
+}
+
+#[test]
+fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.provider("delivered");
+    f.daemon(&[]);
+    let snapshot = || f.action(json!({"op":"get_snapshot"})).1;
+    wait(|| {
+        snapshot()["available"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["harness"] == "fixture")
+    });
+    let options = f.state.join("plugins/fixture/options.json");
+    let mut config: Value = serde_json::from_str(&fs::read_to_string(&options).unwrap()).unwrap();
+    config["configured"] = json!(false);
+    fs::write(&options, config.to_string()).unwrap();
+    assert_eq!(snapshot()["available"], json!([]));
+    config["configured"] = json!(true);
+    fs::write(&options, config.to_string()).unwrap();
+    assert!(snapshot()["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["harness"] == "fixture"));
+}
+
+#[test]
+fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.daemon(&[]);
+    assert_eq!(
+        f.action(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}))
+            .0,
+        200
+    );
+    let host = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+    assert_eq!(host["enabled"], false);
+    assert_eq!(host["running"], false);
+    assert_eq!(host["token"].as_str().unwrap().len(), 64);
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert_eq!(saved["host_hub"]["token"], host["token"]);
+    assert_eq!(
+        f.action(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"]["token"],
+        host["token"]
+    );
+}
+
+#[test]
 fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1488,7 +1583,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.20.0");
+    assert_eq!(init["serverInfo"]["version"], "0.20.1");
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1609,7 +1704,7 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.20.0");
+    assert_eq!(http(p, "/health", None).1["version"], "0.20.1");
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -2193,6 +2288,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.20.0"
+        "cito v0.20.1"
     );
 }

@@ -203,8 +203,8 @@ fn distribution_versions_native_manifests_formula_and_signed_ui() {
             .0
     );
     let text = fs::read_to_string(formula).unwrap();
-    assert!(text.contains("version \"0.20.0\""));
-    assert!(text.contains("v0.20.0"));
+    assert!(text.contains("version \"0.20.1\""));
+    assert!(text.contains("v0.20.1"));
     assert!(!text.contains("depends_on \"node\""));
     assert!(
         text.contains("(prefix/\"Cito.app\").install \"Contents\""),
@@ -222,7 +222,7 @@ fn distribution_versions_native_manifests_formula_and_signed_ui() {
         "plugins/telegram/plugin.json",
     ] {
         let v: Value = serde_json::from_str(&fs::read_to_string(r.join(path)).unwrap()).unwrap();
-        assert_eq!(v["version"], "0.20.0", "{path}");
+        assert_eq!(v["version"], "0.20.1", "{path}");
     }
     let v: Value =
         serde_json::from_str(&fs::read_to_string(r.join("plugins/pi/package.json")).unwrap())
@@ -275,7 +275,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     for path in [app.join("Contents/MacOS/Cito"), f.state.join("bin/cito")] {
         let (ok, out, err) = f.command(path.to_str().unwrap(), &["--version"], "");
         assert!(ok, "{err}");
-        assert_eq!(out, "cito v0.20.0\n");
+        assert_eq!(out, "cito v0.20.1\n");
     }
     assert!(
         f.command(
@@ -314,7 +314,7 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         let file = site.join(page);
         let html = fs::read_to_string(&file).unwrap();
         assert!(
-            html.contains("name=\"application-version\" content=\"0.20.0\""),
+            html.contains("name=\"application-version\" content=\"0.20.1\""),
             "{page}"
         );
         for attr in ["href=\"", "src=\""] {

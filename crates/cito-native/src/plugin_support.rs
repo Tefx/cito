@@ -121,14 +121,19 @@ impl Drop for FileLock {
 }
 pub fn clean_sidecars(path: &Path) {
     let Some(parent) = path.parent() else { return };
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else { return };
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
     let lock_name = format!("{name}.cito.lock");
     let bak_prefix = format!("{name}.bak.");
     let tmp_prefix = format!("{name}.tmp-");
     if let Ok(entries) = fs::read_dir(parent) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().into_owned();
-            if fname == lock_name || fname.starts_with(&bak_prefix) || fname.starts_with(&tmp_prefix) {
+            if fname == lock_name
+                || fname.starts_with(&bak_prefix)
+                || fname.starts_with(&tmp_prefix)
+            {
                 let _ = fs::remove_file(entry.path());
             }
         }

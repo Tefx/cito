@@ -6,6 +6,10 @@ trap 'rm -rf "$root"' EXIT HUP INT TERM
 mkdir -p "$root/home" "$root/state"
 printf '#!/bin/sh\nexit 0\n' > "$root/mock"
 chmod 700 "$root/mock"
+# Forward only the explicit opt-in visual-review artifact directory.
+if [ -n "${CITO_TEST_SNAPSHOT_DIR:-}" ]; then
+  set -- /usr/bin/env CITO_TEST_SNAPSHOT_DIR="$CITO_TEST_SNAPSHOT_DIR" "$@"
+fi
 # env -i prevents inherited credentials, plugin paths and harness homes leaking in.
 env -i PATH="$PATH" TMPDIR=/tmp HOME="$root/home" USER=alice \
   CITO_STATE_DIR="$root/state" CITO_CONFIG_PATH="$root/state/config.json" \

@@ -28,18 +28,17 @@
       "type": "string",
       "required": true,
       "placeholder": "Paired via /start or enter Chat ID",
-      "helpText": "Auto-filled when you pair via /start, or enter your numeric Chat ID"
+      "helpText": "Your personal Chat ID, paired via /start"
     }
   ],
   "pairing": {
     "supported": true,
     "actionLabel": "Pair Account…",
-    "helpText": "Generates a 10-minute /start command to link your private Telegram chat."
+    "helpText": "Each human pairs their own account: send the 10-minute /start command to the shared bot on Telegram."
   },
-  "version": "0.20.0",
+  "version": "0.20.1",
   "setupGuide": [
     "1. Message @BotFather on Telegram (/newbot) to create a bot and copy its Bot Token.",
-    "2. Paste the Bot Token below and click Pair Account… to generate a 1-time /start command.",
-    "3. Send the /start command to your bot in Telegram — Chat ID fills in automatically."
+    "2. Paste the Bot Token below. Save once for this Hub; every human shares this gateway."
   ]
 }
