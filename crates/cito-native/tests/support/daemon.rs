@@ -142,6 +142,22 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
     let ma = a.provider("delivered_unconfirmed");
     a.daemon(&[]);
     let old = enroll(&a, ma);
+    let sibling = Fixture::new(config.clone());
+    let sibling_meta = sibling.provider("delivered_unconfirmed");
+    sibling.daemon(&[]);
+    let attached = enroll(&sibling, sibling_meta);
+    assert_eq!(attached["binding_generation"], old["binding_generation"]);
+    let sibling_row =
+        sibling.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    // Hold only the sibling's dispatch lease; its receiver must keep polling unfenced.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    sibling.db("state.sqlite").execute(
+        "UPDATE local_listeners SET dispatcher_token='test-held',lease_until_ms=? WHERE listener_id=?",
+        &[json!(now + 60_000), sibling_row["listener_id"].clone()],
+    ).unwrap();
     let b = Fixture::new(config);
     b.provider("delivered_unconfirmed");
     fs::write(
@@ -154,23 +170,74 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
         &b,
         json!({"expected_harness":"fixture","expected_session_id":"session-1"}),
     );
-    b.tool(
+    // Heartbeat fencing must work even before another signal arrives.
+    wait(|| {
+        a.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"]
+            == "FENCED_INACTIVE"
+    });
+    let sent = b.tool(
         "cito_send",
         json!({"to":winner["listener_id"],"message":"Winner"}),
         human(),
     );
     wait(|| {
-        a.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"]
-            == "FENCED_INACTIVE"
+        b.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
+            .len()
+            == 1
+            && sibling.rows("SELECT * FROM local_signals").len() == 1
     });
+    assert!(sibling.rows("SELECT held_reason FROM local_signals")[0]["held_reason"].is_null());
     assert_eq!(
         b.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
         "ACTIVE"
     );
-    assert!(
-        winner["binding_generation"].as_u64().unwrap()
-            > old["binding_generation"].as_u64().unwrap()
+    assert_eq!(winner["binding_generation"], old["binding_generation"]);
+    assert_eq!(
+        sibling.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
+        "ACTIVE"
     );
+    let winner_row = b.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    let old_row = a.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    assert_ne!(winner_row["owner_token"], old_row["owner_token"]);
+    let remote: Value = serde_json::from_str(
+        host.db("hub/hub.sqlite")
+            .query(
+                "SELECT CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
+                &[winner_row["listener_id"].clone()],
+            )
+            .unwrap()[0]["value"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    for row in [&winner_row, &sibling_row] {
+        let channel = format!("{}:fixture", row["host_id"].as_str().unwrap());
+        assert_eq!(remote["channels"][&channel]["state"], "ACTIVE");
+        assert_eq!(
+            remote["channels"][&channel]["owner_token"],
+            row["owner_token"]
+        );
+    }
+    for (fixture, expected) in [(&a, 0), (&b, 1), (&sibling, 0)] {
+        let calls = fs::read_to_string(fixture.state.join("plugins/fixture/calls.jsonl")).unwrap();
+        let wakes: Vec<Value> = calls
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|call| call["op"] == "wake")
+            .collect();
+        assert_eq!(wakes.len(), expected);
+        if let Some(wake) = wakes.first() {
+            assert_eq!(
+                wake["signals"][0]["signal_id"],
+                sent["signal_id"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit(':')
+                    .next()
+                    .unwrap()
+            );
+        }
+    }
 }
 #[test]
 fn http_origin_guard_strict_tool_schemas_and_singleton_port_ownership() {

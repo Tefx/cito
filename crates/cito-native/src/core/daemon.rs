@@ -1333,10 +1333,10 @@ impl DaemonService {
             let id_prefix = self.scoped(hub, "");
             let plugin = self.plugins.find_by_id(string(&row, "harness")).cloned();
             self.receivers.insert(key,thread::spawn(move||{
+                let channel=format!("{}:{}",host_id,string(&row,"harness"));
                 if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
-                    if remote["binding_generation"]!=row["binding_generation"]||remote["owner_token"]!=row["owner_token"]{let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
+                    if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
-                    let channel=format!("{}:{}",host_id,string(&row,"harness"));
                     if let Some(ch) = remote["channels"]
                         .as_object_mut()
                         .and_then(|m| m.get_mut(&channel))

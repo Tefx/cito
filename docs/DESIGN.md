@@ -70,7 +70,8 @@
 
 ### 3.2 Multi-Channel Registration & Lease Aggregation (`crates/cito-native/src/core/lease.rs`, `hub.rs`)
 - **`Registration` Schema**:
-  - Includes `channels: BTreeMap<String, ChannelAttachment>` where each `ChannelAttachment` has `{ channel_id, kind, host_id, host_name, delivery_mode: "notify_fanout" | "wake_exclusive", priority, state: "ACTIVE" | "UNLISTENED", updated_at_ms }`.
+  - Includes `channels: BTreeMap<String, ChannelAttachment>` where each `ChannelAttachment` has `{ channel_id, kind, host_id, host_name, delivery_mode: "notify_fanout" | "wake_exclusive", priority, state: "ACTIVE" | "UNLISTENED", owner_token?, updated_at_ms }`.
+  - **Channel Ownership**: Local registrations store an `owner_token` on their channel attachment. Refreshing the same local binding retains its token; replacing that channel's owner rotates only its token. An active sibling channel preserves the Node's `binding_generation` and top-level `owner_token`, keeping pending signal generations and legacy sibling owners valid. Heartbeats, wake preflight/renewal, and captured-owner detach compare the local row against its channel token and Node generation, falling back to the top-level token only when the channel token is absent. With no active sibling, a replacement also advances the Node generation and replaces its top-level token.
   - **Lease Evaluation (`evaluate_node_lease`, `F13`)**:
     - A channel attachment with `state == "ACTIVE"` and `host_id == "hub"` (an enabled Hub-hosted Human Channel such as Telegram) is treated as **permanently active** while its binding remains enabled in `hub_human_channels` (never expiring at the 60s `ACTIVE_LEASE_MS` or 30m `RETENTION_MS` thresholds).
     - A host-attached channel (`host_id != "hub"`) is `ACTIVE` when `now - updated_at_ms < 60_000`, `DISCONNECTED_RETAINED` when `60_000 <= age <= 1_800_000`, and `EXPIRED` when `age > 1_800_000`.

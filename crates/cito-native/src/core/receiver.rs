@@ -1,5 +1,6 @@
 use super::{
     identity::{iso, string},
+    registration::remote_matches_listener,
     state::LocalState,
     transport::HubClient,
 };
@@ -66,8 +67,7 @@ fn plugin_request_owned(
                         client.kv_get(string(row, "listener_id"))?.filter(|(r, _)| {
                             r.is_object()
                                 && r["state"] == "ACTIVE"
-                                && r["binding_generation"] == row["binding_generation"]
-                                && r["owner_token"] == row["owner_token"]
+                                && remote_matches_listener(r, row, channel)
                                 && r["channels"]
                                     .get(channel)
                                     .is_none_or(|ch| ch["state"] == "ACTIVE")
@@ -537,10 +537,7 @@ fn detach_channel_expected(
         if !remote.is_object() {
             return Err("INVALID_INPUT: Listener must be an object".into());
         }
-        if captured.is_some_and(|row| {
-            remote["binding_generation"] != row["binding_generation"]
-                || remote["owner_token"] != row["owner_token"]
-        }) {
+        if captured.is_some_and(|row| !remote_matches_listener(&remote, row, channel)) {
             return Err("STALE_GENERATION: Listener changed during channel detach".into());
         }
         if let Some(ch) = remote["channels"]

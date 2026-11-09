@@ -453,6 +453,7 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
         .kv_get(string(&f.row, "listener_id"))?
         .ok_or("Missing registration")?;
     remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","host_name":"sibling","delivery_mode":"wake_exclusive","priority":100,"state":"ACTIVE","updated_at_ms":now_ms()});
+    remote["owner_token"] = json!("legacy-sibling-owner");
     f.client
         .kv_save(string(&f.row, "listener_id"), &remote, Some(revision))?;
     f.dispatch(&f.plugin("print(json.dumps({'ok':True,'outcome':'session_switched'}))"))?;
@@ -549,6 +550,7 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
     registration["channels"][channel]["updated_at_ms"] = json!(initial_heartbeat - 55_000);
     registration["updated_at_ms"] = json!(initial_heartbeat - 55_000);
     registration["channels"]["sibling:fixture"] = json!({"state":"ACTIVE","updated_at_ms":1});
+    registration["owner_token"] = json!("legacy-sibling-owner");
     let sibling = registration["channels"]["sibling:fixture"].clone();
     f.client.kv_save(id, &registration, Some(revision))?;
     let initial = db.query("SELECT claim_until_ms FROM hub_signals", &[])?[0]["claim_until_ms"]
@@ -676,6 +678,68 @@ fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), Stri
         .rows()?
         .iter()
         .all(|r| r["state"] == "EXPIRED_UNSENT" && r["acknowledged_at_ms"].is_null()));
+    Ok(())
+}
+
+#[test]
+fn same_channel_refresh_retains_owner_and_replacement_fences_without_siblings() -> Result<(), String>
+{
+    let f = Fixture::new()?;
+    let id = string(&f.row, "listener_id");
+    let args = json!({"about":"Refreshed receiver"});
+    register_listener(&f.state, &f.client, "host", &args, &f.row)?;
+    let refreshed = f
+        .state
+        .listener("local", id)?
+        .ok_or("Missing refreshed row")?;
+    assert_eq!(refreshed["binding_generation"], f.row["binding_generation"]);
+    assert_eq!(refreshed["owner_token"], f.row["owner_token"]);
+    let mut caller = f.row.clone();
+    caller["endpoint_pid"] = json!(42);
+    register_listener(&f.state, &f.client, "host", &args, &caller)?;
+    let replacement = f
+        .state
+        .listener("local", id)?
+        .ok_or("Missing replacement row")?;
+    assert_eq!(
+        replacement["binding_generation"].as_u64(),
+        f.row["binding_generation"].as_u64().map(|v| v + 1)
+    );
+    assert_ne!(replacement["owner_token"], f.row["owner_token"]);
+    let remote = f.client.kv_get(id)?.ok_or("Missing registration")?.0;
+    assert_eq!(remote["owner_token"], replacement["owner_token"]);
+    assert_eq!(
+        remote["channels"]["host:fixture"]["owner_token"],
+        replacement["owner_token"]
+    );
+    Ok(())
+}
+
+#[test]
+fn channel_takeover_blocks_stale_detach_and_fences_before_spawn() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.seed("s")?;
+    let id = string(&f.row, "listener_id");
+    let (mut remote, revision) = f.client.kv_get(id)?.ok_or("Missing registration")?;
+    remote["channels"]["host:fixture"]["owner_token"] = json!("winner-owner");
+    remote["channels"]["sibling:fixture"] = json!({"state":"ACTIVE"});
+    f.client.kv_save(id, &remote, Some(revision))?;
+    let error = detach_channel_expected(&f.client, id, "host:fixture", Some(&f.row))
+        .expect_err("Stale owner must not detach the winner");
+    assert!(error.starts_with("STALE_GENERATION:"));
+    assert_eq!(
+        f.client.kv_get(id)?.ok_or("Missing registration")?.0,
+        remote
+    );
+    assert!(f.dispatch(&f.plugin(DELIVER)).is_err());
+    assert!(f.requests()?.is_empty());
+    assert_eq!(
+        f.state.listener("local", id)?.ok_or("Missing listener")?["status"],
+        "FENCED_INACTIVE"
+    );
+    assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    assert_eq!(f.rows()?[0]["held_reason"], "fenced_before_dispatch");
+    assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
     Ok(())
 }
 
