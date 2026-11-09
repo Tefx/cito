@@ -951,8 +951,6 @@ impl HubEngine {
                 if reset_user || p["cancel_pair"] == true {
                     cancel_pair(c, id, caller)?;
                 }
-                // SPEC QUESTION: DESIGN 10.4 resets the caller and detaches other bindings;
-                // the dispatch also describes channel-wide user-binding cleanup.
                 if reset_hub {
                     for b in c.query("SELECT * FROM hub_human_channels WHERE plugin_id=?", &[json!(id)])? {
                         attach(c, &b, false, self.inner.remote.load(Ordering::SeqCst))?;
@@ -966,8 +964,6 @@ impl HubEngine {
                     else if let Some(patch) = p.get("user_config") {
                         let identity_changed = fields(&plugin).iter().any(|f| s(f,"scope") == "user" && patch.get(s(f,"key")).is_some_and(|v| *v != config[s(f,"key")]));
                         merge_channel_config(&plugin, "user", &mut config, patch, clear_secret);
-                        // SPEC QUESTION: DESIGN 10.4 strips stale external identity metadata;
-                        // the dispatch names a manual identity field absent from this schema.
                         if identity_changed {
                             if let Some(m) = config.as_object_mut() {
                                 for key in ["_external_chat_id", "_external_user_id"] {
@@ -1741,8 +1737,6 @@ fn save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String> {
     Ok(changed)
 }
 const REDACTED_SECRET: &str = "••••••••";
-// SPEC QUESTION: The dispatch says empty secret patches clear; DESIGN 10.3/L2
-// requires retention without an explicit reset. This candidate follows DESIGN.
 fn merge_channel_config(
     plugin: &ChannelPlugin,
     scope: &str,

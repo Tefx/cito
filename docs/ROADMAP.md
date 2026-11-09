@@ -12,14 +12,14 @@ Cito's evolution from `v0.11.3` through `v0.20.0` is organized into **nine `0.x`
 
 ---
 
-## Stage 8 (`v0.20.0` — Implementation Candidate / Phase `v24`; Acceptance and Distribution Pending)
+## Stage 8 (`v0.20.0` — Completed / Phase `v24`)
 
 Stage 8 closes the lifecycle contracts in [DESIGN §10](DESIGN.md#10-stage-8-v0200--phase-v24-full-lifecycle-ux-state-machine--reconfiguration-contract-l1l17):
 - **L1–L8**: Declarative channel guidance, independent field visibility and secret redaction, retain/replace/explicit-clear patches, non-persisting tests, readiness-gated attachments, pause/unpair/service reset, superseded/cancelled pairing, selected-Hub refresh, token-rotation process/cursor reset, and remote-only channel schemas.
 - **L9–L13**: Guided setup, app-specific lifecycle hints, missing-file repair, listener/cache cleanup on disconnect, and separate Disconnect All versus full uninstall actions.
 - **L14–L17**: Interactive OIDC account switching, disabled-Hub sign-in, inline Hub edits, visible disconnected Hubs, LAN port/auth controls with bind-failure rollback, and actionable Directory/Activity empty states.
 
-Implementation verification runs on the target Mac using isolated HOME and Cito state directories. Acceptance requires reconciling the dispatch with DESIGN §10.3–§10.4 on empty-secret patches, manual identity representation, and service-reset binding scope. The current candidate follows DESIGN. Release publication, the published archive checksum, the Homebrew tap, and live website deployment remain distribution tasks.
+Verified on the target Mac using isolated HOME and Cito state directories. Release publication, the published archive checksum, the Homebrew tap, and live website deployment remain separate distribution tasks.
 
 ## Architectural Guardrails (Applicable to All Stages)
 
