@@ -66,6 +66,8 @@ Use **`Remove All Integrations…`** in the footer for a separate uninstall conf
 - **Tab 2 — `Human Channels`**: Select the target Hub, securely enter its Telegram Bot Token (`scope: "hub"`), click **`Pair Account…`** and follow the displayed `/start cito-a1b2c3d4e5` instruction, or click **`Send Test`**. Pairing updates your account fields without overwriting edits.
 - **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`✨ Paste from Invite`** / **`+ Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub. The join code advertises the configured bind address (or the Mac's primary IPv4/available hostname for wildcard binds), includes token authentication when enabled, and selects the joined Hub as default. Treat token-bearing join codes as credentials; loopback-only binds remain local to the Mac.
 
+Hosted Hub settings validate field types before saving: `enabled` must be a boolean, `port` an integer from `0` to `65535` (`0` selects an available port), `bind` a non-empty string, `token` a string, and `auth_mode` either `none` or `token`. Rejected field values leave both the saved configuration and the running hosted Hub unchanged.
+
 You can also inspect status or join hubs from the CLI when needed:
 
 ```sh

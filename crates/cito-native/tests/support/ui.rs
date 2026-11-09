@@ -417,6 +417,62 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         "{endpoint}: {anonymous:?}"
     );
 
+    let committed = fs::read(&host.config).unwrap();
+    for patch in [
+        json!({"auth_mode":"invalid"}),
+        json!({"auth_mode":"oidc"}),
+        json!({"auth_mode":null}),
+        json!({"auth_mode":1}),
+        json!({"port":70000}),
+        json!({"port":-1}),
+        json!({"port":1.5}),
+        json!({"port":"4291"}),
+        json!({"port":null}),
+        json!({"enabled":"true"}),
+        json!({"enabled":null}),
+        json!({"bind":""}),
+        json!({"bind":" "}),
+        json!({"bind":false}),
+        json!({"bind":null}),
+        json!({"token":42}),
+        json!({"token":null}),
+        json!({"token":" "}),
+        json!({"enabled":false,"port":70000}),
+        json!({"enabled":false,"auth_mode":"invalid"}),
+    ] {
+        let mut action = json!({"op":"set_host_hub","enabled":true});
+        action
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let (status, error) = host.action(action.clone());
+        assert_eq!(status, 400, "{action}: {error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("INVALID_INPUT:"),
+            "{action}: {error}"
+        );
+        assert_eq!(fs::read(&host.config).unwrap(), committed, "{action}");
+        let (status, health) = http(port, "/health", None);
+        assert_eq!(status, 200, "{action}: {health}");
+        assert_eq!(health["ok"], true);
+        assert_eq!(health["auth_mode"], "token");
+        let entries: Value = ureq::post(&format!("{endpoint}/v1/rpc"))
+            .set("Authorization", "Bearer lan-test-token")
+            .timeout(std::time::Duration::from_secs(2))
+            .send_json(json!({"op":"kv_snapshot"}))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(entries["ok"], true, "{action}: {entries}");
+        assert!(
+            entries["result"]["entries"].is_array(),
+            "{action}: {entries}"
+        );
+    }
+
     let client = Fixture::new(json!({}));
     client.daemon(&[]);
     let ui = start(&client);
@@ -476,7 +532,7 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
             format!("cito setup --hub lan --url http://{authority}:{port} --default")
         );
     }
-    for bind in ["0.0.0.0", "::", ""] {
+    for bind in ["0.0.0.0", "::"] {
         assert_eq!(
             host.action(json!({"op":"set_host_hub","enabled":true,"bind":bind}))
                 .0,

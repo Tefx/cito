@@ -1,4 +1,5 @@
 use super::{
+    auth::HubAuth,
     hub::HubEngine,
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
     receiver::{detach_channel_expected, plugin_request, poll_listener},
@@ -2026,9 +2027,14 @@ impl DaemonService {
                             host[key] = value.clone();
                         }
                     }
-                    if host["enabled"] == true && string(&host, "token").is_empty() {
+                    if host["enabled"] == true
+                        && host
+                            .get("token")
+                            .is_none_or(|token| token.as_str() == Some(""))
+                    {
                         host["token"] = json!(crate::plugins::try_random_hex(32)?);
                     }
+                    host_hub_server_config(&host)?;
                     v["host_hub"] = host;
                     if let Some(m) = v.as_object_mut() {
                         m.remove("hostHub");
@@ -2086,25 +2092,10 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
-        if self.host_server.is_some() {
-            self.host_server.take();
-        }
-        if host["enabled"] == true {
-            let mode = host_hub_auth_mode(host);
-            let auth = super::auth::HubAuth::new(
-                mode,
-                host["token"].as_str().map(str::to_string),
-                None,
-                None,
-            )?;
-            let server = self.local.start_server(
-                host["bind"]
-                    .as_str()
-                    .filter(|bind| !bind.is_empty())
-                    .unwrap_or("0.0.0.0"),
-                host["port"].as_u64().unwrap_or(4291) as u16,
-                auth,
-            )?;
+        let settings = host_hub_server_config(host)?;
+        self.host_server.take();
+        if let Some((bind, port, auth)) = settings {
+            let server = self.local.start_server(bind, port, auth)?;
             if self.closing {
                 drop(server);
             } else {
@@ -2140,6 +2131,41 @@ impl DaemonService {
             &[json!(std::process::id())],
         );
     }
+}
+
+fn host_hub_server_config(host: &Value) -> Result<Option<(&str, u16, HubAuth)>, String> {
+    if !host.is_null() && !host.is_object() {
+        return Err("INVALID_INPUT: Host hub must be an object".into());
+    }
+    if host.get("enabled").is_some_and(|v| !v.is_boolean()) {
+        return Err("INVALID_INPUT: Host hub enabled must be a boolean".into());
+    }
+    if host.get("token").is_some_and(|v| !v.is_string()) {
+        return Err("INVALID_INPUT: Host hub token must be a string".into());
+    }
+    let bind = match host.get("bind") {
+        Some(value) => value
+            .as_str()
+            .filter(|bind| !bind.trim().is_empty())
+            .ok_or("INVALID_INPUT: Host hub bind must be a non-empty string")?,
+        None => "0.0.0.0",
+    };
+    let port = match host.get("port") {
+        Some(value) => value
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .ok_or("INVALID_INPUT: Host hub port must be an integer from 0 to 65535")?,
+        None => 4291,
+    };
+    let mode = host_hub_auth_mode(host);
+    if host.get("auth_mode").is_some_and(|v| !v.is_string()) || !matches!(mode, "none" | "token") {
+        return Err("INVALID_INPUT: Host hub auth_mode must be none or token".into());
+    }
+    if host["enabled"] != true {
+        return Ok(None);
+    }
+    let auth = HubAuth::new(mode, host["token"].as_str().map(str::to_string), None, None)?;
+    Ok(Some((bind, port, auth)))
 }
 
 fn host_hub_auth_mode(host: &Value) -> &str {
@@ -3043,6 +3069,60 @@ mod tests {
                     Ok(())
                 })?;
                 assert_eq!(service.raw_config()?, json!({"other":7,"user":"bob"}));
+                Ok(())
+            })();
+            service.shutdown();
+            result
+        })();
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        result
+    }
+    #[test]
+    fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4()));
+        let result = (|| {
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let config = NativeConfig {
+                state_dir: dir.join("state"),
+                config_path: dir.join("config.json"),
+                home_dir: dir.join("home"),
+                daemon_port: 0,
+                user: "alice".into(),
+                default_hub: "local".into(),
+            };
+            let plugins = LoadedPlugins {
+                plugins: vec![],
+                rejected_ids: Default::default(),
+            };
+            let mut service = DaemonService::open(&config, &plugins)?;
+            let result = (|| {
+                let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"none"});
+                fs::write(&config.config_path, json!({"host_hub":host}).to_string())
+                    .map_err(|e| e.to_string())?;
+                service.sync_host_hub()?;
+                let address = service.host_server.as_ref().unwrap().address;
+                for (key, value) in [
+                    ("auth_mode", json!("invalid")),
+                    ("auth_mode", json!("token")),
+                    ("port", json!(70000)),
+                    ("bind", json!("")),
+                ] {
+                    let mut invalid = host.clone();
+                    invalid[key] = value;
+                    fs::write(&config.config_path, json!({"host_hub":invalid}).to_string())
+                        .map_err(|e| e.to_string())?;
+                    let error = service.sync_host_hub().unwrap_err();
+                    assert!(error.starts_with("INVALID_INPUT:"), "{error}");
+                    assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                    let health: Value = ureq::get(&format!("http://{address}/health"))
+                        .timeout(Duration::from_secs(2))
+                        .call()
+                        .map_err(|e| e.to_string())?
+                        .into_json()
+                        .map_err(|e| e.to_string())?;
+                    assert_eq!(health["ok"], true);
+                    assert_eq!(health["auth_mode"], "none");
+                }
                 Ok(())
             })();
             service.shutdown();
