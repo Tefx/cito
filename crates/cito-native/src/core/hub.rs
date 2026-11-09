@@ -1842,7 +1842,7 @@ fn handle_http(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/native-hub/cases.rs"]
+#[path = "../../tests/hub/cases.rs"]
 mod tests;
 
 static HUB_STOP: AtomicBool = AtomicBool::new(false);

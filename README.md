@@ -44,7 +44,7 @@ This installs `Cito.app` and places `cito` and `cito-mcp` on your `PATH`. The na
 
 ```sh
 cito --version
-# -> cito v0.18.0
+# -> cito v0.19.0
 ```
 
 ### Option 2: Download `Cito.app` for macOS
@@ -227,9 +227,13 @@ Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude`
 
 ## Development (`Build & Test`)
 
+Cito v0.19.0 uses a root Cargo workspace and the macOS Swift compiler. No root Node package or npm installation is needed. The Pi extension contract test uses a local Node.js runtime with type stripping (Node 22.13+); it has no npm dependencies.
+
+`build.rs` compiles and ad-hoc signs the Swift companion. Cargo's macOS linker hook (`bin/cito-linker`) stages completed release executables into `bin/` and `plugins/*/bin/`. This post-link hook avoids recursive Cargo builds and keeps packaged binaries usable after deleting `target/`. Keep the incremental target directory during development.
+
+The native subprocess suite uses temporary homes, private state/config paths, ephemeral ports, headless UI, mock host commands, and one shared process-test lock. Existing in-memory Rust tests run through the isolated Cargo test runner. No test modifies the developer's installed integrations or LaunchAgents.
+
 ```sh
-npm ci
-npm run typecheck
-npm run compile
-npm test
+cargo test --workspace && cargo build --release
+/usr/bin/ruby -c packaging/homebrew/cito.rb
 ```

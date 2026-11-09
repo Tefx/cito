@@ -351,7 +351,7 @@ impl OidcVerifier {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/native-hub/auth_cases.rs"]
+#[path = "../../tests/hub/auth_cases.rs"]
 mod tests;
 
 pub struct HubAuth {

@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="application-version" content="0.19.0" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Architecture &amp; Protocol — Cito Documentation</title>
   <meta name="description" content="Symmetric Node (Human | Agent) ↔ Hub ↔ Channels (1..K) ontology, @self / @username addressing, multi-channel read sync, and the 5 MCP tools." />
@@ -142,6 +143,9 @@
           </tr>
         </tbody>
       </table>
+      <h2 id="native-workspace">6. Native Workspace (v0.19.0)</h2>
+      <p>The root Cargo workspace builds the Rust core, native plugin executables, and signed Swift companion. Run <code>cargo test --workspace &amp;&amp; cargo build --release</code> and <code>/usr/bin/ruby -c packaging/homebrew/cito.rb</code>. The Swift build script compiles the UI, and the macOS post-link hook stages release binaries into <code>bin/</code> and <code>plugins/*/bin/</code>.</p>
+      <p>The native integration suite uses temporary homes and state directories, ephemeral loopback ports, mock host commands, headless AppKit, and bounded subprocess concurrency. The Pi package is the sole TypeScript host extension; its contract test uses Node type stripping without npm dependencies.</p>
     </main>
   </div>
 

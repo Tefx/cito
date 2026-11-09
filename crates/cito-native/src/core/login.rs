@@ -706,5 +706,5 @@ fn callback(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/native-hub/login_cases.rs"]
+#[path = "../../tests/hub/login_cases.rs"]
 mod tests;

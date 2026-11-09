@@ -3,6 +3,11 @@ import Foundation
 import Darwin
 import QuartzCore
 
+// Headless tests use a real private pasteboard without changing the user clipboard.
+let usesPrivatePasteboard = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
+let appPasteboard = usesPrivatePasteboard ? NSPasteboard.withUniqueName() : NSPasteboard.general
+atexit { if usesPrivatePasteboard { appPasteboard.releaseGlobally() } }
+
 enum StatusIconState { case active, idle, warning }
 func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
     let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
@@ -637,8 +642,8 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.toolTip = peer.scoped_id
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
         copyControl.pressed = { [weak copyControl] in
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+            appPasteboard.clearContents()
+            appPasteboard.setString(peer.scoped_id, forType: .string)
             copyControl?.copied()
         }
 
@@ -1001,11 +1006,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if op == "test_clipboard", let text = object["text"] as? String {
                 if object["system_only"] as? Bool != true { clipboardString = text }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                appPasteboard.clearContents()
+                appPasteboard.setString(text, forType: .string)
                 return
             }
             if op == "test_settings_key", let key = object["key"] as? String {
+                if key.lowercased() == "command-comma", let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43) {
+                    _ = cardMenu.performKeyEquivalent(with: event)
+                }
                 if key.lowercased() == "escape" {
                     closeSettingsPanel(emitAction: true)
                 }
@@ -1349,7 +1357,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             copy.toolTip = listener.scoped_id; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
             copy.pressed = { [weak self, weak copy] in
                 self?.clipboardString = listener.scoped_id
-                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(listener.scoped_id, forType: .string)
+                appPasteboard.clearContents(); appPasteboard.setString(listener.scoped_id, forType: .string)
                 copy?.copied()
             }
             card.addSubview(copy)
@@ -1495,8 +1503,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
                     copy.pressed = { [weak self, weak copy] in
                         self?.clipboardString = peer.scoped_id
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+                        appPasteboard.clearContents()
+                        appPasteboard.setString(peer.scoped_id, forType: .string)
                         copy?.copied()
                     }
                     row.addSubview(copy)
@@ -1781,7 +1789,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func handlePasteHubInvite() {
-        let systemText = NSPasteboard.general.string(forType: .string) ?? ""
+        let systemText = appPasteboard.string(forType: .string) ?? ""
         let raw = (systemText.isEmpty && headless ? clipboardString : systemText)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
@@ -2184,8 +2192,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         copyInvite.pressed = { [weak self, weak copyInvite] in
             guard let self = self else { return }
             self.clipboardString = inviteCmd
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(inviteCmd, forType: .string)
+            appPasteboard.clearContents()
+            appPasteboard.setString(inviteCmd, forType: .string)
             copyInvite?.copied()
         }
         hostCard.addSubview(copyInvite)
@@ -2996,8 +3004,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard directoryFilteredPeers.indices.contains(directorySelectedIndex) else { return }
             let peer = directoryFilteredPeers[directorySelectedIndex]
             clipboardString = peer.scoped_id
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(peer.scoped_id, forType: .string)
+            appPasteboard.clearContents()
+            appPasteboard.setString(peer.scoped_id, forType: .string)
             if let table = directoryTableView,
                let cell = table.view(atColumn: 0, row: directorySelectedIndex, makeIfNecessary: true) as? DirectoryPeerCellView {
                 cell.copyControl.copied()
@@ -3171,7 +3179,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let button = status?.button ?? headlessStatusButton
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
-        let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (NSPasteboard.general.string(forType: .string) ?? "")
+        let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
         let snapshot: [String: Any] = ["items": items, "icon_alpha": probes, "actions": menuActions.count, "count": uniqueSessionCount,
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,

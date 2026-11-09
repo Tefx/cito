@@ -1,10 +1,9 @@
 **
+!Cargo.toml
+!Cargo.lock
 !crates/
 !crates/cito-native/
 !crates/cito-native/**
 **/target/
 !plugins/
 !plugins/**
-!tests/
-!tests/native-hub/
-!tests/native-hub/**

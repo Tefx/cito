@@ -8,7 +8,7 @@ Cito's evolution from `v0.11.3` through `v0.19.0` is organized into **eight `0.x
 - **Stage 4 (`v0.16.0` — Completed)**: Project Website, Visual Architecture Showcase, Plugin SDK Authoring Guide & Onboarding Docs
 - **Stage 5 (`v0.17.0` — Completed)**: Initial Native Packaging, First-Launch Consent & Surgical Disconnect/Uninstall
 - **Stage 6 (`v0.18.0` — Active / Phase `v22`)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
-- **Stage 7 (`v0.19.0` — Planned / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
+- **Stage 7 (`v0.19.0` — Implementation / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
 
 ---
 
@@ -86,11 +86,11 @@ Completed in Phase `v18` (`2ade0a7`, tag `v0.14.0`).
 
 ---
 
-## Stage 7 (`v0.19.0` — Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
+## Stage 7 (`v0.19.0` — Implementation / Phase `v23`): Pure Rust Workspace Consolidation, Removal of Root Node/Vitest Scaffolding & `cargo test` Unification
 
 1. **Remove Root Node.js / Vitest Scaffolding**:
    - Delete root `package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, and `tests/**/*.ts` (`tests/support/native-harness.ts`), keeping only `plugins/pi/{package.json, cito-bridge.ts}` for the Pi host.
 2. **Promote Root `Cargo.toml` Workspace & Migrate Full E2E/Integration Suite to `cargo test`**:
-   - Establish root `Cargo.toml` workspace and migrate all behavioral, protocol, SQLite, plugin subprocess, headless `cito-ui`, website, and `F1`–`F64` regression tests into native Rust tests (`crates/cito-native/tests/*.rs`) executed via `cargo test --workspace`.
+   - Establish root `Cargo.toml` workspace and migrate all behavioral, protocol, SQLite, plugin subprocess, headless `cito-ui`, website, and `F1`–`F64` regression tests into native Rust tests (`crates/cito-native/tests/*.rs`) executed via `cargo test --workspace`. Run `cargo test --workspace && cargo build --release` from the root; the Swift build script and post-link staging hook retain signed package binaries independently of `target/`.
 3. **Pure-Rust CI & `v0.19.0` Release**:
    - Remove `actions/setup-node` / `npm` steps from `.github/workflows/release.yml`, bump version to `v0.19.0`, run iterative `code-hygiene` convergence, and publish `v0.19.0` to GitHub Releases and `Tefx/homebrew-tap`.

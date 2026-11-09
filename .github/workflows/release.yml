@@ -17,19 +17,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js (Build & Test Toolchain)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies, compile native binaries & run test suite
+      - name: Build & verify native Rust workspace and Homebrew formula
         run: |
-          npm ci
-          npm install --prefix "$RUNNER_TEMP/cito-pi-host" --no-save --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.0
-          npm run typecheck
-          npm run compile
-          CITO_PI_PACKAGE_DIR="$RUNNER_TEMP/cito-pi-host/node_modules/@earendil-works/pi-coding-agent" npm test
+          cargo test --workspace
+          cargo build --release
           /usr/bin/ruby -c packaging/homebrew/cito.rb
 
       - name: Build relocatable Cito.app bundle

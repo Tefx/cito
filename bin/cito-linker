@@ -1,0 +1,28 @@
+#!/bin/sh
+# Cargo's linker hook stages completed release executables after linking.
+set -eu
+/usr/bin/cc "$@"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; out="$1"; break; fi
+  shift
+done
+case "$out" in */release/deps/*) ;; *) exit 0 ;; esac
+root="$(cd "$(dirname "$0")/.." && pwd)"
+case "$(basename "$out")" in
+  cito_native-*) dest="$root/bin/cito-native-darwin-arm64" ;;
+  cito_plugin_pi-*) dest="$root/plugins/pi/bin/cito-plugin-pi" ;;
+  cito_plugin_codex-*) dest="$root/plugins/codex/bin/cito-plugin-codex" ;;
+  cito_plugin_claude-*) dest="$root/plugins/claude/bin/cito-plugin-claude" ;;
+  cito_claude_hook-*) dest="$root/plugins/claude/bin/cito-claude-hook" ;;
+  cito_plugin_telegram-*) dest="$root/plugins/telegram/bin/cito-plugin-telegram" ;;
+  *) exit 0 ;;
+esac
+# Replace atomically so an interrupted link/sign never exposes a partial binary.
+mkdir -p "$(dirname "$dest")"
+tmp="$dest.tmp.$$"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+cp "$out" "$tmp"
+chmod 755 "$tmp"
+/usr/bin/codesign --force --sign - "$tmp"
+mv -f "$tmp" "$dest"

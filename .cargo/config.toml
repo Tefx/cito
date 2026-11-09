@@ -1,0 +1,3 @@
+[target.aarch64-apple-darwin]
+linker = "bin/cito-linker"
+runner = "bin/cito-test-runner"

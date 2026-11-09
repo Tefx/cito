@@ -1,6 +1,6 @@
 [package]
 name = "cito-native"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2021"
 publish = false
 
@@ -17,10 +17,3 @@ ureq = { version = "2.12", features = ["json"] }
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true

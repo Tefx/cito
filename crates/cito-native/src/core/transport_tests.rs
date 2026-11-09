@@ -40,9 +40,9 @@ fn fixture(https: bool) -> (Fixture, HubClient) {
     let mut agent = ureq::agent();
     if https {
         let cert = rustls::pki_types::CertificateDer::from(
-            include_bytes!("../../../../tests/native-hub/fixtures/localhost-cert.der").to_vec(),
+            include_bytes!("../../tests/hub/fixtures/localhost-cert.der").to_vec(),
         );
-        let key = include_str!("../../../../tests/native-hub/fixtures/localhost-key.pem")
+        let key = include_str!("../../tests/hub/fixtures/localhost-key.pem")
             .lines()
             .filter(|line| !line.starts_with("---"))
             .collect::<String>();

@@ -53,6 +53,14 @@ pub fn resolve_stable_package_root(raw: &str) -> String {
 
 pub fn resolve_package_root() -> PathBuf {
     if let Ok(exe) = env::current_exe() {
+        // Cargo executables live under a profile directory, not the package bin/.
+        // OUT_DIR also covers an explicitly configured Cargo target directory.
+        let checkout = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        if let Some(profile) = Path::new(env!("OUT_DIR")).ancestors().nth(3) {
+            if exe.starts_with(profile) && checkout.join("Cargo.toml").is_file() {
+                return checkout;
+            }
+        }
         if let Some(exe_dir) = exe.parent() {
             let parent = exe_dir.parent().unwrap_or(exe_dir);
             let raw = parent.to_string_lossy().to_string();
@@ -525,6 +533,15 @@ pub fn build_mac_app_bundle_native(
     state_dir: &Path,
     plugins: &LoadedPlugins,
 ) -> Result<(PathBuf, u64), String> {
+    build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
+}
+
+fn build_mac_app_bundle_from_root(
+    dest_dir: Option<&str>,
+    state_dir: &Path,
+    plugins: &LoadedPlugins,
+    pkg_root: &Path,
+) -> Result<(PathBuf, u64), String> {
     let home = system_home_dir();
     let base_dest = match dest_dir {
         Some(d) => expand_home_dir(d, "destDir", Some(&home))?,
@@ -582,7 +599,6 @@ pub fn build_mac_app_bundle_native(
     fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
     let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));
 
-    let pkg_root = resolve_package_root();
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let helper_native = helpers_dir.join("cito-native");
     fs::copy(&exe, &helper_native).map_err(|e| e.to_string())?;
@@ -1396,7 +1412,7 @@ mod tests {
         let ui = root.join("bin/cito-ui");
         fs::write(&ui, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&ui, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = build_mac_app_bundle_native(None, &root, &plugins);
+        let result = build_mac_app_bundle_from_root(None, &root, &plugins, &root);
         let copied_native = root
             .join("Applications/Cito.app/Contents/Helpers/cito-native")
             .is_file();
@@ -1677,6 +1693,21 @@ mod tests {
 
     #[test]
     fn uninstall_uses_configured_port_unlistens_and_waits_before_removal() {
+        // Keep process-global environment immutable while other unit tests run.
+        if env::var_os("CITO_UNINSTALL_TEST_WORKER").is_none() {
+            let output = Command::new(env::current_exe().unwrap())
+                .args(["setup::implementation::tests::uninstall_uses_configured_port_unlistens_and_waits_before_removal", "--exact", "--nocapture"])
+                .env("CITO_UNINSTALL_TEST_WORKER", "1")
+                .env_remove("CITO_DAEMON_PORT")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
         use std::io::{Read, Write};
         let (root, plugins) = fixture();
         let state = root.join("installed");
