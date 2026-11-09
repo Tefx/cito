@@ -7333,7 +7333,7 @@ phases:
   - id: v24.gate
     name: V24 Stage 8 (v0.20.0) Independent Terminal Acceptance, L1–L17 Lifecycle
       Verification & Live Distribution Gate
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v24` (`v0.20.0`) acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session.\n- **Boundary:**\
@@ -7370,3 +7370,5 @@ phases:
     depends_on:
     - v24.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-09T18:09:26.485585Z'
