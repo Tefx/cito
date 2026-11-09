@@ -665,6 +665,8 @@ fn unlisten_aborts_child_and_preserves_unlistened_passive_reason() -> Result<(),
 #[test]
 fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), String> {
     let f = Fixture::new()?;
+    // Keep cold system-interpreter initialization outside the one-second expiry budget.
+    plugin_request(&f.plugin(DELIVER), &json!({"state_dir": f.dir}), None, None)?;
     f.seed("early")?;
     f.seed("late")?;
     f.state.db.execute(
@@ -672,7 +674,13 @@ fn batch_expiry_aborts_owned_child_and_expires_every_member() -> Result<(), Stri
         &[json!(now_ms() + 1000)],
     )?;
     let worker = f.worker(f.plugin(WAIT));
-    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+    wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3)).map_err(|e| {
+        format!(
+            "Waiting for expiring batch child to start: {e}; worker_finished={}; rows={:?}",
+            worker.is_finished(),
+            f.rows()
+        )
+    })?;
     wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
     assert!(worker.join()?.is_err());
     child_gone(&f)?;
