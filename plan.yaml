@@ -7409,7 +7409,7 @@ phases:
   name: 'V25 Stage 9 (v0.20.1): Theory-Grounded UI/UX Redesign, Two-Stratum Human
     Channel Architecture (Hub Gateway vs. Personal Human Node), Configured-Only Session
     Discovery, Live Pi Process Discovery & Visual E2E Verification (U1–U11)'
-  status: in_progress
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, test_inspect reports truncated_labels == [] across all surfaces/tabs/forms,
     grep -rnE -i "\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b"
@@ -7683,7 +7683,7 @@ phases:
   - id: v25.gate
     name: V25 Stage 9 (v0.20.1) Independent Terminal Acceptance, U1–U11 Visual/UX
       Verification & Live Distribution Gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v25` (`v0.20.1`) acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session.\n- **Boundary:**\
@@ -7728,3 +7728,36 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-09T21:35:14.779332Z'
+    done_at: '2026-11-09T21:43:47.909184+00:00'
+    evidence: "Artifact:\n- Commit: fbfd894959064e878762172e38ffa9163e7235e7 (code\
+      \ commit `5ad5cc3b8200d0648353132d251222bd218f9402`, annotated tag `v0.20.1`\
+      \ at release build commit `1fcf264a7ea45554d7edf6316edd5a9bd60dffca`)\n- Independent\
+      \ Gate Reviewer: `gate-reviewer` (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T21-36-05-900Z_01a1c23d-650b-758c-b79d-c91d38f02d0d.jsonl`)\n\
+      - Validator Result: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v25-gate/binding-delta.json /tmp/cito-v25-gate/report-delta.json`\
+      \ -> `{\"valid\":true,\"binding_checked\":true,\"kind\":\"gate\",\"schema_version\"\
+      :\"gate.report.v2\",\"evidence_disposition\":\"POSITIVE_GATE_EVIDENCE\",\"errors\"\
+      :[]}`\n- Requirements Proven (`4/4 PROVEN`, `0` findings):\n  1. `REQ-V25-1-CARGO-WORKSPACE-AND-U1-U11-PASS`:\
+      \ `PROVEN` (`cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` passed 100% locally and on `macos-15` in GitHub\
+      \ Actions run `42701878316` with 223 tests passed, 0 failed, 0 compiler/linker\
+      \ warnings, `Syntax OK`, `truncated_labels == []`, and clean host state).\n\
+      \  2. `REQ-V25-2-ZERO-HARDCODING-AND-LANGUAGE-POLICY`: `PROVEN` (zero hardcoded\
+      \ agent/channel identifiers in `crates/cito-native/src/core/` and `src/macos/`,\
+      \ English-only UI/docs/comments, zero company-specific names).\n  3. `REQ-V25-3-MULTIMODAL-VISUAL-AND-HYGIENE-CONVERGENCE`:\
+      \ `PROVEN` (all 12 rendered 2x Retina PNG snapshots in `/tmp/cito-v25-snapshots/`\
+      \ visually inspected and verified clean by `uiux-auditor` and `gate-reviewer`;\
+      \ Round 3 `uiux-auditor`, `structural-auditor`, and `pathway-auditor` converged\
+      \ with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`).\n  4. `REQ-V25-4-LIVE-DISTRIBUTION-V0-20-1`:\
+      \ `PROVEN` (`https://tefx.github.io/cito/` HTTP 200 via run `42703588283`; GitHub\
+      \ Release `v0.20.1` via `macos-15` run `42701878316` with `Cito-macos-arm64.zip`\
+      \ SHA-256 `ee0c82bebda11ce621cbc7b81fcfeb6e5e5d4c01799a10e33a0b4107511cfc47`\
+      \ synchronized in `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` `Formula/cito.rb`\
+      \ & `Casks/cito.rb` at commit `edc4aa09cfee23701c1cb134429e4e2b5b0f7e72`).\n\
+      \nVerification:\n- Run: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v25-gate/binding-delta.json /tmp/cito-v25-gate/report-delta.json`\
+      \ -> `valid: true, binding_checked: true, evidence_disposition: POSITIVE_GATE_EVIDENCE`\n\
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` -> 223 passed, 0 failed, 0 warnings, `Syntax OK`\n\
+      \nSpec link:\n- docs/DESIGN.md (§11, V25 Stage 9 v0.20.1 U1–U11)\n- docs/ROADMAP.md\n\
+      - .github/workflows/release.yml, packaging/homebrew/cito.rb"
