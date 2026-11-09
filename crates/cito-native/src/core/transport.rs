@@ -196,7 +196,6 @@ impl HubClient {
         Ok(response.get("result").cloned().unwrap_or(response))
     }
     fn rpc_http(&self, op: &str, params: &Value) -> Result<Value, String> {
-        use std::net::ToSocketAddrs;
         let url = url::Url::parse(&format!(
             "{}/v1/rpc",
             string(&self.config, "url").trim_end_matches('/')
@@ -204,9 +203,10 @@ impl HubClient {
         .map_err(|e| e.to_string())?;
         let host = url.host_str().ok_or("Invalid Hub URL")?;
         let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
-        let address = (host, port)
-            .to_socket_addrs()
+        let address = url
+            .socket_addrs(|| None)
             .map_err(|e| e.to_string())?
+            .into_iter()
             .next()
             .ok_or("Hub address unavailable")?;
         let result = (|| -> Result<Value, String> {

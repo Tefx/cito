@@ -1417,7 +1417,11 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
-        let port = host["port"].as_u64().unwrap_or(4291);
+        let port = self
+            .host_server
+            .as_ref()
+            .map(|server| u64::from(server.port()))
+            .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
         let token = string(host, "token");
         let advertised = advertised_hub_host(string(host, "bind"));
         let authority = if advertised.contains(':') {

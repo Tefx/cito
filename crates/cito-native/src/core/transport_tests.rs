@@ -19,13 +19,13 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.dir).unwrap();
     }
 }
-fn fixture(https: bool) -> (Fixture, HubClient) {
+fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
     let dir =
         std::env::temp_dir().join(format!("cito-backlog-{}", crate::plugins::random_uuid_v4()));
     let engine = Arc::new(HubEngine::open(&dir).unwrap());
     let server = engine
         .start_server(
-            "127.0.0.1",
+            bind,
             0,
             super::super::auth::HubAuth::new("none", None, None, None).unwrap(),
         )
@@ -130,9 +130,21 @@ fn fixture(https: bool) -> (Fixture, HubClient) {
 }
 
 #[test]
+fn ipv6_loopback_hub_rpc_round_trip() {
+    let (f, client) = fixture("::1", false);
+    assert!(f.server.address.is_ipv6());
+    let value = json!({"scope":"workspace","title":"IPv6 loopback"});
+    let saved = client.kv_save("ipv6-round-trip", &value, None).unwrap();
+    assert_eq!(
+        client.kv_get("ipv6-round-trip").unwrap(),
+        Some((value, saved["revision"].as_u64().unwrap()))
+    );
+}
+
+#[test]
 fn large_backlog_pages_round_trip_over_http_and_https() {
     for https in [false, true] {
-        let (f, client) = fixture(https);
+        let (f, client) = fixture("127.0.0.1", https);
         let target = "c_0123456789abcdef";
         let registration = json!({"listener_id":target,"principal_id":"none#alice","owner_user":"alice","scope":"workspace","harness":"fixture","session_id":"s","binding_generation":1,"state":"ACTIVE"});
         f.engine

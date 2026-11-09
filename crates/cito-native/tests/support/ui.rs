@@ -387,9 +387,8 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     let _lock = serial();
     let host = Fixture::new(json!({"host_hub":{"token":"lan-test-token"}}));
     host.daemon(&[]);
-    let port = port();
     assert_eq!(
-        host.action(json!({"op":"set_host_hub","enabled":true,"port":port,"bind":"127.0.0.1"}))
+        host.action(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1"}))
             .0,
         200
     );
@@ -397,8 +396,13 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     assert_eq!(status, 200);
     let hosted = &snapshot["settings"]["host_hub"];
     assert_eq!(hosted["running"], true);
+    let port = u16::try_from(hosted["port"].as_u64().unwrap()).unwrap();
+    assert_ne!(port, 0);
+    let configured: Value =
+        serde_json::from_str(&fs::read_to_string(&host.config).unwrap()).unwrap();
+    assert_eq!(configured["host_hub"]["port"], 0);
     let endpoint = hosted["endpoint_url"].as_str().unwrap();
-    assert!(!endpoint.contains("0.0.0.0"));
+    assert_eq!(endpoint, format!("http://127.0.0.1:{port}"));
     assert_eq!(
         hosted["invite_command"],
         format!(
