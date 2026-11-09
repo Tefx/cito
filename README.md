@@ -68,6 +68,8 @@ Use **`Remove All Integrations…`** in the footer for a separate uninstall conf
 
 Hosted Hub settings validate fields before saving: `enabled` must be a boolean, `port` an integer from `0` to `65535` (`0` selects an available port), `bind` an IPv4 or IPv6 address, `token` a string, and `auth_mode` either `none` or `token`. Invalid fields or unavailable listening addresses leave both the saved configuration and the running hosted Hub unchanged. Listener replacements retain the current listener until the new socket binds; changes on the same socket release it first and restore the previous listener and authentication if binding fails.
 
+Hub saves and pasted invites validate the candidate configuration before replacing `config.json`. An optional Hub `user` must be `null` or a string of 1–64 ASCII letters, numbers, dots, underscores, or hyphens. Token authentication requires a non-empty string `token`; OIDC requires a valid HTTPS `issuer` (loopback HTTP is allowed for local testing) and a non-empty `clientId` or `client_id`. Explicit OIDC `scopes` must be valid scope tokens and include `openid`. Invalid input leaves the saved configuration unchanged so UI actions and MCP calls remain usable.
+
 You can also inspect status or join hubs from the CLI when needed:
 
 ```sh

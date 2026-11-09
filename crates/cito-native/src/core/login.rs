@@ -121,14 +121,14 @@ impl Drop for BrowserGuard {
     }
 }
 
-struct Settings<'a> {
+pub(super) struct Settings<'a> {
     issuer: &'a str,
     client: &'a str,
     port: u16,
     scopes: Option<Vec<&'a str>>,
 }
 impl<'a> Settings<'a> {
-    fn new(config: &'a Value) -> Result<Self, String> {
+    pub(super) fn new(config: &'a Value) -> Result<Self, String> {
         let issuer = config
             .get("issuer")
             .or_else(|| config.get("oidcIssuer"))
@@ -136,6 +136,8 @@ impl<'a> Settings<'a> {
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: issuer required")?
             .trim_end_matches('/');
+        crate::plugins::validate_https_issuer(issuer)
+            .map_err(|error| format!("INVALID_INPUT: {error}"))?;
         let client = config
             .get("clientId")
             .or_else(|| config.get("client_id"))

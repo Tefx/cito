@@ -85,12 +85,7 @@ impl NativeConfig {
             .and_then(|h| h.get("user"))
             .and_then(Value::as_str)
             .unwrap_or(&global_user);
-        if user.is_empty()
-            || user.len() > 64
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        {
+        if !validate_user(user) {
             return Err(format!("Invalid user for hub {hub}"));
         }
         Ok(user.to_string())
@@ -566,12 +561,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
     }
     let mut user = match env::var("CITO_USER") {
         Ok(u) => {
-            if u.is_empty()
-                || u.len() > 64
-                || !u
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-            {
+            if !validate_user(&u) {
                 return Err(
                     "CITO_USER must contain 1-64 letters, numbers, dots, underscores or hyphens"
                         .to_string(),
@@ -684,12 +674,7 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
         }
         if env::var("CITO_USER").is_err() {
             if let Some(config_user) = map.get("user").and_then(Value::as_str) {
-                if config_user.is_empty()
-                    || config_user.len() > 64
-                    || !config_user
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-                {
+                if !validate_user(config_user) {
                     return Err("Invalid user in config.json".to_string());
                 }
                 user = config_user.to_string();

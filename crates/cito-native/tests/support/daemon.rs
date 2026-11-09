@@ -1346,6 +1346,105 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     assert_eq!(config["hubs"]["other"]["url"], "local://");
 }
 #[test]
+fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.daemon(&[]);
+    let before = fs::read(&f.config).unwrap();
+    let invalid = [
+        json!({"user":"alice smith"}),
+        json!({"user":""}),
+        json!({"user":"a".repeat(65)}),
+        json!({"user":"alice@work"}),
+        json!({"user":42}),
+        json!({"user":false}),
+        json!({"user":[]}),
+        json!({"user":{}}),
+        json!({"authMode":"token"}),
+        json!({"authMode":"token","token":"   "}),
+        json!({"authMode":"token","token":42}),
+        json!({"authMode":"oidc","client_id":"client"}),
+        json!({"authMode":"oidc","issuer":"http://id.example.com","client_id":"client"}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com?query=1","client_id":"client"}),
+        json!({"authMode":"oidc","issuer":42,"client_id":"client"}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com"}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","client_id":"   "}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":42}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","scopes":"openid"}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","scopes":["profile"]}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","scopes":["openid","invalid scope"]}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","redirectPort":65536}),
+    ];
+    for op in ["setup_save_hub", "save_hub"] {
+        for fields in &invalid {
+            let mut cfg = json!({"url":"local://","auth_mode":"none","set_default":true});
+            cfg.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let action = if op == "setup_save_hub" {
+                cfg["op"] = json!(op);
+                cfg["name"] = json!("work");
+                cfg
+            } else {
+                json!({"op":op,"name":"work","config":cfg})
+            };
+            let (status, response) = f.action(action.clone());
+            assert_eq!(status, 400, "{action}: {response}");
+            assert!(
+                response["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("INVALID_INPUT:"),
+                "{response}"
+            );
+            assert_eq!(fs::read(&f.config).unwrap(), before, "{action}");
+            let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+            assert_eq!(status, 200, "{snapshot}");
+            assert_eq!(snapshot["hub"], "local");
+            let inbox = f.tool("cito_inbox", json!({}), human());
+            assert_eq!(inbox["signals"], json!([]));
+            assert_eq!(inbox["acknowledged_count"], 0);
+        }
+    }
+    for user in [
+        Value::Null,
+        json!("a"),
+        json!("Alice.Smith_1-"),
+        json!("a".repeat(64)),
+    ] {
+        let (status, response) = f.action(
+            json!({"op":"save_hub","name":"work","url":"local://","auth_mode":"none","user":user}),
+        );
+        assert_eq!(status, 200, "{response}");
+        let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        assert_eq!(config["hubs"]["work"]["user"], user);
+    }
+    for fields in [
+        json!({"authMode":"token","token":"test-token"}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","client_id":"client","scopes":["openid","profile"]}),
+        json!({"authMode":"oidc","issuer":"https://id.example.com","clientId":"client","redirectPort":0}),
+        json!({"authMode":"oidc","oidcIssuer":"https://id.example.com","oidcClientId":"client","oidcScopes":["openid"]}),
+    ] {
+        let mut cfg = fields.clone();
+        cfg["url"] = json!("local://");
+        cfg["enabled"] = json!(false);
+        let (status, response) =
+            f.action(json!({"op":"setup_save_hub","name":"work","config":cfg}));
+        assert_eq!(status, 200, "{response}");
+        let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+        for (key, value) in fields.as_object().unwrap() {
+            assert_eq!(&config["hubs"]["work"][key], value);
+        }
+    }
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":false}))
+            .0,
+        200
+    );
+    let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    assert_eq!(config["desktopBannerEnabled"], false);
+}
+#[test]
 fn stdio_signal_handlers_exit_cleanly_and_daemon_health_owns_sandbox() {
     let _lock = serial();
     for signal in [libc::SIGINT, libc::SIGTERM] {

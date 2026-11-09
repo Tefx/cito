@@ -109,6 +109,14 @@ pub fn parse_config_object(raw: &str) -> Result<Map<String, Value>, String> {
     }
 }
 
+pub fn validate_user(user: &str) -> bool {
+    !user.is_empty()
+        && user.len() <= 64
+        && user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 pub fn canonical_auth_mode(raw: &str) -> Result<String, String> {
     let mode = raw.trim().to_ascii_lowercase();
     if matches!(mode.as_str(), "none" | "token" | "oidc") {

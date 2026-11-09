@@ -285,12 +285,7 @@ impl DaemonService {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| raw["user"].as_str().map(str::to_string))
             .unwrap_or_else(|| self.config.user.clone());
-        if user.is_empty()
-            || user.len() > 64
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        {
+        if !crate::plugins::validate_user(&user) {
             return Err("INVALID_INPUT: Invalid user".into());
         }
         Ok(user.to_ascii_lowercase())
@@ -1566,15 +1561,21 @@ impl DaemonService {
                 return Err("INVALID_INPUT: Config must be an object".into());
             }
             action(&mut raw)?;
+            let rendered = serde_json::to_string_pretty(&raw).map_err(|e| e.to_string())?;
+            let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&rendered))
+                .map_err(|error| format!("INVALID_INPUT: {error}"))?;
+            for cfg in hubs.values().chain(std::iter::once(&raw)) {
+                if let Some(user) = cfg.get("user").filter(|user| !user.is_null()) {
+                    if !user.as_str().is_some_and(crate::plugins::validate_user) {
+                        return Err("INVALID_INPUT: User must contain 1-64 ASCII letters, numbers, dots, underscores or hyphens".into());
+                    }
+                }
+            }
             let tmp = self
                 .config
                 .config_path
                 .with_extension(format!("json.{}.tmp", std::process::id()));
-            fs::write(
-                &tmp,
-                serde_json::to_vec_pretty(&raw).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
+            fs::write(&tmp, rendered).map_err(|e| e.to_string())?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
                 .map_err(|e| e.to_string())?;
             fs::rename(tmp, &self.config.config_path).map_err(|e| e.to_string())?;
@@ -1605,12 +1606,7 @@ impl DaemonService {
             "get_snapshot" => return self.snapshot(),
             "set_user" => {
                 let user = string(action, "user");
-                if user.is_empty()
-                    || user.len() > 64
-                    || !user
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-                {
+                if !crate::plugins::validate_user(user) {
                     return Err("INVALID_INPUT: Invalid user".into());
                 }
                 self.mutate_config(|v| {
@@ -1661,7 +1657,18 @@ impl DaemonService {
                     return Err("INVALID_INPUT: Invalid authMode".into());
                 }
                 cfg["authMode"] = json!(auth);
-                crate::plugins::validate_nats_url(string(&cfg, "url"))?;
+                crate::plugins::validate_nats_url(string(&cfg, "url"))
+                    .map_err(|error| format!("INVALID_INPUT: {error}"))?;
+                if auth == "token"
+                    && cfg["token"]
+                        .as_str()
+                        .is_none_or(|token| token.trim().is_empty())
+                {
+                    return Err("INVALID_INPUT: Hub token is required in token mode".into());
+                }
+                if auth == "oidc" {
+                    super::login::Settings::new(&cfg)?;
+                }
                 let set_default = cfg["set_default"].as_bool().unwrap_or(false);
                 if let Some(m) = cfg.as_object_mut() {
                     for k in ["op", "name", "hub", "auth", "auth_mode", "set_default"] {
@@ -3122,7 +3129,28 @@ mod tests {
                         raw
                     );
                 }
-                fs::write(&config.config_path, r#"{"other":7}"#).map_err(|e| e.to_string())?;
+                let before = r#"{"other":7}"#;
+                fs::write(&config.config_path, before).map_err(|e| e.to_string())?;
+                for candidate in [
+                    json!({"hubs":[]}),
+                    json!({"hubs":{"work":[]}}),
+                    json!({"hubs":{"work":{"authMode":"invalid"}}}),
+                    json!({"hubs":{"work":{"enabled":false,"user":"alice smith"}}}),
+                    json!({"user":"alice smith"}),
+                    json!({"user":42}),
+                ] {
+                    let error = service
+                        .mutate_config(|v| {
+                            *v = candidate;
+                            Ok(())
+                        })
+                        .unwrap_err();
+                    assert!(error.starts_with("INVALID_INPUT:"), "{error}");
+                    assert_eq!(
+                        fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
+                        before
+                    );
+                }
                 service.mutate_config(|v| {
                     v["user"] = json!("bob");
                     Ok(())
