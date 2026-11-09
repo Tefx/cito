@@ -76,28 +76,75 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
 
 #[test]
 fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
+    if std::env::var_os("CITO_TEST_STAGED_PLUGINS").is_some() {
+        // Re-enter under the fixture environment without changing process-global
+        // variables in the parent test runner.
+        let (config, plugins) = cito_native::plugins::load_native_config().unwrap();
+        let custom = plugins.find_by_id("custom-agent").unwrap();
+        let custom_dir = config.state_dir.join("plugins/custom-agent");
+        let cwd = fs::canonicalize(&custom_dir).unwrap();
+        assert!(!custom.is_builtin);
+        assert_eq!(custom.plugin_dir, custom_dir);
+        let response =
+            cito_native::plugins::plugin_request(custom, &json!({"op":"setup_inspect"})).unwrap();
+        assert_eq!(response["cwd"], json!(cwd));
+        assert_eq!(response["executable"], json!(custom_dir.join("./run.sh")));
+        assert_eq!(
+            cito_native::setup::inspect_plugin_setup(custom),
+            (true, true, vec![cwd.display().to_string()])
+        );
+        assert!(plugins.find_by_id("pi").unwrap().is_builtin);
+        return;
+    }
+
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
     let daemon = f.daemon(&[]);
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
     f.stop(daemon);
+    let custom = f.state.join("plugins/custom-agent");
+    fs::create_dir_all(&custom).unwrap();
+    fs::write(
+        custom.join("plugin.json"),
+        json!({"id":"custom-agent","kind":"agent","displayName":"Custom Agent","command":["./run.sh"]}).to_string(),
+    ).unwrap();
+    script(
+        &custom.join("run.sh"),
+        "#!/bin/sh\nread -r request\nprintf '{\"ok\":true,\"installed\":true,\"configured\":true,\"paths\":[\"%s\"],\"cwd\":\"%s\",\"executable\":\"%s\"}\\n' \"$(pwd -P)\" \"$(pwd -P)\" \"$0\"\n",
+    );
+    let check_plugins = |f: &mut Fixture| {
+        f.env.insert("CITO_TEST_STAGED_PLUGINS".into(), "1".into());
+        let (ok, out, err) = f.command(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            &[
+                "--exact",
+                "daemon::lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins",
+                "--nocapture",
+            ],
+            "",
+        );
+        f.env.remove("CITO_TEST_STAGED_PLUGINS");
+        assert!(ok, "{out}\n{err}");
+    };
     f.env.insert(
         "CITO_BUILTIN_PLUGINS_DIR".into(),
         f.state.join("plugins").display().to_string(),
     );
+    check_plugins(&mut f);
     let mut daemon = f.daemon(&[]);
-    let app = || {
+    let app = |f: &Fixture, id: &str| {
         let snapshot = f.action(json!({"op":"get_snapshot"})).1;
         let apps: Vec<_> = snapshot["settings"]["apps"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|p| p["id"] == "pi")
+            .filter(|p| p["id"] == id)
             .collect();
-        assert_eq!(apps.len(), 1, "built-in descriptor must remain unique");
+        assert_eq!(apps.len(), 1, "descriptor must remain unique: {id}");
         apps[0].clone()
     };
-    assert_eq!(app()["status"], "ready");
+    assert_eq!(app(&f, "pi")["status"], "ready");
+    assert_eq!(app(&f, "custom-agent")["status"], "ready");
     // Repairs must use the distribution even though the loaded descriptor is staged.
     for asset in [
         "cito-bridge.ts",
@@ -107,17 +154,21 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     ] {
         let staged = f.state.join("plugins/pi").join(asset);
         fs::remove_file(&staged).unwrap();
-        assert_eq!(app()["status"], "repair_needed", "{asset}");
+        assert_eq!(app(&f, "pi")["status"], "repair_needed", "{asset}");
         assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
         assert_eq!(
             fs::read(&staged).unwrap(),
             fs::read(root().join("plugins/pi").join(asset)).unwrap()
         );
-        assert_eq!(app()["status"], "ready", "{asset}");
+        assert_eq!(app(&f, "pi")["status"], "ready", "{asset}");
     }
     let alias = f.dir.join("staged-plugins");
     std::os::unix::fs::symlink(f.state.join("plugins"), &alias).unwrap();
     for builtin_root in [f.state.join("plugins"), alias] {
+        f.env.insert(
+            "CITO_BUILTIN_PLUGINS_DIR".into(),
+            builtin_root.display().to_string(),
+        );
         for missing_manifest in [true, false] {
             f.stop(daemon);
             let staged = f.state.join("plugins/pi");
@@ -127,8 +178,15 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
                 fs::remove_dir_all(&staged).unwrap();
             }
             // A new process must rediscover the descriptor, including through an alias.
-            daemon = f.daemon(&[("CITO_BUILTIN_PLUGINS_DIR", builtin_root.to_str().unwrap())]);
-            assert_eq!(app()["status"], "repair_needed");
+            check_plugins(&mut f);
+            daemon = f.daemon(&[]);
+            assert_eq!(app(&f, "pi")["status"], "repair_needed");
+            let custom_app = app(&f, "custom-agent");
+            assert_eq!(custom_app["status"], "ready");
+            assert_eq!(
+                custom_app["paths"],
+                json!([fs::canonicalize(&custom).unwrap()])
+            );
             assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
             for asset in ["plugin.json", "bin/cito-plugin-pi", "cito-bridge.ts"] {
                 assert_eq!(
@@ -136,8 +194,8 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
                     fs::read(root().join("plugins/pi").join(asset)).unwrap()
                 );
             }
-            assert_eq!(app()["status"], "ready");
-            assert_eq!(app()["configured"], true);
+            assert_eq!(app(&f, "pi")["status"], "ready");
+            assert_eq!(app(&f, "pi")["configured"], true);
         }
     }
 }

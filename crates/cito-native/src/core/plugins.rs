@@ -479,13 +479,14 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
 
     let staged_root = state_dir.join("plugins");
     let mut builtin_roots: Vec<_> = resolve_builtin_plugins_dir().into_iter().collect();
-    if builtin_roots.first().is_some_and(|root| {
+    let using_staged_root = builtin_roots.first().is_some_and(|root| {
         root == &staged_root
             || fs::canonicalize(root)
                 .ok()
                 .zip(fs::canonicalize(&staged_root).ok())
                 .is_some_and(|(builtin, staged)| builtin == staged)
-    }) {
+    });
+    if using_staged_root {
         // Installed shims point at staged files; recover deleted descriptors from
         // the distribution so a new process can still offer Repair.
         builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
@@ -499,6 +500,17 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
                 .collect();
             subdirs.sort();
             for sub in subdirs {
+                // The staged directory also hosts custom plugins. Only bundled
+                // IDs belong here; leave the rest for external discovery below.
+                if using_staged_root
+                    && !sub.file_name().and_then(|s| s.to_str()).is_some_and(|id| {
+                        super::setup::resolve_bundled_plugin_dir(id)
+                            .join("plugin.json")
+                            .is_file()
+                    })
+                {
+                    continue;
+                }
                 if let Ok(desc) = parse_manifest_dir(&sub, true) {
                     if builtin_ids.insert(desc.id.clone()) {
                         plugins.push(desc);
