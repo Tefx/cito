@@ -1431,6 +1431,40 @@ fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
     }
 }
 #[test]
+fn dual_default_hub_aliases_allow_cli_removal_and_restart() {
+    let _lock = serial();
+    let f = Fixture::new(json!({
+        "defaultHub":"work",
+        "default_hub":"work",
+        "hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}
+    }));
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &["setup", "--remove-hub", "work", "--no-login-item", "--json"],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    let saved: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    assert_eq!(saved["default_hub"], "local");
+    assert!(saved.get("defaultHub").is_none());
+    assert!(saved["hubs"].get("work").is_none());
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
+    assert!(ok, "{out}\n{err}");
+    let inspection: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(inspection["defaultHub"], "local");
+    assert_eq!(inspection["hubs"]["local"]["url"], "local://");
+    let daemon = f.daemon(&[]);
+    let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
+    assert_eq!(status, 200, "{snapshot}");
+    assert_eq!(snapshot["hub"], "local");
+    let (ok, out, err) = f.command(NATIVE, &["find", "--user", "absent", "--json"], "");
+    assert!(ok, "{out}\n{err}");
+    let found: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(found["ok"], true);
+    assert_eq!(found["listeners"], json!([]));
+    f.stop(daemon);
+}
+#[test]
 fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
     let _lock = serial();
     let f = Fixture::new(json!({"default_hub":"work","hubs":{"work":{"url":"local://"}}}));

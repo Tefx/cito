@@ -166,9 +166,10 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
         hm.remove("disabled");
         hm.insert("enabled".to_string(), json!(enabled));
     }
-    let default_hub = obj
-        .remove("defaultHub")
-        .or_else(|| obj.remove("default_hub"))
+    let camel = obj.remove("defaultHub");
+    let snake = obj.remove("default_hub");
+    let default_hub = camel
+        .or(snake)
         .and_then(|v| v.as_str().map(str::to_owned))
         .filter(|name| hubs.contains_key(name))
         .or_else(|| hubs.keys().next().cloned())
@@ -193,6 +194,21 @@ mod tests {
         assert!(hubs["cloud"].get("auth").is_none());
         assert_eq!(hubs["cloud"]["user"], "bob");
         assert_eq!(rest["other"], 7);
+    }
+    #[test]
+    fn dual_default_hub_aliases_are_removed_from_rest() {
+        for snake in ["work", "local"] {
+            let raw = json!({
+                "defaultHub":"work",
+                "default_hub":snake,
+                "hubs":{"local":{"url":"local://"},"work":{"url":"local://"}},
+                "other":7
+            })
+            .to_string();
+            let (default, _, rest) = try_normalize_existing_config(Some(&raw)).unwrap();
+            assert_eq!(default, "work", "{raw}");
+            assert_eq!(Value::Object(rest), json!({"other":7}));
+        }
     }
     #[test]
     fn disabled_hub_alias_is_folded_into_enabled() {
