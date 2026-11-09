@@ -6924,7 +6924,7 @@ phases:
   - id: v23.gate
     name: V23 Stage 7 (v0.19.0) Independent Terminal Acceptance, Pure Rust Workspace
       Verification & Live Distribution Gate
-    status: claimed
+    status: pending
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v23` and `v0.19.0` acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh `gate-reviewer` session (never resuming\
@@ -6960,7 +6960,50 @@ phases:
     - .github/workflows/release.yml
     - packaging/homebrew/cito.rb
     depends_on:
+    - v23.impl
     - v23.hygiene
+    - v23.repair_linker
     agent: gate-reviewer
-    claimed_by: gate-reviewer
-    claimed_at: '2026-11-09T07:42:25.577763Z'
+  - id: v23.repair_linker
+    name: 'V23 Gate Repair: Silence Informational codesign replacing existing signature
+      Stderr in bin/cito-linker & Refresh v0.19.0 Release'
+    status: pending
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** Close `V23-GATE-1` by filtering informational `replacing existing
+      signature` stderr from `/usr/bin/codesign --force --sign - "$tmp"` in `bin/cito-linker:41`
+      while preserving real `codesign` errors and non-zero exit codes, re-running
+      the `v0.19.0` release workflow on `macos-15` with zero `linker_messages` warnings,
+      and syncing the updated `Cito-macos-arm64.zip` SHA-256 to `packaging/homebrew/cito.rb`
+      and `Tefx/homebrew-tap`.
+
+      - **Boundary:** Owner `rust-senior`; modifies `bin/cito-linker` and `packaging/homebrew/cito.rb`
+      in `/Users/tefx/Projects/cito`, refreshes annotated tag/release `v0.19.0` on
+      `Tefx/cito`, and updates `Formula/cito.rb` on `Tefx/homebrew-tap`.
+
+      - **Admit:** Completed `v23.hygiene` and `v23.gate` finding `V23-GATE-1`; `cargo
+      test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`
+      exiting `0` locally with zero compiler or linker warnings; GitHub Release `v0.19.0`
+      workflow on `macos-15` completing with zero `linker_messages` warnings; and
+      matching `Cito-macos-arm64.zip` SHA-256 across GitHub Release `v0.19.0`, `packaging/homebrew/cito.rb`,
+      and `Tefx/homebrew-tap` `Formula/cito.rb` for `v23.gate` Delta re-review.
+
+      - **Recovery:** Revert or refine `bin/cito-linker` in place if real `codesign`
+      errors or exit codes are masked, and reconcile tag `v0.19.0` and Homebrew Formula
+      SHA-256 before completing.'
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - bin/cito-linker
+    - packaging/homebrew/cito.rb
+    - .github/workflows/release.yml
+    depends_on:
+    - v23.hygiene
+    agent: rust-senior
