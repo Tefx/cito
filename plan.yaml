@@ -7249,7 +7249,7 @@ phases:
     name: 'Iterative Code-Hygiene Convergence on Stage 8 (v0.20.0) & Live Distribution
       Closure (GitHub Release v0.20.0 & Tefx/homebrew-tap Formula/Cask) [REQUIRES_SKILL:
       code-hygiene] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: pending
+    status: claimed
     description: '```yaml
 
       step_type: implementation
@@ -7298,6 +7298,8 @@ phases:
     depends_on:
     - v24.impl
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-09T15:57:33.557309Z'
   - id: v24.gate
     name: V24 Stage 8 (v0.20.0) Independent Terminal Acceptance, L1–L17 Lifecycle
       Verification & Live Distribution Gate
