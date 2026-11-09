@@ -877,7 +877,7 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     put(&e, "target", "none#bob", "workspace");
     send(&e, &human, "original");
     let events = e.subscribe(None).unwrap();
-    let request = json!({"to":"work:target","message":"Approved","in_reply_to":"work:original"});
+    let request = json!({"to":"work:target","message":"Approved","in_reply_to":"work:original","msg_id":"desktop-reply","host_id":"desktop","host_name":"Desktop"});
     e.inner.db.execute("CREATE TRIGGER fail_reply_ack BEFORE UPDATE OF acked_at_ms ON hub_signals WHEN OLD.signal_id='original' BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
     assert!(e
         .rpc("send_reply_from_human", &request, Some(&sender))
@@ -907,6 +907,9 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     assert_eq!(payload["message"], "Approved");
     assert_eq!(payload["in_reply_to"], "original");
     assert_eq!(payload["from"]["principal_id"], "none#alice");
+    assert_eq!(payload["from"]["host_id"], "desktop");
+    assert_eq!(payload["from"]["host_name"], "Desktop");
+    assert_eq!(published["seq"], reply["seq"]);
     assert_eq!(
         payload["from"]["listener_id"],
         format!("alice-{}", human.trim_start_matches("c_"))
@@ -916,15 +919,32 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     let ack: Value = serde_json::from_slice(&B64.decode(s(&event, "data_b64")).unwrap()).unwrap();
     assert_eq!(ack["node_id"], human);
     assert_eq!(ack["signal_ids"], json!(["original"]));
-    assert!(e
-        .inner
-        .db
-        .query(
-            "SELECT acked_at_ms FROM hub_signals WHERE signal_id='original'",
-            &[]
-        )
-        .unwrap()[0]["acked_at_ms"]
-        .is_number());
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT acked_at_ms FROM hub_signals WHERE signal_id='original'",
+                &[]
+            )
+            .unwrap()[0]["acked_at_ms"],
+        reply["acked_at_ms"]
+    );
+    assert!(reply["acked_at_ms"].is_number());
+    let duplicate = e
+        .rpc("send_reply_from_human", &request, Some(&sender))
+        .unwrap();
+    assert_eq!(duplicate["signal_id"], reply["signal_id"]);
+    assert_eq!(duplicate["seq"], reply["seq"]);
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT signal_id FROM hub_signals ORDER BY seq", &[])
+            .unwrap(),
+        vec![
+            json!({"signal_id":"original"}),
+            json!({"signal_id":reply["signal_id"]})
+        ]
+    );
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
 }

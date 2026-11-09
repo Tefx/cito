@@ -1117,49 +1117,41 @@ impl DaemonService {
             let id=format!("sig_{}",random_uuid_v4().replace('-',""));c.execute("INSERT INTO local_sent_idempotency(hub,dedup_id,request_hash,signal_id,to_listener_id,status,expires_at_iso,expires_at_ms) VALUES(?,?,?,?,?,'PENDING_PUBLISH',?,?)",&[json!(hub),json!(dedup),json!(request_hash),json!(id),json!(canonical),json!(iso(now+1_800_000)),json!(now+1_800_000)])?;
             c.query("SELECT * FROM local_sent_idempotency WHERE hub=? AND dedup_id=?",&[json!(hub),json!(dedup)])?.into_iter().next().ok_or("Sent reservation missing".into())
         })?;
-        let signal_id = string(&reservation, "signal_id");
+        let mut signal_id = string(&reservation, "signal_id").to_owned();
         let mut seq = reservation["seq"].as_u64().unwrap_or(0);
         if reservation["status"] == "PENDING_PUBLISH" {
-            let local_sender = match from_id {
-                Some(ref id) => self.state.listener(hub, id)?,
-                None => None,
-            };
-            let signal = json!({"signal_id":signal_id,"to":canonical,"target_generation":target["binding_generation"],"sender_endpoint_key":endpoint,"from":{"principal_id":slot.identity["principal_id"],"user":slot.identity["owner_user"],"host_id":self.host_id,"host_name":local_host_name(),"harness":caller.as_ref().map(|c|c["harness"].clone()),"listener_id":local_sender.as_ref().map(|s|s["public_id"].clone()),"title":caller.as_ref().map(|c|string(c,"title")).unwrap_or(""),"about":local_sender.as_ref().map(|s|s["about"].clone())},"message":message,"in_reply_to":reply_to});
-            let published=slot.rpc("js_publish",&json!({"subject":format!("cito.signal.{canonical}"),"data_b64":STANDARD.encode(serde_json::to_vec(&signal).map_err(|e|e.to_string())?),"opts":{"msgID":dedup}}))?;
-            seq = published["seq"].as_u64().unwrap_or(0);
-            self.state.db.execute("UPDATE local_sent_idempotency SET seq=?,status='wake_accepted' WHERE hub=? AND dedup_id=?",&[json!(seq),json!(hub),json!(dedup)])?;
-        }
-        if caller.as_ref().is_some_and(|c| c["harness"] == "human") {
-            if let Some(source) = reply_to.as_str() {
-                let node = self
-                    .state
-                    .db
-                    .query(
-                        "SELECT listener_id FROM local_signals WHERE hub=? AND signal_id=?",
-                        &[json!(hub), json!(source)],
-                    )?
-                    .into_iter()
-                    .next()
-                    .map(|row| string(&row, "listener_id").to_owned());
-                let node = match node {
-                    Some(node) => node,
-                    None => {
-                        super::registration::local_node_id(&self.state, slot, "human", "default")?
-                    }
+            let human = caller.as_ref().is_some_and(|c| c["harness"] == "human");
+            let published = if human {
+                // The Hub owns reply publication and source acknowledgment in one
+                // transaction. Human sends without a source use the same publication path.
+                slot.rpc("send_reply_from_human", &json!({"to":canonical,"message":message,"in_reply_to":reply_to,"reply_signal_id":signal_id,"msg_id":dedup,"host_id":self.host_id,"host_name":local_host_name()}))?
+            } else {
+                let local_sender = match from_id.as_deref() {
+                    Some(id) => self.state.listener(hub, id)?,
+                    None => None,
                 };
-                // Publish first: rejected replies must leave the source unread. The
-                // durable acknowledgment queue retries Hub/channel fan-out after outages.
-                self.state.acknowledge(
-                    hub,
-                    &node,
-                    &[json!(source)],
-                    &format!("{}:human", self.host_id),
-                )?;
-                self.flush_acks();
+                let signal = json!({"signal_id":signal_id,"to":canonical,"target_generation":target["binding_generation"],"sender_endpoint_key":endpoint,"from":{"principal_id":slot.identity["principal_id"],"user":slot.identity["owner_user"],"host_id":self.host_id,"host_name":local_host_name(),"harness":caller.as_ref().map(|c|c["harness"].clone()),"listener_id":local_sender.as_ref().map(|s|s["public_id"].clone()),"title":caller.as_ref().map(|c|string(c,"title")).unwrap_or(""),"about":local_sender.as_ref().map(|s|s["about"].clone())},"message":message,"in_reply_to":reply_to});
+                slot.rpc("js_publish",&json!({"subject":format!("cito.signal.{canonical}"),"data_b64":STANDARD.encode(serde_json::to_vec(&signal).map_err(|e|e.to_string())?),"opts":{"msgID":dedup}}))?
+            };
+            seq = published["seq"].as_u64().unwrap_or(0);
+            if human {
+                signal_id = published["signal_id"]
+                    .as_str()
+                    .ok_or("Published reply ID missing")?
+                    .to_owned();
             }
+            // Commit local read state with the sent reservation. If this fails after
+            // the Hub commits, retry the RPC with the same key and committed signal ID.
+            self.state.db.transaction(|c| {
+                if human && reply_to.is_string() {
+                    c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?", &[published["acked_at_ms"].clone(),json!(hub),json!(from_id),reply_to.clone()])?;
+                }
+                c.execute("UPDATE local_sent_idempotency SET signal_id=?,seq=?,status='wake_accepted' WHERE hub=? AND dedup_id=?",&[json!(signal_id),json!(seq),json!(hub),json!(dedup)])?;
+                Ok(())
+            })?;
         }
         Ok(
-            json!({"ok":true,"signal_id":self.scoped(hub,signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"]}),
+            json!({"ok":true,"signal_id":self.scoped(hub,&signal_id),"seq":seq,"to":self.scoped(hub,string(target,"public_id")),"status":"wake_accepted","held_reason":null,"expires_at":reservation["expires_at_iso"]}),
         )
     }
     fn inbox(&self, hub: &str, args: &Value, meta: &Value) -> Result<Value, String> {
@@ -1854,7 +1846,7 @@ impl DaemonService {
                 });
                 return result.map(|result| {
                     if op == "send_reply_from_human" {
-                        // Keep the reply action's response shape while sharing send/ack semantics.
+                        // Keep the reply action's response shape while sharing the atomic Human RPC.
                         let unscoped = |key| string(&result, key).rsplit(':').next().unwrap_or("");
                         json!({"ok":true,"signal_id":unscoped("signal_id"),"target_display":unscoped("to"),"error":null})
                     } else {

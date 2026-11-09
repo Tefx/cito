@@ -228,7 +228,7 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
 }
 
 #[test]
-fn human_desktop_replies_acknowledge_local_hub_and_channel_only_after_publish() {
+fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_local_state() {
     let _lock = serial();
     let f = Fixture::new(json!({"hubs":{"work":{"url":"local://"}},"defaultHub":"work"}));
     let meta = f.provider("delivered_unconfirmed");
@@ -376,43 +376,101 @@ fn human_desktop_replies_acknowledge_local_hub_and_channel_only_after_publish() 
 
     let retried = source();
     hub.execute("CREATE TRIGGER reject_ack BEFORE UPDATE OF acked_at_ms ON hub_signals BEGIN SELECT RAISE(ABORT,'injected ack failure'); END", &[]).unwrap();
+    let before = hub
+        .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+        .unwrap();
+    for op in ["send_signal", "send_reply_from_human", "cito_send"] {
+        let args = json!({"to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":format!("retry-{op}")});
+        if op == "cito_send" {
+            let result = f.tool_result(op, args, human());
+            assert_eq!(result["isError"], true);
+            assert!(result.to_string().contains("injected ack failure"));
+        } else {
+            let mut action = args;
+            action["op"] = json!(op);
+            let count = ui_results().len();
+            let (status, result) = f.action(action);
+            assert_eq!(status, 400, "{result}");
+            assert!(result.to_string().contains("injected ack failure"));
+            wait(|| ui_results().len() == count + 1);
+            assert_eq!(ui_results().last().unwrap()["ok"], false);
+        }
+        assert_unread(&retried);
+        assert_eq!(
+            hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+                .unwrap(),
+            before
+        );
+        assert!(f
+            .rows(&format!(
+                "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
+            ))
+            .is_empty());
+    }
+    hub.execute("DROP TRIGGER reject_ack", &[]).unwrap();
+    let args = json!({"to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":"retry-send_reply_from_human","op":"send_reply_from_human"});
     let count = ui_results().len();
-    assert_eq!(f.action(json!({"op":"send_signal","to":target["listener_id"],"message":"Retry acknowledgment","in_reply_to":format!("work:{retried}")})).0, 200);
+    let (status, reply) = f.action(args.clone());
+    assert_eq!(status, 200, "{reply}");
     wait(|| ui_results().len() == count + 1);
     assert_eq!(ui_results().last().unwrap()["ok"], true);
+    assert_eq!(f.action(args).1["signal_id"], reply["signal_id"]);
+    wait(|| ui_results().len() == count + 2);
+    assert_eq!(ui_results().last().unwrap()["ok"], true);
+    assert_eq!(
+        hub.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
+            .unwrap()[0]["n"]
+            .as_u64()
+            .unwrap(),
+        before[0]["n"].as_u64().unwrap() + 1
+    );
+    wait(|| {
+        channel_frames()
+            .iter()
+            .any(|frame| frame["op"] == "on_acked" && frame["signal_ids"] == json!([retried]))
+    });
     assert!(f.rows(&format!(
         "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='{retried}'"
     ))[0]["acknowledged_at_ms"]
         .is_number());
-    assert!(!f
+    assert!(f
         .rows(&format!(
             "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
         ))
         .is_empty());
+
+    // A local commit failure leaves the reservation pending after the Hub commits.
+    // Retrying must reuse the Hub's signal ID and reconcile the local source.
+    let recovered = source();
+    let local = f.db("state.sqlite");
+    local.execute("CREATE TRIGGER reject_sent_commit BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'injected local commit failure'); END", &[]).unwrap();
+    let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
+    let result = f.tool_result("cito_send", args.clone(), human());
+    assert_eq!(result["isError"], true);
+    assert!(result.to_string().contains("injected local commit failure"));
+    let committed = hub.query("SELECT seq,signal_id FROM hub_signals WHERE json_extract(CAST(data AS TEXT),'$.in_reply_to')=?", &[json!(recovered)]).unwrap();
+    assert_eq!(committed.len(), 1);
     assert!(hub
         .query(
             "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
-            &[json!(retried)]
+            &[json!(recovered)]
         )
         .unwrap()[0]["acked_at_ms"]
-        .is_null());
-    hub.execute("DROP TRIGGER reject_ack", &[]).unwrap();
-    wait(|| {
-        f.rows(&format!(
-            "SELECT signal_id FROM pending_hub_acks WHERE signal_id='{retried}'"
-        ))
-        .is_empty()
-            && hub
-                .query(
-                    "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
-                    &[json!(retried)],
-                )
-                .unwrap()[0]["acked_at_ms"]
-                .is_number()
-            && channel_frames()
-                .iter()
-                .any(|frame| frame["op"] == "on_acked" && frame["signal_ids"] == json!([retried]))
-    });
+        .is_number());
+    local
+        .execute("DROP TRIGGER reject_sent_commit", &[])
+        .unwrap();
+    let reply = f.tool("cito_send", args, human());
+    assert_eq!(
+        reply["signal_id"],
+        format!("work:{}", committed[0]["signal_id"].as_str().unwrap())
+    );
+    assert_eq!(reply["seq"], committed[0]["seq"]);
+    assert_eq!(hub.query("SELECT seq,signal_id FROM hub_signals WHERE json_extract(CAST(data AS TEXT),'$.in_reply_to')=?", &[json!(recovered)]).unwrap(), committed);
+    assert!(f.rows(&format!(
+        "SELECT acknowledged_at_ms FROM local_signals WHERE signal_id='{recovered}'"
+    ))[0]["acknowledged_at_ms"]
+        .is_number());
 
     let failed = source();
     let before = hub
