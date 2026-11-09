@@ -3,7 +3,7 @@ class Cito < Formula
   homepage "https://tefx.github.io/cito/"
   url "https://github.com/Tefx/cito/releases/download/v0.19.0/Cito-macos-arm64.zip"
   version "0.19.0"
-  sha256 "fc902e2191e4e4ce3252b2cd783961e14a7c28264c96bb19d8b1ffeb6f84bd66"
+  sha256 "fae0dba5293e9a1fd00f564d2bf7d1155370d1560cfba1e3a010e76d213f30ad"
   license "MIT"
 
   depends_on arch: :arm64

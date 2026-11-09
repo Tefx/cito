@@ -480,7 +480,7 @@ struct ChannelFieldItem: Decodable, Equatable {
     let type: String
     let required: Bool
     let placeholder: String
-    let value: String
+    let value: String?
     let configured: Bool
     let hidden: Bool?
 }
@@ -846,7 +846,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         for channel in value.channels ?? [] {
             for field in channel.fields {
                 let key = target + "|channel_field:\(channel.id):\(field.key)"
-                if channelFieldDrafts[key] == field.value { channelFieldDrafts.removeValue(forKey: key) }
+                if channelFieldDrafts[key] == (field.value ?? "") { channelFieldDrafts.removeValue(forKey: key) }
             }
             channelInstructions.removeValue(forKey: target + "|" + channel.id)
         }
@@ -886,6 +886,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         else {
             status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             status?.menu = cardMenu
+            statusImage = makeCitoStatusIcon(.idle)
+            if let button = status?.button {
+                formatStatusButton(button, count: 0, image: statusImage)
+            }
             hoverEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
                 MenuControl.reconcileActiveHover()
                 return event
@@ -2067,7 +2071,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let labelView = textLabel(f.label, NSRect(x: 14, y: fieldY + 4, width: 150, height: 16), size: 11.5, weight: .medium)
                 labelView.toolTip = f.label
                 chCard.addSubview(labelView)
-                let initialVal = channelFieldDrafts[draftKey(fieldId)] ?? f.value
+                let initialVal = channelFieldDrafts[draftKey(fieldId)] ?? (f.value ?? "")
                 let inputField = makeEditableField(fieldId, frame: NSRect(x: 170, y: fieldY, width: 296, height: 24),
                     placeholder: f.placeholder, value: initialVal, secret: f.type == "secret")
                 chCard.addSubview(inputField)
@@ -2094,8 +2098,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let fid = "channel_field:\(chId):\(f.key)"
                     if let v = self.channelFieldDrafts[self.draftKey(fid)] ?? self.settingsFieldControls[fid]?.stringValue {
                         vals[f.key] = v
-                    } else if !f.value.isEmpty {
-                        vals[f.key] = f.value
+                    } else if let fv = f.value, !fv.isEmpty {
+                        vals[f.key] = fv
                     }
                 }
                 return vals
