@@ -303,6 +303,7 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         while !stop.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(1)))
                         .unwrap();
