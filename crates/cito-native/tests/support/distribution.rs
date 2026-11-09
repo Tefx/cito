@@ -12,7 +12,7 @@ fn website_clipboard_promises_failure_retry_and_duplicate_suppression() {
 #[test]
 fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let mut f = Fixture::new(json!({}));
     let package = f.dir.join("package");
     let bin = package.join("bin");
     let release = package.join("target/release");
@@ -74,6 +74,14 @@ fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
         "",
     );
     assert!(ok, "{out}\n{err}");
+    assert!(err.is_empty(), "re-signing emitted linker stderr: {err}");
+    let (ok, out, err) = f.command(
+        "/usr/bin/codesign",
+        &["--display", "--verbose=4", linked.to_str().unwrap()],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+    assert!(err.contains("Signature=adhoc"), "{err}");
     assert_eq!(
         f.command(staged.to_str().unwrap(), &[], ""),
         (true, "production\n".into(), String::new())
@@ -93,6 +101,7 @@ fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
         "",
     );
     assert!(ok, "{out}\n{err}");
+    assert!(err.is_empty(), "re-signing emitted linker stderr: {err}");
     assert_eq!(
         f.command(staged.to_str().unwrap(), &[], "").1,
         "production\n"
@@ -151,6 +160,37 @@ fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
         production,
         "LTO test harness overwrote staged production binary"
     );
+
+    // Contaminate only the staged copy so the real signer rejects it after a successful link.
+    let tools = f.dir.join("tools");
+    script(
+        &tools.join("cp"),
+        "#!/bin/sh\nset -eu\n/bin/cp \"$@\"\n/usr/bin/xattr -w com.apple.ResourceFork fixture \"$2\"\n",
+    );
+    f.env.insert(
+        "PATH".into(),
+        format!("{}:{}", tools.display(), f.env["PATH"]),
+    );
+    let (ok, out, err) = f.command(
+        linker.to_str().unwrap(),
+        &[source.to_str().unwrap(), "-o", linked.to_str().unwrap()],
+        "",
+    );
+    assert!(!ok, "signing failure was swallowed: {out}\n{err}");
+    assert!(
+        err.contains("resource fork, Finder information, or similar detritus not allowed"),
+        "signing diagnostic was swallowed: {err}"
+    );
+    assert_eq!(
+        fs::read(&staged).unwrap(),
+        production,
+        "failed signing replaced the staged production binary"
+    );
+    assert!(fs::read_dir(&bin).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".tmp.")));
 }
 #[test]
 fn distribution_versions_native_manifests_formula_and_signed_ui() {
