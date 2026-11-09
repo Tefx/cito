@@ -7761,3 +7761,212 @@ phases:
       \ packaging/homebrew/cito.rb` -> 223 passed, 0 failed, 0 warnings, `Syntax OK`\n\
       \nSpec link:\n- docs/DESIGN.md (§11, V25 Stage 9 v0.20.1 U1–U11)\n- docs/ROADMAP.md\n\
       - .github/workflows/release.yml, packaging/homebrew/cito.rb"
+- id: v26
+  name: 'V26 Stage 10 (v0.20.2): Root-Cause Equivalence-Class Closure (R1–R5), True
+    Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop Error
+    Surfacing, Bridge Readiness & Daemon<->UI Closed-Loop Verification'
+  status: pending
+  gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
+    pass 100%, test_inspect reports truncated_labels == [], overlapping_siblings ==
+    [], and clipped_views == [] across all surfaces/tabs/forms, grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+    crates/cito-native/src/core/ src/macos/ exits with 0 matches, all rendered 2x
+    Retina PNG snapshots pass multimodal uiux-auditor + pathway-auditor + structural-auditor
+    [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE] (Completeness:
+    CLEAN, Simplicity: ZERO_NEW_ISSUES), and GitHub Release v0.20.2 + Tefx/homebrew-tap
+    (Formula/cito.rb & Casks/cito.rb) + GitHub Pages (https://tefx.github.io/cito/)
+    are live.'
+  context: 'Close all 5 root-cause equivalence classes (R1–R5) and their repository-wide
+    siblings in Stage 10 (v0.20.2) per docs/DESIGN.md §12 and docs/ROADMAP.md: true
+    two-stratum progressive disclosure (stratum_hub:<id> auto-collapsing when gatewayActive
+    with edit_hub_service:<id> / clear_channel_service:<id>, independent save_hub_service:<id>
+    saving only hub_config without touching hub_human_channels, and Step-2 prerequisite
+    gating when !gatewayActive (R1)); full mechanical geometry invariants (truncated_labels,
+    overlapping_siblings, clipped_views) across all surfaces and G1–G8 coordinate
+    fixes (R2); closed-loop UI actions, visible error surfacing (settings_error_banner,
+    add_hub_error, menu_error_row, hub.error), submit_add_hub validation, and unified
+    paste_hub_invite (R3); pre-session_start identify fallback in cito-bridge.ts,
+    needs_reload UX in cardMenu, and bounded exponential badge retry backoff (250ms..15s)
+    in SessionActivity (R4); and real DaemonService <-> Headless cito-ui closed-loop
+    integration tests + multimodal Retina PNG verification (R5), publishing v0.20.2
+    to GitHub Releases and Tefx/homebrew-tap (Formula/cito.rb & Casks/cito.rb).'
+  depends_on:
+  - v25
+  steps:
+  - id: v26.impl
+    name: Implement V26 Stage 10 (v0.20.2) Root-Cause Equivalence-Class Closure (R1–R5),
+      True Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop
+      Error Surfacing, Bridge Readiness & Daemon<->UI Closed-Loop Suite
+    status: pending
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      ```\n\n- **Deliver:** Complete Stage 10 (`v0.20.2` — `R1`–`R5`) implementation\
+      \ per `docs/DESIGN.md` §12:\n  1. **`R1` — True Two-Stratum Progressive Disclosure,\
+      \ Independent Scope Saving (`save_hub_service:<id>`, `edit_hub_service:<id>`)\
+      \ & Prerequisite Gating (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`,\
+      \ `hub.rs`)**: Split `collectValues(scopeFilter: \"hub\" | \"user\")` and clear\
+      \ acknowledged secret drafts on save; route `\"save_hub_service\"` in `daemon.rs`\
+      \ to populate only `params[\"hub_config\"]` (omitting `user_config` and `enabled`\
+      \ so `hub_human_channels` is untouched); collapse `stratum_hub:<id>` into a\
+      \ `36pt`/`50pt` single-row summary when `gatewayActive` with `edit_hub_service:<id>`\
+      \ (`\"Change Token…\"`) and `clear_channel_service:<id>`, and render `save_hub_service:<id>`\
+      \ (`\"Save Gateway Token\"`) + `cancel_edit_hub_service:<id>` when expanded;\
+      \ enforce `guard isEnabled else { return }` in `MenuControl` and disable Step-2\
+      \ personal inputs/actions (`isEnabled = false`, `alphaValue = 0.55`, keeping\
+      \ `skip_channel:<id>` enabled) in direct `userStratum` (`456pt`) coordinates\
+      \ when `!gatewayActive`.\n  2. **`R2` — Full Mechanical Geometry Invariants\
+      \ (`truncated_labels`, `overlapping_siblings`, `clipped_views`) & Coordinate\
+      \ Fixes (`G1`–`G8`) (`src/macos/cito-ui.swift`, `crates/cito-native/tests/support/ui.rs`)**:\
+      \ Upgrade `inspectMenu()` to compute and emit `truncated_labels`, `overlapping_siblings`,\
+      \ and `clipped_views` across `cardMenu`, `SettingsPanel`, and `DirectoryPanel`,\
+      \ and resolve all 8 geometry defects (`G1`–`G8`).\n  3. **`R3` — Closed-Loop\
+      \ UI Actions, Visible Error Surfacing & Invite/Form Validation (`src/macos/cito-ui.swift`,\
+      \ `crates/cito-native/src/core/daemon.rs`)**: Track `last_hub_errors` on `DaemonService`,\
+      \ emit `{\"op\": \"error\", ...}` frames on action failures in `spawn_ui`, unify\
+      \ `\"paste_hub_invite\"` (`JSON`, `http(s)://`, `cito setup --hub ...`), handle\
+      \ `frame.op == \"error\"` in `cito-ui.swift` across `composerErrorLabel`, `add_hub_error`,\
+      \ `settings_error_banner` (shifting scroll viewport height down by `36pt`),\
+      \ and `menu_error_row`, validate `submit_add_hub` before closing, preserve `hostHubPortDraft`,\
+      \ and validate `effectiveChannelHub` against `settings.hubs`.\n  4. **`R4` —\
+      \ Process Discovery vs. Bridge Socket Readiness, Vendor-Neutral `needs_reload`\
+      \ UX in `cardMenu`, & Bounded Exponential Retry Backoff (`plugins/pi/{native.rs,cito-bridge.ts}`,\
+      \ `crates/cito-native/src/core/session_activity.rs`, `src/macos/cito-ui.swift`)**:\
+      \ Add pre-`session_start` `identify` fallback (`process.cwd()` + latest `.jsonl`)\
+      \ in `plugins/pi/cito-bridge.ts`; emit `needs_reload: true` and `reload_hint`\
+      \ for unbridged processes in `plugins/pi/native.rs` while preventing `resolve_caller`/`probe`\
+      \ from enrolling unbridged processes; render a `46pt` `needs_reload` row with\
+      \ `reload:<harness>:<sid>` (`\"/reload\"`) in `cardMenu`; and add bounded exponential\
+      \ badge retry backoff (`250ms..15s`) and inactive entry retirement in `SessionActivity`.\n\
+      \  5. **`R5` — Real `DaemonService <-> Headless cito-ui` Closed-Loop Integration\
+      \ Suite, Retina PNG Snapshots & `v0.20.2` Version Bump (`crates/cito-native/tests/support/ui.rs`,\
+      \ `Cargo.toml`, `packaging/homebrew/cito.rb`, `README.md`, `site/index.html`)**:\
+      \ Add closed-loop `DaemonService <-> Headless cito-ui` integration tests asserting\
+      \ `truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views\
+      \ == []` on every step, render 2x Retina PNG snapshots for all core states,\
+      \ and bump version to `0.20.2`.\n- **Boundary:** Owner `rust-senior`; modifies\
+      \ `/Users/tefx/Projects/cito` (`plan.yaml` managed exclusively by Vectl).\n\
+      - **Admit:** Completed Phase `v25` and `docs/DESIGN.md` §12 (`R1`–`R5`); `cargo\
+      \ test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`\
+      \ and the zero-hardcoding check (`grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` == 0 matches) pass with `truncated_labels\
+      \ == []`, `overlapping_siblings == []`, and `clipped_views == []`.\n- **Recovery:**\
+      \ Reconcile compilation, test, or UI geometry/error-surfacing failures in place\
+      \ within the step worktree and clean up any temporary test artifacts or processes."
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - plugins/pi/native.rs
+    - plugins/pi/cito-bridge.ts
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - Cargo.toml
+    - packaging/homebrew/cito.rb
+    - README.md
+    - site/index.html
+    agent: rust-senior
+  - id: v26.hygiene
+    name: 'Multimodal Visual Snapshot Inspection, Iterative Contract-and-Simplicity
+      Convergence & Live v0.20.2 Distribution Closure (GitHub Release v0.20.2 & Tefx/homebrew-tap
+      Formula/Cask) [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** `[REQUIRES_SKILL: contract-and-simplicity]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`
+      Render 2x Retina PNG snapshots via `test_render_png` for all core UI states
+      covering `R1`–`R5` (including collapsed and expanded `stratum_hub:<id>`, `settings_error_banner`,
+      `add_hub_error`, and `needs_reload` candidate rows), run fresh-context `uiux-auditor`
+      (multimodal PNG inspection), `pathway-auditor`, and `structural-auditor` rounds
+      until a fresh audit round returns `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`
+      with zero matches on the core/UI hardcoding grep gate and `truncated_labels
+      == []`, `overlapping_siblings == []`, and `clipped_views == []`, and publish
+      `v0.20.2` to GitHub Releases (`Tefx/cito`), GitHub Pages (`https://tefx.github.io/cito/`),
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Boundary:** Owner `rust-senior`; repository changes in `/Users/tefx/Projects/cito`
+      plus authorized distribution effects on `Tefx/cito` (GitHub Release `v0.20.2`
+      & GitHub Pages) and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`)
+      after multimodal visual review, contract-and-simplicity convergence, and `cargo
+      test --workspace` pass.
+
+      - **Admit:** Completed `v26.impl` (`R1`–`R5`), rendered 2x Retina PNG snapshots
+      inspected by `uiux-auditor` alongside `pathway-auditor` and `structural-auditor`
+      reaching `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`, `truncated_labels
+      == []`, `overlapping_siblings == []`, `clipped_views == []`, zero matches on
+      `grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/core/ src/macos/`, `cargo test --workspace && cargo build
+      --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exiting `0`, and verified
+      SHA-256 parity across GitHub Release `v0.20.2`, `packaging/homebrew/cito.rb`,
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Recovery:** If any multimodal visual check, audit round, or release/tap
+      update reports actionable findings, repair in place, re-render the affected
+      PNG snapshots, re-run checks and fresh-context delta verification until `ZERO_NEW_ISSUES`,
+      and reconcile release tags and Homebrew tap Formula/Cask SHA-256 values.'
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v26.impl
+    agent: rust-senior
+  - id: v26.gate
+    name: V26 Stage 10 (v0.20.2) Independent Terminal Acceptance, R1–R5 Root-Cause
+      Closure & Live Distribution Gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
+      \n- **Deliver:** Independent terminal Phase `v26` (`v0.20.2`) acceptance decision\
+      \ (`PASS` or `FAIL`) issued by a fresh-context `gate-reviewer` session.\n- **Boundary:**\
+      \ Owner `gate-reviewer`; strictly read-only (`repo_change_policy: no_repo_change`)\
+      \ over the immutable integrated Git HEAD in `/Users/tefx/Projects/cito` and\
+      \ live public endpoints.\n- **Admit:**\n  - Included phase and terminal outcomes:\
+      \ Phase `v26` (`v26.impl` and `v26.hygiene`) bound to the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito`.\n  - Consumed evidence and checks:\n\
+      \    1. `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` exits `0` with 100% pass rate across all native\
+      \ Rust unit, integration, `F1`–`F64`, `L1`–`L17`, `U1`–`U11`, and `R1`–`R5`\
+      \ closed-loop `DaemonService <-> Headless cito-ui` tests, with `truncated_labels\
+      \ == []`, `overlapping_siblings == []`, and `clipped_views == []` across all\
+      \ surfaces/tabs/forms.\n    2. Zero hardcoded agent/channel names or forbidden\
+      \ strings: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` returns `0` matches; `[\\p{Script=Han}]`\
+      \ and `\\b(rda|casdoor|rcatwin|keppel|mingchen)\\b` return `0` matches across\
+      \ repository files (excluding the policy rule line in `docs/DESIGN.md`).\n \
+      \   3. Multimodal visual & contract-and-simplicity convergence: fresh-context\
+      \ `uiux-auditor` (over all rendered 2x Retina PNG snapshots including collapsed/expanded\
+      \ `stratum_hub:<id>`, `settings_error_banner`, `add_hub_error`, and `needs_reload`),\
+      \ `pathway-auditor`, and `structural-auditor` reports verify closure of all\
+      \ admitted findings with `Completeness: CLEAN` and `Simplicity: ZERO_NEW_ISSUES`.\n\
+      \    4. Live distribution verification: `https://tefx.github.io/cito/` returns\
+      \ HTTP `200`, GitHub Release `v0.20.2` publishes `Cito-macos-arm64.zip` + `.sha256`\
+      \ at `0.20.2`, and `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`) match the published `v0.20.2` SHA-256.\n- **Recovery:**\
+      \ If any acceptance check fails, record concrete counterexamples and route a\
+      \ cohesive writable repair to `rust-senior` before re-running this gate in Delta\
+      \ mode."
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v26.hygiene
+    agent: gate-reviewer
