@@ -90,7 +90,7 @@
       <ul>
         <li><strong>Tab 1 — <code>Agent Apps</code></strong>: Displays every installed or available coding harness (<code>Codex</code>, <code>Pi Coding Agent</code>, and experimental <code>Claude Code</code>) with live status badges (<code>● Connected</code> / <code>○ Not Set Up</code>) and one-click <strong><code>Set Up</code></strong>, <strong><code>Re-check</code></strong>, and <strong><code>Disconnect</code></strong> controls.</li>
         <li><strong>Tab 2 — <code>Human Channels</code></strong>: Select your target Hub at the top, toggle <strong><code>Mac Desktop Banner</code></strong>, enter channel credentials (such as your Telegram <strong>Bot Token</strong> and <strong>Chat ID</strong>), click <strong><code>Pair Account…</code></strong> to pair your personal chat, or click <strong><code>Send Test</code></strong> and <strong><code>Save</code></strong>.</li>
-        <li><strong>Tab 3 — <code>Hubs &amp; Network</code></strong>: Toggle <strong><code>Share Hub on Local Network</code></strong> (<code>:4291</code>), click <strong><code>Copy 1-Click Join Code</code></strong>, or click <strong><code>✨ Paste from Invite</code></strong> / <strong><code>+ Add Hub…</code></strong> to join a LAN, Tailscale, or Team OIDC Hub.</li>
+        <li><strong>Tab 3 — <code>Hubs &amp; Network</code></strong>: Toggle <strong><code>Share Hub on Local Network</code></strong> (<code>:4291</code>), click <strong><code>Copy 1-Click Join Code</code></strong>, or click <strong><code>Paste Invite</code></strong> / <strong><code>+ Add Hub…</code></strong> to join a LAN, Tailscale, or Team OIDC Hub.</li>
         <li><strong>Window Footer</strong>: Toggle <strong><code>Start Cito at Login</code></strong> on the left or click <strong><code>Remove All Integrations…</code></strong> on the right (with an optional checkbox to also delete <code>~/.cito</code> local data and hub settings).</li>
       </ul>
 
@@ -146,13 +146,13 @@ args = []</code></pre>
       </ol>
 
       <p>Saved Bot Tokens stay redacted. Leave the field blank to retain the saved token, or enter a replacement. <strong>Send Test</strong> uses candidate values without saving them. <strong>Pause</strong> retains your Chat ID; <strong>Unpair</strong> removes your binding. When unpaired, <strong>Clear Token</strong> clears the Hub service. <strong>Copy Command</strong> copies the active pairing command; <strong>Cancel</strong> invalidates it. A new pairing command supersedes earlier commands and expires after ten minutes.</p>
-      <p>Use the <strong>?</strong> setup guide to move between apps, mobile alerts, and hubs. <strong>Repair</strong> restores missing staged files. <strong>Disconnect All</strong> stops listeners and removes app integrations while keeping Cito running; <strong>Confirm Uninstall</strong> removes Cito and quits.</p>
+      <p>Use the <strong>?</strong> setup guide to move between apps, Human Channels, and hubs. <strong>Repair</strong> restores missing staged files. <strong>Disconnect All</strong> stops listeners and removes app integrations while keeping Cito running; <strong>Confirm Uninstall</strong> removes Cito and quits.</p>
       <h2 id="lan-and-team-hubs">5. LAN &amp; Team Hub Setup</h2>
       <h3>Sharing Across Your Own Macs (LAN / Tailscale)</h3>
       <ol>
         <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share Hub on Local Network</code></strong>.</li>
         <li>Click <strong><code>Copy 1-Click Join Code</code></strong> to copy a 1-click <code>cito setup</code> join command containing your LAN address and pre-shared token.</li>
-        <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>✨ Paste from Invite</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
+        <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>Paste Invite</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
       </ol>
 
       <p>Change the sharing port with <strong>Apply</strong> and select <strong>Auth: Token</strong> or <strong>Auth: None</strong>. Bind errors appear on the sharing card and preserve the previous listener. Use <strong>Edit</strong> on an existing Hub to update its settings without re-entering saved secrets. Disconnected hubs remain visible with <strong>Connect</strong>. OIDC <strong>Switch Account</strong> always requests an interactive account picker.</p>

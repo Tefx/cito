@@ -1134,7 +1134,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let harnessesChanged = nextHarnesses != harnesses
             if harnessesChanged { harnesses = nextHarnesses }
             let nextSettings = frame.settings ?? settings
-            let settingsChanged = nextSettings != settings
+            // An unchanged save acknowledgement still needs to refresh the settings feedback.
+            let settingsChanged = nextSettings != settings || hostHubPortPending
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name) }
             if let error = frame.composer_error, !error.isEmpty { composerErrorLabel?.stringValue = error }
             if hasRenderedState && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {

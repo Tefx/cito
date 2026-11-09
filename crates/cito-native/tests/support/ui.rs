@@ -241,6 +241,45 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert!(!node(&s, "settings_items", "host_hub_error").is_null());
         assert_eq!(f.frames(p).len(), before);
     }
+    // An unchanged snapshot must still acknowledge an explicit Apply action.
+    frame["settings"] = cfg.clone();
+    f.send(p, frame.clone());
+    for op in ["state", "settings"] {
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+            "Apply"
+        );
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":"4291"}),
+        );
+        let before = f.frames(p).len();
+        control(&f, p, "apply_host_hub_port");
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+            "Apply",
+            "Do not report success before the daemon acknowledges the save"
+        );
+        wait(|| {
+            f.frames(p)[before..]
+                .iter()
+                .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291)
+        });
+        f.send(
+            p,
+            if op == "state" {
+                frame.clone()
+            } else {
+                json!({"op":"settings","settings":cfg})
+            },
+        );
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+            "✓ Saved",
+            "An unchanged {op} frame must acknowledge the save"
+        );
+    }
     f.send(
         p,
         json!({"op":"test_settings_input","id":"host_hub_port","value":" 5301 "}),

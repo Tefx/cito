@@ -2299,6 +2299,7 @@ impl DaemonService {
                     return Err(error);
                 }
                 self.last_host_hub_error = None;
+                self.emit(json!({"op":"settings","settings":self.settings()}));
             }
             "set_launch_at_login" => {
                 set_launch_at_login(
@@ -3587,6 +3588,19 @@ mod tests {
                     .timeout(Duration::from_secs(2))
                     .send_json(json!({"op":"kv_snapshot"}));
                 assert!(matches!(rejected, Err(ureq::Error::Status(401, _))));
+
+                // Saving the current port still sends an explicit settings acknowledgement.
+                let settings = service.settings();
+                let ui = Arc::new(UiMailbox::default());
+                service.ui = Some(ui.clone());
+                service.action(&json!({"op":"set_host_hub","port":address.port()}))?;
+                {
+                    let frames = ui.pending.lock().map_err(|e| e.to_string())?;
+                    assert!(frames.iter().any(|(_, bytes)| {
+                        let frame: Value = serde_json::from_slice(bytes).unwrap();
+                        frame["op"] == "settings" && frame["settings"] == settings
+                    }));
+                }
 
                 // Port zero requests a distinct listener while the old socket is still held.
                 service.action(&json!({"op":"set_host_hub","port":0}))?;
