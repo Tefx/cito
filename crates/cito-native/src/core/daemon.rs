@@ -1424,7 +1424,7 @@ impl DaemonService {
     fn settings_for_hub(&self, channel_hub: &str) -> Value {
         let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p| {
             let (installed,configured_in_host,paths)=inspect_plugin_setup(p);
-            let repair=configured_in_host && (!self.config.state_dir.join("bin/cito-mcp").is_file() || !self.config.state_dir.join("plugins").join(&p.id).is_dir());
+            let repair=configured_in_host && (!self.config.state_dir.join("bin/cito-mcp").is_file() || !super::setup::is_staged_plugin_intact(&self.config.state_dir, p));
             let configured=configured_in_host && !repair;
             let detail=if repair { "Staged Cito files missing — click Repair to restore" }
                 else if configured { p.post_setup_hint.as_deref().unwrap_or("Connected and ready") }
@@ -1941,58 +1941,56 @@ impl DaemonService {
                     "channel_test" | "test_human_channel" => "human_channels_test",
                     _ => "human_channels_configure",
                 };
-                let mut params = action.clone();
-                params["plugin_id"] = json!(id);
-                if let Some(values) = action["values"].as_object() {
-                    let local = self
-                        .plugins
-                        .find_by_id(id)
-                        .map(|p| p.fields.clone())
-                        .filter(|f| !f.is_empty());
-                    let fields = if let Some(fields) = local {
-                        fields
-                    } else {
-                        let schema = self.slot(&hub)?.rpc("human_channels_list", &json!({}))?;
-                        schema["channels"]
-                            .as_array()
-                            .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
-                            .and_then(|ch| ch["fields"].as_array())
-                            .cloned()
-                            .ok_or_else(|| {
-                                format!("INVALID_INPUT: Unknown human channel plugin: {id}")
-                            })?
-                    };
-                    let mut hub_config = Map::new();
-                    let mut user_config = Map::new();
-                    for field in &fields {
-                        let key = string(field, "key");
-                        if let Some(value) = values.get(key) {
-                            if field["scope"] == "hub" {
-                                hub_config.insert(key.into(), value.clone());
-                            } else {
-                                user_config.insert(key.into(), value.clone());
+                let result: Result<Value, String> = (|| {
+                    let mut params = action.clone();
+                    params["plugin_id"] = json!(id);
+                    if let Some(values) = action["values"].as_object() {
+                        let local = self
+                            .plugins
+                            .find_by_id(id)
+                            .map(|p| p.fields.clone())
+                            .filter(|f| !f.is_empty());
+                        let fields = if let Some(fields) = local {
+                            fields
+                        } else {
+                            let schema = self.slot(&hub)?.rpc("human_channels_list", &json!({}))?;
+                            schema["channels"]
+                                .as_array()
+                                .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
+                                .and_then(|ch| ch["fields"].as_array())
+                                .cloned()
+                                .ok_or_else(|| {
+                                    format!("INVALID_INPUT: Unknown human channel plugin: {id}")
+                                })?
+                        };
+                        let mut hub_config = Map::new();
+                        let mut user_config = Map::new();
+                        for field in &fields {
+                            let key = string(field, "key");
+                            if let Some(value) = values.get(key) {
+                                if field["scope"] == "hub" {
+                                    hub_config.insert(key.into(), value.clone());
+                                } else {
+                                    user_config.insert(key.into(), value.clone());
+                                }
                             }
                         }
+                        params["hub_config"] = Value::Object(hub_config);
+                        params["user_config"] = Value::Object(user_config);
                     }
-                    params["hub_config"] = Value::Object(hub_config);
-                    params["user_config"] = Value::Object(user_config);
-                }
-                if op == "channel_cancel_pair" {
-                    params["cancel_pair"] = json!(true);
-                }
-                if op == "channel_unpair"
-                    || (op == "disconnect_human_channel" && action["reset_hub"] != true)
-                {
-                    params["reset_user"] = json!(action["reset_user"] != false);
-                }
-                if op == "clear_channel_service" {
-                    params["reset_hub"] = json!(true);
-                    params["reset_user"] = json!(true);
-                }
-                let result = self
-                    .slot(&hub)
-                    .and_then(|slot| slot.rpc(rpc, &params))
-                    .and_then(|result| {
+                    if op == "channel_cancel_pair" {
+                        params["cancel_pair"] = json!(true);
+                    }
+                    if op == "channel_unpair"
+                        || (op == "disconnect_human_channel" && action["reset_hub"] != true)
+                    {
+                        params["reset_user"] = json!(action["reset_user"] != false);
+                    }
+                    if op == "clear_channel_service" {
+                        params["reset_hub"] = json!(true);
+                        params["reset_user"] = json!(true);
+                    }
+                    self.slot(&hub)?.rpc(rpc, &params).and_then(|result| {
                         if matches!(rpc, "human_channel_pair_start" | "human_channels_test")
                             && !result.is_object()
                         {
@@ -2000,7 +1998,8 @@ impl DaemonService {
                         } else {
                             Ok(result)
                         }
-                    });
+                    })
+                })();
                 match &result {
                     Ok(result)
                         if matches!(rpc, "human_channel_pair_start" | "human_channels_test") =>

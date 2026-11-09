@@ -74,6 +74,55 @@ pub fn resolve_package_root() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
+pub fn resolve_bundled_plugin_dir(id: &str) -> PathBuf {
+    bundled_plugin_dir(&resolve_package_root(), id)
+}
+
+fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
+    ["Resources/plugins", "plugins", "share/cito/plugins"]
+        .into_iter()
+        .map(|relative| root.join(relative).join(id))
+        .find(|dir| dir.join("plugin.json").is_file())
+        .unwrap_or_else(|| {
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins")).join(id)
+        })
+}
+
+pub fn is_staged_plugin_intact(state_dir: &Path, plugin: &PluginDescriptor) -> bool {
+    is_plugin_dir_intact(&state_dir.join("plugins").join(&plugin.id), plugin)
+}
+
+pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> bool {
+    if !dir.join("plugin.json").is_file() {
+        return false;
+    }
+    if let Some(cmd) = plugin.command.first() {
+        if (cmd.starts_with("./") || cmd.starts_with("../")) && !dir.join(cmd).is_file() {
+            return false;
+        }
+    }
+    !plugin.is_builtin || contains_plugin_files(&resolve_bundled_plugin_dir(&plugin.id), dir)
+}
+
+fn contains_plugin_files(source: &Path, target: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(source) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        let Ok(kind) = entry.file_type() else {
+            return false;
+        };
+        let staged = target.join(entry.file_name());
+        if (kind.is_file() && !staged.is_file())
+            || (kind.is_dir() && !contains_plugin_files(&entry.path(), &staged))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn resolve_state_and_config_paths() -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let home_env = env::var("HOME").ok();
     let home_dir = expand_home_dir("~", "HOME", home_env.as_deref())?;
@@ -99,17 +148,23 @@ pub fn ensure_cli_shims_native(
     let mut written = Vec::new();
     for plugin in &plugins.plugins {
         let target = plugins_dir.join(&plugin.id);
-        let bundled = resolve_package_root().join("plugins").join(&plugin.id);
-        let source = if plugin.plugin_dir.is_dir() {
-            &plugin.plugin_dir
-        } else if plugin.is_builtin && bundled.join("plugin.json").is_file() {
+        let bundled = resolve_bundled_plugin_dir(&plugin.id);
+        let source = if plugin.is_builtin
+            && bundled.join("plugin.json").is_file()
+            && fs::canonicalize(&bundled).ok() != fs::canonicalize(&target).ok()
+        {
             &bundled
+        } else if plugin.plugin_dir.is_dir() {
+            &plugin.plugin_dir
         } else {
             // A deleted external plugin cannot be reconstructed. It must not block
             // repairs of bundled plugins; applying that missing target still fails.
             continue;
         };
-        if fs::canonicalize(source).ok() != fs::canonicalize(&target).ok() || !target.exists() {
+        if !target.exists()
+            || !is_staged_plugin_intact(state_dir, plugin)
+            || fs::canonicalize(source).ok() != fs::canonicalize(&target).ok()
+        {
             copy_dir_recursive(source, &target)?;
             written.push(target);
         }
@@ -1457,6 +1512,29 @@ mod tests {
                 rejected_ids: HashSet::new(),
             },
         )
+    }
+
+    #[test]
+    fn bundled_plugin_resolution_covers_distribution_layouts() {
+        let (root, _) = fixture();
+        fs::remove_file(root.join("plugins/sample/plugin.json")).unwrap();
+        for (package, relative) in [
+            (root.join("Cito.app/Contents"), "Resources/plugins/sample"),
+            (root.join("prefix"), "share/cito/plugins/sample"),
+            (root.clone(), "plugins/sample"),
+        ] {
+            let bundled = package.join(relative);
+            fs::create_dir_all(&bundled).unwrap();
+            // A directory left behind without its manifest is not a distribution.
+            assert_ne!(bundled_plugin_dir(&package, "sample"), bundled);
+            fs::write(bundled.join("plugin.json"), "{}").unwrap();
+            assert_eq!(bundled_plugin_dir(&package, "sample"), bundled);
+        }
+        assert_eq!(
+            bundled_plugin_dir(&root.join("missing"), "sample"),
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins/sample"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

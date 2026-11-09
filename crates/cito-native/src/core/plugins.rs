@@ -725,16 +725,12 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
         .first()
         .ok_or("PLUGIN_LOAD_ERROR: empty command")?;
     let relative = executable.starts_with("./") || executable.starts_with("../");
-    let plugin_dir = if plugin.is_builtin
-        && (!plugin.plugin_dir.is_dir()
-            || (relative && !plugin.plugin_dir.join(executable).is_file()))
-    {
-        super::setup::resolve_package_root()
-            .join("plugins")
-            .join(&plugin.id)
-    } else {
-        plugin.plugin_dir.clone()
-    };
+    let plugin_dir =
+        if plugin.is_builtin && !super::setup::is_plugin_dir_intact(&plugin.plugin_dir, plugin) {
+            super::setup::resolve_bundled_plugin_dir(&plugin.id)
+        } else {
+            plugin.plugin_dir.clone()
+        };
     let executable = if relative {
         plugin_dir.join(executable)
     } else if executable.starts_with('~') {

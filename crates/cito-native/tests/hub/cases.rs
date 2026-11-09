@@ -187,8 +187,29 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
         .starts_with("INVALID_INPUT"));
     configure(json!({"cancel_pair":true}));
     assert!(redeem(&second["code"]).is_err());
+    let redeem_without_address = |code: &Value| {
+        e.redeem("fixture", &json!({"code":code,"is_private_chat":true,"external_chat_id":"external","external_user_id":"user","user_config_patch":{}}))
+    };
+    let incomplete = pair();
+    assert_eq!(
+        redeem_without_address(&incomplete["code"]).unwrap()["ok"],
+        true
+    );
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    configure(json!({"user_config":{"address":"saved-room"}}));
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
+    let retained = pair();
+    assert_eq!(
+        redeem_without_address(&retained["code"]).unwrap()["ok"],
+        true
+    );
+    assert_eq!(list()["fields"][1]["value"], "saved-room");
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
+    configure(json!({"reset_user":true}));
     let third = pair();
     assert_eq!(redeem(&third["code"]).unwrap()["ok"], true);
+    assert_eq!(list()["fields"][1]["value"], "paired");
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
     assert!(list()["detail"].as_str().unwrap().contains("Alice"));
     configure(json!({"user_config":{"address":"manual"}}));
     let b = e
@@ -212,6 +233,12 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     assert_eq!(list()["enabled"], false);
     assert!(!e.inner.processes.lock().unwrap().contains_key("fixture"));
     assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    let missing_service = pair();
+    assert_eq!(redeem(&missing_service["code"]).unwrap()["ok"], true);
+    assert_eq!(list()["fields"][1]["value"], "paired");
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    configure(json!({"hub_config":{"credential":"restored"}}));
+    assert_eq!(reg()["channels"]["hub:fixture"]["state"], "ACTIVE");
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
 }

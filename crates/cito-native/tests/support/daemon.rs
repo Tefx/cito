@@ -35,10 +35,11 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
             ),
         ] {
             let before = frames().len();
-            let mut action = json!({"op":op,"channel_id":id});
-            if id == "channel" {
-                action["values"] = json!({"credential":"invalid"});
-            }
+            let action = json!({"op":op,"channel_id":id,"values":if id == "channel" {
+                json!({"credential":"invalid"})
+            } else {
+                json!({"botToken":"x"})
+            }});
             let (status, result) = f.action(action);
             assert_eq!(status, expected_status, "{result}");
             assert_eq!(result["ok"], false);
@@ -95,9 +96,23 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
             .clone()
     };
     assert_eq!(app()["status"], "ready");
-    // A partial deletion must also use the bundled executable and working directory.
-    fs::remove_file(f.state.join("plugins/pi/bin/cito-plugin-pi")).unwrap();
-    assert_eq!(app()["status"], "ready");
+    // Repairs must use the distribution even though the loaded descriptor is staged.
+    for asset in [
+        "cito-bridge.ts",
+        "package.json",
+        "plugin.json",
+        "bin/cito-plugin-pi",
+    ] {
+        let staged = f.state.join("plugins/pi").join(asset);
+        fs::remove_file(&staged).unwrap();
+        assert_eq!(app()["status"], "repair_needed", "{asset}");
+        assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+        assert_eq!(
+            fs::read(&staged).unwrap(),
+            fs::read(root().join("plugins/pi").join(asset)).unwrap()
+        );
+        assert_eq!(app()["status"], "ready", "{asset}");
+    }
     fs::remove_dir_all(f.state.join("plugins/pi")).unwrap();
     assert_eq!(app()["status"], "repair_needed");
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);

@@ -1210,7 +1210,34 @@ impl HubEngine {
     }
     fn redeem(&self, id: &str, f: &Value) -> Result<Value, String> {
         let plugin = self.plugin(id)?;
-        let result=self.inner.db.transaction(|c|{if f["is_private_chat"]!=true{return Err("FORBIDDEN: pairing requires a private conversation".into())}let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;let code=required(f,"code")?.trim();let row=one(c,"SELECT * FROM hub_pairing_codes WHERE code=? AND plugin_id=? AND consumed_ms IS NULL AND expires_ms>?",&[json!(code),json!(id),json!(now_ms())])?.ok_or("INVALID_INPUT: expired or consumed pairing code")?;let mut config=f["user_config_patch"].clone();validate_config(&plugin,&config,"user")?;config["_external_chat_id"]=json!(chat);config["_external_user_id"]=json!(user);let boundary=max_seq(c)?;c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET enabled=1,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",&[row["principal_id"].clone(),json!(id),row["owner_user"].clone(),json!(config.to_string()),f["display_label"].clone(),json!(boundary),json!(now_ms())])?;c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE code=?",&[json!(now_ms()),json!(code)])?;let binding=one(c,"SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",&[row["principal_id"].clone(),json!(id)])?.ok_or("Binding missing")?;attach(c,&binding,true,self.inner.remote.load(Ordering::SeqCst))?;Ok(json!({"op":"pair_ack","code":code,"ok":true,"owner_user":row["owner_user"],"error":null}))})?;
+        let result = self.inner.db.transaction(|c| {
+            if f["is_private_chat"] != true {
+                return Err("FORBIDDEN: pairing requires a private conversation".into());
+            }
+            let chat = required(f, "external_chat_id")?;
+            let user = required(f, "external_user_id")?;
+            let code = required(f, "code")?.trim();
+            let row = one(c, "SELECT * FROM hub_pairing_codes WHERE code=? AND plugin_id=? AND consumed_ms IS NULL AND expires_ms>?",
+                &[json!(code), json!(id), json!(now_ms())])?
+                .ok_or("INVALID_INPUT: expired or consumed pairing code")?;
+            validate_config(&plugin, &f["user_config_patch"], "user")?;
+            let old = one(c, "SELECT user_config_json FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
+                &[row["principal_id"].clone(), json!(id)])?;
+            let mut config = old.as_ref().map(|b| parse(b, "user_config_json")).unwrap_or(json!({}));
+            merge_channel_config(&plugin, "user", &mut config, &f["user_config_patch"], false);
+            config["_external_chat_id"] = json!(chat);
+            config["_external_user_id"] = json!(user);
+            let (service_cfg, _) = service(c, id)?;
+            let active = ready(&plugin, &service_cfg, "hub") && ready(&plugin, &config, "user");
+            let boundary = max_seq(c)?;
+            c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET enabled=1,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
+                &[row["principal_id"].clone(), json!(id), row["owner_user"].clone(), json!(config.to_string()), f["display_label"].clone(), json!(boundary), json!(now_ms())])?;
+            c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE code=?", &[json!(now_ms()), json!(code)])?;
+            let binding = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
+                &[row["principal_id"].clone(), json!(id)])?.ok_or("Binding missing")?;
+            attach(c, &binding, active, self.inner.remote.load(Ordering::SeqCst))?;
+            Ok(json!({"op":"pair_ack","code":code,"ok":true,"owner_user":row["owner_user"],"error":null}))
+        })?;
         // The callback runs on the child's reader thread; configure is a one-way write.
         let process = self
             .inner
