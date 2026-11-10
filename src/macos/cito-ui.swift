@@ -850,6 +850,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var submittedHostHubPort: Int?
     var addHubName = ""
     var addHubUrl = ""
+    var submittedAddHubName = ""
+    var submittedAddHubUrl = ""
     var addHubAuth = "none"
     var addHubToken = ""
     var addHubUser = ""
@@ -859,7 +861,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var channelFieldDrafts: [String: String] = [:]
     var channelSecretOriginal: [String: String] = [:]
     var editingHubGateway = Set<String>()
-    var pendingChannelValues: [String: (requestId: String, values: [String: String])] = [:]
+    var pendingChannelValues: [String: (hub: String, channelId: String, scope: String, values: [String: String])] = [:]
     var selectedChannelHub = ""
     var channelSettingsByHub: [String: [ChannelSetupItem]] = [:]
     var channelInstructions: [String: String] = [:]
@@ -882,10 +884,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             hostHubPortError = nil
             if hostHubPortSaved && Int(hostHubPortDraft ?? "") == submittedHostHubPort { hostHubPortDraft = nil }
         }
-        if addHubSaving && confirmHubSave, let saved = value.hubs.first(where: { $0.name == addHubName.trimmingCharacters(in:.whitespacesAndNewlines) && $0.url == addHubUrl.trimmingCharacters(in:.whitespacesAndNewlines) }) {
+        if addHubSaving && confirmHubSave, let saved = value.hubs.first(where: { $0.name == submittedAddHubName && $0.url == submittedAddHubUrl }) {
             addHubSaving = false
             addHubError = saved.error
-            if saved.error == nil { addHubFormOpen = false; addHubToken = "" }
+            if saved.error == nil && addHubName.trimmingCharacters(in: .whitespacesAndNewlines) == submittedAddHubName && addHubUrl.trimmingCharacters(in: .whitespacesAndNewlines) == submittedAddHubUrl {
+                addHubFormOpen = false; addHubToken = ""
+            }
         }
         let target = value.settings_hub ?? value.channel_hub ?? hub ?? effectiveChannelHub
         channelSettingsByHub[target] = value.channels ?? []
@@ -893,16 +897,21 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let key=target + "|" + channel.id
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
-            let acknowledged = savedChannel == channel.id && pendingChannelValues[key]?.requestId == savedRequest ? pendingChannelValues.removeValue(forKey: key)?.values : nil
+            var acknowledged: (scope: String, values: [String: String])?
+            if savedChannel == channel.id, let savedRequest = savedRequest,
+               let entry = pendingChannelValues[savedRequest], entry.hub == target && entry.channelId == channel.id {
+                pendingChannelValues.removeValue(forKey: savedRequest)
+                acknowledged = (scope: entry.scope, values: entry.values)
+            }
             for field in channel.fields {
                 let draft = target + "|channel_field:\(channel.id):\(field.key)"
-                if let sent = acknowledged?[field.key], channelFieldDrafts[draft] == sent {
+                if let sent = acknowledged?.values[field.key], channelFieldDrafts[draft] == sent {
                     channelFieldDrafts.removeValue(forKey: draft)
                 } else if field.type != "secret" && channelFieldDrafts[draft] == (field.value ?? "") {
                     channelFieldDrafts.removeValue(forKey: draft)
                 }
             }
-            if acknowledged != nil && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
+            if acknowledged?.scope == "hub" && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
                 editingHubGateway.remove(key)
             }
             if let instruction=channel.pairing_instruction, !instruction.isEmpty { channelInstructions[key]=instruction }
@@ -1262,7 +1271,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
            let id = action["channel_id"] as? String, let values = action["values"] as? [String: String] {
             let requestId = UUID().uuidString
             outgoing["request_id"] = requestId
-            pendingChannelValues["\(action["hub"] as? String ?? effectiveChannelHub)|\(id)"] = (requestId, values)
+            let hub = action["hub"] as? String ?? effectiveChannelHub
+            let scope = (action["scope"] as? String) ?? (op == "save_hub_service" ? "hub" : "user")
+            // Supersede only this scope's older intent, never another scope's save.
+            pendingChannelValues = pendingChannelValues.filter { $0.value.hub != hub || $0.value.channelId != id || $0.value.scope != scope }
+            pendingChannelValues[requestId] = (hub: hub, channelId: id, scope: scope, values: values)
         }
         if let op = action["op"] as? String,
            ["channel_save", "save_hub_service", "channel_pair", "channel_toggle", "channel_unpair", "channel_cancel_pair", "disconnect_human_channel"].contains(op),
@@ -2643,6 +2656,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     if !iss.isEmpty { action["issuer"] = iss }
                     if !cid.isEmpty { action["client_id"] = cid }
                 }
+                self.submittedAddHubName=name; self.submittedAddHubUrl=url
                 self.addHubSaving=true; self.addHubError=nil
                 self.emit(action)
                 self.rebuildSettingsPanel()

@@ -258,7 +258,7 @@ pub struct DaemonService {
     active_settings_hub: Option<String>,
     last_app_action: HashMap<String, String>,
     last_host_hub_error: Option<String>,
-    last_hub_errors: HashMap<String, String>,
+    last_hub_errors: HashMap<String, (String, bool)>,
 }
 impl DaemonService {
     pub fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
@@ -1296,6 +1296,15 @@ impl DaemonService {
     pub fn poll(&mut self) -> Result<(), String> {
         self.reload_slots()?;
         self.flush_acks();
+        // Successful background RPCs or event reconnection supersede transport
+        // errors, but cannot resolve a rejected configuration edit.
+        self.last_hub_errors.retain(|hub, (_, transient)| {
+            !*transient
+                || !self
+                    .slots
+                    .get(hub)
+                    .is_some_and(|slot| slot.connection_status() == "connected")
+        });
         let finished: Vec<String> = self
             .receivers
             .iter()
@@ -1467,7 +1476,10 @@ impl DaemonService {
             .map(|server| u64::from(server.port()))
             .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
         for item in &mut hubs {
-            item["error"] = json!(self.last_hub_errors.get(string(item, "name")));
+            item["error"] = json!(self
+                .last_hub_errors
+                .get(string(item, "name"))
+                .map(|(error, _)| error));
             let cfg = self
                 .slots
                 .get(string(item, "name"))
@@ -1704,7 +1716,10 @@ impl DaemonService {
                     self.last_hub_errors.remove(&hub);
                 }
                 Err(error) => {
-                    self.last_hub_errors.insert(hub, error.clone());
+                    let transient = ["NATS_UNAVAILABLE:", "AUTH_UNAVAILABLE:", "UNAUTHORIZED:"]
+                        .iter()
+                        .any(|prefix| error.starts_with(prefix));
+                    self.last_hub_errors.insert(hub, (error.clone(), transient));
                 }
             }
         }

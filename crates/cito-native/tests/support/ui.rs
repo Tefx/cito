@@ -430,6 +430,126 @@ fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer
     );
 }
 
+#[test]
+fn r1_overlapping_channel_scopes_acknowledge_secrets_and_gateway_edits_independently() {
+    let _lock = serial();
+    for hub_first in [false, true] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        cfg["settings_hub"] = json!("personal");
+        cfg["channels"][0]["fields"][0]["value"] = json!("");
+        cfg["channels"][0]["fields"][1]["type"] = json!("secret");
+        cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        f.send(p, frame);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:channels");
+        control(&f, p, "edit_hub_service:channel");
+        for (field, value, control_id) in [
+            ("secret", "gateway-token", "save_hub_service:channel"),
+            ("account", "personal-token", "save_channel:channel"),
+        ] {
+            f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+            control(&f, p, control_id);
+        }
+        inspect(&f, p);
+        let latest = |op: &str| {
+            f.frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == op)
+                .unwrap()
+        };
+        let gateway = latest("save_hub_service");
+        let personal = latest("channel_save");
+        assert_eq!(gateway["values"], json!({"secret":"gateway-token"}));
+        assert_eq!(personal["values"], json!({"account":"personal-token"}));
+        assert_ne!(gateway["request_id"], personal["request_id"]);
+        let ordered = if hub_first {
+            [&gateway, &personal]
+        } else {
+            [&personal, &gateway]
+        };
+        for (index, action) in ordered.into_iter().enumerate() {
+            f.send(p, json!({"op":"settings","ok":true,"source_op":action["op"],"channel_id":"channel","request_id":action["request_id"],"settings":cfg}));
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "settings_items", "stratum_hub:channel")["height"] == 36,
+                hub_first || index == 1,
+                "Only a gateway acknowledgement may collapse the gateway editor"
+            );
+            if !hub_first && index == 0 {
+                control(&f, p, "save_channel:channel");
+                inspect(&f, p);
+                assert_eq!(latest("channel_save")["values"], json!({}));
+                assert!(!node(&s, "settings_items", "channel_field:channel:secret").is_null());
+            }
+        }
+        control(&f, p, "edit_hub_service:channel");
+        control(&f, p, "save_hub_service:channel");
+        control(&f, p, "save_channel:channel");
+        inspect(&f, p);
+        for op in ["save_hub_service", "channel_save"] {
+            assert_eq!(
+                latest(op)["values"],
+                json!({}),
+                "Acknowledged secrets must not be resubmitted: {op}"
+            );
+        }
+    }
+}
+
+#[test]
+fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts() {
+    let _lock = serial();
+    for (field, newer) in [
+        ("settings_hub_name", "newer"),
+        ("settings_hub_url", "http://127.0.0.1:4291"),
+    ] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        f.send(p, frame);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:hubs");
+        control(&f, p, "open_add_hub");
+        for (id, value) in [
+            ("settings_hub_name", "submitted"),
+            ("settings_hub_url", "local://"),
+        ] {
+            f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
+        }
+        control(&f, p, "submit_add_hub");
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "submit_add_hub")["enabled"],
+            false
+        );
+        assert!(f.frames(p).iter().any(|a| a["op"] == "setup_save_hub"
+            && a["name"] == "submitted"
+            && a["url"] == "local://"));
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":field,"value":newer}),
+        );
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        f.send(
+            p,
+            json!({"op":"settings","ok":true,"source_op":"setup_save_hub","settings":cfg}),
+        );
+        let s = inspect(&f, p);
+        assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+        assert_eq!(
+            node(&s, "settings_items", "submit_add_hub")["enabled"],
+            true
+        );
+        assert_eq!(node(&s, "settings_items", field)["text"], newer);
+    }
+}
+
 fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
     let path = f.dir.join(name);
     f.send(

@@ -1960,6 +1960,131 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         .is_null());
 }
 #[test]
+fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_errors() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (server, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"shared":{"url":format!("http://127.0.0.1:{port}")}},"defaultHub":"shared"}),
+    );
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    host.stop(server);
+    let (status, error) = f.action(json!({"op":"test_hub","hub":"shared"}));
+    assert_eq!(status, 400);
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("NATS_UNAVAILABLE:"));
+    let failed = f.action(json!({"op":"get_snapshot"})).1;
+    for hubs in [&failed["hubs"], &failed["settings"]["hubs"]] {
+        assert_eq!(
+            hubs.as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["name"] == "shared")
+                .unwrap()["error"],
+            error["error"]
+        );
+    }
+    let frames_path = f.home.join("ui-frames");
+    wait(|| {
+        fs::read_to_string(&frames_path)
+            .unwrap_or_default()
+            .contains(error["error"].as_str().unwrap())
+    });
+    let before = fs::read_to_string(&frames_path).unwrap().len();
+    host.spawn(
+        NATIVE,
+        &[
+            "hub",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--data-dir",
+            host.state.join("hub").to_str().unwrap(),
+            "--auth",
+            "none",
+        ],
+        &[],
+    );
+    // No UI or MCP request drives recovery: the daemon's background transport
+    // work must publish a fresh state before we read either projection.
+    wait(|| {
+        fs::read_to_string(&frames_path)
+            .unwrap_or_default()
+            .get(before..)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|frame| {
+                frame["op"] == "state"
+                    && frame["hubs"].as_array().is_some_and(|hubs| {
+                        hubs.iter().any(|h| {
+                            h["name"] == "shared"
+                                && h["status"] == "connected"
+                                && h["error"].is_null()
+                        })
+                    })
+            })
+    });
+    let recovered = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        f.action(json!({"op":"open_settings","hub":"shared"})).0,
+        200
+    );
+    let mut settings = Value::Null;
+    wait(|| {
+        settings = fs::read_to_string(&frames_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["op"] == "settings" && frame["hub"] == "shared")
+            .last()
+            .map(|frame| frame["settings"].clone())
+            .unwrap_or(Value::Null);
+        settings.is_object()
+    });
+    for hubs in [
+        &recovered["hubs"],
+        &recovered["settings"]["hubs"],
+        &settings["hubs"],
+    ] {
+        assert!(hubs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "shared")
+            .unwrap()["error"]
+            .is_null());
+    }
+    let (status, invalid) =
+        f.action(json!({"op":"setup_save_hub","name":"shared","url":"invalid"}));
+    assert_eq!(status, 400);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("INVALID_INPUT:"));
+    // A healthy connection must not hide a rejected configuration edit, even
+    // after another background poll has observed the recovered transport.
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        snapshot["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "shared")
+            .unwrap()["error"],
+        invalid["error"]
+    );
+}
+
+#[test]
 fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
