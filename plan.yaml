@@ -8286,7 +8286,7 @@ phases:
   name: 'V28 Stage 11 (v0.20.3): Light/Dark Appearance Contrast (CitoPalette), Agent-Only
     Menu Bar Counter, Human Node Card Title Normalization, Agent-vs-Human Reply Boundary
     & Explicit Menu Bar Activity Entry (C1–C5)'
-  status: in_progress
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100% with 0 compiler/linker warnings, test_inspect across both appearance:
     "light" (aqua) and appearance: "dark" (darkAqua) reports truncated_labels == [],
@@ -8548,7 +8548,7 @@ phases:
   - id: v28.gate
     name: V28 Independent Terminal Acceptance, C1–C5 Light/Dark Verification & v0.20.3
       Release Alignment Gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent fresh-context `gate-reviewer` validation (`gate.report.v2`\
       \ `PASS`, `POSITIVE_GATE_EVIDENCE`) over Phase `v28` (`C1`–`C5` Light/Dark verification)\
@@ -8593,3 +8593,31 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-10T13:04:21.022664Z'
+    done_at: '2026-11-10T13:14:45.398017+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 5c42bb16ab9410d47868c75187a566151cf76e49 (code commit e59b835a9e8b6dad7562bee0feec537efa63300b;
+      release tag `v0.20.3` at build commit `04d25f002c956e46ec285bc411157f6a85f25b78`;
+      `Tefx/homebrew-tap` commit `d89c1954bacc41f8d4a5859f0972416b631ae00c`)
+
+      - Gate Report (`gate.report.v2`): `/Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-10T13-10-29-444Z-2026-11-10T13-05-15-263Z_01a1c590-0ffe-7318-a8b3-5d7562e798cc.js-d8c9b42bafc4be87.txt`
+      (fresh-context `gate-reviewer` session `2026-11-10T13-05-15-263Z_01a1c590-0ffe-7318-a8b3-5d7562e798cc.jsonl`,
+      `status: PASS`, `review_kind: PHASE_GATE`, `review_mode: FULL`, `target_ref:
+      git:5c42bb16ab9410d47868c75187a566151cf76e49`, 4/4 requirements `PROVEN`, `findings:
+      []`, `warnings: []`).
+
+
+      Verification:
+
+      - Run: `python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v28-gate/binding.json /tmp/cito-v28-gate/report.json` -> `{"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}`
+
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c
+      packaging/homebrew/cito.rb` -> 248 passed, 0 failed, 0 compiler/linker warnings,
+      `Syntax OK`
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§13), docs/ROADMAP.md (Stage 11 v0.20.3), packaging/homebrew/cito.rb,
+      .github/workflows/release.yml'
