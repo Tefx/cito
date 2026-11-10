@@ -377,6 +377,24 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             "Missing real daemon frame: {op}"
         );
     }
+    // Command-specific results and generic failures must retain the UI's identity.
+    for (action, status, _) in &l.results {
+        let result_op = match action["op"].as_str() {
+            Some("send_signal" | "send_reply_from_human") => "composer_result",
+            Some("set_host_hub") if action["port"].is_number() => "settings",
+            _ => continue,
+        };
+        assert!(!action["request_id"].as_str().unwrap().is_empty());
+        assert!(l
+            .frames
+            .iter()
+            .any(|frame| frame["op"] == result_op && frame["request_id"] == action["request_id"]));
+        if *status >= 400 {
+            assert!(l.frames.iter().any(|frame| frame["op"] == "error"
+                && frame["source_op"] == action["op"]
+                && frame["request_id"] == action["request_id"]));
+        }
+    }
     for (name, op) in [("INVALID!", "error"), ("scratch", "settings")] {
         let (action, _, _) = l
             .results
@@ -994,7 +1012,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert!(!node(&s, "settings_items", "host_hub_error").is_null());
         assert_eq!(f.frames(p).len(), before);
     }
-    // An unchanged snapshot must still acknowledge an explicit Apply action.
+    // Only a command acknowledgement may settle Apply, including an unchanged save.
     frame["settings"] = cfg.clone();
     f.send(p, frame.clone());
     for op in ["state", "settings"] {
@@ -1025,6 +1043,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
                 .iter()
                 .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291)
         });
+        let submitted = f.frames(p)[before..]
+            .iter()
+            .find(|v| v["op"] == "set_host_hub")
+            .unwrap()
+            .clone();
+        assert!(!submitted["request_id"].as_str().unwrap().is_empty());
         f.send(
             p,
             if op == "state" {
@@ -1035,8 +1059,17 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         );
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+            "Apply",
+            "An uncorrelated {op} snapshot cannot acknowledge the save"
+        );
+        f.send(
+            p,
+            json!({"op":"settings","request_id":submitted["request_id"],"settings":cfg}),
+        );
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
             "✓ Saved",
-            "An unchanged {op} frame must acknowledge the save"
+            "An unchanged correlated acknowledgement must settle the save"
         );
     }
     f.send(
@@ -1049,15 +1082,34 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .iter()
             .any(|v| v["op"] == "set_host_hub" && v["port"] == 5301)
     });
+    let submitted = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "set_host_hub")
+        .unwrap();
     cfg["host_hub"]["port"] = json!(5301);
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":submitted["request_id"],"settings":cfg}),
+    );
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
         "✓ Saved"
     );
     control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let failed = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "set_host_hub")
+        .unwrap();
     cfg["host_hub"]["error"] = json!("Port already in use");
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":failed["request_id"],"settings":cfg}),
+    );
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "apply_host_hub_port")["text"],
@@ -1067,8 +1119,36 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         node(&s, "settings_items", "host_hub_error")["text"],
         "Port already in use"
     );
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let retry = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "set_host_hub")
+        .unwrap();
+    assert_ne!(retry["request_id"], failed["request_id"]);
+    f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":failed["request_id"],"error":"Late port error"}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":failed["request_id"],"settings":cfg}),
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+        "Apply"
+    );
     cfg["host_hub"]["error"] = Value::Null;
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":retry["request_id"],"settings":cfg}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "apply_host_hub_port")["text"],
+        "✓ Saved",
+        "Late failure must not settle the retry"
+    );
+    assert!(!s.to_string().contains("Late port error"));
     control(&f, p, "edit_hub:local");
     let s = inspect(&f, p);
     assert!(
@@ -1811,9 +1891,16 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         2,
         "The composer result must settle the send and allow a new one"
     );
+    let failed = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap();
+    assert!(!failed["request_id"].as_str().unwrap().is_empty());
     f.send(
         p,
-        json!({"op":"composer_result","ok":false,"error":"Hub unavailable. Retry."}),
+        json!({"op":"composer_result","ok":false,"error":"Hub unavailable. Retry.","request_id":failed["request_id"]}),
     );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
@@ -1825,6 +1912,50 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         node(&s, "directory_items", "composer_error")["text"],
         "Hub unavailable. Retry."
     );
+    // A's trailing generic error can arrive after B has already been submitted.
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let retry = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap();
+    assert_ne!(retry["request_id"], failed["request_id"]);
+    for source_op in ["send_signal", "send_reply_from_human"] {
+        f.send(p, json!({"op":"error","source_op":source_op,"request_id":failed["request_id"],"error":"Late send error"}));
+    }
+    f.send(p, json!({"op":"composer_result","ok":false,"request_id":failed["request_id"],"error":"Late result"}));
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(
+        node(&s, "directory_items", "composer_error")["text"],
+        "Sending…"
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
+            .count(),
+        3,
+        "A's late error must not permit a duplicate of B"
+    );
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":retry["request_id"]}),
+    );
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+    control(&f, p, "msg_dir:personal:one");
+    f.send(p, json!({"op":"test_composer_input","value":"Next draft"}));
+    f.send(p, json!({"op":"error","source_op":"send_signal","request_id":retry["request_id"],"error":"Already settled"}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Next draft"
+    );
+    assert_eq!(node(&s, "directory_items", "composer_error")["text"], "");
     control(&f, p, "composer_cancel");
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "directory_shortcuts")["text"],
@@ -2338,11 +2469,11 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             .cloned()
             .collect::<Vec<_>>(),
         vec![
-            json!({"op":"composer_result","ok":true,"error":null}),
-            json!({"op":"composer_result","ok":true,"error":null}),
-            json!({"op":"composer_result","ok":true,"error":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
             json!({"op":"composer_result","ok":false,"error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
-            json!({"op":"composer_result","ok":true,"error":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
         ]
     );
     assert_eq!(

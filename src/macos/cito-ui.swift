@@ -825,6 +825,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var composerReplySignalId: String?
     var composerErrorLabel: NSTextField?
     var composerPendingText: String?
+    var composerPendingRequestId = ""
     var composerPendingTarget = ""
     var composerPendingHub = ""
     var composerPendingReplySignalId: String? = nil
@@ -849,6 +850,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var hostHubPortError: String?
     var hostHubPortDraft: String?
     var submittedHostHubPort: Int?
+    var submittedHostHubRequestId = ""
     var addHubName = ""
     var addHubUrl = ""
     var submittedAddHubName = ""
@@ -881,7 +883,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func draftKey(_ fieldId: String) -> String { effectiveChannelHub + "|" + fieldId }
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) {
         settings = value
-        if hostHubPortPending && (value.host_hub.port == submittedHostHubPort || value.host_hub.error != nil) {
+        if hostHubPortPending && savedRequest == submittedHostHubRequestId &&
+           (value.host_hub.port == submittedHostHubPort || value.host_hub.error != nil) {
             hostHubPortPending = false
             hostHubPortSaved = value.host_hub.port == submittedHostHubPort && value.host_hub.error == nil
             if hostHubPortSaved { hostHubPortSavedUntil = Date().addingTimeInterval(1.2) }
@@ -1138,6 +1141,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.op == "composer_result" {
             guard composerPendingText != nil else { return }
+            if let requestId = frame.request_id, requestId != composerPendingRequestId { return }
             if frame.ok == true {
                 if composerTarget == composerPendingTarget && composerTargetHub == composerPendingHub && composerReplySignalId == composerPendingReplySignalId && composerInputField?.stringValue == composerPendingText { closeComposer() }
                 else { composerErrorLabel?.stringValue = "Sent. Your newer draft is preserved." }
@@ -1145,6 +1149,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 composerErrorLabel?.stringValue = frame.error ?? "Send failed. Your draft is preserved."
             }
             composerPendingText = nil
+            composerPendingRequestId = ""
             composerPendingTarget = ""
             composerPendingHub = ""
             composerPendingReplySignalId = nil
@@ -1152,6 +1157,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         if frame.op == "error" {
             let sourceOp = frame.source_op ?? ""
+            // A command may emit both its result and a trailing generic error.
+            // Neither can settle a retry or overwrite its feedback.
+            if ["send_signal", "send_reply_from_human"].contains(sourceOp),
+               let requestId = frame.request_id, requestId != composerPendingRequestId { return }
+            if sourceOp == "set_host_hub", let requestId = frame.request_id,
+               requestId != submittedHostHubRequestId { return }
             let isAddHubOp = ["setup_save_hub", "save_hub"].contains(sourceOp) ||
                 (sourceOp.isEmpty && addHubSaving && frame.request_id == nil)
             if isAddHubOp, let requestId = frame.request_id,
@@ -1161,7 +1172,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 (sourceOp.isEmpty && addHubFormOpen)
             let error = frame.error ?? "Unknown daemon error"
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
-            if sourceOp == "set_host_hub" || sourceOp.isEmpty { hostHubPortPending = false }
+            if (sourceOp == "set_host_hub" || sourceOp.isEmpty) &&
+               (frame.request_id == nil || frame.request_id == submittedHostHubRequestId) {
+                hostHubPortPending = false
+                submittedHostHubRequestId = ""
+            }
             if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || sourceOp.isEmpty {
                 hubInvitePending=false; hubInvitePastedUntil = .distantPast
             }
@@ -1170,7 +1185,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 (sourceOp.isEmpty && composerPendingText != nil)
             if isComposerError {
                 composerErrorLabel?.stringValue = error
-                composerPendingText = nil; composerPendingTarget = ""; composerPendingHub = ""; composerPendingReplySignalId = nil
+                composerPendingText = nil; composerPendingRequestId = ""; composerPendingTarget = ""; composerPendingHub = ""; composerPendingReplySignalId = nil
             } else if isAddHubError { addHubError = error }
             else if settingsVisible { settingsBannerError = error }
             else { menuBannerError = error }
@@ -1288,6 +1303,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func emit(_ action: [String: Any]) {
         var outgoing = action
+        if let op = action["op"] as? String, ["send_signal", "send_reply_from_human"].contains(op), composerPendingText != nil {
+            let requestId = UUID().uuidString
+            outgoing["request_id"] = requestId
+            composerPendingRequestId = requestId
+        }
+        if action["op"] as? String == "set_host_hub", hostHubPortPending {
+            let requestId = UUID().uuidString
+            outgoing["request_id"] = requestId
+            submittedHostHubRequestId = requestId
+        }
         if let op = action["op"] as? String, ["setup_save_hub", "save_hub"].contains(op), addHubSaving {
             let requestId = UUID().uuidString
             outgoing["request_id"] = requestId

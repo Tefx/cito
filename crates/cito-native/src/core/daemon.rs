@@ -2113,6 +2113,7 @@ impl DaemonService {
                 let mut send_args = action.clone();
                 if let Some(args) = send_args.as_object_mut() {
                     args.remove("op");
+                    args.remove("request_id");
                     if op == "send_reply_from_human" {
                         args.insert(
                             "to".into(),
@@ -2144,8 +2145,8 @@ impl DaemonService {
                 let result = validate_tool_input("cito_send", &send_args)
                     .and_then(|()| self.send(&hub, &send_args, &meta));
                 self.emit(match &result {
-                    Ok(_) => json!({"op":"composer_result","ok":true,"error":null}),
-                    Err(e) => json!({"op":"composer_result","ok":false,"error":e}),
+                    Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
+                    Err(e) => json!({"op":"composer_result","ok":false,"error":e,"request_id":action["request_id"]}),
                 });
                 return result.map(|result| {
                     if op == "send_reply_from_human" {
@@ -2359,14 +2360,14 @@ impl DaemonService {
                 self.host_server = server;
                 if let Err(error) = result {
                     self.last_host_hub_error = Some(error.clone());
-                    self.emit(json!({"op":"settings","settings":self.settings()}));
+                    self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
                     rollback.map_err(|rollback| {
                         format!("{error}; failed to restore host hub listener: {rollback}")
                     })?;
                     return Err(error);
                 }
                 self.last_host_hub_error = None;
-                self.emit(json!({"op":"settings","settings":self.settings()}));
+                self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
             }
             "set_launch_at_login" => {
                 set_launch_at_login(

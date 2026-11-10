@@ -993,14 +993,18 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             f.tool("cito_send", json!({"hub":"work","to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")}), human())
         } else {
             let action = if op == "send_signal" {
-                json!({"op":op,"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
+                json!({"op":op,"request_id":format!("{op}-{id}"),"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
             } else {
-                json!({"op":op,"to_listener_id":target["listener_id"],"text":"Approved","in_reply_to":null,"signal_id":format!("work:{id}")})
+                json!({"op":op,"request_id":format!("{op}-{id}"),"to_listener_id":target["listener_id"],"text":"Approved","in_reply_to":null,"signal_id":format!("work:{id}")})
             };
             let (status, result) = f.action(action);
             assert_eq!(status, 200, "{result}");
             wait(|| ui_results().len() == results_before + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], true);
+            assert_eq!(
+                ui_results().last().unwrap()["request_id"],
+                format!("{op}-{id}")
+            );
             result
         };
         if op == "send_reply_from_human" {
@@ -1175,10 +1179,12 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             ("Wrong hub", format!("elsewhere:{failed}")),
         ] {
             let count = ui_results().len();
-            let (status, result) = f.action(json!({"op":op,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
+            let request_id = format!("{op}-failure-{count}");
+            let (status, result) = f.action(json!({"op":op,"request_id":request_id,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
             assert_eq!(status, 400, "{result}");
             wait(|| ui_results().len() == count + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], false);
+            assert_eq!(ui_results().last().unwrap()["request_id"], request_id);
             assert_unread(&failed);
         }
     }
