@@ -8624,7 +8624,7 @@ phases:
 - id: v29
   name: 'V29 Stage 12 (v0.21.0): Holistic UI/UX & Cross-Layer Pathway Remediation
     (D01–D18)'
-  status: pending
+  status: in_progress
   gate: 'All D01–D18 requirements in docs/DESIGN.md §14 pass; all 6 inspectMenu()
     mechanical invariants equal [] across all 4 surfaces (menu, directory, settings,
     banner) in Light and Dark appearances; pathway-auditor, structural-auditor, and
@@ -8643,7 +8643,7 @@ phases:
   - id: v29.impl
     name: V29 D01–D18 Holistic UI/UX & Cross-Layer Pathway Implementation, 6-Invariant
       Oracle Upgrade, Light/Dark & Banner Snapshots & v0.21.0 Alignment
-    status: pending
+    status: claimed
     description: 'Implement all binding requirements in docs/DESIGN.md §14 (Principles
       1–5, D01–D18): (1) CitoPresentation domain-to-UI projection & machine error
       prefix stripping (D01–D05, F02, F10, F11); (2) Unified readable address contract
@@ -8683,6 +8683,8 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-10T19:51:48.562604Z'
   - id: v29.hygiene
     name: 'V29 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       4-Surface Multimodal Review & v0.21.0 Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
