@@ -584,9 +584,26 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             node(&inspect(&f, p), "settings_items", "submit_add_hub")["enabled"],
             false
         );
-        assert!(f.frames(p).iter().any(|a| a["op"] == "setup_save_hub"
-            && a["name"] == "submitted"
-            && a["url"] == "local://"));
+        let submitted = f
+            .frames(p)
+            .into_iter()
+            .find(|a| a["op"] == "setup_save_hub")
+            .unwrap();
+        assert_eq!(submitted["name"], "submitted");
+        assert_eq!(submitted["url"], "local://");
+        assert!(!submitted["request_id"].as_str().unwrap().is_empty());
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":null,"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(
+            !node(&s, "settings_items", "add_hub_form").is_null(),
+            "An untagged acknowledgement must not close the active submission"
+        );
+        assert_eq!(
+            node(&s, "settings_items", "submit_add_hub")["enabled"],
+            false,
+            "An untagged acknowledgement must not settle the active submission"
+        );
         if field.starts_with("settings_hub_auth:") {
             control(&f, p, field);
         } else {
@@ -595,11 +612,7 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
                 json!({"op":"test_settings_input","id":field,"value":newer}),
             );
         }
-        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
-        f.send(
-            p,
-            json!({"op":"settings","ok":true,"source_op":"setup_save_hub","settings":cfg}),
-        );
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":submitted["request_id"],"settings":cfg}));
         let s = inspect(&f, p);
         assert!(!node(&s, "settings_items", "add_hub_form").is_null());
         assert_eq!(

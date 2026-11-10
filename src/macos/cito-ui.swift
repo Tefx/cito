@@ -888,7 +888,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if hostHubPortSaved && Int(hostHubPortDraft ?? "") == submittedHostHubPort { hostHubPortDraft = nil }
         }
         if addHubSaving && confirmHubSave && !submittedAddHubRequestId.isEmpty &&
-           (savedRequest == nil || savedRequest == submittedAddHubRequestId),
+           savedRequest == submittedAddHubRequestId,
            let saved = value.hubs.first(where: { $0.name == submittedAddHubName && $0.url == submittedAddHubUrl }) {
             addHubSaving = false
             addHubError = saved.error
