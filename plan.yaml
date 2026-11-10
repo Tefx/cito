@@ -7765,7 +7765,7 @@ phases:
   name: 'V26 Stage 10 (v0.20.2): Root-Cause Equivalence-Class Closure (R1–R5), True
     Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop Error
     Surfacing, Bridge Readiness & Daemon<->UI Closed-Loop Verification'
-  status: in_progress
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100%, test_inspect reports truncated_labels == [], overlapping_siblings ==
     [], and clipped_views == [] across all surfaces/tabs/forms, grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
@@ -8000,7 +8000,7 @@ phases:
   - id: v26.gate
     name: V26 Stage 10 (v0.20.2) Independent Terminal Acceptance, R1–R5 Root-Cause
       Closure & Live Distribution Gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v26` (`v0.20.2`) acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh-context `gate-reviewer` session.\n- **Boundary:**\
@@ -8043,3 +8043,37 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-10T04:45:53.573119Z'
+    done_at: '2026-11-10T04:54:11.584806+00:00'
+    evidence: "Artifact:\n- Commit: e15a578752f4e2cd2c5601b253bc829861e8ab7f (code\
+      \ commit `9b21537ec097146e60ae1083d044fc0c22b46127`, annotated tag `v0.20.2`\
+      \ at release build commit `3f11be9134a07242bc4fdf50bb967be6a9355740`)\n- Independent\
+      \ Gate Reviewer: `gate-reviewer` (session `/Users/tefx/.pi/larva/child-sessions/2026-11-10T04-47-03-861Z_01a1c3c7-f4b4-7289-99d6-6b353b78c441.jsonl`)\n\
+      - Validator Result: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v26-gate/binding.json /tmp/cito-v26-gate/report.json`\
+      \ -> `{\"valid\":true,\"binding_checked\":true,\"kind\":\"gate\",\"schema_version\"\
+      :\"gate.report.v2\",\"evidence_disposition\":\"POSITIVE_GATE_EVIDENCE\",\"errors\"\
+      :[]}`\n- Requirements Proven (`4/4 PROVEN`, `0` findings):\n  1. `REQ-V26-1-CARGO-WORKSPACE-AND-R1-R5-PASS`:\
+      \ `PROVEN` (`cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` passed 100% locally and on `macos-15` in GitHub\
+      \ Actions run `42756302664` with 230 tests passed, 0 failed, 0 compiler/linker\
+      \ warnings, `Syntax OK`, `truncated_labels == []`, `overlapping_siblings ==\
+      \ []`, `clipped_views == []`, and clean host state).\n  2. `REQ-V26-2-ZERO-HARDCODING-AND-LANGUAGE-POLICY`:\
+      \ `PROVEN` (zero hardcoded agent/channel identifiers in `crates/cito-native/src/core/`\
+      \ and `src/macos/`, English-only UI/docs/comments, zero company-specific names).\n\
+      \  3. `REQ-V26-3-MULTIMODAL-VISUAL-AND-HYGIENE-CONVERGENCE`: `PROVEN` (all 25\
+      \ rendered 2x Retina PNG snapshots in `/tmp/cito-v26-snapshots/` visually inspected\
+      \ and verified clean by `uiux-auditor` and `gate-reviewer`; Round 10 `uiux-auditor`,\
+      \ `structural-auditor`, and `pathway-auditor` all returned `Completeness: CLEAN`\
+      \ and `Simplicity: ZERO_NEW_ISSUES`).\n  4. `REQ-V26-4-LIVE-DISTRIBUTION-V0-20-2`:\
+      \ `PROVEN` (`https://tefx.github.io/cito/` HTTP 200 via run `42757629722`; GitHub\
+      \ Release `v0.20.2` via `macos-15` run `42756302664` with `Cito-macos-arm64.zip`\
+      \ SHA-256 `c015a21e73954ef5cf80a6f1354bb0e176cd02840e5335a5c365cb6e3975bd2c`\
+      \ synchronized in `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` `Formula/cito.rb`\
+      \ & `Casks/cito.rb` at commit `ae0530f39d08fb4c66ca198b424acf93b191f229`).\n\
+      \nVerification:\n- Run: `python3 ~/.pi/agent/scripts/review_report_validator.py\
+      \ --kind gate --binding /tmp/cito-v26-gate/binding.json /tmp/cito-v26-gate/report.json`\
+      \ -> `valid: true, binding_checked: true, evidence_disposition: POSITIVE_GATE_EVIDENCE`\n\
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c\
+      \ packaging/homebrew/cito.rb` -> 230 passed, 0 failed, 0 warnings, `Syntax OK`\n\
+      \nSpec link:\n- docs/DESIGN.md (§12, V26 Stage 10 v0.20.2 R1–R5)\n- docs/ROADMAP.md\n\
+      - .github/workflows/release.yml, packaging/homebrew/cito.rb"
