@@ -8077,3 +8077,134 @@ phases:
       \ packaging/homebrew/cito.rb` -> 230 passed, 0 failed, 0 warnings, `Syntax OK`\n\
       \nSpec link:\n- docs/DESIGN.md (§12, V26 Stage 10 v0.20.2 R1–R5)\n- docs/ROADMAP.md\n\
       - .github/workflows/release.yml, packaging/homebrew/cito.rb"
+- id: v27
+  name: V27 Full-Scope 2D Contract-and-Simplicity Iterative Convergence Audit, Mechanism-Level
+    Consolidation & Release Alignment
+  status: pending
+  gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
+    pass 100% with 0 compiler/linker warnings, test_inspect reports truncated_labels
+    == [], overlapping_siblings == [], and clipped_views == [], grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+    crates/cito-native/src/core/ src/macos/ exits with 0 matches, [REQUIRES_SKILL:
+    contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE] converges to Completeness:
+    CLEAN, Simplicity: ZERO_NEW_ISSUES, and Uninspected Gaps: NONE across pathway-auditor,
+    structural-auditor, and uiux-auditor, and any resulting code changes are published
+    and synchronized to GitHub Releases and Tefx/homebrew-tap.'
+  context: 'Execute a complete, partitioned 1..EOF 2D contract-and-simplicity ([REQUIRES_SKILL:
+    contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]) audit and repair
+    loop across the entire Cito design specification (docs/DESIGN.md, docs/ROADMAP.md)
+    and implementation (crates/cito-native/src/**, plugins/**, src/macos/cito-ui.swift,
+    crates/cito-native/tests/**, site/**): partition the 35,083-line scope into collectively
+    exhaustive 1..EOF slices across pathway-auditor (vertical pathways P_1..P_m),
+    structural-auditor (horizontal peer families & state representations H_1..H_n),
+    and uiux-auditor (design spec, AppKit UI, multimodal Retina PNG snapshots, and
+    website surfaces), synthesize a mechanism-lifted Frozen Finding Ledger, close
+    all admitted [CONTRACT / WIRE] and [SIMPLICITY / TRIM] mechanisms in one cohesive
+    pass per round via rust-senior, and run Semantic-Impact Delta Re-Reviews until
+    all auditors return Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES with Uninspected
+    Gaps: NONE.'
+  depends_on:
+  - v26
+  steps:
+  - id: v27.hygiene
+    name: 'Full-Scope 1..EOF 2D Contract-and-Simplicity Iterative Convergence Audit,
+      Mechanism-Level Consolidation & Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
+      [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** `[REQUIRES_SKILL: contract-and-simplicity]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`
+      Execute the complete, partitioned `1..EOF` 2D contract-and-simplicity audit
+      and mechanism-level consolidation loop across `docs/DESIGN.md`, `docs/ROADMAP.md`,
+      `crates/cito-native/src/**`, `plugins/**`, `src/macos/cito-ui.swift`, `crates/cito-native/tests/**`,
+      and `site/**`: synthesize the mechanism-lifted Frozen Finding Ledger across
+      `pathway-auditor`, `structural-auditor`, and `uiux-auditor` (including rendered
+      2x Retina PNG snapshots), apply cohesive Two-Phase (`Phase A: WIRE / FIX / REWRITE_TEST`,
+      `Phase B: DELETE / INLINE / CONSOLIDATE / DECOUPLE / TIGHTEN / PRUNE_TEST`)
+      repairs per round, run Semantic-Impact Delta Re-Reviews until all auditors return
+      `Completeness: CLEAN`, `Simplicity: ZERO_NEW_ISSUES`, and `Uninspected Gaps:
+      NONE`, and publish/synchronize any resulting code or version changes to GitHub
+      Releases (`Tefx/cito`), GitHub Pages (`https://tefx.github.io/cito/`), and `Tefx/homebrew-tap`
+      (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Boundary:** Owner `rust-senior`; repository changes in `/Users/tefx/Projects/cito`
+      plus authorized distribution synchronization on `Tefx/cito` and `Tefx/homebrew-tap`
+      when code changes occur after full `1..EOF` audit convergence and `cargo test
+      --workspace` pass.
+
+      - **Admit:** Completed Phase `v26`, collectively exhaustive `1..EOF` slice audits
+      across `pathway-auditor`, `structural-auditor`, and `uiux-auditor` converging
+      to `Completeness: CLEAN`, `Simplicity: ZERO_NEW_ISSUES`, and `Uninspected Gaps:
+      NONE`, `test_inspect` reporting `truncated_labels == []`, `overlapping_siblings
+      == []`, and `clipped_views == []`, zero matches on `grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/core/ src/macos/`, `cargo test --workspace && cargo build
+      --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exiting `0` with `0`
+      compiler/linker warnings, and verified release/tap synchronization if repository
+      code changed.
+
+      - **Recovery:** If any audit slice, delta re-review, test, geometry invariant,
+      or release synchronization check reports actionable findings, close the shared
+      failure mechanism across its affected peer/branch family in place, re-render
+      affected PNG snapshots, re-run checks, and repeat Semantic-Impact Delta Re-Reviews
+      until `ZERO_NEW_ISSUES`.'
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/lib.rs
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - site/index.html
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    agent: rust-senior
+  - id: v27.gate
+    name: V27 Independent Terminal Acceptance, Full-Scope 2D Contract-and-Simplicity
+      Convergence & Release Alignment Gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
+      \n- **Deliver:** Independent terminal Phase `v27` acceptance decision (`PASS`\
+      \ or `FAIL`) issued by a fresh-context `gate-reviewer` session.\n- **Boundary:**\
+      \ Owner `gate-reviewer`; strictly read-only (`repo_change_policy: no_repo_change`)\
+      \ over the immutable integrated Git HEAD in `/Users/tefx/Projects/cito` and\
+      \ live public endpoints.\n- **Admit:**\n  - Included phase and terminal outcomes:\
+      \ Phase `v27` (`v27.hygiene`) bound to the immutable integrated Git HEAD in\
+      \ `/Users/tefx/Projects/cito`.\n  - Consumed evidence and checks:\n    1. `cargo\
+      \ test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb`\
+      \ exits `0` with 100% pass rate and `0` compiler/linker warnings, and `test_inspect`\
+      \ reports `truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views\
+      \ == []` across all surfaces, tabs, and forms.\n    2. Zero hardcoded agent/channel\
+      \ names or forbidden strings: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` exits with `0` matches; `[\\p{Script=Han}]`\
+      \ and `\\b(rda|casdoor|rcatwin|keppel|mingchen)\\b` return `0` matches across\
+      \ repository files (excluding the policy rule line in `docs/DESIGN.md`).\n \
+      \   3. Full-Scope `1..EOF` 2D `contract-and-simplicity` (`[REQUIRES_SKILL: contract-and-simplicity]`\
+      \ `[GATE_MODE: ITERATIVE_CONVERGENCE]`) convergence: `pathway-auditor`, `structural-auditor`,\
+      \ and `uiux-auditor` reports verify closure of all admitted findings across\
+      \ the complete 35,083-line scope with `Completeness: CLEAN`, `Simplicity: ZERO_NEW_ISSUES`,\
+      \ and `Uninspected Gaps: NONE`.\n    4. Live distribution alignment: if `v27.hygiene`\
+      \ modified production code or release artifacts, GitHub Releases (`Tefx/cito`),\
+      \ GitHub Pages (`https://tefx.github.io/cito/`), `packaging/homebrew/cito.rb`,\
+      \ and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`) are synchronized\
+      \ to the latest release tag and SHA-256.\n- **Recovery:** If any acceptance\
+      \ check fails, record concrete counterexamples and route a cohesive writable\
+      \ repair to `rust-senior` before re-running this gate in Delta mode."
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/lib.rs
+    - src/macos/cito-ui.swift
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v27.hygiene
+    agent: gate-reviewer
