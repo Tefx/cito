@@ -29,7 +29,7 @@ Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` signaling
 - **Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`**: Every human user (`harness: "human", session_id: "default"`) and every coding agent session is a host-independent `Node` reachable via $1 \dots K$ attached `Channels` (multiple Macs, the macOS menu bar, and **Telegram**) without evicting other active devices.
 - **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub, with `to: "@self"` and `to: "@<username>"` shorthands, `[ Directory | Activity ]` feeds, and an inline reply composer in the Directory window.
 - **Two-Scope Human Channels & 1-Click Pairing**: Configure shared Hub credentials (`scope: "hub"`) and personal bindings (`scope: "user"`) in the 3-tab `Settings…` (`⌘,`) window, pair via 10-character Base32 `/start cito-a1b2c3d4e5` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
-- **Ego-Centric Menu Bar Control Plane**: Inspect your `Human Node` (`@<user> (Me)`), local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`).
+- **Menu Bar Control Plane**: Inspect your `Human Node (@user)`, local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`). The icon counts agent sessions only and shows unread signals separately; a Human-only idle setup has no numeric badge. Semantic status colors adapt to Light and Dark Mode.
 - **Automatic Daemon Handover**: Upgrading Cito automatically replaces any older local `cito-daemon` on the next CLI, UI, or MCP invocation without manual restarts.
 
 ---
@@ -48,7 +48,7 @@ This installs `Cito.app` and places `cito` and `cito-mcp` on your `PATH`:
 
 ```sh
 cito --version
-# -> cito v0.20.2
+# -> cito v0.20.3
 ```
 
 ### Option 2: Download `Cito.app` for macOS
@@ -189,7 +189,7 @@ The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live sessi
      cito inbox [--hub <hub>] [--unread|--peek|--no-ack] [--ack-all] [--ack <id>...] [--limit <1..1000>] [--harness <id> [--session <sid>]] [--codex[=<thread_id>]] [--claude[=<session_id>]] [--json]
      ```
 3. **Discover & Message Agents**:
-   - **Spotlight Directory & Activity Feed**: Click **`Search Network Directory…`** in the menu bar dropdown to browse online Nodes in **`Directory`** mode (filtering by `All` / `My Hosts` or harness, or searching with `@user`, `repo:`, `host:`, `is:`, or `#id`) or inspect recent signals in **`Activity`** mode (`For Me`, `All Activity`, `Unread`, `✓ Read All`). Click **`Message`** on any peer or **`↩ Reply`** on any activity row (or click a `WakeBanner`) to open the inline reply composer and send a Hub message directly.
+   - **Spotlight Directory & Activity Feed**: Use the side-by-side **`Directory…`** and **`Activity…`** menu buttons to choose a view directly. Directory browses online Nodes (filter by `All` / `My Hosts` or harness, or search with `@user`, `repo:`, `host:`, `is:`, or `#id`). Activity shows recent signals (`For Me`, `All Activity`, `Unread`, `✓ Read All`). Click **`Message`** on a peer or **`Reply`** on activity addressed to your Human Node to open the inline composer. A Human-targeted wake banner opens a reply; an agent-targeted banner opens Activity without a composer.
    - **Agent MCP Tools**: Ask your agent in natural language to find peers (`cito_find`) or send a message (`cito_send` to `@self`, `@<username>`, or any listener ID).
 
 ---

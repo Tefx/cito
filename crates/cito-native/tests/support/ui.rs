@@ -810,10 +810,13 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
 }
 
 fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
+    render_png_as(f, p, surface, name, None);
+}
+fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: Option<&str>) {
     let path = f.dir.join(name);
     f.send(
         p,
-        json!({"op":"test_render_png","surface":surface,"path":path}),
+        json!({"op":"test_render_png","surface":surface,"path":path,"appearance":appearance}),
     );
     wait(|| {
         f.output(p, true)
@@ -842,6 +845,245 @@ fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
     if let Some(dir) = std::env::var_os("CITO_TEST_SNAPSHOT_DIR") {
         fs::create_dir_all(&dir).unwrap();
         fs::copy(&path, std::path::Path::new(&dir).join(name)).unwrap();
+    }
+}
+
+#[test]
+fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let mut l = ClosedLoop::new(&f);
+    let s = l.until(|s| {
+        nodes(&s["items"])
+            .iter()
+            .any(|n| n["text"] == "Human Node (@alice)")
+    });
+    assert_eq!(s["count"], 0);
+    assert_eq!(s["button_title"], "");
+    assert_eq!(
+        node(&s, "items", "header_subtitle")["text"],
+        "Ready · Human listening"
+    );
+    let id = f.rows("SELECT public_id FROM local_listeners WHERE harness='human'")[0]["public_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row_id = format!("session:{id}");
+    assert_eq!(node(&s, "items", &row_id)["height"], 64);
+    l.control(&format!("stop:{id}"));
+    l.until(|s| !node(s, "items", "listen_human").is_null());
+    l.control("listen_human");
+    let s = l.until(|s| !node(s, "items", &row_id).is_null());
+    assert_eq!(node(&s, "items", &row_id)["height"], 64);
+    assert!(nodes(&s["items"])
+        .iter()
+        .any(|n| n["text"] == "Human Node (@alice)"));
+    assert_eq!(
+        f.rows("SELECT title FROM local_listeners WHERE harness='human'")[0]["title"],
+        "Human"
+    );
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, l.ui, Some(appearance));
+        assert_eq!(s["low_contrast_labels"], json!([]), "{appearance}");
+        render_png_as(
+            &f,
+            l.ui,
+            "menu",
+            &format!("c2_human_reenabled_{appearance}.png"),
+            Some(appearance),
+        );
+    }
+}
+
+#[test]
+fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appearances() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut human = listener();
+    human["harness"] = json!("human");
+    human["session_id"] = json!("default");
+    human["title"] = json!(" ");
+    human["about"] = json!("Human receiver");
+    human["scoped_id"] = json!("personal:human");
+    human["user"] = json!("bob");
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["listeners"] = json!([]);
+    f.send(p, frame.clone());
+    let idle = inspect(&f, p);
+    assert_eq!(idle["button_title"], "");
+    assert_eq!(
+        node(&idle, "items", "header_subtitle")["text"],
+        "Ready · Idle"
+    );
+    frame["listeners"] = json!([human.clone()]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(s["count"], 0);
+    assert_eq!(s["button_title"], "");
+    assert_eq!(node(&s, "items", "session:personal:human")["height"], 64);
+    assert!(nodes(&s["items"])
+        .iter()
+        .any(|n| n["text"] == "Human Node (@bob)"));
+    frame["unread_count"] = json!(3);
+    f.send(p, frame.clone());
+    assert_eq!(inspect(&f, p)["button_title"], " 🔔3");
+    let mut second = listener();
+    second["hub"] = json!("work");
+    second["scoped_id"] = json!("work:copy");
+    frame["listeners"] = json!([human, listener(), second]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(s["count"], 1);
+    assert_eq!(s["button_title"], " 1 🔔3");
+    frame["unread_count"] = json!(0);
+    f.send(p, frame.clone());
+    assert_eq!(inspect(&f, p)["button_title"], " 1");
+    assert_eq!(
+        node(&inspect(&f, p), "items", "activity_unread_badge")["text"],
+        "History"
+    );
+    frame["unread_count"] = json!(3);
+    frame["available"] = json!([{"harness":"fixture","session_id":"pending","title":"Pending bridge","cwd":"/tmp","needs_reload":true}]);
+    f.send(p, frame);
+    control(&f, p, "open_directory");
+    assert_eq!(
+        inspect(&f, p)["directory_mode"],
+        "directory",
+        "Unread signals cannot hijack Directory entry"
+    );
+    f.send(
+        p,
+        json!({"op":"directory","peers":[peer("one")],"online_count":2}),
+    );
+    for appearance in ["light", "dark"] {
+        control(&f, p, "copy:personal:repo-abcdefghijkl");
+        let s = inspect_as(&f, p, Some(appearance));
+        assert_eq!(
+            s["low_contrast_labels"],
+            json!([]),
+            "menu/directory {appearance}"
+        );
+        let copied = node(&s, "items", "copy:personal:repo-abcdefghijkl");
+        let expected_red = if appearance == "light" { 0.04 } else { 0.28 };
+        assert!((copied["foreground"][0].as_f64().unwrap() - expected_red).abs() < 0.001);
+        let dir = node(&s, "items", "open_directory");
+        let act = node(&s, "items", "open_activity");
+        assert_eq!(
+            (
+                dir["x"].clone(),
+                dir["width"].clone(),
+                dir["height"].clone()
+            ),
+            (json!(12), json!(174), json!(28))
+        );
+        assert_eq!(
+            (act["x"].clone(), act["width"].clone()),
+            (json!(194), json!(174))
+        );
+        assert_eq!(dir["text"], "Directory…");
+        assert_eq!(act["text"], "Activity…");
+        assert_eq!(act["symbol"], "bell.badge.fill");
+        render_png_as(
+            &f,
+            p,
+            "menu",
+            &format!("c3_menu_{appearance}.png"),
+            Some(appearance),
+        );
+        render_png_as(
+            &f,
+            p,
+            "directory",
+            &format!("c3_directory_{appearance}.png"),
+            Some(appearance),
+        );
+        control(&f, p, "open_settings");
+        for tab in ["apps", "channels", "hubs"] {
+            control(&f, p, &format!("settings_tab:{tab}"));
+            let s = inspect_as(&f, p, Some(appearance));
+            assert_eq!(
+                s["low_contrast_labels"],
+                json!([]),
+                "settings/{tab} {appearance}"
+            );
+            render_png_as(
+                &f,
+                p,
+                "settings",
+                &format!("c3_settings_{tab}_{appearance}.png"),
+                Some(appearance),
+            );
+        }
+        f.send(
+            p,
+            json!({"op":"error","source_op":"hub_action","error":"Connection unavailable"}),
+        );
+        let s = inspect_as(&f, p, Some(appearance));
+        assert_eq!(s["low_contrast_labels"], json!([]), "error {appearance}");
+        control(&f, p, "dismiss_menu_error");
+    }
+    control(&f, p, "open_activity");
+    assert_eq!(inspect(&f, p)["directory_mode"], "activity");
+    assert!(f
+        .frames(p)
+        .iter()
+        .any(|v| v["op"] == "open_directory" && v["mode"] == "activity"));
+    assert!(f
+        .frames(p)
+        .iter()
+        .any(|v| v["op"] == "open_directory" && v["mode"] == "directory"));
+}
+
+#[test]
+fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = f.spawn(
+        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
+        &[],
+        &[("CITO_BANNER_DISMISS_MS", "10000")],
+    );
+    let mut frame = state();
+    frame["activity"] = json!([{"hub":"personal","signal_id":"personal:sig_1","listener_id":"c_other","from_user":"alice","from_host_name":"desktop","from_harness":"fixture","from_title":"Sender","from_scoped_id":"personal:sender","target_harness":"fixture","target_title":"Agent","target_scoped_id":"personal:other","message":"Done","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
+    f.send(p, frame);
+    for harness in ["human", "fixture", "other-agent"] {
+        let mut wake = banner();
+        wake["payload"]["target_harness"] = json!(harness);
+        f.send(p, wake);
+        f.send(p, json!({"op":"test_click"}));
+        let s = inspect(&f, p);
+        assert_eq!(s["directory_mode"], "activity");
+        if harness == "human" {
+            assert_eq!(s["wake_action_text"], "Click to reply in Cito ↩");
+            assert_eq!(s["composer_open"], true);
+            assert_eq!(s["composer_target"], "personal:sender-abcdefgh2345");
+        } else {
+            assert_eq!(s["wake_action_text"], "Click to view in Activity ↗");
+            assert_eq!(s["composer_open"], false);
+            assert_eq!(s["composer_target"], "");
+            assert_eq!(s["directory_selected_id"], "personal:sig_1");
+            assert_eq!(
+                node(&s, "directory_items", "directory_shortcuts")["text"],
+                "⎋ Close"
+            );
+            f.send(p, json!({"op":"test_directory_key","key":"return"}));
+            assert_eq!(inspect(&f, p)["composer_open"], false);
+        }
+    }
+    for appearance in ["light", "dark"] {
+        assert_eq!(
+            inspect_as(&f, p, Some(appearance))["low_contrast_labels"],
+            json!([])
+        );
+        render_png_as(
+            &f,
+            p,
+            "directory",
+            &format!("c4_activity_agent_{appearance}.png"),
+            Some(appearance),
+        );
     }
 }
 
@@ -1914,7 +2156,7 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     frame["unread_count"] = json!(1);
     f.send(p, frame);
     f.send(p,json!({"op":"directory","peers":[peer("one")],"matched_count":1,"online_count":2,"activity":activity,"unread_count":1}));
-    control(&f, p, "open_directory");
+    control(&f, p, "open_activity");
     let s = inspect(&f, p);
     assert_eq!(s["directory_mode"], "activity");
     assert_eq!(
@@ -1923,7 +2165,12 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     );
     control(&f, p, "act_filter:all");
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
-    assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:sig_read");
+    let s = inspect(&f, p);
+    assert_eq!(s["directory_selected_id"], "personal:sig_read");
+    assert!(node(&s, "directory_items", "reply_activity:personal:sig_read")["hidden"] == true);
+    control(&f, p, "reply_activity:personal:sig_read");
+    f.send(p, json!({"op":"test_directory_key","key":"return"}));
+    assert_eq!(inspect(&f, p)["composer_open"], false);
     f.send(p, json!({"op":"test_directory_key","key":"up"}));
     assert_eq!(
         inspect(&f, p)["directory_selected_id"],
@@ -2019,12 +2266,15 @@ fn start(f: &Fixture) -> usize {
     )
 }
 fn inspect(f: &Fixture, p: usize) -> Value {
+    inspect_as(f, p, None)
+}
+fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
     let count = f
         .output(p, true)
         .lines()
         .filter(|l| l.starts_with("cito-ui: menu "))
         .count();
-    f.send(p, json!({"op":"test_inspect"}));
+    f.send(p, json!({"op":"test_inspect_menu","appearance":appearance}));
     wait(|| {
         f.output(p, true)
             .lines()

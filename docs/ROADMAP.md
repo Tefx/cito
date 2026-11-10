@@ -1,6 +1,6 @@
 # Cito Product & Architecture Roadmap
 
-Cito's evolution from `v0.11.3` through `v0.20.2` is organized into **eleven `0.x` stages (`Stage 0` through `Stage 10`)**:
+Cito's evolution from `v0.11.3` through `v0.20.3` is organized into **twelve `0.x` stages (`Stage 0` through `Stage 11`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
@@ -13,9 +13,22 @@ Cito's evolution from `v0.11.3` through `v0.20.2` is organized into **eleven `0.
 - **Stage 9 (`v0.20.1` — Completed / Phase `v25`)**: Theory-Grounded UI/UX Redesign, Two-Stratum Human Channel Architecture (`Hub Gateway` vs. `Personal Human Node`), Configured-Only Session Discovery, Live `Pi` Process Discovery & Multimodal Visual E2E Verification (`U1`–`U11`)
 - **Stage 10 (`v0.20.2` — Phase `v26`)**: Root-Cause Equivalence-Class Closure (`R1`–`R5`), True Progressive Disclosure, Full Mechanical Geometry Invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`), Closed-Loop Error Surfacing, Bridge Readiness & `Daemon<->UI` Closed-Loop Verification
 
+- **Stage 11 (`v0.20.3` — Phase `v28`)**: Light/Dark semantic contrast, agent-only menu counter, normalized Human Node cards, Human-only Activity replies, and explicit Directory / Activity menu entries (`C1`–`C5`).
+
 ---
 
-## Stage 10 (`v0.20.2` — Phase `v26`)
+## Stage 11 (`v0.20.3` — Phase `v28`)
+
+[DESIGN §13](DESIGN.md#13-v28--stage-11-v0203-lightdark-appearance-contrast-citopalette-agent-only-menu-bar-counter-human-node-card-title-normalization-agent-vs-human-reply-boundary--explicit-menu-bar-activity-entry-c1c5) defines the binding `C1`–`C5` contract:
+- **C1**: Count distinct agent sessions only; show Human readiness separately and show unread signals independently of session count.
+- **C2**: Normalize blank Human enrollment titles in daemon and shared registration, preserving compact `64pt` Human cards through Disable → Enable and retaining custom titles/descriptions.
+- **C3**: Resolve semantic text, icons, and chip colors dynamically for `aqua` / `darkAqua`; enforce WCAG AA contrast using the real AppKit inspection tree and capture 2x Retina PNGs under deterministic Light/Dark offscreen backdrops.
+- **C4**: Route Human-targeted wake clicks to reply; route agent-targeted wake clicks to Activity without a composer. Hide and guard replies on activity that is not For Me.
+- **C5**: Place `Directory…` and `Activity…` side by side in the menu and always open the explicitly selected mode.
+
+Release metadata, plugin manifests, the Homebrew formula, README, and website align at `0.20.3`. Validation includes real daemon/UI re-enrollment, both appearances, existing geometry invariants, workspace tests, and a warning-free release build. Product version, phase ID, and SQLite schema remain independent.
+
+## Stage 10 (`v0.20.2` — Completed / Phase `v26`)
 
 Stage 10 closes the five root-cause equivalence classes (`R1`–`R5`) specified in [DESIGN §12](DESIGN.md#12-stage-10-v0202--phase-v26-root-cause-equivalence-class-closure-r1r5-true-progressive-disclosure-full-mechanical-geometry-invariants-closed-loop-error-surfacing-bridge-readiness--daemon-ui-closed-loop-verification):
 - **`R1` — True Two-Stratum Progressive Disclosure, Independent Scope Saving & Prerequisite Gating**: Scope-filtered `collectValues(scopeFilter: "hub" | "user")`, dedicated `"save_hub_service"` RPC routing (`params["hub_config"]` only, without creating/resuming a personal row in `hub_human_channels`), progressive collapse of `stratum_hub:<id>` (`36pt`/`50pt` summary bar when `gatewayActive` with `edit_hub_service:<id>` `"Change Token…"` and `clear_channel_service:<id>`), and genuine `MenuControl.isEnabled` prerequisite gating on Step 2 (`stratum_user:<id>`) when `!gatewayActive`.

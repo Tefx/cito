@@ -1589,7 +1589,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.20.2");
+    assert_eq!(init["serverInfo"]["version"], "0.20.3");
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1710,7 +1710,7 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.20.2");
+    assert_eq!(http(p, "/health", None).1["version"], "0.20.3");
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -2525,6 +2525,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.20.2"
+        "cito v0.20.3"
     );
 }

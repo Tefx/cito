@@ -36,12 +36,13 @@ func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
     return image
 }
 
-func formatStatusButton(_ button: NSButton, count: Int, image: NSImage?) {
+func formatStatusButton(_ button: NSButton, count: Int, unreadCount: Int, image: NSImage?) {
     button.image = image
+    let title = (count > 0 ? " \(count)" : "") + (unreadCount > 0 ? " 🔔\(unreadCount)" : "")
     button.title = ""
-    button.imagePosition = count == 0 ? .imageOnly : .imageLeading
-    if count > 0 {
-        button.attributedTitle = NSAttributedString(string: " \(count)",
+    button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
+    if !title.isEmpty {
+        button.attributedTitle = NSAttributedString(string: title,
             attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)])
     }
 }
@@ -62,6 +63,58 @@ extension NSColor {
             return resolved
         }
     }
+}
+
+// Semantic foregrounds retain WCAG AA contrast on both translucent surface backdrops.
+enum CitoPalette {
+    private static func adaptive(_ light: NSColor, _ dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        }
+    }
+    static let secondaryText = adaptive(
+        NSColor(srgbRed: 0.28, green: 0.29, blue: 0.31, alpha: 1),
+        NSColor(srgbRed: 0.78, green: 0.79, blue: 0.82, alpha: 1))
+    static let successText = adaptive(
+        NSColor(srgbRed: 0.04, green: 0.43, blue: 0.16, alpha: 1),
+        NSColor(srgbRed: 0.28, green: 0.85, blue: 0.44, alpha: 1))
+    static let warningText = adaptive(
+        NSColor(srgbRed: 0.64, green: 0.28, blue: 0.00, alpha: 1),
+        NSColor(srgbRed: 1.00, green: 0.70, blue: 0.25, alpha: 1))
+    static let dangerText = adaptive(
+        NSColor(srgbRed: 0.74, green: 0.10, blue: 0.14, alpha: 1),
+        NSColor(srgbRed: 1.00, green: 0.44, blue: 0.42, alpha: 1))
+    static let infoText = adaptive(
+        NSColor(srgbRed: 0.00, green: 0.34, blue: 0.75, alpha: 1),
+        NSColor(srgbRed: 0.40, green: 0.74, blue: 1.00, alpha: 1))
+    static let copiedFill = adaptive(
+        NSColor(srgbRed: 0.04, green: 0.43, blue: 0.16, alpha: 0.14),
+        NSColor(srgbRed: 0.19, green: 0.82, blue: 0.35, alpha: 0.22))
+    static let copiedBorder = adaptive(
+        NSColor(srgbRed: 0.04, green: 0.43, blue: 0.16, alpha: 0.34),
+        NSColor(srgbRed: 0.19, green: 0.82, blue: 0.35, alpha: 0.45))
+    static let warningFill = adaptive(
+        NSColor(srgbRed: 0.64, green: 0.28, blue: 0.00, alpha: 0.14),
+        NSColor(srgbRed: 1.00, green: 0.62, blue: 0.04, alpha: 0.18))
+    // Warning chips use an opaque text-surface base, avoiding stacked tint losses.
+    static let warningSurface = NSColor(name: nil) { appearance in
+        var color = NSColor.clear
+        appearance.performAsCurrentDrawingAppearance {
+            let fill = warningFill.usingColorSpace(.sRGB)
+            color = NSColor.textBackgroundColor.blended(withFraction: fill?.alphaComponent ?? 0,
+                of: fill?.withAlphaComponent(1) ?? .clear) ?? .textBackgroundColor
+        }
+        return color
+    }
+    static let warningBorder = adaptive(
+        NSColor(srgbRed: 0.64, green: 0.28, blue: 0.00, alpha: 0.32),
+        NSColor(srgbRed: 1.00, green: 0.62, blue: 0.04, alpha: 0.40))
+    static let surfaceBackground = adaptive(
+        NSColor(srgbRed: 236/255, green: 239/255, blue: 243/255, alpha: 1),
+        NSColor(srgbRed: 30/255, green: 32/255, blue: 36/255, alpha: 1))
+    // Filled controls keep white titles, so their fill stays dark in either appearance.
+    static let prominentFill = NSColor(srgbRed: 0.00, green: 0.34, blue: 0.75, alpha: 1)
+    static let destructiveFill = NSColor(srgbRed: 0.74, green: 0.10, blue: 0.14, alpha: 1)
 }
 
 final class SurfaceView: NSView {
@@ -126,13 +179,13 @@ func tintColor(_ name: String) -> NSColor {
     switch name.lowercased() {
     case "indigo": return .systemIndigo
     case "teal": return .systemTeal
-    case "orange", "amber", "yellow": return .systemOrange
-    case "blue": return .systemBlue
+    case "orange", "amber", "yellow": return CitoPalette.warningText
+    case "blue": return CitoPalette.infoText
     case "purple": return .systemPurple
-    case "green": return .systemGreen
+    case "green": return CitoPalette.successText
     case "pink": return .systemPink
     case "gray": return .systemGray
-    default: return .systemBlue
+    default: return CitoPalette.infoText
     }
 }
 func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -> HarnessVisual {
@@ -151,7 +204,7 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
             id: "human",
             name: "Human",
             symbol: "person.crop.circle.fill",
-            tint: .systemGreen,
+            tint: CitoPalette.successText,
             tier: "stable",
             order: -1
         )
@@ -160,7 +213,7 @@ func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -
         id: harness,
         name: harness.capitalized,
         symbol: "bolt.horizontal.fill",
-        tint: .systemBlue,
+        tint: CitoPalette.infoText,
         tier: "custom",
         order: 3
     )
@@ -306,31 +359,37 @@ final class MenuControl: NSControl {
             border = .labelColor.withAppearanceAlpha(isHovered ? 0.28 : 0.14)
             foreground = isHovered ? .labelColor : normalColor
             primarySymbol = foreground
-            accessorySymbol = isHovered ? .labelColor : .secondaryLabelColor
+            accessorySymbol = isHovered ? .labelColor : CitoPalette.secondaryText
         case .prominent:
-            fill = isHovered ? .systemBlue : .systemBlue.withAppearanceAlpha(0.88)
+            fill = CitoPalette.prominentFill
             border = .white.withAlphaComponent(isHovered ? 0.36 : 0.22)
             foreground = .white; primarySymbol = .white; accessorySymbol = .white
         case .subtleHeader:
             fill = isHovered ? .labelColor.withAppearanceAlpha(0.10) : .clear
             border = nil
             foreground = isHovered ? .labelColor : normalColor
-            primarySymbol = isHovered ? .labelColor : .secondaryLabelColor
+            primarySymbol = isHovered ? .labelColor : CitoPalette.secondaryText
             accessorySymbol = primarySymbol
         case .destructiveHover:
-            fill = isHovered ? .systemRed.withAppearanceAlpha(0.88) : .labelColor.withAppearanceAlpha(0.09)
+            fill = isHovered ? CitoPalette.destructiveFill : .labelColor.withAppearanceAlpha(0.09)
             border = isHovered ? .white.withAlphaComponent(0.26) : .labelColor.withAppearanceAlpha(0.14)
-            foreground = isHovered ? .white : .secondaryLabelColor
+            foreground = isHovered ? .white : CitoPalette.secondaryText
             primarySymbol = foreground; accessorySymbol = foreground
         }
         let isCopied = feedbackTimer?.isValid == true
-        label.textColor = isCopied ? .systemGreen : foreground
+        label.textColor = isCopied ? CitoPalette.successText : foreground
         leadingSymbolView?.contentTintColor = primarySymbol
         centerSymbolView?.contentTintColor = primarySymbol
         accessorySymbolView?.contentTintColor = accessorySymbol
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = (isCopied ? NSColor.systemGreen.withAppearanceAlpha(0.16) : fill).cgColor
-            layer?.borderColor = (isCopied ? NSColor.systemGreen.withAppearanceAlpha(0.36) : border)?.cgColor
+            // A copied chip uses the canonical surface beneath its translucent fill;
+            // stacking it over a tinted card would lower the specified green below AA.
+            let copiedFill = CitoPalette.copiedFill.usingColorSpace(.sRGB)
+            let copiedBackground = CitoPalette.surfaceBackground.blended(
+                withFraction: copiedFill?.alphaComponent ?? 0,
+                of: copiedFill?.withAlphaComponent(1) ?? .clear)
+            layer?.backgroundColor = (isCopied ? copiedBackground ?? CitoPalette.surfaceBackground : fill).cgColor
+            layer?.borderColor = (isCopied ? CitoPalette.copiedBorder : border)?.cgColor
             layer?.borderWidth = isCopied || border != nil ? 1 : 0
         }
     }
@@ -343,7 +402,7 @@ final class MenuControl: NSControl {
         feedbackTimer?.invalidate()
         leadingSymbolView?.isHidden = true
         label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
-        label.stringValue = message; label.textColor = .systemGreen
+        label.stringValue = message; label.textColor = CitoPalette.successText
         let restore = Timer(timeInterval: 1.2, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             if self.leadingSymbolView != nil {
@@ -429,6 +488,7 @@ struct Listener: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
     let harness: String, session_id: String, title: String, cwd: String, scope: String
     let about: String?, repo: String?, branch: String?
+    let user: String?, owner_user: String?
     let channels: [String]?
 }
 struct Candidate: Decodable, Equatable {
@@ -585,9 +645,9 @@ final class DirectoryPeerCellView: NSTableCellView {
         badgeIcon = NSImageView(frame: NSRect(x: 6, y: 6, width: 16, height: 16))
         badgeView.addSubview(badgeIcon)
         line1TitleLabel = textLabel("", NSRect(x: 52, y: 26, width: 180, height: 18), size: 13, weight: .semibold, color: .labelColor)
-        line1RepoLabel = textLabel("", NSRect(x: 232, y: 26, width: 180, height: 18), size: 11.5, weight: .regular, color: .secondaryLabelColor)
+        line1RepoLabel = textLabel("", NSRect(x: 232, y: 26, width: 180, height: 18), size: 11.5, weight: .regular, color: CitoPalette.secondaryText)
         line2UserLabel = textLabel("", NSRect(x: 52, y: 7, width: 80, height: 16), size: 11.5, weight: .medium, color: .labelColor)
-        line2MetaLabel = textLabel("", NSRect(x: 132, y: 7, width: 220, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor)
+        line2MetaLabel = textLabel("", NSRect(x: 132, y: 7, width: 220, height: 16), size: 11.5, weight: .regular, color: CitoPalette.secondaryText)
         msgControl = MenuControl("Message", frame: NSRect(x: 356, y: 16, width: 78, height: 22), leadingSymbol: "bubble.left")
         copyControl = MenuControl("", frame: NSRect(x: 440, y: 16, width: 104, height: 22), leadingSymbol: "doc.on.doc")
         super.init(frame: frameRect)
@@ -635,6 +695,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
         copyControl.feedbackTimer?.invalidate()
         copyControl.feedbackTimer = nil
+        copyControl.isHidden = false
         copyControl.setHovered(false)
         copyControl.frame = NSRect(x: 544 - copyWidth, y: 16, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
@@ -704,11 +765,12 @@ final class DirectoryPeerCellView: NSTableCellView {
         badgeIcon.contentTintColor = .white
 
         msgControl.isHidden = true
-        let replyWidth: CGFloat = 72
+        let replyWidth: CGFloat = item.for_me ? 72 : 0
+        copyControl.isHidden = !item.for_me
         copyControl.feedbackTimer?.invalidate()
         copyControl.feedbackTimer = nil
         copyControl.setHovered(false)
-        copyControl.frame = NSRect(x: 544 - replyWidth, y: 16, width: replyWidth, height: 22)
+        copyControl.frame = NSRect(x: 472, y: 16, width: 72, height: 22)
         copyControl.setLeadingSymbol("arrowshape.turn.up.left")
         copyControl.label.font = .systemFont(ofSize: 11, weight: .medium)
         copyControl.label.stringValue = "Reply"
@@ -716,7 +778,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.setAccessibilityLabel("Reply")
         copyControl.toolTip = "Reply to \(item.from_scoped_id ?? item.from_user)"
         copyControl.identifier = NSUserInterfaceItemIdentifier("reply_activity:\(item.signal_id)")
-        copyControl.pressed = onReply
+        copyControl.pressed = item.for_me ? onReply : nil
 
         let availWidth: CGFloat = 544 - replyWidth - 60
         let unreadPrefix = item.unread ? "● " : ""
@@ -753,7 +815,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     let cardMenu = NSMenu()
     var selectedHubs = Set<String>()
     var statusImage: NSImage?
-    var uniqueSessionCount: Int { Set(listeners.map { "\($0.harness):\($0.session_id)" }).count }
+    var uniqueSessionCount: Int {
+        Dictionary(grouping: listeners.filter { $0.harness != "human" }, by: { $0.harness })
+            .values.reduce(0) { $0 + Set($1.map { $0.session_id }).count }
+    }
+    var humanListening: Bool { listeners.contains { $0.harness == "human" } }
+    var wakeActionText = ""
+    var testAppearance: NSAppearance?
     var hubs: [Hub] = []
     var listeners: [Listener] = []
     var available: [Candidate] = []
@@ -764,7 +832,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var myRemoteCollapsed = false
     var collapsedGroups = Set<String>()
     func statusColor(_ status: String) -> NSColor {
-        status == "connected" ? .systemGreen : status == "connecting" ? .systemOrange : status == "auth_required" ? .systemRed : .systemGray
+        status == "connected" ? CitoPalette.successText : status == "connecting" ? CitoPalette.warningText : status == "auth_required" ? CitoPalette.dangerText : .systemGray
     }
     var effectiveTargetHub: String {
         if !selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub && $0.status != "disconnected" }) {
@@ -966,7 +1034,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             status?.menu = cardMenu
             statusImage = makeCitoStatusIcon(.idle)
             if let button = status?.button {
-                formatStatusButton(button, count: 0, image: statusImage)
+                formatStatusButton(button, count: 0, unreadCount: 0, image: statusImage)
             }
             hoverEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
                 MenuControl.reconcileActiveHover()
@@ -1031,19 +1099,21 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if headless, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let op = object["op"] as? String {
             if op == "test_click" { hide(clicked: true); return }
-            if op == "test_inspect" { inspectMenu(); return }
+            if ["test_appearance", "test_inspect", "test_inspect_menu", "test_render_png"].contains(op),
+               let name = object["appearance"] as? String, ["light", "dark"].contains(name) {
+                testAppearance = NSAppearance(named: name == "light" ? .aqua : .darkAqua)
+                for item in cardMenu.items { item.view?.appearance = testAppearance }
+                directoryPanel?.appearance = testAppearance
+                settingsPanel?.appearance = testAppearance
+                panel?.appearance = testAppearance
+            }
+            if op == "test_inspect" || op == "test_inspect_menu" { inspectMenu(); return }
             if op == "test_render_png", let surface = object["surface"] as? String, let path = object["path"] as? String {
                 renderPNG(surface: surface, path: path); return
             }
             if op == "test_menu_open" { menuWillOpen(cardMenu); return }
             if op == "test_menu_close" { menuDidClose(cardMenu); return }
-            if op == "test_appearance", let name = object["appearance"] as? String, ["light", "dark"].contains(name) {
-                let appearance = NSAppearance(named: name == "dark" ? .darkAqua : .aqua)
-                for item in cardMenu.items { item.view?.appearance = appearance }
-                directoryPanel?.appearance = appearance
-                settingsPanel?.appearance = appearance
-                return
-            }
+            if op == "test_appearance" { return }
             if op == "test_hover", let id = object["id"] as? String, let hovered = object["hovered"] as? Bool {
                 for item in cardMenu.items {
                     if let view = item.view, let control = findControl(in: view, id: id) {
@@ -1241,7 +1311,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
                 statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
                 if let button = status?.button ?? headlessStatusButton {
-                    formatStatusButton(button, count: count, image: statusImage)
+                    formatStatusButton(button, count: count, unreadCount: unreadCount, image: statusImage)
                 }
             } else {
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
@@ -1334,30 +1404,32 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
         statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
         if let button = status?.button ?? headlessStatusButton {
-            formatStatusButton(button, count: count, image: statusImage)
+            formatStatusButton(button, count: count, unreadCount: unreadCount, image: statusImage)
         }
         let menu = cardMenu
         menu.removeAllItems()
         func host(_ view: NSView, id: String) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
+            view.appearance = testAppearance
             let item = NSMenuItem(); item.view = view; menu.addItem(item); return item
         }
         let header = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 40))
         header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 36, height: 18), size: 13, weight: .bold))
         let subtitleText: String
         if count > 0 {
-            subtitleText = myRemote.isEmpty ? "\(count) listening" : "\(count) listening · \(myRemote.count) remote"
+            subtitleText = "Ready · \(count) agent\(count == 1 ? "" : "s") listening\(humanListening ? " · Human ready" : "")"
         } else {
-            subtitleText = myRemote.isEmpty ? "Idle" : "Idle · \(myRemote.count) remote"
+            subtitleText = humanListening ? "Ready · Human listening" : "Ready · Idle"
         }
-        let subWidth = ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8
-        let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: .secondaryLabelColor)
+        let subWidth = min(246, ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8)
+        let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: CitoPalette.secondaryText)
         subLabel.identifier = NSUserInterfaceItemIdentifier("header_subtitle")
+        subLabel.lineBreakMode = .byTruncatingMiddle; subLabel.toolTip = subtitleText
         header.addSubview(subLabel)
         _ = host(header, id: "header")
         if let error = menuBannerError {
             let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
-            let label = textLabel(error,NSRect(x:12,y:3,width:320,height:30),size:10,color:.systemRed)
+            let label = textLabel(error,NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
             label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=error
             row.addSubview(label)
             let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
@@ -1409,7 +1481,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             else if hub.status == "auth_required" { statusText = "Authentication required" }
             else { statusText = "Offline · Disconnected" }
             let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: max(40, buttonsMinX - 20), height: 16),
-                color: hub.error != nil || hub.status == "auth_required" ? .labelColor : .secondaryLabelColor)
+                color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = hub.error ?? statusText; drawer.addSubview(detail)
             let item = host(drawer, id: "drawer:\(hub.name)")
@@ -1453,7 +1525,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 net.contentTintColor = .labelColor; pill.addSubview(net); pill.centerSymbolView = net
                 let chev = NSImageView(frame: NSRect(x: 31, y: 7, width: 8, height: 8))
                 chev.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)
-                chev.contentTintColor = .secondaryLabelColor; pill.addSubview(chev); pill.accessorySymbolView = chev
+                chev.contentTintColor = CitoPalette.secondaryText; pill.addSubview(chev); pill.accessorySymbolView = chev
                 pill.toolTip = "Connected · \(hub.user ?? "local")"
             } else {
                 pill.label.font = btnFont
@@ -1490,7 +1562,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let title = textLabel("Human Node (@\(targetUser))", NSRect(x: 46, y: 24, width: 220, height: 16), size: 12.5, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
-            card.addSubview(textLabel("Paused · Click Enable to receive signals", NSRect(x: 46, y: 8, width: 220, height: 14), size: 10.5, color: .secondaryLabelColor))
+            card.addSubview(textLabel("Paused · Click Enable to receive signals", NSRect(x: 46, y: 8, width: 220, height: 14), size: 10.5, color: CitoPalette.secondaryText))
             let enable = MenuControl("Enable", frame: NSRect(x: 272, y: 12, width: 78, height: 22), leadingSymbol: "plus", radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
@@ -1505,7 +1577,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }.map { $0.element }
         for listener in orderedListeners {
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let hasDistinctAbout = !aboutText.isEmpty && aboutText.caseInsensitiveCompare(listener.title.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame
+            let rawTitle = listener.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isHuman = listener.harness == "human"
+            let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
+                .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
+            let displayTitle = isHuman && (rawTitle.isEmpty || rawTitle == "Human" || rawTitle == "@\(user)" || rawTitle.hasPrefix("Human Node"))
+                ? "Human Node (@\(user))" : listener.title
+            let hasDistinctAbout = !aboutText.isEmpty && aboutText.caseInsensitiveCompare(rawTitle) != .orderedSame
+                && !(isHuman && (aboutText == "Human" || aboutText == "Human receiver"))
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
             let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
             let row = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: rowHeight))
@@ -1522,12 +1601,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let hubPillWidth = min(76, max(46, ceil(measureTextWidth(listener.hub, font: btnFont)) + 22))
             let baseActionWidth: CGFloat = showScopeToggle ? 88 : 22
             let actionWidth: CGFloat = hubs.count > 1 ? baseActionWidth + hubPillWidth + 4 : baseActionWidth
-            let title = textLabel(listener.title,
+            let title = textLabel(displayTitle,
                 NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle
-            title.toolTip = listener.title; card.addSubview(title)
+            title.toolTip = displayTitle; card.addSubview(title)
             if hasDistinctAbout {
-                let aboutLabel = textLabel(aboutText, NSRect(x: 54, y: 28, width: 296, height: 16), size: 11.5, color: .secondaryLabelColor)
+                let aboutLabel = textLabel(aboutText, NSRect(x: 54, y: 28, width: 296, height: 16), size: 11.5, color: CitoPalette.secondaryText)
                 aboutLabel.lineBreakMode = .byTruncatingMiddle
                 aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
             }
@@ -1552,7 +1631,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
             }
             let path = textLabel(pathText,
-                NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: .secondaryLabelColor)
+                NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = listener.cwd; card.addSubview(path)
             let scopeX: CGFloat = 350 - baseActionWidth
             if hubs.count > 1 {
@@ -1629,10 +1708,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 86), radius: 10, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
                 icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
-                icon.contentTintColor = .secondaryLabelColor; card.addSubview(icon)
+                icon.contentTintColor = CitoPalette.secondaryText; card.addSubview(icon)
                 card.addSubview(textLabel("No active listeners", NSRect(x: 44, y: 57, width: 304, height: 18), size: 13, weight: .semibold))
                 let subtitle = !(settings?.apps.contains(where:{$0.configured}) ?? true) ? "Connect your coding apps in Settings to start" : "Call cito_listen in a session or open Human Channels"
-                card.addSubview(textLabel(subtitle, NSRect(x:44,y:36,width:304,height:16),size:10.5,color:.secondaryLabelColor))
+                card.addSubview(textLabel(subtitle, NSRect(x:44,y:36,width:304,height:16),size:10.5,color:CitoPalette.secondaryText))
                 let apps=MenuControl("Set Up Agent Apps…",frame:NSRect(x:44,y:8,width:148,height:22),radius:6)
                 apps.identifier=NSUserInterfaceItemIdentifier("empty_open_setup")
                 apps.pressed={ [weak self] in self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
@@ -1647,9 +1726,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let pill = roundedView(NSRect(x: 10, y: 3, width: 360, height: 28), radius: 8, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 7, width: 14, height: 14))
                 icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
-                icon.contentTintColor = .secondaryLabelColor; pill.addSubview(icon)
+                icon.contentTintColor = CitoPalette.secondaryText; pill.addSubview(icon)
                 pill.addSubview(textLabel("No active listeners — click + Listen below",
-                    NSRect(x: 32, y: 6, width: 316, height: 16), size: 11, color: .secondaryLabelColor))
+                    NSRect(x: 32, y: 6, width: 316, height: 16), size: 11, color: CitoPalette.secondaryText))
                 row.addSubview(pill); _ = host(row, id: "empty")
             }
         }
@@ -1658,7 +1737,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let remoteHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 26))
             remoteHeader.addSubview(roundedView(NSRect(x: 12, y: 24, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
             let toggleRemote = MenuControl("MY OTHER HOSTS · \(myRemote.count)", frame: NSRect(x: 8, y: 1, width: 364, height: 22),
-                leadingSymbol: myRemoteCollapsed ? "chevron.right" : "chevron.down", color: .secondaryLabelColor, radius: 6)
+                leadingSymbol: myRemoteCollapsed ? "chevron.right" : "chevron.down", color: CitoPalette.secondaryText, radius: 6)
             toggleRemote.identifier = NSUserInterfaceItemIdentifier("toggle_my_remote")
             toggleRemote.style = .subtleHeader
             toggleRemote.label.font = .systemFont(ofSize: 10, weight: .semibold)
@@ -1679,7 +1758,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     row.identifier = NSUserInterfaceItemIdentifier(rowId)
                     let hostIcon = NSImageView(frame: NSRect(x: 16, y: 10, width: 14, height: 14))
                     hostIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Remote host")
-                    hostIcon.contentTintColor = .secondaryLabelColor
+                    hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
                     let short = shortPublicId(peer.public_id)
                     let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
@@ -1727,7 +1806,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
             availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
             availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: hubs.count > 1 ? 124 : 220, height: 14),
-                size: 10, weight: .semibold, color: .secondaryLabelColor))
+                size: 10, weight: .semibold, color: CitoPalette.secondaryText))
             if hubs.count > 1 {
                 let targetStrip = NSScrollView(frame: NSRect(x: 140, y: 2, width: 228, height: 18))
                 targetStrip.drawsBackground = false
@@ -1766,7 +1845,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if visibleAvailable.isEmpty {
                 let emptyTarget = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
                 let label = textLabel("All sessions listening on \(targetHub)",
-                    NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor)
+                    NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: CitoPalette.secondaryText)
                 label.lineBreakMode = .byTruncatingMiddle; label.toolTip = label.stringValue
                 emptyTarget.addSubview(label)
                 _ = host(emptyTarget, id: "available_empty_target")
@@ -1799,7 +1878,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 groupControl.symbolName = isCollapsed ? "chevron.right" : "chevron.down"
                 let chev = NSImageView(frame: NSRect(x: 6, y: 7, width: 10, height: 10))
                 chev.image = NSImage(systemSymbolName: isCollapsed ? "chevron.right" : "chevron.down", accessibilityDescription: nil)
-                chev.contentTintColor = .secondaryLabelColor
+                chev.contentTintColor = CitoPalette.secondaryText
                 groupControl.addSubview(chev)
                 groupControl.accessorySymbolView = chev
                 let badge = makeHarnessBadge(NSRect(x: 20, y: 3, width: 18, height: 18),
@@ -1834,7 +1913,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         info.identifier=NSUserInterfaceItemIdentifier("candidate_title:\(c.harness):\(c.session_id)")
                         row.addSubview(info)
                         if needsReload {
-                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:24,y:5,width:274,height:15),size:10,color:.systemOrange)
+                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:24,y:5,width:274,height:15),size:10,color:CitoPalette.warningText)
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
                             let reload=MenuControl("/reload",frame:NSRect(x:298,y:12,width:70,height:22),leadingSymbol:"doc.on.doc")
@@ -1887,34 +1966,33 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
         }
-        // Zone 4 — Network Directory Launcher Row
+        // Zone 4 — Explicit Directory and Activity entry points.
         if !hubs.isEmpty {
             let dirRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 34))
             dirRow.addSubview(roundedView(NSRect(x: 12, y: 32, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-            let openDir = MenuControl("Search Network Directory…", frame: NSRect(x: 10, y: 4, width: 360, height: 26),
-                leadingSymbol: "magnifyingglass", radius: 7)
-            openDir.identifier = NSUserInterfaceItemIdentifier("open_directory")
-            openDir.label.font = .systemFont(ofSize: 11.5, weight: .medium)
-            openDir.label.alignment = .left
-            openDir.label.frame = NSRect(x: 24, y: 5, width: 180, height: 16)
-            if unreadCount > 0 || directoryOnlineCount > 0 {
-                let badgeText = unreadCount > 0
-                    ? "🔔 \(unreadCount) unread · \(directoryOnlineCount) online"
-                    : "\(directoryOnlineCount) online"
-                let countBadge = textLabel(badgeText, NSRect(x: 208, y: 5, width: 144, height: 16),
-                    size: 11, weight: unreadCount > 0 ? .medium : .regular, color: .secondaryLabelColor)
-                countBadge.alignment = .right
-                countBadge.identifier = NSUserInterfaceItemIdentifier("directory_online_badge")
-                openDir.addSubview(countBadge)
+            for (mode, x, title, symbol, trailing, tip) in [
+                ("directory", CGFloat(12), "Directory…", "magnifyingglass", "\(directoryOnlineCount) online", "Search Network Directory (⌘K)"),
+                ("activity", CGFloat(194), "Activity…", unreadCount > 0 ? "bell.badge.fill" : "clock.arrow.circlepath",
+                 unreadCount > 0 ? "\(unreadCount) unread" : "History", "Open Activity Stream")
+            ] {
+                let control = MenuControl(title, frame: NSRect(x: x, y: 2, width: 174, height: 28), leadingSymbol: symbol, radius: 7)
+                control.identifier = NSUserInterfaceItemIdentifier("open_\(mode)")
+                control.toolTip = tip
+                control.label.font = .systemFont(ofSize: 11, weight: .medium)
+                control.label.alignment = .left
+                control.label.frame = NSRect(x: 22, y: 6, width: 76, height: 16)
+                let badge = textLabel(trailing, NSRect(x: 100, y: 6, width: 68, height: 16), size: 10, color: CitoPalette.secondaryText)
+                badge.alignment = .right; badge.lineBreakMode = .byTruncatingMiddle; badge.toolTip = trailing
+                badge.identifier = NSUserInterfaceItemIdentifier(mode == "directory" ? "directory_online_badge" : "activity_unread_badge")
+                control.addSubview(badge)
+                control.pressed = { [weak self, weak menu] in
+                    guard let self = self else { return }
+                    menu?.cancelTracking()
+                    self.openDirectoryPanel(mode: mode)
+                    self.emit(["op": "open_directory", "mode": mode])
+                }
+                dirRow.addSubview(control)
             }
-            openDir.pressed = { [weak self, weak menu] in
-                guard let self = self else { return }
-                menu?.cancelTracking()
-                let initialMode = self.unreadCount > 0 ? "activity" : "directory"
-                self.openDirectoryPanel(mode: initialMode)
-                self.emit(["op": "query_directory", "query": self.directoryQuery, "scope": self.directoryScopeFilter, "harness": self.directoryHarnessFilter])
-            }
-            dirRow.addSubview(openDir)
             _ = host(dirRow, id: "directory_row")
         }
         let footer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 36))
@@ -1956,6 +2034,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if settingsPanel == nil {
             let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
                                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            window.appearance = testAppearance
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.isFloatingPanel = true
@@ -2108,9 +2187,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         header.addSubview(roundedView(NSRect(x: 0, y: 0, width: 520, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
         root.addSubview(header)
         if let error = settingsBannerError {
-            let banner=roundedView(NSRect(x:20,y:376,width:480,height:32),radius:6,color:.systemRed.withAppearanceAlpha(0.10))
+            let banner=roundedView(NSRect(x:20,y:376,width:480,height:32),radius:6,color:CitoPalette.dangerText.withAppearanceAlpha(0.10))
             banner.identifier=NSUserInterfaceItemIdentifier("settings_error_banner")
-            let label=textLabel(error,NSRect(x:10,y:3,width:432,height:26),size:10,color:.systemRed)
+            let label=textLabel(error,NSRect(x:10,y:3,width:432,height:26),size:10,color:CitoPalette.dangerText)
             label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=error
             label.identifier=NSUserInterfaceItemIdentifier("settings_error_label"); banner.addSubview(label)
             let dismiss=MenuControl("Dismiss",frame:NSRect(x:450,y:6,width:22,height:20),symbol:"xmark")
@@ -2128,8 +2207,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             AppSetupItem(id: h.id, display_name: h.display_name, tier: h.tier, installed: true,
                 configured: false, status: "not_configured", detail: "Click Set Up to connect", paths: [])
         }
-        appsView.addSubview(textLabel("CONNECTED AGENT APPS", NSRect(x:20,y:338,width:240,height:14),size:10,weight:.semibold,color:.secondaryLabelColor))
-        appsView.addSubview(textLabel("Enable 1-click notification & wake support in your coding apps.", NSRect(x:20,y:320,width:480,height:15),size:11.5,color:.secondaryLabelColor))
+        appsView.addSubview(textLabel("CONNECTED AGENT APPS", NSRect(x:20,y:338,width:240,height:14),size:10,weight:.semibold,color:CitoPalette.secondaryText))
+        appsView.addSubview(textLabel("Enable 1-click notification & wake support in your coding apps.", NSRect(x:20,y:320,width:480,height:15),size:11.5,color:CitoPalette.secondaryText))
         if onboardingGuideOpen {
             let banner=roundedView(NSRect(x:20,y:348-(settingsBannerError == nil ? 0 : 36),width:480,height:58),radius:8,color:.controlAccentColor.withAppearanceAlpha(0.10))
             banner.identifier=NSUserInterfaceItemIdentifier("onboarding_banner")
@@ -2175,14 +2254,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = app.display_name
             card.addSubview(title)
             if app.tier == "experimental" {
-                let expPill = roundedView(NSRect(x: 54 + titleW, y: 56, width: 88, height: 16), radius: 8, color: .systemOrange.withAppearanceAlpha(0.18))
+                let expPill = roundedView(NSRect(x: 54 + titleW, y: 56, width: 88, height: 16), radius: 8, color: CitoPalette.warningSurface, border: CitoPalette.warningBorder)
                 expPill.identifier = NSUserInterfaceItemIdentifier("settings_app_tier:\(app.id)")
-                let expLabel = textLabel("Experimental", NSRect(x: 6, y: 1, width: 76, height: 14), size: 9.5, weight: .semibold, color: .systemOrange)
+                let expLabel = textLabel("Experimental", NSRect(x: 6, y: 1, width: 76, height: 14), size: 9.5, weight: .semibold, color: CitoPalette.warningText)
                 expLabel.alignment = .center
                 expPill.addSubview(expLabel)
                 card.addSubview(expPill)
             }
-            let detail = textLabel(app.detail, NSRect(x:50,y:8,width:418,height:30),size:11,color:.secondaryLabelColor)
+            let detail = textLabel(app.detail, NSRect(x:50,y:8,width:418,height:30),size:11,color:CitoPalette.secondaryText)
             detail.maximumNumberOfLines=2; detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip=([app.detail]+app.paths).joined(separator:"\n")
             card.addSubview(detail)
@@ -2190,7 +2269,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let statusText = app.configured ? "● Connected" : (app.status == "repair_needed" ? "⚠ Repair Needed" : "○ Not Set Up")
             let statusFrame = app.configured ? NSRect(x: 230, y: 49, width: 82, height: 16) : NSRect(x: 294, y: 49, width: 100, height: 16)
             let statusLabel = textLabel(statusText, statusFrame,
-                size: 11, weight: .medium, color: app.configured ? .systemGreen : (app.status == "repair_needed" ? .systemOrange : .secondaryLabelColor))
+                size: 11, weight: .medium, color: app.configured ? CitoPalette.successText : (app.status == "repair_needed" ? CitoPalette.warningText : CitoPalette.secondaryText))
             statusLabel.alignment = .right
             statusLabel.identifier = NSUserInterfaceItemIdentifier("settings_app_status:\(app.id)")
             card.addSubview(statusLabel)
@@ -2229,7 +2308,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.11))
         bannerCard.identifier = NSUserInterfaceItemIdentifier("settings_desktop_banner_card")
         bannerCard.addSubview(textLabel("Mac Desktop Banner", NSRect(x: 14, y: 25, width: 240, height: 17), size: 13, weight: .semibold))
-        bannerCard.addSubview(textLabel("Show floating HUD wake banners on this Mac when signals arrive.", NSRect(x: 14, y: 7, width: 366, height: 15), size: 10.5, color: .secondaryLabelColor))
+        bannerCard.addSubview(textLabel("Show floating HUD wake banners on this Mac when signals arrive.", NSRect(x: 14, y: 7, width: 366, height: 15), size: 10.5, color: CitoPalette.secondaryText))
         let toggleBanner = MenuControl(bannerEnabled ? "● Enabled" : "Off", frame: NSRect(x: 386, y: 12, width: 80, height: 24), radius: 12)
         toggleBanner.identifier = NSUserInterfaceItemIdentifier("toggle_desktop_banner")
         toggleBanner.style = bannerEnabled ? .prominent : .neutral
@@ -2239,7 +2318,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         bannerCard.addSubview(toggleBanner)
         channelsView.addSubview(bannerCard)
 
-        channelsView.addSubview(textLabel("TARGET HUB:", NSRect(x: 20, y: 342, width: 78, height: 14), size: 10, weight: .semibold, color: .secondaryLabelColor))
+        channelsView.addSubview(textLabel("TARGET HUB:", NSRect(x: 20, y: 342, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText))
         let selector = NSScrollView(frame: NSRect(x: 102, y: 336, width: 398, height: 28))
         selector.drawsBackground = false
         selector.hasHorizontalScroller = false
@@ -2311,11 +2390,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let chStatusText:String
             let chStatusColor:NSColor
             switch channelResult?.ok == false ? "error" : ch.status {
-            case "ready": chStatusText = ch.display_label.flatMap { $0.isEmpty ? nil : "● Connected (\($0))" } ?? "● Connected"; chStatusColor = .systemGreen
-            case "paused": chStatusText = "⏸ Paused"; chStatusColor = .systemOrange
-            case "pairing_pending": chStatusText = "◌ Pairing…"; chStatusColor = .systemBlue
-            case "error": chStatusText = "⚠ Error"; chStatusColor = .systemRed
-            default: chStatusText = ch.hub_provided || ch.status == "hub_ready" ? "Hub Service: ● Ready" : "○ Not Configured"; chStatusColor = .secondaryLabelColor
+            case "ready": chStatusText = ch.display_label.flatMap { $0.isEmpty ? nil : "● Connected (\($0))" } ?? "● Connected"; chStatusColor = CitoPalette.successText
+            case "paused": chStatusText = "⏸ Paused"; chStatusColor = CitoPalette.warningText
+            case "pairing_pending": chStatusText = "◌ Pairing…"; chStatusColor = CitoPalette.infoText
+            case "error": chStatusText = "⚠ Error"; chStatusColor = CitoPalette.dangerText
+            default: chStatusText = ch.hub_provided || ch.status == "hub_ready" ? "Hub Service: ● Ready" : "○ Not Configured"; chStatusColor = CitoPalette.secondaryText
             }
             let chStatusLabel = textLabel(chStatusText, NSRect(x: 240, y: cardHeight - 20, width: 226, height: 15), size: 11, weight: .medium, color: chStatusColor)
             chStatusLabel.alignment = .right
@@ -2323,7 +2402,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             chStatusLabel.identifier = NSUserInterfaceItemIdentifier("settings_channel_status:\(ch.id)")
             chCard.addSubview(chStatusLabel)
 
-            let chDetail = textLabel(channelResult?.detail ?? ch.detail, NSRect(x: 44, y: cardHeight - 36, width: 422, height: 14), size: 10.5, color: .secondaryLabelColor)
+            let chDetail = textLabel(channelResult?.detail ?? ch.detail, NSRect(x: 44, y: cardHeight - 36, width: 422, height: 14), size: 10.5, color: CitoPalette.secondaryText)
             chDetail.lineBreakMode = .byTruncatingMiddle; chDetail.toolTip = chDetail.stringValue
             chDetail.identifier = NSUserInterfaceItemIdentifier("settings_channel_detail:\(ch.id)")
             chCard.addSubview(chDetail)
@@ -2331,11 +2410,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let hubStratum = roundedView(NSRect(x:12,y:6+userStratumH+6,width:456,height:hubStratumH),radius:8,
                 color:.controlAccentColor.withAppearanceAlpha(0.06),border:.controlAccentColor.withAppearanceAlpha(0.14))
             hubStratum.identifier=NSUserInterfaceItemIdentifier("stratum_hub:\(ch.id)")
-            let hubTitle=textLabel("1. HUB GATEWAY · ONCE PER HUB",NSRect(x:10,y:hubStratumH-25,width:168,height:14),size:9,weight:.bold,color:.secondaryLabelColor)
+            let hubTitle=textLabel("1. HUB GATEWAY · ONCE PER HUB",NSRect(x:10,y:hubStratumH-25,width:168,height:14),size:9,weight:.bold,color:CitoPalette.secondaryText)
             hubTitle.identifier=NSUserInterfaceItemIdentifier("stratum_hub_title:\(ch.id)")
             hubStratum.addSubview(hubTitle)
             let gatewayStatus=textLabel(gatewayActive ? "● Hub Gateway Active" : "○ Gateway Token Required",
-                gatewayActive ? NSRect(x:182,y:hubStratumH-25,width:106,height:14) : NSRect(x:280,y:hubStratumH-25,width:164,height:14),size:9,weight:.medium,color:gatewayActive ? .systemGreen : .secondaryLabelColor)
+                gatewayActive ? NSRect(x:182,y:hubStratumH-25,width:106,height:14) : NSRect(x:280,y:hubStratumH-25,width:164,height:14),size:9,weight:.medium,color:gatewayActive ? CitoPalette.successText : CitoPalette.secondaryText)
             gatewayStatus.alignment = gatewayActive ? .left : .right
             gatewayStatus.identifier=NSUserInterfaceItemIdentifier("stratum_hub_status:\(ch.id)")
             hubStratum.addSubview(gatewayStatus)
@@ -2348,12 +2427,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 hubStratum.addSubview(clear)
             }
             if (hubGatewayExpanded || hubFields.isEmpty) && gatewayRoleH > 0 {
-                let gatewayDescription=textLabel(gatewayRole,NSRect(x:12,y:hubStratumH-30-gatewayRoleH,width:432,height:gatewayRoleH),size:10,color:.secondaryLabelColor)
+                let gatewayDescription=textLabel(gatewayRole,NSRect(x:12,y:hubStratumH-30-gatewayRoleH,width:432,height:gatewayRoleH),size:10,color:CitoPalette.secondaryText)
                 gatewayDescription.maximumNumberOfLines=0; gatewayDescription.lineBreakMode = .byWordWrapping
                 hubStratum.addSubview(gatewayDescription)
             }
             if hubGatewayExpanded && guideH>0 {
-                let box=textLabel(guide,NSRect(x:12,y:hubStratumH-30-gatewayRoleH-guideH,width:432,height:guideH),size:10,color:.secondaryLabelColor)
+                let box=textLabel(guide,NSRect(x:12,y:hubStratumH-30-gatewayRoleH-guideH,width:432,height:guideH),size:10,color:CitoPalette.secondaryText)
                 box.identifier=NSUserInterfaceItemIdentifier("channel_setup_guide:\(ch.id)")
                 box.maximumNumberOfLines=0; box.lineBreakMode = .byWordWrapping
                 hubStratum.addSubview(box)
@@ -2361,11 +2440,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let userStratum=roundedView(NSRect(x:12,y:6,width:456,height:userStratumH),radius:8,
                 color:.labelColor.withAppearanceAlpha(0.04),border:.labelColor.withAppearanceAlpha(0.10))
             userStratum.identifier=NSUserInterfaceItemIdentifier("stratum_user:\(ch.id)")
-            let userTitle=textLabel("2. YOUR PERSONAL NODE (@\(currentUser)) · EACH HUMAN ON '\(effectiveChannelHub.uppercased())'",NSRect(x:12,y:userStratumH-19,width:432,height:13),size:9.5,weight:.bold,color:.secondaryLabelColor)
+            let userTitle=textLabel("2. YOUR PERSONAL NODE (@\(currentUser)) · EACH HUMAN ON '\(effectiveChannelHub.uppercased())'",NSRect(x:12,y:userStratumH-19,width:432,height:13),size:9.5,weight:.bold,color:CitoPalette.secondaryText)
             userTitle.lineBreakMode = .byTruncatingMiddle; userTitle.toolTip = userTitle.stringValue
             userTitle.identifier=NSUserInterfaceItemIdentifier("stratum_user_title:\(ch.id)")
             userStratum.addSubview(userTitle)
-            let personalDescription=textLabel(personalRole,NSRect(x:12,y:userStratumH-26-personalRoleH,width:432,height:personalRoleH),size:10,color:.secondaryLabelColor)
+            let personalDescription=textLabel(personalRole,NSRect(x:12,y:userStratumH-26-personalRoleH,width:432,height:personalRoleH),size:10,color:CitoPalette.secondaryText)
             personalDescription.maximumNumberOfLines=0; personalDescription.lineBreakMode = .byWordWrapping
             userStratum.addSubview(personalDescription)
             for (container, fields, top) in [(hubStratum,hubGatewayExpanded ? hubFields : [],hubStratumH-34-gatewayRoleH-guideH),(userStratum,userFields,userStratumH-30-personalRoleH)] {
@@ -2379,7 +2458,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     if container === userStratum && !gatewayActive { inputField.isEnabled=false; inputField.alphaValue=0.55 }
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     if let help=f.help_text, !help.isEmpty {
-                        container.addSubview(textLabel(help,NSRect(x:158,y:fieldY-13,width:286,height:12),size:9.5,color:.secondaryLabelColor))
+                        container.addSubview(textLabel(help,NSRect(x:158,y:fieldY-13,width:286,height:12),size:9.5,color:CitoPalette.secondaryText))
                         fieldY-=12
                     }
                     fieldY-=26
@@ -2388,7 +2467,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             chCard.addSubview(hubStratum); chCard.addSubview(userStratum)
             func gate(_ control: MenuControl) { control.isEnabled=gatewayActive; control.alphaValue=gatewayActive ? 1 : 0.55 }
             if !instruction.isEmpty {
-                let instrLabel = textLabel(instruction, NSRect(x: 12, y: 40, width: 248, height: instructionHeight), size: 11.5, weight: .semibold, color: .systemBlue)
+                let instrLabel = textLabel(instruction, NSRect(x: 12, y: 40, width: 248, height: instructionHeight), size: 11.5, weight: .semibold, color: CitoPalette.infoText)
                 instrLabel.maximumNumberOfLines = 0
                 instrLabel.lineBreakMode = .byWordWrapping
                 instrLabel.isSelectable = true
@@ -2519,7 +2598,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.12))
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
         hostCard.addSubview(textLabel("Share Hub on Local Network", NSRect(x: 14, y: 104, width: 260, height: 18), size: 13, weight: .semibold))
-        hostCard.addSubview(textLabel("Let your other Macs or teammates connect to this Mac.", NSRect(x: 14, y: 86, width: 360, height: 15), size: 11, color: .secondaryLabelColor))
+        hostCard.addSubview(textLabel("Let your other Macs or teammates connect to this Mac.", NSRect(x: 14, y: 86, width: 360, height: 15), size: 11, color: CitoPalette.secondaryText))
 
         let toggleTitle = hostHub.enabled ? "● Sharing" : "Off"
         let toggleHostBtn = MenuControl(toggleTitle, frame: NSRect(x: 396, y: 100, width: 70, height: 24), radius: 12)
@@ -2534,7 +2613,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let authMode=hostHub.auth_mode ?? (hostHub.token.isEmpty ? "none" : "token")
         let showToken=authMode == "token" && !hostHub.token.isEmpty
         let endpointLabel = textLabel(hostHub.endpoint_url, NSRect(x: 14, y: 46, width: showToken ? 254 : 452, height: 16),
-            size: 11.5, weight: .medium, color: hostHub.enabled ? .labelColor : .secondaryLabelColor)
+            size: 11.5, weight: .medium, color: hostHub.enabled ? .labelColor : CitoPalette.secondaryText)
         endpointLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
         endpointLabel.lineBreakMode = .byTruncatingMiddle; endpointLabel.toolTip = endpointLabel.stringValue
         endpointLabel.identifier = NSUserInterfaceItemIdentifier("host_hub_endpoint")
@@ -2589,14 +2668,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         hostCard.addSubview(apply)
         if let error=hostHubPortError ?? hostHub.error, !error.isEmpty {
-            let label=textLabel(error,NSRect(x:14,y:66,width:452,height:14),size:10,color:.systemRed)
+            let label=textLabel(error,NSRect(x:14,y:66,width:452,height:14),size:10,color:CitoPalette.dangerText)
             label.lineBreakMode = .byTruncatingMiddle; label.toolTip = error
             label.identifier=NSUserInterfaceItemIdentifier("host_hub_error"); hostCard.addSubview(label)
         }
         hubsView.addSubview(hostCard)
 
         hubsView.addSubview(textLabel("CONNECTED HUBS", NSRect(x: 20, y: 194, width: 180, height: 14),
-            size: 10, weight: .semibold, color: .secondaryLabelColor))
+            size: 10, weight: .semibold, color: CitoPalette.secondaryText))
 
         let pasteBtn = MenuControl("Paste Invite", frame: NSRect(x: 272, y: 190, width: 116, height: 22), leadingSymbol: "doc.on.clipboard", radius: 6)
         pasteBtn.identifier = NSUserInterfaceItemIdentifier("paste_hub_invite")
@@ -2625,14 +2704,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
 
             func fieldLabel(_ title: String, _ frame: NSRect) {
-                form.addSubview(textLabel(title,frame,size:10,weight:.semibold,color:.secondaryLabelColor))
+                form.addSubview(textLabel(title,frame,size:10,weight:.semibold,color:CitoPalette.secondaryText))
             }
             if editingExistingHub && editingOriginalHub == "local" {
                 form.addSubview(textLabel("Edit Built-in Local Hub (local://)",NSRect(x:14,y:156,width:452,height:18),size:12.5,weight:.semibold))
-                form.addSubview(textLabel("Runs in-process on this Mac (SQLite-backed). No external server or auth needed.",NSRect(x:14,y:134,width:452,height:16),size:11,color:.secondaryLabelColor))
+                form.addSubview(textLabel("Runs in-process on this Mac (SQLite-backed). No external server or auth needed.",NSRect(x:14,y:134,width:452,height:16),size:11,color:CitoPalette.secondaryText))
                 fieldLabel("YOUR DISPLAY HANDLE (@USERNAME)",NSRect(x:14,y:104,width:452,height:14))
                 form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:76,width:452,height:24),placeholder:"e.g. alice",value:addHubUser))
-                form.addSubview(textLabel("Shown to local agent sessions when you send or receive signals on this Mac.",NSRect(x:14,y:54,width:452,height:14),size:10.5,color:.secondaryLabelColor))
+                form.addSubview(textLabel("Shown to local agent sessions when you send or receive signals on this Mac.",NSRect(x:14,y:54,width:452,height:14),size:10.5,color:CitoPalette.secondaryText))
                 for (id,value) in [("settings_hub_name","local"),("settings_hub_url","local://")] {
                     let field=makeEditableField(id,frame:.zero,placeholder:"",value:value)
                     field.isHidden=true; form.addSubview(field)
@@ -2670,13 +2749,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:56,width:260,height:24),placeholder:"https://id.example.com",value:addHubIssuer))
                     form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:282,y:56,width:184,height:24),placeholder:"cito",value:addHubClientId))
                 }
-                let protocolHelp=textLabel("Supports http://ip:4291 (Mac Share) or https:// (Team Hub).",NSRect(x:14,y:8,width:284,height:28),size:10,color:.secondaryLabelColor)
+                let protocolHelp=textLabel("Supports http://ip:4291 (Mac Share) or https:// (Team Hub).",NSRect(x:14,y:8,width:284,height:28),size:10,color:CitoPalette.secondaryText)
                 protocolHelp.maximumNumberOfLines=2; protocolHelp.lineBreakMode = .byWordWrapping
                 form.addSubview(protocolHelp)
             }
 
             if let error=addHubError {
-                let label=textLabel(error,NSRect(x:14,y:36,width:452,height:15),size:10,color:.systemRed)
+                let label=textLabel(error,NSRect(x:14,y:36,width:452,height:15),size:10,color:CitoPalette.dangerText)
                 label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=error
                 label.lineBreakMode = .byTruncatingMiddle; form.addSubview(label)
             }
@@ -2750,7 +2829,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 nameLabel.lineBreakMode = .byTruncatingMiddle; nameLabel.toolTip = hub.name
                 row.addSubview(nameLabel)
                 let subtitle=local ? "Built-in on this Mac (local://) · Handle: @\(hub.user ?? "local")" : "\(hub.url) · \(hub.auth_mode)"
-                let subtitleLabel = textLabel(subtitle, NSRect(x: 28, y: 7, width: textWidth, height: 14), size: 10.5, color: .secondaryLabelColor)
+                let subtitleLabel = textLabel(subtitle, NSRect(x: 28, y: 7, width: textWidth, height: 14), size: 10.5, color: CitoPalette.secondaryText)
                 subtitleLabel.lineBreakMode = .byTruncatingMiddle; subtitleLabel.toolTip = subtitle
                 row.addSubview(subtitleLabel)
 
@@ -2828,7 +2907,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
         if uninstallConfirmOpen {
             let confirmBox = roundedView(NSRect(x: 20, y: 48, width: 480, height: 96), radius: 10,
-                color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: .systemRed.withAppearanceAlpha(0.35))
+                color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: CitoPalette.dangerText.withAppearanceAlpha(0.35))
             confirmBox.identifier = NSUserInterfaceItemIdentifier("uninstall_confirm_box")
 
             confirmBox.addSubview(textLabel("Reset or Uninstall Cito",NSRect(x:12,y:68,width:456,height:18),size:12.5,weight:.semibold))
@@ -2907,6 +2986,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if directoryPanel != nil { return }
         let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.appearance = testAppearance
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isFloatingPanel = true
@@ -3113,7 +3193,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         cancelComposerBtn.pressed = { [weak self] in self?.closeComposer() }
         composer.addSubview(cancelComposerBtn)
 
-        let composerError = textLabel("", NSRect(x: 16, y: 44, width: 528, height: 15), size: 10.5, color: .systemRed)
+        let composerError = textLabel("", NSRect(x: 16, y: 44, width: 528, height: 15), size: 10.5, color: CitoPalette.dangerText)
         composerError.identifier = NSUserInterfaceItemIdentifier("composer_error")
         composerError.lineBreakMode = .byTruncatingMiddle
         composer.addSubview(composerError)
@@ -3125,12 +3205,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 28))
         footerBar.identifier = NSUserInterfaceItemIdentifier("directory_footer")
         footerBar.addSubview(roundedView(NSRect(x: 0, y: 27, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-        let shortcuts = textLabel("↵ Copy Selected ID    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: .secondaryLabelColor)
+        let shortcuts = textLabel("↵ Copy Selected ID    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: CitoPalette.secondaryText)
         shortcuts.identifier = NSUserInterfaceItemIdentifier("directory_shortcuts")
         directoryShortcutsLabel = shortcuts
         footerBar.addSubview(shortcuts)
         updateDirectoryShortcuts()
-        let summary = textLabel("0 of 0 online", NSRect(x: 320, y: 6, width: 224, height: 16), size: 11, color: .secondaryLabelColor)
+        let summary = textLabel("0 of 0 online", NSRect(x: 320, y: 6, width: 224, height: 16), size: 11, color: CitoPalette.secondaryText)
         summary.alignment = .right
         summary.identifier = NSUserInterfaceItemIdentifier("directory_summary")
         footerBar.addSubview(summary)
@@ -3143,9 +3223,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func updateDirectoryShortcuts() {
+        let canReply = activityFilteredItems.indices.contains(directorySelectedIndex) && activityFilteredItems[directorySelectedIndex].for_me
         directoryShortcutsLabel?.stringValue = !(directoryComposerBar?.isHidden ?? true)
             ? "↵ Send    ⎋ Cancel Reply"
-            : (directoryMode == "activity" ? "↵ Reply    ⎋ Close" : "↵ Copy Selected ID    ⎋ Close")
+            : (directoryMode == "activity" ? (canReply ? "↵ Reply    ⎋ Close" : "⎋ Close") : "↵ Copy Selected ID    ⎋ Close")
     }
 
     func updateDirectoryModePills() {
@@ -3373,7 +3454,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             action={ [weak self] in self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
         }
         box.addSubview(textLabel(title,NSRect(x:20,y:96,width:480,height:22),size:15,weight:.semibold))
-        box.addSubview(textLabel(subtitle,NSRect(x:20,y:64,width:480,height:20),size:12,color:.secondaryLabelColor))
+        box.addSubview(textLabel(subtitle,NSRect(x:20,y:64,width:480,height:20),size:12,color:CitoPalette.secondaryText))
         let button=MenuControl(label,frame:NSRect(x:166,y:18,width:188,height:26),radius:6)
         button.identifier=NSUserInterfaceItemIdentifier(id); button.pressed=action; box.addSubview(button)
         root.addSubview(box)
@@ -3391,6 +3472,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return true
         }
         directorySelectedIndex = activityFilteredItems.isEmpty ? 0 : min(max(0, directorySelectedIndex), activityFilteredItems.count - 1)
+        updateDirectoryShortcuts()
         updateDirectoryEmptyState()
         directorySummaryLabel?.stringValue = "\(activityFilteredItems.count) signals · \(unreadCount) unread"
         if let table = directoryTableView {
@@ -3515,8 +3597,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if directoryMode == "activity" {
                 guard activityFilteredItems.indices.contains(directorySelectedIndex) else { return }
-                let item = activityFilteredItems[directorySelectedIndex]
-                openComposer(target: item.from_scoped_id ?? "@\(item.from_user)", hub: item.hub, replySignalId: item.signal_id)
+                replyToActivity(activityFilteredItems[directorySelectedIndex])
                 return
             }
             guard directoryFilteredPeers.indices.contains(directorySelectedIndex) else { return }
@@ -3587,7 +3668,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let item = activityFilteredItems[row]
             cell.configureActivity(with: item, selected: row == directorySelectedIndex, harnesses: harnessMap) { [weak self] in
                 guard let self = self else { return }
-                self.openComposer(target: item.from_scoped_id ?? "@\(item.from_user)", hub: item.hub, replySignalId: item.signal_id)
+                self.replyToActivity(item)
             }
             return cell
         }
@@ -3606,6 +3687,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
         guard row >= 0 && row < count else { return }
         directorySelectedIndex = row
+        updateDirectoryShortcuts()
         for r in 0..<table.numberOfRows {
             if let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false) as? DirectoryPeerCellView {
                 cell.setSelected(r == row)
@@ -3626,7 +3708,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let height=rows.reduce(CGFloat(8)) { $0 + ($1.view?.frame.height ?? 9) }
             let composite=FlippedView(frame:NSRect(x:0,y:0,width:380,height:height))
             composite.wantsLayer=true
-            composite.layer?.backgroundColor=NSColor.windowBackgroundColor.cgColor
+            composite.appearance = testAppearance
+            composite.effectiveAppearance.performAsCurrentDrawingAppearance {
+                composite.layer?.backgroundColor = CitoPalette.surfaceBackground.cgColor
+            }
             var y:CGFloat=4
             for row in rows {
                 if let child=row.view {
@@ -3653,10 +3738,35 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             table.layoutSubtreeIfNeeded()
         }
+        view.window?.appearance = testAppearance
+        view.appearance = testAppearance
+        // Behind-window effects cannot sample a desktop in an offscreen panel.
+        // Substitute the declared appearance backdrop only for capture, restoring
+        // the live material and its root fill before returning to event handling.
+        let effects = view.subviews.compactMap { $0 as? NSVisualEffectView }
+        let effectVisibility = effects.map { $0.isHidden }
+        let surface = view as? SurfaceView
+        let originalFill = surface?.fillColor
+        effects.forEach { $0.isHidden = true }
+        surface?.fillColor = CitoPalette.surfaceBackground
+        defer {
+            for (effect, hidden) in zip(effects, effectVisibility) { effect.isHidden = hidden }
+            if let fill = originalFill { surface?.fillColor = fill }
+        }
         view.layoutSubtreeIfNeeded()
         guard let bitmap=NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:Int(view.bounds.width*2),pixelsHigh:Int(view.bounds.height*2),bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0) else { diagnostic("render failed: bitmap allocation"); return }
         bitmap.size=view.bounds.size
-        view.cacheDisplay(in:view.bounds,to:bitmap)
+        // Offscreen visual effects have no desktop to sample. Provide the same opaque
+        // Light/Dark backing used by the contrast oracle, then composite real AppKit drawing.
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+            NSGraphicsContext.current?.cgContext.scaleBy(x: 2, y: 2)
+            CitoPalette.surfaceBackground.setFill()
+            view.bounds.fill()
+            NSGraphicsContext.restoreGraphicsState()
+            view.cacheDisplay(in:view.bounds,to:bitmap)
+        }
         guard let data=bitmap.representation(using:.png,properties:[:]) else { diagnostic("render failed: PNG encoding"); return }
         do { try data.write(to:URL(fileURLWithPath:path),options:.atomic); diagnostic("rendered " + path) }
         catch { diagnostic("render failed: " + error.localizedDescription) }
@@ -3666,6 +3776,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var truncatedLabels: [String] = []
         var overlappingSiblings: [String] = []
         var clippedViews: [String] = []
+        var lowContrastLabels: [String] = []
         func name(_ view: NSView) -> String {
             view.identifier?.rawValue ?? (view as? NSTextField)?.stringValue ?? String(describing:type(of:view))
         }
@@ -3682,8 +3793,45 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard let rgb = color?.usingColorSpace(.deviceRGB) else { return [] }
             return [rgb.redComponent, rgb.greenComponent, rgb.blueComponent, rgb.alphaComponent]
         }
-        func project(_ view: NSView, visible: Bool = true) -> [String: Any] {
+        func resolved(_ color: NSColor, in appearance: NSAppearance) -> NSColor {
+            var rgb = NSColor.black
+            appearance.performAsCurrentDrawingAppearance { rgb = color.usingColorSpace(.sRGB) ?? .black }
+            return rgb
+        }
+        func blended(_ foreground: NSColor, over background: NSColor, opacity: CGFloat = 1) -> NSColor {
+            let a = foreground.alphaComponent * opacity
+            return NSColor(srgbRed: foreground.redComponent * a + background.redComponent * (1-a),
+                green: foreground.greenComponent * a + background.greenComponent * (1-a),
+                blue: foreground.blueComponent * a + background.blueComponent * (1-a), alpha: 1)
+        }
+        func luminance(_ color: NSColor) -> CGFloat {
+            func linear(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c/12.92 : pow((c+0.055)/1.055, 2.4) }
+            return 0.2126 * linear(color.redComponent) + 0.7152 * linear(color.greenComponent) + 0.0722 * linear(color.blueComponent)
+        }
+        func project(_ view: NSView, visible: Bool = true, background: NSColor? = nil, opacity: CGFloat = 1, enabled: Bool = true) -> [String: Any] {
             let visible = visible && !view.isHidden
+            let opacity = opacity * view.alphaValue
+            let enabled = enabled && ((view as? NSControl)?.isEnabled ?? true)
+            let base = background ?? resolved(CitoPalette.surfaceBackground, in: view.effectiveAppearance)
+            var surface = base
+            // Resolve dynamic layer-backed fills in the same appearance as the text.
+            if let control = view as? MenuControl { control.applyVisualState() }
+            if let fill = view as? SurfaceView { fill.applyLayerColors() }
+            if let fill = view.layer?.backgroundColor.flatMap({ NSColor(cgColor: $0) }) {
+                surface = blended(resolved(fill, in: view.effectiveAppearance), over: base, opacity: opacity)
+            }
+            var contrast: CGFloat?
+            if visible, enabled, opacity > 0.6, let label = view as? NSTextField,
+               !label.stringValue.isEmpty, let color = label.textColor {
+                let foreground = blended(resolved(color, in: view.effectiveAppearance), over: surface, opacity: opacity)
+                let a = luminance(foreground), b = luminance(surface)
+                let ratio = (max(a,b)+0.05)/(min(a,b)+0.05)
+                contrast = ratio
+                if ratio < 4.5 {
+                    let labelName = (label.superview as? MenuControl).map { name($0) } ?? name(label)
+                    lowContrastLabels.append("\(labelName): \(String(format: "%.2f", Double(ratio)))")
+                }
+            }
             if visible, let label = view as? NSTextField, !label.isEditable,
                label.lineBreakMode != .byTruncatingMiddle, (label.superview is MenuControl || !isDataRow(label)) {
                 let font = label.font ?? .systemFont(ofSize:12)
@@ -3737,7 +3885,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             var result: [String: Any] = ["id": (view as? DirectoryPeerCellView)?.inspectionId ?? view.identifier?.rawValue ?? "", "width": view.frame.width,
                 "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
-                "children": childViews.map { project($0, visible: visible) }]
+                "children": childViews.map { project($0, visible: visible, background: surface, opacity: opacity, enabled: enabled) }]
+            result["contrast"] = contrast
             result["background"] = components(view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) })
             result["border"] = components(view.layer?.borderColor.flatMap { NSColor(cgColor: $0) })
             result["border_width"] = view.layer?.borderWidth ?? 0
@@ -3756,7 +3905,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
                 result["label_width"] = control.label.frame.width
                 result["label_measured_width"] = measureTextWidth(control.label.stringValue,font:control.label.font ?? .systemFont(ofSize:12))
-                result["green"] = control.label.textColor == NSColor.systemGreen
+                result["green"] = control.label.textColor == CitoPalette.successText
                 result["hovered"] = control.isHovered
                 control.effectiveAppearance.performAsCurrentDrawingAppearance { result["foreground"] = components(control.label.textColor) }
                 if let symbol = control.symbolName { result["symbol"] = symbol }
@@ -3806,6 +3955,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
         let snapshot: [String: Any] = ["items": items, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
+            "low_contrast_labels": lowContrastLabels, "wake_action_text": wakeActionText,
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),
@@ -3826,7 +3976,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             "button_digit_widths": font.map { font in ["11111111", "88888888"].map { ($0 as NSString).size(withAttributes: [.font: font]).width } } ?? []]
         diagnostic("menu " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
     }
+    func replyToActivity(_ item: ActivityItem) {
+        guard item.for_me else { return }
+        openComposer(target: item.from_scoped_id ?? "@\(item.from_user)", hub: item.hub, replySignalId: item.signal_id)
+    }
+    func openActivityForSignal(_ value: Payload) {
+        closeComposer()
+        directoryQuery = ""; directorySearchField?.stringValue = ""
+        activityFilter = "all"
+        openDirectoryPanel(mode: "activity")
+        directorySelectedIndex = value.signal_id.flatMap { id in activityFilteredItems.firstIndex { $0.signal_id == id } } ?? 0
+        directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
+        directoryTableView?.scrollRowToVisible(directorySelectedIndex)
+        emit(["op": "open_directory", "mode": "activity"])
+    }
     func openDirectoryForReply(_ value: Payload) {
+        guard value.target_harness == "human" else { return }
         let target = (value.from_scoped_id?.isEmpty == false) ? value.from_scoped_id! : "@\(value.from_user)"
         openDirectoryPanel(mode: "activity")
         if let sigId = value.signal_id, let idx = activityFilteredItems.firstIndex(where: { $0.signal_id == sigId }) {
@@ -3841,14 +4006,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let clickedPayload = (clicked && visible) ? payload : nil
         visible = false; panel?.orderOut(nil)
         if let val = clickedPayload {
-            openDirectoryForReply(val)
+            if val.target_harness == "human" { openDirectoryForReply(val) }
+            else { openActivityForSignal(val) }
         }
         if headless { diagnostic(clicked ? "banner clicked" : "banner hidden") }
     }
     func show(_ value: Payload) {
         let title = "Cito · \(value.target_title)" + (displayedCount > 1 ? " (\(displayedCount))" : "")
         let semanticLabel = (value.effective_wake ? "Notification" : "Passive") + (displayedCount > 1 ? " · ×\(displayedCount)" : "")
-        let actionText = "Click to reply in Cito ↩"
+        let actionText = value.target_harness == "human" ? "Click to reply in Cito ↩" : "Click to view in Activity ↗"
+        wakeActionText = actionText
         visible = true
         if headless {
             // Diagnostics expose the actual presentation model, without adding
@@ -3870,7 +4037,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
-            window.appearance = NSAppearance(named: .vibrantDark)
+            window.appearance = testAppearance
             let root = ClickView(frame: window.contentView!.bounds)
             root.clicked = { [weak self] in self?.hide(clicked: true) }
             root.setAccessibilityElement(true)
@@ -3912,7 +4079,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let label = NSTextField(wrappingLabelWithString: "")
                 label.isSelectable = false
                 label.font = index == 0 || index == 4 ? .boldSystemFont(ofSize: size) : .systemFont(ofSize: size)
-                label.textColor = index == 1 ? NSColor.white.withAlphaComponent(0.7) : .white
+                label.textColor = index == 1 ? CitoPalette.secondaryText : .labelColor
                 label.frame = frames[index]
                 label.maximumNumberOfLines = index == 2 ? 2 : 1
                 label.lineBreakMode = .byTruncatingTail
@@ -3928,21 +4095,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             window.contentView = root
             panel = window
         }
-        let color = value.effective_wake
-            ? NSColor(srgbRed: 1, green: 159.0 / 255, blue: 10.0 / 255, alpha: 1)
-            : NSColor(srgbRed: 100.0 / 255, green: 210.0 / 255, blue: 1, alpha: 1)
-        accentBar?.layer?.backgroundColor = color.cgColor
-        iconBadge?.layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
+        let color = value.effective_wake ? CitoPalette.warningText : CitoPalette.infoText
+        panel?.effectiveAppearance.performAsCurrentDrawingAppearance {
+            accentBar?.layer?.backgroundColor = color.cgColor
+            iconBadge?.layer?.backgroundColor = (value.effective_wake ? CitoPalette.warningFill : CitoPalette.infoText.withAppearanceAlpha(0.14)).cgColor
+            labels[4].layer?.backgroundColor = (value.effective_wake ? CitoPalette.warningSurface : CitoPalette.infoText.withAppearanceAlpha(0.14)).cgColor
+        }
         icon?.image = NSImage(systemSymbolName: value.effective_wake ? "bell.badge.fill" : "tray.and.arrow.down.fill", accessibilityDescription: semanticLabel)
         icon?.contentTintColor = color
         labels[0].stringValue = "Cito" + (value.target_title.isEmpty ? "" : " · \(value.target_title)")
         labels[1].stringValue = value.displaySubtitle
         labels[2].stringValue = value.displayMessage
         labels[3].stringValue = actionText
-        labels[3].textColor = .systemBlue
+        labels[3].textColor = CitoPalette.infoText
         labels[4].stringValue = semanticLabel
         labels[4].textColor = color
-        labels[4].layer?.backgroundColor = color.withAlphaComponent(0.14).cgColor
+
         panel?.contentView?.setAccessibilityLabel("\(labels[0].stringValue). \(semanticLabel). \(value.displaySubtitle). \(value.displayMessage). \(labels[3].stringValue)")
         let initialDisplay = !(panel?.isVisible ?? false)
         if let screen = NSScreen.main, let window = panel {

@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V26 — Stage 10 `v0.20.2`: Root-Cause Equivalence-Class Closure (`R1`–`R5`), True Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop Error Surfacing, Bridge Readiness & `Daemon<->UI` Closed-Loop Verification, Building on Stage 9 `U1`–`U11` & Stage 8 `L1`–`L17`)
+# Cito Architecture & Protocol Specification (V28 — Stage 11 `v0.20.3`: Light/Dark Contrast, Agent-Only Counter, Human Node Titles, Reply Boundaries & Explicit Activity Entry — C1–C5)
 
-> **Normative Supersession Notice (`V26` / `v0.20.2`)**:
-> This `V26` specification is the single authoritative contract for Cito `v0.20.2` (Stage 10 — Phase `v26`), superseding `V25` (`v0.20.1`). Stage 10 (`§12`) resolves all 5 root-cause equivalence classes (`R1`–`R5`) identified across the three-agent root-cause audit (`pathway-auditor`, `uiux-auditor`, and `structural-auditor`): true two-stratum progressive disclosure and independent scope saving (`R1`), full mechanical geometry invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`) and 8 coordinate fixes (`R2`), closed-loop UI action error surfacing and form/invite validation (`R3`), bridge socket readiness vs. `needs_reload` UX and bounded exponential retry backoff (`R4`), and real `DaemonService <-> Headless cito-ui` closed-loop integration plus 2x Retina PNG multimodal verification (`R5`). All paths written with `~` in prose examples represent the user's home directory; in actual runtime configuration files (`settings.json`, `config.toml`, `LaunchAgent` plist), Cito always expands `~` to the resolved absolute filesystem path.
+> **Normative Supersession Notice (`V28` / `v0.20.3`)**:
+> This specification is the authoritative contract for Cito `v0.20.3` (Stage 11 — Phase `v28`). Section 13 supersedes conflicting presentation and interaction rules in Sections 10–12. The Stage 10 (`v0.20.2`) two-stratum channel setup, independent scope saving, geometry checks, error handling, bridge readiness, and real daemon/UI integration contracts remain in force. All paths written with `~` in prose examples represent the user's home directory; runtime configuration files use expanded absolute paths.
 
 ---
 
@@ -299,7 +299,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 
 ### 7.2 Historical Stage 6 Transition (`F1, F43, F46, F50`)
 
-The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.20.2` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
+The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.20.3` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
 1. **Root `package.json` Contract**:
    - `"version": "0.18.0"`, `"license": "MIT"`, `"type": "module"`.
    - `"bin": { "cito": "bin/cito", "cito-mcp": "bin/cito-mcp" }` (`cito-claude-hook` removed from top-level `bin`).
@@ -1083,4 +1083,63 @@ Stage 10 (`v0.20.2` — Phase `v26`) supersedes any conflicting layout, coordina
 | **`R3`** | Closed-loop UI actions, visible error surfacing (`settings_error_banner`, `add_hub_error`, `menu_error_row`, `hub.error`) & invite/form validation | `src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs` | `DaemonService` tracks `last_hub_errors`, emits `{"op": "error", ...}` on action failure, and unifies `paste_hub_invite`; `cito-ui` surfaces errors in `add_hub_error`, `settings_error_banner` (shifting scroll viewport by `36pt`), `menu_error_row`, and `composerErrorLabel`, validates `submit_add_hub` before closing, preserves `hostHubPortDraft`, and falls back `effectiveChannelHub` to `"local"` on Hub removal. |
 | **`R4`** | Process discovery vs. bridge socket readiness, vendor-neutral `needs_reload` UX in `cardMenu`, & bounded exponential retry backoff | `plugins/pi/{native.rs,cito-bridge.ts}`, `crates/cito-native/src/core/session_activity.rs`, `src/macos/cito-ui.swift` | `cito-bridge.ts` `identify` falls back to `process.cwd()` / latest `.jsonl` before `session_start`; unbridged processes emit `needs_reload: true` and cannot be enrolled by `resolve_caller`/`probe`; `cardMenu` renders a `46pt` `needs_reload` row with `reload:<harness>:<sid>` (`"/reload"`); `SessionActivity` backs off `250ms..15s` and retires inactive badge entries. |
 | **`R5`** | Real `DaemonService <-> Headless cito-ui` closed-loop integration suite & multimodal Retina PNG verification | `crates/cito-native/tests/support/ui.rs` | Closed-loop harness pipes `cito-ui` stdout actions through a real `DaemonService` and feeds real daemon frames back to `cito-ui` stdin, asserting `truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views == []` at every step and rendering 2x Retina PNG snapshots of all core states. |
+
+## 13. V28 — Stage 11 v0.20.3: Light/Dark Appearance Contrast (CitoPalette), Agent-Only Menu Bar Counter, Human Node Card Title Normalization, Agent-vs-Human Reply Boundary & Explicit Menu Bar Activity Entry (C1–C5)
+
+Stage 11 preserves the symmetric Node/Hub/Channels ontology and plugin boundary. These changes correct existing UI behavior without adding public CLI, MCP, or daemon/UI protocol fields. The implementation lives in `src/macos/cito-ui.swift` (`Companion`, `MenuControl`, `DirectoryPeerCellView`) and the existing registration/daemon paths. Class names in earlier design sections describe surfaces; they do not require separate controller classes.
+
+### 13.1 C1 — Agent-only session counter and Human readiness
+
+- `uniqueSessionCount` counts distinct `(harness, session_id)` pairs only where `harness != "human"`. Registering the same agent on two hubs still contributes one session; custom plugin harness IDs count normally.
+- `humanListening` independently reports whether any Human listener exists.
+- The status button title is `""` with no agents and no unread signals, `" N"` with agents, `" 🔔U"` with unread signals, or `" N 🔔U"` with both. Human enrollment never adds a permanent `1`.
+- `header_subtitle` reads `Ready · N agent(s) listening`, optionally followed by ` · Human ready`; without agents it reads `Ready · Human listening` or `Ready · Idle`. The bounded label uses middle truncation and a full tooltip.
+
+### 13.2 C2 — Human enrollment and compact card titles
+
+- The daemon `listen_session` action and shared `registration::register_locked` path default missing, empty, or whitespace-only Human titles to `Human`. The normalized title reaches the response, local SQLite row, and Hub registration. Agent titles and nonempty custom Human titles remain unchanged.
+- Human cards display `Human Node (@user)` for default titles (`Human`, empty/whitespace, `Human Node…`) and the legacy auto-generated `@user` title. Identity comes from the listener's `user` or `owner_user`, then that listener's Hub account, then the selected account.
+- Default `about` values `Human` and `Human receiver` never create a second description line. A distinct custom description still creates a `78pt` row; a default Human card stays a compact `64pt` row (`58pt` inner card) at startup and after Disable → Enable. Custom titles remain visible.
+
+### 13.3 C3 — Dynamic semantic colors and contrast oracle
+
+`CitoPalette` uses `NSColor(name: nil)` providers and `bestMatch(from: [.darkAqua, .aqua])`. RGB components are sRGB; alpha defaults to `1`.
+
+| Token | Light (`aqua`) | Dark (`darkAqua`) |
+| :--- | :--- | :--- |
+| `successText` | `(0.04, 0.43, 0.16)` | `(0.28, 0.85, 0.44)` |
+| `warningText` | `(0.64, 0.28, 0.00)` | `(1.00, 0.70, 0.25)` |
+| `dangerText` | `(0.74, 0.10, 0.14)` | `(1.00, 0.44, 0.42)` |
+| `infoText` | `(0.00, 0.34, 0.75)` | `(0.40, 0.74, 1.00)` |
+| `copiedFill` | `(0.04, 0.43, 0.16, 0.14)` | `(0.19, 0.82, 0.35, 0.22)` |
+| `copiedBorder` | `(0.04, 0.43, 0.16, 0.34)` | `(0.19, 0.82, 0.35, 0.45)` |
+| `warningFill` | `(0.64, 0.28, 0.00, 0.14)` | `(1.00, 0.62, 0.04, 0.18)` |
+| `warningBorder` | `(0.64, 0.28, 0.00, 0.32)` | `(1.00, 0.62, 0.04, 0.40)` |
+
+- Status text and icons use these semantic tokens instead of raw system green/orange/red/blue. Secondary text uses opaque appearance-specific gray to avoid low-contrast system secondary-label alpha. White-on-filled controls retain dark blue/red fills in both appearances.
+- Dynamic layer colors resolve inside `effectiveAppearance.performAsCurrentDrawingAppearance`. Copied chips composite `copiedFill` onto the canonical surface rather than stacking card tints; warning chips composite `warningFill` onto the native text-surface base. These opaque chip backings preserve the specified foreground/fill values while preventing stacked tint contrast losses.
+- The headless-only `test_inspect_menu` (also `test_inspect`) and `test_render_png` commands accept optional `appearance: "light" | "dark"`. Appearance propagates to menu views and windows before layout. Snapshots use exactly 2 pixels per point.
+- Offscreen capture uses `#ECEFF3` (Light) or `#1E2024` (Dark). Behind-window visual effects have no desktop to sample offscreen, so capture temporarily substitutes this declared backdrop, then restores live materials and root fills. Rendering runs under the effective drawing appearance. Snapshots verify deterministic material backdrops, not every possible desktop wallpaper.
+- `inspectMenu()` resolves visible `NSTextField` text (including `MenuControl` titles) into sRGB, composites alpha and nested layer fills onto the same canonical backdrop, linearizes sRGB, and computes WCAG `(Lmax + 0.05) / (Lmin + 0.05)`. Non-disabled labels with effective view alpha greater than `0.6` and ratio below `4.5` appear in `low_contrast_labels`; each inspected label also exposes its measured ratio. Hidden labels are excluded.
+
+### 13.4 C4 — Human reply boundary and agent Activity navigation
+
+- Human-targeted wake banners say `Click to reply in Cito ↩`; clicking opens the existing inline reply composer for the sender.
+- Every non-Human target says `Click to view in Activity ↗`; clicking clears the composer, opens Activity with All Activity selected, clears search, and selects the matching `signal_id` or index `0`. It never opens a Human reply composer. `wake_action_text` exposes the actual action string to headless inspection.
+- Activity cells show Reply only for `item.for_me`. Both button activation and Return guard this boundary. Agent-to-agent activity remains viewable without exposing a Human reply action. This rule does not restrict explicit Message actions on Directory peers.
+
+### 13.5 C5 — Explicit side-by-side menu entries
+
+Zone 4 contains two `174 × 28pt` controls, at `x = 12` and `x = 194`, within the `356pt` content span:
+
+- `open_directory`: `Directory…`, `magnifyingglass`, `N online`, tooltip `Search Network Directory (⌘K)`. Always opens Directory, regardless of unread count.
+- `open_activity`: `Activity…`, `bell.badge.fill` with unread signals or `clock.arrow.circlepath` otherwise; trailing `U unread` or `History`, tooltip `Open Activity Stream`. Always opens Activity.
+- Each emits the existing `open_directory` action with explicit `mode: "directory" | "activity"`.
+
+### 13.6 Verification and release alignment
+
+- `crates/cito-native/tests/support/ui.rs` exercises counters, real daemon Disable → Enable, default and legacy titles, duplicate agent enrollment, both wake actions, Reply/Return guards, explicit entry modes, and Light/Dark contrast across menu, Directory, and all three Settings tabs.
+- Run `CITO_TEST_SNAPSHOT_DIR=/tmp/cito-v28-snapshots cargo test --test native ui::` and visually inspect `c2_human_reenabled_{light,dark}.png` and `c3_*_{light,dark}.png`. Both appearances must report `low_contrast_labels == []` alongside all three existing geometry invariants.
+- Run `cargo test --workspace && cargo build --release` without compiler warnings, and `/usr/bin/ruby -c packaging/homebrew/cito.rb`. Verify zero concrete agent/channel names in core Rust and Swift, staged signed binaries, and `bin/cito --version` reporting `cito v0.20.3`.
+- `crates/cito-native/Cargo.toml` remains the canonical product version. Cargo.lock, plugin distribution metadata, the Homebrew formula, README, and website release metadata align at `0.20.3`. Stage/phase identifiers and SQLite schema versions remain independent; no schema migration is required.
 

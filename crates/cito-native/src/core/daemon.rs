@@ -2230,6 +2230,9 @@ impl DaemonService {
                         .caller(&meta, true)?
                         .ok_or("BINDING_REQUIRED: Session is not open")?;
                 }
+                if caller["harness"] == "human" && string(&caller, "title").trim().is_empty() {
+                    caller["title"] = json!("Human");
+                }
                 let about = action["about"].as_str().unwrap_or("Session");
                 return self.listen(
                     &hub,

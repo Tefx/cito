@@ -95,6 +95,10 @@ fn register_locked(
     }
     let harness = string(caller, "harness");
     let session = string(caller, "session_id");
+    let title = match string(caller, "title") {
+        title if harness == "human" && title.trim().is_empty() => "Human",
+        title => title,
+    };
     if harness.is_empty() || session.is_empty() || (harness == "human" && session != "default") {
         return Err("INVALID_INPUT: Invalid Node session identity".into());
     }
@@ -217,7 +221,7 @@ fn register_locked(
             .cloned()
             .unwrap_or_default();
         channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":if harness=="human"{"notify_fanout"}else{"wake_exclusive"},"priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":now_ms()}));
-        let value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":string(caller,"title"),"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
+        let value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
         if client.kv_save(&id, &value, remote.map(|r| r.1)).is_err() {
             continue;
         }
@@ -228,13 +232,13 @@ fn register_locked(
             }
             let changed = connection.execute(
                 "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
-                &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(string(caller,"title")),json!(about),json!(scope),json!(generation),json!(owner)],
+                &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(generation),json!(owner)],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
             Ok(())
         })?;
         return Ok(
-            json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":caller["title"],"scope":scope,"lease_ttl_seconds":60}),
+            json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
         );
     }
     Err("STALE_GENERATION: Listener CAS retries exhausted".into())
@@ -245,6 +249,53 @@ mod tests {
     use super::*;
     use crate::core::hub::HubEngine;
     use std::{fs, sync::Arc};
+
+    #[test]
+    fn human_title_defaults_reach_response_local_state_and_hub_without_changing_custom_titles(
+    ) -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("cito-registration-{}", random_uuid_v4()));
+        let engine = Arc::new(HubEngine::open(&root.join("hub"))?);
+        engine.set_plugin_roots(&[])?;
+        let result = (|| {
+            let state = LocalState::open(&root.join("state"))?;
+            let client = HubClient::new(
+                "work".into(),
+                json!({"url":"local://"}),
+                "alice",
+                Some(engine.clone()),
+            );
+            for (harness, title, expected) in [
+                ("human", Value::Null, "Human"),
+                ("human", json!(""), "Human"),
+                ("human", json!(" \n\t"), "Human"),
+                ("human", json!("Review desk"), "Review desk"),
+                ("fixture", json!(""), ""),
+                ("fixture", json!("Agent title"), "Agent title"),
+            ] {
+                let response = register_listener(
+                    &state,
+                    &client,
+                    "host",
+                    &json!({"about":"Human receiver"}),
+                    &json!({"harness":harness,"session_id":"default","title":title}),
+                )?;
+                let id = string(&response, "canonical_listener_id");
+                assert_eq!(response["title"], expected);
+                assert_eq!(
+                    state.listener("work", id)?.ok_or("Missing local row")?["title"],
+                    expected
+                );
+                assert_eq!(
+                    client.kv_get(id)?.ok_or("Missing hub row")?.0["title"],
+                    expected
+                );
+            }
+            Ok(())
+        })();
+        engine.shutdown();
+        fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        result
+    }
 
     #[test]
     fn automatic_second_host_preserves_remote_scope() -> Result<(), String> {
