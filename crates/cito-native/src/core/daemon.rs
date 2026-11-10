@@ -1695,7 +1695,7 @@ impl DaemonService {
         let result = self.action_inner(action);
         self.record_hub_result(action, &result);
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
-            self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"settings":self.settings()}));
+            self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
         }
         self.push_ui();
         result
@@ -2896,7 +2896,7 @@ fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Resul
         }
         if let Err(error) = &result {
             s.emit(
-                json!({"op":"error","error":error,"source_op":action["op"],"hub":action["hub"]}),
+                json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
             );
         }
         s.push_ui();

@@ -377,10 +377,17 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             "Missing real daemon frame: {op}"
         );
     }
-    assert!(l
-        .frames
-        .iter()
-        .any(|frame| frame["op"] == "error" && frame["source_op"] == "setup_save_hub"));
+    for (name, op) in [("INVALID!", "error"), ("scratch", "settings")] {
+        let (action, _, _) = l
+            .results
+            .iter()
+            .find(|(action, _, _)| action["op"] == "setup_save_hub" && action["name"] == name)
+            .unwrap();
+        assert!(!action["request_id"].as_str().unwrap().is_empty());
+        assert!(l.frames.iter().any(|frame| frame["op"] == op
+            && frame["source_op"] == action["op"]
+            && frame["request_id"] == action["request_id"]));
+    }
 }
 
 #[test]
@@ -616,6 +623,94 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             field.strip_prefix("settings_hub_").unwrap()
         };
         assert_eq!(resubmitted[key], newer, "Preserve the newer {field} draft");
+    }
+
+    for retry_after_error in [false, true] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        f.send(p, frame);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:hubs");
+        let mut submissions = Vec::new();
+        for token in ["cancelled-token", "current-token"] {
+            control(&f, p, "open_add_hub");
+            control(&f, p, "settings_hub_auth:token");
+            for (id, value) in [
+                ("settings_hub_name", "submitted"),
+                ("settings_hub_url", "local://"),
+                ("settings_hub_token", token),
+            ] {
+                f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
+            }
+            control(&f, p, "submit_add_hub");
+            inspect(&f, p);
+            let action = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == "setup_save_hub")
+                .unwrap();
+            assert!(!action["request_id"].as_str().unwrap().is_empty());
+            assert_eq!(action["token"], token);
+            submissions.push(action);
+            if token == "cancelled-token" {
+                control(&f, p, "cancel_add_hub");
+            }
+        }
+        let cancelled = &submissions[0];
+        let mut current = submissions[1].clone();
+        assert_ne!(cancelled["request_id"], current["request_id"]);
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":cancelled["request_id"],"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+        assert_eq!(
+            node(&s, "settings_items", "submit_add_hub")["enabled"],
+            false
+        );
+        for op in ["setup_save_hub", "save_hub"] {
+            f.send(p, json!({"op":"error","source_op":op,"request_id":cancelled["request_id"],"error":"Cancelled submission failed"}));
+            let s = inspect(&f, p);
+            assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+            assert_eq!(
+                node(&s, "settings_items", "submit_add_hub")["enabled"],
+                false
+            );
+            assert!(node(&s, "settings_items", "add_hub_error").is_null());
+        }
+        if retry_after_error {
+            f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":current["request_id"],"error":"Current submission failed"}));
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "settings_items", "submit_add_hub")["enabled"],
+                true
+            );
+            assert_eq!(
+                node(&s, "settings_items", "add_hub_error")["text"],
+                "Current submission failed"
+            );
+            control(&f, p, "submit_add_hub");
+            inspect(&f, p);
+            let retry = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == "setup_save_hub")
+                .unwrap();
+            assert_eq!(
+                retry["token"], "current-token",
+                "Stale responses must preserve the newer secret draft"
+            );
+            assert_ne!(retry["request_id"], current["request_id"]);
+            current = retry;
+        }
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":current["request_id"],"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(node(&s, "settings_items", "add_hub_form").is_null());
+        assert!(!node(&s, "settings_items", "settings_hub:submitted").is_null());
     }
 }
 

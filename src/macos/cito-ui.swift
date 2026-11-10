@@ -852,6 +852,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var addHubUrl = ""
     var submittedAddHubName = ""
     var submittedAddHubUrl = ""
+    var submittedAddHubRequestId = ""
     var addHubDraftGeneration = 0
     var submittedAddHubGeneration = 0
     var addHubAuth = "none"
@@ -886,7 +887,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             hostHubPortError = nil
             if hostHubPortSaved && Int(hostHubPortDraft ?? "") == submittedHostHubPort { hostHubPortDraft = nil }
         }
-        if addHubSaving && confirmHubSave, let saved = value.hubs.first(where: { $0.name == submittedAddHubName && $0.url == submittedAddHubUrl }) {
+        if addHubSaving && confirmHubSave && !submittedAddHubRequestId.isEmpty &&
+           (savedRequest == nil || savedRequest == submittedAddHubRequestId),
+           let saved = value.hubs.first(where: { $0.name == submittedAddHubName && $0.url == submittedAddHubUrl }) {
             addHubSaving = false
             addHubError = saved.error
             if saved.error == nil && addHubDraftGeneration == submittedAddHubGeneration {
@@ -1146,6 +1149,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return
         }
         if frame.op == "error" {
+            if let requestId = frame.request_id, ["setup_save_hub", "save_hub"].contains(frame.source_op ?? ""),
+               requestId != submittedAddHubRequestId { return }
             let error = frame.error ?? "Unknown daemon error"
             pendingMutation = false; hostHubPortPending = false; addHubSaving = false
             hubInvitePending=false; hubInvitePastedUntil = .distantPast
@@ -1269,6 +1274,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func emit(_ action: [String: Any]) {
         var outgoing = action
+        if let op = action["op"] as? String, ["setup_save_hub", "save_hub"].contains(op), addHubSaving {
+            let requestId = UUID().uuidString
+            outgoing["request_id"] = requestId
+            submittedAddHubRequestId = requestId
+        }
         if let op = action["op"] as? String, ["channel_save", "save_hub_service"].contains(op),
            let id = action["channel_id"] as? String, let values = action["values"] as? [String: String] {
             let requestId = UUID().uuidString
@@ -2551,7 +2561,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.editingOriginalHub=""
             self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubAuth="none"
             self.addHubDraftGeneration += 1
-            self.addHubError=nil; self.addHubSaving=false
+            self.addHubError=nil; self.addHubSaving=false; self.submittedAddHubRequestId=""
             self.addHubFormOpen = wasEditing ? true : !self.addHubFormOpen
             self.rebuildSettingsPanel()
         }
@@ -2623,6 +2633,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             cancelBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.addHubFormOpen = false
+                self.addHubSaving = false; self.submittedAddHubRequestId = ""
                 self.rebuildSettingsPanel()
             }
             form.addSubview(cancelBtn)
@@ -2694,6 +2705,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     self.addHubName=hub.name; self.addHubUrl=hub.url; self.addHubAuth=hub.auth_mode
                     self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubToken=""
                     self.addHubDraftGeneration += 1
+                    self.addHubSaving=false; self.submittedAddHubRequestId=""; self.addHubError=nil
                     self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.addHubFormOpen=true
                     self.rebuildSettingsPanel()
                 }
