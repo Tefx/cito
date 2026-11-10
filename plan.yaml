@@ -8080,7 +8080,7 @@ phases:
 - id: v27
   name: V27 Full-Scope 2D Contract-and-Simplicity Iterative Convergence Audit, Mechanism-Level
     Consolidation & Release Alignment
-  status: in_progress
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100% with 0 compiler/linker warnings, test_inspect reports truncated_labels
     == [], overlapping_siblings == [], and clipped_views == [], grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
@@ -8213,7 +8213,7 @@ phases:
   - id: v27.gate
     name: V27 Independent Terminal Acceptance, Full-Scope 2D Contract-and-Simplicity
       Convergence & Release Alignment Gate
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v27` acceptance decision (`PASS`\
       \ or `FAIL`) issued by a fresh-context `gate-reviewer` session.\n- **Boundary:**\
@@ -8255,3 +8255,30 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-10T08:23:48.326639Z'
+    done_at: '2026-11-10T08:36:42.150057+00:00'
+    evidence: 'Artifact:
+
+      - Commit: ffe3cc46091207efaee1d5d1f150a751bd070043 (code commit 8b22875667ae588eeb499cf72bb93dbb7e1a53a9;
+      release tag `v0.20.2` at build commit `9948f2bb56d586c24231ff6b51d29c3e55489eb8`;
+      `Tefx/homebrew-tap` commit `98528121bcf4a6e6d4eebdbaffefc75064ab683c`)
+
+      - Gate Report (`gate.report.v2`): `/Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-10T08-32-27-826Z-2026-11-10T08-26-19-908Z_01a1c490-b382-729f-bed3-2de97136abf8.js-e6834d4b501e2aa1.txt`
+      (fresh-context `gate-reviewer` session `2026-11-10T08-26-19-908Z_01a1c490-b382-729f-bed3-2de97136abf8.jsonl`,
+      `status: PASS`, `review_kind: PHASE_GATE`, `review_mode: FULL`, `target_ref:
+      git:ffe3cc46091207efaee1d5d1f150a751bd070043`, 4/4 requirements `PROVEN`, `findings:
+      []`, `warnings: []`).
+
+
+      Verification:
+
+      - Run: `python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v27-gate/binding.json /tmp/cito-v27-gate/report.json` -> `{"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}`
+
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c
+      packaging/homebrew/cito.rb` -> 243 passed, 0 failed, 0 compiler/linker warnings,
+      `Syntax OK`
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1–12), docs/ROADMAP.md, packaging/homebrew/cito.rb, .github/workflows/release.yml'
