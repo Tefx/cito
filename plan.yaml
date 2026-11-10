@@ -8109,7 +8109,7 @@ phases:
     name: 'Full-Scope 1..EOF 2D Contract-and-Simplicity Iterative Convergence Audit,
       Mechanism-Level Consolidation & Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -8167,6 +8167,49 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-10T05:02:46.961698Z'
+    done_at: '2026-11-10T08:23:20.233573+00:00'
+    evidence: "Artifact:\n- Commit: 8b22875667ae588eeb499cf72bb93dbb7e1a53a9 (30 files\
+      \ changed, +1362 / -379 lines across 2D `1..EOF` discovery & semantic-impact\
+      \ delta rounds + Homebrew checksum alignment; annotated release tag `v0.20.2`\
+      \ at build commit `9948f2bb56d586c24231ff6b51d29c3e55489eb8`)\n- Executor: rust-senior\
+      \ + fresh-context `pathway-auditor` (Slices P-A & P-B), `structural-auditor`\
+      \ ($H_1 \\dots H_4$), and `uiux-auditor` (Slice U + 33 Retina PNG snapshots)\
+      \ under `[REQUIRES_SKILL: contract-and-simplicity]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`.\n\
+      - Convergence Summary:\n  - Round 1 Exhaustive `1..EOF` 2D Discovery read 100%\
+      \ (`1..EOF`) of all 40+ design, source, plugin, UI, website, and test files\
+      \ (`Uninspected Gaps: NONE`), synthesizing the Frozen Finding Ledger (`M1`–`M7`\
+      \ + Phase B structural trims).\n  - Closed all mechanisms (`M1` dry-run `setup_remove`\
+      \ guards & hermetic `resolve_app_bundle_path`, `M2` `host_hub` RMW preservation,\
+      \ `sync_host_hub()` reload & `host_hub_reload_failed` reconciliation, `qualify_reply_ids`\
+      \ normalization, and `cito-bridge.ts` port precedence, `M3` `hub_processed_replies`\
+      \ rotation reset, `replay` readiness gate, missing-plugin resilience, SSE drop\
+      \ cleanup, and persistent channel process-group teardown, `M4` hook-backed Claude\
+      \ `probe` fallback, atomic `drain_wakes`, and 8 MiB HTTP response bound, `M5`\
+      \ `generate_hub_invite` `\"name\"`, `set_scope` CAS retry, hub-scoped `ack_signals`,\
+      \ and 16-char hex `format_sender`, `M6`–`M7` `.byTruncatingMiddle` + `toolTip`\
+      \ on dynamic labels, `dismiss_menu_error`, channel draft cleanup, `renderPNG(\"\
+      directory\")` row materialization, `PendingComposerSend`/`PendingHubSave` struct\
+      \ consolidation, removal of `clear_wake_claim`/`schedule_wake_retry`/`loadStartupHarnesses`,\
+      \ injectable renewal interval in `receiver_tests.rs`, and doc/site sync) plus\
+      \ Round 2–3 delta items (`V27-R2-P1`–`V27-R2-P4`, `V27-R3-P1`).\n  - Round 4\
+      \ fresh-context verdicts:\n    - `pathway-auditor` (`2026-11-10T07-53-47-720Z_01a1c472-e9c7-7361-b313-7b77c1229e08.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n    - `structural-auditor` (`2026-11-10T07-53-47-809Z_01a1c472-ea20-77cb-b70a-7156022cadc8.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n    - `uiux-auditor` (`2026-11-10T07-53-47-629Z_01a1c472-e96c-7209-be96-1f7a8facb83e.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n- Live Distribution Alignment (`v0.20.2`):\n\
+      \  - GitHub Release `v0.20.2` (`https://github.com/Tefx/cito/releases/tag/v0.20.2`,\
+      \ built on `macos-15` in Actions run `42780054674` with `0` `warning:` and `0`\
+      \ `linker_messages` lines): published `Cito-macos-arm64.zip` with SHA-256 `8e9d14eea5b1d310b392752817d6d48c15fdfee2723080b6ee4b515f1c160625`,\
+      \ synchronized to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`, commit `98528121bcf4a6e6d4eebdbaffefc75064ab683c`).\n\n\
+      Verification:\n- Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` -> 243 passed, 0 failed, 0 compiler/linker\
+      \ warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v27.hygiene`.\n\nSpec link:\n\
+      - docs/DESIGN.md (§§1–12), docs/ROADMAP.md"
   - id: v27.gate
     name: V27 Independent Terminal Acceptance, Full-Scope 2D Contract-and-Simplicity
       Convergence & Release Alignment Gate
