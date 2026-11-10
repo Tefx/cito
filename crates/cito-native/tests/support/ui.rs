@@ -955,6 +955,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
     ] {
         let mut human = peer("human");
         human["harness"] = json!("human");
+        human["display_address"] = json!("@bob");
         human["title"] = json!(title);
         human["about"] = json!(about);
         let mut agent = peer("agent");
@@ -997,6 +998,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     human["about"] = json!("Human receiver");
     human["scoped_id"] = json!("personal:human");
     human["user"] = json!("bob");
+    human["display_address"] = json!("@bob");
     let mut frame = state();
     frame["settings"] = settings();
     frame["listeners"] = json!([]);
@@ -1009,6 +1011,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     );
     for user in ["alice", "bob"] {
         human["user"] = json!(user);
+        human["display_address"] = json!(format!("@{user}"));
         frame["listeners"] = json!([human.clone()]);
         f.send(p, frame.clone());
         let s = inspect(&f, p);
@@ -1028,6 +1031,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     let mut second = listener();
     second["hub"] = json!("work");
     second["scoped_id"] = json!("work:copy");
+    second["display_address"] = json!("work:alice/fixture#abcd");
     frame["listeners"] = json!([human, listener(), second]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
@@ -1187,7 +1191,7 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
         "hub":hub,"signal_id":id,"listener_id":"c_other","from_user":"alice",
         "from_host_name":"desktop","from_harness":"fixture","from_title":"Sender",
         "from_scoped_id":format!("{hub}:sender"),"target_harness":if for_me { "human" } else { "fixture" },
-        "target_title":"Receiver","target_scoped_id":format!("{hub}:other"),"message":"Done",
+        "target_title":"Receiver","target_scoped_id":format!("{hub}:other"),"message":"First line\nSecond line",
         "created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":for_me
     })).collect::<Vec<_>>());
     f.send(p, frame);
@@ -1235,6 +1239,16 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
             s["directory_selected_index"], selected_index,
             "{harness}: {hub}/{signal}"
         );
+        if selected_index == 1 {
+            assert_eq!(
+                node(&s, "directory_items", "activity_row:sig_other")["height"],
+                52
+            );
+            assert_eq!(
+                node(&s, "directory_items", "activity_row:sig_agent")["height"],
+                108
+            );
+        }
         if harness == "human" {
             assert_eq!(s["wake_action_text"], "Click to reply in Cito ↩");
             assert_eq!(s["composer_open"], true);
@@ -1801,7 +1815,12 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
             .rev()
             .find(|a| matches!(a["op"].as_str(), Some("query_directory" | "open_directory")))
             .unwrap();
-        f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[peer("one")]}));
+        let mut remote = peer("one");
+        remote["display_address"] = json!(format!(
+            "personal:{}",
+            remote["display_address"].as_str().unwrap()
+        ));
+        f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[remote]}));
         control(&f, p, "msg_dir:personal:one");
         f.send(
             p,
@@ -1833,6 +1852,7 @@ fn u3_paused_human_card_is_per_hub_and_excludes_offline_targets() {
     let mut human = listener();
     human["harness"] = json!("human");
     human["session_id"] = json!("default");
+    human["display_address"] = json!("@alice");
     frame["listeners"] = json!([human]);
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
@@ -2143,6 +2163,33 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
             .unwrap()
     };
     assert_eq!(latest("save_hub_service")["values"], json!({}));
+    f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"escape-discard"}));
+    let mut remote = cfg.clone();
+    remote["settings_hub"] = json!("work");
+    f.send(p, json!({"op":"settings","hub":"work","settings":remote}));
+    control(&f, p, "channel_hub_selector:work");
+    control(&f, p, "edit_hub_service:channel");
+    for (field, value) in [("secret", "escape-work"), ("account", "keep-work")] {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+    }
+    f.send(p, json!({"op":"test_settings_key","key":"escape"}));
+    for hub in ["work", "personal"] {
+        control(&f, p, &format!("channel_hub_selector:{hub}"));
+        control(&f, p, "edit_hub_service:channel");
+        control(&f, p, "save_hub_service:channel");
+        inspect(&f, p);
+        assert_eq!(
+            latest("save_hub_service")["values"],
+            json!({}),
+            "Escape discards gateway drafts on {hub}"
+        );
+        control(&f, p, "save_channel:channel");
+        inspect(&f, p);
+        assert_eq!(
+            latest("channel_save")["values"],
+            json!({"account":if hub == "work" { "keep-work" } else { "keep-personal" }})
+        );
+    }
     control(&f, p, "save_channel:channel");
     inspect(&f, p);
     assert_eq!(
@@ -2190,6 +2237,9 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
         36,
         "Clearing a gateway also leaves its old edit mode"
     );
+    f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","instruction":"Send the link command below","pairing_command":"/link 123456"}));
+    control(&f, p, "copy_pair_command:channel");
+    assert_eq!(inspect(&f, p)["clipboard"], "/link 123456");
 }
 #[test]
 fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
@@ -2571,6 +2621,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     second["hub"] = json!("work");
     second["scoped_id"] = json!("work:repo-workabcdefgh");
     second["listener_id"] = json!("c_workabcdefgh");
+    second["display_address"] = json!("work:alice/fixture#abcd");
     next["listeners"] = json!([listener(), second]);
     f.send(p, next);
     let s = inspect(&f, p);
@@ -2892,7 +2943,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(inspect(&f, p)["directory_open"], false);
 }
 fn settings() -> Value {
-    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"desktop_banner_enabled":true,"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"local://","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
+    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"desktop_banner_enabled":true,"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"http://127.0.0.1:4291","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
 }
 #[test]
 fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() {
@@ -2918,6 +2969,56 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
             inspect_as(&f, p, Some(appearance));
         }
+        for human in [false, true] {
+            let mut invalid = state();
+            invalid["listeners"][0]["hub"] = json!(if human { "personal" } else { "work" });
+            invalid["listeners"][0]["harness"] = json!(if human { "human" } else { "fixture" });
+            // DTO and chip agree, but the address violates the ontology/routing rule.
+            invalid["listeners"][0]["display_address"] = json!("alice/fixture#abcd");
+            f.send(p, invalid);
+            assert!(
+                !inspect_unchecked(&f, p, Some(appearance))["address_mismatches"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let mut invalid = state();
+        invalid["activity"] = json!([{"hub":"personal","signal_id":"jargon","listener_id":"target","from_user":"alice","from_host_name":"host","from_title":"Sender","target_harness":"fixture","target_title":"Human Node","target_scoped_id":"personal:target","message":"Message","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}]);
+        f.send(p, invalid);
+        control(&f, p, "open_activity");
+        control(&f, p, "act_filter:all");
+        let s = inspect_unchecked(&f, p, Some(appearance));
+        assert!(s["jargon_leaks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("act_title:jargon")));
+        assert_eq!(
+            node(&s, "directory_items", "directory_shortcuts")["text"],
+            "⎋ Close"
+        );
+        let mut clean = state();
+        clean["activity"] = json!([]);
+        f.send(p, clean);
+        let mut invalid = banner();
+        invalid["payload"]["from_title"] = json!("[Passive] Sender");
+        f.send(p, invalid);
+        assert!(inspect_unchecked(&f, p, Some(appearance))["jargon_leaks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("banner_data:1")));
+        // A human banner's fixed title is chrome and must be measured for truncation.
+        let mut chrome = banner();
+        chrome["payload"]["target_harness"] = json!("human");
+        f.send(p, chrome);
+        assert_eq!(
+            node(
+                &inspect_unchecked(&f, p, Some(appearance)),
+                "banner_items",
+                "banner_chrome:0"
+            )["text"],
+            "Cito · Direct Message"
+        );
     }
 }
 
@@ -2993,6 +3094,8 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     remote_human["title"] = json!("Human");
     remote_human["about"] = json!("Human receiver");
     remote_human["display_address"] = json!("@bob");
+    remote_human["repo"] = Value::Null;
+    remote_human["branch"] = Value::Null;
     let peers = json!([remote_agent, remote_human]);
     let short = json!({"hub":"local","signal_id":"local:short","listener_id":"c_76e846d115ce642f","from_user":"bob","from_host_name":"laptop","from_harness":"pi","from_title":"Review","from_scoped_id":"local:review","from_display_address":"bob/pi#abcd","target_harness":"human","target_title":"Human","target_scoped_id":"local:alice-76e846d115ce642f","target_display_address":"@alice","message":"Review ready.","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true});
     let mut expanded = short.clone();
@@ -3109,15 +3212,20 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         notification["payload"]["from_display_address"] = json!("bob/pi#abcd");
         f.send(p, notification);
         let s = inspect(&f, p);
+        let title_id = if kind == "human" {
+            "banner_chrome:0"
+        } else {
+            "banner_data:0"
+        };
         assert_eq!(
-            node(&s, "banner_items", "banner_data:0")["text"],
+            node(&s, "banner_items", title_id)["text"],
             if kind == "human" {
                 "Cito · Direct Message"
             } else {
                 "Cito · Review"
             }
         );
-        assert_eq!(node(&s, "banner_items", "banner_data:0")["hidden"], false);
+        assert_eq!(node(&s, "banner_items", title_id)["hidden"], false);
         capture("banner", name);
     }
 }
@@ -3129,6 +3237,7 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
     let p = start(&f);
     let mut frame = state();
     frame["settings"] = settings();
+    frame["harnesses"] = json!((0..6).map(|i| json!({"id":format!("agent-{i}"),"display_name":format!("Agent {i}"),"kind":"agent","sf_symbol":"terminal","tint":"blue","tier":"stable","order":i})).collect::<Vec<_>>());
     frame["my_remote_listeners"] = json!([peer("remote")]);
     f.send(p, frame);
     control(&f, p, "copy_remote:personal:remote");
@@ -3137,7 +3246,24 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
         peer("remote")["display_address"]
     );
     control(&f, p, "open_directory");
-    send_fixture(&f, p, json!({"op":"directory","peers":[peer("one")]}));
+    control(&f, p, "dir_harness:agent-5");
+    let overflow = inspect(&f, p);
+    assert_eq!(overflow["directory_harness"], "agent-5");
+    assert!(!node(&overflow, "directory_items", "directory_harness_scroll").is_null());
+    control(&f, p, "dir_harness:all");
+    let mut canonical = peer("one");
+    canonical["listener_id"] = json!("c_abcd123456789012");
+    canonical["public_id"] = json!("bob-abcd123456789012");
+    canonical["display_address"] = json!("bob/fixture#abcd");
+    send_fixture(&f, p, json!({"op":"directory","peers":[canonical]}));
+    for prefix in ["abcd1234", "abcd12345678", "abcd123456789012"] {
+        f.send(
+            p,
+            json!({"op":"test_directory_query","query":format!("bob/fixture#{prefix}")}),
+        );
+        assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
+    }
+    f.send(p, json!({"op":"test_directory_query","query":""}));
     let before = inspect(&f, p);
     f.send(p,json!({"op":"directory","request_id":"stale","query":"","scope":"all","harness":"all","peers":[peer("two")],"online_count":0}));
     assert_eq!(
@@ -3251,6 +3377,58 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         "@alice",
         "A newer clipboard action supersedes in-flight message chunks"
     );
+    assert_eq!(inspect(&f, l.ui)["composer_open"], false);
+    for invalid_chunk in [false, true] {
+        l.control(&control_id);
+        let request = f
+            .frames(l.ui)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "copy_activity_message")
+            .unwrap();
+        f.send(l.ui, if invalid_chunk {
+            json!({"op":"activity_message","request_id":request["request_id"],"part":1,"message":"out of order","complete":true,"error":"COPY_FAILED: Message unavailable"})
+        } else {
+            json!({"op":"error","source_op":"copy_activity_message","request_id":request["request_id"],"error":"COPY_FAILED: Message unavailable"})
+        });
+        let failed = inspect(&f, l.ui);
+        assert_eq!(failed["clipboard"], "@alice");
+        let status = node(&failed, "directory_items", "directory_summary");
+        assert_eq!(status["text"], "Message unavailable");
+        assert_eq!(status["tooltip"], "Message unavailable");
+        assert_eq!(status["hidden"], false);
+        l.pump();
+        assert_eq!(inspect(&f, l.ui)["clipboard"], "@alice");
+    }
+    let mut state = f.action(json!({"op":"get_snapshot"})).1;
+    state["settings"]["host_hub"]["enabled"] = json!(true);
+    state["settings"]["host_hub"]["token"] = json!("fixture-token");
+    state["settings"]["host_hub"]["auth_mode"] = json!("token");
+    state["settings"]["host_hub"]["invite_command"] =
+        json!("cito setup --hub work --url http://127.0.0.1:4291");
+    state["available"] = json!([{"harness":"fixture","session_id":"reload","title":"Reload bridge","cwd":"/tmp","needs_reload":true}]);
+    f.send(l.ui, state);
+    l.control("open_settings");
+    l.control("settings_tab:hubs");
+    for (id, expected) in [
+        ("copy_host_hub_token", "fixture-token"),
+        (
+            "copy_hub_invite",
+            "cito setup --hub work --url http://127.0.0.1:4291",
+        ),
+        ("reload:fixture:reload", "/reload"),
+    ] {
+        l.control(&control_id);
+        let request = f
+            .frames(l.ui)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "copy_activity_message")
+            .unwrap();
+        l.control(id);
+        f.send(l.ui, json!({"op":"activity_message","request_id":request["request_id"],"part":0,"message":"late full message","complete":true}));
+        assert_eq!(inspect(&f, l.ui)["clipboard"], expected, "{id}");
+    }
 }
 
 #[test]

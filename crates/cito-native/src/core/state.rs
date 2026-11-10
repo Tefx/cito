@@ -318,7 +318,7 @@ impl LocalState {
         filter: &str,
         query: &str,
     ) -> Result<(Vec<Value>, u64, u64), String> {
-        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' '||s.from_user||' '||s.from_title||' '||COALESCE(l.title,'')),lower(?))>0)";
+        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' '||s.from_user||' '||s.from_host_name||' '||s.from_title||' '||COALESCE(l.title,'')||' '||s.signal_id||' '||s.listener_id||' '||CASE WHEN l.harness='human' THEN 'you' ELSE '' END),lower(?))>0)";
         let params = [json!(filter), json!(filter), json!(query), json!(query)];
         self.db.transaction(|c| {
             let counts = c.query(&format!("SELECT COUNT(*) AS total,COUNT(CASE WHEN s.acknowledged_at_ms IS NULL THEN 1 END) AS unread{predicate}"), &params)?;

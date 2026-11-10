@@ -173,6 +173,70 @@ fn repair_default_hub(v: &mut Value) {
     }
 }
 
+// Presentation must cover local registrations before the asynchronous directory
+// cache catches up. Cached Hub rows retain their lease and attachment metadata.
+fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
+    let mut peers = slot.cached_directory();
+    let mut ids: HashSet<String> = peers
+        .iter()
+        .map(|p| string(p, "listener_id").into())
+        .collect();
+    if let Ok(rows) = state.db.query(
+        "SELECT * FROM local_listeners WHERE hub=? AND status='ACTIVE'",
+        &[json!(slot.name)],
+    ) {
+        for mut row in rows {
+            if ids.insert(string(&row, "listener_id").into()) {
+                row["state"] = json!("ACTIVE");
+                peers.push(row);
+            }
+        }
+    }
+    peers
+}
+fn sender_display_address(
+    hub: &str,
+    default_hub: &str,
+    source: Option<&str>,
+    user: &str,
+    harness: &str,
+    peers: &[Value],
+) -> Option<String> {
+    if let Some(id) = source.filter(|id| !id.is_empty()) {
+        let canonical = super::identity::canonical_node_id(id).unwrap_or_default();
+        if let Some(sender) = peers.iter().find(|p| p["listener_id"] == canonical) {
+            return Some(super::identity::display_address(
+                hub,
+                default_hub,
+                sender,
+                peers,
+            ));
+        }
+        if !canonical.is_empty() && !user.is_empty() && !harness.is_empty() {
+            let sender = json!({"owner_user":user,"harness":harness,"listener_id":canonical,"public_id":super::identity::public_listener_id(user, &canonical)});
+            return Some(super::identity::display_address(
+                hub,
+                default_hub,
+                &sender,
+                peers,
+            ));
+        }
+        return Some(if hub == default_hub {
+            id.into()
+        } else {
+            format!("{hub}:{id}")
+        });
+    }
+    (harness == "human" && !user.is_empty()).then(|| {
+        super::identity::display_address(
+            hub,
+            default_hub,
+            &json!({"owner_user":user,"harness":"human"}),
+            peers,
+        )
+    })
+}
+
 #[derive(Default)]
 struct UiMailbox {
     pending: Mutex<std::collections::VecDeque<(Option<String>, Vec<u8>)>>,
@@ -735,6 +799,7 @@ impl DaemonService {
                 caller["session_id"].clone(),
             ],
         )?;
+        let _ = self.slot(hub)?.directory();
         result["listener_id"] = json!(self.scoped(hub, string(&result, "listener_id")));
         Ok(result)
     }
@@ -857,7 +922,14 @@ impl DaemonService {
                         }
                         let scoped_id = self.scoped(&name, string(&row, "public_id"));
                         let display_address = self.display_address(&name, &row);
+                        let full_alias = format!(
+                            "{}/{}#{}",
+                            normalize_slug(string(&row, "owner_user")),
+                            string(&row, "harness"),
+                            string(&row, "listener_id").strip_prefix("c_").unwrap_or("")
+                        );
                         let haystack = [
+                            full_alias.as_str(),
                             string(&row, "title"),
                             string(&row, "about"),
                             string(&row, "repo"),
@@ -1422,6 +1494,28 @@ impl DaemonService {
     pub fn poll(&mut self) -> Result<(), String> {
         self.reload_slots()?;
         self.flush_acks();
+        // Only the selected Settings hub needs retrying. Snapshot remains cache-only;
+        // poll performs at most one bounded inventory RPC per iteration.
+        if let Some(hub) = self.active_settings_hub.as_deref() {
+            let refresh = self
+                .cached_remote_channels
+                .lock()
+                .ok()
+                .and_then(|cache| {
+                    cache.get(hub).map(|inventory| {
+                        inventory["status"] == "error"
+                            || inventory["channels"].as_array().is_some_and(|channels| {
+                                channels.iter().any(|ch| {
+                                    matches!(string(ch, "status"), "pairing_pending" | "error")
+                                })
+                            })
+                    })
+                })
+                .unwrap_or(false);
+            if refresh {
+                self.refresh_channels(hub);
+            }
+        }
         // Successful background RPCs or event reconnection supersede transport
         // errors, but cannot resolve a rejected configuration edit.
         self.last_hub_errors.retain(|hub, (_, transient)| {
@@ -1524,6 +1618,7 @@ impl DaemonService {
                 if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |signal| {
                     if let Some(ui) = &ui {
                         if !slot.closed.load(Ordering::SeqCst) {
+                            let peers = address_peers(&state, &slot);
                             ui.emit(json!({"op":"banner","payload":{
                                 "target_harness":row["harness"],"target_session_id":row["session_id"],
                                 "target_title":row["title"],"target_cwd":row["cwd"],
@@ -1533,12 +1628,8 @@ impl DaemonService {
                                 "signal_id":format!("{id_prefix}{}",string(signal,"signal_id")),"hub":slot.name,
                                 "from_harness":signal["from"]["harness"],
                                 "from_scoped_id":signal["from"]["listener_id"].as_str().filter(|id|!id.is_empty()).map(|id|format!("{id_prefix}{id}")).or_else(|| (signal["from"]["harness"]=="human").then(||format!("{id_prefix}@{}",string(&signal["from"],"user")))),
-                                "from_display_address":signal["from"]["listener_id"].as_str().filter(|id|!id.is_empty()).map(|id| {
-                                    let peers=slot.cached_directory();
-                                    let canonical=super::identity::canonical_node_id(id).unwrap_or_default();
-                                    peers.iter().find(|p|p["listener_id"]==canonical).map(|sender|super::identity::display_address(&slot.name,&default_hub,sender,&peers)).unwrap_or_else(|| if slot.name==default_hub {id.into()} else {format!("{}:{id}",slot.name)})
-                                }).or_else(|| (signal["from"]["harness"]=="human").then(||super::identity::display_address(&slot.name,&default_hub,&json!({"harness":"human","owner_user":signal["from"]["user"]}),&[]))),
-                                "target_display_address":super::identity::display_address(&slot.name,&default_hub,&row,&slot.cached_directory()),"count":1
+                                "from_display_address":sender_display_address(&slot.name,&default_hub,signal["from"]["listener_id"].as_str(),string(&signal["from"],"user"),string(&signal["from"],"harness"),&peers),
+                                "target_display_address":super::identity::display_address(&slot.name,&default_hub,&row,&peers),"count":1
                             }}));
                         }
                     }
@@ -1679,7 +1770,7 @@ impl DaemonService {
         let peers = self
             .slots
             .get(hub)
-            .map(|s| s.cached_directory())
+            .map(|s| address_peers(&self.state, s))
             .unwrap_or_default();
         super::identity::display_address(hub, &self.config.default_hub, row, &peers)
     }
@@ -1697,8 +1788,11 @@ impl DaemonService {
                 row["target_title"] = json!(string(&target, "title"));
                 row["target_scoped_id"] =
                     json!(self.scoped(string(&row, "hub"), string(&target, "public_id")));
-                row["target_display_address"] =
-                    json!(self.display_address(string(&row, "hub"), &target));
+                row["target_display_address"] = if target.is_null() {
+                    Value::Null
+                } else {
+                    json!(self.display_address(string(&row, "hub"), &target))
+                };
                 let source = row["from_listener_id"]
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -1716,20 +1810,19 @@ impl DaemonService {
                             Value::Null
                         }
                     });
-                row["from_display_address"] = source
-                    .as_deref()
-                    .map(|id| {
-                        let canonical = super::identity::canonical_node_id(id).unwrap_or_default();
-                        let sender = self.slots.get(string(&row, "hub")).and_then(|s| {
-                            s.cached_directory()
-                                .into_iter()
-                                .find(|p| p["listener_id"] == canonical)
-                        });
-                        sender
-                            .map(|s| json!(self.display_address(string(&row, "hub"), &s)))
-                            .unwrap_or_else(|| row["from_scoped_id"].clone())
-                    })
-                    .unwrap_or_else(|| row["from_scoped_id"].clone());
+                let peers = self
+                    .slots
+                    .get(string(&row, "hub"))
+                    .map(|slot| address_peers(&self.state, slot))
+                    .unwrap_or_default();
+                row["from_display_address"] = json!(sender_display_address(
+                    string(&row, "hub"),
+                    &self.config.default_hub,
+                    source.as_deref(),
+                    string(&row, "from_user"),
+                    string(&row, "from_harness"),
+                    &peers
+                ));
                 row["message_truncated"] = json!(string(&row, "message").len() > 512);
                 row["for_me"] = json!(target["harness"] == "human");
                 row
@@ -3852,6 +3945,102 @@ pub use super::cli::run_cli_command;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Result<(), String>
+    {
+        let dir = std::env::temp_dir().join(format!("cito-addresses-{}", random_uuid_v4()));
+        let config = NativeConfig {
+            state_dir: dir.join("state"),
+            config_path: dir.join("config.json"),
+            home_dir: dir.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let mut service = DaemonService::open(&config, &plugins)?;
+        let result = (|| {
+            for session in ["session-26", "session-324"] {
+                service.listen(
+                    "local",
+                    &json!({"about":"Session"}),
+                    &json!({"harness":"fixture","session_id":session,"title":"Review","cwd":""}),
+                )?;
+            }
+            let snapshot = service.snapshot()?;
+            for (session, address) in [
+                ("session-26", "alice/fixture#a5705540"),
+                ("session-324", "alice/fixture#a5706e4d"),
+            ] {
+                let row = snapshot["listeners"]
+                    .as_array()
+                    .ok_or("Missing listeners")?
+                    .iter()
+                    .find(|row| row["session_id"] == session)
+                    .ok_or("Missing enrolled session")?;
+                assert_eq!(row["display_address"], address);
+                assert!(service
+                    .slot("local")?
+                    .cached_directory()
+                    .iter()
+                    .any(|peer| peer["listener_id"] == row["listener_id"]));
+            }
+            // A registration absent from the Hub cache still participates locally.
+            let id = listener_id("none#alice", "fixture", "session-324");
+            service.local.rpc(
+                "kv_delete",
+                &json!({"key":id}),
+                Some(&super::super::identity::principal("alice")),
+            )?;
+            service.slot("local")?.directory()?;
+            let snapshot = service.snapshot()?;
+            let first = snapshot["listeners"]
+                .as_array()
+                .ok_or("Missing listeners")?
+                .iter()
+                .find(|row| row["session_id"] == "session-26")
+                .ok_or("Missing first session")?;
+            assert_eq!(first["display_address"], "alice/fixture#a5705540");
+            let activity = service.activity_dto(vec![json!({"hub":"local","listener_id":"missing","from_listener_id":"alice-abcd123456789012","from_user":"alice","from_harness":"fixture","message":"hello"})]);
+            assert_eq!(activity[0]["from_display_address"], "alice/fixture#abcd");
+            assert!(activity[0]["target_display_address"].is_null());
+            Ok(())
+        })();
+        service.shutdown();
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        result
+    }
+    #[test]
+    fn sender_addresses_use_readable_metadata_before_directory_arrival() {
+        for (hub, expected) in [
+            ("local", "alice/fixture#abcd"),
+            ("work", "work:alice/fixture#abcd"),
+        ] {
+            assert_eq!(
+                sender_display_address(
+                    hub,
+                    "local",
+                    Some("alice-abcd123456789012"),
+                    "alice",
+                    "fixture",
+                    &[]
+                )
+                .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            sender_display_address("local", "local", None, "alice", "fixture", &[]),
+            None
+        );
+        assert_eq!(
+            sender_display_address("local", "local", None, "alice", "human", &[]).as_deref(),
+            Some("@alice")
+        );
+    }
     #[test]
     fn default_hub_repair_handles_missing_defaults_and_all_disabled_hubs() {
         for (mut config, expected) in [

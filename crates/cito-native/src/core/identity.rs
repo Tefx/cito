@@ -125,21 +125,26 @@ pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value
             if prefix.is_empty() {
                 break;
             }
-            let collisions = peers
-                .iter()
-                .filter(|p| {
-                    normalize_slug(string(p, "owner_user")) == user
-                        && string(p, "harness") == harness
-                        && matches!(
-                            super::lease::evaluate_node_lease(p, crate::plugins::now_ms()),
-                            "ACTIVE" | "DISCONNECTED_RETAINED"
-                        )
-                        && string(p, "listener_id")
-                            .strip_prefix("c_")
-                            .is_some_and(|s| s.starts_with(prefix))
-                })
-                .count();
-            if collisions <= 1 || (length == 12 && suffix.len() == 12) {
+            // The projected row may precede directory-cache enrollment. Count it
+            // exactly once even when peers contains duplicate canonical rows.
+            let mut candidates = std::collections::HashSet::from([string(row, "listener_id")]);
+            candidates.extend(
+                peers
+                    .iter()
+                    .filter(|p| {
+                        normalize_slug(string(p, "owner_user")) == user
+                            && string(p, "harness") == harness
+                            && matches!(
+                                super::lease::evaluate_node_lease(p, crate::plugins::now_ms()),
+                                "ACTIVE" | "DISCONNECTED_RETAINED"
+                            )
+                            && string(p, "listener_id")
+                                .strip_prefix("c_")
+                                .is_some_and(|s| s.starts_with(prefix))
+                    })
+                    .map(|p| string(p, "listener_id")),
+            );
+            if candidates.len() <= 1 || (length == 12 && suffix.len() == 12) {
                 chosen = Some(prefix);
                 break;
             }
@@ -262,6 +267,29 @@ mod tests {
         assert_eq!(
             display_address("local", "work", &first, &[first.clone(), second]),
             "local:alice/agent#abcd1234"
+        );
+        assert_eq!(
+            display_address("work", "work", &first, &[row("c_abcd987654321098")]),
+            "alice/agent#abcd1234"
+        );
+        assert_eq!(
+            display_address("work", "work", &first, &[first.clone(), first.clone()]),
+            "alice/agent#abcd"
+        );
+        for (other, expected) in [
+            ("c_abcd123498765432", "alice/agent#abcd12345678"),
+            ("c_abcd123456789099", "alice/agent#abcd123456789012"),
+        ] {
+            assert_eq!(
+                display_address("work", "work", &first, &[row(other)]),
+                expected
+            );
+        }
+        let mut expired = row("c_abcd987654321098");
+        expired["updated_at_ms"] = json!(crate::plugins::now_ms() - 1_800_001);
+        assert_eq!(
+            display_address("work", "work", &first, &[expired]),
+            "alice/agent#abcd"
         );
         let legacy = row("c_abcdefabcdef");
         let extended = row("c_abcdefabcdef1234");

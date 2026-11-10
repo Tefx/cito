@@ -1120,8 +1120,8 @@ impl HubEngine {
                 let detail=match status {
                     "ready"=>label.map(|l|format!("Connected as {l} · Ready for notifications")).unwrap_or("Connected and ready for notifications".into()),
                     "paused"=>label.map(|l|format!("Paused ({l}) · Enable to resume notifications")).unwrap_or("Paused · Enable to resume notifications".into()),
-                    "pairing_pending"=>"Pairing in progress · Send the /start command below".into(),
-                    "hub_ready"=>"Service ready · Pair your account or enter Chat ID".into(),
+                    "pairing_pending"=>"Pairing in progress · Send the pairing command below to finish linking".into(),
+                    "hub_ready"=>"Service ready · Pair your account or enter your destination below".into(),
                     _=>"Configure service credentials and pair your account".into(),
                 };
                 let fs=fields(&plugin).iter().map(|f| {

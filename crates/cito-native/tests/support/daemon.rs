@@ -348,6 +348,37 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
             .1["channels"][0]["status"],
         "hub_ready"
     );
+    let paired =
+        f.action(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}));
+    assert_eq!(paired.0, 200, "{paired:?}");
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"],
+        "pairing_pending"
+    );
+    let code = db
+        .query(
+            "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+            &[],
+        )
+        .unwrap()[0]["code"]
+        .clone();
+    // The plugin redeems on the remote Hub, outside the daemon's action path.
+    rpc(
+        port,
+        "human_channels_test",
+        json!({"plugin_id":"remote-channel","user_config":{"address":format!("redeem:{}", code.as_str().unwrap())}}),
+    );
+    wait(|| {
+        db.query(
+            "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+            &[],
+        )
+        .unwrap()
+        .is_empty()
+    });
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "ready"
+    });
     assert_eq!(f.action(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true})).1["channels"][0]["status"],"not_configured");
 }
 #[test]
@@ -1645,6 +1676,12 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
     let target = enroll(&f, meta);
     let canonical = target["canonical_listener_id"].as_str().unwrap();
     let prefix = &canonical[2..6];
+    for length in [8, 12, 16] {
+        let query = format!("alice/fixture#{}", &canonical[2..2 + length]);
+        let found = f.tool("cito_find", json!({"query":query}), human());
+        assert_eq!(found["matched_count"], 1, "{found}");
+        assert_eq!(found["listeners"][0]["listener_id"], canonical);
+    }
     for to in [
         format!("alice/fixture#{prefix}"),
         format!("fixture#{prefix}"),
@@ -1744,6 +1781,14 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
             .len()
             == 1
     });
+    let early = f.action(json!({"op":"get_snapshot"})).1;
+    assert!(
+        early["activity"][0]["from_display_address"]
+            .as_str()
+            .unwrap()
+            .contains("/fixture#"),
+        "{early}"
+    );
     let (status, snapshot) = f.action(json!({"op":"query_directory","filter":"all"}));
     assert_eq!(status, 200, "{snapshot}");
     let activity = &snapshot["activity"][0];

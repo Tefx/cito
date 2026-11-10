@@ -25,6 +25,12 @@ for line in sys.stdin:
         reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": True,
                  "instruction": "Send " + request["code"] + " to fixture-account"}
     elif op == "test":
+        address = request.get("user_config", {}).get("address", "")
+        if address.startswith("redeem:"):
+            print(json.dumps({"op": "pair_redeem", "code": address.removeprefix("redeem:"),
+                              "is_private_chat": True, "external_chat_id": "room",
+                              "external_user_id": "alice", "display_label": "Alice",
+                              "user_config_patch": {"address": "paired-room"}}), flush=True)
         if request.get("hub_config", {}).get("credential") == "invalid":
             reply = {"op": "rpc_result", "req_id": request["req_id"], "ok": False, "error": "Invalid token"}
         else:

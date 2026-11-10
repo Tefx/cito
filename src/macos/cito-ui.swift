@@ -168,12 +168,6 @@ func distinctAbout(_ raw: String?, title: String, user: String) -> String? {
     let lower = value.lowercased()
     return value.isEmpty || [title.lowercased(), "@\(user.lowercased())", "session", "agent session", "coding session", "human", "human receiver", "human node", "human channel"].contains(lower) ? nil : value
 }
-func shortPublicId(_ raw: String) -> String {
-    guard let split = raw.lastIndex(of: "-") else { return raw }
-    let slug = String(raw[..<split]), fp4 = String(raw[raw.index(after: split)...].prefix(4))
-    let cleanSlug = slug.count > 18 ? String(slug.prefix(8)) + "…" + String(slug.suffix(7)) : slug
-    return "\(cleanSlug)#\(fp4)"
-}
 struct HarnessMeta: Decodable, Equatable {
     let id: String
     let display_name: String
@@ -589,7 +583,7 @@ struct ChannelSetupItem: Decodable, Equatable {
     let pairing_supported: Bool
     let pairing_action_label: String?
     let pairing_code: String?
-    let pairing_command: String?
+    var pairing_command: String?
     let pairing_instruction: String?
     let fields: [ChannelFieldItem]
     let setup_guide: [String]?
@@ -649,6 +643,7 @@ struct Frame: Decodable {
     let channel_id: String?
     let code: String?
     let instruction: String?
+    let pairing_command: String?
     let detail: String?
     let hubs: [Hub]?
     let listeners: [Listener]?
@@ -803,6 +798,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         line2MetaLabel.stringValue = " · \(hostText)" + (displayAbout.map { " · \($0)" } ?? "")
         line2MetaLabel.frame = NSRect(x: 52 + userW, y: 7, width: max(0, availWidth - userW), height: 16)
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("dir_meta:\(peer.scoped_id)")
+        line2MetaLabel.toolTip = line2MetaLabel.stringValue
     }
 
     func configureActivity(with item: ActivityItem, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onReply: @escaping () -> Void) {
@@ -823,6 +819,8 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.frame = NSRect(x:404,y:rowHeight-36,width:68,height:22)
         msgControl.setLeadingSymbol("arrowshape.turn.up.left")
         msgControl.label.stringValue = "Reply"
+        msgControl.setAccessibilityLabel("Reply")
+        msgControl.toolTip = "Reply"
         msgControl.identifier = NSUserInterfaceItemIdentifier("reply_activity:\(item.signal_id)")
         msgControl.pressed = canReply ? onReply : nil
         copyControl.isHidden = false
@@ -832,6 +830,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.label.font = .systemFont(ofSize:11,weight:.medium)
         copyControl.label.stringValue = "Copy"
         copyControl.setAccessibilityLabel("Copy message")
+        copyControl.toolTip = "Copy message"
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_activity_msg:\(item.signal_id)")
         copyControl.pressed = { [weak copyControl] in if let c = copyControl { onCopy(c) } }
         copyControl.applyVisualState()
@@ -900,19 +899,31 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     var directoryRequestId = ""
     var composerDraftIdempotencyKey = UUID().uuidString
-    var pendingMessageCopy: (requestId: String, control: MenuControl)?
-    var messageCopyBuffer = ""
-    var messageCopyNextPart = 0
+    struct PendingMessageCopy {
+        let requestId: String
+        weak var control: MenuControl?
+        var buffer = ""
+        var nextPart = 0
+    }
+    var pendingMessageCopy: PendingMessageCopy?
     var activityTotal = 0
     var activityUnreadCount = 0
     var serverActivityFilter: String?
     var serverActivityQuery = ""
-    func copyText(_ text: String, control: MenuControl? = nil) {
+    func copyText(_ text: String, control: MenuControl? = nil, feedback: String = "✓ Copied") {
         pendingMessageCopy = nil
         clipboardString = text
         appPasteboard.clearContents()
         appPasteboard.setString(text, forType: .string)
-        control?.copied("✓ Copied")
+        control?.copied(feedback)
+    }
+    func showMessageCopyError(_ message: String) {
+        pendingMessageCopy = nil
+        setComposerStatus(message)
+        if directoryComposerBar?.isHidden != false {
+            directorySummaryLabel?.stringValue = presentationError(message)
+            directorySummaryLabel?.toolTip = presentationError(message)
+        }
     }
     func queryDirectory(op: String = "query_directory") {
         directoryRequestId = UUID().uuidString
@@ -986,8 +997,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var hubInvitePastedUntil = Date.distantPast
     var editingExistingHub = false
     var editingOriginalHub = ""
-    var onboardingGuideOpen = false
-    var nextStepCalloutDismissed = false
     var hostHubPortPending = false
     var hostHubPortSaved = false
     var hostHubPortSavedUntil = Date.distantPast
@@ -1020,9 +1029,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         return settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? "local"
     }
     func draftKey(_ fieldId: String) -> String { effectiveChannelHub + "|" + fieldId }
-    func clearChannelDrafts(_ channel: ChannelSetupItem, scope: String? = nil) {
+    func clearChannelDrafts(_ channel: ChannelSetupItem, scope: String? = nil, hub: String? = nil) {
         for field in channel.fields where scope == nil || field.scope == scope {
-            channelFieldDrafts.removeValue(forKey: draftKey("channel_field:\(channel.id):\(field.key)"))
+            channelFieldDrafts.removeValue(forKey: "\(hub ?? effectiveChannelHub)|channel_field:\(channel.id):\(field.key)")
         }
     }
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) {
@@ -1320,16 +1329,17 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             pendingChannelValues.removeValue(forKey: requestId)
         }
         if frame.op == "activity_message" {
-            guard let pending = pendingMessageCopy, frame.request_id == pending.requestId else { return }
-            if let message = frame.message, (frame.part ?? 0) == messageCopyNextPart {
-                messageCopyBuffer += message; messageCopyNextPart += 1
-                if frame.complete != false { copyText(messageCopyBuffer, control:pending.control); messageCopyBuffer = "" }
+            guard var pending = pendingMessageCopy, frame.request_id == pending.requestId else { return }
+            if let message = frame.message, frame.part == pending.nextPart, frame.error == nil, frame.ok != false {
+                pending.buffer += message; pending.nextPart += 1
+                if frame.complete != false { copyText(pending.buffer, control:pending.control) }
+                else { pendingMessageCopy = pending }
             }
-            else { pendingMessageCopy = nil; setComposerStatus(frame.error ?? "Message retrieval failed.") }
+            else { showMessageCopyError(frame.error ?? "Message retrieval failed.") }
             return
         }
         if frame.op == "error", let pending = pendingMessageCopy, frame.request_id == pending.requestId {
-            pendingMessageCopy = nil; setComposerStatus(frame.error ?? "Message retrieval failed."); return
+            showMessageCopyError(frame.error ?? "Message retrieval failed."); return
         }
         if frame.op == "composer_result" {
             guard let pending = pendingComposer, frame.request_id == pending.requestId else { return }
@@ -1395,7 +1405,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return
         }
         if frame.op == "pair_code", let id = frame.channel_id {
-            channelInstructions["\(frame.hub ?? effectiveChannelHub)|\(id)"] = frame.instruction ?? frame.code ?? ""
+            let hub = frame.hub ?? effectiveChannelHub
+            channelInstructions["\(hub)|\(id)"] = frame.instruction ?? frame.code ?? ""
+            if let index = channelSettingsByHub[hub]?.firstIndex(where: { $0.id == id }) {
+                channelSettingsByHub[hub]?[index].pairing_command = frame.pairing_command ?? frame.instruction
+            }
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
@@ -1612,7 +1626,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: max(40, buttonsMinX - 20), height: 16),
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
-            detail.toolTip = hub.error ?? statusText; drawer.addSubview(detail)
+            detail.toolTip = statusText; drawer.addSubview(detail)
             let item = host(drawer, id: "drawer:\(hub.name)")
             let autoExpand = hub.status != "connected" || hub.error != nil
             item.isHidden = selectedHubs.contains(hub.name) ? false : !autoExpand
@@ -1909,7 +1923,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let info = textLabel("\(hostText) · \(nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user))\(branchSuffix)",
                         NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
-                    info.toolTip = "\(peer.scoped_id) — \(peer.about)"
+                    info.toolTip = peer.scoped_id + (distinctAbout(peer.about, title: peer.title, user: peer.user).map { " — \($0)" } ?? "")
                     row.addSubview(info)
                     remoteRows.append((id: rowId, view: row))
                 }
@@ -2060,8 +2074,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             reload.identifier=NSUserInterfaceItemIdentifier("reload:\(c.harness):\(c.session_id)")
                             reload.pressed={ [weak self, weak reload] in
                                 guard let self=self else{return}
-                                self.clipboardString="/reload"; appPasteboard.clearContents(); appPasteboard.setString("/reload",forType:.string)
-                                reload?.copied(); self.emit(["op":"refresh_available"])
+                                self.copyText("/reload", control:reload)
+                                self.emit(["op":"refresh_available"])
                             }
                             row.addSubview(reload); candidateRows.append((id:rowId,view:row)); continue
                         }
@@ -2199,7 +2213,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
             else if addHubFormOpen { addHubFormOpen = false; pendingHubSave = nil; rebuildSettingsPanel() }
-            else if !editingHubGateway.isEmpty { editingHubGateway.removeAll(); rebuildSettingsPanel() }
+            else if !editingHubGateway.isEmpty {
+                for (hub, channels) in channelSettingsByHub {
+                    for ch in channels where editingHubGateway.contains("\(hub)|\(ch.id)") { clearChannelDrafts(ch, scope:"hub", hub:hub) }
+                }
+                editingHubGateway.removeAll(); rebuildSettingsPanel()
+            }
             else { closeSettingsPanel(emitAction:true) }
         default: break
         }
@@ -2691,7 +2710,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             } else {
                 let skip=MenuControl("Skip for Now",frame:NSRect(x:130,y:6,width:96,height:24),radius:6)
                 skip.identifier=NSUserInterfaceItemIdentifier("skip_channel:\(ch.id)")
-                skip.pressed={ [weak self] in self?.nextStepCalloutDismissed=true; self?.settingsActiveTab="hubs"; self?.rebuildSettingsPanel() }
+                skip.pressed={ [weak self] in self?.settingsActiveTab="hubs"; self?.rebuildSettingsPanel() }
                 userStratum.addSubview(skip)
             }
             let testBtn = MenuControl("Send Test", frame: NSRect(x: 290, y: 6, width: 80, height: 24), radius: 6)
@@ -2714,7 +2733,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
             if !gatewayActive {
                 for child in userStratum.subviews where child !== userTitle { child.removeFromSuperview() }
-                userTitle.frame = NSRect(x:12,y:7,width:432,height:26)
+                let textH = max(14, ceil((userTitle.stringValue as NSString).boundingRect(with:NSSize(width:432,height:40),options:[.usesLineFragmentOrigin],attributes:[.font:userTitle.font ?? .boldSystemFont(ofSize:9.5)]).height))
+                userTitle.frame = NSRect(x:12,y:floor((40-textH)/2),width:432,height:textH)
                 userTitle.maximumNumberOfLines = 2; userTitle.lineBreakMode = .byWordWrapping
             }
             channelsView.addSubview(chCard)
@@ -2761,9 +2781,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let token=MenuControl("Token: \(String(hostHub.token.prefix(8)))… Copy",frame:NSRect(x:274,y:44,width:192,height:20),leadingSymbol:"key.fill",radius:6)
             token.identifier=NSUserInterfaceItemIdentifier("copy_host_hub_token")
             token.pressed={ [weak self, weak token] in
-                self?.clipboardString=hostHub.token
-                appPasteboard.clearContents(); appPasteboard.setString(hostHub.token,forType:.string)
-                token?.copied("✓ Token Copied")
+                self?.copyText(hostHub.token, control:token, feedback:"✓ Token Copied")
             }
             hostCard.addSubview(token)
         }
@@ -2772,11 +2790,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         copyInvite.identifier = NSUserInterfaceItemIdentifier("copy_hub_invite")
         let inviteCmd = hostHub.invite_command
         copyInvite.pressed = { [weak self, weak copyInvite] in
-            guard let self = self else { return }
-            self.clipboardString = inviteCmd
-            appPasteboard.clearContents()
-            appPasteboard.setString(inviteCmd, forType: .string)
-            copyInvite?.copied("✓ Copied")
+            self?.copyText(inviteCmd, control:copyInvite)
         }
         hostCard.addSubview(copyInvite)
         hostCard.addSubview(textLabel("Port:",NSRect(x:188,y:16,width:34,height:15),size:11))
@@ -2965,9 +2979,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let needsSignIn = hub.auth_mode == "oidc" && hub.enabled && ["auth_required","disconnected"].contains(hub.status)
                 let textWidth:CGFloat=local ? 300 : (needsSignIn ? 150 : 222)
                 let authTitle = ["none":"Trusted Network","token":"Shared Token","oidc":"Team Sign-In"][hub.auth_mode] ?? "Network"
-                let endpoint = hub.url.replacingOccurrences(of:"^https?://",with:"",options:.regularExpression)
+                let endpoint = hub.url == "local://" ? "On this Mac" : hub.url.replacingOccurrences(of:"^https?://",with:"",options:.regularExpression)
                 let detail = hub.error.map(presentationError) ?? (hub.status == "connected" ? "" : (["auth_required":"Sign-in required","disconnected":"Offline","connecting":"Connecting…"][hub.status] ?? "Unavailable"))
-                let subtitle=(local || hub.url == "local://") ? "Built-in on this Mac · Signed in as @\(hub.user ?? "local")" : "\(endpoint) · \(authTitle)" + (detail.isEmpty ? "" : " · \(detail)")
+                let subtitle=local ? "Built-in on this Mac · Signed in as @\(hub.user ?? "local")" : "\(endpoint) · \(authTitle)" + (hub.user.map { " · @\($0)" } ?? "") + (detail.isEmpty ? "" : " · \(detail)")
                 let subtitleWidth:CGFloat = hub.status == "connected" && hub.error == nil ? (local ? 300 : 222) : 424
                 let subtitleHeight = max(14,ceil((subtitle as NSString).boundingRect(with:NSSize(width:subtitleWidth,height:10000),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height)+2)
                 let rowHeight = max(48,subtitleHeight+32)
@@ -3390,7 +3404,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func updateDirectoryShortcuts() {
-        let canReply = activityFilteredItems.indices.contains(directorySelectedIndex) && activityFilteredItems[directorySelectedIndex].for_me
+        let canReply = activityFilteredItems.indices.contains(directorySelectedIndex) && activityFilteredItems[directorySelectedIndex].for_me && !(activityFilteredItems[directorySelectedIndex].from_display_address ?? activityFilteredItems[directorySelectedIndex].from_scoped_id ?? "").isEmpty
         directoryShortcutsLabel?.stringValue = !(directoryComposerBar?.isHidden ?? true)
             ? "↵ Send    ⎋ Cancel Reply"
             : (directoryMode == "activity" ? (canReply ? "↵ Reply    ⎋ Close" : "⎋ Close") : "↵ Copy Selected ID    ⎋ Close")
@@ -3583,6 +3597,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pill.isHidden = isActivity
                 let active = (id == "dir_scope:\(directoryScopeFilter)") || (id == "dir_harness:\(directoryHarnessFilter)")
                 pill.style = active ? .prominent : .neutral
+                if !isActivity && active && id.hasPrefix("dir_harness:") { pill.scrollToVisible(pill.bounds) }
             }
         }
     }
@@ -3636,7 +3651,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if activityFilter == "me" && !item.for_me { return false }
             if activityFilter == "unread" && !item.unread { return false }
             if !q.isEmpty {
-                let hay = [item.from_user, item.from_host_name, item.from_title, item.target_title, item.message, item.signal_id]
+                let hay = [item.from_user, item.from_host_name, item.from_title, item.target_title, item.message, item.signal_id, item.listener_id, item.target_harness == "human" ? "You" : ""]
                     .joined(separator: " ").lowercased()
                 if !hay.contains(q) { return false }
             }
@@ -3714,7 +3729,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let idTok = String(tok.dropFirst())
                 if !peer.public_id.lowercased().contains(idTok) && !peer.scoped_id.lowercased().contains(idTok) && !peer.listener_id.lowercased().contains(idTok) { return false }
             } else {
-                let hay = [peer.display_address, peer.title, peer.about, peer.cwd ?? "", peer.repo ?? "", peer.branch ?? "", peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
+                let userSlug = peer.public_id.split(separator:"-").dropLast().joined(separator:"-")
+                let fullAlias = "\(userSlug)/\(peer.harness)#\(peer.listener_id.hasPrefix("c_") ? String(peer.listener_id.dropFirst(2)) : "")"
+                let hay = [fullAlias, peer.display_address, peer.title, peer.about, peer.cwd ?? "", peer.repo ?? "", peer.branch ?? "", peer.user, peer.host_name, peer.host_id, peer.harness, peer.public_id, peer.scoped_id, peer.listener_id]
                     .joined(separator: " ").lowercased()
                 if !hay.contains(tok) { return false }
             }
@@ -3834,8 +3851,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
         if item.message_truncated != true { copyText(item.message,control:control); return }
         let request = UUID().uuidString
-        pendingMessageCopy = (request,control)
-        messageCopyBuffer = ""; messageCopyNextPart = 0
+        pendingMessageCopy = PendingMessageCopy(requestId:request,control:control)
         emit(["op":"copy_activity_message","request_id":request,"hub":item.hub,"signal_id":item.signal_id])
     }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
@@ -4056,7 +4072,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if visible, let label = view as? NSTextField, !label.isEditable {
                 let id = name(label)
                 let data = isDataRow(label) && !(label.superview is MenuControl) && !id.hasPrefix("dir_user:")
-                if !data && label.stringValue.range(of:"local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil { jargonLeaks.append(id) }
+                let dataJargon = (id == "banner_data:1" && label.stringValue.contains("[Passive]")) || (id.hasPrefix("act_title:") && label.stringValue.range(of:"Human Node|Human receiver|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil)
+                if dataJargon || !data && label.stringValue.range(of:"local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil { jargonLeaks.append(id) }
             }
             if visible, let control = view as? MenuControl {
                 let id = control.identifier?.rawValue ?? ""
@@ -4065,7 +4082,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let scoped = String(id.dropFirst(prefix.count))
                     let address = listeners.first { $0.scoped_id == scoped }?.display_address ?? (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }?.display_address
                     let label = control.feedbackTimer?.isValid == true ? (control.accessibilityLabel() ?? "") : control.label.stringValue
-                    if label.isEmpty || address != label { addressMismatches.append(id) }
+                    let listener = listeners.first { $0.scoped_id == scoped }
+                    let peer = (myRemote + directoryAllPeers).first { $0.scoped_id == scoped }
+                    let hub = listener?.hub ?? peer?.hub ?? ""
+                    let harness = listener?.harness ?? peer?.harness ?? ""
+                    let defaultHub = settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? ""
+                    if label.isEmpty || address != label || (harness == "human" && !label.contains("@")) || (hub != defaultHub && !label.hasPrefix("\(hub):")) { addressMismatches.append(id) }
                 }
             }
             if visible, let scroll = view as? NSScrollView {
@@ -4073,7 +4095,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
                 case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && editingHubGateway.isEmpty && (settings?.channels?.first?.fields.count ?? 0) <= 2
-                case "settings_hubs_tab": defaultLayout = (settings?.hubs.count ?? 0) <= 2 && settings?.host_hub.enabled != true && settings?.host_hub.error == nil && !hostHubPortPending && hostHubPortDraft == nil && !addHubFormOpen
+                case "settings_hubs_tab": defaultLayout = (settings?.hubs.count ?? 0) <= 2 && settings?.host_hub.enabled != true && settings?.host_hub.error == nil && !hostHubPortPending && hostHubPortDraft == nil && hostHubPortError == nil && !addHubFormOpen
                 default: defaultLayout = false
                 }
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }
@@ -4233,9 +4255,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         activityFilter = "all"
         openDirectoryPanel(mode: "activity")
         directorySelectedIndex = activityFilteredItems.firstIndex { matchesWakeSignal($0, payload: value) } ?? 0
-        directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
-        directoryTableView?.scrollRowToVisible(directorySelectedIndex)
-        updateDirectoryShortcuts()
+        applyActivityFilter()
     }
     func openDirectoryForReply(_ value: Payload) {
         guard value.target_harness == "human" else { return }
@@ -4244,9 +4264,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         activityFilter = "all"
         openDirectoryPanel(mode: "activity")
         directorySelectedIndex = activityFilteredItems.firstIndex { matchesWakeSignal($0, payload: value) } ?? 0
-        directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
-        directoryTableView?.scrollRowToVisible(directorySelectedIndex)
-        updateDirectoryShortcuts()
+        applyActivityFilter()
         openComposer(target: target, hub: value.hub ?? "", replySignalId: value.signal_id)
     }
     func hide(clicked: Bool) {
@@ -4351,6 +4369,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let badgeW = max(76,ceil(measureTextWidth(semanticLabel,font:.boldSystemFont(ofSize:10))) + 16)
         labels[4].frame = NSRect(x:372-badgeW,y:103,width:badgeW,height:20)
         labels[0].frame.size.width = 372-badgeW-68
+        labels[0].identifier = NSUserInterfaceItemIdentifier(value.target_harness == "human" ? "banner_chrome:0" : "banner_data:0")
         labels[0].stringValue = title
         labels[1].stringValue = value.displaySubtitle
         labels[2].stringValue = value.displayMessage
