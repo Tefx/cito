@@ -21,7 +21,10 @@ try {
  bridge(api);
  // Startup must recover an F58 stale socket, even before session_start.
  for(let i=0;i<100;i++){try{if((await request({op:'ping'})).ok)break;}catch{}await new Promise(r=>setTimeout(r,10));}
- assert.equal((await request({op:'identify'})).error,'SESSION_NOT_OPEN');
+ const fallback=await request({op:'identify'});assert.equal(fallback.ok,true);assert.equal(fallback.session_id,`pid-${process.pid}`);assert.equal(fallback.cwd,process.cwd());
+ const sessionDir=join(process.env.HOME,'.pi','agent','sessions',`--${process.cwd().replace(/^\//,'').replaceAll('/','-')}--`);mkdirSync(sessionDir,{recursive:true});
+ writeFileSync(join(sessionDir,'latest.jsonl'),JSON.stringify({type:'session',id:'pre-start',name:'Before start'})+'\n{"partial":');
+ const recovered=await request({op:'identify'});assert.equal(recovered.ok,true);assert.equal(recovered.session_id,'pre-start');assert.equal(recovered.session_name,'Before start');
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
  assert.equal(attempts,2);assert.deepEqual(registrations,[{name:'cito',config:{command:join(state,'bin/cito-mcp'),args:[]}}]);assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(join(state,'sockets')).mode&0o777,0o700);
  assert.deepEqual(await request({op:'ping'}),{ok:true});assert.equal((await request({op:'identify'})).session_id,'session-a');

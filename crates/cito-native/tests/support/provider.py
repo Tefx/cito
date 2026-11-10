@@ -23,7 +23,7 @@ result = dict(ok=True)
 if op == "resolve_caller":
     result = dict(ok=True, caller=caller) if request.get("meta", {}).get("expected_harness") == "fixture" else dict(ok=False, error_code="BINDING_REQUIRED", message="Explicit fixture identity required")
 elif op == "discover_sessions":
-    result["sessions"] = [dict(caller, updated_at_ms=int(time.time()*1000))]
+    result["sessions"] = options.get("sessions", [dict(caller, updated_at_ms=int(time.time()*1000))])
 elif op == "probe":
     result.update(status=options["status"], current_session_id=options["session_id"])
 elif op == "wake":

@@ -97,7 +97,11 @@ fn identify(req: &Value, p: u32) -> Result<Value> {
         &json!({"op":"identify"}),
     )
 }
-// Session files are hints for live, same-user processes, never evidence of liveness.
+fn allow_process_only(req: &Value) -> bool {
+    env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("1")
+        && env_value(req, "CITO_PI_REQUIRE_BRIDGE").as_deref() != Some("1")
+}
+// Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
     if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0")
         || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"]}))
@@ -192,6 +196,10 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
         {
             v["session_id"] = json!(format!("pid-{p}"));
             v["session_name"] = json!(basename);
+        }
+        if !allow_process_only(req) {
+            v["needs_reload"] = json!(true);
+            v["reload_hint"] = json!("Run /reload in Pi to enable 1-click listen");
         }
         // Fence PID reuse while lsof and session metadata were read.
         if process_identity(p).is_ok_and(|current| current == identity) {
@@ -311,9 +319,15 @@ pub fn handle(input: &Value) -> Result<Value> {
     };
     match op {
         "discover_sessions" => Ok(
-            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c}).collect::<Vec<_>>()}),
+            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c["reload_hint"]=v["reload_hint"].clone();c}).collect::<Vec<_>>()}),
         ),
         "resolve_caller" | "verify" => {
+            if cs.iter().any(|(_, v)| v["needs_reload"] == true) {
+                return Ok(error(
+                    "PI_BRIDGE_UNAVAILABLE",
+                    "Run /reload in Pi to enable 1-click listen",
+                ));
+            }
             if cs.is_empty() && endpoint_responded {
                 return Ok(error(
                     "PI_BRIDGE_UNAVAILABLE",
@@ -322,7 +336,21 @@ pub fn handle(input: &Value) -> Result<Value> {
             }
             if cs.is_empty() {
                 match cached_caller(req, "pi", None, matches_process) {
-                    Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
+                    Ok(Some(c)) => {
+                        if !allow_process_only(req)
+                            && !pid(&c).is_some_and(|p| {
+                                identify(req, p).is_ok_and(|v| {
+                                    v["ok"] == true && v["session_id"] == c["session_id"]
+                                })
+                            })
+                        {
+                            return Ok(error(
+                                "PI_BRIDGE_UNAVAILABLE",
+                                "Run /reload in Pi to enable 1-click listen",
+                            ));
+                        }
+                        return Ok(json!({"ok":true,"caller":c}));
+                    }
                     Err(e) => return Ok(e),
                     Ok(None) => {}
                 }
@@ -366,6 +394,11 @@ pub fn handle(input: &Value) -> Result<Value> {
                     json!({"ok":true,"status":"closed_definitive","reason":"Pi bridge is unavailable"}),
                 );
             };
+            if v["needs_reload"] == true {
+                return Ok(
+                    json!({"ok":true,"status":"closed_definitive","reason":"Run /reload in Pi to enable 1-click listen"}),
+                );
+            }
             let sid = str_at(v, "session_id");
             Ok(
                 json!({"ok":true,"status":if sid==str_at(req,"session_id"){"alive"}else{"switched"},"current_session_id":sid,"reason":null}),
@@ -388,6 +421,9 @@ pub fn handle(input: &Value) -> Result<Value> {
                     return Ok(json!({"ok":true}));
                 }
                 return match socket_call(&path, &request) {
+                    Ok(reply) if clearing && reply["error"] == "SESSION_MISMATCH" => {
+                        Ok(json!({"ok":true}))
+                    }
                     Err(_) if clearing && process_identity(p).is_err() => {
                         let _ = fs::remove_file(&path);
                         Ok(json!({"ok":true}))

@@ -1583,7 +1583,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.20.1");
+    assert_eq!(init["serverInfo"]["version"], "0.20.2");
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1704,7 +1704,7 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.20.1");
+    assert_eq!(http(p, "/health", None).1["version"], "0.20.2");
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -1827,6 +1827,76 @@ fn live_user_reload_and_auth_mode_canonicalization_survive_restart() {
         .starts_with("bob-"));
 }
 #[test]
+fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
+    let _lock = serial();
+    let owner = Fixture::new(json!({}));
+    let manifest = json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Messenger",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"pairing":{"supported":true},"fields":[
+        {"key":"credential","scope":"hub","type":"secret","required":true},
+        {"key":"address","scope":"user","type":"string","required":true}]});
+    let directory = owner.state.join("hub/plugins/channel");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("plugin.json"), manifest.to_string()).unwrap();
+    let (_, p) = owner.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"remote":{"url":format!("http://127.0.0.1:{p}")}},"defaultHub":"local"}),
+    );
+    let mut conflicting = manifest;
+    conflicting["fields"][0]["scope"] = json!("user");
+    conflicting["fields"][1]["scope"] = json!("hub");
+    let directory = f.state.join("plugins/channel");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("plugin.json"), conflicting.to_string()).unwrap();
+    f.daemon(&[]);
+    let rows = || {
+        owner
+            .db("hub/hub.sqlite")
+            .query(
+                "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap()
+    };
+    for op in [
+        "save_hub_service",
+        "channel_save",
+        "channel_pair",
+        "channel_test",
+    ] {
+        let (status,v)=f.action(json!({"op":op,"scope":"hub","hub":"remote","channel_id":"channel","enabled":true,"user_config":{"address":"injected"},"display_label":"injected","values":{"credential":op,"address":"must-not-save"}}));
+        assert_eq!(status, 200, "{v}");
+        assert!(rows().is_empty());
+        let cfg = owner
+            .db("hub/hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        let cfg: Value = serde_json::from_str(cfg[0]["config_json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            cfg,
+            json!({"credential":op}),
+            "Selected remote schema must override conflicting local field scopes"
+        );
+    }
+    assert_eq!(f.action(json!({"op":"channel_save","hub":"remote","channel_id":"channel","enabled":true,"values":{"address":"personal"}})).0,200);
+    assert_eq!(rows()[0]["enabled"], 1);
+    assert_eq!(
+        f.action(
+            json!({"op":"channel_toggle","hub":"remote","channel_id":"channel","enabled":false})
+        )
+        .0,
+        200
+    );
+    let paused = rows();
+    assert_eq!(f.action(json!({"op":"save_hub_service","hub":"remote","channel_id":"channel","values":{"credential":"rotated"}})).0,200);
+    assert_eq!(rows(), paused);
+    assert_eq!(f.action(json!({"op":"channel_test","hub":"remote","channel_id":"channel","values":{"address":"candidate"}})).0,200);
+    assert_eq!(rows(), paused, "Non-persisting tests cannot write bindings");
+}
+
+#[test]
 fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1852,6 +1922,42 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(config["desktopBannerEnabled"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
+    for (name,invite) in [
+        ("127-0-0-1",format!("http://127.0.0.1:{}",port())),
+        ("joined",format!("cito setup --hub joined --url http://127.0.0.1:{} --auth token --token fixture-token --default",port())),
+        ("json",json!({"name":"json","url":format!("http://127.0.0.1:{}",port()),"auth_mode":"none"}).to_string()),
+        ("equals",format!("cito setup --hub=equals --url=http://127.0.0.1:{} --default",port())),
+    ] {
+        let (status,value)=f.action(json!({"op":"paste_hub_invite","invite":invite})); assert_eq!(status,200,"{value}");
+        let config:Value=serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+        assert!(config["hubs"][name].is_object()); assert_eq!(config["default_hub"],name);
+    }
+    let (status, error) = f.action(json!({"op":"test_hub","hub":"json"}));
+    assert_eq!(status, 400);
+    let state = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        state["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "json")
+            .unwrap()["error"],
+        error["error"]
+    );
+    assert_eq!(
+        f.action(json!({"op":"setup_save_hub","name":"json","url":"local://","auth_mode":"none"}))
+            .0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"test_hub","hub":"json"})).0, 200);
+    let state = f.action(json!({"op":"get_snapshot"})).1;
+    assert!(state["settings"]["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "json")
+        .unwrap()["error"]
+        .is_null());
 }
 #[test]
 fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
@@ -2288,6 +2394,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.20.1"
+        "cito v0.20.2"
     );
 }

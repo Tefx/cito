@@ -2,6 +2,434 @@ use super::support::*;
 use serde_json::{json, Value};
 use std::fs;
 
+/// Real daemon subprocess with its production dispatch_action path and UI mailbox.
+/// The recording endpoint preserves daemon frame order; no state/settings/result
+/// frames are synthesized by this relay. All children use Fixture's cleanroom API.
+struct ClosedLoop<'a> {
+    f: &'a Fixture,
+    ui: usize,
+    actions: usize,
+    frames: Vec<Value>,
+    results: Vec<(Value, u16, Value)>,
+}
+impl<'a> ClosedLoop<'a> {
+    fn new(f: &'a Fixture) -> Self {
+        let recorder = f.recording_ui();
+        f.daemon(&[
+            ("CITO_DISABLE_UI", "0"),
+            ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+        ]);
+        Self {
+            f,
+            ui: start(f),
+            actions: 0,
+            frames: Vec::new(),
+            results: Vec::new(),
+        }
+    }
+    fn pump(&mut self) {
+        let actions = self.f.frames(self.ui);
+        for action in &actions[self.actions..] {
+            let (status, result) = self.f.action(action.clone());
+            self.results.push((action.clone(), status, result));
+        }
+        self.actions = actions.len();
+        let frames: Vec<Value> = fs::read_to_string(self.f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+        for frame in &frames[self.frames.len()..] {
+            self.f.send(self.ui, frame.clone());
+            inspect(self.f, self.ui);
+        }
+        self.frames = frames;
+    }
+    fn until(&mut self, predicate: impl Fn(&Value) -> bool) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            self.pump();
+            let s = inspect(self.f, self.ui);
+            if predicate(&s) {
+                return s;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Closed-loop timeout: {s}; results={:?}",
+                self.results
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    fn control(&mut self, id: &str) {
+        control(self.f, self.ui, id);
+        inspect(self.f, self.ui);
+    }
+    fn input(&mut self, id: &str, value: &str) {
+        self.f.send(
+            self.ui,
+            json!({"op":"test_settings_input","id":id,"value":value}),
+        );
+        inspect(self.f, self.ui);
+    }
+    fn snapshot(&mut self, surface: &str, name: &str) {
+        self.pump();
+        inspect(self.f, self.ui);
+        render_png(self.f, self.ui, surface, name);
+        inspect(self.f, self.ui);
+    }
+}
+
+#[test]
+fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"host_hub":{"bind":"127.0.0.1"}}));
+    f.provider("delivered_unconfirmed");
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"),json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Messenger","setupGuide":["Create a gateway credential with your provider.","Save it once, then pair your personal account."],
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"pairing":{"supported":true},"fields":[
+        {"key":"credential","label":"Gateway Token","scope":"hub","type":"secret","required":true},
+        {"key":"address","label":"Personal Address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let mut l = ClosedLoop::new(&f);
+    l.until(|s| node(s, "items", "header").is_object());
+    l.control("open_settings");
+    l.until(|s| s["settings_open"] == true);
+    l.control("settings_tab:channels");
+    let s = l.until(|s| !node(s, "settings_items", "save_hub_service:channel").is_null());
+    for id in [
+        "channel_field:channel:address",
+        "pair_channel:channel",
+        "test_channel:channel",
+        "save_channel:channel",
+    ] {
+        assert_eq!(node(&s, "settings_items", id)["enabled"], false, "{id}");
+        assert_eq!(node(&s, "settings_items", id)["alpha"], 0.55);
+    }
+    assert_eq!(
+        node(&s, "settings_items", "skip_channel:channel")["enabled"],
+        true
+    );
+    let before = f.frames(l.ui).len();
+    for id in [
+        "pair_channel:channel",
+        "test_channel:channel",
+        "save_channel:channel",
+    ] {
+        l.control(id);
+    }
+    inspect(&f, l.ui);
+    assert_eq!(
+        f.frames(l.ui).len(),
+        before,
+        "Disabled controls cannot emit actions"
+    );
+    l.snapshot("settings", "r1_gateway_unconfigured.png");
+    l.input("channel_field:channel:credential", "gateway-one");
+    l.control("save_hub_service:channel");
+    l.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    assert!(f
+        .db("hub.sqlite")
+        .query(
+            "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.db("hub.sqlite").query("SELECT json_extract(config_json,'$.credential') AS credential FROM hub_plugin_services WHERE plugin_id='channel'",&[]).unwrap()[0]["credential"],"gateway-one");
+    l.snapshot("settings", "r1_gateway_active_collapsed.png");
+    l.control("edit_hub_service:channel");
+    l.until(|s| !node(s, "settings_items", "channel_field:channel:credential").is_null());
+    l.snapshot("settings", "r1_gateway_active_expanded.png");
+    l.control("save_hub_service:channel");
+    l.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    assert_eq!(
+        l.results
+            .iter()
+            .rev()
+            .find(|(a, _, _)| a["op"] == "save_hub_service")
+            .unwrap()
+            .0["values"],
+        json!({}),
+        "Acknowledged secrets must not be resubmitted"
+    );
+    l.input("channel_field:channel:address", "personal-room");
+    l.control("save_channel:channel");
+    l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Pause");
+    l.control("toggle_channel:channel");
+    l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Resume");
+    let paused = f
+        .db("hub.sqlite")
+        .query(
+            "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+            &[],
+        )
+        .unwrap();
+    l.control("edit_hub_service:channel");
+    l.until(|s| !node(s, "settings_items", "channel_field:channel:credential").is_null());
+    l.input("channel_field:channel:credential", "gateway-two");
+    l.control("save_hub_service:channel");
+    l.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    assert_eq!(
+        f.db("hub.sqlite")
+            .query(
+                "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+                &[]
+            )
+            .unwrap(),
+        paused,
+        "Gateway rotation cannot change/resume the personal binding"
+    );
+    l.control("pair_channel:channel");
+    l.until(|s| !node(s, "settings_items", "pairing_instruction:channel").is_null());
+    l.snapshot("settings", "r1_pairing_real_code.png");
+    l.control("test_channel:channel");
+    l.until(|s| {
+        node(s, "settings_items", "settings_channel_detail:channel")["text"]
+            == "Fixture test succeeded"
+    });
+
+    l.control("settings_tab:hubs");
+    l.control("open_add_hub");
+    l.control("submit_add_hub");
+    l.until(|s| node(s, "settings_items", "add_hub_error")["text"] == "Hub name is required.");
+    l.snapshot("settings", "r3_add_hub_validation.png");
+    l.input("settings_hub_name", "INVALID!");
+    l.input("settings_hub_url", "local://");
+    l.control("submit_add_hub");
+    l.until(|s| {
+        node(s, "settings_items", "add_hub_error")["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Invalid hub name"))
+    });
+    l.snapshot("settings", "r3_add_hub_daemon_error.png");
+    l.input("settings_hub_name", "scratch");
+    l.control("submit_add_hub");
+    l.until(|s| {
+        node(s, "settings_items", "add_hub_form").is_null()
+            && !node(s, "settings_items", "settings_hub:scratch").is_null()
+    });
+    // The same form remains open through validation and daemon errors, and closes
+    // only on a real settings/state acknowledgement of the saved Hub.
+    l.input("host_hub_port", &port().to_string());
+    l.control("apply_host_hub_port");
+    l.until(|s| node(s, "settings_items", "apply_host_hub_port")["text"] == "✓ Saved");
+    l.control("toggle_host_hub");
+    l.until(|s| node(s, "settings_items", "toggle_host_hub")["text"] == "● Sharing");
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = occupied.local_addr().unwrap().port().to_string();
+    l.input("host_hub_port", &busy);
+    l.control("apply_host_hub_port");
+    l.until(|s| !node(s, "settings_items", "settings_error_banner").is_null());
+    l.snapshot("settings", "r3_settings_error_banner.png");
+    l.control("settings_tab:apps");
+    l.control("settings_tab:hubs");
+    let s = l.until(|s| node(s, "settings_items", "host_hub_port")["text"] == busy);
+    assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], busy);
+    l.control("dismiss_settings_error");
+    l.until(|s| node(s, "settings_items", "settings_error_banner").is_null());
+    l.control("paste_hub_invite");
+    l.until(|s| {
+        node(s, "settings_items", "settings_error_label")["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Clipboard"))
+    });
+    l.control("dismiss_settings_error");
+    // JSON invites use the daemon parser. CLI/URL formats are also exercised by
+    // the invite round-trip and parser tests, without connecting to real services.
+    f.send(l.ui,json!({"op":"test_clipboard","text":json!({"name":"pasted","url":format!("http://127.0.0.1:{}",port())}).to_string()}));
+    l.control("paste_hub_invite");
+    l.until(|s| !node(s, "settings_items", "settings_hub:pasted").is_null());
+    l.control("remove_hub:pasted");
+    l.until(|s| node(s, "settings_items", "settings_hub:pasted").is_null());
+    l.control("remove_hub:scratch");
+    l.until(|s| node(s, "settings_items", "settings_hub:scratch").is_null());
+    l.control("close_settings");
+    l.until(|s| s["settings_open"] == false);
+
+    // A real plugin discovery response travels through SessionActivity, snapshot,
+    // and the UI, including mixed 36/46-point rows in the scroll document.
+    let options = f.state.join("plugins/fixture/options.json");
+    let sessions:Vec<Value>=(0..5).map(|i|json!({"harness":"fixture","session_id":format!("reload-{i}"),"title":"Work session","cwd":"/tmp","needs_reload":i%2==0,"reload_hint":"Run /reload in Fixture to enable 1-click listen"})).collect();
+    fs::write(&options,json!({"session_id":"session-1","status":"alive","outcome":"delivered_unconfirmed","sessions":sessions}).to_string()).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
+        200
+    );
+    l.until(|s| !node(s, "items", "reload:fixture:reload-0").is_null());
+    l.snapshot("menu", "r4_needs_reload_candidates.png");
+    l.control("reload:fixture:reload-0");
+    l.until(|s| s["clipboard"] == "/reload");
+    l.control("listen:fixture:reload-1");
+    l.until(|s| !node(s, "items", "menu_error_row").is_null());
+    l.snapshot("menu", "r3_menu_error.png");
+
+    l.control("open_directory");
+    let s = l.until(|s| {
+        s["directory_open"] == true && s["directory_matched_count"].as_u64().is_some_and(|n| n > 0)
+    });
+    l.snapshot("directory", "r5_real_directory.png");
+    let msg = nodes(&s["directory_items"])
+        .into_iter()
+        .find_map(|n| {
+            n["id"]
+                .as_str()
+                .filter(|id| id.starts_with("msg_dir:"))
+                .map(str::to_string)
+        })
+        .unwrap();
+    l.control(&msg);
+    l.until(|s| s["composer_open"] == true);
+    f.send(
+        l.ui,
+        json!({"op":"test_composer_input","value":"Closed-loop message"}),
+    );
+    l.control("composer_send");
+    let s = l.until(|s| {
+        node(s, "directory_items", "composer_error")["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("SELF_SEND_FORBIDDEN"))
+    });
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Closed-loop message"
+    );
+    l.snapshot("directory", "r3_real_composer_error.png");
+    l.control("composer_cancel");
+    assert_eq!(
+        f.action(json!({"op":"listen_session","harness":"fixture","session_id":"session-1"}))
+            .0,
+        200
+    );
+    f.send(l.ui, json!({"op":"test_directory_query","query":""}));
+    let target = f
+        .rows("SELECT public_id FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        [0]["public_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let message = format!("msg_dir:{target}");
+    l.until(|s| !node(s, "directory_items", &message).is_null());
+    l.control(&message);
+    l.until(|s| s["composer_open"] == true);
+    f.send(
+        l.ui,
+        json!({"op":"test_composer_input","value":"Closed-loop delivery"}),
+    );
+    l.control("composer_send");
+    l.until(|s| s["composer_open"] == false);
+    l.snapshot("directory", "r5_real_composer_acknowledged.png");
+    for op in [
+        "state",
+        "settings",
+        "directory",
+        "pair_code",
+        "channel_test_result",
+        "composer_result",
+        "error",
+    ] {
+        assert!(
+            l.frames.iter().any(|frame| frame["op"] == op),
+            "Missing real daemon frame: {op}"
+        );
+    }
+    assert!(l
+        .frames
+        .iter()
+        .any(|frame| frame["op"] == "error" && frame["source_op"] == "setup_save_hub"));
+}
+
+#[test]
+fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    cfg["channels"][0]["fields"][0]["value"] = json!("");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "edit_hub_service:channel");
+    let save = |value: &str| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":value}),
+        );
+        control(&f, p, "save_hub_service:channel");
+        inspect(&f, p);
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "save_hub_service")
+            .unwrap()
+    };
+    let first = save("one");
+    let second = save("two");
+    assert_ne!(first["request_id"], second["request_id"]);
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":first["request_id"],"settings":cfg}));
+    assert!(
+        !node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:secret"
+        )
+        .is_null(),
+        "An older save cannot close the current edit"
+    );
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_test","channel_id":"channel","settings":cfg}));
+    assert!(
+        !node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:secret"
+        )
+        .is_null(),
+        "A test is not a save acknowledgement"
+    );
+    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"newer-draft"}));
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":second["request_id"],"settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let third = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "save_hub_service")
+        .unwrap();
+    assert_eq!(third["values"], json!({"secret":"newer-draft"}));
+    f.send(p,json!({"op":"settings","ok":false,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
+    assert!(!node(
+        &inspect(&f, p),
+        "settings_items",
+        "channel_field:channel:secret"
+    )
+    .is_null());
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "save_hub_service")
+            .unwrap()["values"],
+        json!({})
+    );
+}
+
 fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
     let path = f.dir.join(name);
     f.send(
@@ -196,6 +624,11 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
     assert!(node(&s, "settings_items", "clear_channel_service:channel").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "stratum_hub:channel")["height"],
+        50
+    );
+    render_png(&f, p, "settings", "r1_gateway_non_admin.png");
     assert!(
         nodes(&node(&s, "settings_items", "stratum_hub:channel")["children"])
             .iter()
@@ -245,6 +678,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     frame["settings"] = cfg.clone();
     f.send(p, frame.clone());
     for op in ["state", "settings"] {
+        // Editing a new intent ends prior acknowledgement feedback, even when
+        // duplicate daemon refreshes arrive during the feedback timer.
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":"4291"}),
+        );
         f.send(p, json!({"op":"settings","settings":cfg}));
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
@@ -483,7 +922,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
         )["text"],
         "Test sent"
     );
-    for action in ["save_channel", "clear_channel_service"] {
+    for action in ["save_hub_service", "clear_channel_service"] {
         for ok in [false, true] {
             cfg["channels"][0]["configured"] = json!(false);
             cfg["channels"][0]["status"] = json!("not_configured");
@@ -567,6 +1006,13 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
     assert_eq!(
+        node(&s, "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
+    control(&f, p, "edit_hub_service:channel");
+    let s = inspect(&f, p);
+    assert_eq!(
         node(&s, "settings_items", "channel_field:channel:secret")["secure"],
         true
     );
@@ -574,7 +1020,7 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
         node(&s, "settings_items", "channel_field:channel:secret")["placeholder"],
         "Saved — enter replacement"
     );
-    assert!(!node(&s, "settings_items", "channel_setup_guide:channel").is_null());
+    assert!(node(&s, "settings_items", "channel_setup_guide:channel").is_null());
     for (button, op) in [
         ("save_channel:channel", "channel_save"),
         ("test_channel:channel", "channel_test"),
@@ -892,6 +1338,8 @@ fn inspect(f: &Fixture, p: usize) -> Value {
     )
     .unwrap();
     assert_eq!(snapshot["truncated_labels"], json!([]));
+    assert_eq!(snapshot["overlapping_siblings"], json!([]));
+    assert_eq!(snapshot["clipped_views"], json!([]));
     snapshot
 }
 fn nodes(tree: &Value) -> Vec<Value> {
@@ -1074,6 +1522,9 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     let s = inspect(&f, p);
     assert_eq!(s["settings_open"], true);
     assert_eq!(s["settings_tab"], "channels");
+    assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
+    control(&f, p, "edit_hub_service:channel");
+    let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "channel_field:channel:secret")["secure"],
         true
@@ -1092,7 +1543,14 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
         p,
         json!({"op":"settings","hub":"work","settings":settings()}),
     );
+    control(&f, p, "edit_hub_service:channel");
     f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"new-secret"}));
+    control(&f, p, "save_hub_service:channel");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "save_hub_service" && v["values"] == json!({"secret":"new-secret"}))
+    });
     let mut paired = settings();
     paired["channels"][0]["fields"][1]["value"] = json!("server-account");
     f.send(p, json!({"op":"settings","hub":"work","settings":paired}));
@@ -1107,9 +1565,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     control(&f, p, "save_channel:channel");
     wait(|| {
         f.frames(p).iter().any(|v| {
-            v["op"] == "channel_save"
-                && v["values"]["account"] == "server-account"
-                && v["values"]["secret"] == "new-secret"
+            v["op"] == "channel_save" && v["values"] == json!({"account":"server-account"})
         })
     });
     control(&f, p, "open_uninstall_confirm");
@@ -1138,7 +1594,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     control(&f, p, "paste_hub_invite");
     wait(|| {
         f.frames(p).iter().any(|v| {
-            v["op"] == "setup_save_hub" && v["name"] == "shared" && v["token"] == "test-token"
+            v["op"] == "paste_hub_invite" && v["invite"] == "cito setup --hub shared --url http://127.0.0.1:4291 --auth token --token test-token --default"
         })
     });
     assert!(!f.state.join("onboarding-shown").exists());
@@ -1257,17 +1713,14 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         client
             .frames(ui)
             .iter()
-            .any(|v| v["op"] == "setup_save_hub")
+            .any(|v| v["op"] == "paste_hub_invite")
     });
     let action = client
         .frames(ui)
         .into_iter()
-        .find(|v| v["op"] == "setup_save_hub")
+        .find(|v| v["op"] == "paste_hub_invite")
         .unwrap();
-    assert_eq!(action["url"], endpoint);
-    assert_eq!(action["auth_mode"], "token");
-    assert_eq!(action["token"], "lan-test-token");
-    assert_eq!(action["set_default"], true);
+    assert_eq!(action["invite"], hosted["invite_command"]);
     let (status, result) = client.action(action);
     assert_eq!(status, 200, "{result}");
     let (status, result) = client.action(json!({"op":"test_hub","hub":"lan"}));
@@ -1276,6 +1729,9 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     let configured: Value =
         serde_json::from_str(&fs::read_to_string(&client.config).unwrap()).unwrap();
     assert_eq!(configured["default_hub"], "lan");
+    assert_eq!(configured["hubs"]["lan"]["url"], endpoint);
+    assert_eq!(configured["hubs"]["lan"]["authMode"], "token");
+    assert_eq!(configured["hubs"]["lan"]["token"], "lan-test-token");
     let (status, exported) = client.action(json!({"op":"generate_hub_invite","hub":"lan"}));
     assert_eq!(status, 200);
     assert_eq!(exported["invite"]["url"], endpoint);

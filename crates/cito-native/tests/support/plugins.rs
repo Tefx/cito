@@ -68,6 +68,35 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(probe["status"], "alive", "{probe}");
     }
+    // Production readiness gating is distinct from the explicit process-only test mode.
+    f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
+    let gated = discover(&f);
+    for p in [f.pid(first), f.pid(second)] {
+        let row = gated["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["endpoint_pid"] == p)
+            .unwrap();
+        assert_eq!(row["needs_reload"], true);
+        assert_eq!(
+            row["reload_hint"],
+            "Run /reload in Pi to enable 1-click listen"
+        );
+        assert_eq!(
+            f.plugin(PI, json!({"op":"resolve_caller","endpoint_pid":p}))["ok"],
+            false
+        );
+        assert_eq!(
+            f.plugin(
+                PI,
+                json!({"op":"probe","endpoint_pid":p,"session_id":row["session_id"]})
+            )["status"],
+            "closed_definitive"
+        );
+        assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":p,"session_id":row["session_id"],"badge":null}))["ok"],true);
+    }
+    f.env.remove("CITO_PI_REQUIRE_BRIDGE");
     // Socket-backed identities take precedence, including when resolving a process-only PID.
     let endpoint_script = f.dir.join("endpoint.cjs");
     fs::write(&endpoint_script, include_str!("endpoint.cjs")).unwrap();
@@ -814,7 +843,12 @@ fn cached_pid_identity_requires_same_live_invocation_and_plugin_process_command(
         request["require_open"] = json!(false);
         request["cached_caller"] = cached.clone();
         request["meta"] = json!({"expected_harness":id,"expected_session_id":"session-a"});
-        assert_eq!(f.plugin(bin, request.clone())["caller"], cached);
+        let offline = f.plugin(bin, request.clone());
+        if id == "pi" {
+            assert_eq!(offline["error_code"], "PI_BRIDGE_UNAVAILABLE");
+        } else {
+            assert_eq!(offline["caller"], cached);
+        }
         for key in ["command", "started_at"] {
             let mut stale = request.clone();
             stale["cached_caller"]["process_identity"][key] = json!("another invocation");

@@ -48,7 +48,7 @@ This installs `Cito.app` and places `cito` and `cito-mcp` on your `PATH`:
 
 ```sh
 cito --version
-# -> cito v0.20.1
+# -> cito v0.20.2
 ```
 
 ### Option 2: Download `Cito.app` for macOS

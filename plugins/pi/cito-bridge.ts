@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -187,12 +187,37 @@ export default function citoBridge(pi: BridgeAPI): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     ownsSocket = false;
   }
+  function fallbackIdentity(): { session_id: string; session_name: string; cwd: string } {
+    const cwd = process.cwd();
+    const folder = join(piHome, "sessions", `--${cwd.replace(/^\//, "").replaceAll("/", "-")}--`);
+    let latest: { path: string; modified: number } | undefined;
+    try {
+      for (const entry of readdirSync(folder)) {
+        if (!entry.endsWith(".jsonl")) continue;
+        const path = join(folder, entry), modified = statSync(path).mtimeMs;
+        if (!latest || modified > latest.modified || (modified === latest.modified && path > latest.path)) latest = { path, modified };
+      }
+      if (latest) {
+        let id = basename(latest.path, ".jsonl"), name = basename(cwd);
+        for (const line of readFileSync(latest.path, "utf8").split("\n")) {
+          try {
+            const row = JSON.parse(line);
+            if ((row.type === "session" || row.type == null) && typeof row.id === "string" && row.id) id = row.id;
+            if (typeof row.name === "string" && row.name) name = row.name;
+            if (typeof row.session_name === "string" && row.session_name) name = row.session_name;
+          } catch {} // A concurrent trailing partial JSON line is not an identity.
+        }
+        return { session_id: id, session_name: name, cwd };
+      }
+    } catch {} // Missing session storage still has a stable process-scoped identity.
+    return { session_id: `pid-${process.pid}`, session_name: basename(cwd), cwd };
+  }
   function handle(req: Record<string, unknown>): Record<string, unknown> {
     const ctx = context;
     if (ctx) update(ctx);
     if (req.op === "ping") return { ok: true };
     if (req.op === "identify") {
-      if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
+      if (!ctx || !sessionId) return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, ...fallbackIdentity(), updated_at_ms: lastActiveMs };
       return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: sessionId,
         session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd, updated_at_ms: lastActiveMs };
     }
