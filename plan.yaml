@@ -8000,7 +8000,7 @@ phases:
   - id: v26.gate
     name: V26 Stage 10 (v0.20.2) Independent Terminal Acceptance, R1–R5 Root-Cause
       Closure & Live Distribution Gate
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v26` (`v0.20.2`) acceptance decision\
       \ (`PASS` or `FAIL`) issued by a fresh-context `gate-reviewer` session.\n- **Boundary:**\
@@ -8041,3 +8041,5 @@ phases:
     depends_on:
     - v26.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-10T04:45:53.573119Z'
