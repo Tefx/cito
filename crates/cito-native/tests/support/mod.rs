@@ -291,7 +291,9 @@ impl Fixture {
                 return false;
             }
             let (s, h) = http(self.port, "/health", None);
-            s == 200 && h["version"] == "0.20.3" && h["stateDir"] == json!(self.state)
+            s == 200
+                && h["version"] == env!("CARGO_PKG_VERSION")
+                && h["stateDir"] == json!(self.state)
         });
         index
     }

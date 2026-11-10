@@ -303,7 +303,7 @@ fn channel_test_uses_candidate_config_without_persisting_or_restarting_live_serv
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
-    e.set_plugin_roots(&[root.clone()]).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":false,"hub_config":{"credential":"saved"},"user_config":{"address":"saved-room"}}),Some(&owner)).unwrap();
     let before = e
@@ -743,7 +743,7 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
         manifest["id"] = json!("a");
         manifest["command"] = json!([dir.join("missing-executable")]);
         std::fs::write(broken.join("plugin.json"), manifest.to_string()).unwrap();
-        e.set_plugin_roots(&[root.clone()]).unwrap();
+        e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
         assert_eq!(
             e.inner
                 .plugins
@@ -806,7 +806,7 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open_with_remote(&dir, true).unwrap();
-    e.set_plugin_roots(&[root.clone()]).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice.smith","owner_user":"alice.smith"});
     e.rpc(
         "human_channels_configure",
@@ -936,7 +936,7 @@ fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
-    e.set_plugin_roots(&[root.clone()]).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     e.rpc(
         "human_channels_configure",
@@ -1026,7 +1026,7 @@ fn reservations_retry_holes_and_record_all_chunks() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
-    e.set_plugin_roots(&[root.clone()]).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "historical");
@@ -1105,7 +1105,7 @@ fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        e.set_plugin_roots(&[root.clone()]).unwrap();
+        e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
         e.rpc(
             "human_channels_configure",
             &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"}}),
@@ -1224,7 +1224,7 @@ fn human_reply_rpc_notifies_bound_channels_with_source_message_ids() {
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        e.set_plugin_roots(&[root.clone()]).unwrap();
+        e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
         e.rpc(
             "human_channels_configure",
             &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"}}),
@@ -1625,7 +1625,7 @@ fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
 fn binary_payloads_survive_kv_stream_consumers_and_restart() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();
-    let payloads = vec![
+    let payloads = [
         Vec::new(),
         b"message".to_vec(),
         b"\xff\x00\xfe'); DROP TABLE hub_kv; --".to_vec(),
@@ -1910,7 +1910,7 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
-    e.set_plugin_roots(&[root.clone()]).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let pid = "none#alice";
     let node = listener_id(pid, "human", "default");
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":true,"hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}),Some(&json!({"principal_id":pid,"owner_user":"alice"}))).unwrap();
@@ -1935,7 +1935,7 @@ fn reservations_renew_while_process_is_live_and_replay_after_exit() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
-    e.set_plugin_roots(&[root.clone()]).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     e.rpc("human_channels_configure",&json!({"plugin_id":"fixture","enabled":true,"hub_config":{"credential":"test-only"},"user_config":{"address":"room"}}),Some(&json!({"principal_id":"none#alice","owner_user":"alice"}))).unwrap();
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "concurrent");

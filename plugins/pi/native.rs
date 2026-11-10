@@ -249,12 +249,10 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
                     if v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
-                    {
-                        if v.get("pi_pid")
+                        && v.get("pi_pid")
                             .is_none_or(|id| id.as_u64() == Some(p as u64))
-                        {
-                            return (vec![(p, v)], true);
-                        }
+                    {
+                        return (vec![(p, v)], true);
                     }
                 }
                 let Some(parent) = process_parent(p) else {

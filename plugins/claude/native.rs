@@ -711,10 +711,12 @@ pub fn main() {
         eprintln!("Claude sidecar: {e}");
     }
 }
+type BadgeInodes = std::collections::HashMap<PathBuf, (u64, u64)>;
+
 struct SidecarCleanup {
     path: PathBuf,
     inode: (u64, u64),
-    badges: std::sync::Mutex<(bool, std::collections::HashMap<PathBuf, (u64, u64)>)>,
+    badges: std::sync::Mutex<(bool, BadgeInodes)>,
 }
 impl SidecarCleanup {
     fn stop(&self) {

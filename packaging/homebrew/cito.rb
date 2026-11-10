@@ -1,51 +1,25 @@
-class Cito < Formula
-  desc "Cross-harness agent and human notification network for macOS"
+# Release template. Generate the installable Cask with packaging/release.py.
+cask "cito" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/Tefx/cito/releases/download/v#{version}/Cito-macos-arm64.zip"
+  name "Cito"
+  desc "Cross-harness agent and human signaling network"
   homepage "https://tefx.github.io/cito/"
-  url "https://github.com/Tefx/cito/releases/download/v0.20.3/Cito-macos-arm64.zip"
-  version "0.20.3"
-  sha256 "ee1c94676031b941e253846b40f10fe9ef8bcb256ccbe474dbbc4fd1d445d272"
-  license "MIT"
 
   depends_on arch: :arm64
-  depends_on :macos
+  depends_on macos: :ventura
 
-  def install
-    if File.directory?("Cito.app")
-      prefix.install "Cito.app"
-    elsif File.directory?("Contents")
-      (prefix/"Cito.app").install "Contents"
-    else
-      odie "Cito.app bundle Contents not found in archive"
-    end
+  app "Cito.app"
+  binary "#{appdir}/Cito.app/Contents/MacOS/Cito", target: "cito"
+  binary "#{appdir}/Cito.app/Contents/MacOS/Cito", target: "cito-mcp"
 
-    (bin/"cito").write <<~EOS
-      #!/bin/sh
-      export CITO_BUILTIN_PLUGINS_DIR="#{opt_prefix}/Cito.app/Contents/Resources/plugins"
-      exec "#{opt_prefix}/Cito.app/Contents/Helpers/cito-native" "$@"
-    EOS
-    (bin/"cito-mcp").write <<~EOS
-      #!/bin/sh
-      export CITO_BUILTIN_PLUGINS_DIR="#{opt_prefix}/Cito.app/Contents/Resources/plugins"
-      export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
-      if [ "$#" -eq 0 ]; then
-        exec "#{opt_prefix}/Cito.app/Contents/Helpers/cito-native" mcp-stdio
-      fi
-      exec "#{opt_prefix}/Cito.app/Contents/Helpers/cito-native" "$@"
-    EOS
-    chmod 0755, [bin/"cito", bin/"cito-mcp"]
-  end
+  uninstall quit: "one.tefx.cito"
 
-  def caveats
-    <<~EOS
-      Cito.app has been installed to:
-        #{opt_prefix}/Cito.app
-
-      To launch the menu bar app (or install the cask `brew install --cask tefx/tap/cito` for /Applications & Spotlight):
-        open "#{opt_prefix}/Cito.app"
-    EOS
-  end
-
-  test do
-    assert_match "cito v#{version}", shell_output("#{bin}/cito --version")
-  end
+  zap trash: [
+    "~/.cito",
+    "~/Applications/Cito.app",
+    "~/Library/LaunchAgents/com.tefx.cito.daemon.plist",
+  ]
 end

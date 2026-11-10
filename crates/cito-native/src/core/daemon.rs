@@ -1307,10 +1307,10 @@ impl DaemonService {
         // errors, but cannot resolve a rejected configuration edit.
         self.last_hub_errors.retain(|hub, (_, transient)| {
             !*transient
-                || !self
+                || self
                     .slots
                     .get(hub)
-                    .is_some_and(|slot| slot.connection_status() == "connected")
+                    .is_none_or(|slot| slot.connection_status() != "connected")
         });
         let finished: Vec<String> = self
             .receivers
@@ -3425,6 +3425,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
         .map_err(|e| e.to_string())?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(config.state_dir.join("daemon.lock"))

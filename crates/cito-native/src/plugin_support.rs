@@ -553,19 +553,6 @@ pub fn process_entrypoint(command: &str) -> Option<(&str, Option<&str>)> {
         Some((program, None))
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::process_entrypoint;
-    #[test]
-    fn interpreter_entrypoint_ignores_loader_values_and_rejects_eval() {
-        assert_eq!(process_entrypoint("node --require /tmp/preload.js --experimental-strip-types /tmp/program.js --session other"), Some(("node", Some("/tmp/program.js"))));
-        assert_eq!(process_entrypoint("node -e /tmp/program.js"), None);
-        assert_eq!(
-            process_entrypoint("bun run -- /tmp/program.js"),
-            Some(("bun", Some("/tmp/program.js")))
-        );
-    }
-}
 pub fn normalize_repo(origin: &str) -> Option<String> {
     let remote = origin.trim().trim_end_matches('/').trim_end_matches(".git");
     let path = if let Some((_, rest)) = remote.split_once("://") {
@@ -759,4 +746,17 @@ pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
         }
     }
     Ok(rows)
+}
+#[cfg(test)]
+mod tests {
+    use super::process_entrypoint;
+    #[test]
+    fn interpreter_entrypoint_ignores_loader_values_and_rejects_eval() {
+        assert_eq!(process_entrypoint("node --require /tmp/preload.js --experimental-strip-types /tmp/program.js --session other"), Some(("node", Some("/tmp/program.js"))));
+        assert_eq!(process_entrypoint("node -e /tmp/program.js"), None);
+        assert_eq!(
+            process_entrypoint("bun run -- /tmp/program.js"),
+            Some(("bun", Some("/tmp/program.js")))
+        );
+    }
 }

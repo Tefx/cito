@@ -106,8 +106,8 @@ pub fn canonical_node_id(raw: &str) -> Result<String, String> {
     if !(suffix.len() == 16
         && suffix
             .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        && !(suffix.len() == 12
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || suffix.len() == 12
             && suffix
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)))
