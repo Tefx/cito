@@ -8704,3 +8704,20 @@ phases:
     depends_on:
     - v29.impl
     agent: rust-senior
+  - id: v29.gate
+    name: V29 Independent Terminal Acceptance, D01–D18 6-Invariant Verification &
+      v0.21.0 Release Gate
+    status: pending
+    description: Independently verify all D01–D18 requirements in docs/DESIGN.md §14,
+      all 6 inspectMenu() mechanical invariants (truncated_labels, overlapping_siblings,
+      clipped_views, low_contrast_labels, jargon_leaks, address_mismatches == [])
+      in Light and Dark modes across all 4 surfaces (including WakeBanner), full cargo
+      test --workspace pass with 0 warnings, and v0.21.0 release alignment.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v29.hygiene
+    agent: gate-reviewer
