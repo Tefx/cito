@@ -1149,15 +1149,25 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return
         }
         if frame.op == "error" {
-            if let requestId = frame.request_id, ["setup_save_hub", "save_hub"].contains(frame.source_op ?? ""),
+            let sourceOp = frame.source_op ?? ""
+            let isAddHubOp = ["setup_save_hub", "save_hub"].contains(sourceOp) ||
+                (sourceOp.isEmpty && addHubSaving && frame.request_id == nil)
+            if isAddHubOp, let requestId = frame.request_id,
                requestId != submittedAddHubRequestId { return }
+            // Untagged save errors can belong to pasted invites, not the active form submission.
+            let isAddHubError = (isAddHubOp && (frame.request_id == submittedAddHubRequestId || (!addHubSaving && addHubFormOpen))) ||
+                (sourceOp.isEmpty && addHubFormOpen)
             let error = frame.error ?? "Unknown daemon error"
-            pendingMutation = false; hostHubPortPending = false; addHubSaving = false
-            hubInvitePending=false; hubInvitePastedUntil = .distantPast
-            if composerPendingText != nil || (["send_signal","send_reply_from_human"].contains(frame.source_op ?? "") && !(directoryComposerBar?.isHidden ?? true)) {
+            pendingMutation = false
+            if sourceOp == "set_host_hub" || sourceOp.isEmpty { hostHubPortPending = false }
+            if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || sourceOp.isEmpty {
+                hubInvitePending=false; hubInvitePastedUntil = .distantPast
+            }
+            if isAddHubError { addHubSaving = false; submittedAddHubRequestId = "" }
+            if composerPendingText != nil || (["send_signal","send_reply_from_human"].contains(sourceOp) && !(directoryComposerBar?.isHidden ?? true)) {
                 composerErrorLabel?.stringValue = error
                 composerPendingText = nil; composerPendingTarget = ""; composerPendingHub = ""
-            } else if addHubFormOpen { addHubError = error }
+            } else if isAddHubError { addHubError = error }
             else if settingsVisible { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")

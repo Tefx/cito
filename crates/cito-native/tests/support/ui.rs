@@ -694,6 +694,29 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             );
             assert!(node(&s, "settings_items", "add_hub_error").is_null());
         }
+        for (op, error) in [
+            ("hub_action", "OIDC cancelled"),
+            ("setup_save_hub", "Invite failed"),
+            ("paste_hub_invite", "Invalid invite"),
+        ] {
+            f.send(
+                p,
+                json!({"op":"error","source_op":op,"request_id":null,"error":error}),
+            );
+            let s = inspect(&f, p);
+            assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+            assert_eq!(
+                node(&s, "settings_items", "submit_add_hub")["enabled"],
+                false,
+                "An unrelated {op} error must not settle the active submission"
+            );
+            assert!(node(&s, "settings_items", "add_hub_error").is_null());
+            assert!(!node(&s, "settings_items", "settings_error_banner").is_null());
+            assert_eq!(
+                node(&s, "settings_items", "settings_error_label")["text"],
+                error
+            );
+        }
         if retry_after_error {
             f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":current["request_id"],"error":"Current submission failed"}));
             let s = inspect(&f, p);
