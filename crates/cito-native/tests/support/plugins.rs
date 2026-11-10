@@ -68,6 +68,35 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(probe["status"], "alive", "{probe}");
     }
+    // Production readiness gating is distinct from the explicit process-only test mode.
+    f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
+    let gated = discover(&f);
+    for p in [f.pid(first), f.pid(second)] {
+        let row = gated["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["endpoint_pid"] == p)
+            .unwrap();
+        assert_eq!(row["needs_reload"], true);
+        assert_eq!(
+            row["reload_hint"],
+            "Run /reload in Pi to enable 1-click listen"
+        );
+        assert_eq!(
+            f.plugin(PI, json!({"op":"resolve_caller","endpoint_pid":p}))["ok"],
+            false
+        );
+        assert_eq!(
+            f.plugin(
+                PI,
+                json!({"op":"probe","endpoint_pid":p,"session_id":row["session_id"]})
+            )["status"],
+            "closed_definitive"
+        );
+        assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":p,"session_id":row["session_id"],"badge":null}))["ok"],true);
+    }
+    f.env.remove("CITO_PI_REQUIRE_BRIDGE");
     // Socket-backed identities take precedence, including when resolving a process-only PID.
     let endpoint_script = f.dir.join("endpoint.cjs");
     fs::write(&endpoint_script, include_str!("endpoint.cjs")).unwrap();
@@ -378,6 +407,99 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
             .count(),
         6
     );
+}
+#[test]
+fn setup_remove_dry_run_preserves_live_plugin_runtime() {
+    use std::os::unix::net::UnixListener;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    fs::create_dir_all(f.state.join("claude/wakes")).unwrap();
+    let queue = f.state.join("claude/wakes/session-a.jsonl");
+    fs::write(&queue, b"retained wake\n").unwrap();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let socket = f.state.join(format!("sockets/{id}-pid-123.sock"));
+        let _listener = UnixListener::bind(&socket).unwrap();
+        assert_eq!(f.plugin(bin, json!({"op":"setup_apply"}))["ok"], true);
+        assert_eq!(
+            f.plugin(bin, json!({"op":"setup_remove","dry_run":true}))["ok"],
+            true
+        );
+        assert!(socket.exists());
+        assert_eq!(fs::read(&queue).unwrap(), b"retained wake\n");
+        assert_eq!(
+            f.plugin(bin, json!({"op":"setup_inspect"}))["configured"],
+            true
+        );
+        assert_eq!(f.plugin(bin, json!({"op":"setup_remove"}))["ok"], true);
+        assert!(!socket.exists());
+    }
+    assert!(!queue.exists());
+}
+#[test]
+fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_alias() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let script = f.dir.join("claude.mjs");
+    fs::write(
+        &script,
+        "console.log('ready'); setInterval(() => {}, 1000);",
+    )
+    .unwrap();
+    let endpoint = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    f.env
+        .insert("CITO_ENDPOINT_PID".into(), f.pid(endpoint).to_string());
+    let transcripts = f.home.join(".claude/projects/-repo");
+    fs::create_dir_all(&transcripts).unwrap();
+    let sid = "11111111-1111-1111-1111-111111111111";
+    fs::write(transcripts.join(format!("{sid}.jsonl")), b"").unwrap();
+    f.plugin(
+        HOOK,
+        json!({"hook_event_name":"SessionStart","session_id":sid,"cwd":"/repo"}),
+    );
+    assert!(!f
+        .state
+        .join(format!("sockets/claude-pid-{}.sock", f.pid(endpoint)))
+        .exists());
+    for (expected, status) in [(sid, "alive"), ("old-session", "switched")] {
+        let result = f.plugin(
+            CLAUDE,
+            json!({"op":"probe","session_id":expected,"cwd":"/repo","endpoint_pid":f.pid(endpoint)}),
+        );
+        assert_eq!(result["status"], status, "{result}");
+    }
+    let wakes = f.state.join("claude/wakes");
+    fs::create_dir_all(&wakes).unwrap();
+    fs::create_dir_all(f.state.join("claude/aliases")).unwrap();
+    fs::write(f.state.join("claude/aliases").join(sid), b"claude-123").unwrap();
+    let alias = wakes.join("claude-123.jsonl");
+    fs::write(
+        &alias,
+        "{\"batch_id\":\"alias\",\"content\":\"keep alias\"}\n",
+    )
+    .unwrap();
+    let broken = wakes.join(format!("{sid}.jsonl.draining-0"));
+    fs::write(&broken, [255]).unwrap();
+    assert_eq!(
+        f.plugin(
+            HOOK,
+            json!({"hook_event_name":"UserPromptSubmit","session_id":sid,"cwd":"/repo"})
+        ),
+        json!({})
+    );
+    assert!(alias.exists());
+    assert!(broken.exists());
+    fs::remove_file(broken).unwrap();
+    let result = f.plugin(
+        HOOK,
+        json!({"hook_event_name":"UserPromptSubmit","session_id":sid,"cwd":"/repo"}),
+    );
+    assert_eq!(
+        result["hookSpecificOutput"]["additionalContext"],
+        "keep alias"
+    );
+    assert!(!alias.exists());
 }
 #[test]
 fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
@@ -814,7 +936,12 @@ fn cached_pid_identity_requires_same_live_invocation_and_plugin_process_command(
         request["require_open"] = json!(false);
         request["cached_caller"] = cached.clone();
         request["meta"] = json!({"expected_harness":id,"expected_session_id":"session-a"});
-        assert_eq!(f.plugin(bin, request.clone())["caller"], cached);
+        let offline = f.plugin(bin, request.clone());
+        if id == "pi" {
+            assert_eq!(offline["error_code"], "PI_BRIDGE_UNAVAILABLE");
+        } else {
+            assert_eq!(offline["caller"], cached);
+        }
         for key in ["command", "started_at"] {
             let mut stale = request.clone();
             stale["cached_caller"]["process_identity"][key] = json!("another invocation");

@@ -1,7 +1,7 @@
 use crate::plugins::{
-    expand_home_dir, now_ms, random_hex, resolve_builtin_plugins_dir, system_home_dir,
-    validate_harness_id, validate_https_issuer, validate_hub_name, validate_nats_url,
-    LoadedPlugins, PluginDescriptor, CITO_VERSION,
+    expand_home_dir, now_ms, random_hex, resolve_builtin_plugins_dir, validate_harness_id,
+    validate_https_issuer, validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
+    CITO_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -203,27 +203,6 @@ pub fn ensure_cli_shims_native(
         fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
         written.push(shim_path);
-    }
-    if let Ok(exe_path) = env::current_exe() {
-        let exe_s = exe_path.to_string_lossy();
-        if (exe_s.contains("/Cellar/cito/") || exe_s.contains("/opt/cito/"))
-            && state_dir.to_str().is_some_and(|s| s.ends_with("/.cito"))
-        {
-            let opt_app = PathBuf::from(resolve_stable_package_root(&exe_s))
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf());
-            if let Some(src_app) = opt_app.filter(|p| p.ends_with("Cito.app") && p.is_dir()) {
-                let dst_app = PathBuf::from("/Applications/Cito.app");
-                if !dst_app.exists() || dst_app.join("Contents/Info.plist").is_file() {
-                    let _ = copy_dir_recursive(&src_app, &dst_app);
-                    let _ = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-                        .args(["-f", "/Applications/Cito.app"])
-                        .status();
-                }
-            }
-        }
     }
     Ok(written)
 }
@@ -635,22 +614,25 @@ pub fn build_mac_app_bundle_native(
     build_mac_app_bundle_from_root(dest_dir, state_dir, plugins, &resolve_package_root())
 }
 
+fn resolve_app_bundle_path(dest_dir: Option<&str>, state_dir: &Path) -> Result<PathBuf, String> {
+    let base_dest = match dest_dir {
+        Some(dest) => expand_home_dir(dest, "destDir", None)?,
+        None => state_dir.join("Applications"),
+    };
+    Ok(if base_dest.to_string_lossy().ends_with(".app") {
+        base_dest
+    } else {
+        base_dest.join("Cito.app")
+    })
+}
+
 fn build_mac_app_bundle_from_root(
     dest_dir: Option<&str>,
     state_dir: &Path,
     plugins: &LoadedPlugins,
     pkg_root: &Path,
 ) -> Result<(PathBuf, u64), String> {
-    let home = system_home_dir();
-    let base_dest = match dest_dir {
-        Some(d) => expand_home_dir(d, "destDir", Some(&home))?,
-        None => state_dir.join("Applications"),
-    };
-    let app_path = if base_dest.to_string_lossy().ends_with(".app") {
-        base_dest
-    } else {
-        base_dest.join("Cito.app")
-    };
+    let app_path = resolve_app_bundle_path(dest_dir, state_dir)?;
     let contents_dir = app_path.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
     let helpers_dir = contents_dir.join("Helpers");
@@ -875,15 +857,19 @@ pub fn uninstall_setup_native(
         let _ = fs::remove_file(&lock_file);
     }
 
-    for app_target in [
-        home_dir.join("Applications").join("Cito.app"),
-        PathBuf::from("/Applications/Cito.app"),
-    ] {
-        let is_symlink = fs::symlink_metadata(&app_target)
+    let app_targets = [
+        resolve_app_bundle_path(None, state_dir)?,
+        resolve_app_bundle_path(None, home_dir)?,
+    ];
+    for (index, app_target) in app_targets.iter().enumerate() {
+        if app_targets[..index].contains(app_target) {
+            continue;
+        }
+        let is_symlink = fs::symlink_metadata(app_target)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
         if is_symlink {
-            let _ = fs::remove_file(&app_target);
+            let _ = fs::remove_file(app_target);
             actions.push(SetupAction {
                 target: "cito".to_string(),
                 path: app_target.to_string_lossy().to_string(),
@@ -892,7 +878,7 @@ pub fn uninstall_setup_native(
                 detail: format!("Removed {} symlink", app_target.display()),
             });
         } else if purge_data && app_target.exists() {
-            let _ = fs::remove_dir_all(&app_target);
+            let _ = fs::remove_dir_all(app_target);
             actions.push(SetupAction {
                 target: "cito".to_string(),
                 path: app_target.to_string_lossy().to_string(),
@@ -1084,12 +1070,9 @@ pub fn run_setup_cli(args: &[String]) {
             let action = SetupAction {
                 target: "cito".to_string(),
                 path: if build_app {
-                    build_app_dest.clone().unwrap_or_else(|| {
-                        home_dir
-                            .join("Applications/Cito.app")
-                            .to_string_lossy()
-                            .into_owned()
-                    })
+                    resolve_app_bundle_path(build_app_dest.as_deref(), &state_dir)?
+                        .to_string_lossy()
+                        .into_owned()
                 } else {
                     state_dir.to_string_lossy().into_owned()
                 },
@@ -1312,11 +1295,12 @@ pub fn run_setup_cli(args: &[String]) {
             }
 
             if share_hub.is_some() || share_port.is_some() {
-                let prev = rest
-                    .get("host_hub")
-                    .and_then(|v| v.as_object())
-                    .cloned()
+                let mut prev = rest
+                    .remove("host_hub")
+                    .or_else(|| rest.remove("hostHub"))
+                    .and_then(|v| v.as_object().cloned())
                     .unwrap_or_default();
+                rest.remove("hostHub");
                 let en = share_hub.unwrap_or_else(|| {
                     prev.get("enabled")
                         .and_then(|v| v.as_bool())
@@ -1333,10 +1317,10 @@ pub fn run_setup_cli(args: &[String]) {
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .unwrap_or_else(|| random_hex(32));
-                rest.insert(
-                    "host_hub".to_string(),
-                    json!({ "enabled": en, "port": p, "token": tok }),
-                );
+                prev.insert("enabled".into(), json!(en));
+                prev.insert("port".into(), json!(p));
+                prev.insert("token".into(), json!(tok));
+                rest.insert("host_hub".to_string(), Value::Object(prev));
             }
 
             let def_enabled = hubs
@@ -1579,8 +1563,8 @@ mod tests {
         }
     }
 
-    fn cli_child(root: &Path, args: &[&str]) -> std::process::Output {
-        fs::create_dir_all(root.join("bundled")).unwrap();
+    fn cli_child(home_dir: &Path, state_dir: &Path, args: &[&str]) -> std::process::Output {
+        fs::create_dir_all(home_dir.join("bundled")).unwrap();
         Command::new(env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -1588,12 +1572,14 @@ mod tests {
                 "--test-threads=1",
                 "--nocapture",
             ])
-            .env("HOME", root)
-            .env("CITO_STATE_DIR", root)
-            .env("CITO_CONFIG_PATH", root.join("config.json"))
-            .env("CITO_BUILTIN_PLUGINS_DIR", root.join("bundled"))
-            .env_remove("CITO_PLUGIN_PATH")
-            .env_remove("CITO_DAEMON_PORT")
+            .env_clear()
+            .env("PATH", env::var("PATH").unwrap())
+            .env("HOME", home_dir)
+            .env("CITO_STATE_DIR", state_dir)
+            .env("CITO_CONFIG_PATH", state_dir.join("config.json"))
+            .env("CITO_BUILTIN_PLUGINS_DIR", home_dir.join("bundled"))
+            .env("CITO_DISABLE_UI", "1")
+            .env("CITO_UI_HEADLESS", "1")
             .env("CITO_SETUP_TEST_ARGS", serde_json::to_string(args).unwrap())
             .output()
             .unwrap()
@@ -1602,7 +1588,7 @@ mod tests {
     #[test]
     fn app_bundle_rejects_invalid_signing_identity() {
         let (root, _) = fixture();
-        let result = cli_child(&root, &["test-codesign-failure"]);
+        let result = cli_child(&root, &root, &["test-codesign-failure"]);
         fs::remove_dir_all(root).unwrap();
         assert!(
             result.status.success(),
@@ -1636,7 +1622,7 @@ mod tests {
         let unreadable = bundled.join("unreadable");
         fs::write(&unreadable, "plugin resource").unwrap();
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = cli_child(&root, &["--build-app"]);
+        let result = cli_child(&root, &root, &["--build-app"]);
         let contents = root.join("Applications/Cito.app/Contents");
         let copied_native = contents.join("Helpers/cito-native").is_file();
         let reached_plugins = contents.join("Resources/plugins").is_dir();
@@ -1678,7 +1664,7 @@ mod tests {
             vec!["--dry-run", "--uninstall", "--purge-data"],
             vec!["--dry-run", "--disable", "sample"],
         ] {
-            let result = cli_child(&root, &args);
+            let result = cli_child(&root, &root, &args);
             assert!(
                 result.status.success(),
                 "{}",
@@ -1690,10 +1676,160 @@ mod tests {
     }
 
     #[test]
+    fn cli_build_app_matches_dry_run_with_separate_home_and_state() {
+        let (root, _) = fixture();
+        let home = root.join("home");
+        let state = root.join("state");
+        let result_json = |args: &[&str]| -> Value {
+            let output = cli_child(&home, &state, args);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            // The isolated worker also prints the Rust test harness summary.
+            serde_json::from_str(&stdout[stdout.find('{').unwrap()..=stdout.rfind('}').unwrap()])
+                .unwrap()
+        };
+        for (destination, expected) in [
+            (None, state.join("Applications/Cito.app")),
+            (
+                Some(root.join("directory").display().to_string()),
+                root.join("directory/Cito.app"),
+            ),
+            (
+                Some(root.join("Custom.app").display().to_string()),
+                root.join("Custom.app"),
+            ),
+            (
+                Some("~/directory".to_string()),
+                home.join("directory/Cito.app"),
+            ),
+            (Some("~/Custom.app".to_string()), home.join("Custom.app")),
+        ] {
+            let mut args = vec!["--json", "--build-app"];
+            if let Some(dest) = destination.as_deref() {
+                args.push(dest);
+            }
+            args.push("--dry-run");
+            let preview = result_json(&args);
+            assert_eq!(preview["actions"][0]["path"], json!(expected));
+            assert!(!expected.exists(), "Dry-run must not create the bundle");
+            assert!(!state.exists(), "Dry-run must not create local state");
+            args.pop();
+            let built = result_json(&args);
+            assert_eq!(built["appPath"], preview["actions"][0]["path"]);
+            assert!(expected.join("Contents/Info.plist").is_file());
+            assert!(expected.join("Contents/Helpers/cito-native").is_file());
+            fs::remove_dir_all(&state).unwrap();
+        }
+        assert!(!home.join("Applications/Cito.app").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_uninstall_covers_state_and_home_bundles_without_duplicate_actions() {
+        for shared_home in [false, true] {
+            for symlink in [false, true] {
+                for purge in [false, true] {
+                    let (root, _) = fixture();
+                    let home = root.join("home");
+                    let state = if shared_home {
+                        home.clone()
+                    } else {
+                        root.join("state")
+                    };
+                    fs::create_dir_all(&state).unwrap();
+                    fs::write(state.join("config.json"), "{}").unwrap();
+                    let outside = root.join("Applications/Cito.app");
+                    fs::create_dir_all(&outside).unwrap();
+                    fs::write(outside.join("sentinel"), "unrelated bundle").unwrap();
+                    let mut targets = vec![
+                        state.join("Applications/Cito.app"),
+                        home.join("Applications/Cito.app"),
+                    ];
+                    targets.dedup();
+                    for target in &targets {
+                        fs::create_dir_all(target.parent().unwrap()).unwrap();
+                        if symlink {
+                            std::os::unix::fs::symlink(&outside, target).unwrap();
+                        } else {
+                            fs::create_dir_all(target).unwrap();
+                            fs::write(target.join("sentinel"), "local bundle").unwrap();
+                        }
+                    }
+                    let mut args = vec!["--json", "--uninstall"];
+                    if purge {
+                        args.push("--purge-data");
+                    }
+                    let output = cli_child(&home, &state, &args);
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let stdout = String::from_utf8(output.stdout).unwrap();
+                    let result: Value = serde_json::from_str(
+                        &stdout[stdout.find('{').unwrap()..=stdout.rfind('}').unwrap()],
+                    )
+                    .unwrap();
+                    let actions = result["actions"].as_array().unwrap();
+                    for target in &targets {
+                        assert_eq!(fs::symlink_metadata(target).is_err(), symlink || purge);
+                        assert_eq!(
+                            actions
+                                .iter()
+                                .filter(|a| a["path"] == json!(target))
+                                .count(),
+                            usize::from(symlink || purge)
+                        );
+                    }
+                    assert_eq!(
+                        fs::read_to_string(outside.join("sentinel")).unwrap(),
+                        "unrelated bundle"
+                    );
+                    fs::remove_dir_all(root).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cli_share_updates_preserve_host_settings_and_aliases() {
+        let (root, _) = fixture();
+        for key in ["host_hub", "hostHub"] {
+            let mut raw = json!({"hubs":{"local":{"url":"local://"}}});
+            raw[key] = json!({"enabled":false,"port":4291,"token":"retained","bind":"127.0.0.1","auth_mode":"none","extension":{"value":7}});
+            fs::write(root.join("config.json"), raw.to_string()).unwrap();
+            for (args, enabled, port) in [
+                (vec!["--share-hub"], true, 4291),
+                (vec!["--share-port", "5301"], true, 5301),
+                (vec!["--no-share-hub"], false, 5301),
+            ] {
+                let output = cli_child(&root, &root, &args);
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let config: Value =
+                    serde_json::from_str(&fs::read_to_string(root.join("config.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    config["host_hub"],
+                    json!({"enabled":enabled,"port":port,"token":"retained","bind":"127.0.0.1","auth_mode":"none","extension":{"value":7}})
+                );
+                assert!(config.get("hostHub").is_none());
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn cli_rejects_malformed_config_before_writes() {
         let (root, _) = fixture();
         fs::write(root.join("config.json"), "{broken").unwrap();
-        let result = cli_child(&root, &["--enable", "sample"]);
+        let result = cli_child(&root, &root, &["--enable", "sample"]);
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("Invalid JSON"));
         assert_eq!(
@@ -1729,7 +1865,7 @@ mod tests {
                 .filter(|line| serde_json::from_str::<Value>(line).unwrap()["op"] == "setup_apply")
                 .count()
         };
-        let result = cli_child(&root, &["--enable", "sample"]);
+        let result = cli_child(&root, &root, &["--enable", "sample"]);
         assert!(
             result.status.success(),
             "{}",
@@ -1737,6 +1873,7 @@ mod tests {
         );
         assert_eq!((apply_count("sample"), apply_count("other")), (1, 0));
         let result = cli_child(
+            &root,
             &root,
             &[
                 "--hub",
@@ -1756,7 +1893,7 @@ mod tests {
         let config: Value =
             serde_json::from_str(&fs::read_to_string(root.join("config.json")).unwrap()).unwrap();
         assert_eq!(config["hubs"]["cloud"]["authMode"], "none");
-        let result = cli_child(&root, &[]);
+        let result = cli_child(&root, &root, &[]);
         assert!(
             result.status.success(),
             "{}",

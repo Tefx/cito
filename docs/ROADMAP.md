@@ -1,6 +1,6 @@
 # Cito Product & Architecture Roadmap
 
-Cito's evolution from `v0.11.3` through `v0.20.1` is organized into **ten `0.x` stages (`Stage 0` through `Stage 9`)**:
+Cito's evolution from `v0.11.3` through `v0.20.2` is organized into **eleven `0.x` stages (`Stage 0` through `Stage 10`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
@@ -10,11 +10,23 @@ Cito's evolution from `v0.11.3` through `v0.20.1` is organized into **ten `0.x` 
 - **Stage 6 (`v0.18.0` — Completed)**: Pure Rust Core (`libsqlite3`), Symmetric Out-of-Process Plugin Protocol (`stdin`/`stdout` NDJSON), Relocation of `cito-claude-hook` to `plugins/claude/`, Standard Pi Package Mode, Retirement of Duplicate `src/*.ts`, Complete `F1`–`F64` Remediation & Live GitHub Pages / Release / Homebrew Tap Closure
 - **Stage 7 (`v0.19.0` — Completed / Phase `v23`)**: Pure Rust Workspace Consolidation, Complete Removal of Root Node/Vitest Scaffolding (`package.json`, `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `node_modules/`, `tests/**/*.ts`) & Unified `cargo test` Native Test Suite
 - **Stage 8 (`v0.20.0` — Completed / Phase `v24`)**: Full Lifecycle UX State Machine & Reconfiguration Contract (`L1`–`L17`)
-- **Stage 9 (`v0.20.1` — Implemented / Phase `v25`)**: Theory-Grounded UI/UX Redesign, Two-Stratum Human Channel Architecture (`Hub Gateway` vs. `Personal Human Node`), Configured-Only Session Discovery, Live `Pi` Process Discovery & Multimodal Visual E2E Verification (`U1`–`U11`)
+- **Stage 9 (`v0.20.1` — Completed / Phase `v25`)**: Theory-Grounded UI/UX Redesign, Two-Stratum Human Channel Architecture (`Hub Gateway` vs. `Personal Human Node`), Configured-Only Session Discovery, Live `Pi` Process Discovery & Multimodal Visual E2E Verification (`U1`–`U11`)
+- **Stage 10 (`v0.20.2` — Phase `v26`)**: Root-Cause Equivalence-Class Closure (`R1`–`R5`), True Progressive Disclosure, Full Mechanical Geometry Invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`), Closed-Loop Error Surfacing, Bridge Readiness & `Daemon<->UI` Closed-Loop Verification
 
 ---
 
-## Stage 9 (`v0.20.1` — Implemented / Phase `v25`)
+## Stage 10 (`v0.20.2` — Phase `v26`)
+
+Stage 10 closes the five root-cause equivalence classes (`R1`–`R5`) specified in [DESIGN §12](DESIGN.md#12-stage-10-v0202--phase-v26-root-cause-equivalence-class-closure-r1r5-true-progressive-disclosure-full-mechanical-geometry-invariants-closed-loop-error-surfacing-bridge-readiness--daemon-ui-closed-loop-verification):
+- **`R1` — True Two-Stratum Progressive Disclosure, Independent Scope Saving & Prerequisite Gating**: Scope-filtered `collectValues(scopeFilter: "hub" | "user")`, dedicated `"save_hub_service"` RPC routing (`params["hub_config"]` only, without creating/resuming a personal row in `hub_human_channels`), progressive collapse of `stratum_hub:<id>` (`36pt`/`50pt` summary bar when `gatewayActive` with `edit_hub_service:<id>` `"Change Token…"` and `clear_channel_service:<id>`), and genuine `MenuControl.isEnabled` prerequisite gating on Step 2 (`stratum_user:<id>`) when `!gatewayActive`.
+- **`R2` — Full Mechanical Geometry Invariants & Coordinate Fixes (`G1`–`G8`)**: Upgrade `inspectMenu()` to compute and assert `truncated_labels == []`, `overlapping_siblings == []`, and `clipped_views == []` across `cardMenu`, `SettingsPanel`, and `DirectoryPanel`, resolving all 8 coordinate and clipping defects (`G1`–`G8`).
+- **`R3` — Closed-Loop UI Actions, Visible Error Surfacing & Invite/Form Validation**: Track `last_hub_errors` on `DaemonService`, emit `{"op": "error", ...}` frames on action failures, unify `"paste_hub_invite"` (`JSON`, `http(s)://`, `cito setup --hub ...`), and surface errors across `add_hub_error`, `settings_error_banner` (with `36pt` scroll viewport shift), `menu_error_row`, and `composerErrorLabel` while keeping forms open until validated and acknowledged.
+- **`R4` — Process Discovery vs. Bridge Socket Readiness, Vendor-Neutral `needs_reload` UX & Bounded Exponential Retry Backoff**: Pre-`session_start` `identify` fallback in `plugins/pi/cito-bridge.ts`, `needs_reload: true` candidate reporting for unbridged processes in `plugins/pi/native.rs` (blocking unbridged enrollment in `resolve_caller`/`probe`), vendor-neutral `46pt` `needs_reload` row with `reload:<harness>:<sid>` (`"/reload"`) in `cardMenu`, and bounded exponential badge retry backoff (`250ms..15s`) in `SessionActivity`.
+- **`R5` — Real `DaemonService <-> Headless cito-ui` Closed-Loop Integration Suite & Multimodal Retina PNG Verification**: Wire `cito-ui` stdout actions directly into a real `DaemonService` and feed real daemon response frames back into `cito-ui` stdin, asserting all 3 geometry invariants on every step and capturing 2x Retina PNG snapshots across all core states.
+
+---
+
+## Stage 9 (`v0.20.1` — Completed / Phase `v25`)
 
 Stage 9 implements the holistic UI/UX and session-discovery contracts in [DESIGN §11](DESIGN.md#11-stage-9-v0201--phase-v25-theory-grounded-uiux-redesign-two-stratum-human-channel-architecture-hub-gateway-vs-personal-human-node-holistic-layout-grid--live-visual-e2e-verification-u1u11):
 - **U1–U3**: Configured-only session discovery (`configured == true` gate in `daemon.rs` `snapshot()`), self-healing `pi-pid-<pid>.sock` extension bridge plus live `Pi` process & `.jsonl` session discovery (`CITO_PI_PROCESS_DISCOVERY` hermetic sandbox isolation and `pid-<p>` collision fallback), and per-Hub `human_paused_card` (`listen_human`) re-enrollment in `cardMenu`.

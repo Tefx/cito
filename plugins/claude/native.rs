@@ -127,22 +127,22 @@ fn setup(req: &Value) -> Result<Value> {
                 groups.push(json!({"hooks":[{"type":"command","command":hook}]}));
             }
         }
-        if remove {
-            let _ = fs::remove_dir_all(state(req).join("claude"));
-            if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
-                for entry in entries.flatten() {
-                    if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("claude-pid-")
-                    {
-                        let _ = fs::remove_file(entry.path());
-                    }
+        Ok(())
+    })?;
+    if remove && req["dry_run"] != true {
+        let _ = fs::remove_dir_all(state(req).join("claude"));
+        if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("claude-pid-")
+                {
+                    let _ = fs::remove_file(entry.path());
                 }
             }
         }
-        Ok(())
-    })?;
+    }
     Ok(json!({"ok":true,"actions":[action]}))
 }
 fn queue(req: &Value, sid: &str) -> Result<PathBuf> {
@@ -178,25 +178,37 @@ pub fn append_wake(req: &Value, sid: &str) -> Result<()> {
     writeln!(f, "{row}").map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
-pub fn drain_wakes(req: &Value, sid: &str) -> Result<Vec<Value>> {
-    let _lock = queue_lock(req, sid)?;
-    let path = queue(req, sid)?;
-    let prefix = format!(
-        "{}.draining-",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .ok_or("Invalid queue path")?
-    );
+fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
+    // Lock both identities in stable order and validate every queue before deleting any.
+    let mut lock_sessions = sessions.to_vec();
+    lock_sessions.sort_unstable();
+    lock_sessions.dedup();
+    let _locks = lock_sessions
+        .iter()
+        .map(|sid| queue_lock(req, sid))
+        .collect::<Result<Vec<_>>>()?;
     let mut paths = vec![];
-    if let Some(dir) = path.parent() {
-        for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
-            if e.file_name().to_string_lossy().starts_with(&prefix) {
-                paths.push(e.path());
+    for sid in sessions {
+        let path = queue(req, sid)?;
+        let prefix = format!(
+            "{}.draining-",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .ok_or("Invalid queue path")?
+        );
+        let mut staged = vec![];
+        if let Some(dir) = path.parent() {
+            for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+                if e.file_name().to_string_lossy().starts_with(&prefix) {
+                    staged.push(e.path());
+                }
             }
         }
+        staged.sort();
+        paths.extend(staged);
+        paths.push(path);
     }
-    paths.sort();
-    paths.push(path);
+    let mut consumed = vec![];
     let mut rows = vec![];
     let mut seen = HashSet::new();
     for p in paths {
@@ -212,7 +224,10 @@ pub fn drain_wakes(req: &Value, sid: &str) -> Result<Vec<Value>> {
                 }
             }
         }
-        fs::remove_file(p).map_err(|e| e.to_string())?;
+        consumed.push(p);
+    }
+    for path in consumed {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(rows)
 }
@@ -505,9 +520,15 @@ pub fn handle(req: &Value) -> Result<Value> {
             Ok(v) if v["ok"] == true => Ok(
                 json!({"ok":true,"status":if v["session_id"]==req["session_id"]{"alive"}else{"switched"},"current_session_id":v["session_id"],"reason":null}),
             ),
-            _ => Ok(
-                json!({"ok":true,"status":if pid(req).map(|p|!alive(p)).unwrap_or(false){"closed_definitive"}else{"transient_error"},"reason":"Endpoint bridge is unavailable"}),
+            _ if pid(req).is_some_and(|p| !alive(p)) => Ok(
+                json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process is closed"}),
             ),
+            _ => match resolve(req) {
+                Ok(current) => Ok(
+                    json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
+                ),
+                Err(reason) => Ok(json!({"ok":true,"status":"transient_error","reason":reason})),
+            },
         },
         "update_badge" => {
             badge(
@@ -596,11 +617,12 @@ pub fn hook_main() {
         let alias = read_optional(&state(&req).join("claude/aliases").join(&sid))?
             .and_then(|s| validate_session(&s).ok())
             .filter(|s| s.starts_with("claude-") && s != &sid);
-        let mut wakes = match alias.as_deref() {
-            Some(id) => drain_wakes(&req, id)?,
-            None => vec![],
-        };
-        wakes.extend(drain_wakes(&req, &sid)?);
+        let sessions: Vec<_> = alias
+            .as_deref()
+            .into_iter()
+            .chain(std::iter::once(sid.as_str()))
+            .collect();
+        let mut wakes = drain_wakes(&req, &sessions)?;
         // Drain order follows recovered staging files, then the active queue.
         let mut seen = HashSet::new();
         wakes.retain(|w| {

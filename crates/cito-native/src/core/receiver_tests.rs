@@ -103,7 +103,14 @@ impl Fixture {
         }
     }
     fn dispatch(&self, plugin: &PluginDescriptor) -> Result<(), String> {
-        dispatch_listener(&self.state, &self.client, &self.row, plugin, &self.dir)
+        dispatch_listener(
+            &self.state,
+            &self.client,
+            &self.row,
+            plugin,
+            &self.dir,
+            Duration::from_secs(10),
+        )
     }
     fn rows(&self) -> Result<Vec<Value>, String> {
         self.state
@@ -133,7 +140,14 @@ impl Fixture {
         Worker {
             release: self.dir.join("release"),
             thread: Some(thread::spawn(move || {
-                dispatch_listener(&state, &client, &row, &plugin, &dir)
+                dispatch_listener(
+                    &state,
+                    &client,
+                    &row,
+                    &plugin,
+                    &dir,
+                    Duration::from_millis(150),
+                )
             })),
         }
     }
@@ -218,7 +232,15 @@ fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> 
         "alice",
         None,
     );
-    assert!(dispatch_listener(&f.state, &client, &f.row, &f.plugin(DELIVER), &f.dir).is_err());
+    assert!(dispatch_listener(
+        &f.state,
+        &client,
+        &f.row,
+        &f.plugin(DELIVER),
+        &f.dir,
+        Duration::from_secs(10)
+    )
+    .is_err());
     assert!(f.requests()?.is_empty());
     let failed = f.rows()?;
     assert_eq!(failed[0]["state"], "RECEIVED");
@@ -435,7 +457,7 @@ fn frozen_restart_preserves_queue_written_and_does_not_ack_unknown_insertion() -
     )?;
     let reopened = LocalState::open(&f.dir)?;
     reopened.recover_dispatch_leases()?;
-    dispatch_listener(&reopened,&f.client,&f.row,&f.plugin("print(json.dumps({'ok':True,'outcome':'delivered_unconfirmed','queue_written':True,'open_confirmed':True}))"),&f.dir)?;
+    dispatch_listener(&reopened,&f.client,&f.row,&f.plugin("print(json.dumps({'ok':True,'outcome':'delivered_unconfirmed','queue_written':True,'open_confirmed':True}))"),&f.dir,Duration::from_secs(10))?;
     let request = &f.requests()?[0];
     assert_eq!(request["batch_id"], batch[0]["batch_id"]);
     assert_eq!(request["text"], "exact persisted card");
@@ -564,17 +586,17 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
         || {
             db.query("SELECT claim_until_ms FROM hub_signals", &[])
                 .ok()
-                .is_some_and(|r| r[0]["claim_until_ms"].as_u64().unwrap_or(0) >= initial + 9000)
+                .is_some_and(|r| r[0]["claim_until_ms"].as_u64().unwrap_or(0) >= initial + 100)
                 && f.state
                     .listener("local", string(&f.row, "listener_id"))
                     .ok()
                     .flatten()
-                    .is_some_and(|r| r["lease_until_ms"].as_u64().unwrap_or(0) >= initial + 9000)
+                    .is_some_and(|r| r["lease_until_ms"].as_u64().unwrap_or(0) >= initial + 100)
                 && f.client.kv_get(id).ok().flatten().is_some_and(|(r, _)| {
                     r["channels"][channel]["updated_at_ms"]
                         .as_u64()
                         .unwrap_or(0)
-                        >= initial_heartbeat + 9000
+                        >= initial_heartbeat + 100
                         && r["updated_at_ms"] == r["channels"][channel]["updated_at_ms"]
                         && r["channels"]["sibling:fixture"] == sibling
                         && r["binding_generation"] == registration["binding_generation"]
@@ -582,7 +604,7 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
                         && super::super::lease::evaluate_node_lease(&r, now_ms()) == "ACTIVE"
                 })
         },
-        Duration::from_secs(13),
+        Duration::from_millis(900),
     );
     // Release and join even if the renewal assertion fails, so no child escapes.
     std::fs::write(f.dir.join("release"), b"done").map_err(|e| e.to_string())?;
@@ -606,7 +628,7 @@ fn renewal_claim_loss_aborts_unfinished_real_child_and_recovers_retry_schedule(
         "UPDATE hub_signals SET claimed_by_channel='winner:fixture',claim_until_ms=?",
         &[json!(now_ms() + 60_000)],
     )?;
-    let stopped = wait_until(|| worker.is_finished(), Duration::from_secs(13));
+    let stopped = wait_until(|| worker.is_finished(), Duration::from_millis(900));
     if stopped.is_err() {
         std::fs::write(f.dir.join("release"), b"done").map_err(|e| e.to_string())?;
     }
@@ -786,6 +808,34 @@ fn remote_preflight_generation_mismatch_fences_captured_listener_before_spawn() 
     Ok(())
 }
 
+#[test]
+fn disabled_legacy_hubs_do_not_qualify_single_local_reply_ids() -> Result<(), String> {
+    if std::env::var_os("CITO_REPLY_IDS_WORKER").is_none() {
+        let output = std::process::Command::new(
+            std::env::current_exe().map_err(|e| e.to_string())?,
+        )
+        .args([
+            "--exact",
+            "core::receiver::tests::disabled_legacy_hubs_do_not_qualify_single_local_reply_ids",
+        ])
+        .env("CITO_REPLY_IDS_WORKER", "1")
+        .env_remove("CITO_CONFIG_PATH")
+        .output()
+        .map_err(|e| e.to_string())?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return Ok(());
+    }
+    let f = Fixture::new()?;
+    std::fs::write(f.dir.join("config.json"), json!({"defaultHub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","disabled":true}}}).to_string()).map_err(|e| e.to_string())?;
+    assert!(!qualify_reply_ids(&f.dir, "local"));
+    std::fs::write(f.dir.join("config.json"), json!({"defaultHub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":true}}}).to_string()).map_err(|e| e.to_string())?;
+    assert!(qualify_reply_ids(&f.dir, "local"));
+    Ok(())
+}
 #[test]
 fn durable_remote_ack_reconciliation_works_after_transport_cursor_has_advanced(
 ) -> Result<(), String> {

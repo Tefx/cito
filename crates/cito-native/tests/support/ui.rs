@@ -2,6 +2,813 @@ use super::support::*;
 use serde_json::{json, Value};
 use std::fs;
 
+/// Real daemon subprocess with its production dispatch_action path and UI mailbox.
+/// The recording endpoint preserves daemon frame order; no state/settings/result
+/// frames are synthesized by this relay. All children use Fixture's cleanroom API.
+struct ClosedLoop<'a> {
+    f: &'a Fixture,
+    ui: usize,
+    actions: usize,
+    frames: Vec<Value>,
+    results: Vec<(Value, u16, Value)>,
+}
+impl<'a> ClosedLoop<'a> {
+    fn new(f: &'a Fixture) -> Self {
+        let recorder = f.recording_ui();
+        f.daemon(&[
+            ("CITO_DISABLE_UI", "0"),
+            ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+        ]);
+        Self {
+            f,
+            ui: start(f),
+            actions: 0,
+            frames: Vec::new(),
+            results: Vec::new(),
+        }
+    }
+    fn pump(&mut self) {
+        let actions = self.f.frames(self.ui);
+        for action in &actions[self.actions..] {
+            let (status, result) = self.f.action(action.clone());
+            self.results.push((action.clone(), status, result));
+        }
+        self.actions = actions.len();
+        let frames: Vec<Value> = fs::read_to_string(self.f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+        for frame in &frames[self.frames.len()..] {
+            self.f.send(self.ui, frame.clone());
+            inspect(self.f, self.ui);
+        }
+        self.frames = frames;
+    }
+    fn until(&mut self, predicate: impl Fn(&Value) -> bool) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            self.pump();
+            let s = inspect(self.f, self.ui);
+            if predicate(&s) {
+                return s;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Closed-loop timeout: {s}; results={:?}",
+                self.results
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    fn control(&mut self, id: &str) {
+        control(self.f, self.ui, id);
+        inspect(self.f, self.ui);
+    }
+    fn input(&mut self, id: &str, value: &str) {
+        self.f.send(
+            self.ui,
+            json!({"op":"test_settings_input","id":id,"value":value}),
+        );
+        inspect(self.f, self.ui);
+    }
+    fn snapshot(&mut self, surface: &str, name: &str) {
+        self.pump();
+        inspect(self.f, self.ui);
+        render_png(self.f, self.ui, surface, name);
+        inspect(self.f, self.ui);
+    }
+}
+
+#[test]
+fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"host_hub":{"bind":"127.0.0.1"}}));
+    f.provider("delivered_unconfirmed");
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"),json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Messenger","setupGuide":["Create a gateway credential with your provider.","Save it once, then pair your personal account."],
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"pairing":{"supported":true},"fields":[
+        {"key":"credential","label":"Gateway Token","scope":"hub","type":"secret","required":true},
+        {"key":"address","label":"Personal Address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let mut l = ClosedLoop::new(&f);
+    l.until(|s| node(s, "items", "header").is_object());
+    l.control("open_settings");
+    l.until(|s| s["settings_open"] == true);
+    l.control("settings_tab:channels");
+    let s = l.until(|s| !node(s, "settings_items", "save_hub_service:channel").is_null());
+    for id in [
+        "channel_field:channel:address",
+        "pair_channel:channel",
+        "test_channel:channel",
+        "save_channel:channel",
+    ] {
+        assert_eq!(node(&s, "settings_items", id)["enabled"], false, "{id}");
+        assert_eq!(node(&s, "settings_items", id)["alpha"], 0.55);
+    }
+    assert_eq!(
+        node(&s, "settings_items", "skip_channel:channel")["enabled"],
+        true
+    );
+    let before = f.frames(l.ui).len();
+    for id in [
+        "pair_channel:channel",
+        "test_channel:channel",
+        "save_channel:channel",
+    ] {
+        l.control(id);
+    }
+    inspect(&f, l.ui);
+    assert_eq!(
+        f.frames(l.ui).len(),
+        before,
+        "Disabled controls cannot emit actions"
+    );
+    l.snapshot("settings", "r1_gateway_unconfigured.png");
+    l.input("channel_field:channel:credential", "gateway-one");
+    l.control("save_hub_service:channel");
+    l.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    assert!(f
+        .db("hub.sqlite")
+        .query(
+            "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.db("hub.sqlite").query("SELECT json_extract(config_json,'$.credential') AS credential FROM hub_plugin_services WHERE plugin_id='channel'",&[]).unwrap()[0]["credential"],"gateway-one");
+    l.snapshot("settings", "r1_gateway_active_collapsed.png");
+    l.control("edit_hub_service:channel");
+    l.until(|s| !node(s, "settings_items", "channel_field:channel:credential").is_null());
+    l.snapshot("settings", "r1_gateway_active_expanded.png");
+    l.control("save_hub_service:channel");
+    l.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    assert_eq!(
+        l.results
+            .iter()
+            .rev()
+            .find(|(a, _, _)| a["op"] == "save_hub_service")
+            .unwrap()
+            .0["values"],
+        json!({}),
+        "Acknowledged secrets must not be resubmitted"
+    );
+    // Submit both scopes before pumping the daemon, then request a background
+    // settings snapshot. Both request acknowledgements must reach the real UI.
+    let frame_start = l.frames.len();
+    l.control("edit_hub_service:channel");
+    l.input("channel_field:channel:credential", "gateway-overlap");
+    l.control("save_hub_service:channel");
+    l.input("channel_field:channel:address", "personal-room");
+    l.control("save_channel:channel");
+    let mut saves = Vec::new();
+    wait(|| {
+        saves = f
+            .frames(l.ui)
+            .into_iter()
+            .filter(|a| {
+                (a["op"] == "save_hub_service"
+                    && a["values"] == json!({"credential":"gateway-overlap"}))
+                    || (a["op"] == "channel_save" && a["values"]["address"] == "personal-room")
+            })
+            .collect();
+        saves.len() == 2
+    });
+    assert_ne!(saves[0]["request_id"], saves[1]["request_id"]);
+    l.control("open_settings");
+    wait(|| {
+        l.pump();
+        let frames = &l.frames[frame_start..];
+        frames.iter().enumerate().any(|(index, frame)| {
+            frame["op"] == "settings"
+                && frame["hub"] == "local"
+                && frame["request_id"].is_null()
+                && frame["source_op"].is_null()
+                && saves.iter().all(|save| {
+                    frames[..index].iter().any(|ack| {
+                        ack["op"] == "settings" && ack["request_id"] == save["request_id"]
+                    })
+                })
+        })
+    });
+    let s = inspect(&f, l.ui);
+    assert_eq!(
+        node(&s, "settings_items", "toggle_channel:channel")["text"],
+        "Pause"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    l.control("toggle_channel:channel");
+    l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Resume");
+    let paused = f
+        .db("hub.sqlite")
+        .query(
+            "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+            &[],
+        )
+        .unwrap();
+    l.control("edit_hub_service:channel");
+    l.until(|s| !node(s, "settings_items", "channel_field:channel:credential").is_null());
+    l.input("channel_field:channel:credential", "gateway-two");
+    l.control("save_hub_service:channel");
+    l.until(|s| node(s, "settings_items", "stratum_hub:channel")["height"] == 36);
+    assert_eq!(
+        f.db("hub.sqlite")
+            .query(
+                "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+                &[]
+            )
+            .unwrap(),
+        paused,
+        "Gateway rotation cannot change/resume the personal binding"
+    );
+    l.control("pair_channel:channel");
+    l.until(|s| !node(s, "settings_items", "pairing_instruction:channel").is_null());
+    l.snapshot("settings", "r1_pairing_real_code.png");
+    l.control("test_channel:channel");
+    l.until(|s| {
+        node(s, "settings_items", "settings_channel_detail:channel")["text"]
+            == "Fixture test succeeded"
+    });
+
+    l.control("settings_tab:hubs");
+    l.control("open_add_hub");
+    l.control("submit_add_hub");
+    l.until(|s| node(s, "settings_items", "add_hub_error")["text"] == "Hub name is required.");
+    l.snapshot("settings", "r3_add_hub_validation.png");
+    l.input("settings_hub_name", "INVALID!");
+    l.input("settings_hub_url", "local://");
+    l.control("submit_add_hub");
+    l.until(|s| {
+        node(s, "settings_items", "add_hub_error")["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Invalid hub name"))
+    });
+    l.snapshot("settings", "r3_add_hub_daemon_error.png");
+    l.input("settings_hub_name", "scratch");
+    l.control("submit_add_hub");
+    l.until(|s| {
+        node(s, "settings_items", "add_hub_form").is_null()
+            && !node(s, "settings_items", "settings_hub:scratch").is_null()
+    });
+    // The same form remains open through validation and daemon errors, and closes
+    // only on a real settings/state acknowledgement of the saved Hub.
+    l.input("host_hub_port", &port().to_string());
+    l.control("apply_host_hub_port");
+    l.until(|s| node(s, "settings_items", "apply_host_hub_port")["text"] == "✓ Saved");
+    l.control("toggle_host_hub");
+    l.until(|s| node(s, "settings_items", "toggle_host_hub")["text"] == "● Sharing");
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = occupied.local_addr().unwrap().port().to_string();
+    l.input("host_hub_port", &busy);
+    l.control("apply_host_hub_port");
+    l.until(|s| !node(s, "settings_items", "settings_error_banner").is_null());
+    l.snapshot("settings", "r3_settings_error_banner.png");
+    l.control("settings_tab:apps");
+    l.control("settings_tab:hubs");
+    let s = l.until(|s| node(s, "settings_items", "host_hub_port")["text"] == busy);
+    assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], busy);
+    l.control("dismiss_settings_error");
+    l.until(|s| node(s, "settings_items", "settings_error_banner").is_null());
+    l.control("paste_hub_invite");
+    l.until(|s| {
+        node(s, "settings_items", "settings_error_label")["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Clipboard"))
+    });
+    l.control("dismiss_settings_error");
+    // JSON invites use the daemon parser. CLI/URL formats are also exercised by
+    // the invite round-trip and parser tests, without connecting to real services.
+    f.send(l.ui,json!({"op":"test_clipboard","text":json!({"name":"pasted","url":format!("http://127.0.0.1:{}",port())}).to_string()}));
+    l.control("paste_hub_invite");
+    l.until(|s| !node(s, "settings_items", "settings_hub:pasted").is_null());
+    l.control("remove_hub:pasted");
+    l.until(|s| node(s, "settings_items", "settings_hub:pasted").is_null());
+    l.control("remove_hub:scratch");
+    l.until(|s| node(s, "settings_items", "settings_hub:scratch").is_null());
+    l.control("close_settings");
+    l.until(|s| s["settings_open"] == false);
+
+    // A real plugin discovery response travels through SessionActivity, snapshot,
+    // and the UI, including mixed 36/46-point rows in the scroll document.
+    let options = f.state.join("plugins/fixture/options.json");
+    let sessions:Vec<Value>=(0..5).map(|i|json!({"harness":"fixture","session_id":format!("reload-{i}"),"title":"Work session","cwd":"/tmp","needs_reload":i%2==0,"reload_hint":"Run /reload in Fixture to enable 1-click listen"})).collect();
+    fs::write(&options,json!({"session_id":"session-1","status":"alive","outcome":"delivered_unconfirmed","sessions":sessions}).to_string()).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
+        200
+    );
+    l.until(|s| !node(s, "items", "reload:fixture:reload-0").is_null());
+    l.snapshot("menu", "r4_needs_reload_candidates.png");
+    l.control("reload:fixture:reload-0");
+    l.until(|s| s["clipboard"] == "/reload");
+    l.control("listen:fixture:reload-1");
+    l.until(|s| !node(s, "items", "menu_error_row").is_null());
+    l.snapshot("menu", "r3_menu_error.png");
+    l.control("dismiss_menu_error");
+    l.until(|s| node(s, "items", "menu_error_row").is_null());
+
+    l.control("open_directory");
+    let s = l.until(|s| {
+        s["directory_open"] == true && s["directory_matched_count"].as_u64().is_some_and(|n| n > 0)
+    });
+    l.snapshot("directory", "r5_real_directory.png");
+    let msg = nodes(&s["directory_items"])
+        .into_iter()
+        .find_map(|n| {
+            n["id"]
+                .as_str()
+                .filter(|id| id.starts_with("msg_dir:"))
+                .map(str::to_string)
+        })
+        .unwrap();
+    l.control(&msg);
+    l.until(|s| s["composer_open"] == true);
+    f.send(
+        l.ui,
+        json!({"op":"test_composer_input","value":"Closed-loop message"}),
+    );
+    l.control("composer_send");
+    let s = l.until(|s| {
+        node(s, "directory_items", "composer_error")["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("SELF_SEND_FORBIDDEN"))
+    });
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Closed-loop message"
+    );
+    l.snapshot("directory", "r3_real_composer_error.png");
+    l.control("composer_cancel");
+    assert_eq!(
+        f.action(json!({"op":"listen_session","harness":"fixture","session_id":"session-1"}))
+            .0,
+        200
+    );
+    f.send(l.ui, json!({"op":"test_directory_query","query":""}));
+    let target = f
+        .rows("SELECT public_id FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        [0]["public_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let message = format!("msg_dir:{target}");
+    l.until(|s| !node(s, "directory_items", &message).is_null());
+    l.control(&message);
+    l.until(|s| s["composer_open"] == true);
+    f.send(
+        l.ui,
+        json!({"op":"test_composer_input","value":"Closed-loop delivery"}),
+    );
+    l.control("composer_send");
+    l.until(|s| s["composer_open"] == false);
+    l.snapshot("directory", "r5_real_composer_acknowledged.png");
+    for op in [
+        "state",
+        "settings",
+        "directory",
+        "pair_code",
+        "channel_test_result",
+        "composer_result",
+        "error",
+    ] {
+        assert!(
+            l.frames.iter().any(|frame| frame["op"] == op),
+            "Missing real daemon frame: {op}"
+        );
+    }
+    // Both Apply submissions own identities; the sharing toggle only uses the active port.
+    assert_eq!(
+        l.results
+            .iter()
+            .filter(
+                |(action, _, _)| action["op"] == "set_host_hub" && action["request_id"].is_string()
+            )
+            .count(),
+        2
+    );
+    // Command-specific results and generic failures must retain the UI's identity.
+    for (action, status, _) in &l.results {
+        let result_op = match action["op"].as_str() {
+            Some("send_signal" | "send_reply_from_human") => "composer_result",
+            Some("set_host_hub") if action["request_id"].is_string() => "settings",
+            _ => continue,
+        };
+        assert!(!action["request_id"].as_str().unwrap().is_empty());
+        assert!(l
+            .frames
+            .iter()
+            .any(|frame| frame["op"] == result_op && frame["request_id"] == action["request_id"]));
+        if *status >= 400 {
+            assert!(l.frames.iter().any(|frame| frame["op"] == "error"
+                && frame["source_op"] == action["op"]
+                && frame["request_id"] == action["request_id"]));
+        }
+    }
+    for (name, op) in [("INVALID!", "error"), ("scratch", "settings")] {
+        let (action, _, _) = l
+            .results
+            .iter()
+            .find(|(action, _, _)| action["op"] == "setup_save_hub" && action["name"] == name)
+            .unwrap();
+        assert!(!action["request_id"].as_str().unwrap().is_empty());
+        assert!(l.frames.iter().any(|frame| frame["op"] == op
+            && frame["source_op"] == action["op"]
+            && frame["request_id"] == action["request_id"]));
+    }
+}
+
+#[test]
+fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    cfg["channels"][0]["fields"][0]["value"] = json!("");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "edit_hub_service:channel");
+    let save = |value: &str| {
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":value}),
+        );
+        control(&f, p, "save_hub_service:channel");
+        inspect(&f, p);
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "save_hub_service")
+            .unwrap()
+    };
+    let first = save("one");
+    let second = save("two");
+    assert_ne!(first["request_id"], second["request_id"]);
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":first["request_id"],"settings":cfg}));
+    assert!(
+        !node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:secret"
+        )
+        .is_null(),
+        "An older save cannot close the current edit"
+    );
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_test","channel_id":"channel","settings":cfg}));
+    assert!(
+        !node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:secret"
+        )
+        .is_null(),
+        "A test is not a save acknowledgement"
+    );
+    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"newer-draft"}));
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":second["request_id"],"settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let third = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "save_hub_service")
+        .unwrap();
+    assert_eq!(third["values"], json!({"secret":"newer-draft"}));
+    f.send(p,json!({"op":"settings","ok":false,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
+    assert!(!node(
+        &inspect(&f, p),
+        "settings_items",
+        "channel_field:channel:secret"
+    )
+    .is_null());
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
+    assert!(
+        !node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:secret"
+        )
+        .is_null(),
+        "A late success cannot acknowledge an already failed submission"
+    );
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let retry = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "save_hub_service")
+        .unwrap();
+    assert_ne!(retry["request_id"], third["request_id"]);
+    assert_eq!(retry["values"], json!({"secret":"newer-draft"}));
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":retry["request_id"],"settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "save_hub_service")
+            .unwrap()["values"],
+        json!({})
+    );
+}
+
+#[test]
+fn r1_overlapping_channel_scopes_acknowledge_secrets_and_gateway_edits_independently() {
+    let _lock = serial();
+    for hub_first in [false, true] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        cfg["settings_hub"] = json!("personal");
+        cfg["channels"][0]["fields"][0]["value"] = json!("");
+        cfg["channels"][0]["fields"][1]["type"] = json!("secret");
+        cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        f.send(p, frame);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:channels");
+        control(&f, p, "edit_hub_service:channel");
+        for (field, value, control_id) in [
+            ("secret", "gateway-token", "save_hub_service:channel"),
+            ("account", "personal-token", "save_channel:channel"),
+        ] {
+            f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+            control(&f, p, control_id);
+        }
+        inspect(&f, p);
+        let latest = |op: &str| {
+            f.frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == op)
+                .unwrap()
+        };
+        let gateway = latest("save_hub_service");
+        let personal = latest("channel_save");
+        assert_eq!(gateway["values"], json!({"secret":"gateway-token"}));
+        assert_eq!(personal["values"], json!({"account":"personal-token"}));
+        assert_ne!(gateway["request_id"], personal["request_id"]);
+        let ordered = if hub_first {
+            [&gateway, &personal]
+        } else {
+            [&personal, &gateway]
+        };
+        for (index, action) in ordered.into_iter().enumerate() {
+            f.send(p, json!({"op":"settings","ok":true,"source_op":action["op"],"channel_id":"channel","request_id":action["request_id"],"settings":cfg}));
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "settings_items", "stratum_hub:channel")["height"] == 36,
+                hub_first || index == 1,
+                "Only a gateway acknowledgement may collapse the gateway editor"
+            );
+            if !hub_first && index == 0 {
+                control(&f, p, "save_channel:channel");
+                inspect(&f, p);
+                assert_eq!(latest("channel_save")["values"], json!({}));
+                assert!(!node(&s, "settings_items", "channel_field:channel:secret").is_null());
+            }
+        }
+        control(&f, p, "edit_hub_service:channel");
+        control(&f, p, "save_hub_service:channel");
+        control(&f, p, "save_channel:channel");
+        inspect(&f, p);
+        for op in ["save_hub_service", "channel_save"] {
+            assert_eq!(
+                latest(op)["values"],
+                json!({}),
+                "Acknowledged secrets must not be resubmitted: {op}"
+            );
+        }
+    }
+}
+
+#[test]
+fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts() {
+    let _lock = serial();
+    for (field, newer) in [
+        ("settings_hub_name", "newer"),
+        ("settings_hub_url", "http://127.0.0.1:4291"),
+        ("settings_hub_token", "newer-token"),
+        ("settings_hub_user", "bob"),
+        ("settings_hub_auth:none", "none"),
+    ] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        f.send(p, frame);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:hubs");
+        control(&f, p, "open_add_hub");
+        control(&f, p, "settings_hub_auth:token");
+        for (id, value) in [
+            ("settings_hub_name", "submitted"),
+            ("settings_hub_url", "local://"),
+            ("settings_hub_token", "submitted-token"),
+        ] {
+            f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
+        }
+        control(&f, p, "submit_add_hub");
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "submit_add_hub")["enabled"],
+            false
+        );
+        let submitted = f
+            .frames(p)
+            .into_iter()
+            .find(|a| a["op"] == "setup_save_hub")
+            .unwrap();
+        assert_eq!(submitted["name"], "submitted");
+        assert_eq!(submitted["url"], "local://");
+        assert!(!submitted["request_id"].as_str().unwrap().is_empty());
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":null,"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(
+            !node(&s, "settings_items", "add_hub_form").is_null(),
+            "An untagged acknowledgement must not close the active submission"
+        );
+        assert_eq!(
+            node(&s, "settings_items", "submit_add_hub")["enabled"],
+            false,
+            "An untagged acknowledgement must not settle the active submission"
+        );
+        if field.starts_with("settings_hub_auth:") {
+            control(&f, p, field);
+        } else {
+            f.send(
+                p,
+                json!({"op":"test_settings_input","id":field,"value":newer}),
+            );
+        }
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":submitted["request_id"],"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+        assert_eq!(
+            node(&s, "settings_items", "submit_add_hub")["enabled"],
+            true
+        );
+        if field != "settings_hub_token" && !field.starts_with("settings_hub_auth:") {
+            assert_eq!(node(&s, "settings_items", field)["text"], newer);
+        }
+        control(&f, p, "submit_add_hub");
+        inspect(&f, p);
+        let resubmitted = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "setup_save_hub")
+            .unwrap();
+        let key = if field.starts_with("settings_hub_auth:") {
+            "auth_mode"
+        } else {
+            field.strip_prefix("settings_hub_").unwrap()
+        };
+        assert_eq!(resubmitted[key], newer, "Preserve the newer {field} draft");
+    }
+
+    for retry_after_error in [false, true] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        let mut frame = state();
+        frame["settings"] = cfg.clone();
+        f.send(p, frame);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:hubs");
+        let mut submissions = Vec::new();
+        for token in ["cancelled-token", "current-token"] {
+            control(&f, p, "open_add_hub");
+            control(&f, p, "settings_hub_auth:token");
+            for (id, value) in [
+                ("settings_hub_name", "submitted"),
+                ("settings_hub_url", "local://"),
+                ("settings_hub_token", token),
+            ] {
+                f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
+            }
+            control(&f, p, "submit_add_hub");
+            inspect(&f, p);
+            let action = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == "setup_save_hub")
+                .unwrap();
+            assert!(!action["request_id"].as_str().unwrap().is_empty());
+            assert_eq!(action["token"], token);
+            submissions.push(action);
+            if token == "cancelled-token" {
+                control(&f, p, "cancel_add_hub");
+            }
+        }
+        let cancelled = &submissions[0];
+        let mut current = submissions[1].clone();
+        assert_ne!(cancelled["request_id"], current["request_id"]);
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":cancelled["request_id"],"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+        assert_eq!(
+            node(&s, "settings_items", "submit_add_hub")["enabled"],
+            false
+        );
+        for op in ["setup_save_hub", "save_hub"] {
+            f.send(p, json!({"op":"error","source_op":op,"request_id":cancelled["request_id"],"error":"Cancelled submission failed"}));
+            let s = inspect(&f, p);
+            assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+            assert_eq!(
+                node(&s, "settings_items", "submit_add_hub")["enabled"],
+                false
+            );
+            assert!(node(&s, "settings_items", "add_hub_error").is_null());
+        }
+        for frame in [
+            json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
+            json!({"op":"error","source_op":"setup_save_hub","error":"Invite failed"}),
+            json!({"op":"error","source_op":"paste_hub_invite","error":"Invalid invite"}),
+            json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+            json!({"op":"error","source_op":"","request_id":current["request_id"],"error":"Source-less correlated transport failure"}),
+        ] {
+            let error = frame["error"].clone();
+            let source_less = frame.get("source_op").is_none();
+            if source_less {
+                control(&f, p, "close_settings");
+                assert_eq!(inspect(&f, p)["settings_open"], false);
+            }
+            f.send(p, frame);
+            let s = inspect(&f, p);
+            assert!(!node(&s, "settings_items", "add_hub_form").is_null());
+            assert_eq!(
+                node(&s, "settings_items", "submit_add_hub")["enabled"],
+                false,
+                "An unrelated error must not settle the active submission: {error}"
+            );
+            assert!(node(&s, "settings_items", "add_hub_error").is_null());
+            assert!(!node(&s, "settings_items", "settings_error_banner").is_null());
+            assert_eq!(
+                node(&s, "settings_items", "settings_error_label")["text"],
+                error
+            );
+            if source_less {
+                assert!(node(&s, "items", "menu_error_row").is_null());
+                control(&f, p, "open_settings");
+            }
+        }
+        if retry_after_error {
+            f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":current["request_id"],"error":"Current submission failed"}));
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "settings_items", "submit_add_hub")["enabled"],
+                true
+            );
+            assert_eq!(
+                node(&s, "settings_items", "add_hub_error")["text"],
+                "Current submission failed"
+            );
+            control(&f, p, "submit_add_hub");
+            inspect(&f, p);
+            let retry = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == "setup_save_hub")
+                .unwrap();
+            assert_eq!(
+                retry["token"], "current-token",
+                "Stale responses must preserve the newer secret draft"
+            );
+            assert_ne!(retry["request_id"], current["request_id"]);
+            current = retry;
+        }
+        f.send(p, json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":current["request_id"],"settings":cfg}));
+        let s = inspect(&f, p);
+        assert!(node(&s, "settings_items", "add_hub_form").is_null());
+        assert!(!node(&s, "settings_items", "settings_hub:submitted").is_null());
+    }
+}
+
 fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
     let path = f.dir.join(name);
     f.send(
@@ -45,6 +852,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let p = start(&f);
     let mut cfg = settings();
     cfg["settings_hub"] = json!("local");
+    cfg["hubs"][1]["url"] = json!("https://cito.example.com");
+    cfg["hubs"][1]["auth_mode"] = json!("oidc");
     cfg["channels"][0]["status"] = json!("not_configured");
     cfg["channels"][0]["fields"][0]["configured"] = json!(false);
     cfg["channels"][0]["fields"][0]["value"] = json!("");
@@ -196,6 +1005,11 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
     assert!(node(&s, "settings_items", "clear_channel_service:channel").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "stratum_hub:channel")["height"],
+        50
+    );
+    render_png(&f, p, "settings", "r1_gateway_non_admin.png");
     assert!(
         nodes(&node(&s, "settings_items", "stratum_hub:channel")["children"])
             .iter()
@@ -241,10 +1055,25 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert!(!node(&s, "settings_items", "host_hub_error").is_null());
         assert_eq!(f.frames(p).len(), before);
     }
-    // An unchanged snapshot must still acknowledge an explicit Apply action.
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5301"}),
+    );
+    control(&f, p, "settings_tab:hubs");
+    assert!(
+        node(&inspect(&f, p), "settings_items", "host_hub_error").is_null(),
+        "Editing the port clears local validation feedback"
+    );
+    // Only a command acknowledgement may settle Apply, including an unchanged save.
     frame["settings"] = cfg.clone();
     f.send(p, frame.clone());
     for op in ["state", "settings"] {
+        // Editing a new intent ends prior acknowledgement feedback, even when
+        // duplicate daemon refreshes arrive during the feedback timer.
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":"4291"}),
+        );
         f.send(p, json!({"op":"settings","settings":cfg}));
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
@@ -266,6 +1095,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
                 .iter()
                 .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291)
         });
+        let submitted = f.frames(p)[before..]
+            .iter()
+            .find(|v| v["op"] == "set_host_hub")
+            .unwrap()
+            .clone();
+        assert!(!submitted["request_id"].as_str().unwrap().is_empty());
         f.send(
             p,
             if op == "state" {
@@ -276,8 +1111,17 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         );
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+            "Apply",
+            "An uncorrelated {op} snapshot cannot acknowledge the save"
+        );
+        f.send(
+            p,
+            json!({"op":"settings","request_id":submitted["request_id"],"settings":cfg}),
+        );
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
             "✓ Saved",
-            "An unchanged {op} frame must acknowledge the save"
+            "An unchanged correlated acknowledgement must settle the save"
         );
     }
     f.send(
@@ -290,15 +1134,74 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .iter()
             .any(|v| v["op"] == "set_host_hub" && v["port"] == 5301)
     });
+    let submitted = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "set_host_hub")
+        .unwrap();
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5302"}),
+    );
+    let before = f.frames(p).len();
+    for id in ["toggle_host_hub_auth", "toggle_host_hub"] {
+        control(&f, p, id);
+    }
+    inspect(&f, p);
+    let toggles = f.frames(p)[before..].to_vec();
+    assert_eq!(toggles.len(), 2);
+    for action in toggles {
+        assert_eq!(action["op"], "set_host_hub");
+        assert_eq!(action["port"], cfg["host_hub"]["port"]);
+        assert!(
+            action["request_id"].is_null(),
+            "Toggles cannot own the port save"
+        );
+    }
+    // Neither untagged errors nor refreshes may release Apply's pending identity.
+    for source in [json!({}), json!({"source_op":"set_host_hub"})] {
+        let mut error = json!({"op":"error","error":"Unrelated host error"});
+        error
+            .as_object_mut()
+            .unwrap()
+            .extend(source.as_object().unwrap().clone());
+        f.send(p, error);
+    }
     cfg["host_hub"]["port"] = json!(5301);
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "✓ Saved"
+        "Apply"
+    );
+    f.send(
+        p,
+        json!({"op":"settings","request_id":submitted["request_id"],"settings":cfg}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "apply_host_hub_port")["text"],
+        "✓ Saved",
+        "Apply must retain the original request identity and submitted port across toggles"
+    );
+    assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], "5302");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5301"}),
     );
     control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let failed = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "set_host_hub")
+        .unwrap();
     cfg["host_hub"]["error"] = json!("Port already in use");
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":failed["request_id"],"settings":cfg}),
+    );
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "apply_host_hub_port")["text"],
@@ -308,8 +1211,36 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         node(&s, "settings_items", "host_hub_error")["text"],
         "Port already in use"
     );
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let retry = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "set_host_hub")
+        .unwrap();
+    assert_ne!(retry["request_id"], failed["request_id"]);
+    f.send(p, json!({"op":"error","source_op":"set_host_hub","request_id":failed["request_id"],"error":"Late port error"}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":failed["request_id"],"settings":cfg}),
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+        "Apply"
+    );
     cfg["host_hub"]["error"] = Value::Null;
-    f.send(p, json!({"op":"settings","settings":cfg}));
+    f.send(
+        p,
+        json!({"op":"settings","request_id":retry["request_id"],"settings":cfg}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "apply_host_hub_port")["text"],
+        "✓ Saved",
+        "Late failure must not settle the retry"
+    );
+    assert!(!s.to_string().contains("Late port error"));
     control(&f, p, "edit_hub:local");
     let s = inspect(&f, p);
     assert!(
@@ -348,6 +1279,129 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             f.send(p, json!({"op":"test_appearance","appearance":appearance}));
             inspect(&f, p);
         }
+    }
+}
+
+#[test]
+fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow() {
+    let _lock = serial();
+    for length in [40, 64] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let handle = "w".repeat(length);
+        let hub = "h".repeat(40);
+        let display_name = "W".repeat(length);
+        let error = format!(
+            "INVALID_INPUT: {}",
+            "Long diagnostic with recovery context. ".repeat(10)
+        );
+        let mut cfg = settings();
+        cfg["settings_hub"] = json!(hub);
+        cfg["hubs"][0]["name"] = json!(hub);
+        cfg["hubs"][0]["user"] = json!(handle);
+        cfg["channels"][0]["display_name"] = json!(display_name);
+        cfg["channels"][0]["display_label"] = json!(handle);
+        cfg["channels"][0]["configured"] = json!(true);
+        cfg["channels"][0]["status"] = json!("ready");
+        for app in cfg["apps"].as_array_mut().unwrap() {
+            app["display_name"] = json!(display_name);
+            app["detail"] = json!(error);
+            app["paths"] = json!([]);
+        }
+        let mut frame = state();
+        frame["hubs"][0]["name"] = json!(hub);
+        frame["hubs"][0]["user"] = json!(handle);
+        frame["listeners"] = json!([]);
+        frame["settings"] = cfg;
+        frame["harnesses"][0]["display_name"] = json!(display_name);
+        frame["available"] =
+            json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
+        f.send(p, frame.clone());
+        let tooltip = |snapshot: &Value, surface: &str, text: &str| {
+            assert!(
+                nodes(&snapshot[surface])
+                    .iter()
+                    .any(|n| n["text"] == text && n["tooltip"] == text),
+                "Missing full tooltip for {text}"
+            );
+            assert_eq!(snapshot["truncated_labels"], json!([]));
+        };
+        let s = inspect(&f, p);
+        tooltip(&s, "items", &format!("Human Node (@{handle})"));
+        let mut active = listener();
+        active["hub"] = json!(hub);
+        frame["listeners"] = json!([active]);
+        f.send(p, frame.clone());
+        f.send(p, json!({"op":"error","error":error}));
+        let s = inspect(&f, p);
+        tooltip(&s, "items", &error);
+        let pill = node(&s, "items", "switch_hub:personal:repo-abcdefghijkl");
+        assert!(pill["tooltip"].as_str().unwrap().contains(&hub));
+        tooltip(&s, "items", &hub);
+        render_png(&f, p, "menu", &format!("long_identity_menu_{length}.png"));
+        control(&f, p, "open_settings");
+        let s = inspect(&f, p);
+        tooltip(&s, "settings_items", &display_name);
+        tooltip(&s, "settings_items", &error);
+        render_png(
+            &f,
+            p,
+            "settings",
+            &format!("long_identity_apps_{length}.png"),
+        );
+        control(&f, p, "settings_tab:channels");
+        let s = inspect(&f, p);
+        tooltip(&s, "settings_items", &display_name);
+        tooltip(&s, "settings_items", &format!("● Connected ({handle})"));
+        let title = node(&s, "settings_items", "stratum_user_title:channel");
+        assert!(title["text"].as_str().unwrap().contains(&handle));
+        assert!(title["text"]
+            .as_str()
+            .unwrap()
+            .contains(&hub.to_ascii_uppercase()));
+        assert_eq!(title["tooltip"], title["text"]);
+        f.send(p, json!({"op":"error","error":error}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["tooltip"],
+            error
+        );
+        render_png(
+            &f,
+            p,
+            "settings",
+            &format!("long_identity_channels_{length}.png"),
+        );
+        control(&f, p, "open_directory");
+        f.send(p, json!({"op":"directory","peers":[peer("one")]}));
+        control(&f, p, "msg_dir:personal:one");
+        f.send(
+            p,
+            json!({"op":"test_composer_input","value":"Keep this draft"}),
+        );
+        control(&f, p, "composer_send");
+        inspect(&f, p);
+        let submitted = f
+            .frames(p)
+            .into_iter()
+            .find(|a| a["op"] == "send_signal")
+            .unwrap();
+        f.send(p, json!({"op":"composer_result","ok":false,"request_id":submitted["request_id"],"error":error}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "directory_items", "composer_input")["text"],
+            "Keep this draft"
+        );
+        assert_eq!(
+            node(&s, "directory_items", "composer_error")["tooltip"],
+            error
+        );
+        render_png(
+            &f,
+            p,
+            "directory",
+            &format!("long_identity_composer_{length}.png"),
+        );
     }
 }
 
@@ -483,7 +1537,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
         )["text"],
         "Test sent"
     );
-    for action in ["save_channel", "clear_channel_service"] {
+    for action in ["save_hub_service", "clear_channel_service"] {
         for ok in [false, true] {
             cfg["channels"][0]["configured"] = json!(false);
             cfg["channels"][0]["status"] = json!("not_configured");
@@ -567,6 +1621,13 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     control(&f, p, "settings_tab:channels");
     let s = inspect(&f, p);
     assert_eq!(
+        node(&s, "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
+    assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
+    control(&f, p, "edit_hub_service:channel");
+    let s = inspect(&f, p);
+    assert_eq!(
         node(&s, "settings_items", "channel_field:channel:secret")["secure"],
         true
     );
@@ -574,7 +1635,7 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
         node(&s, "settings_items", "channel_field:channel:secret")["placeholder"],
         "Saved — enter replacement"
     );
-    assert!(!node(&s, "settings_items", "channel_setup_guide:channel").is_null());
+    assert!(node(&s, "settings_items", "channel_setup_guide:channel").is_null());
     for (button, op) in [
         ("save_channel:channel", "channel_save"),
         ("test_channel:channel", "channel_test"),
@@ -635,6 +1696,87 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     });
 }
 #[test]
+fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("saved-account");
+    cfg["channels"][0]["fields"][0]["value"] = json!("");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "edit_hub_service:channel");
+    for (field, value) in [("secret", "discard-gateway"), ("account", "keep-personal")] {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+    }
+    control(&f, p, "cancel_edit_hub_service:channel");
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let latest = |op: &str| {
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == op)
+            .unwrap()
+    };
+    assert_eq!(latest("save_hub_service")["values"], json!({}));
+    control(&f, p, "save_channel:channel");
+    inspect(&f, p);
+    assert_eq!(
+        latest("channel_save")["values"],
+        json!({"account":"keep-personal"})
+    );
+    control(&f, p, "unpair_channel:channel");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:account"
+        )["text"],
+        cfg["channels"][0]["fields"][1]["value"]
+    );
+    for (field, value) in [("secret", "discard-token"), ("account", "discard-account")] {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+    }
+    control(&f, p, "clear_channel_service:channel");
+    cfg["channels"][0]["configured"] = json!(false);
+    cfg["channels"][0]["status"] = json!("not_configured");
+    for field in cfg["channels"][0]["fields"].as_array_mut().unwrap() {
+        field["configured"] = json!(false);
+        field["value"] = json!("");
+    }
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:account")["text"],
+        ""
+    );
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    assert_eq!(
+        latest("save_hub_service")["values"],
+        json!({"secret":""}),
+        "An unconfigured gateway submits the empty field, never the discarded secret draft"
+    );
+    cfg["channels"][0]["fields"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("hub_ready");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        36,
+        "Clearing a gateway also leaves its old edit mode"
+    );
+}
+#[test]
 fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -681,7 +1823,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     wait(|| {
         f.frames(p)
             .iter()
-            .any(|v| v["op"] == "set_host_hub" && v["port"] == 5300 && v["auth_mode"] == "token")
+            .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291 && v["auth_mode"] == "token")
     });
     control(&f, p, "edit_hub:work");
     let s = inspect(&f, p);
@@ -839,9 +1981,17 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     });
     control(&f, p, "target_hub:personal");
     assert!(!node(&inspect(&f, p), "items", "available_empty_target").is_null());
-    // First response settles the pending Listen mutation; the next identical state is idle.
+    f.send(
+        p,
+        json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
+    );
+    let before = inspect(&f, p)["rebuilds"].as_u64().unwrap();
+    // An unrelated error must not settle Listen; even an unchanged state must refresh it.
     f.send(p, frame.clone());
-    let before = inspect(&f, p)["rebuilds"].clone();
+    let after = inspect(&f, p)["rebuilds"].as_u64().unwrap();
+    assert_eq!(after, before + 1);
+    // The next identical state is idle.
+    let before = json!(after);
     f.send(p, frame);
     assert_eq!(inspect(&f, p)["rebuilds"], before);
     control(&f, p, "switch_hub:personal:repo-abcdefghijkl");
@@ -892,6 +2042,8 @@ fn inspect(f: &Fixture, p: usize) -> Value {
     )
     .unwrap();
     assert_eq!(snapshot["truncated_labels"], json!([]));
+    assert_eq!(snapshot["overlapping_siblings"], json!([]));
+    assert_eq!(snapshot["clipped_views"], json!([]));
     snapshot
 }
 fn nodes(tree: &Value) -> Vec<Value> {
@@ -986,6 +2138,46 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     f.send(p, json!({"op":"test_directory_key","key":"up"}));
     assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
     control(&f, p, "msg_dir:personal:one");
+    let before = f.frames(p).len();
+    for oversized in ["x".repeat(65_537), "e\u{301}".repeat(32_769)] {
+        f.send(p, json!({"op":"test_composer_input","value":oversized}));
+        control(&f, p, "composer_send");
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "directory_items", "composer_input")["text"],
+            oversized
+        );
+        assert_eq!(
+            node(&s, "directory_items", "composer_error")["text"],
+            "INVALID_INPUT: Message exceeds maximum length"
+        );
+        assert_eq!(
+            f.frames(p).len(),
+            before,
+            "Oversized input must not be emitted"
+        );
+    }
+    // Word breaks keep native text layout bounded while testing 65,536 Unicode scalars.
+    let maximum = "😀 ".repeat(32_767) + "😀x";
+    f.send(p, json!({"op":"test_composer_input","value":maximum}));
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let submitted = f.frames(p)[before..]
+        .iter()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        submitted["message"], maximum,
+        "Local rejection must not leave the composer pending"
+    );
+    assert!(serde_json::to_vec(&submitted).unwrap().len() <= 1_048_576);
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":submitted["request_id"]}),
+    );
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+    control(&f, p, "msg_dir:personal:one");
     f.send(
         p,
         json!({"op":"test_composer_input","value":"Draft preserved"}),
@@ -998,7 +2190,62 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     });
     f.send(
         p,
-        json!({"op":"composer_result","ok":false,"error":"Hub unavailable. Retry."}),
+        json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(
+        node(&s, "directory_items", "composer_error")["text"],
+        "Sending…"
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
+            .count(),
+        1,
+        "Unrelated errors must not permit a duplicate send"
+    );
+    let submitted = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap();
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":submitted["request_id"]}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], false);
+    assert_eq!(node(&s, "directory_items", "composer_input")["text"], "");
+    control(&f, p, "msg_dir:personal:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Draft preserved"}),
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
+            .count(),
+        2,
+        "The composer result must settle the send and allow a new one"
+    );
+    let failed = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap();
+    assert!(!failed["request_id"].as_str().unwrap().is_empty());
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":false,"error":"Hub unavailable. Retry.","request_id":failed["request_id"]}),
     );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
@@ -1010,14 +2257,173 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         node(&s, "directory_items", "composer_error")["text"],
         "Hub unavailable. Retry."
     );
+    // A's trailing generic error can arrive after B has already been submitted.
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let retry = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap();
+    assert_ne!(retry["request_id"], failed["request_id"]);
+    for source_op in ["send_signal", "send_reply_from_human"] {
+        f.send(p, json!({"op":"error","source_op":source_op,"request_id":failed["request_id"],"error":"Late send error"}));
+    }
+    f.send(p, json!({"op":"composer_result","ok":false,"request_id":failed["request_id"],"error":"Late result"}));
+    for frame in [
+        json!({"op":"composer_result","ok":true}),
+        json!({"op":"composer_result","ok":false,"error":"Untagged result"}),
+        json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+        json!({"op":"error","source_op":"send_signal","error":"Untagged send error"}),
+        json!({"op":"error","source_op":"send_reply_from_human","error":"Untagged reply error"}),
+    ] {
+        f.send(p, frame);
+    }
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(
+        node(&s, "directory_items", "composer_error")["text"],
+        "Sending…"
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
+            .count(),
+        3,
+        "A's late error must not permit a duplicate of B"
+    );
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":retry["request_id"]}),
+    );
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+    control(&f, p, "msg_dir:personal:one");
+    f.send(p, json!({"op":"test_composer_input","value":"Next draft"}));
+    f.send(p, json!({"op":"error","source_op":"send_signal","request_id":retry["request_id"],"error":"Already settled"}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Next draft"
+    );
+    assert_eq!(node(&s, "directory_items", "composer_error")["text"], "");
     control(&f, p, "composer_cancel");
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "directory_shortcuts")["text"],
         "↵ Copy Selected ID    ⎋ Close"
     );
     control(&f, p, "dir_mode:activity");
-    f.send(p, state());
+    let activity: Vec<_> = ["reply_a", "reply_b"]
+        .into_iter()
+        .map(|id| {
+            json!({"hub":"personal","signal_id":format!("personal:{id}"),
+                "listener_id":"c_human","from_user":"bob","from_host_name":"laptop",
+                "from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one",
+                "target_harness":"human","target_title":"Me","target_scoped_id":"personal:me",
+                "message":"Approve?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})
+        })
+        .collect();
+    let mut frame = state();
+    frame["activity"] = json!(activity);
+    frame["unread_count"] = json!(2);
+    f.send(p, frame);
+    control(&f, p, "reply_activity:personal:reply_a");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Same reply text"}),
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let replies: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["to"], "personal:one");
+    assert_eq!(replies[0]["hub"], "personal");
+    assert_eq!(replies[0]["in_reply_to"], "personal:reply_a");
+    control(&f, p, "reply_activity:personal:reply_b");
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_reply_signal_id"], "personal:reply_b");
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Same reply text"
+    );
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":replies[0]["request_id"]}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(s["composer_target"], "personal:one");
+    assert_eq!(s["composer_reply_signal_id"], "personal:reply_b");
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Same reply text"
+    );
+    assert_eq!(
+        node(&s, "directory_items", "composer_error")["text"],
+        "Sent. Your newer draft is preserved."
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let replies: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+        .collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[1]["to"], "personal:one");
+    assert_eq!(replies[1]["hub"], "personal");
+    assert_eq!(replies[1]["in_reply_to"], "personal:reply_b");
+    // Cancel only hides the draft; its in-flight send must still own its snapshot.
+    control(&f, p, "composer_cancel");
     control(&f, p, "dir_mode:directory");
+    control(&f, p, "msg_dir:personal:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Same reply text"}),
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+            .count(),
+        2,
+        "Cancel must not allow a second send before the first result"
+    );
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":replies[1]["request_id"]}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(s["composer_reply_signal_id"], "");
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Same reply text"
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let replies: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+        .collect();
+    assert_eq!(replies.len(), 3);
+    assert!(replies[2]["in_reply_to"].is_null());
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":replies[2]["request_id"]}),
+    );
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+    f.send(p, state());
     assert!(!node(&inspect(&f, p), "directory_items", "msg_dir:personal:one").is_null());
     f.send(p, json!({"op":"test_directory_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["directory_open"], false);
@@ -1074,6 +2480,9 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     let s = inspect(&f, p);
     assert_eq!(s["settings_open"], true);
     assert_eq!(s["settings_tab"], "channels");
+    assert!(node(&s, "settings_items", "channel_field:channel:secret").is_null());
+    control(&f, p, "edit_hub_service:channel");
+    let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "channel_field:channel:secret")["secure"],
         true
@@ -1092,7 +2501,14 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
         p,
         json!({"op":"settings","hub":"work","settings":settings()}),
     );
+    control(&f, p, "edit_hub_service:channel");
     f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"new-secret"}));
+    control(&f, p, "save_hub_service:channel");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "save_hub_service" && v["values"] == json!({"secret":"new-secret"}))
+    });
     let mut paired = settings();
     paired["channels"][0]["fields"][1]["value"] = json!("server-account");
     f.send(p, json!({"op":"settings","hub":"work","settings":paired}));
@@ -1107,9 +2523,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     control(&f, p, "save_channel:channel");
     wait(|| {
         f.frames(p).iter().any(|v| {
-            v["op"] == "channel_save"
-                && v["values"]["account"] == "server-account"
-                && v["values"]["secret"] == "new-secret"
+            v["op"] == "channel_save" && v["values"] == json!({"account":"server-account"})
         })
     });
     control(&f, p, "open_uninstall_confirm");
@@ -1138,7 +2552,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     control(&f, p, "paste_hub_invite");
     wait(|| {
         f.frames(p).iter().any(|v| {
-            v["op"] == "setup_save_hub" && v["name"] == "shared" && v["token"] == "test-token"
+            v["op"] == "paste_hub_invite" && v["invite"] == "cito setup --hub shared --url http://127.0.0.1:4291 --auth token --token test-token --default"
         })
     });
     assert!(!f.state.join("onboarding-shown").exists());
@@ -1257,17 +2671,14 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         client
             .frames(ui)
             .iter()
-            .any(|v| v["op"] == "setup_save_hub")
+            .any(|v| v["op"] == "paste_hub_invite")
     });
     let action = client
         .frames(ui)
         .into_iter()
-        .find(|v| v["op"] == "setup_save_hub")
+        .find(|v| v["op"] == "paste_hub_invite")
         .unwrap();
-    assert_eq!(action["url"], endpoint);
-    assert_eq!(action["auth_mode"], "token");
-    assert_eq!(action["token"], "lan-test-token");
-    assert_eq!(action["set_default"], true);
+    assert_eq!(action["invite"], hosted["invite_command"]);
     let (status, result) = client.action(action);
     assert_eq!(status, 200, "{result}");
     let (status, result) = client.action(json!({"op":"test_hub","hub":"lan"}));
@@ -1276,11 +2687,46 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     let configured: Value =
         serde_json::from_str(&fs::read_to_string(&client.config).unwrap()).unwrap();
     assert_eq!(configured["default_hub"], "lan");
+    assert_eq!(configured["hubs"]["lan"]["url"], endpoint);
+    assert_eq!(configured["hubs"]["lan"]["authMode"], "token");
+    assert_eq!(configured["hubs"]["lan"]["token"], "lan-test-token");
     let (status, exported) = client.action(json!({"op":"generate_hub_invite","hub":"lan"}));
     assert_eq!(status, 200);
     assert_eq!(exported["invite"]["url"], endpoint);
     assert_eq!(exported["invite"]["authMode"], "token");
     assert_eq!(exported["invite"]["token"], "lan-test-token");
+    assert_eq!(exported["invite"]["name"], "lan");
+    let prior = client
+        .frames(ui)
+        .iter()
+        .filter(|v| v["op"] == "paste_hub_invite")
+        .count();
+    client.send(
+        ui,
+        json!({"op":"test_clipboard","text":exported["invite"].to_string()}),
+    );
+    control(&client, ui, "paste_hub_invite");
+    wait(|| {
+        client
+            .frames(ui)
+            .iter()
+            .filter(|v| v["op"] == "paste_hub_invite")
+            .count()
+            > prior
+    });
+    let action = client
+        .frames(ui)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "paste_hub_invite")
+        .unwrap();
+    let (status, result) = client.action(action);
+    assert_eq!(status, 200, "{result}");
+    let mut unnamed = exported["invite"].clone();
+    unnamed.as_object_mut().unwrap().remove("name");
+    let (status, result) =
+        client.action(json!({"op":"paste_hub_invite","invite":unnamed.to_string()}));
+    assert_eq!(status, 200, "{result}");
 
     // Inspect documentation-range binds without opening non-loopback test sockets.
     // Explicit no-auth must override a retained token.
@@ -1408,7 +2854,7 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             .iter()
             .filter(|frame| frame["op"] == "composer_result")
             .count()
-            == 5
+            == 4
     });
     let frames = frames();
     assert_eq!(
@@ -1418,11 +2864,10 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             .cloned()
             .collect::<Vec<_>>(),
         vec![
-            json!({"op":"composer_result","ok":true,"error":null}),
-            json!({"op":"composer_result","ok":true,"error":null}),
-            json!({"op":"composer_result","ok":true,"error":null}),
-            json!({"op":"composer_result","ok":false,"error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
-            json!({"op":"composer_result","ok":true,"error":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
+            json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
         ]
     );
     assert_eq!(

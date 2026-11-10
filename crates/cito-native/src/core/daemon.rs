@@ -179,7 +179,11 @@ struct UiMailbox {
 impl UiMailbox {
     fn emit(&self, frame: Value) {
         // Snapshots coalesce; command results and banners stay ordered.
-        let key = if matches!(string(&frame, "op"), "state" | "settings" | "directory") {
+        let key = if string(&frame, "request_id").is_empty()
+            && string(&frame, "source_op").is_empty()
+            && frame["confirm_hub_save"] != true
+            && matches!(string(&frame, "op"), "state" | "settings" | "directory")
+        {
             Some(format!(
                 "{}:{}",
                 string(&frame, "op"),
@@ -254,10 +258,13 @@ pub struct DaemonService {
     closing: bool,
     host_id: String,
     host_server: Option<super::hub::HubServer>,
+    applied_host_config: Option<Value>,
+    host_hub_reload_failed: bool,
     uninstall: Option<bool>,
     active_settings_hub: Option<String>,
     last_app_action: HashMap<String, String>,
     last_host_hub_error: Option<String>,
+    last_hub_errors: HashMap<String, (String, bool)>,
 }
 impl DaemonService {
     pub fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
@@ -299,10 +306,13 @@ impl DaemonService {
             closing: false,
             host_id,
             host_server: None,
+            applied_host_config: None,
+            host_hub_reload_failed: false,
             uninstall: None,
             active_settings_hub: None,
             last_app_action: HashMap::new(),
             last_host_hub_error: None,
+            last_hub_errors: HashMap::new(),
         };
         service.reload_slots()?;
         Ok(service)
@@ -330,6 +340,7 @@ impl DaemonService {
         if self.closing {
             return Ok(());
         }
+        let _ = self.sync_host_hub();
         let mut raw = self.raw_config()?;
         self.config.user = self.get_effective_user()?;
         repair_default_hub(&mut raw);
@@ -1294,6 +1305,15 @@ impl DaemonService {
     pub fn poll(&mut self) -> Result<(), String> {
         self.reload_slots()?;
         self.flush_acks();
+        // Successful background RPCs or event reconnection supersede transport
+        // errors, but cannot resolve a rejected configuration edit.
+        self.last_hub_errors.retain(|hub, (_, transient)| {
+            !*transient
+                || !self
+                    .slots
+                    .get(hub)
+                    .is_some_and(|slot| slot.connection_status() == "connected")
+        });
         let finished: Vec<String> = self
             .receivers
             .iter()
@@ -1465,6 +1485,10 @@ impl DaemonService {
             .map(|server| u64::from(server.port()))
             .unwrap_or_else(|| host["port"].as_u64().unwrap_or(4291));
         for item in &mut hubs {
+            item["error"] = json!(self
+                .last_hub_errors
+                .get(string(item, "name"))
+                .map(|(error, _)| error));
             let cfg = self
                 .slots
                 .get(string(item, "name"))
@@ -1673,6 +1697,43 @@ impl DaemonService {
         })
     }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
+        let result = self.action_inner(action);
+        self.record_hub_result(action, &result);
+        if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
+            self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
+        }
+        self.push_ui();
+        result
+    }
+    fn record_hub_result(&mut self, action: &Value, result: &Result<Value, String>) {
+        if matches!(
+            string(action, "op"),
+            "login_hub"
+                | "hub_action"
+                | "test_hub"
+                | "setup_save_hub"
+                | "save_hub"
+                | "setup_toggle_hub"
+        ) {
+            let hub = action["hub"]
+                .as_str()
+                .or_else(|| action["name"].as_str())
+                .unwrap_or(&self.config.default_hub)
+                .to_owned();
+            match result {
+                Ok(_) => {
+                    self.last_hub_errors.remove(&hub);
+                }
+                Err(error) => {
+                    let transient = ["NATS_UNAVAILABLE:", "AUTH_UNAVAILABLE:", "UNAUTHORIZED:"]
+                        .iter()
+                        .any(|prefix| error.starts_with(prefix));
+                    self.last_hub_errors.insert(hub, (error.clone(), transient));
+                }
+            }
+        }
+    }
+    fn action_inner(&mut self, action: &Value) -> Result<Value, String> {
         if !action.is_object() {
             return Err("INVALID_INPUT: Action must be an object".into());
         }
@@ -1782,8 +1843,13 @@ impl DaemonService {
                     .unwrap_or(&name)
                     .to_string();
                 self.mutate_config(|v| {
+                    // Materialize the implicit local Hub before saving/editing a
+                    // first explicit Hub, so first-run edits cannot discard it.
+                    if v["hubs"].is_null() {
+                        v["hubs"] = json!({"local":{"url":"local://"}});
+                    }
                     if !v["hubs"].is_object() {
-                        v["hubs"] = json!({});
+                        return Err("INVALID_INPUT: Hubs must be an object".into());
                     }
                     if editing {
                         let mut base = v["hubs"][&original].clone();
@@ -1924,19 +1990,15 @@ impl DaemonService {
             }
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
             "paste_hub_invite" => {
-                let invite = string(action, "invite");
-                let mut value: Value = serde_json::from_str(invite)
-                    .map_err(|_| "INVALID_INPUT: Invalid hub invite")?;
-                if !value.is_object() {
-                    return Err("INVALID_INPUT: Invalid hub invite".into());
-                }
-                value["op"] = json!("save_hub");
-                return self.action(&value);
+                return self.action(&parse_hub_invite(string(action, "invite"))?);
             }
             "generate_hub_invite" => {
-                return Ok(json!({"ok":true,"invite":self.slot(&hub)?.config}))
+                let mut invite = self.slot(&hub)?.config.clone();
+                invite["name"] = json!(hub);
+                return Ok(json!({"ok":true,"invite":invite}));
             }
             "channel_save"
+            | "save_hub_service"
             | "configure_human_channel"
             | "disconnect_human_channel"
             | "channel_toggle"
@@ -1952,33 +2014,32 @@ impl DaemonService {
                     .or_else(|| action["plugin_id"].as_str())
                     .ok_or("INVALID_INPUT: channel_id required")?;
                 self.active_settings_hub = Some(hub.clone());
-                let rpc = match op {
-                    "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
-                    "channel_test" | "test_human_channel" => "human_channels_test",
-                    _ => "human_channels_configure",
+                let hub_only = op == "save_hub_service" || action["scope"] == "hub";
+                let rpc = if hub_only {
+                    "human_channels_configure"
+                } else {
+                    match op {
+                        "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
+                        "channel_test" | "test_human_channel" => "human_channels_test",
+                        _ => "human_channels_configure",
+                    }
                 };
                 let result: Result<Value, String> = (|| {
                     let mut params = action.clone();
                     params["plugin_id"] = json!(id);
                     if let Some(values) = action["values"].as_object() {
-                        let local = self
-                            .plugins
-                            .find_by_id(id)
-                            .map(|p| p.fields.clone())
-                            .filter(|f| !f.is_empty());
-                        let fields = if let Some(fields) = local {
-                            fields
-                        } else {
-                            let schema = self.slot(&hub)?.rpc("human_channels_list", &json!({}))?;
-                            schema["channels"]
-                                .as_array()
-                                .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
-                                .and_then(|ch| ch["fields"].as_array())
-                                .cloned()
-                                .ok_or_else(|| {
-                                    format!("INVALID_INPUT: Unknown human channel plugin: {id}")
-                                })?
-                        };
+                        // The selected Hub owns the schema, including remote-only plugins
+                        // and remote schemas that differ from a locally installed plugin.
+                        let schema = self.slot(&hub)?.rpc("human_channels_list", &json!({}))?;
+                        let fields = schema["channels"]
+                            .as_array()
+                            .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
+                            .and_then(|ch| ch["fields"].as_array())
+                            .cloned()
+                            .or_else(|| self.plugins.find_by_id(id).map(|p| p.fields.clone()))
+                            .ok_or_else(|| {
+                                format!("INVALID_INPUT: Unknown human channel plugin: {id}")
+                            })?;
                         let mut hub_config = Map::new();
                         let mut user_config = Map::new();
                         for field in &fields {
@@ -1991,8 +2052,12 @@ impl DaemonService {
                                 }
                             }
                         }
-                        params["hub_config"] = Value::Object(hub_config);
-                        params["user_config"] = Value::Object(user_config);
+                        if !hub_config.is_empty() {
+                            params["hub_config"] = Value::Object(hub_config);
+                        }
+                        if !user_config.is_empty() {
+                            params["user_config"] = Value::Object(user_config);
+                        }
                     }
                     if op == "channel_cancel_pair" {
                         params["cancel_pair"] = json!(true);
@@ -2005,6 +2070,15 @@ impl DaemonService {
                     if op == "clear_channel_service" {
                         params["reset_hub"] = json!(true);
                         params["reset_user"] = json!(true);
+                    }
+                    if hub_only {
+                        // Hub-only saves cannot create, edit, or resume a personal binding,
+                        // even if a caller supplies unrelated personal mutation parameters.
+                        let hub_config = params
+                            .get("hub_config")
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
+                        params = json!({"plugin_id":id,"hub_config":hub_config});
                     }
                     self.slot(&hub)?.rpc(rpc, &params).and_then(|result| {
                         if matches!(rpc, "human_channel_pair_start" | "human_channels_test")
@@ -2036,7 +2110,7 @@ impl DaemonService {
                     _ => {}
                 }
                 self.emit(
-                    json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
+                    json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":op,"request_id":action["request_id"],"settings":self.settings_for_hub(&hub)}),
                 );
                 self.push_ui();
                 return result;
@@ -2046,6 +2120,7 @@ impl DaemonService {
                 let mut send_args = action.clone();
                 if let Some(args) = send_args.as_object_mut() {
                     args.remove("op");
+                    args.remove("request_id");
                     if op == "send_reply_from_human" {
                         args.insert(
                             "to".into(),
@@ -2077,8 +2152,8 @@ impl DaemonService {
                 let result = validate_tool_input("cito_send", &send_args)
                     .and_then(|()| self.send(&hub, &send_args, &meta));
                 self.emit(match &result {
-                    Ok(_) => json!({"op":"composer_result","ok":true,"error":null}),
-                    Err(e) => json!({"op":"composer_result","ok":false,"error":e}),
+                    Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
+                    Err(e) => json!({"op":"composer_result","ok":false,"error":e,"request_id":action["request_id"]}),
                 });
                 return result.map(|result| {
                     if op == "send_reply_from_human" {
@@ -2097,14 +2172,22 @@ impl DaemonService {
                     &[],
                 )?;
                 for row in rows {
+                    let requested_hub = string(action, "hub");
+                    if !requested_hub.is_empty() && row["hub"] != requested_hub {
+                        continue;
+                    }
                     if op == "mark_all_activity_read"
                         || action["ack_all"] == true
                         || ids.iter().any(|id| {
                             id == &row["signal_id"]
                                 || id.as_str()
                                     == Some(
-                                        self.scoped(string(&row, "hub"), string(&row, "signal_id"))
-                                            .as_str(),
+                                        format!(
+                                            "{}:{}",
+                                            string(&row, "hub"),
+                                            string(&row, "signal_id")
+                                        )
+                                        .as_str(),
                                     )
                                 || id == &row["batch_id"]
                         })
@@ -2169,12 +2252,24 @@ impl DaemonService {
                     return Err("INVALID_INPUT: Invalid scope".into());
                 }
                 let slot = self.slot(&hub)?;
-                let (mut row, rev) = slot.kv_get(id)?.ok_or("LISTENER_NOT_FOUND")?;
-                if !row.is_object() {
-                    return Err("INVALID_INPUT: Listener must be an object".into());
+                let _registration = slot
+                    .registration
+                    .lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                for attempt in 0..3 {
+                    let (mut row, rev) = slot.kv_get(id)?.ok_or("LISTENER_NOT_FOUND")?;
+                    if !row.is_object() {
+                        return Err("INVALID_INPUT: Listener must be an object".into());
+                    }
+                    row["scope"] = json!(scope);
+                    match slot.kv_save(id, &row, Some(rev)) {
+                        Ok(_) => break,
+                        Err(error) if attempt == 2 || !error.starts_with("10071:") => {
+                            return Err(error)
+                        }
+                        Err(_) => {}
+                    }
                 }
-                row["scope"] = json!(scope);
-                slot.kv_save(id, &row, Some(rev))?;
                 self.state.db.execute(
                     "UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=?",
                     &[json!(scope), json!(hub), json!(id)],
@@ -2290,16 +2385,19 @@ impl DaemonService {
                     Ok(())
                 };
                 self.host_server = server;
+                self.host_hub_reload_failed = false;
                 if let Err(error) = result {
                     self.last_host_hub_error = Some(error.clone());
-                    self.emit(json!({"op":"settings","settings":self.settings()}));
+                    self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
                     rollback.map_err(|rollback| {
                         format!("{error}; failed to restore host hub listener: {rollback}")
                     })?;
                     return Err(error);
                 }
+                self.applied_host_config =
+                    self.raw_config().ok().map(|raw| raw["host_hub"].clone());
                 self.last_host_hub_error = None;
-                self.emit(json!({"op":"settings","settings":self.settings()}));
+                self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
             }
             "set_launch_at_login" => {
                 set_launch_at_login(
@@ -2375,8 +2473,29 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
-        let settings = host_hub_server_config(host)?;
-        replace_host_hub_server(&self.local, &mut self.host_server, settings)
+        if self.applied_host_config.as_ref() == Some(host) {
+            // Restoring the applied config resolves reload errors, not rejected UI actions.
+            if self.host_hub_reload_failed {
+                self.last_host_hub_error = None;
+                self.host_hub_reload_failed = false;
+            }
+            return Ok(());
+        }
+        match host_hub_server_config(host).and_then(|settings| {
+            replace_host_hub_server(&self.local, &mut self.host_server, settings)
+        }) {
+            Ok(()) => {
+                self.applied_host_config = Some(host.clone());
+                self.last_host_hub_error = None;
+                self.host_hub_reload_failed = false;
+                Ok(())
+            }
+            Err(error) => {
+                self.last_host_hub_error = Some(error.clone());
+                self.host_hub_reload_failed = true;
+                Err(error)
+            }
+        }
     }
     fn shutdown(&mut self) {
         // The caller sets closing while holding the service mutex after all calls drain.
@@ -2741,12 +2860,121 @@ fn http_client_pid(stream: &TcpStream) -> Option<u32> {
         None
     }
 }
+fn parse_hub_invite(raw: &str) -> Result<Value, String> {
+    let raw = raw.trim();
+    let invalid = || "INVALID_INPUT: Invalid hub invite".to_owned();
+    let mut value = if raw.starts_with('{') {
+        let value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+        if !value.is_object() {
+            return Err(invalid());
+        }
+        value
+    } else if raw.starts_with("http://") || raw.starts_with("https://") {
+        let url = url::Url::parse(raw).map_err(|_| invalid())?;
+        let host = url.host_str().ok_or_else(invalid)?;
+        let name = host
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        json!({"name":name.trim_matches('-').chars().take(32).collect::<String>(),"url":raw,"auth_mode":"none"})
+    } else {
+        // Join codes generated by Cito contain no shell quoting or expansion.
+        // Reject malformed/unknown options rather than executing clipboard text.
+        let mut words = raw.split_whitespace();
+        if words.next() != Some("cito") || words.next() != Some("setup") {
+            return Err(invalid());
+        }
+        let mut value = json!({});
+        while let Some(word) = words.next() {
+            if word == "--default" {
+                value["set_default"] = json!(true);
+                continue;
+            }
+            let (option, argument) = match word.split_once('=') {
+                Some(pair) => pair,
+                None => (word, words.next().ok_or_else(invalid)?),
+            };
+            let key = match option {
+                "--hub" => "name",
+                "--url" => "url",
+                "--auth" => "auth_mode",
+                "--token" => "token",
+                "--issuer" => "issuer",
+                "--client-id" => "client_id",
+                "--user" => "user",
+                _ => return Err(invalid()),
+            };
+            if argument.is_empty() || argument.starts_with("--") {
+                return Err(invalid());
+            }
+            value[key] = json!(argument);
+        }
+        value
+    };
+    if value["name"].is_null() {
+        value["name"] = value["hub"].clone();
+    }
+    if string(&value, "name").is_empty() {
+        let url = url::Url::parse(string(&value, "url")).map_err(|_| invalid())?;
+        let name: String = url
+            .host_str()
+            .ok_or_else(invalid)?
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        value["name"] = json!(name.trim_matches('-').chars().take(32).collect::<String>());
+    }
+    if !crate::plugins::validate_hub_name(string(&value, "name")) {
+        return Err(invalid());
+    }
+    if string(&value, "url") != "local://" {
+        let url = url::Url::parse(string(&value, "url")).map_err(|_| invalid())?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(invalid());
+        }
+    }
+    value["op"] = json!("setup_save_hub");
+    if value["set_default"].is_null() {
+        value["set_default"] = json!(true);
+    }
+    Ok(value)
+}
 fn interactive_login(action: &Value) -> bool {
     action["op"] == "login_hub"
         || (action["op"] == "hub_action"
             && matches!(action["action"].as_str(), Some("login" | "switch_account")))
 }
 fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Result<Value, String> {
+    let result = dispatch_action_inner(service, action);
+    if let Ok(mut s) = service.lock() {
+        if interactive_login(action) {
+            s.record_hub_result(action, &result);
+        }
+        if let Err(error) = &result {
+            s.emit(
+                json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
+            );
+        }
+        s.push_ui();
+    }
+    result
+}
+fn dispatch_action_inner(
+    service: &Arc<Mutex<DaemonService>>,
+    action: &Value,
+) -> Result<Value, String> {
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
         if s.closing || shutdown_requested() {
@@ -3140,7 +3368,6 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 let drained = reader.skip_until(b'\n');
                 if let Ok(s) = service.lock() {
                     let error = "INVALID_INPUT: UI action exceeds 1 MiB";
-                    s.emit(json!({"op":"composer_result","ok":false,"error":error}));
                     s.emit(json!({"op":"error","error":error}));
                 }
                 if drained.is_err() {
@@ -3152,11 +3379,9 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 let is_login = interactive_login(&action);
                 let service = service.clone();
                 let run = move || {
-                    if let Err(e) = dispatch_action(&service, &action) {
-                        if let Ok(s) = service.lock() {
-                            s.emit(json!({"op":"error","error":e}));
-                        }
-                    }
+                    // Both UI stdout actions and HTTP control callers share the
+                    // same closed-loop error frame and refreshed state emission.
+                    let _ = dispatch_action(&service, &action);
                 };
                 if is_login {
                     logins.push(thread::spawn(run));
@@ -3489,6 +3714,49 @@ mod tests {
         result
     }
     #[test]
+    fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cito-ack-scope-{}", random_uuid_v4()));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let config = NativeConfig {
+            state_dir: dir.join("state"),
+            config_path: dir.join("config.json"),
+            home_dir: dir.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        fs::write(
+            &config.config_path,
+            json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let mut service = DaemonService::open(&config, &plugins)?;
+        let result = (|| {
+            for hub in ["local", "work"] {
+                service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES(?,'shared','node',1,1,'alice','host','','message','now',?,'RECEIVED')", &[json!(hub),json!(now_ms()+60_000)])?;
+            }
+            service.action(&json!({"op":"ack_signals","hub":"local","ack_all":true}))?;
+            let state = service.state.clone();
+            let unread = || {
+                state.db.query(
+                    "SELECT hub FROM local_signals WHERE acknowledged_at_ms IS NULL",
+                    &[],
+                )
+            };
+            assert_eq!(unread()?, vec![json!({"hub":"work"})]);
+            service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"]}))?;
+            assert!(unread()?.is_empty());
+            Ok(())
+        })();
+        service.shutdown();
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        result
+    }
+    #[test]
     fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4()));
         let result = (|| {
@@ -3508,10 +3776,12 @@ mod tests {
             let mut service = DaemonService::open(&config, &plugins)?;
             let result = (|| {
                 let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"token","token":"previous-token"});
-                let committed = json!({"host_hub":host,"other":7}).to_string();
+                let mut committed = json!({"host_hub":host,"other":7}).to_string();
                 fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
-                service.sync_host_hub()?;
+                service.reload_slots()?;
                 let address = service.host_server.as_ref().unwrap().address;
+                service.reload_slots()?;
+                assert_eq!(service.host_server.as_ref().unwrap().address, address);
                 let rpc = |address, token| -> Result<(), String> {
                     let response: Value = ureq::post(&format!("http://{address}/v1/rpc"))
                         .set("Authorization", &format!("Bearer {token}"))
@@ -3540,8 +3810,12 @@ mod tests {
                     invalid[key] = value.clone();
                     let reload = json!({"host_hub":invalid}).to_string();
                     fs::write(&config.config_path, &reload).map_err(|e| e.to_string())?;
-                    let error = service.sync_host_hub().unwrap_err();
+                    service.reload_slots()?;
+                    let settings = service.settings();
+                    let error = settings["host_hub"]["error"].as_str().unwrap();
                     assert!(error.starts_with("INVALID_INPUT:"), "{error}");
+                    assert_eq!(settings["host_hub"]["running"], true);
+                    assert_eq!(settings["host_hub"]["port"], address.port());
                     assert_eq!(service.host_server.as_ref().unwrap().address, address);
                     assert_eq!(
                         fs::read(&config.config_path).map_err(|e| e.to_string())?,
@@ -3549,10 +3823,21 @@ mod tests {
                     );
                     rpc(address, "previous-token")?;
 
+                    // Restoring the exact applied config clears reload feedback without rebinding.
                     fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
+                    service.reload_slots()?;
+                    assert_eq!(service.settings()["host_hub"]["error"], Value::Null);
+                    assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                    rpc(address, "previous-token")?;
+
                     let mut action = json!({"op":"set_host_hub","enabled":true});
                     action[key] = value;
-                    assert!(service.action(&action).is_err(), "{action}");
+                    let error = service.action(&action).unwrap_err();
+                    assert!(error.starts_with("INVALID_INPUT:"), "{action}: {error}");
+                    assert_eq!(service.settings()["host_hub"]["error"], error);
+                    // An unchanged config cannot resolve a rejected UI action.
+                    service.reload_slots()?;
+                    assert_eq!(service.settings()["host_hub"]["error"], error);
                     assert_eq!(
                         fs::read(&config.config_path).map_err(|e| e.to_string())?,
                         committed.as_bytes()
@@ -3560,6 +3845,17 @@ mod tests {
                     assert_eq!(service.host_server.as_ref().unwrap().address, address);
                     rpc(address, "previous-token")?;
                 }
+
+                // A valid external edit supersedes the reload/action error without
+                // abandoning the current socket or its working credentials.
+                let mut valid = host.clone();
+                valid["port"] = json!(address.port());
+                committed = json!({"host_hub":valid,"other":7}).to_string();
+                fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
+                service.reload_slots()?;
+                assert_eq!(service.settings()["host_hub"]["error"], Value::Null);
+                assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                rpc(address, "previous-token")?;
 
                 // A write failure after binding must restore the old socket and credentials.
                 let tmp = config
@@ -3607,7 +3903,12 @@ mod tests {
                 let replacement = service.host_server.as_ref().unwrap().address;
                 assert_ne!(replacement, address);
                 rpc(replacement, "replacement-token")?;
-                service.action(&json!({"op":"set_host_hub","enabled":false}))?;
+                fs::write(
+                    &config.config_path,
+                    json!({"host_hub":{"enabled":false}}).to_string(),
+                )
+                .map_err(|e| e.to_string())?;
+                service.reload_slots()?;
                 assert!(service.host_server.is_none());
                 assert!(TcpStream::connect(replacement).is_err());
                 Ok(())
@@ -3646,13 +3947,30 @@ mod tests {
     fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
         let mailbox = UiMailbox::default();
         for i in 0..40 {
-            mailbox.push(Some("settings:local".into()), vec![i]);
+            mailbox.emit(json!({"op":"settings","hub":"local","revision":i}));
         }
-        mailbox.push(None, b"composer_result".to_vec());
-        mailbox.push(None, b"pair_code".to_vec());
-        assert_eq!(mailbox.next(), Some(vec![39]));
-        assert_eq!(mailbox.next(), Some(b"composer_result".to_vec()));
-        assert_eq!(mailbox.next(), Some(b"pair_code".to_vec()));
+        let results = [
+            json!({"op":"settings","hub":"local","request_id":"gateway-save"}),
+            json!({"op":"settings","hub":"local","request_id":"personal-save"}),
+            json!({"op":"settings","hub":"local","confirm_hub_save":true}),
+            json!({"op":"settings","hub":"local","ok":true,"source_op":"setup_save_hub"}),
+            json!({"op":"composer_result","ok":true}),
+            json!({"op":"pair_code","code":"123456"}),
+        ];
+        for result in &results {
+            mailbox.emit(result.clone());
+        }
+        let snapshot = json!({"op":"settings","hub":"local","revision":40});
+        mailbox.emit(snapshot.clone());
+        assert_eq!(
+            mailbox.pending.lock().map_err(|e| e.to_string())?.len(),
+            1 + results.len()
+        );
+        for expected in std::iter::once(snapshot).chain(results) {
+            let bytes = mailbox.next().ok_or("Missing UI frame")?;
+            let actual: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            assert_eq!(actual, expected);
+        }
         mailbox.close();
         assert_eq!(mailbox.next(), None);
         Ok(())

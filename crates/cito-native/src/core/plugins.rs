@@ -983,81 +983,95 @@ pub struct HttpResponse {
 }
 
 pub fn read_http_response(stream: &mut impl Read) -> Result<HttpResponse, String> {
-    let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    let n = reader
-        .read_line(&mut status_line)
-        .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err("Empty HTTP response".to_string());
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    fn line(reader: &mut impl BufRead, total: &mut usize) -> Result<String, String> {
+        let mut bytes = Vec::new();
+        reader
+            .take((MAX_BYTES - *total + 1) as u64)
+            .read_until(b'\n', &mut bytes)
+            .map_err(|e| e.to_string())?;
+        *total += bytes.len();
+        if *total > MAX_BYTES || !bytes.ends_with(b"\n") {
+            return Err("Truncated or oversized HTTP headers".into());
+        }
+        String::from_utf8(bytes).map_err(|e| e.to_string())
     }
+    let mut reader = BufReader::new(stream);
+    let mut header_bytes = 0;
+    let status_line = line(&mut reader, &mut header_bytes)?;
     let status = status_line
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| format!("Invalid HTTP status: {}", status_line.trim()))?;
-
-    let mut content_length: Option<usize> = None;
+    let mut content_length = None;
     let mut chunked = false;
     loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        if read == 0 || line == "\r\n" || line == "\n" {
+        let header = line(&mut reader, &mut header_bytes)?;
+        if header == "\r\n" || header == "\n" {
             break;
         }
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim().to_ascii_lowercase();
-            let val = v.trim().to_ascii_lowercase();
-            if key == "content-length" {
-                content_length = val.parse::<usize>().ok();
-            } else if key == "transfer-encoding" && val.contains("chunked") {
-                chunked = true;
+        let (key, value) = header.split_once(':').ok_or("Invalid HTTP header")?;
+        if key.eq_ignore_ascii_case("content-length") {
+            let length = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "Invalid Content-Length")?;
+            if length > MAX_BYTES || content_length.replace(length).is_some() {
+                return Err("Oversized or duplicate Content-Length".into());
             }
+        } else if key.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = value.trim().eq_ignore_ascii_case("chunked");
         }
     }
-
     if status == 202 || status == 204 {
         return Ok(HttpResponse {
             status,
             body: String::new(),
         });
     }
-
-    let mut body_bytes = Vec::new();
+    let mut body = Vec::new();
     if chunked {
         loop {
-            let mut size_line = String::new();
-            let r = reader
-                .read_line(&mut size_line)
+            let size = line(&mut reader, &mut header_bytes)?;
+            let size = usize::from_str_radix(size.trim().split(';').next().unwrap_or(""), 16)
+                .map_err(|_| "Invalid HTTP chunk size")?;
+            if size == 0 {
+                while !matches!(
+                    line(&mut reader, &mut header_bytes)?.as_str(),
+                    "\r\n" | "\n"
+                ) {}
+                break;
+            }
+            if size > MAX_BYTES - body.len() {
+                return Err("HTTP body exceeds 8 MiB".into());
+            }
+            let offset = body.len();
+            body.resize(offset + size, 0);
+            reader
+                .read_exact(&mut body[offset..])
                 .map_err(|e| e.to_string())?;
-            if r == 0 {
-                break;
+            let mut crlf = [0; 2];
+            reader.read_exact(&mut crlf).map_err(|e| e.to_string())?;
+            if &crlf != b"\r\n" {
+                return Err("Invalid HTTP chunk terminator".into());
             }
-            let size_hex = size_line.trim().split(';').next().unwrap_or("");
-            let chunk_size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
-            if chunk_size == 0 {
-                let mut trailer = String::new();
-                let _ = reader.read_line(&mut trailer);
-                break;
-            }
-            let mut chunk = vec![0u8; chunk_size];
-            reader.read_exact(&mut chunk).map_err(|e| e.to_string())?;
-            body_bytes.extend_from_slice(&chunk);
-            let mut crlf = [0u8; 2];
-            let _ = reader.read_exact(&mut crlf);
         }
-    } else if let Some(len) = content_length {
-        body_bytes.resize(len, 0);
-        reader
-            .read_exact(&mut body_bytes)
-            .map_err(|e| e.to_string())?;
+    } else if let Some(length) = content_length {
+        body.resize(length, 0);
+        reader.read_exact(&mut body).map_err(|e| e.to_string())?;
     } else {
-        let _ = reader.read_to_end(&mut body_bytes);
+        reader
+            .take((MAX_BYTES + 1) as u64)
+            .read_to_end(&mut body)
+            .map_err(|e| e.to_string())?;
+        if body.len() > MAX_BYTES {
+            return Err("HTTP body exceeds 8 MiB".into());
+        }
     }
-
     Ok(HttpResponse {
         status,
-        body: String::from_utf8_lossy(&body_bytes).to_string(),
+        body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
 
@@ -1452,6 +1466,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn http_response_bounds_and_malformed_framing_are_errors() {
+        for response in [
+            "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: invalid\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nnope\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n800001\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx",
+        ] {
+            assert!(
+                read_http_response(&mut response.as_bytes()).is_err(),
+                "{response}"
+            );
+        }
+        let mut oversized_header = vec![b'x'; 8 * 1024 * 1024 + 1];
+        assert!(read_http_response(&mut oversized_header.as_slice()).is_err());
+        oversized_header.clear();
+        let mut unframed = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        unframed.resize(unframed.len() + 8 * 1024 * 1024 + 1, b'x');
+        assert!(read_http_response(&mut unframed.as_slice()).is_err());
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n";
+        assert_eq!(
+            read_http_response(&mut chunked.as_slice()).unwrap().body,
+            "hi"
+        );
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("body failed"))
+            }
+        }
+        let mut reader = std::io::Read::chain(b"HTTP/1.1 200 OK\r\n\r\n".as_slice(), Broken);
+        assert!(read_http_response(&mut reader).is_err());
+    }
     #[test]
     fn daemon_health_requires_matching_state_and_safe_pid() {
         let (root, _) = fixture("/bin/cat");

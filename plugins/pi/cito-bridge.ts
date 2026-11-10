@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -126,12 +126,17 @@ export default function citoBridge(pi: BridgeAPI): void {
   }
   async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>): Promise<Record<string, unknown>> {
     let configuredPort: unknown;
-    try { configuredPort = (JSON.parse(readFileSync(join(resolvedStateDir, "config.json"), "utf8")) as { daemonPort?: unknown }).daemonPort; }
+    const rawConfig = process.env.CITO_CONFIG_PATH ?? join(resolvedStateDir, "config.json");
+    const configPath = rawConfig === "~" ? homedir() : rawConfig.startsWith("~/")
+      ? join(homedir(), rawConfig.slice(2)) : resolve(rawConfig);
+    try { configuredPort = (JSON.parse(readFileSync(configPath, "utf8")) as { daemonPort?: unknown }).daemonPort; }
     catch {} // A missing config falls back to the environment and default port.
-    const candidatePorts = [configuredPort, process.env.CITO_DAEMON_PORT]
-      .filter(value => typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
-      .map(Number);
-    const port = candidatePorts.find(value => Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
+    const envPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
+    const candidatePorts = [
+      /^\+?\d+$/.test(envPort) ? Number(envPort) : undefined,
+      typeof configuredPort === "number" ? configuredPort : undefined,
+    ];
+    const port = candidatePorts.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -170,16 +175,18 @@ export default function citoBridge(pi: BridgeAPI): void {
     return payload;
   }
 
-  function update(ctx: BridgeContext): void {
-    const nextSessionId = ctx.sessionManager.getSessionId();
+  function setSession(nextSessionId: string | undefined): void {
     if (nextSessionId !== sessionId) {
       activeBadge = undefined;
-      ctx.ui.setStatus("cito", undefined);
       lastActiveMs = Date.now();
     }
     sessionId = nextSessionId;
     if (sessionId && !sessions.has(sessionId)) sessions.set(sessionId, new Set());
+  }
+  function update(ctx: BridgeContext): void {
+    setSession(ctx.sessionManager.getSessionId());
     context = ctx;
+    ctx.ui.setStatus("cito", activeBadge);
   }
   function unlinkSocket(): void {
     if (!ownsSocket) return;
@@ -187,24 +194,51 @@ export default function citoBridge(pi: BridgeAPI): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     ownsSocket = false;
   }
+  function fallbackIdentity(): { session_id: string; session_name: string; cwd: string } {
+    const cwd = process.cwd();
+    const folder = join(piHome, "sessions", `--${cwd.replace(/^\//, "").replaceAll("/", "-")}--`);
+    let latest: { path: string; modified: number } | undefined;
+    try {
+      for (const entry of readdirSync(folder)) {
+        if (!entry.endsWith(".jsonl")) continue;
+        const path = join(folder, entry), modified = statSync(path).mtimeMs;
+        if (!latest || modified > latest.modified || (modified === latest.modified && path > latest.path)) latest = { path, modified };
+      }
+      if (latest) {
+        let id = basename(latest.path, ".jsonl"), name = basename(cwd);
+        for (const line of readFileSync(latest.path, "utf8").split("\n")) {
+          try {
+            const row = JSON.parse(line);
+            if ((row.type === "session" || row.type == null) && typeof row.id === "string" && row.id) id = row.id;
+            if (typeof row.name === "string" && row.name) name = row.name;
+            if (typeof row.session_name === "string" && row.session_name) name = row.session_name;
+          } catch {} // A concurrent trailing partial JSON line is not an identity.
+        }
+        return { session_id: id, session_name: name, cwd };
+      }
+    } catch {} // Missing session storage still has a stable process-scoped identity.
+    return { session_id: `pid-${process.pid}`, session_name: basename(cwd), cwd };
+  }
   function handle(req: Record<string, unknown>): Record<string, unknown> {
     const ctx = context;
     if (ctx) update(ctx);
     if (req.op === "ping") return { ok: true };
-    if (req.op === "identify") {
-      if (!ctx || !sessionId) return { ok: false, error: "SESSION_NOT_OPEN" };
-      return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid, session_id: sessionId,
-        session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd, updated_at_ms: lastActiveMs };
-    }
-    if (req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
-    if (!ctx || !sessionId || req.session_id !== sessionId) return { ok: false, error: "SESSION_MISMATCH" };
+    if (req.op !== "identify" && req.op !== "status" && req.op !== "deliver") return { ok: false, error: "INVALID_REQUEST" };
+    const identity = ctx && sessionId
+      ? { session_id: sessionId, session_name: ctx.sessionManager.getSessionName() ?? "", cwd: ctx.cwd }
+      : fallbackIdentity();
+    setSession(identity.session_id);
+    const currentId = identity.session_id;
+    if (req.op === "identify") return { ok: true, endpoint_pid: process.pid, pi_pid: process.pid,
+      ...identity, updated_at_ms: lastActiveMs };
+    if (!currentId || req.session_id !== currentId) return { ok: false, error: "SESSION_MISMATCH" };
     if (req.op === "status") {
       if (req.badge != null && typeof req.badge !== "string") return { ok: false, error: "INVALID_REQUEST" };
       activeBadge = (req.badge as string | undefined) ?? undefined;
-      ctx.ui.setStatus("cito", activeBadge);
+      ctx?.ui.setStatus("cito", activeBadge);
       return { ok: true };
     }
-    const processedBatchIds = sessions.get(sessionId)!;
+    const processedBatchIds = sessions.get(currentId)!;
     if (typeof req.batch_id !== "string" || !req.batch_id) return { ok: false, error: "INVALID_REQUEST" };
     if (processedBatchIds.has(req.batch_id)) return { ok: true, delivered: true, deduplicated: true };
     if (typeof req.content !== "string" || typeof req.wake !== "boolean") return { ok: false, error: "INVALID_REQUEST" };

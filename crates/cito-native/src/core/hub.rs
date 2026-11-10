@@ -280,6 +280,27 @@ fn hub_patch_guard(p: &Value, caller: Option<&Value>) -> Result<(), String> {
 struct Subscriber {
     principal: Option<Value>,
     tx: mpsc::SyncSender<Value>,
+    identity: Arc<()>,
+}
+pub struct Subscription {
+    receiver: mpsc::Receiver<Value>,
+    owner: std::sync::Weak<Inner>,
+    identity: Arc<()>,
+}
+impl std::ops::Deref for Subscription {
+    type Target = mpsc::Receiver<Value>;
+    fn deref(&self) -> &Self::Target {
+        &self.receiver
+    }
+}
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.upgrade() {
+            if let Ok(mut subscribers) = owner.subscribers.lock() {
+                subscribers.retain(|sub| !Arc::ptr_eq(&sub.identity, &self.identity));
+            }
+        }
+    }
 }
 struct Inner {
     db: Database,
@@ -363,14 +384,23 @@ impl HubEngine {
         self.seed_environment()?;
         Ok(())
     }
-    pub fn subscribe(&self, principal: Option<Value>) -> Result<mpsc::Receiver<Value>, String> {
-        let (tx, rx) = mpsc::sync_channel(256);
+    pub fn subscribe(&self, principal: Option<Value>) -> Result<Subscription, String> {
+        let (tx, receiver) = mpsc::sync_channel(256);
+        let identity = Arc::new(());
         self.inner
             .subscribers
             .lock()
             .map_err(|_| "Subscriber lock poisoned")?
-            .push(Subscriber { principal, tx });
-        Ok(rx)
+            .push(Subscriber {
+                principal,
+                tx,
+                identity: identity.clone(),
+            });
+        Ok(Subscription {
+            receiver,
+            owner: Arc::downgrade(&self.inner),
+            identity,
+        })
     }
     pub fn shutdown(&self) {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
@@ -794,10 +824,14 @@ impl HubEngine {
     fn restore_attachments(&self) -> Result<(), String> {
         self.inner.db.transaction(|c| {
             for b in c.query("SELECT * FROM hub_human_channels WHERE enabled=1", &[])? {
-                let plugin = self.plugin(s(&b, "plugin_id"))?;
-                let (cfg, _) = service(c, &plugin.id)?;
-                let active = ready(&plugin, &cfg, "hub")
-                    && ready(&plugin, &parse(&b, "user_config_json"), "user");
+                let active = match self.plugin(s(&b, "plugin_id")) {
+                    Ok(plugin) => {
+                        let (cfg, _) = service(c, &plugin.id)?;
+                        ready(&plugin, &cfg, "hub")
+                            && ready(&plugin, &parse(&b, "user_config_json"), "user")
+                    }
+                    Err(_) => false,
+                };
                 attach(c, &b, active, self.inner.remote.load(Ordering::SeqCst))?;
             }
             Ok(())
@@ -1163,7 +1197,7 @@ impl HubEngine {
                 &[json!(now_ms()), json!(plugin.id)],
             )?;
         }
-        let reservations=self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let mut sends=Vec::new();for b in bindings{let node=find_human(c,s(&b,"principal_id"))?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status='delivered' OR d.status='in_flight' AND d.delivered_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000)])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})?;
+        let reservations=self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,s(&b,"principal_id"))?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status='delivered' OR d.status='in_flight' AND d.delivered_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000)])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})?;
         let mut send_error = None;
         for send in reservations {
             if let Err(err) = process.send(&send) {
@@ -1749,6 +1783,10 @@ fn save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String> {
     let changed = old != *cfg;
     c.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES(?,?,'{}',?) ON CONFLICT(plugin_id) DO UPDATE SET config_json=excluded.config_json,service_state_json=CASE WHEN ? THEN '{}' ELSE service_state_json END,updated_ms=excluded.updated_ms", &[json!(id),json!(cfg.to_string()),json!(now_ms()),json!(changed)])?;
     if changed {
+        c.execute(
+            "DELETE FROM hub_processed_replies WHERE plugin_id=?",
+            &[json!(id)],
+        )?;
         c.execute(
             "DELETE FROM hub_channel_delivery_msgs WHERE plugin_id=?",
             &[json!(id)],

@@ -993,14 +993,18 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             f.tool("cito_send", json!({"hub":"work","to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")}), human())
         } else {
             let action = if op == "send_signal" {
-                json!({"op":op,"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
+                json!({"op":op,"request_id":format!("{op}-{id}"),"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
             } else {
-                json!({"op":op,"to_listener_id":target["listener_id"],"text":"Approved","in_reply_to":null,"signal_id":format!("work:{id}")})
+                json!({"op":op,"request_id":format!("{op}-{id}"),"to_listener_id":target["listener_id"],"text":"Approved","in_reply_to":null,"signal_id":format!("work:{id}")})
             };
             let (status, result) = f.action(action);
             assert_eq!(status, 200, "{result}");
             wait(|| ui_results().len() == results_before + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], true);
+            assert_eq!(
+                ui_results().last().unwrap()["request_id"],
+                format!("{op}-{id}")
+            );
             result
         };
         if op == "send_reply_from_human" {
@@ -1175,10 +1179,12 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             ("Wrong hub", format!("elsewhere:{failed}")),
         ] {
             let count = ui_results().len();
-            let (status, result) = f.action(json!({"op":op,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
+            let request_id = format!("{op}-failure-{count}");
+            let (status, result) = f.action(json!({"op":op,"request_id":request_id,"to":target["listener_id"],"message":message,"in_reply_to":reply_to}));
             assert_eq!(status, 400, "{result}");
             wait(|| ui_results().len() == count + 1);
             assert_eq!(ui_results().last().unwrap()["ok"], false);
+            assert_eq!(ui_results().last().unwrap()["request_id"], request_id);
             assert_unread(&failed);
         }
     }
@@ -1583,7 +1589,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.20.1");
+    assert_eq!(init["serverInfo"]["version"], "0.20.2");
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1704,7 +1710,7 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.20.1");
+    assert_eq!(http(p, "/health", None).1["version"], "0.20.2");
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -1827,6 +1833,76 @@ fn live_user_reload_and_auth_mode_canonicalization_survive_restart() {
         .starts_with("bob-"));
 }
 #[test]
+fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
+    let _lock = serial();
+    let owner = Fixture::new(json!({}));
+    let manifest = json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Messenger",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],"pairing":{"supported":true},"fields":[
+        {"key":"credential","scope":"hub","type":"secret","required":true},
+        {"key":"address","scope":"user","type":"string","required":true}]});
+    let directory = owner.state.join("hub/plugins/channel");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("plugin.json"), manifest.to_string()).unwrap();
+    let (_, p) = owner.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"remote":{"url":format!("http://127.0.0.1:{p}")}},"defaultHub":"local"}),
+    );
+    let mut conflicting = manifest;
+    conflicting["fields"][0]["scope"] = json!("user");
+    conflicting["fields"][1]["scope"] = json!("hub");
+    let directory = f.state.join("plugins/channel");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("plugin.json"), conflicting.to_string()).unwrap();
+    f.daemon(&[]);
+    let rows = || {
+        owner
+            .db("hub/hub.sqlite")
+            .query(
+                "SELECT * FROM hub_human_channels WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap()
+    };
+    for op in [
+        "save_hub_service",
+        "channel_save",
+        "channel_pair",
+        "channel_test",
+    ] {
+        let (status,v)=f.action(json!({"op":op,"scope":"hub","hub":"remote","channel_id":"channel","enabled":true,"user_config":{"address":"injected"},"display_label":"injected","values":{"credential":op,"address":"must-not-save"}}));
+        assert_eq!(status, 200, "{v}");
+        assert!(rows().is_empty());
+        let cfg = owner
+            .db("hub/hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        let cfg: Value = serde_json::from_str(cfg[0]["config_json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            cfg,
+            json!({"credential":op}),
+            "Selected remote schema must override conflicting local field scopes"
+        );
+    }
+    assert_eq!(f.action(json!({"op":"channel_save","hub":"remote","channel_id":"channel","enabled":true,"values":{"address":"personal"}})).0,200);
+    assert_eq!(rows()[0]["enabled"], 1);
+    assert_eq!(
+        f.action(
+            json!({"op":"channel_toggle","hub":"remote","channel_id":"channel","enabled":false})
+        )
+        .0,
+        200
+    );
+    let paused = rows();
+    assert_eq!(f.action(json!({"op":"save_hub_service","hub":"remote","channel_id":"channel","values":{"credential":"rotated"}})).0,200);
+    assert_eq!(rows(), paused);
+    assert_eq!(f.action(json!({"op":"channel_test","hub":"remote","channel_id":"channel","values":{"address":"candidate"}})).0,200);
+    assert_eq!(rows(), paused, "Non-persisting tests cannot write bindings");
+}
+
+#[test]
 fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1852,7 +1928,168 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(config["desktopBannerEnabled"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
+    for (name,invite) in [
+        ("127-0-0-1",format!("http://127.0.0.1:{}",port())),
+        ("joined",format!("cito setup --hub joined --url http://127.0.0.1:{} --auth token --token fixture-token --default",port())),
+        ("json",json!({"name":"json","url":format!("http://127.0.0.1:{}",port()),"auth_mode":"none"}).to_string()),
+        ("equals",format!("cito setup --hub=equals --url=http://127.0.0.1:{} --default",port())),
+    ] {
+        let (status,value)=f.action(json!({"op":"paste_hub_invite","invite":invite})); assert_eq!(status,200,"{value}");
+        let config:Value=serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+        assert!(config["hubs"][name].is_object()); assert_eq!(config["default_hub"],name);
+    }
+    let (status, error) = f.action(json!({"op":"test_hub","hub":"json"}));
+    assert_eq!(status, 400);
+    let state = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        state["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "json")
+            .unwrap()["error"],
+        error["error"]
+    );
+    assert_eq!(
+        f.action(json!({"op":"setup_save_hub","name":"json","url":"local://","auth_mode":"none"}))
+            .0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"test_hub","hub":"json"})).0, 200);
+    let state = f.action(json!({"op":"get_snapshot"})).1;
+    assert!(state["settings"]["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "json")
+        .unwrap()["error"]
+        .is_null());
 }
+#[test]
+fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_errors() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (server, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"shared":{"url":format!("http://127.0.0.1:{port}")}},"defaultHub":"shared"}),
+    );
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    host.stop(server);
+    let (status, error) = f.action(json!({"op":"test_hub","hub":"shared"}));
+    assert_eq!(status, 400);
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("NATS_UNAVAILABLE:"));
+    let failed = f.action(json!({"op":"get_snapshot"})).1;
+    for hubs in [&failed["hubs"], &failed["settings"]["hubs"]] {
+        assert_eq!(
+            hubs.as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["name"] == "shared")
+                .unwrap()["error"],
+            error["error"]
+        );
+    }
+    let frames_path = f.home.join("ui-frames");
+    wait(|| {
+        fs::read_to_string(&frames_path)
+            .unwrap_or_default()
+            .contains(error["error"].as_str().unwrap())
+    });
+    let before = fs::read_to_string(&frames_path).unwrap().len();
+    host.spawn(
+        NATIVE,
+        &[
+            "hub",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--data-dir",
+            host.state.join("hub").to_str().unwrap(),
+            "--auth",
+            "none",
+        ],
+        &[],
+    );
+    // No UI or MCP request drives recovery: the daemon's background transport
+    // work must publish a fresh state before we read either projection.
+    wait(|| {
+        fs::read_to_string(&frames_path)
+            .unwrap_or_default()
+            .get(before..)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|frame| {
+                frame["op"] == "state"
+                    && frame["hubs"].as_array().is_some_and(|hubs| {
+                        hubs.iter().any(|h| {
+                            h["name"] == "shared"
+                                && h["status"] == "connected"
+                                && h["error"].is_null()
+                        })
+                    })
+            })
+    });
+    let recovered = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        f.action(json!({"op":"open_settings","hub":"shared"})).0,
+        200
+    );
+    let mut settings = Value::Null;
+    wait(|| {
+        settings = fs::read_to_string(&frames_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["op"] == "settings" && frame["hub"] == "shared")
+            .last()
+            .map(|frame| frame["settings"].clone())
+            .unwrap_or(Value::Null);
+        settings.is_object()
+    });
+    for hubs in [
+        &recovered["hubs"],
+        &recovered["settings"]["hubs"],
+        &settings["hubs"],
+    ] {
+        assert!(hubs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "shared")
+            .unwrap()["error"]
+            .is_null());
+    }
+    let (status, invalid) =
+        f.action(json!({"op":"setup_save_hub","name":"shared","url":"invalid"}));
+    assert_eq!(status, 400);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("INVALID_INPUT:"));
+    // A healthy connection must not hide a rejected configuration edit, even
+    // after another background poll has observed the recovered transport.
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        snapshot["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "shared")
+            .unwrap()["error"],
+        invalid["error"]
+    );
+}
+
 #[test]
 fn removing_or_disabling_default_hubs_persists_a_restartable_fallback() {
     let _lock = serial();
@@ -2288,6 +2525,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.20.1"
+        "cito v0.20.2"
     );
 }

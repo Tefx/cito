@@ -17,6 +17,10 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BADGE_TIMEOUT: Duration = Duration::from_millis(1500);
 const BADGE_RETRY: Duration = Duration::from_millis(250);
 const MAX_WORKERS: usize = 4;
+const INACTIVE_FAILURE_LIMIT: u32 = 7;
+fn badge_retry(failures: u32) -> Duration {
+    (BADGE_RETRY * (1u32 << failures.saturating_sub(1).min(6))).min(Duration::from_secs(15))
+}
 
 type Worker<T> = JoinHandle<Result<T, String>>;
 
@@ -62,6 +66,8 @@ struct Badge {
     sent: Option<Intent>,
     retry_at: Instant,
     worker: Option<Worker<Intent>>,
+    attempted: Option<Intent>,
+    failures: u32,
 }
 
 /// Call `tick` after receiver reconciliation and after admission/ack/unlisten/
@@ -74,6 +80,7 @@ pub struct SessionActivity {
     env: Value,
     discovery: Vec<Discovery>,
     badges: BTreeMap<Target, Badge>,
+    history_loaded: bool,
     stopping: Arc<AtomicBool>,
     closed: bool,
 }
@@ -95,6 +102,7 @@ impl SessionActivity {
                 })
                 .collect(),
             badges: BTreeMap::new(),
+            history_loaded: false,
             stopping: Arc::new(AtomicBool::new(false)),
             closed: false,
         }
@@ -177,10 +185,19 @@ impl SessionActivity {
         self.reap_badges();
         // One short transaction captures both rows and counts. Persisted ACTIVE
         // rows alone never establish liveness and never add unread to a badge.
-        let desired = desired_badges(state, live_active)?;
+        let mut desired = desired_badges(state, live_active)?;
+        // Historical endpoints need one bounded clear after startup, not a fresh
+        // retry lifecycle on every DB scan once their badge entry has retired.
+        if self.history_loaded {
+            desired.retain(|target, intent| {
+                intent.badge.is_some() || self.badges.contains_key(target)
+            });
+        }
+        self.history_loaded = true;
         for (target, badge) in &mut self.badges {
             if !desired.contains_key(target) && badge.desired.badge.is_some() {
                 badge.desired.badge = None;
+                badge.failures = 0;
                 badge.retry_at = Instant::now();
             }
         }
@@ -188,6 +205,7 @@ impl SessionActivity {
             if let Some(badge) = self.badges.get_mut(&target) {
                 if badge.desired != intent {
                     badge.desired = intent;
+                    badge.failures = 0;
                     badge.retry_at = Instant::now();
                 }
             } else if let Some(provider) = self
@@ -203,10 +221,18 @@ impl SessionActivity {
                         sent: None,
                         retry_at: Instant::now(),
                         worker: None,
+                        attempted: None,
+                        failures: 0,
                     },
                 );
             }
         }
+        self.badges.retain(|_, badge| {
+            badge.worker.is_some()
+                || badge.desired.badge.is_some()
+                || (badge.sent.as_ref() != Some(&badge.desired)
+                    && badge.failures < INACTIVE_FAILURE_LIMIT)
+        });
         self.start_badges()?;
         let mut capacity = MAX_WORKERS
             .saturating_sub(self.discovery.iter().filter(|p| p.worker.is_some()).count());
@@ -286,13 +312,20 @@ impl SessionActivity {
             }
             if let Some(worker) = badge.worker.take() {
                 match worker.join() {
-                    Ok(Ok(sent)) => badge.sent = Some(sent),
+                    Ok(Ok(sent)) => {
+                        badge.sent = Some(sent);
+                        badge.failures = 0;
+                    }
                     result => {
                         // A failed call may already have applied an effect. Its
                         // previous acknowledged value cannot suppress a retry.
                         badge.sent = None;
-                        badge.retry_at = Instant::now() + BADGE_RETRY;
-                        eprintln!("cito badge {}: {:?}", badge.plugin.id, result);
+                        if badge.attempted.as_ref() == Some(&badge.desired) {
+                            badge.failures = badge.failures.saturating_add(1);
+                            badge.retry_at = Instant::now() + badge_retry(badge.failures);
+                            eprintln!("cito badge {}: {:?}", badge.plugin.id, result);
+                        }
+                        // An obsolete failed intent never delays its replacement.
                     }
                 }
             }
@@ -313,6 +346,7 @@ impl SessionActivity {
             }
             let plugin = badge.plugin.clone();
             let intent = badge.desired.clone();
+            badge.attempted = Some(intent.clone());
             let request = badge_request(&self.state_dir, &self.env, &intent);
             let stopping = self.stopping.clone();
             badge.worker = Some(
@@ -1106,7 +1140,15 @@ print(json.dumps(response), flush=True)
                 .values()
                 .all(|b| b.sent.as_ref() == Some(&b.desired))
         })?;
-        assert_eq!(activity.badges.len(), 2);
+        assert_eq!(
+            activity.badges.len(),
+            1,
+            "The acknowledged inactive endpoint must retire"
+        );
+        assert!(f
+            .calls("agent", "update_badge")
+            .iter()
+            .any(|r| r["req"]["endpoint_pid"] == 44 && r["req"]["badge"].is_null()));
         assert!(activity.badges[&Target::of(&row)]
             .sent
             .as_ref()
@@ -1169,6 +1211,78 @@ print(json.dumps(response), flush=True)
         let calls = f.calls("agent", "update_badge").len();
         activity.shutdown()?;
         assert_eq!(f.calls("agent", "update_badge").len(), calls);
+        Ok(())
+    }
+
+    #[test]
+    fn badge_backoff_is_exponential_capped_and_inactive_failures_retire() -> Result<(), String> {
+        assert_eq!(
+            (1..=9)
+                .map(|n| badge_retry(n).as_millis())
+                .collect::<Vec<_>>(),
+            vec![250, 500, 1000, 2000, 4000, 8000, 15000, 15000, 15000]
+        );
+        let mut f = Fixture::new()?;
+        f.provider("agent", json!({}))?;
+        let row = f.listener("east", "session", Some(42), 1)?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, std::slice::from_ref(&row), |a| {
+            a.badges
+                .values()
+                .all(|b| b.sent.as_ref() == Some(&b.desired))
+        })?;
+        // Controlled worker completions exercise the real reap/tick policy without
+        // sleeping through the capped 15-second retry interval.
+        for failures in 1..=3 {
+            let badge = activity
+                .badges
+                .get_mut(&Target::of(&row))
+                .ok_or("Missing badge")?;
+            badge.attempted = Some(badge.desired.clone());
+            badge.worker = Some(thread::spawn(|| Err("unavailable".into())));
+            while !badge.worker.as_ref().is_some_and(|w| w.is_finished()) {
+                thread::yield_now();
+            }
+            activity.reap_badges();
+            let badge = &activity.badges[&Target::of(&row)];
+            assert_eq!(badge.failures, failures);
+            assert!(
+                badge.retry_at > Instant::now() + badge_retry(failures) - Duration::from_millis(50)
+            );
+        }
+        f.seed(
+            "east",
+            "new",
+            "STORED_PASSIVE",
+            Value::Null,
+            now_ms() + 60_000,
+        )?;
+        activity.tick(&f.state, std::slice::from_ref(&row))?;
+        assert_eq!(
+            activity.badges[&Target::of(&row)].failures,
+            0,
+            "New intent resets retry history"
+        );
+        pump(&mut activity, &f, std::slice::from_ref(&row), |a| {
+            a.badges.values().all(|b| b.worker.is_none())
+        })?;
+        let badge = activity
+            .badges
+            .get_mut(&Target::of(&row))
+            .ok_or("Missing badge")?;
+        badge.desired.badge = None;
+        badge.sent = None;
+        badge.failures = INACTIVE_FAILURE_LIMIT;
+        activity.tick(&f.state, &[])?;
+        assert!(activity.badges.is_empty());
+        let count = f.calls("agent", "update_badge").len();
+        for _ in 0..3 {
+            activity.tick(&f.state, &[])?;
+        }
+        assert!(activity.badges.is_empty());
+        assert_eq!(f.calls("agent", "update_badge").len(), count);
+        activity.shutdown()?;
+        assert_reaped(&f);
         Ok(())
     }
 
