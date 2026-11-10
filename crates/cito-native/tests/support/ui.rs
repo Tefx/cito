@@ -153,9 +153,53 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
         json!({}),
         "Acknowledged secrets must not be resubmitted"
     );
+    // Submit both scopes before pumping the daemon, then request a background
+    // settings snapshot. Both request acknowledgements must reach the real UI.
+    let frame_start = l.frames.len();
+    l.control("edit_hub_service:channel");
+    l.input("channel_field:channel:credential", "gateway-overlap");
+    l.control("save_hub_service:channel");
     l.input("channel_field:channel:address", "personal-room");
     l.control("save_channel:channel");
-    l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Pause");
+    let mut saves = Vec::new();
+    wait(|| {
+        saves = f
+            .frames(l.ui)
+            .into_iter()
+            .filter(|a| {
+                (a["op"] == "save_hub_service"
+                    && a["values"] == json!({"credential":"gateway-overlap"}))
+                    || (a["op"] == "channel_save" && a["values"]["address"] == "personal-room")
+            })
+            .collect();
+        saves.len() == 2
+    });
+    assert_ne!(saves[0]["request_id"], saves[1]["request_id"]);
+    l.control("open_settings");
+    wait(|| {
+        l.pump();
+        let frames = &l.frames[frame_start..];
+        frames.iter().enumerate().any(|(index, frame)| {
+            frame["op"] == "settings"
+                && frame["hub"] == "local"
+                && frame["request_id"].is_null()
+                && frame["source_op"].is_null()
+                && saves.iter().all(|save| {
+                    frames[..index].iter().any(|ack| {
+                        ack["op"] == "settings" && ack["request_id"] == save["request_id"]
+                    })
+                })
+        })
+    });
+    let s = inspect(&f, l.ui);
+    assert_eq!(
+        node(&s, "settings_items", "toggle_channel:channel")["text"],
+        "Pause"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "stratum_hub:channel")["height"],
+        36
+    );
     l.control("toggle_channel:channel");
     l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Resume");
     let paused = f
@@ -507,6 +551,9 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
     for (field, newer) in [
         ("settings_hub_name", "newer"),
         ("settings_hub_url", "http://127.0.0.1:4291"),
+        ("settings_hub_token", "newer-token"),
+        ("settings_hub_user", "bob"),
+        ("settings_hub_auth:none", "none"),
     ] {
         let f = Fixture::new(json!({}));
         let p = start(&f);
@@ -517,9 +564,11 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
         control(&f, p, "open_settings");
         control(&f, p, "settings_tab:hubs");
         control(&f, p, "open_add_hub");
+        control(&f, p, "settings_hub_auth:token");
         for (id, value) in [
             ("settings_hub_name", "submitted"),
             ("settings_hub_url", "local://"),
+            ("settings_hub_token", "submitted-token"),
         ] {
             f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
         }
@@ -531,11 +580,15 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
         assert!(f.frames(p).iter().any(|a| a["op"] == "setup_save_hub"
             && a["name"] == "submitted"
             && a["url"] == "local://"));
-        f.send(
-            p,
-            json!({"op":"test_settings_input","id":field,"value":newer}),
-        );
-        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
+        if field.starts_with("settings_hub_auth:") {
+            control(&f, p, field);
+        } else {
+            f.send(
+                p,
+                json!({"op":"test_settings_input","id":field,"value":newer}),
+            );
+        }
+        cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"submitted","url":"local://","auth_mode":"token","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}));
         f.send(
             p,
             json!({"op":"settings","ok":true,"source_op":"setup_save_hub","settings":cfg}),
@@ -546,7 +599,23 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             node(&s, "settings_items", "submit_add_hub")["enabled"],
             true
         );
-        assert_eq!(node(&s, "settings_items", field)["text"], newer);
+        if field != "settings_hub_token" && !field.starts_with("settings_hub_auth:") {
+            assert_eq!(node(&s, "settings_items", field)["text"], newer);
+        }
+        control(&f, p, "submit_add_hub");
+        inspect(&f, p);
+        let resubmitted = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "setup_save_hub")
+            .unwrap();
+        let key = if field.starts_with("settings_hub_auth:") {
+            "auth_mode"
+        } else {
+            field.strip_prefix("settings_hub_").unwrap()
+        };
+        assert_eq!(resubmitted[key], newer, "Preserve the newer {field} draft");
     }
 }
 

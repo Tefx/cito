@@ -179,7 +179,11 @@ struct UiMailbox {
 impl UiMailbox {
     fn emit(&self, frame: Value) {
         // Snapshots coalesce; command results and banners stay ordered.
-        let key = if matches!(string(&frame, "op"), "state" | "settings" | "directory") {
+        let key = if string(&frame, "request_id").is_empty()
+            && string(&frame, "source_op").is_empty()
+            && frame["confirm_hub_save"] != true
+            && matches!(string(&frame, "op"), "state" | "settings" | "directory")
+        {
             Some(format!(
                 "{}:{}",
                 string(&frame, "op"),
@@ -3800,13 +3804,30 @@ mod tests {
     fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
         let mailbox = UiMailbox::default();
         for i in 0..40 {
-            mailbox.push(Some("settings:local".into()), vec![i]);
+            mailbox.emit(json!({"op":"settings","hub":"local","revision":i}));
         }
-        mailbox.push(None, b"composer_result".to_vec());
-        mailbox.push(None, b"pair_code".to_vec());
-        assert_eq!(mailbox.next(), Some(vec![39]));
-        assert_eq!(mailbox.next(), Some(b"composer_result".to_vec()));
-        assert_eq!(mailbox.next(), Some(b"pair_code".to_vec()));
+        let results = [
+            json!({"op":"settings","hub":"local","request_id":"gateway-save"}),
+            json!({"op":"settings","hub":"local","request_id":"personal-save"}),
+            json!({"op":"settings","hub":"local","confirm_hub_save":true}),
+            json!({"op":"settings","hub":"local","ok":true,"source_op":"setup_save_hub"}),
+            json!({"op":"composer_result","ok":true}),
+            json!({"op":"pair_code","code":"123456"}),
+        ];
+        for result in &results {
+            mailbox.emit(result.clone());
+        }
+        let snapshot = json!({"op":"settings","hub":"local","revision":40});
+        mailbox.emit(snapshot.clone());
+        assert_eq!(
+            mailbox.pending.lock().map_err(|e| e.to_string())?.len(),
+            1 + results.len()
+        );
+        for expected in std::iter::once(snapshot).chain(results) {
+            let bytes = mailbox.next().ok_or("Missing UI frame")?;
+            let actual: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            assert_eq!(actual, expected);
+        }
         mailbox.close();
         assert_eq!(mailbox.next(), None);
         Ok(())

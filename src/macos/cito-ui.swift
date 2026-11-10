@@ -852,6 +852,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var addHubUrl = ""
     var submittedAddHubName = ""
     var submittedAddHubUrl = ""
+    var addHubDraftGeneration = 0
+    var submittedAddHubGeneration = 0
     var addHubAuth = "none"
     var addHubToken = ""
     var addHubUser = ""
@@ -887,7 +889,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if addHubSaving && confirmHubSave, let saved = value.hubs.first(where: { $0.name == submittedAddHubName && $0.url == submittedAddHubUrl }) {
             addHubSaving = false
             addHubError = saved.error
-            if saved.error == nil && addHubName.trimmingCharacters(in: .whitespacesAndNewlines) == submittedAddHubName && addHubUrl.trimmingCharacters(in: .whitespacesAndNewlines) == submittedAddHubUrl {
+            if saved.error == nil && addHubDraftGeneration == submittedAddHubGeneration {
                 addHubFormOpen = false; addHubToken = ""
             }
         }
@@ -2548,6 +2550,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.editingExistingHub=false
             self.editingOriginalHub=""
             self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubAuth="none"
+            self.addHubDraftGeneration += 1
             self.addHubError=nil; self.addHubSaving=false
             self.addHubFormOpen = wasEditing ? true : !self.addHubFormOpen
             self.rebuildSettingsPanel()
@@ -2585,7 +2588,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     pill.style = addHubAuth == mode ? .prominent : .neutral
                     pill.pressed={ [weak self] in
                         guard let self=self else{return}
-                        self.syncAddHubFieldsFromControls(); self.addHubAuth=mode; self.rebuildSettingsPanel()
+                        self.syncAddHubFieldsFromControls()
+                        if self.addHubAuth != mode { self.addHubDraftGeneration += 1 }
+                        self.addHubAuth=mode; self.rebuildSettingsPanel()
                     }
                     form.addSubview(pill)
                 }
@@ -2657,6 +2662,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     if !cid.isEmpty { action["client_id"] = cid }
                 }
                 self.submittedAddHubName=name; self.submittedAddHubUrl=url
+                self.submittedAddHubGeneration=self.addHubDraftGeneration
                 self.addHubSaving=true; self.addHubError=nil
                 self.emit(action)
                 self.rebuildSettingsPanel()
@@ -2687,6 +2693,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     guard let self=self else{return}
                     self.addHubName=hub.name; self.addHubUrl=hub.url; self.addHubAuth=hub.auth_mode
                     self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubToken=""
+                    self.addHubDraftGeneration += 1
                     self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.addHubFormOpen=true
                     self.rebuildSettingsPanel()
                 }
@@ -3463,8 +3470,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return
         }
         if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostHubPortDraft=field.stringValue; hostHubPortSaved=false }
-        if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue, id.hasPrefix("channel_field:") {
-            channelFieldDrafts[draftKey(id)] = field.stringValue
+        if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue {
+            if id.hasPrefix("channel_field:") { channelFieldDrafts[draftKey(id)] = field.stringValue }
+            else if id.hasPrefix("settings_hub_") { addHubDraftGeneration += 1 }
         }
         syncAddHubFieldsFromControls()
     }
