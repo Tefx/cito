@@ -2473,10 +2473,19 @@ impl DaemonService {
         if self.applied_host_config.as_ref() == Some(host) {
             return Ok(());
         }
-        let settings = host_hub_server_config(host)?;
-        replace_host_hub_server(&self.local, &mut self.host_server, settings)?;
-        self.applied_host_config = Some(host.clone());
-        Ok(())
+        match host_hub_server_config(host).and_then(|settings| {
+            replace_host_hub_server(&self.local, &mut self.host_server, settings)
+        }) {
+            Ok(()) => {
+                self.applied_host_config = Some(host.clone());
+                self.last_host_hub_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.last_host_hub_error = Some(error.clone());
+                Err(error)
+            }
+        }
     }
     fn shutdown(&mut self) {
         // The caller sets closing while holding the service mutex after all calls drain.
@@ -3757,7 +3766,7 @@ mod tests {
             let mut service = DaemonService::open(&config, &plugins)?;
             let result = (|| {
                 let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"token","token":"previous-token"});
-                let committed = json!({"host_hub":host,"other":7}).to_string();
+                let mut committed = json!({"host_hub":host,"other":7}).to_string();
                 fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
                 service.reload_slots()?;
                 let address = service.host_server.as_ref().unwrap().address;
@@ -3791,8 +3800,12 @@ mod tests {
                     invalid[key] = value.clone();
                     let reload = json!({"host_hub":invalid}).to_string();
                     fs::write(&config.config_path, &reload).map_err(|e| e.to_string())?;
-                    let error = service.sync_host_hub().unwrap_err();
+                    service.reload_slots()?;
+                    let settings = service.settings();
+                    let error = settings["host_hub"]["error"].as_str().unwrap();
                     assert!(error.starts_with("INVALID_INPUT:"), "{error}");
+                    assert_eq!(settings["host_hub"]["running"], true);
+                    assert_eq!(settings["host_hub"]["port"], address.port());
                     assert_eq!(service.host_server.as_ref().unwrap().address, address);
                     assert_eq!(
                         fs::read(&config.config_path).map_err(|e| e.to_string())?,
@@ -3811,6 +3824,17 @@ mod tests {
                     assert_eq!(service.host_server.as_ref().unwrap().address, address);
                     rpc(address, "previous-token")?;
                 }
+
+                // A valid external edit supersedes the reload/action error without
+                // abandoning the current socket or its working credentials.
+                let mut valid = host.clone();
+                valid["port"] = json!(address.port());
+                committed = json!({"host_hub":valid,"other":7}).to_string();
+                fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
+                service.reload_slots()?;
+                assert_eq!(service.settings()["host_hub"]["error"], Value::Null);
+                assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                rpc(address, "previous-token")?;
 
                 // A write failure after binding must restore the old socket and credentials.
                 let tmp = config

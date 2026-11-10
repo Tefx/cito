@@ -814,6 +814,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var composerTargetHub = ""
     var composerReplySignalId: String?
     var composerErrorLabel: NSTextField?
+    func setComposerStatus(_ message: String) {
+        composerErrorLabel?.stringValue = message
+        composerErrorLabel?.toolTip = message
+    }
     struct PendingComposerSend {
         let text: String
         let requestId: String
@@ -1144,9 +1148,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard let pending = pendingComposer, frame.request_id == pending.requestId else { return }
             if frame.ok == true {
                 if composerTarget == pending.target && composerTargetHub == pending.hub && composerReplySignalId == pending.replySignalId && composerInputField?.stringValue == pending.text { closeComposer() }
-                else { composerErrorLabel?.stringValue = "Sent. Your newer draft is preserved." }
+                else { setComposerStatus("Sent. Your newer draft is preserved.") }
             } else {
-                composerErrorLabel?.stringValue = frame.error ?? "Send failed. Your draft is preserved."
+                setComposerStatus(frame.error ?? "Send failed. Your draft is preserved.")
             }
             pendingComposer = nil
             return
@@ -1159,13 +1163,17 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                (pendingComposer == nil || frame.request_id != pendingComposer?.requestId) { return }
             if sourceOp == "set_host_hub", let requestId = frame.request_id,
                requestId != submittedHostHubRequestId { return }
-            let isAddHubOp = ["setup_save_hub", "save_hub"].contains(sourceOp) ||
-                (sourceOp.isEmpty && pendingHubSave != nil && frame.request_id == nil)
+            let isAddHubOp = ["setup_save_hub", "save_hub"].contains(sourceOp)
             if isAddHubOp, let requestId = frame.request_id,
                requestId != pendingHubSave?.requestId { return }
-            // Untagged save errors can belong to pasted invites, not the active form submission.
-            let isAddHubError = (isAddHubOp && ((pendingHubSave != nil && frame.request_id == pendingHubSave?.requestId) || (pendingHubSave == nil && addHubFormOpen))) ||
-                (sourceOp.isEmpty && addHubFormOpen)
+            // Only the matching save result owns an active form submission.
+            // Untagged invite/transport failures remain visible in the settings banner.
+            let isAddHubError: Bool
+            if let pending = pendingHubSave {
+                isAddHubError = isAddHubOp && frame.request_id == pending.requestId
+            } else {
+                isAddHubError = addHubFormOpen && (isAddHubOp || sourceOp.isEmpty)
+            }
             let error = frame.error ?? "Unknown daemon error"
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
             if (sourceOp == "set_host_hub" || sourceOp.isEmpty) &&
@@ -1180,10 +1188,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let isComposerError = ["send_signal", "send_reply_from_human", ""].contains(sourceOp) &&
                 pendingComposer != nil && frame.request_id == pendingComposer?.requestId
             if isComposerError {
-                composerErrorLabel?.stringValue = error
+                setComposerStatus(error)
                 pendingComposer = nil
             } else if isAddHubError { addHubError = error }
-            else if settingsVisible { settingsBannerError = error }
+            else if settingsVisible || pendingHubSave != nil { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild()
@@ -1227,7 +1235,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
             let settingsChanged = nextSettings != settings || hostHubPortPending
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name) }
-            if let error = frame.composer_error, !error.isEmpty { composerErrorLabel?.stringValue = error }
+            if let error = frame.composer_error, !error.isEmpty { setComposerStatus(error) }
             if hasRenderedState && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
                 let count = uniqueSessionCount
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
@@ -1350,7 +1358,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if let error = menuBannerError {
             let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
             let label = textLabel(error,NSRect(x:12,y:3,width:320,height:30),size:10,color:.systemRed)
-            label.maximumNumberOfLines=2; label.lineBreakMode = .byWordWrapping; label.toolTip=error
+            label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=error
             row.addSubview(label)
             let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
             dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
@@ -1449,6 +1457,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pill.toolTip = "Connected · \(hub.user ?? "local")"
             } else {
                 pill.label.font = btnFont
+                pill.label.lineBreakMode = .byTruncatingMiddle; pill.label.toolTip = title
                 pill.label.frame.origin.x = 16; pill.label.frame.size.width = width - 20
                 pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
                 pill.toolTip = isSingleDefault ? (hub.status == "connected" ? "Connected · \(hub.user ?? "local")" : title) : "\(hub.name) · \(hub.status)"
@@ -1478,7 +1487,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let card = roundedView(NSRect(x: 10, y: 3, width: 360, height: 46), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
             card.addSubview(makeHarnessBadge(NSRect(x: 10, y: 9, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
-            card.addSubview(textLabel("Human Node (@\(targetUser))", NSRect(x: 46, y: 24, width: 220, height: 16), size: 12.5, weight: .semibold))
+            let title = textLabel("Human Node (@\(targetUser))", NSRect(x: 46, y: 24, width: 220, height: 16), size: 12.5, weight: .semibold)
+            title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
+            card.addSubview(title)
             card.addSubview(textLabel("Paused · Click Enable to receive signals", NSRect(x: 46, y: 8, width: 220, height: 14), size: 10.5, color: .secondaryLabelColor))
             let enable = MenuControl("Enable", frame: NSRect(x: 272, y: 12, width: 78, height: 22), leadingSymbol: "plus", radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
@@ -1549,6 +1560,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 hubPill.identifier = NSUserInterfaceItemIdentifier("switch_hub:\(listener.scoped_id)")
                 hubPill.style = .neutral
                 hubPill.label.font = btnFont
+                hubPill.label.lineBreakMode = .byTruncatingMiddle; hubPill.label.toolTip = listener.hub
+                hubPill.toolTip = listener.hub
                 hubPill.label.alignment = .left
                 hubPill.label.frame = NSRect(x: 16, y: 3.5, width: hubPillWidth - 20, height: 15)
                 let hubStatus = hubs.first(where: { $0.name == listener.hub })?.status ?? "disconnected"
@@ -1559,7 +1572,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     h.status == "connected" && !listeners.contains(where: { $0.hub == h.name && $0.harness == listener.harness && $0.session_id == listener.session_id })
                 }) ?? ring.first
                 if let nextHub = nextTarget?.name {
-                    hubPill.toolTip = "Switch hub to \(nextHub)"
+                    hubPill.toolTip = "\(listener.hub) · Switch hub to \(nextHub)"
                     hubPill.pressed = { [weak self] in
                         guard let self = self else { return }
                         self.pendingMutation = true
@@ -1752,8 +1765,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 : available
             if visibleAvailable.isEmpty {
                 let emptyTarget = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
-                emptyTarget.addSubview(textLabel("All sessions listening on \(targetHub)",
-                    NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor))
+                let label = textLabel("All sessions listening on \(targetHub)",
+                    NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: .secondaryLabelColor)
+                label.lineBreakMode = .byTruncatingMiddle; label.toolTip = label.stringValue
+                emptyTarget.addSubview(label)
                 _ = host(emptyTarget, id: "available_empty_target")
             }
             var groupsByHarness: [String: [Candidate]] = [:]
@@ -1779,9 +1794,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 28))
                 let groupControl = MenuControl(groupTitle, frame: NSRect(x: 8, y: 2, width: 364, height: 24), radius: 6)
                 groupControl.identifier = NSUserInterfaceItemIdentifier("toggle_group:\(harness)")
-                if visual.tier == "experimental" {
-                    groupControl.toolTip = "\(visual.name) (Experimental)"
-                }
+                groupControl.toolTip = visual.tier == "experimental" ? "\(groupTitle) (Experimental)" : groupTitle
                 groupControl.style = .subtleHeader
                 groupControl.symbolName = isCollapsed ? "chevron.right" : "chevron.down"
                 let chev = NSImageView(frame: NSRect(x: 6, y: 7, width: 10, height: 10))
@@ -1795,6 +1808,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 groupControl.label.frame = NSRect(x: 44, y: 4, width: 310, height: 16)
                 groupControl.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
                 groupControl.label.alignment = .left
+                groupControl.label.lineBreakMode = .byTruncatingMiddle; groupControl.label.toolTip = groupTitle
                 groupControl.pressed = { [weak self] in
                     guard let self = self else { return }
                     if self.collapsedGroups.contains(harness) { self.collapsedGroups.remove(harness) }
@@ -2097,7 +2111,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let banner=roundedView(NSRect(x:20,y:376,width:480,height:32),radius:6,color:.systemRed.withAppearanceAlpha(0.10))
             banner.identifier=NSUserInterfaceItemIdentifier("settings_error_banner")
             let label=textLabel(error,NSRect(x:10,y:3,width:432,height:26),size:10,color:.systemRed)
-            label.maximumNumberOfLines=2; label.lineBreakMode = .byWordWrapping; label.toolTip=error
+            label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=error
             label.identifier=NSUserInterfaceItemIdentifier("settings_error_label"); banner.addSubview(label)
             let dismiss=MenuControl("Dismiss",frame:NSRect(x:450,y:6,width:22,height:20),symbol:"xmark")
             dismiss.identifier=NSUserInterfaceItemIdentifier("dismiss_settings_error")
@@ -2157,7 +2171,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
             let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
             let titleW = min(app.tier == "experimental" ? (app.configured ? 84 : 148) : (app.configured ? 174 : 238), ceil(measureTextWidth(app.display_name, font: titleFont)) + 6)
-            card.addSubview(textLabel(app.display_name, NSRect(x: 50, y: 55, width: titleW, height: 17), size: 13, weight: .semibold))
+            let title = textLabel(app.display_name, NSRect(x: 50, y: 55, width: titleW, height: 17), size: 13, weight: .semibold)
+            title.lineBreakMode = .byTruncatingMiddle; title.toolTip = app.display_name
+            card.addSubview(title)
             if app.tier == "experimental" {
                 let expPill = roundedView(NSRect(x: 54 + titleW, y: 56, width: 88, height: 16), radius: 8, color: .systemOrange.withAppearanceAlpha(0.18))
                 expPill.identifier = NSUserInterfaceItemIdentifier("settings_app_tier:\(app.id)")
@@ -2167,7 +2183,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 card.addSubview(expPill)
             }
             let detail = textLabel(app.detail, NSRect(x:50,y:8,width:418,height:30),size:11,color:.secondaryLabelColor)
-            detail.maximumNumberOfLines=2; detail.lineBreakMode = .byWordWrapping
+            detail.maximumNumberOfLines=2; detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip=([app.detail]+app.paths).joined(separator:"\n")
             card.addSubview(detail)
 
@@ -2288,7 +2304,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             chBadge.addSubview(chIcon)
             chCard.addSubview(chBadge)
 
-            chCard.addSubview(textLabel(ch.display_name, NSRect(x: 44, y: cardHeight - 21, width: 180, height: 16), size: 12.5, weight: .semibold))
+            let chTitle = textLabel(ch.display_name, NSRect(x: 44, y: cardHeight - 21, width: 180, height: 16), size: 12.5, weight: .semibold)
+            chTitle.lineBreakMode = .byTruncatingMiddle; chTitle.toolTip = ch.display_name
+            chCard.addSubview(chTitle)
             let channelResult = channelResults["\(effectiveChannelHub)|\(ch.id)"]
             let chStatusText:String
             let chStatusColor:NSColor
@@ -2301,6 +2319,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let chStatusLabel = textLabel(chStatusText, NSRect(x: 240, y: cardHeight - 20, width: 226, height: 15), size: 11, weight: .medium, color: chStatusColor)
             chStatusLabel.alignment = .right
+            chStatusLabel.lineBreakMode = .byTruncatingMiddle; chStatusLabel.toolTip = chStatusText
             chStatusLabel.identifier = NSUserInterfaceItemIdentifier("settings_channel_status:\(ch.id)")
             chCard.addSubview(chStatusLabel)
 
@@ -2343,6 +2362,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 color:.labelColor.withAppearanceAlpha(0.04),border:.labelColor.withAppearanceAlpha(0.10))
             userStratum.identifier=NSUserInterfaceItemIdentifier("stratum_user:\(ch.id)")
             let userTitle=textLabel("2. YOUR PERSONAL NODE (@\(currentUser)) · EACH HUMAN ON '\(effectiveChannelHub.uppercased())'",NSRect(x:12,y:userStratumH-19,width:432,height:13),size:9.5,weight:.bold,color:.secondaryLabelColor)
+            userTitle.lineBreakMode = .byTruncatingMiddle; userTitle.toolTip = userTitle.stringValue
             userTitle.identifier=NSUserInterfaceItemIdentifier("stratum_user_title:\(ch.id)")
             userStratum.addSubview(userTitle)
             let personalDescription=textLabel(personalRole,NSRect(x:12,y:userStratumH-26-personalRoleH,width:432,height:personalRoleH),size:10,color:.secondaryLabelColor)
@@ -2379,9 +2399,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
 
             let chId = ch.id
-            weak var owner = self
-            func collectValues(scopeFilter: String) -> [String: String] {
-                guard let self = owner else { return [:] }
+            let collectValues: (String) -> [String: String] = { [weak self] scopeFilter in
+                guard let self = self else { return [:] }
                 self.syncAddHubFieldsFromControls()
                 var vals: [String: String] = [:]
                 for f in ch.fields where f.hidden != true && f.scope == scopeFilter {
@@ -2400,7 +2419,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if hubGatewayExpanded {
                     let save = MenuControl("Save Gateway Token",frame:NSRect(x:304,y:6,width:140,height:24))
                     save.identifier=NSUserInterfaceItemIdentifier("save_hub_service:\(ch.id)"); save.style = .prominent
-                    save.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"save_hub_service","hub":self.effectiveChannelHub,"channel_id":ch.id,"scope":"hub","values":collectValues(scopeFilter:"hub")]) }
+                    save.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"save_hub_service","hub":self.effectiveChannelHub,"channel_id":ch.id,"scope":"hub","values":collectValues("hub")]) }
                     hubStratum.addSubview(save)
                     if gatewayActive {
                         let cancel=MenuControl("Cancel",frame:NSRect(x:232,y:6,width:66,height:24))
@@ -2424,7 +2443,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pairBtn.identifier = NSUserInterfaceItemIdentifier("pair_channel:\(ch.id)")
                 pairBtn.pressed = { [weak self] in
                     guard let self = self else { return }
-                    self.emit(["op": "channel_pair", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues(scopeFilter:"user")])
+                    self.emit(["op": "channel_pair", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues("user")])
                 }
                 gate(pairBtn); userStratum.addSubview(pairBtn)
             }
@@ -2467,7 +2486,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             testBtn.identifier = NSUserInterfaceItemIdentifier("test_channel:\(ch.id)")
             testBtn.pressed = { [weak self] in
                 guard let self = self else { return }
-                self.emit(["op": "channel_test", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues(scopeFilter:"user")])
+                self.emit(["op": "channel_test", "hub": self.effectiveChannelHub, "channel_id": chId, "values": collectValues("user")])
             }
             gate(testBtn); userStratum.addSubview(testBtn)
 
@@ -2476,7 +2495,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             saveBtn.style = .prominent
             saveBtn.pressed = { [weak self] in
                 guard let self = self else { return }
-                let values = collectValues(scopeFilter:"user")
+                let values = collectValues("user")
                 self.emit(["op": "channel_save", "hub": self.effectiveChannelHub, "channel_id": chId, "enabled": true, "values": values])
             }
             gate(saveBtn); userStratum.addSubview(saveBtn)
@@ -3096,7 +3115,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
         let composerError = textLabel("", NSRect(x: 16, y: 44, width: 528, height: 15), size: 10.5, color: .systemRed)
         composerError.identifier = NSUserInterfaceItemIdentifier("composer_error")
-        composerError.toolTip = "Send status. Failed sends preserve your draft."
+        composerError.lineBreakMode = .byTruncatingMiddle
         composer.addSubview(composerError)
         composerErrorLabel = composerError
         directoryComposerBar = composer
@@ -3151,7 +3170,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func openComposer(target: String, hub: String = "", replySignalId: String? = nil) {
         ensureDirectoryPanel()
-        composerErrorLabel?.stringValue = ""
+        setComposerStatus("")
         composerTarget = target
         composerTargetHub = hub
         composerReplySignalId = replySignalId
@@ -3160,6 +3179,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerTargetPill?.frame.size.width=targetWidth
         composerTargetPill?.label.frame.size.width=targetWidth-6
         composerTargetPill?.label.stringValue = displayTarget
+        composerTargetPill?.label.lineBreakMode = .byTruncatingMiddle
+        composerTargetPill?.label.toolTip = target
         composerInputField?.frame=NSRect(x:18+targetWidth,y:10,width:394-targetWidth,height:24)
         composerTargetPill?.setAccessibilityLabel(target)
         composerTargetPill?.toolTip = target
@@ -3178,7 +3199,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerReplySignalId = nil
         composerInputField?.stringValue = ""
         directoryComposerBar?.isHidden = true
-        composerErrorLabel?.stringValue = ""
+        setComposerStatus("")
         updateDirectoryShortcuts()
         directoryScrollView?.frame = NSRect(x: 0, y: 28, width: 560, height: 334)
     }
@@ -3188,7 +3209,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         guard pendingComposer == nil, !composerTarget.isEmpty, !text.isEmpty else { return }
         // Match the daemon's Unicode code-point limit, including combining scalars.
         guard text.unicodeScalars.count <= 65_536 else {
-            composerErrorLabel?.stringValue = "INVALID_INPUT: Message exceeds maximum length"
+            setComposerStatus("INVALID_INPUT: Message exceeds maximum length")
             return
         }
         let requestId = UUID().uuidString
@@ -3205,12 +3226,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             action["in_reply_to"] = replyId
         }
         guard let data = try? JSONSerialization.data(withJSONObject: action, options: [.sortedKeys]), data.count <= 1_048_576 else {
-            composerErrorLabel?.stringValue = "INVALID_INPUT: UI action exceeds 1 MiB"
+            setComposerStatus("INVALID_INPUT: UI action exceeds 1 MiB")
             return
         }
         pendingComposer = PendingComposerSend(text:composerInputField?.stringValue ?? text,
             requestId:requestId, target:composerTarget, hub:composerTargetHub, replySignalId:composerReplySignalId)
-        composerErrorLabel?.stringValue = "Sending…"
+        setComposerStatus("Sending…")
         emit(action)
     }
 
@@ -3728,6 +3749,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 result["text"] = label is NSSecureTextField ? "••••" : label.stringValue
                 result["secure"] = label is NSSecureTextField
                 result["placeholder"] = label.placeholderString ?? ""
+                result["tooltip"] = label.toolTip ?? ""
             }
             if let control = view as? NSControl { result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue }
             if let control = view as? MenuControl {

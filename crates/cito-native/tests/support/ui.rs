@@ -744,21 +744,26 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             );
             assert!(node(&s, "settings_items", "add_hub_error").is_null());
         }
-        for (op, error) in [
-            ("hub_action", "OIDC cancelled"),
-            ("setup_save_hub", "Invite failed"),
-            ("paste_hub_invite", "Invalid invite"),
+        for frame in [
+            json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
+            json!({"op":"error","source_op":"setup_save_hub","error":"Invite failed"}),
+            json!({"op":"error","source_op":"paste_hub_invite","error":"Invalid invite"}),
+            json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+            json!({"op":"error","source_op":"","request_id":current["request_id"],"error":"Source-less correlated transport failure"}),
         ] {
-            f.send(
-                p,
-                json!({"op":"error","source_op":op,"request_id":null,"error":error}),
-            );
+            let error = frame["error"].clone();
+            let source_less = frame.get("source_op").is_none();
+            if source_less {
+                control(&f, p, "close_settings");
+                assert_eq!(inspect(&f, p)["settings_open"], false);
+            }
+            f.send(p, frame);
             let s = inspect(&f, p);
             assert!(!node(&s, "settings_items", "add_hub_form").is_null());
             assert_eq!(
                 node(&s, "settings_items", "submit_add_hub")["enabled"],
                 false,
-                "An unrelated {op} error must not settle the active submission"
+                "An unrelated error must not settle the active submission: {error}"
             );
             assert!(node(&s, "settings_items", "add_hub_error").is_null());
             assert!(!node(&s, "settings_items", "settings_error_banner").is_null());
@@ -766,6 +771,10 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
                 node(&s, "settings_items", "settings_error_label")["text"],
                 error
             );
+            if source_less {
+                assert!(node(&s, "items", "menu_error_row").is_null());
+                control(&f, p, "open_settings");
+            }
         }
         if retry_after_error {
             f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":current["request_id"],"error":"Current submission failed"}));
@@ -1270,6 +1279,129 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             f.send(p, json!({"op":"test_appearance","appearance":appearance}));
             inspect(&f, p);
         }
+    }
+}
+
+#[test]
+fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow() {
+    let _lock = serial();
+    for length in [40, 64] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let handle = "w".repeat(length);
+        let hub = "h".repeat(40);
+        let display_name = "W".repeat(length);
+        let error = format!(
+            "INVALID_INPUT: {}",
+            "Long diagnostic with recovery context. ".repeat(10)
+        );
+        let mut cfg = settings();
+        cfg["settings_hub"] = json!(hub);
+        cfg["hubs"][0]["name"] = json!(hub);
+        cfg["hubs"][0]["user"] = json!(handle);
+        cfg["channels"][0]["display_name"] = json!(display_name);
+        cfg["channels"][0]["display_label"] = json!(handle);
+        cfg["channels"][0]["configured"] = json!(true);
+        cfg["channels"][0]["status"] = json!("ready");
+        for app in cfg["apps"].as_array_mut().unwrap() {
+            app["display_name"] = json!(display_name);
+            app["detail"] = json!(error);
+            app["paths"] = json!([]);
+        }
+        let mut frame = state();
+        frame["hubs"][0]["name"] = json!(hub);
+        frame["hubs"][0]["user"] = json!(handle);
+        frame["listeners"] = json!([]);
+        frame["settings"] = cfg;
+        frame["harnesses"][0]["display_name"] = json!(display_name);
+        frame["available"] =
+            json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
+        f.send(p, frame.clone());
+        let tooltip = |snapshot: &Value, surface: &str, text: &str| {
+            assert!(
+                nodes(&snapshot[surface])
+                    .iter()
+                    .any(|n| n["text"] == text && n["tooltip"] == text),
+                "Missing full tooltip for {text}"
+            );
+            assert_eq!(snapshot["truncated_labels"], json!([]));
+        };
+        let s = inspect(&f, p);
+        tooltip(&s, "items", &format!("Human Node (@{handle})"));
+        let mut active = listener();
+        active["hub"] = json!(hub);
+        frame["listeners"] = json!([active]);
+        f.send(p, frame.clone());
+        f.send(p, json!({"op":"error","error":error}));
+        let s = inspect(&f, p);
+        tooltip(&s, "items", &error);
+        let pill = node(&s, "items", "switch_hub:personal:repo-abcdefghijkl");
+        assert!(pill["tooltip"].as_str().unwrap().contains(&hub));
+        tooltip(&s, "items", &hub);
+        render_png(&f, p, "menu", &format!("long_identity_menu_{length}.png"));
+        control(&f, p, "open_settings");
+        let s = inspect(&f, p);
+        tooltip(&s, "settings_items", &display_name);
+        tooltip(&s, "settings_items", &error);
+        render_png(
+            &f,
+            p,
+            "settings",
+            &format!("long_identity_apps_{length}.png"),
+        );
+        control(&f, p, "settings_tab:channels");
+        let s = inspect(&f, p);
+        tooltip(&s, "settings_items", &display_name);
+        tooltip(&s, "settings_items", &format!("● Connected ({handle})"));
+        let title = node(&s, "settings_items", "stratum_user_title:channel");
+        assert!(title["text"].as_str().unwrap().contains(&handle));
+        assert!(title["text"]
+            .as_str()
+            .unwrap()
+            .contains(&hub.to_ascii_uppercase()));
+        assert_eq!(title["tooltip"], title["text"]);
+        f.send(p, json!({"op":"error","error":error}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["tooltip"],
+            error
+        );
+        render_png(
+            &f,
+            p,
+            "settings",
+            &format!("long_identity_channels_{length}.png"),
+        );
+        control(&f, p, "open_directory");
+        f.send(p, json!({"op":"directory","peers":[peer("one")]}));
+        control(&f, p, "msg_dir:personal:one");
+        f.send(
+            p,
+            json!({"op":"test_composer_input","value":"Keep this draft"}),
+        );
+        control(&f, p, "composer_send");
+        inspect(&f, p);
+        let submitted = f
+            .frames(p)
+            .into_iter()
+            .find(|a| a["op"] == "send_signal")
+            .unwrap();
+        f.send(p, json!({"op":"composer_result","ok":false,"request_id":submitted["request_id"],"error":error}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "directory_items", "composer_input")["text"],
+            "Keep this draft"
+        );
+        assert_eq!(
+            node(&s, "directory_items", "composer_error")["tooltip"],
+            error
+        );
+        render_png(
+            &f,
+            p,
+            "directory",
+            &format!("long_identity_composer_{length}.png"),
+        );
     }
 }
 
