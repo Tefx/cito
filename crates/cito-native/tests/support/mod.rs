@@ -149,6 +149,7 @@ impl Fixture {
             ("TMPDIR", dir.display().to_string()),
             ("USER", "alice".into()),
             ("CITO_USER", "alice".into()),
+            ("CITO_HOST_NAME", "mac-studio".into()),
             ("CITO_PI_PROCESS_DISCOVERY", "0".into()),
             ("CITO_DISABLE_UI", "1".into()),
             ("CITO_UI_HEADLESS", "1".into()),

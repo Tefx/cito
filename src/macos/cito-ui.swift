@@ -153,6 +153,13 @@ func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
     field.font = font
     return ceil(field.fittingSize.width)
 }
+func nodeDisplayTitle(_ title: String, harness: String, user: String) -> String {
+    let raw = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    if harness == "human" && (raw.isEmpty || raw == "Human" || raw == "@\(user)" || raw == "@\(user) (Me)" || raw.hasPrefix("Human Node")) {
+        return "Human Node (@\(user))"
+    }
+    return title
+}
 func shortPublicId(_ raw: String) -> String {
     guard let split = raw.lastIndex(of: "-") else { return raw }
     let slug = String(raw[..<split]), fp4 = String(raw[raw.index(after: split)...].prefix(4))
@@ -725,8 +732,9 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let availWidth = max(120, 544 - copyWidth - msgWidth - 66)
         let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        let titleW = min(availWidth, measureTextWidth(peer.title, font: titleFont) + 4)
-        line1TitleLabel.stringValue = peer.title
+        let displayTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user)
+        let titleW = min(availWidth, measureTextWidth(displayTitle, font: titleFont) + 4)
+        line1TitleLabel.stringValue = displayTitle
         line1TitleLabel.frame = NSRect(x: 52, y: 26, width: titleW, height: 18)
         line1TitleLabel.identifier = NSUserInterfaceItemIdentifier("dir_title:\(peer.scoped_id)")
 
@@ -748,7 +756,9 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let cleanHost = peer.host_name.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
         let hostText = (peer.channels ?? []).isEmpty ? (cleanHost.isEmpty ? peer.host_name : cleanHost) : peer.channels!.joined(separator: ", ")
-        line2MetaLabel.stringValue = "@\(hostText) · \(peer.about)"
+        let displayAbout = peer.harness == "human" && (peer.about == "Human" || peer.about == "@\(peer.user)" || peer.about == peer.title)
+            ? "Human receiver" : peer.about
+        line2MetaLabel.stringValue = "@\(hostText) · \(displayAbout)"
         line2MetaLabel.frame = NSRect(x: 52 + userW, y: 7, width: max(0, availWidth - userW), height: 16)
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("dir_meta:\(peer.scoped_id)")
     }
@@ -1413,15 +1423,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             view.appearance = testAppearance
             let item = NSMenuItem(); item.view = view; menu.addItem(item); return item
         }
+        let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         let header = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 40))
         header.addSubview(textLabel("Cito", NSRect(x: 12, y: 12, width: 36, height: 18), size: 13, weight: .bold))
         let subtitleText: String
         if count > 0 {
-            subtitleText = "Ready · \(count) agent\(count == 1 ? "" : "s") listening\(humanListening ? " · Human ready" : "")"
+            subtitleText = "Ready · \(count) agent\(count == 1 ? "" : "s") listening"
         } else {
             subtitleText = humanListening ? "Ready · Human listening" : "Ready · Idle"
         }
-        let subWidth = min(246, ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8)
+        let totalHubPillsWidth = hubs.reduce(CGFloat(0)) { $0 + min(180, measureTextWidth($1.name, font: btnFont) + 26) }
+            + CGFloat(max(0, hubs.count - 1)) * 4
+        let subtitleLimit: CGFloat = hubs.count > 1 ? min(246, 368 - 54 - min(144, totalHubPillsWidth)) : 246
+        let subWidth = min(subtitleLimit, ceil(measureTextWidth(subtitleText, font: .systemFont(ofSize: 11.5))) + 8)
         let subLabel = textLabel(subtitleText, NSRect(x: 50, y: 12, width: subWidth, height: 17), size: 11.5, color: CitoPalette.secondaryText)
         subLabel.identifier = NSUserInterfaceItemIdentifier("header_subtitle")
         subLabel.lineBreakMode = .byTruncatingMiddle; subLabel.toolTip = subtitleText
@@ -1440,7 +1454,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             _ = host(row,id:"menu_error_row")
         }
         var drawerItems: [String: NSMenuItem] = [:]
-        let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         for hub in hubs {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 32))
             let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": hub.status == "connected" ? "switch_account" : "login"]) }
@@ -1492,11 +1505,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let stripX = max(138, 54 + subWidth)
         let stripWidth = max(44, 368 - stripX)
         let hubStrip = NSScrollView(frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22))
+        hubStrip.identifier = NSUserInterfaceItemIdentifier("header_hub_strip")
         hubStrip.drawsBackground = false; hubStrip.hasHorizontalScroller = false
         let pillContainer = NSView(frame: NSRect(x: 0, y: 0, width: stripWidth, height: 22))
         hubStrip.documentView = pillContainer; header.addSubview(hubStrip)
         var pillX: CGFloat = stripWidth
-        for hub in hubs.reversed() {
+        for (index, hub) in hubs.reversed().enumerated() {
             let color = statusColor(hub.status)
             let isSingleDefault = hubs.count == 1 && (hub.name == "default" || hub.name == "local")
             let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
@@ -1514,7 +1528,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 title = hub.name
             }
             let width: CGFloat = isCompactIcon ? 44 : min(180, measureTextWidth(title, font: btnFont) + 26)
-            pillX -= width
+            pillX -= width + (index == 0 ? 0 : 4)
             let pill = MenuControl(title, frame: NSRect(x: pillX, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
             if isCompactIcon {
@@ -1542,7 +1556,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 menu?.update()
                 MenuControl.reconcileActiveHover()
             }
-            pillContainer.addSubview(pill); pillX -= 4
+            pillContainer.addSubview(pill)
         }
         if pillX < 0 {
             for pill in pillContainer.subviews { pill.frame.origin.x -= pillX }
@@ -1581,8 +1595,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let isHuman = listener.harness == "human"
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
                 .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
-            let displayTitle = isHuman && (rawTitle.isEmpty || rawTitle == "Human" || rawTitle == "@\(user)" || rawTitle.hasPrefix("Human Node"))
-                ? "Human Node (@\(user))" : listener.title
+            let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user)
             let hasDistinctAbout = !aboutText.isEmpty && aboutText.caseInsensitiveCompare(rawTitle) != .orderedSame
                 && !(isHuman && (aboutText == "Human" || aboutText == "Human receiver"))
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
@@ -1593,27 +1606,32 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 color: .labelColor.withAppearanceAlpha(0.07), border: .labelColor.withAppearanceAlpha(0.11))
             row.addSubview(card)
             activeRows.append((id: "session:\(listener.scoped_id)", view: row))
-            let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: 34, height: 34),
-                radius: 8, iconInset: 8, harness: listener.harness, harnesses: map)
+            let multiHub = hubs.count > 1
+            let badgeSize: CGFloat = multiHub ? 28 : 34
+            let titleX: CGFloat = multiHub ? 42 : 54
+            let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: badgeSize, height: badgeSize),
+                radius: 8, iconInset: multiHub ? 7 : 8, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
             let listenerHub = hubs.first(where: { $0.name == listener.hub })
             let showScopeToggle = !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
-            let hubPillWidth = min(76, max(46, ceil(measureTextWidth(listener.hub, font: btnFont)) + 22))
-            let baseActionWidth: CGFloat = showScopeToggle ? 88 : 22
-            let actionWidth: CGFloat = hubs.count > 1 ? baseActionWidth + hubPillWidth + 4 : baseActionWidth
+            let hubPillWidth = min(64, max(44, ceil(measureTextWidth(listener.hub, font: btnFont)) + 20))
+            let scopeWidth: CGFloat = 62
+            let stopX: CGFloat = 328
+            let scopeX = showScopeToggle ? stopX - 4 - scopeWidth : stopX
+            let titleRight = multiHub ? scopeX - hubPillWidth - 8 : scopeX - 6
             let title = textLabel(displayTitle,
-                NSRect(x: 54, y: cardHeight - 26, width: 350 - 54 - actionWidth - 6, height: 18), size: 13, weight: .semibold)
+                NSRect(x: titleX, y: cardHeight - 26, width: titleRight - titleX, height: 18), size: 13, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle
             title.toolTip = displayTitle; card.addSubview(title)
             if hasDistinctAbout {
-                let aboutLabel = textLabel(aboutText, NSRect(x: 54, y: 28, width: 296, height: 16), size: 11.5, color: CitoPalette.secondaryText)
+                let aboutLabel = textLabel(aboutText, NSRect(x: titleX, y: 28, width: 350 - titleX, height: 16), size: 11.5, color: CitoPalette.secondaryText)
                 aboutLabel.lineBreakMode = .byTruncatingMiddle
                 aboutLabel.toolTip = aboutText; card.addSubview(aboutLabel)
             }
             let short = shortPublicId(listener.public_id)
             let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
             let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
-            let copy = MenuControl(short, frame: NSRect(x: 54, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
+            let copy = MenuControl(short, frame: NSRect(x: titleX, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
             copy.label.font = copyFont
             copy.toolTip = listener.scoped_id; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
             copy.pressed = { [weak self, weak copy] in
@@ -1631,9 +1649,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
             }
             let path = textLabel(pathText,
-                NSRect(x: 54 + copyWidth + 8, y: 8, width: max(0, 296 - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
+                NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, 350 - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = listener.cwd; card.addSubview(path)
-            let scopeX: CGFloat = 350 - baseActionWidth
             if hubs.count > 1 {
                 let hubPill = MenuControl(listener.hub, frame: NSRect(x: scopeX - hubPillWidth - 4, y: cardHeight - 28, width: hubPillWidth, height: 22), radius: 6)
                 hubPill.identifier = NSUserInterfaceItemIdentifier("switch_hub:\(listener.scoped_id)")
@@ -1642,9 +1659,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 hubPill.label.lineBreakMode = .byTruncatingMiddle; hubPill.label.toolTip = listener.hub
                 hubPill.toolTip = listener.hub
                 hubPill.label.alignment = .left
-                hubPill.label.frame = NSRect(x: 16, y: 3.5, width: hubPillWidth - 20, height: 15)
+                hubPill.label.frame = NSRect(x: 13, y: 3.5, width: hubPillWidth - 13, height: 15)
                 let hubStatus = hubs.first(where: { $0.name == listener.hub })?.status ?? "disconnected"
-                hubPill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: statusColor(hubStatus)))
+                hubPill.addSubview(roundedView(NSRect(x: 6, y: 8.5, width: 5, height: 5), radius: 2.5, color: statusColor(hubStatus)))
                 let currentIndex = hubs.firstIndex(where: { $0.name == listener.hub }) ?? 0
                 let ring = (1..<hubs.count).map { hubs[(currentIndex + $0) % hubs.count] }.filter { $0.name != listener.hub && $0.status != "disconnected" }
                 let nextTarget = ring.first(where: { h in
@@ -1660,10 +1677,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 card.addSubview(hubPill)
             }
-            var x: CGFloat = scopeX
             if showScopeToggle {
                 var scope = listener.scope
-                let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: x, y: cardHeight - 28, width: 62, height: 22),
+                let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: scopeX, y: cardHeight - 28, width: scopeWidth, height: 22),
                     leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
                 scopeBtn.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
                 let scopeColor = { [weak scopeBtn] in
@@ -1679,9 +1695,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     scopeBtn?.setAccessibilityLabel(scopeBtn?.label.stringValue); scopeColor()
                     self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
                 }
-                card.addSubview(scopeBtn); x += 66
+                card.addSubview(scopeBtn)
             }
-            let stop = MenuControl("Stop listening", frame: NSRect(x: x, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
+            let stop = MenuControl("Stop listening", frame: NSRect(x: stopX, y: cardHeight - 28, width: 22, height: 22), symbol: "xmark")
             stop.toolTip = "Stop listening"; stop.style = .destructiveHover
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
@@ -3833,14 +3849,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
             if visible, let label = view as? NSTextField, !label.isEditable,
-               label.lineBreakMode != .byTruncatingMiddle, (label.superview is MenuControl || !isDataRow(label)) {
+               (label.lineBreakMode != .byTruncatingMiddle || label.stringValue.count <= 22),
+               (label.superview is MenuControl || !isDataRow(label)) {
                 let font = label.font ?? .systemFont(ofSize:12)
                 let truncated: Bool
                 if label.maximumNumberOfLines == 1 {
                     // Native cell insets and attributed glyph metrics determine
                     // what AppKit can actually draw, not the outer field width.
                     let drawingWidth = label.cell?.drawingRect(forBounds:label.bounds).width ?? label.bounds.width
-                    truncated = label.attributedStringValue.size().width > drawingWidth + 0.5
+                    let requiredWidth = label.cell?.cellSize.width ?? label.attributedStringValue.size().width
+                    truncated = requiredWidth > drawingWidth + 0.5
                 } else {
                     let height = ceil((label.stringValue as NSString).boundingRect(with:NSSize(width:label.frame.width,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:font]).height)
                     truncated = height > label.frame.height + 2
@@ -3963,7 +3981,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             "directory_online_count": directoryOnlineCount,
             "directory_matched_count": directoryMatchedCount, "directory_query": directoryQuery,
             "directory_scope": directoryScopeFilter, "directory_harness": directoryHarnessFilter,
-            "directory_selected_id": selectedId, "directory_items": directoryItems,
+            "directory_selected_id": selectedId, "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
@@ -3980,24 +3998,35 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         guard item.for_me else { return }
         openComposer(target: item.from_scoped_id ?? "@\(item.from_user)", hub: item.hub, replySignalId: item.signal_id)
     }
+    private func matchesWakeSignal(_ item: ActivityItem, payload: Payload) -> Bool {
+        guard let signalId = payload.signal_id else { return false }
+        let hub = payload.hub ?? ""
+        return item.signal_id == signalId
+            || (!hub.isEmpty && item.hub == hub && "\(item.hub):\(item.signal_id)" == signalId)
+            || (signalId.split(separator: ":", maxSplits: 1).last.map(String.init) == item.signal_id
+                && (hub.isEmpty || item.hub == hub))
+    }
     func openActivityForSignal(_ value: Payload) {
         closeComposer()
         directoryQuery = ""; directorySearchField?.stringValue = ""
         activityFilter = "all"
         openDirectoryPanel(mode: "activity")
-        directorySelectedIndex = value.signal_id.flatMap { id in activityFilteredItems.firstIndex { $0.signal_id == id } } ?? 0
+        directorySelectedIndex = activityFilteredItems.firstIndex { matchesWakeSignal($0, payload: value) } ?? 0
         directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
         directoryTableView?.scrollRowToVisible(directorySelectedIndex)
+        updateDirectoryShortcuts()
         emit(["op": "open_directory", "mode": "activity"])
     }
     func openDirectoryForReply(_ value: Payload) {
         guard value.target_harness == "human" else { return }
         let target = (value.from_scoped_id?.isEmpty == false) ? value.from_scoped_id! : "@\(value.from_user)"
+        directoryQuery = ""; directorySearchField?.stringValue = ""
+        activityFilter = "all"
         openDirectoryPanel(mode: "activity")
-        if let sigId = value.signal_id, let idx = activityFilteredItems.firstIndex(where: { $0.signal_id == sigId }) {
-            directorySelectedIndex = idx
-            directoryTableView?.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-        }
+        directorySelectedIndex = activityFilteredItems.firstIndex { matchesWakeSignal($0, payload: value) } ?? 0
+        directoryTableView?.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
+        directoryTableView?.scrollRowToVisible(directorySelectedIndex)
+        updateDirectoryShortcuts()
         openComposer(target: target, hub: value.hub ?? "", replySignalId: value.signal_id)
         emit(["op": "open_directory", "mode": "activity"])
     }
