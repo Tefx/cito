@@ -8286,7 +8286,7 @@ phases:
   name: 'V28 Stage 11 (v0.20.3): Light/Dark Appearance Contrast (CitoPalette), Agent-Only
     Menu Bar Counter, Human Node Card Title Normalization, Agent-vs-Human Reply Boundary
     & Explicit Menu Bar Activity Entry (C1–C5)'
-  status: pending
+  status: in_progress
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100% with 0 compiler/linker warnings, test_inspect across both appearance:
     "light" (aqua) and appearance: "dark" (darkAqua) reports truncated_labels == [],
@@ -8325,7 +8325,7 @@ phases:
   - id: v28.impl
     name: V28 Authoritative DESIGN.md §13 Specification, C1–C5 UX/Visual/Semantic
       Implementation, Light & Dark Retina Snapshots & v0.20.3 Release Alignment
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Authoritative `docs/DESIGN.md` §13 specification, complete\
       \ `C1`–`C5` implementation, Light (`aqua`) & Dark (`darkAqua`) 2x Retina PNG\
@@ -8411,6 +8411,8 @@ phases:
     - src/macos/cito-ui.swift
     - crates/cito-native/tests/support/ui.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-10T10:21:21.460549Z'
   - id: v28.hygiene
     name: 'V28 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & v0.20.3 Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
