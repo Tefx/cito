@@ -6,6 +6,7 @@ import http.server
 import json
 import os
 import pathlib
+import socketserver
 
 sent = []
 polls = 0
@@ -34,6 +35,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         self.wfile.write(data)
-server = http.server.HTTPServer(('127.0.0.1',0),Handler)
-print(json.dumps(dict(port=server.server_port)), flush=True)
+# A loopback fixture must not perform HTTPServer's reverse-DNS lookup at bind time.
+server = socketserver.TCPServer(('127.0.0.1',0),Handler)
+print(json.dumps(dict(port=server.server_address[1])), flush=True)
 server.serve_forever()
