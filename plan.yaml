@@ -8548,7 +8548,7 @@ phases:
   - id: v28.gate
     name: V28 Independent Terminal Acceptance, C1–C5 Light/Dark Verification & v0.20.3
       Release Alignment Gate
-    status: pending
+    status: claimed
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent fresh-context `gate-reviewer` validation (`gate.report.v2`\
       \ `PASS`, `POSITIVE_GATE_EVIDENCE`) over Phase `v28` (`C1`–`C5` Light/Dark verification)\
@@ -8591,3 +8591,5 @@ phases:
     depends_on:
     - v28.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-10T13:04:21.022664Z'
