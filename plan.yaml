@@ -8639,3 +8639,47 @@ phases:
     v0.21.0.
   depends_on:
   - v28
+  steps:
+  - id: v29.impl
+    name: V29 D01–D18 Holistic UI/UX & Cross-Layer Pathway Implementation, 6-Invariant
+      Oracle Upgrade, Light/Dark & Banner Snapshots & v0.21.0 Alignment
+    status: pending
+    description: 'Implement all binding requirements in docs/DESIGN.md §14 (Principles
+      1–5, D01–D18): (1) CitoPresentation domain-to-UI projection & machine error
+      prefix stripping (D01–D05, F02, F10, F11); (2) Unified readable address contract
+      (@<user> and <user>/<harness>#<fp> with 1-to-1 default_hub qualification, @self
+      reservation, suffix collision widening, protocol-neutral pairing_command, MCP
+      tools_list/validate_tool_input parity, and display==clipboard==search==send
+      identity, D06, F15); (3) Sender auto-enrollment on cito_send, non-null from.listener_id,
+      no @from_user fallback for non-human senders, and 7-day Telegram reply retention
+      independent of 30m signal pruning (D18); (4) Universal .overlay scrollers, agent-only
+      Directory facet bar, Human Channels Step 2 collapsed prerequisite strip, Share
+      Hub Off-state collapse, multi-hub header strip & 88pt hub pill, split candidate
+      title/path labels, and uninstall_modal_overlay (D07–D11); (5) Remove ? button
+      & bottom callout, add Activity [Clear] atomic outbox-preserving transaction,
+      filter-before-limit activity queries, selected-row multi-line expansion, full-message
+      copy_activity_message, 512 KiB wake batch ceiling, and interactive-only Pi TTY/flag
+      discovery across process & socket producers (D12–D14, F01, F06–F09); (6) KeyPanel
+      window-level ESC/⌘W/⌘K/↑/↓/⏎ & background drag, Settings active editor focus
+      preservation across state frames, directory query request_id/matched_count/online_count
+      correlation, Composer idempotency_key, hub+target banner coalescing, cache-only
+      snapshot construction, headless WakeBanner renderPNG(surface: "banner"), and
+      6-invariant inspectMenu() gate (D15–D17, F03–F05, F12–F14, F16). Update version
+      to 0.21.0 and pass all workspace tests.'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - plugins/pi/native.rs
+    - plugins/telegram/native.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
