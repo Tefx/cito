@@ -259,6 +259,7 @@ pub struct DaemonService {
     host_id: String,
     host_server: Option<super::hub::HubServer>,
     applied_host_config: Option<Value>,
+    host_hub_reload_failed: bool,
     uninstall: Option<bool>,
     active_settings_hub: Option<String>,
     last_app_action: HashMap<String, String>,
@@ -306,6 +307,7 @@ impl DaemonService {
             host_id,
             host_server: None,
             applied_host_config: None,
+            host_hub_reload_failed: false,
             uninstall: None,
             active_settings_hub: None,
             last_app_action: HashMap::new(),
@@ -2383,6 +2385,7 @@ impl DaemonService {
                     Ok(())
                 };
                 self.host_server = server;
+                self.host_hub_reload_failed = false;
                 if let Err(error) = result {
                     self.last_host_hub_error = Some(error.clone());
                     self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
@@ -2471,6 +2474,11 @@ impl DaemonService {
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
         if self.applied_host_config.as_ref() == Some(host) {
+            // Restoring the applied config resolves reload errors, not rejected UI actions.
+            if self.host_hub_reload_failed {
+                self.last_host_hub_error = None;
+                self.host_hub_reload_failed = false;
+            }
             return Ok(());
         }
         match host_hub_server_config(host).and_then(|settings| {
@@ -2479,10 +2487,12 @@ impl DaemonService {
             Ok(()) => {
                 self.applied_host_config = Some(host.clone());
                 self.last_host_hub_error = None;
+                self.host_hub_reload_failed = false;
                 Ok(())
             }
             Err(error) => {
                 self.last_host_hub_error = Some(error.clone());
+                self.host_hub_reload_failed = true;
                 Err(error)
             }
         }
@@ -3813,10 +3823,21 @@ mod tests {
                     );
                     rpc(address, "previous-token")?;
 
+                    // Restoring the exact applied config clears reload feedback without rebinding.
                     fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
+                    service.reload_slots()?;
+                    assert_eq!(service.settings()["host_hub"]["error"], Value::Null);
+                    assert_eq!(service.host_server.as_ref().unwrap().address, address);
+                    rpc(address, "previous-token")?;
+
                     let mut action = json!({"op":"set_host_hub","enabled":true});
                     action[key] = value;
-                    assert!(service.action(&action).is_err(), "{action}");
+                    let error = service.action(&action).unwrap_err();
+                    assert!(error.starts_with("INVALID_INPUT:"), "{action}: {error}");
+                    assert_eq!(service.settings()["host_hub"]["error"], error);
+                    // An unchanged config cannot resolve a rejected UI action.
+                    service.reload_slots()?;
+                    assert_eq!(service.settings()["host_hub"]["error"], error);
                     assert_eq!(
                         fs::read(&config.config_path).map_err(|e| e.to_string())?,
                         committed.as_bytes()
