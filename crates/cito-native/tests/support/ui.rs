@@ -1605,9 +1605,17 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     });
     control(&f, p, "target_hub:personal");
     assert!(!node(&inspect(&f, p), "items", "available_empty_target").is_null());
-    // First response settles the pending Listen mutation; the next identical state is idle.
+    f.send(
+        p,
+        json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
+    );
+    let before = inspect(&f, p)["rebuilds"].as_u64().unwrap();
+    // An unrelated error must not settle Listen; even an unchanged state must refresh it.
     f.send(p, frame.clone());
-    let before = inspect(&f, p)["rebuilds"].clone();
+    let after = inspect(&f, p)["rebuilds"].as_u64().unwrap();
+    assert_eq!(after, before + 1);
+    // The next identical state is idle.
+    let before = json!(after);
     f.send(p, frame);
     assert_eq!(inspect(&f, p)["rebuilds"], before);
     control(&f, p, "switch_hub:personal:repo-abcdefghijkl");
@@ -1764,6 +1772,45 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
             .iter()
             .any(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
     });
+    f.send(
+        p,
+        json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(
+        node(&s, "directory_items", "composer_error")["text"],
+        "Sending…"
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
+            .count(),
+        1,
+        "Unrelated errors must not permit a duplicate send"
+    );
+    f.send(p, json!({"op":"composer_result","ok":true}));
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], false);
+    assert_eq!(node(&s, "directory_items", "composer_input")["text"], "");
+    control(&f, p, "msg_dir:personal:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Draft preserved"}),
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Draft preserved")
+            .count(),
+        2,
+        "The composer result must settle the send and allow a new one"
+    );
     f.send(
         p,
         json!({"op":"composer_result","ok":false,"error":"Hub unavailable. Retry."}),

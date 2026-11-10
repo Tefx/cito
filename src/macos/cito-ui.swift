@@ -1158,13 +1158,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let isAddHubError = (isAddHubOp && (frame.request_id == submittedAddHubRequestId || (!addHubSaving && addHubFormOpen))) ||
                 (sourceOp.isEmpty && addHubFormOpen)
             let error = frame.error ?? "Unknown daemon error"
-            pendingMutation = false
+            if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
             if sourceOp == "set_host_hub" || sourceOp.isEmpty { hostHubPortPending = false }
             if (["paste_hub_invite", "setup_save_hub", "save_hub"].contains(sourceOp) && frame.request_id == nil) || sourceOp.isEmpty {
                 hubInvitePending=false; hubInvitePastedUntil = .distantPast
             }
             if isAddHubError { addHubSaving = false; submittedAddHubRequestId = "" }
-            if composerPendingText != nil || (["send_signal","send_reply_from_human"].contains(sourceOp) && !(directoryComposerBar?.isHidden ?? true)) {
+            let isComposerError = (["send_signal", "send_reply_from_human"].contains(sourceOp) && (composerPendingText != nil || !(directoryComposerBar?.isHidden ?? true))) ||
+                (sourceOp.isEmpty && composerPendingText != nil)
+            if isComposerError {
                 composerErrorLabel?.stringValue = error
                 composerPendingText = nil; composerPendingTarget = ""; composerPendingHub = ""
             } else if isAddHubError { addHubError = error }
