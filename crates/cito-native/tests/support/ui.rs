@@ -1175,6 +1175,7 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
         ("personal", "sig_agent", false),
         ("personal", "sig_human", true),
         ("work", "sig_agent", false),
+        ("work", "sig_human", true),
     ].into_iter().map(|(hub, id, for_me)| json!({
         "hub":hub,"signal_id":id,"listener_id":"c_other","from_user":"alice",
         "from_host_name":"desktop","from_harness":"fixture","from_title":"Sender",
@@ -1196,7 +1197,11 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
         ),
         ("human", "personal:sig_missing", "personal", 0, "sig_other"),
         ("fixture", "sig_agent", "personal", 1, "sig_agent"),
+        ("fixture", "sig_agent", "work", 3, "sig_agent"),
         ("fixture", "work:sig_agent", "work", 3, "sig_agent"),
+        ("fixture", "work:sig_agent", "", 3, "sig_agent"),
+        ("human", "sig_human", "work", 4, "sig_human"),
+        ("human", "work:sig_human", "", 4, "sig_human"),
         ("fixture", "personal:sig_agent", "", 1, "sig_agent"),
     ] {
         f.send(
@@ -1217,11 +1222,11 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
         assert_eq!(s["activity_filter"], "all");
         assert_eq!(
             s["directory_selected_id"], selected_id,
-            "{harness}: {signal}"
+            "{harness}: {hub}/{signal}"
         );
         assert_eq!(
             s["directory_selected_index"], selected_index,
-            "{harness}: {signal}"
+            "{harness}: {hub}/{signal}"
         );
         if harness == "human" {
             assert_eq!(s["wake_action_text"], "Click to reply in Cito ↩");

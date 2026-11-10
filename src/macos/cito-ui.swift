@@ -3999,12 +3999,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         openComposer(target: item.from_scoped_id ?? "@\(item.from_user)", hub: item.hub, replySignalId: item.signal_id)
     }
     private func matchesWakeSignal(_ item: ActivityItem, payload: Payload) -> Bool {
-        guard let signalId = payload.signal_id else { return false }
-        let hub = payload.hub ?? ""
+        guard let signalId = payload.signal_id, !signalId.isEmpty else { return false }
+        let parts = signalId.split(separator: ":", maxSplits: 1).map(String.init)
+        let effectiveHub = (payload.hub ?? "").isEmpty ? (parts.count == 2 ? parts[0] : "") : (payload.hub ?? "")
+        if !effectiveHub.isEmpty && item.hub != effectiveHub { return false }
         return item.signal_id == signalId
-            || (!hub.isEmpty && item.hub == hub && "\(item.hub):\(item.signal_id)" == signalId)
-            || (signalId.split(separator: ":", maxSplits: 1).last.map(String.init) == item.signal_id
-                && (hub.isEmpty || item.hub == hub))
+            || (!item.hub.isEmpty && "\(item.hub):\(item.signal_id)" == signalId)
+            || (parts.count == 2 && parts[0] == item.hub && parts[1] == item.signal_id)
     }
     func openActivityForSignal(_ value: Payload) {
         closeComposer()
