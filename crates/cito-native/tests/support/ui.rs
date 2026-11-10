@@ -1831,8 +1831,105 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         "↵ Copy Selected ID    ⎋ Close"
     );
     control(&f, p, "dir_mode:activity");
-    f.send(p, state());
+    let activity: Vec<_> = ["reply_a", "reply_b"]
+        .into_iter()
+        .map(|id| {
+            json!({"hub":"personal","signal_id":format!("personal:{id}"),
+                "listener_id":"c_human","from_user":"bob","from_host_name":"laptop",
+                "from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one",
+                "target_harness":"human","target_title":"Me","target_scoped_id":"personal:me",
+                "message":"Approve?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})
+        })
+        .collect();
+    let mut frame = state();
+    frame["activity"] = json!(activity);
+    frame["unread_count"] = json!(2);
+    f.send(p, frame);
+    control(&f, p, "reply_activity:personal:reply_a");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Same reply text"}),
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let replies: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["to"], "personal:one");
+    assert_eq!(replies[0]["hub"], "personal");
+    assert_eq!(replies[0]["in_reply_to"], "personal:reply_a");
+    control(&f, p, "reply_activity:personal:reply_b");
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_reply_signal_id"], "personal:reply_b");
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Same reply text"
+    );
+    f.send(p, json!({"op":"composer_result","ok":true}));
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(s["composer_target"], "personal:one");
+    assert_eq!(s["composer_reply_signal_id"], "personal:reply_b");
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Same reply text"
+    );
+    assert_eq!(
+        node(&s, "directory_items", "composer_error")["text"],
+        "Sent. Your newer draft is preserved."
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let replies: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+        .collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[1]["to"], "personal:one");
+    assert_eq!(replies[1]["hub"], "personal");
+    assert_eq!(replies[1]["in_reply_to"], "personal:reply_b");
+    // Cancel only hides the draft; its in-flight send must still own its snapshot.
+    control(&f, p, "composer_cancel");
     control(&f, p, "dir_mode:directory");
+    control(&f, p, "msg_dir:personal:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Same reply text"}),
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+            .count(),
+        2,
+        "Cancel must not allow a second send before the first result"
+    );
+    f.send(p, json!({"op":"composer_result","ok":true}));
+    let s = inspect(&f, p);
+    assert_eq!(s["composer_open"], true);
+    assert_eq!(s["composer_reply_signal_id"], "");
+    assert_eq!(
+        node(&s, "directory_items", "composer_input")["text"],
+        "Same reply text"
+    );
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let replies: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "send_signal" && v["message"] == "Same reply text")
+        .collect();
+    assert_eq!(replies.len(), 3);
+    assert!(replies[2]["in_reply_to"].is_null());
+    f.send(p, json!({"op":"composer_result","ok":true}));
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+    f.send(p, state());
     assert!(!node(&inspect(&f, p), "directory_items", "msg_dir:personal:one").is_null());
     f.send(p, json!({"op":"test_directory_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["directory_open"], false);

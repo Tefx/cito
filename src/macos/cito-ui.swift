@@ -827,6 +827,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var composerPendingText: String?
     var composerPendingTarget = ""
     var composerPendingHub = ""
+    var composerPendingReplySignalId: String? = nil
     var settings: SettingsPayload?
     var settingsVisible = false
     var settingsActiveTab = "apps"
@@ -1138,7 +1139,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if frame.op == "composer_result" {
             guard composerPendingText != nil else { return }
             if frame.ok == true {
-                if composerTarget == composerPendingTarget && composerTargetHub == composerPendingHub && composerInputField?.stringValue == composerPendingText { closeComposer() }
+                if composerTarget == composerPendingTarget && composerTargetHub == composerPendingHub && composerReplySignalId == composerPendingReplySignalId && composerInputField?.stringValue == composerPendingText { closeComposer() }
                 else { composerErrorLabel?.stringValue = "Sent. Your newer draft is preserved." }
             } else {
                 composerErrorLabel?.stringValue = frame.error ?? "Send failed. Your draft is preserved."
@@ -1146,6 +1147,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             composerPendingText = nil
             composerPendingTarget = ""
             composerPendingHub = ""
+            composerPendingReplySignalId = nil
             return
         }
         if frame.op == "error" {
@@ -1168,7 +1170,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 (sourceOp.isEmpty && composerPendingText != nil)
             if isComposerError {
                 composerErrorLabel?.stringValue = error
-                composerPendingText = nil; composerPendingTarget = ""; composerPendingHub = ""
+                composerPendingText = nil; composerPendingTarget = ""; composerPendingHub = ""; composerPendingReplySignalId = nil
             } else if isAddHubError { addHubError = error }
             else if settingsVisible { settingsBannerError = error }
             else { menuBannerError = error }
@@ -3147,6 +3149,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func closeComposer() {
+        // Keep the entire pending-send snapshot until its result, even after Cancel.
         composerTarget = ""
         composerTargetHub = ""
         composerReplySignalId = nil
@@ -3174,6 +3177,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerPendingText = composerInputField?.stringValue
         composerPendingTarget = composerTarget
         composerPendingHub = composerTargetHub
+        composerPendingReplySignalId = composerReplySignalId
         composerErrorLabel?.stringValue = "Sending…"
         emit(action)
     }
