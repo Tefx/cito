@@ -550,9 +550,8 @@ impl DaemonService {
             {
                 continue;
             }
-            let user = string(&client.identity, "owner_user");
-            let args = json!({"about":format!("@{user}")});
-            let caller = json!({"harness":"human","session_id":"default","cwd":"","title":format!("@{user}")});
+            let args = json!({"about":"Human receiver"});
+            let caller = json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
             if client.local.is_some() {
                 super::registration::register_automatic_human(
                     &self.state,
@@ -604,7 +603,7 @@ impl DaemonService {
                 return Err("INVALID_INPUT: Human node session_id must be 'default'".into());
             }
             return Ok(Some(
-                json!({"harness":"human","session_id":"default","cwd":"","title":format!("@{}",self.get_effective_user()?)}),
+                json!({"harness":"human","session_id":"default","cwd":"","title":"Human"}),
             ));
         }
         let mut failures = Vec::new();
@@ -1028,13 +1027,12 @@ impl DaemonService {
             let disabled = super::registration::local_node(&self.state, slot, "human", "default")?
                 .is_some_and(|row| row["status"] == "UNLISTENED");
             if !disabled {
-                let owner = string(&slot.identity, "owner_user");
                 super::registration::register_automatic_human(
                     &self.state,
                     slot,
                     &self.host_id,
-                    &json!({"about":format!("@{owner}")}),
-                    &json!({"harness":"human","session_id":"default","cwd":"","title":format!("@{owner}")}),
+                    &json!({"about":"Human receiver"}),
+                    &json!({"harness":"human","session_id":"default","cwd":"","title":"Human"}),
                 )?;
                 directory = slot.directory()?;
             }
@@ -2229,6 +2227,9 @@ impl DaemonService {
                     caller = self
                         .caller(&meta, true)?
                         .ok_or("BINDING_REQUIRED: Session is not open")?;
+                }
+                if caller["harness"] == "human" && string(&caller, "title").trim().is_empty() {
+                    caller["title"] = json!("Human");
                 }
                 let about = action["about"].as_str().unwrap_or("Session");
                 return self.listen(

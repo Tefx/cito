@@ -8080,7 +8080,7 @@ phases:
 - id: v27
   name: V27 Full-Scope 2D Contract-and-Simplicity Iterative Convergence Audit, Mechanism-Level
     Consolidation & Release Alignment
-  status: in_progress
+  status: done
   gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
     pass 100% with 0 compiler/linker warnings, test_inspect reports truncated_labels
     == [], overlapping_siblings == [], and clipped_views == [], grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
@@ -8109,7 +8109,7 @@ phases:
     name: 'Full-Scope 1..EOF 2D Contract-and-Simplicity Iterative Convergence Audit,
       Mechanism-Level Consolidation & Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -8167,10 +8167,53 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-10T05:02:46.961698Z'
+    done_at: '2026-11-10T08:23:20.233573+00:00'
+    evidence: "Artifact:\n- Commit: 8b22875667ae588eeb499cf72bb93dbb7e1a53a9 (30 files\
+      \ changed, +1362 / -379 lines across 2D `1..EOF` discovery & semantic-impact\
+      \ delta rounds + Homebrew checksum alignment; annotated release tag `v0.20.2`\
+      \ at build commit `9948f2bb56d586c24231ff6b51d29c3e55489eb8`)\n- Executor: rust-senior\
+      \ + fresh-context `pathway-auditor` (Slices P-A & P-B), `structural-auditor`\
+      \ ($H_1 \\dots H_4$), and `uiux-auditor` (Slice U + 33 Retina PNG snapshots)\
+      \ under `[REQUIRES_SKILL: contract-and-simplicity]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`.\n\
+      - Convergence Summary:\n  - Round 1 Exhaustive `1..EOF` 2D Discovery read 100%\
+      \ (`1..EOF`) of all 40+ design, source, plugin, UI, website, and test files\
+      \ (`Uninspected Gaps: NONE`), synthesizing the Frozen Finding Ledger (`M1`–`M7`\
+      \ + Phase B structural trims).\n  - Closed all mechanisms (`M1` dry-run `setup_remove`\
+      \ guards & hermetic `resolve_app_bundle_path`, `M2` `host_hub` RMW preservation,\
+      \ `sync_host_hub()` reload & `host_hub_reload_failed` reconciliation, `qualify_reply_ids`\
+      \ normalization, and `cito-bridge.ts` port precedence, `M3` `hub_processed_replies`\
+      \ rotation reset, `replay` readiness gate, missing-plugin resilience, SSE drop\
+      \ cleanup, and persistent channel process-group teardown, `M4` hook-backed Claude\
+      \ `probe` fallback, atomic `drain_wakes`, and 8 MiB HTTP response bound, `M5`\
+      \ `generate_hub_invite` `\"name\"`, `set_scope` CAS retry, hub-scoped `ack_signals`,\
+      \ and 16-char hex `format_sender`, `M6`–`M7` `.byTruncatingMiddle` + `toolTip`\
+      \ on dynamic labels, `dismiss_menu_error`, channel draft cleanup, `renderPNG(\"\
+      directory\")` row materialization, `PendingComposerSend`/`PendingHubSave` struct\
+      \ consolidation, removal of `clear_wake_claim`/`schedule_wake_retry`/`loadStartupHarnesses`,\
+      \ injectable renewal interval in `receiver_tests.rs`, and doc/site sync) plus\
+      \ Round 2–3 delta items (`V27-R2-P1`–`V27-R2-P4`, `V27-R3-P1`).\n  - Round 4\
+      \ fresh-context verdicts:\n    - `pathway-auditor` (`2026-11-10T07-53-47-720Z_01a1c472-e9c7-7361-b313-7b77c1229e08.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n    - `structural-auditor` (`2026-11-10T07-53-47-809Z_01a1c472-ea20-77cb-b70a-7156022cadc8.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n    - `uiux-auditor` (`2026-11-10T07-53-47-629Z_01a1c472-e96c-7209-be96-1f7a8facb83e.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n- Live Distribution Alignment (`v0.20.2`):\n\
+      \  - GitHub Release `v0.20.2` (`https://github.com/Tefx/cito/releases/tag/v0.20.2`,\
+      \ built on `macos-15` in Actions run `42780054674` with `0` `warning:` and `0`\
+      \ `linker_messages` lines): published `Cito-macos-arm64.zip` with SHA-256 `8e9d14eea5b1d310b392752817d6d48c15fdfee2723080b6ee4b515f1c160625`,\
+      \ synchronized to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`, commit `98528121bcf4a6e6d4eebdbaffefc75064ab683c`).\n\n\
+      Verification:\n- Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` -> 243 passed, 0 failed, 0 compiler/linker\
+      \ warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v27.hygiene`.\n\nSpec link:\n\
+      - docs/DESIGN.md (§§1–12), docs/ROADMAP.md"
   - id: v27.gate
     name: V27 Independent Terminal Acceptance, Full-Scope 2D Contract-and-Simplicity
       Convergence & Release Alignment Gate
-    status: pending
+    status: done
     description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
       \n- **Deliver:** Independent terminal Phase `v27` acceptance decision (`PASS`\
       \ or `FAIL`) issued by a fresh-context `gate-reviewer` session.\n- **Boundary:**\
@@ -8209,4 +8252,311 @@ phases:
     - packaging/homebrew/cito.rb
     depends_on:
     - v27.hygiene
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-10T08:23:48.326639Z'
+    done_at: '2026-11-10T08:36:42.150057+00:00'
+    evidence: 'Artifact:
+
+      - Commit: ffe3cc46091207efaee1d5d1f150a751bd070043 (code commit 8b22875667ae588eeb499cf72bb93dbb7e1a53a9;
+      release tag `v0.20.2` at build commit `9948f2bb56d586c24231ff6b51d29c3e55489eb8`;
+      `Tefx/homebrew-tap` commit `98528121bcf4a6e6d4eebdbaffefc75064ab683c`)
+
+      - Gate Report (`gate.report.v2`): `/Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-10T08-32-27-826Z-2026-11-10T08-26-19-908Z_01a1c490-b382-729f-bed3-2de97136abf8.js-e6834d4b501e2aa1.txt`
+      (fresh-context `gate-reviewer` session `2026-11-10T08-26-19-908Z_01a1c490-b382-729f-bed3-2de97136abf8.jsonl`,
+      `status: PASS`, `review_kind: PHASE_GATE`, `review_mode: FULL`, `target_ref:
+      git:ffe3cc46091207efaee1d5d1f150a751bd070043`, 4/4 requirements `PROVEN`, `findings:
+      []`, `warnings: []`).
+
+
+      Verification:
+
+      - Run: `python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v27-gate/binding.json /tmp/cito-v27-gate/report.json` -> `{"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}`
+
+      - Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby -c
+      packaging/homebrew/cito.rb` -> 243 passed, 0 failed, 0 compiler/linker warnings,
+      `Syntax OK`
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§§1–12), docs/ROADMAP.md, packaging/homebrew/cito.rb, .github/workflows/release.yml'
+- id: v28
+  name: 'V28 Stage 11 (v0.20.3): Light/Dark Appearance Contrast (CitoPalette), Agent-Only
+    Menu Bar Counter, Human Node Card Title Normalization, Agent-vs-Human Reply Boundary
+    & Explicit Menu Bar Activity Entry (C1–C5)'
+  status: in_progress
+  gate: 'cargo test --workspace && cargo build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb
+    pass 100% with 0 compiler/linker warnings, test_inspect across both appearance:
+    "light" (aqua) and appearance: "dark" (darkAqua) reports truncated_labels == [],
+    overlapping_siblings == [], clipped_views == [], and low_contrast_labels == []
+    (>= 4.5:1 WCAG AA), grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+    crates/cito-native/src/core/ src/macos/ exits with 0 matches, [REQUIRES_SKILL:
+    contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE] converges to Completeness:
+    CLEAN, Simplicity: ZERO_NEW_ISSUES, Holds / Unproven: 0, and Uninspected Gaps:
+    NONE across pathway-auditor, structural-auditor, and uiux-auditor (inspecting
+    both Light aqua and Dark darkAqua 2x Retina PNG snapshots), and v0.20.3 is published
+    on GitHub Releases (macos-15) and synchronized to packaging/homebrew/cito.rb and
+    Tefx/homebrew-tap (Formula/cito.rb & Casks/cito.rb).'
+  context: 'Deliver Stage 11 (v0.20.3 — C1–C5) across docs/DESIGN.md (§13), docs/ROADMAP.md,
+    crates/cito-native/src/core/{daemon.rs,registration.rs}, src/macos/cito-ui.swift,
+    crates/cito-native/tests/support/ui.rs, and release metadata: (C1) agent-only
+    menu bar icon counter (uniqueSessionCount excludes harness == "human") with clear
+    "Ready · Human listening" vs "N agent(s) listening" header_subtitle; (C2) Human
+    Node card title normalization ("Human" default title in daemon.rs and registration.rs,
+    "Human Node (@<user>)" active card title, and suppression of duplicate "Human"/"Human
+    receiver" about lines after Disable -> + Enable); (C3) dynamic Light (aqua) /
+    Dark (darkAqua) semantic palette CitoPalette achieving WCAG AA contrast (>= 4.5:1)
+    with appearance-aware MenuControl.copied(), "appearance": "light" | "dark" support
+    in test_render_png and test_inspect_menu, low_contrast_labels (< 4.5) mechanical
+    contrast oracle in inspectMenu(), and Light + Dark 2x Retina PNG snapshots; (C4)
+    strict Agent-to-Agent vs Agent-to-Human reply boundary in WakeBanner ("Click to
+    reply in Cito ↩" -> openDirectoryForReply vs "Click to view in Activity ↗" ->
+    openActivityForSignal) and DirectoryPanel Activity mode ([Reply] button and Return
+    key enabled only when item.for_me); and (C5) side-by-side Directory… (open_directory)
+    and Activity… (open_activity) entry buttons in Menu Bar Zone 4. Follow with a
+    2D contract-and-simplicity iterative convergence audit ([REQUIRES_SKILL: contract-and-simplicity]
+    [GATE_MODE: ITERATIVE_CONVERGENCE]), v0.20.3 release alignment, and an independent
+    terminal acceptance gate.'
+  depends_on:
+  - v27
+  steps:
+  - id: v28.impl
+    name: V28 Authoritative DESIGN.md §13 Specification, C1–C5 UX/Visual/Semantic
+      Implementation, Light & Dark Retina Snapshots & v0.20.3 Release Alignment
+    status: done
+    description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
+      ```\n\n- **Deliver:** Authoritative `docs/DESIGN.md` §13 specification, complete\
+      \ `C1`–`C5` implementation, Light (`aqua`) & Dark (`darkAqua`) 2x Retina PNG\
+      \ snapshots with mechanical contrast oracle verification, and `v0.20.3` version\
+      \ alignment:\n  - **Specification & Version Metadata**: Update `docs/DESIGN.md`\
+      \ (§13 `V28 — Stage 11 v0.20.3: Light/Dark Semantic Palette CitoPalette, Agent-Only\
+      \ Menu Bar Counter, Human Node Card Title Normalization, Agent-vs-Human Reply\
+      \ Boundary & Explicit Menu Bar Activity Entry (C1–C5)`), `docs/ROADMAP.md` (`Stage\
+      \ 11 v0.20.3`), `README.md`, `site/index.html`, `site/docs/guide.html`, `crates/cito-native/Cargo.toml`\
+      \ (`0.20.3`), `Cargo.lock`, `plugins/pi/package.json` (`0.20.3`), and `packaging/homebrew/cito.rb`\
+      \ (`0.20.3`).\n  - **`C1` (Menu Bar Icon Counter Semantics)**: Define `uniqueSessionCount`\
+      \ in `src/macos/cito-ui.swift` as `Set(listeners.filter { $0.harness != \"human\"\
+      \ }.map { ... }).count` so the ambient `Human Node` (`harness == \"human\"`)\
+      \ does not pin a permanent `1` next to the menu bar icon when 0 agent sessions\
+      \ and 0 unread signals exist; in the menu card `header_subtitle`, clearly show\
+      \ `\"Ready · Human listening\"` when only the Human Node is listening and `\"\
+      N agent(s) listening\"` when agent sessions are attached.\n  - **`C2` (Human\
+      \ Node Re-Enable Card Title Normalization)**: In `crates/cito-native/src/core/daemon.rs`\
+      \ (`listen_session`) and `crates/cito-native/src/core/registration.rs`, default\
+      \ `title` to `\"Human\"` whenever `harness == \"human\"` and `title` is empty;\
+      \ in `src/macos/cito-ui.swift`, render `listener.harness == \"human\"` active\
+      \ cards with title `\"Human Node (@\\(user))\"` and suppress `hasDistinctAbout`\
+      \ when `about` is `\"Human\"` or `\"Human receiver\"`, keeping the compact single-line\
+      \ `64pt` card without a blank top line after `Disable -> + Enable`.\n  - **`C3`\
+      \ (Dynamic Light `aqua` / Dark `darkAqua` Semantic Palette `CitoPalette` & Mechanical\
+      \ Contrast Oracle)**: Implement `enum CitoPalette` in `src/macos/cito-ui.swift`\
+      \ using `NSColor(name: nil) { appearance in ... }` so both `NSAppearance.Name.aqua`\
+      \ (Light Mode) and `NSAppearance.Name.darkAqua` (Dark Mode) achieve WCAG AA\
+      \ contrast (`>= 4.5:1`):\n    - `CitoPalette.successText` (Light: deep emerald\
+      \ `sRGB(0.04, 0.43, 0.16)` `#0A6E29`; Dark: mint `sRGB(0.28, 0.85, 0.44)`),\
+      \ plus appearance-aware `MenuControl.copied()` pill fill/border/text/icon;\n\
+      \    - `CitoPalette.warningText` (Light: deep amber `sRGB(0.64, 0.28, 0.00)`\
+      \ `#A34700` with `0.16` alpha fill / `0.30` alpha border on `Experimental` badge;\
+      \ Dark: warm amber `sRGB(1.00, 0.70, 0.25)`);\n    - `CitoPalette.dangerText`\
+      \ (Light: deep crimson `sRGB(0.74, 0.10, 0.14)`; Dark: coral red `sRGB(1.00,\
+      \ 0.44, 0.42)`);\n    - `CitoPalette.infoText` (Light: deep ocean blue `sRGB(0.00,\
+      \ 0.34, 0.75)`; Dark: sky blue `sRGB(0.40, 0.74, 1.00)`).\n    - Support `\"\
+      appearance\": \"light\" | \"dark\"` in `test_render_png` and `test_inspect_menu`,\
+      \ add `low_contrast_labels` (`contrast < 4.5`) to `inspectMenu()`, and render/verify\
+      \ both Light (`aqua`) and Dark (`darkAqua`) 2x Retina PNG snapshots.\n  - **`C4`\
+      \ (Agent-to-Agent vs. Agent-to-Human Wake Banner & Activity Reply Boundary)**:\n\
+      \    - In `WakeBanner`: when `payload.target_harness == \"human\"`, show `\"\
+      Click to reply in Cito ↩\"` and call `openDirectoryForReply?(payload)`; when\
+      \ `payload.target_harness != \"human\"` (Agent -> Agent message), show `\"Click\
+      \ to view in Activity ↗\"` and open the `Activity` tab with that signal selected\
+      \ without opening the Human reply composer (`openActivityForSignal?(payload)`).\n\
+      \    - In `DirectoryPanel` (`Activity` mode): render the `[Reply]` button (`reply_activity:<index>`)\
+      \ and allow `Return` key reply **only** when `item.for_me` (`item.target_harness\
+      \ == \"human\"`); hide `[Reply]` and ignore `Return` for Agent -> Agent messages\
+      \ (`!item.for_me`).\n  - **`C5` (Explicit Side-by-Side `Directory…` & `Activity…`\
+      \ Entry Buttons in Menu Bar Zone 4)**:\n    - Replace the single full-width\
+      \ `Search Network Directory…` row in Menu Bar Zone 4 with two side-by-side buttons:\
+      \ left `open_directory` (`title: \"Directory…\"`, `symbol: \"magnifyingglass\"\
+      `, `trailingText: \"\\(totalOnlineCount) online\"`) and right `open_activity`\
+      \ (`title: \"Activity…\"`, `symbol: unreadCount > 0 ? \"bell.badge.fill\" :\
+      \ \"clock.arrow.circlepath\"`, `trailingText: unreadCount > 0 ? \"\\(unreadCount)\
+      \ unread\" : \"History\"`, opening `DirectoryPanel` directly in `Activity` mode\
+      \ via `openDirectory(mode: \"activity\")`).\n- **Boundary:** Owner `rust-senior`;\
+      \ modifies `/Users/tefx/Projects/cito` (`plan.yaml` managed exclusively by Vectl).\n\
+      - **Admit:** Completed Phase `v27`; `cargo test --workspace && cargo build --release\
+      \ && /usr/bin/ruby -c packaging/homebrew/cito.rb` exits `0` with 0 compiler/linker\
+      \ warnings; `test_inspect` across both Light (`aqua`) and Dark (`darkAqua`)\
+      \ appearances reports `truncated_labels == []`, `overlapping_siblings == []`,\
+      \ `clipped_views == []`, and `low_contrast_labels == []`; zero hardcoded agent/channel\
+      \ identifiers in `crates/cito-native/src/core/` and `src/macos/`.\n- **Recovery:**\
+      \ Reconcile compilation, test, geometry, or Light/Dark contrast failures in\
+      \ place within the step worktree and clean up any temporary test artifacts or\
+      \ processes."
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - README.md
+    - site/index.html
+    - site/docs/guide.html
+    - crates/cito-native/Cargo.toml
+    - Cargo.lock
+    - plugins/pi/package.json
+    - packaging/homebrew/cito.rb
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/registration.rs
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-10T10:21:21.460549Z'
+    done_at: '2026-11-10T10:53:40.619208+00:00'
+    evidence: "Artifact:\n- Commit: 0924f4f078f9932306253a8885a15083c8a43678 (`fix(ui):\
+      \ implement Stage 11 C1-C5 and align v0.20.3`, 36 files changed, +739 / -192\
+      \ lines)\n- Executor: rust-senior (session `2026-11-10T10-24-59-659Z_01a1c4fd-570a-776b-937d-0249e2a52e6a.jsonl`)\n\
+      - Delivered Scope (`C1`–`C5` + `0.20.3`):\n  1. `C1` (Agent-Only Menu Bar Icon\
+      \ Counter & Header Subtitle): `uniqueSessionCount` excludes `harness == \"human\"\
+      `, so ambient Human Node alone renders `status_title == \"\"` when `unreadCount\
+      \ == 0`, while `header_subtitle` clearly displays `\"Ready · Human listening\"\
+      ` or `\"Ready · N agent(s) listening\"`.\n  2. `C2` (Human Node Re-Enable Card\
+      \ Title Normalization): `daemon.rs` and `registration.rs` default `title` to\
+      \ `\"Human\"` when `harness == \"human\"` and `title` is empty; `cito-ui.swift`\
+      \ renders `\"Human Node (@<user>)\"` and suppresses `hasDistinctAbout` when\
+      \ `about` is `\"Human\"` or `\"Human receiver\"`, preserving a compact single-line\
+      \ `64pt` card after `Disable -> + Enable`.\n  3. `C3` (Dynamic Light `aqua`\
+      \ / Dark `darkAqua` Semantic Palette `CitoPalette` & Mechanical Contrast Oracle):\
+      \ Added `enum CitoPalette` (`successText`, `warningText`, `dangerText`, `infoText`,\
+      \ `copiedFill/Border`, `warningFill/Border`), appearance-aware `renderPNG`/`inspectMenu`\
+      \ (`\"appearance\": \"light\" | \"dark\"`), and `low_contrast_labels` (`contrast\
+      \ < 4.5`) across all 47 Light/Dark 2x Retina snapshots in `/tmp/cito-v28-snapshots`.\n\
+      \  4. `C4` (Agent-to-Agent vs. Agent-to-Human Reply Boundary): `WakeBanner`\
+      \ shows `\"Click to reply in Cito ↩\"` and opens the reply composer only for\
+      \ `target_harness == \"human\"`, and shows `\"Click to view in Activity ↗\"\
+      ` (opening `Activity` with that signal selected and no composer) for `target_harness\
+      \ != \"human\"`; `Activity` rows show `[Reply]` and accept `Return` only when\
+      \ `item.for_me == true`.\n  5. `C5` (Explicit Side-by-Side `Directory…` & `Activity…`\
+      \ Buttons in Menu Bar Zone 4): Replaced single full-width row with `open_directory`\
+      \ (`\"Directory…\"`, `\"N online\"`) and `open_activity` (`\"Activity…\"`, `\"\
+      M unread\"` / `\"History\"`).\n  6. Updated `docs/DESIGN.md` (§13), `docs/ROADMAP.md`,\
+      \ `README.md`, `site/`, and `0.20.3` version manifests.\n\nVerification:\n-\
+      \ Run: `CITO_TEST_SNAPSHOT_DIR=/tmp/cito-v28-snapshots cargo test --test native\
+      \ ui::` -> 24 passed, 47 Retina PNG snapshots rendered & inspected (`low_contrast_labels\
+      \ == []`, `truncated_labels == []`, `overlapping_siblings == []`, `clipped_views\
+      \ == []`)\n- Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` -> 247 passed, 0 failed, 0 compiler/linker\
+      \ warnings, `Syntax OK`, `bin/cito --version` == `cito v0.20.3`\n- Run: `grep\
+      \ -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v28.impl`.\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§13), docs/ROADMAP.md (Stage 11 v0.20.3)"
+  - id: v28.hygiene
+    name: 'V28 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
+      Multimodal Review & v0.20.3 Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
+      [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: claimed
+    description: '```yaml
+
+      step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+      ```
+
+
+      - **Deliver:** `[REQUIRES_SKILL: contract-and-simplicity]` `[GATE_MODE: ITERATIVE_CONVERGENCE]`
+      Execute a 2D contract-and-simplicity iterative convergence audit with fresh-context
+      `pathway-auditor`, `structural-auditor`, and `uiux-auditor` (inspecting both
+      Light `aqua` and Dark `darkAqua` 2x Retina PNG snapshots) until all three return
+      `Completeness: CLEAN`, `Simplicity: ZERO_NEW_ISSUES`, `Holds / Unproven: 0`,
+      and `Uninspected Gaps: NONE` in the same round, then publish `v0.20.3` on GitHub
+      Releases (`macos-15`) and sync the `Cito-macos-arm64.zip` SHA-256 to `packaging/homebrew/cito.rb`
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Boundary:** Owner `rust-senior`; repository changes in `/Users/tefx/Projects/cito`
+      plus authorized distribution effects on `Tefx/cito` (GitHub Release `v0.20.3`
+      & GitHub Pages) and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`)
+      after multimodal Light/Dark visual review, contract-and-simplicity convergence,
+      and `cargo test --workspace` pass.
+
+      - **Admit:** Completed `v28.impl` (`C1`–`C5`), Light (`aqua`) and Dark (`darkAqua`)
+      2x Retina PNG snapshots inspected by fresh-context `uiux-auditor` alongside
+      `pathway-auditor` and `structural-auditor` reaching `Completeness: CLEAN`, `Simplicity:
+      ZERO_NEW_ISSUES`, `Holds / Unproven: 0`, and `Uninspected Gaps: NONE` in the
+      same round; `truncated_labels == []`, `overlapping_siblings == []`, `clipped_views
+      == []`, and `low_contrast_labels == []` in both appearances; zero matches on
+      `grep -rnE -i ''\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\b''
+      crates/cito-native/src/core/ src/macos/`; `cargo test --workspace && cargo build
+      --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exiting `0`; and verified
+      SHA-256 parity across GitHub Release `v0.20.3`, `packaging/homebrew/cito.rb`,
+      and `Tefx/homebrew-tap` (`Formula/cito.rb` & `Casks/cito.rb`).
+
+      - **Recovery:** If any multimodal visual check, audit round, or release/tap
+      update reports actionable findings, repair in place, re-render the affected
+      Light/Dark PNG snapshots, re-run checks and fresh-context delta verification
+      until `ZERO_NEW_ISSUES`, and reconcile release tags and Homebrew tap Formula/Cask
+      SHA-256 values.'
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/registration.rs
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v28.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-10T10:54:11.056646Z'
+  - id: v28.gate
+    name: V28 Independent Terminal Acceptance, C1–C5 Light/Dark Verification & v0.20.3
+      Release Alignment Gate
+    status: pending
+    description: "```yaml\nstep_type: gate\nrepo_change_policy: no_repo_change\n```\n\
+      \n- **Deliver:** Independent fresh-context `gate-reviewer` validation (`gate.report.v2`\
+      \ `PASS`, `POSITIVE_GATE_EVIDENCE`) over Phase `v28` (`C1`–`C5` Light/Dark verification)\
+      \ and live `v0.20.3` distribution.\n- **Boundary:** Owner `gate-reviewer`; strictly\
+      \ read-only (`repo_change_policy: no_repo_change`) over the immutable integrated\
+      \ Git HEAD in `/Users/tefx/Projects/cito` and live public endpoints.\n- **Admit:**\n\
+      \  - Included phase and terminal outcomes: Phase `v28` (`v28.impl` and `v28.hygiene`)\
+      \ bound to the immutable integrated Git HEAD in `/Users/tefx/Projects/cito`.\n\
+      \  - Consumed evidence and checks:\n    1. `cargo test --workspace && cargo\
+      \ build --release && /usr/bin/ruby -c packaging/homebrew/cito.rb` exits `0`\
+      \ with 100% pass rate and 0 compiler/linker warnings, with `truncated_labels\
+      \ == []`, `overlapping_siblings == []`, `clipped_views == []`, and `low_contrast_labels\
+      \ == []` across both Light (`aqua`) and Dark (`darkAqua`) appearances.\n   \
+      \ 2. Zero hardcoded agent/channel names or forbidden strings: `grep -rnE -i\
+      \ '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` returns `0` matches; `[\\p{Script=Han}]`\
+      \ and `\\b(rda|casdoor|rcatwin|keppel|mingchen)\\b` return `0` matches across\
+      \ repository files (excluding the policy rule line in `docs/DESIGN.md`).\n \
+      \   3. Multimodal visual & contract-and-simplicity convergence: fresh-context\
+      \ `pathway-auditor`, `structural-auditor`, and `uiux-auditor` (over both Light\
+      \ `aqua` and Dark `darkAqua` 2x Retina PNG snapshots) reports verify closure\
+      \ of all admitted findings with `Completeness: CLEAN`, `Simplicity: ZERO_NEW_ISSUES`,\
+      \ `Holds / Unproven: 0`, and `Uninspected Gaps: NONE` in the same round.\n \
+      \   4. Live distribution verification: `https://tefx.github.io/cito/` returns\
+      \ HTTP `200`, GitHub Release `v0.20.3` publishes `Cito-macos-arm64.zip` + `.sha256`\
+      \ at `0.20.3`, and `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`) match the published `v0.20.3` SHA-256.\n- **Recovery:**\
+      \ If any acceptance check fails, record concrete counterexamples and route a\
+      \ cohesive writable repair to `rust-senior` before re-running this gate in Delta\
+      \ mode."
+    verification: cargo test --workspace && cargo build --release && /usr/bin/ruby
+      -c packaging/homebrew/cito.rb
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - .github/workflows/release.yml
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v28.hygiene
     agent: gate-reviewer
