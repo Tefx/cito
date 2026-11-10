@@ -254,9 +254,18 @@ fn duplicate_received_recovers_schedule_but_passive_redelivery_keeps_fallback() 
         f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
         1
     );
-    f.state.claim_wake_batch("local", "c_1")?;
-    f.state.clear_wake_claim("local", &[json!("s")], true)?;
-    f.state.schedule_wake_retry("local", "c_1", 30_500)?;
+    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    f.state.finish_wake_batch(
+        &f.listener()?,
+        &batch[0],
+        "STORED_PASSIVE",
+        None,
+        false,
+        false,
+        false,
+        false,
+    )?;
+    f.state.schedule_wake_retry_for(&f.listener()?, 30_500)?;
     let fallback = f
         .state
         .db
@@ -538,6 +547,14 @@ fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
         format_wake_card(&target, &[one.clone()], "cloud", true),
         "🔔 Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl]\n\n&lt;x&gt; & hello"
     );
+    for suffix in ["abcdefghijkl", "0123456789abcdef"] {
+        let mut sender = one.clone();
+        sender["from_listener_id"] = json!(format!("alice-smith-{suffix}"));
+        assert!(!format_sender(&sender, "local", false).contains("Alice Smith"));
+    }
+    let mut distinct = one.clone();
+    distinct["from_title"] = json!("Different title");
+    assert!(format_sender(&distinct, "local", false).contains("Different title"));
     let two = json!({"from_user":"bob","from_host_name":"other.local","from_title":" Sender <B> ","from_listener_id":null,"message":"second"});
     assert_eq!(format_wake_card(&target, &[one, two], "local", false), "🔔 Cito · 2 notifications → &lt;Target&gt;\n\n[1] alice@host [↩ alice-smith-abcdefghijkl]\n&lt;x&gt; & hello\n\n[2] bob@other · Sender &lt;B&gt;\nsecond");
 }

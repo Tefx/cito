@@ -2,6 +2,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
@@ -153,6 +154,7 @@ impl ChannelProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("PLUGIN_EXEC_FAILED: {}: {e}", plugin.id))?;
         let input = child
@@ -271,6 +273,12 @@ impl ChannelProcess {
         result
     }
     pub fn shutdown(&self) {
+        let Ok(mut reader) = self.reader.lock() else {
+            return;
+        };
+        if reader.is_none() {
+            return;
+        }
         let _ = self.send(&json!({"op":"shutdown"}));
         // Closing stdin also triggers the protocol's plugin-side EOF lifecycle.
         if let Ok(mut stdin) = self.stdin.lock() {
@@ -295,16 +303,19 @@ impl ChannelProcess {
                 }
                 thread::sleep(Duration::from_millis(5));
             }
+            // SAFETY: spawn gave this child its own process group. Kill descendants
+            // too: inherited stdout pipes must close before joining the reader.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
         // No cursor, pairing, or delivery callback may outlive a stopped process.
         // Callers release the process registry and database locks before shutdown.
-        if let Ok(mut reader) = self.reader.lock() {
-            if let Some(handle) = reader.take() {
-                if handle.thread().id() != thread::current().id() {
-                    let _ = handle.join();
-                }
+        if let Some(handle) = reader.take() {
+            if handle.thread().id() != thread::current().id() {
+                let _ = handle.join();
             }
         }
     }

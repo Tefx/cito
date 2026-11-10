@@ -14,7 +14,8 @@ pub fn plugin_request(
     renew: Option<(&HubClient, &Value)>,
     fence: Option<(&LocalState, &Value)>,
 ) -> Result<Value, String> {
-    plugin_request_owned(plugin, request, renew, fence).map_err(|e| e.message)
+    plugin_request_owned(plugin, request, renew, fence, Duration::from_secs(10))
+        .map_err(|e| e.message)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -31,6 +32,7 @@ fn plugin_request_owned(
     request: &Value,
     renew: Option<(&HubClient, &Value)>,
     fence: Option<(&LocalState, &Value)>,
+    renewal_interval: Duration,
 ) -> Result<Value, WakeFailure> {
     let mut claim_loss = None;
     let mut last_renew = Duration::ZERO;
@@ -59,7 +61,7 @@ fn plugin_request_owned(
                     state.check_dispatch_in_flight(row, batch, false)?;
                 }
             }
-            let renewal_due = elapsed.saturating_sub(last_renew) >= Duration::from_secs(10);
+            let renewal_due = elapsed.saturating_sub(last_renew) >= renewal_interval;
             if !checked_remote || renewal_due {
                 if let (Some((client, claim)), Some((state, row))) = (renew, fence) {
                     let channel = string(claim, "channel_id");
@@ -242,7 +244,14 @@ pub fn poll_listener(
     let Some(plugin) = plugin else {
         return Ok(());
     };
-    dispatch_listener(local, client, row, plugin, state_dir)
+    dispatch_listener(
+        local,
+        client,
+        row,
+        plugin,
+        state_dir,
+        Duration::from_secs(10),
+    )
 }
 
 pub fn probe_listener(
@@ -291,6 +300,7 @@ fn dispatch_listener(
     row: &Value,
     plugin: &PluginDescriptor,
     state_dir: &std::path::Path,
+    renewal_interval: Duration,
 ) -> Result<(), String> {
     let id = string(row, "listener_id");
     let hub = &client.name;
@@ -367,6 +377,7 @@ fn dispatch_listener(
         &request,
         Some((client, &claim)),
         Some((local, &fenced)),
+        renewal_interval,
     ) {
         Ok(result) if result["ok"] == true => {
             // One request produces one final response. These checkpoints cannot
@@ -564,13 +575,11 @@ fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
             .ok()
         })
         .unwrap_or_else(|| state_dir.join("config.json"));
-    let config = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    let Some(config) = config else {
-        return !matches!(hub, "local" | "default");
-    };
-    let Some(hubs) = config["hubs"].as_object() else {
+    let config = std::fs::read_to_string(path).ok();
+    let Some((configured_default, hubs, _)) = config
+        .as_deref()
+        .and_then(|raw| super::config::try_normalize_existing_config(Some(raw)).ok())
+    else {
         return !matches!(hub, "local" | "default");
     };
     let enabled = hubs.values().filter(|h| h["enabled"] != false).count();
@@ -578,11 +587,7 @@ fn qualify_reply_ids(state_dir: &std::path::Path, hub: &str) -> bool {
     let default = std::env::var("CITO_HUB")
         .ok()
         .filter(|s| !s.trim().is_empty());
-    let default = default
-        .as_deref()
-        .or_else(|| config["default_hub"].as_str())
-        .or_else(|| config["defaultHub"].as_str())
-        .unwrap_or(hub);
+    let default = default.as_deref().unwrap_or(&configured_default);
     count != 1 || !matches!(default, "local" | "default")
 }
 

@@ -258,6 +258,7 @@ pub struct DaemonService {
     closing: bool,
     host_id: String,
     host_server: Option<super::hub::HubServer>,
+    applied_host_config: Option<Value>,
     uninstall: Option<bool>,
     active_settings_hub: Option<String>,
     last_app_action: HashMap<String, String>,
@@ -304,6 +305,7 @@ impl DaemonService {
             closing: false,
             host_id,
             host_server: None,
+            applied_host_config: None,
             uninstall: None,
             active_settings_hub: None,
             last_app_action: HashMap::new(),
@@ -336,6 +338,7 @@ impl DaemonService {
         if self.closing {
             return Ok(());
         }
+        let _ = self.sync_host_hub();
         let mut raw = self.raw_config()?;
         self.config.user = self.get_effective_user()?;
         repair_default_hub(&mut raw);
@@ -1988,7 +1991,9 @@ impl DaemonService {
                 return self.action(&parse_hub_invite(string(action, "invite"))?);
             }
             "generate_hub_invite" => {
-                return Ok(json!({"ok":true,"invite":self.slot(&hub)?.config}))
+                let mut invite = self.slot(&hub)?.config.clone();
+                invite["name"] = json!(hub);
+                return Ok(json!({"ok":true,"invite":invite}));
             }
             "channel_save"
             | "save_hub_service"
@@ -2165,14 +2170,22 @@ impl DaemonService {
                     &[],
                 )?;
                 for row in rows {
+                    let requested_hub = string(action, "hub");
+                    if !requested_hub.is_empty() && row["hub"] != requested_hub {
+                        continue;
+                    }
                     if op == "mark_all_activity_read"
                         || action["ack_all"] == true
                         || ids.iter().any(|id| {
                             id == &row["signal_id"]
                                 || id.as_str()
                                     == Some(
-                                        self.scoped(string(&row, "hub"), string(&row, "signal_id"))
-                                            .as_str(),
+                                        format!(
+                                            "{}:{}",
+                                            string(&row, "hub"),
+                                            string(&row, "signal_id")
+                                        )
+                                        .as_str(),
                                     )
                                 || id == &row["batch_id"]
                         })
@@ -2237,12 +2250,24 @@ impl DaemonService {
                     return Err("INVALID_INPUT: Invalid scope".into());
                 }
                 let slot = self.slot(&hub)?;
-                let (mut row, rev) = slot.kv_get(id)?.ok_or("LISTENER_NOT_FOUND")?;
-                if !row.is_object() {
-                    return Err("INVALID_INPUT: Listener must be an object".into());
+                let _registration = slot
+                    .registration
+                    .lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                for attempt in 0..3 {
+                    let (mut row, rev) = slot.kv_get(id)?.ok_or("LISTENER_NOT_FOUND")?;
+                    if !row.is_object() {
+                        return Err("INVALID_INPUT: Listener must be an object".into());
+                    }
+                    row["scope"] = json!(scope);
+                    match slot.kv_save(id, &row, Some(rev)) {
+                        Ok(_) => break,
+                        Err(error) if attempt == 2 || !error.starts_with("10071:") => {
+                            return Err(error)
+                        }
+                        Err(_) => {}
+                    }
                 }
-                row["scope"] = json!(scope);
-                slot.kv_save(id, &row, Some(rev))?;
                 self.state.db.execute(
                     "UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=?",
                     &[json!(scope), json!(hub), json!(id)],
@@ -2366,6 +2391,8 @@ impl DaemonService {
                     })?;
                     return Err(error);
                 }
+                self.applied_host_config =
+                    self.raw_config().ok().map(|raw| raw["host_hub"].clone());
                 self.last_host_hub_error = None;
                 self.emit(json!({"op":"settings","request_id":action["request_id"],"settings":self.settings()}));
             }
@@ -2443,8 +2470,13 @@ impl DaemonService {
             .get("host_hub")
             .or_else(|| raw.get("hostHub"))
             .unwrap_or(&Value::Null);
+        if self.applied_host_config.as_ref() == Some(host) {
+            return Ok(());
+        }
         let settings = host_hub_server_config(host)?;
-        replace_host_hub_server(&self.local, &mut self.host_server, settings)
+        replace_host_hub_server(&self.local, &mut self.host_server, settings)?;
+        self.applied_host_config = Some(host.clone());
+        Ok(())
     }
     fn shutdown(&mut self) {
         // The caller sets closing while holding the service mutex after all calls drain.
@@ -2868,6 +2900,22 @@ fn parse_hub_invite(raw: &str) -> Result<Value, String> {
     };
     if value["name"].is_null() {
         value["name"] = value["hub"].clone();
+    }
+    if string(&value, "name").is_empty() {
+        let url = url::Url::parse(string(&value, "url")).map_err(|_| invalid())?;
+        let name: String = url
+            .host_str()
+            .ok_or_else(invalid)?
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        value["name"] = json!(name.trim_matches('-').chars().take(32).collect::<String>());
     }
     if !crate::plugins::validate_hub_name(string(&value, "name")) {
         return Err(invalid());
@@ -3647,6 +3695,49 @@ mod tests {
         result
     }
     #[test]
+    fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cito-ack-scope-{}", random_uuid_v4()));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let config = NativeConfig {
+            state_dir: dir.join("state"),
+            config_path: dir.join("config.json"),
+            home_dir: dir.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        fs::write(
+            &config.config_path,
+            json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let mut service = DaemonService::open(&config, &plugins)?;
+        let result = (|| {
+            for hub in ["local", "work"] {
+                service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES(?,'shared','node',1,1,'alice','host','','message','now',?,'RECEIVED')", &[json!(hub),json!(now_ms()+60_000)])?;
+            }
+            service.action(&json!({"op":"ack_signals","hub":"local","ack_all":true}))?;
+            let state = service.state.clone();
+            let unread = || {
+                state.db.query(
+                    "SELECT hub FROM local_signals WHERE acknowledged_at_ms IS NULL",
+                    &[],
+                )
+            };
+            assert_eq!(unread()?, vec![json!({"hub":"work"})]);
+            service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"]}))?;
+            assert!(unread()?.is_empty());
+            Ok(())
+        })();
+        service.shutdown();
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        result
+    }
+    #[test]
     fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4()));
         let result = (|| {
@@ -3668,8 +3759,10 @@ mod tests {
                 let host = json!({"enabled":true,"bind":"127.0.0.1","port":0,"auth_mode":"token","token":"previous-token"});
                 let committed = json!({"host_hub":host,"other":7}).to_string();
                 fs::write(&config.config_path, &committed).map_err(|e| e.to_string())?;
-                service.sync_host_hub()?;
+                service.reload_slots()?;
                 let address = service.host_server.as_ref().unwrap().address;
+                service.reload_slots()?;
+                assert_eq!(service.host_server.as_ref().unwrap().address, address);
                 let rpc = |address, token| -> Result<(), String> {
                     let response: Value = ureq::post(&format!("http://{address}/v1/rpc"))
                         .set("Authorization", &format!("Bearer {token}"))
@@ -3765,7 +3858,12 @@ mod tests {
                 let replacement = service.host_server.as_ref().unwrap().address;
                 assert_ne!(replacement, address);
                 rpc(replacement, "replacement-token")?;
-                service.action(&json!({"op":"set_host_hub","enabled":false}))?;
+                fs::write(
+                    &config.config_path,
+                    json!({"host_hub":{"enabled":false}}).to_string(),
+                )
+                .map_err(|e| e.to_string())?;
+                service.reload_slots()?;
                 assert!(service.host_server.is_none());
                 assert!(TcpStream::connect(replacement).is_err());
                 Ok(())

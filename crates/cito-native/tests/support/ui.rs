@@ -307,6 +307,8 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     l.control("listen:fixture:reload-1");
     l.until(|s| !node(s, "items", "menu_error_row").is_null());
     l.snapshot("menu", "r3_menu_error.png");
+    l.control("dismiss_menu_error");
+    l.until(|s| node(s, "items", "menu_error_row").is_null());
 
     l.control("open_directory");
     let s = l.until(|s| {
@@ -492,6 +494,26 @@ fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer
     )
     .is_null());
     f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":third["request_id"],"settings":cfg}));
+    assert!(
+        !node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:secret"
+        )
+        .is_null(),
+        "A late success cannot acknowledge an already failed submission"
+    );
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let retry = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "save_hub_service")
+        .unwrap();
+    assert_ne!(retry["request_id"], third["request_id"]);
+    assert_eq!(retry["values"], json!({"secret":"newer-draft"}));
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":retry["request_id"],"settings":cfg}));
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
         36
@@ -821,6 +843,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let p = start(&f);
     let mut cfg = settings();
     cfg["settings_hub"] = json!("local");
+    cfg["hubs"][1]["url"] = json!("https://cito.example.com");
+    cfg["hubs"][1]["auth_mode"] = json!("oidc");
     cfg["channels"][0]["status"] = json!("not_configured");
     cfg["channels"][0]["fields"][0]["configured"] = json!(false);
     cfg["channels"][0]["fields"][0]["value"] = json!("");
@@ -1022,6 +1046,15 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert!(!node(&s, "settings_items", "host_hub_error").is_null());
         assert_eq!(f.frames(p).len(), before);
     }
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5301"}),
+    );
+    control(&f, p, "settings_tab:hubs");
+    assert!(
+        node(&inspect(&f, p), "settings_items", "host_hub_error").is_null(),
+        "Editing the port clears local validation feedback"
+    );
     // Only a command acknowledgement may settle Apply, including an unchanged save.
     frame["settings"] = cfg.clone();
     f.send(p, frame.clone());
@@ -1529,6 +1562,87 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
             .iter()
             .any(|v| v["op"] == "channel_unpair" && v["reset_user"] == true)
     });
+}
+#[test]
+fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("saved-account");
+    cfg["channels"][0]["fields"][0]["value"] = json!("");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "edit_hub_service:channel");
+    for (field, value) in [("secret", "discard-gateway"), ("account", "keep-personal")] {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+    }
+    control(&f, p, "cancel_edit_hub_service:channel");
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    let latest = |op: &str| {
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == op)
+            .unwrap()
+    };
+    assert_eq!(latest("save_hub_service")["values"], json!({}));
+    control(&f, p, "save_channel:channel");
+    inspect(&f, p);
+    assert_eq!(
+        latest("channel_save")["values"],
+        json!({"account":"keep-personal"})
+    );
+    control(&f, p, "unpair_channel:channel");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "channel_field:channel:account"
+        )["text"],
+        cfg["channels"][0]["fields"][1]["value"]
+    );
+    for (field, value) in [("secret", "discard-token"), ("account", "discard-account")] {
+        f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
+    }
+    control(&f, p, "clear_channel_service:channel");
+    cfg["channels"][0]["configured"] = json!(false);
+    cfg["channels"][0]["status"] = json!("not_configured");
+    for field in cfg["channels"][0]["fields"].as_array_mut().unwrap() {
+        field["configured"] = json!(false);
+        field["value"] = json!("");
+    }
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "channel_field:channel:account")["text"],
+        ""
+    );
+    control(&f, p, "save_hub_service:channel");
+    inspect(&f, p);
+    assert_eq!(
+        latest("save_hub_service")["values"],
+        json!({"secret":""}),
+        "An unconfigured gateway submits the empty field, never the discarded secret draft"
+    );
+    cfg["channels"][0]["fields"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("hub_ready");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
+        36,
+        "Clearing a gateway also leaves its old edit mode"
+    );
 }
 #[test]
 fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
@@ -2449,6 +2563,38 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     assert_eq!(exported["invite"]["url"], endpoint);
     assert_eq!(exported["invite"]["authMode"], "token");
     assert_eq!(exported["invite"]["token"], "lan-test-token");
+    assert_eq!(exported["invite"]["name"], "lan");
+    let prior = client
+        .frames(ui)
+        .iter()
+        .filter(|v| v["op"] == "paste_hub_invite")
+        .count();
+    client.send(
+        ui,
+        json!({"op":"test_clipboard","text":exported["invite"].to_string()}),
+    );
+    control(&client, ui, "paste_hub_invite");
+    wait(|| {
+        client
+            .frames(ui)
+            .iter()
+            .filter(|v| v["op"] == "paste_hub_invite")
+            .count()
+            > prior
+    });
+    let action = client
+        .frames(ui)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "paste_hub_invite")
+        .unwrap();
+    let (status, result) = client.action(action);
+    assert_eq!(status, 200, "{result}");
+    let mut unnamed = exported["invite"].clone();
+    unnamed.as_object_mut().unwrap().remove("name");
+    let (status, result) =
+        client.action(json!({"op":"paste_hub_invite","invite":unnamed.to_string()}));
+    assert_eq!(status, 200, "{result}");
 
     // Inspect documentation-range binds without opening non-loopback test sockets.
     // Explicit no-auth must override a retained token.

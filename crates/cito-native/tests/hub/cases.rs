@@ -254,7 +254,31 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
     assert!(b["display_label"].is_null());
     e.inner.db.execute("UPDATE hub_plugin_services SET service_state_json='{\"cursor\":\"77\"}' WHERE plugin_id='fixture'",&[]).unwrap();
     let old_process = e.inner.processes.lock().unwrap()["fixture"].clone();
+    put(&e, "sender", "none#bob", "workspace");
+    e.inner
+        .db
+        .execute(
+            "INSERT INTO hub_processed_replies VALUES('fixture','u1',?)",
+            &[json!(now_ms())],
+        )
+        .unwrap();
     configure(json!({"hub_config":{"credential":"rotated"}}));
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET user_config_json=? WHERE plugin_id='fixture'",
+            &[json!(
+                json!({"address":"manual","_external_chat_id":"room","_external_user_id":"user"})
+                    .to_string()
+            )],
+        )
+        .unwrap();
+    e.inner.db.execute("INSERT INTO hub_channel_delivery_msgs VALUES('fixture',?,'rotated-message','original','sender')",
+        &[owner["principal_id"].clone()]).unwrap();
+    let reply = e.inbound_reply("fixture", &json!({"update_id":"u1","external_chat_id":"room","external_user_id":"user","reply_to_external_msg_id":"rotated-message","text":"new bot reply"})).unwrap();
+    assert_eq!(reply["ok"], true);
+    assert_ne!(reply["duplicate"], true);
+    assert!(reply["signal_id"].is_string());
     assert!(!old_process.alive());
     assert_eq!(
         e.inner.db.transaction(|c| service(c, "fixture")).unwrap().1,
@@ -906,6 +930,96 @@ fn cli_option_diagnostics_name_configuration_knobs() {
         cli_options(&["positional".into()]).unwrap_err(),
         "Unexpected argument: positional"
     );
+}
+#[test]
+fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[root.clone()]).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    e.rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"saved"},"enabled":true}),
+        Some(&owner),
+    )
+    .unwrap();
+    let node = listener_id("none#alice", "human", "default");
+    send(&e, &node, "unready");
+    let plugin = e.plugin("fixture").unwrap();
+    let process = e.ensure_process(&plugin, false).unwrap();
+    e.replay(&plugin, &process).unwrap();
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_channel_deliveries", &[])
+        .unwrap()
+        .is_empty());
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET user_config_json='{\"address\":\"room\"}'",
+            &[],
+        )
+        .unwrap();
+    e.replay(&plugin, &process).unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_channel_deliveries", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+    e.inner.plugins.lock().unwrap().clear();
+    e.restore_attachments().unwrap();
+    let registration = e.rpc("kv_get", &json!({"key":node}), None).unwrap();
+    let data: Value = serde_json::from_slice(
+        &B64.decode(registration["value_b64"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["channels"]["hub:fixture"]["state"], "UNLISTENED");
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn subscriptions_unregister_on_drop_without_waiting_for_an_event() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    for _ in 0..20 {
+        let subscription = e.subscribe(None).unwrap();
+        assert_eq!(e.inner.subscribers.lock().unwrap().len(), 1);
+        drop(subscription);
+        assert!(e.inner.subscribers.lock().unwrap().is_empty());
+    }
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn channel_shutdown_kills_descendants_holding_stdout_open() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let mut plugin = hub_plugins::discover(&[root]).unwrap().remove(0);
+    plugin.command = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "sleep 30 & printf '%s\\n' '{\"op\":\"started\"}'; wait".into(),
+    ];
+    let (tx, rx) = mpsc::sync_channel(1);
+    let process = ChannelProcess::spawn(
+        &plugin,
+        Arc::new(move |_| {
+            let _ = tx.try_send(());
+            None
+        }),
+    )
+    .unwrap();
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let started = std::time::Instant::now();
+    process.shutdown();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn reservations_retry_holes_and_record_all_chunks() {

@@ -126,12 +126,17 @@ export default function citoBridge(pi: BridgeAPI): void {
   }
   async function callMcpTool(name: "cito_listen" | "cito_unlisten", args: Record<string, unknown>): Promise<Record<string, unknown>> {
     let configuredPort: unknown;
-    try { configuredPort = (JSON.parse(readFileSync(join(resolvedStateDir, "config.json"), "utf8")) as { daemonPort?: unknown }).daemonPort; }
+    const rawConfig = process.env.CITO_CONFIG_PATH ?? join(resolvedStateDir, "config.json");
+    const configPath = rawConfig === "~" ? homedir() : rawConfig.startsWith("~/")
+      ? join(homedir(), rawConfig.slice(2)) : resolve(rawConfig);
+    try { configuredPort = (JSON.parse(readFileSync(configPath, "utf8")) as { daemonPort?: unknown }).daemonPort; }
     catch {} // A missing config falls back to the environment and default port.
-    const candidatePorts = [configuredPort, process.env.CITO_DAEMON_PORT]
-      .filter(value => typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
-      .map(Number);
-    const port = candidatePorts.find(value => Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
+    const envPort = process.env.CITO_DAEMON_PORT?.trim() ?? "";
+    const candidatePorts = [
+      /^\+?\d+$/.test(envPort) ? Number(envPort) : undefined,
+      typeof configuredPort === "number" ? configuredPort : undefined,
+    ];
+    const port = candidatePorts.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {

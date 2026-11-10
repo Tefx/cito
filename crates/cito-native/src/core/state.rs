@@ -203,17 +203,6 @@ impl LocalState {
             c.query("SELECT * FROM local_signals WHERE hub=? AND listener_id=? AND batch_id=? AND dispatcher_token=? ORDER BY seq", &[json!(hub), json!(id), batch, token])
         })
     }
-    /// Compatibility helper; receiver completion uses the token-fenced API below.
-    #[cfg(test)]
-    pub fn clear_wake_claim(&self, hub: &str, ids: &[Value], passive: bool) -> Result<(), String> {
-        self.db.transaction(|c| {
-            for id in ids {
-                c.execute("UPDATE local_listeners SET dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND dispatcher_token=(SELECT dispatcher_token FROM local_signals WHERE hub=? AND signal_id=?)", &[json!(hub), json!(hub), id.clone()])?;
-                c.execute("UPDATE local_signals SET state=?,dispatcher_token=NULL WHERE hub=? AND signal_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING','STORED_PASSIVE')", &[json!(if passive { "STORED_PASSIVE" } else { "RECEIVED" }), json!(hub), id.clone()])?;
-            }
-            Ok(())
-        })
-    }
     pub fn check_dispatch(
         &self,
         listener: &Value,
@@ -308,11 +297,6 @@ impl LocalState {
         self.db.execute("INSERT INTO wake_retries(hub,listener_id,retry_at_ms) SELECT hub,listener_id,? FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=? ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=excluded.retry_at_ms", &[json!(now_ms()+delay), listener["hub"].clone(), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
         Ok(())
     }
-    #[cfg(test)]
-    pub fn schedule_wake_retry(&self, hub: &str, id: &str, delay: u64) -> Result<(), String> {
-        self.db.execute("INSERT INTO wake_retries VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET retry_at_ms=excluded.retry_at_ms",&[json!(hub),json!(id),json!(now_ms()+delay)])?;
-        Ok(())
-    }
     pub fn acknowledge(
         &self,
         hub: &str,
@@ -398,10 +382,11 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
                         && p.bytes()
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
                 })
-                && suffix.len() == 12
-                && suffix
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+                && (suffix.len() == 16 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+                    || suffix.len() == 12
+                        && suffix
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)))
         })
         .map(|(slug, _)| slug);
     let title_part = if !title.is_empty() && slug != Some(normalize_slug(title).as_str()) {

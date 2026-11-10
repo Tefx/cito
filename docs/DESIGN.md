@@ -228,7 +228,7 @@ Each request is a single JSON object written to `stdin` followed by `\n` (and `s
      1. **Field-level UTF-8 byte caps**: truncate `activity[i].message` to `512` UTF-8 bytes, `about` to `256` UTF-8 bytes, and `title` / `cwd` / `summary` to `128` UTF-8 bytes (on valid UTF-8 char boundaries, appending `"…"`).
      2. **Collection-level caps (preserving authoritative total counts in `unread_count` and `total_online`)**: cap `activity` at `80` items, `peers` at `100` items, `sessions` / `listeners` at `64` items, `my_remote_listeners` at `64` items, and `available` at `32` items.
      3. **Progressive Shedding Loop & Final Guard**: if `serde_json::to_vec(&frame).len() > 262_144`, progressively trim trailing items from `activity`, then `peers` / `my_remote_listeners` / `available`, and finally `sessions` / `listeners` (setting `"truncated": true` on the frame) until the serialized byte length is strictly `<= 262,144` bytes (verified by a regression test with `activity: []` and 150 multibyte-emoji listeners, `F26`).
-   - Inbound `cito-ui -> daemon` action lines use a separate **`1,048,576`-byte (`1 MiB`) limit**, excluding the newline delimiter, matching HTTP `/ui` request bodies. This admits a 65,536-code-point message plus its JSON envelope. Drain oversized lines through the next newline or EOF without growing the buffer, emit `composer_result` (`ok: false`) and `error` with `INVALID_INPUT: UI action exceeds 1 MiB`, and continue processing subsequent actions on the same stream.
+   - Inbound `cito-ui -> daemon` action lines use a separate **`1,048,576`-byte (`1 MiB`) limit**, excluding the newline delimiter, matching HTTP `/ui` request bodies. This admits a 65,536-code-point message plus its JSON envelope. Drain oversized lines through the next newline or EOF without growing the buffer, emit an uncorrelated `error` with `INVALID_INPUT: UI action exceeds 1 MiB`, and continue processing subsequent actions on the same stream. An oversized frame has no trusted request identity, so it cannot settle a pending composer submission.
 
 ---
 
@@ -299,7 +299,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 
 ### 7.2 Historical Stage 6 Transition (`F1, F43, F46, F50`)
 
-The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints.
+The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.20.2` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
 1. **Root `package.json` Contract**:
    - `"version": "0.18.0"`, `"license": "MIT"`, `"type": "module"`.
    - `"bin": { "cito": "bin/cito", "cito-mcp": "bin/cito-mcp" }` (`cito-claude-hook` removed from top-level `bin`).
@@ -353,7 +353,7 @@ The following transition was used for v0.18.0 and is superseded by Section 9. It
    - `apply_setup`:
      - When `enable_harnesses` is non-empty (e.g., clicking `Set Up` on a single app in `SettingsPanel` or running `cito setup --enable <id>`), invokes `setup_apply` **only** on the harnesses in `enable_harnesses`.
      - When called for Hub/hostHub/login-item changes (`hub`, `enable_hubs`, `disable_hubs`, `remove_hubs`, `host_hub`, `launch_at_login`) with empty `enable_harnesses`, updates `config.json` / `LaunchAgent` **without** invoking `setup_apply` on any harness.
-     - Only a bare `cito setup` CLI invocation (with no `--enable`, `--disable`, `--hub`, `--enable-hub`, `--disable-hub`, `--remove-hub`, `--host-hub`, or `--login-item` flags) configures all `tier == "stable"` harnesses (`F20`).
+     - Only a bare `cito setup` CLI invocation (with no `--enable`, `--disable`, `--hub`, `--enable-hub`, `--disable-hub`, `--remove-hub`, `--share-hub`, `--no-share-hub`, `--share-port`, or `--launch-at-login` flags) configures all `tier == "stable"` harnesses (`F20`).
    - `--dry-run` is checked before `--build-app`, `--uninstall`, and `--disable`, returning planned actions without modifying any file or stopping the daemon (`F34`).
    - Malformed JSON in `config.json` returns an explicit parse error before any file write (`F38`).
    - All config file read-modify-write mutations acquire an in-process per-path mutex and `flock` lockfile (`F59`).
@@ -467,8 +467,8 @@ Stage 8 (`v0.20.0` — Phase `v24`) closes all 17 lifecycle, state-machine, and 
        "command": ["./bin/cito-plugin-telegram"],
        "setupGuide": [
          "1. Message @BotFather on Telegram (/newbot) to create a bot and copy its Bot Token.",
-         "2. Paste the Bot Token below and click Pair Account… to generate a 1-time /start command.",
-         "3. Send the /start command to your bot in Telegram — Chat ID fills in automatically."
+         "2. Under 1. HUB GATEWAY · ONCE PER HUB, paste the Bot Token and click Save Gateway Token.",
+         "3. Under 2. YOUR PERSONAL NODE, click Pair Account… and send the generated /start command to your bot — Chat ID fills in automatically. Skip for Now leaves pairing optional."
        ],
        "fields": [
          {

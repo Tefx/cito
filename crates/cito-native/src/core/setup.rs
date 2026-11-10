@@ -204,27 +204,6 @@ pub fn ensure_cli_shims_native(
             .map_err(|e| e.to_string())?;
         written.push(shim_path);
     }
-    if let Ok(exe_path) = env::current_exe() {
-        let exe_s = exe_path.to_string_lossy();
-        if (exe_s.contains("/Cellar/cito/") || exe_s.contains("/opt/cito/"))
-            && state_dir.to_str().is_some_and(|s| s.ends_with("/.cito"))
-        {
-            let opt_app = PathBuf::from(resolve_stable_package_root(&exe_s))
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf());
-            if let Some(src_app) = opt_app.filter(|p| p.ends_with("Cito.app") && p.is_dir()) {
-                let dst_app = PathBuf::from("/Applications/Cito.app");
-                if !dst_app.exists() || dst_app.join("Contents/Info.plist").is_file() {
-                    let _ = copy_dir_recursive(&src_app, &dst_app);
-                    let _ = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-                        .args(["-f", "/Applications/Cito.app"])
-                        .status();
-                }
-            }
-        }
-    }
     Ok(written)
 }
 
@@ -875,10 +854,8 @@ pub fn uninstall_setup_native(
         let _ = fs::remove_file(&lock_file);
     }
 
-    for app_target in [
-        home_dir.join("Applications").join("Cito.app"),
-        PathBuf::from("/Applications/Cito.app"),
-    ] {
+    {
+        let app_target = home_dir.join("Applications").join("Cito.app");
         let is_symlink = fs::symlink_metadata(&app_target)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
@@ -1312,11 +1289,12 @@ pub fn run_setup_cli(args: &[String]) {
             }
 
             if share_hub.is_some() || share_port.is_some() {
-                let prev = rest
-                    .get("host_hub")
-                    .and_then(|v| v.as_object())
-                    .cloned()
+                let mut prev = rest
+                    .remove("host_hub")
+                    .or_else(|| rest.remove("hostHub"))
+                    .and_then(|v| v.as_object().cloned())
                     .unwrap_or_default();
+                rest.remove("hostHub");
                 let en = share_hub.unwrap_or_else(|| {
                     prev.get("enabled")
                         .and_then(|v| v.as_bool())
@@ -1333,10 +1311,10 @@ pub fn run_setup_cli(args: &[String]) {
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .unwrap_or_else(|| random_hex(32));
-                rest.insert(
-                    "host_hub".to_string(),
-                    json!({ "enabled": en, "port": p, "token": tok }),
-                );
+                prev.insert("enabled".into(), json!(en));
+                prev.insert("port".into(), json!(p));
+                prev.insert("token".into(), json!(tok));
+                rest.insert("host_hub".to_string(), Value::Object(prev));
             }
 
             let def_enabled = hubs
@@ -1689,6 +1667,36 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn cli_share_updates_preserve_host_settings_and_aliases() {
+        let (root, _) = fixture();
+        for key in ["host_hub", "hostHub"] {
+            let mut raw = json!({"hubs":{"local":{"url":"local://"}}});
+            raw[key] = json!({"enabled":false,"port":4291,"token":"retained","bind":"127.0.0.1","auth_mode":"none","extension":{"value":7}});
+            fs::write(root.join("config.json"), raw.to_string()).unwrap();
+            for (args, enabled, port) in [
+                (vec!["--share-hub"], true, 4291),
+                (vec!["--share-port", "5301"], true, 5301),
+                (vec!["--no-share-hub"], false, 5301),
+            ] {
+                let output = cli_child(&root, &args);
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let config: Value =
+                    serde_json::from_str(&fs::read_to_string(root.join("config.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    config["host_hub"],
+                    json!({"enabled":enabled,"port":port,"token":"retained","bind":"127.0.0.1","auth_mode":"none","extension":{"value":7}})
+                );
+                assert!(config.get("hostHub").is_none());
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn cli_rejects_malformed_config_before_writes() {
         let (root, _) = fixture();

@@ -80,7 +80,7 @@ fn setup(req: &Value) -> Result<Value> {
         })?);
     }
     actions.push(mutate(req, "pi", &legacy, |_| Ok(None))?);
-    if remove {
+    if remove && req["dry_run"] != true {
         if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with("pi-pid-") {

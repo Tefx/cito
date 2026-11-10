@@ -409,6 +409,99 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
     );
 }
 #[test]
+fn setup_remove_dry_run_preserves_live_plugin_runtime() {
+    use std::os::unix::net::UnixListener;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    fs::create_dir_all(f.state.join("claude/wakes")).unwrap();
+    let queue = f.state.join("claude/wakes/session-a.jsonl");
+    fs::write(&queue, b"retained wake\n").unwrap();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let socket = f.state.join(format!("sockets/{id}-pid-123.sock"));
+        let _listener = UnixListener::bind(&socket).unwrap();
+        assert_eq!(f.plugin(bin, json!({"op":"setup_apply"}))["ok"], true);
+        assert_eq!(
+            f.plugin(bin, json!({"op":"setup_remove","dry_run":true}))["ok"],
+            true
+        );
+        assert!(socket.exists());
+        assert_eq!(fs::read(&queue).unwrap(), b"retained wake\n");
+        assert_eq!(
+            f.plugin(bin, json!({"op":"setup_inspect"}))["configured"],
+            true
+        );
+        assert_eq!(f.plugin(bin, json!({"op":"setup_remove"}))["ok"], true);
+        assert!(!socket.exists());
+    }
+    assert!(!queue.exists());
+}
+#[test]
+fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_alias() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let script = f.dir.join("claude.mjs");
+    fs::write(
+        &script,
+        "console.log('ready'); setInterval(() => {}, 1000);",
+    )
+    .unwrap();
+    let endpoint = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    f.env
+        .insert("CITO_ENDPOINT_PID".into(), f.pid(endpoint).to_string());
+    let transcripts = f.home.join(".claude/projects/-repo");
+    fs::create_dir_all(&transcripts).unwrap();
+    let sid = "11111111-1111-1111-1111-111111111111";
+    fs::write(transcripts.join(format!("{sid}.jsonl")), b"").unwrap();
+    f.plugin(
+        HOOK,
+        json!({"hook_event_name":"SessionStart","session_id":sid,"cwd":"/repo"}),
+    );
+    assert!(!f
+        .state
+        .join(format!("sockets/claude-pid-{}.sock", f.pid(endpoint)))
+        .exists());
+    for (expected, status) in [(sid, "alive"), ("old-session", "switched")] {
+        let result = f.plugin(
+            CLAUDE,
+            json!({"op":"probe","session_id":expected,"cwd":"/repo","endpoint_pid":f.pid(endpoint)}),
+        );
+        assert_eq!(result["status"], status, "{result}");
+    }
+    let wakes = f.state.join("claude/wakes");
+    fs::create_dir_all(&wakes).unwrap();
+    fs::create_dir_all(f.state.join("claude/aliases")).unwrap();
+    fs::write(f.state.join("claude/aliases").join(sid), b"claude-123").unwrap();
+    let alias = wakes.join("claude-123.jsonl");
+    fs::write(
+        &alias,
+        "{\"batch_id\":\"alias\",\"content\":\"keep alias\"}\n",
+    )
+    .unwrap();
+    let broken = wakes.join(format!("{sid}.jsonl.draining-0"));
+    fs::write(&broken, [255]).unwrap();
+    assert_eq!(
+        f.plugin(
+            HOOK,
+            json!({"hook_event_name":"UserPromptSubmit","session_id":sid,"cwd":"/repo"})
+        ),
+        json!({})
+    );
+    assert!(alias.exists());
+    assert!(broken.exists());
+    fs::remove_file(broken).unwrap();
+    let result = f.plugin(
+        HOOK,
+        json!({"hook_event_name":"UserPromptSubmit","session_id":sid,"cwd":"/repo"}),
+    );
+    assert_eq!(
+        result["hookSpecificOutput"]["additionalContext"],
+        "keep alias"
+    );
+    assert!(!alias.exists());
+}
+#[test]
 fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
