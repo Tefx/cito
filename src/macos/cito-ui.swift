@@ -1140,8 +1140,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.op == "composer_result" {
-            guard composerPendingText != nil else { return }
-            if let requestId = frame.request_id, requestId != composerPendingRequestId { return }
+            guard composerPendingText != nil, frame.request_id == composerPendingRequestId else { return }
             if frame.ok == true {
                 if composerTarget == composerPendingTarget && composerTargetHub == composerPendingHub && composerReplySignalId == composerPendingReplySignalId && composerInputField?.stringValue == composerPendingText { closeComposer() }
                 else { composerErrorLabel?.stringValue = "Sent. Your newer draft is preserved." }
@@ -1160,7 +1159,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             // A command may emit both its result and a trailing generic error.
             // Neither can settle a retry or overwrite its feedback.
             if ["send_signal", "send_reply_from_human"].contains(sourceOp),
-               let requestId = frame.request_id, requestId != composerPendingRequestId { return }
+               frame.request_id != composerPendingRequestId { return }
             if sourceOp == "set_host_hub", let requestId = frame.request_id,
                requestId != submittedHostHubRequestId { return }
             let isAddHubOp = ["setup_save_hub", "save_hub"].contains(sourceOp) ||
@@ -1173,7 +1172,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let error = frame.error ?? "Unknown daemon error"
             if ["switch_hub", "set_scope", "listen_session", ""].contains(sourceOp) { pendingMutation = false }
             if (sourceOp == "set_host_hub" || sourceOp.isEmpty) &&
-               (frame.request_id == nil || frame.request_id == submittedHostHubRequestId) {
+               frame.request_id == submittedHostHubRequestId {
                 hostHubPortPending = false
                 submittedHostHubRequestId = ""
             }
@@ -1181,8 +1180,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 hubInvitePending=false; hubInvitePastedUntil = .distantPast
             }
             if isAddHubError { addHubSaving = false; submittedAddHubRequestId = "" }
-            let isComposerError = (["send_signal", "send_reply_from_human"].contains(sourceOp) && (composerPendingText != nil || !(directoryComposerBar?.isHidden ?? true))) ||
-                (sourceOp.isEmpty && composerPendingText != nil)
+            let isComposerError = ["send_signal", "send_reply_from_human", ""].contains(sourceOp) &&
+                composerPendingText != nil && frame.request_id == composerPendingRequestId
             if isComposerError {
                 composerErrorLabel?.stringValue = error
                 composerPendingText = nil; composerPendingRequestId = ""; composerPendingTarget = ""; composerPendingHub = ""; composerPendingReplySignalId = nil
@@ -1303,16 +1302,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func emit(_ action: [String: Any]) {
         var outgoing = action
-        if let op = action["op"] as? String, ["send_signal", "send_reply_from_human"].contains(op), composerPendingText != nil {
-            let requestId = UUID().uuidString
-            outgoing["request_id"] = requestId
-            composerPendingRequestId = requestId
-        }
-        if action["op"] as? String == "set_host_hub", hostHubPortPending {
-            let requestId = UUID().uuidString
-            outgoing["request_id"] = requestId
-            submittedHostHubRequestId = requestId
-        }
         if let op = action["op"] as? String, ["setup_save_hub", "save_hub"].contains(op), addHubSaving {
             let requestId = UUID().uuidString
             outgoing["request_id"] = requestId
@@ -2517,7 +2506,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         toggleHostBtn.style = hostHub.enabled ? .prominent : .neutral
         let nextHostEnabled = !hostHub.enabled
         toggleHostBtn.pressed = { [weak self] in
-            self?.emit(["op": "set_host_hub", "enabled": nextHostEnabled])
+            self?.emit(["op": "set_host_hub", "enabled": nextHostEnabled, "port": hostHub.port])
         }
         hostCard.addSubview(toggleHostBtn)
 
@@ -2556,8 +2545,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         auth.identifier=NSUserInterfaceItemIdentifier("toggle_host_hub_auth")
         auth.pressed={ [weak self] in
             guard let self=self else{return}
-            let port=Int(self.settingsFieldControls["host_hub_port"]?.stringValue ?? "") ?? hostHub.port
-            self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"auth_mode":authMode=="none" ? "token" : "none"])
+            self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":hostHub.port,"auth_mode":authMode=="none" ? "token" : "none"])
         }
         hostCard.addSubview(auth)
         let apply=MenuControl("Apply",frame:NSRect(x:394,y:12,width:72,height:24),radius:6)
@@ -2572,8 +2560,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self.rebuildSettingsPanel()
                 return
             }
+            let requestId = UUID().uuidString
             self.hostHubPortError=nil; self.hostHubPortPending=true; self.hostHubPortSaved=false; self.submittedHostHubPort=port
-            self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port])
+            self.submittedHostHubRequestId = requestId
+            self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"request_id":requestId])
         }
         hostCard.addSubview(apply)
         if let error=hostHubPortError ?? hostHub.error, !error.isEmpty {
@@ -3188,10 +3178,17 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func submitComposer() {
         let text = (composerInputField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard composerPendingText == nil, !composerTarget.isEmpty, !text.isEmpty else { return }
+        // Match the daemon's Unicode code-point limit, including combining scalars.
+        guard text.unicodeScalars.count <= 65_536 else {
+            composerErrorLabel?.stringValue = "INVALID_INPUT: Message exceeds maximum length"
+            return
+        }
+        let requestId = UUID().uuidString
         var action: [String: Any] = [
             "op": "send_signal",
             "to": composerTarget,
-            "message": text
+            "message": text,
+            "request_id": requestId
         ]
         if !composerTargetHub.isEmpty {
             action["hub"] = composerTargetHub
@@ -3199,7 +3196,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if let replyId = composerReplySignalId, !replyId.isEmpty {
             action["in_reply_to"] = replyId
         }
+        guard let data = try? JSONSerialization.data(withJSONObject: action, options: [.sortedKeys]), data.count <= 1_048_576 else {
+            composerErrorLabel?.stringValue = "INVALID_INPUT: UI action exceeds 1 MiB"
+            return
+        }
         composerPendingText = composerInputField?.stringValue
+        composerPendingRequestId = requestId
         composerPendingTarget = composerTarget
         composerPendingHub = composerTargetHub
         composerPendingReplySignalId = composerReplySignalId

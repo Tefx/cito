@@ -377,11 +377,21 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             "Missing real daemon frame: {op}"
         );
     }
+    // Both Apply submissions own identities; the sharing toggle only uses the active port.
+    assert_eq!(
+        l.results
+            .iter()
+            .filter(
+                |(action, _, _)| action["op"] == "set_host_hub" && action["request_id"].is_string()
+            )
+            .count(),
+        2
+    );
     // Command-specific results and generic failures must retain the UI's identity.
     for (action, status, _) in &l.results {
         let result_op = match action["op"].as_str() {
             Some("send_signal" | "send_reply_from_human") => "composer_result",
-            Some("set_host_hub") if action["port"].is_number() => "settings",
+            Some("set_host_hub") if action["request_id"].is_string() => "settings",
             _ => continue,
         };
         assert!(!action["request_id"].as_str().unwrap().is_empty());
@@ -1088,14 +1098,54 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         .rev()
         .find(|v| v["op"] == "set_host_hub")
         .unwrap();
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5302"}),
+    );
+    let before = f.frames(p).len();
+    for id in ["toggle_host_hub_auth", "toggle_host_hub"] {
+        control(&f, p, id);
+    }
+    inspect(&f, p);
+    let toggles = f.frames(p)[before..].to_vec();
+    assert_eq!(toggles.len(), 2);
+    for action in toggles {
+        assert_eq!(action["op"], "set_host_hub");
+        assert_eq!(action["port"], cfg["host_hub"]["port"]);
+        assert!(
+            action["request_id"].is_null(),
+            "Toggles cannot own the port save"
+        );
+    }
+    // Neither untagged errors nor refreshes may release Apply's pending identity.
+    for source in [json!({}), json!({"source_op":"set_host_hub"})] {
+        let mut error = json!({"op":"error","error":"Unrelated host error"});
+        error
+            .as_object_mut()
+            .unwrap()
+            .extend(source.as_object().unwrap().clone());
+        f.send(p, error);
+    }
     cfg["host_hub"]["port"] = json!(5301);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+        "Apply"
+    );
     f.send(
         p,
         json!({"op":"settings","request_id":submitted["request_id"],"settings":cfg}),
     );
+    let s = inspect(&f, p);
     assert_eq!(
-        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-        "✓ Saved"
+        node(&s, "settings_items", "apply_host_hub_port")["text"],
+        "✓ Saved",
+        "Apply must retain the original request identity and submitted port across toggles"
+    );
+    assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], "5302");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5301"}),
     );
     control(&f, p, "apply_host_hub_port");
     inspect(&f, p);
@@ -1527,7 +1577,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     wait(|| {
         f.frames(p)
             .iter()
-            .any(|v| v["op"] == "set_host_hub" && v["port"] == 5300 && v["auth_mode"] == "token")
+            .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291 && v["auth_mode"] == "token")
     });
     control(&f, p, "edit_hub:work");
     let s = inspect(&f, p);
@@ -1842,6 +1892,46 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     f.send(p, json!({"op":"test_directory_key","key":"up"}));
     assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:one");
     control(&f, p, "msg_dir:personal:one");
+    let before = f.frames(p).len();
+    for oversized in ["x".repeat(65_537), "e\u{301}".repeat(32_769)] {
+        f.send(p, json!({"op":"test_composer_input","value":oversized}));
+        control(&f, p, "composer_send");
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "directory_items", "composer_input")["text"],
+            oversized
+        );
+        assert_eq!(
+            node(&s, "directory_items", "composer_error")["text"],
+            "INVALID_INPUT: Message exceeds maximum length"
+        );
+        assert_eq!(
+            f.frames(p).len(),
+            before,
+            "Oversized input must not be emitted"
+        );
+    }
+    // Word breaks keep native text layout bounded while testing 65,536 Unicode scalars.
+    let maximum = "😀 ".repeat(32_767) + "😀x";
+    f.send(p, json!({"op":"test_composer_input","value":maximum}));
+    control(&f, p, "composer_send");
+    inspect(&f, p);
+    let submitted = f.frames(p)[before..]
+        .iter()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        submitted["message"], maximum,
+        "Local rejection must not leave the composer pending"
+    );
+    assert!(serde_json::to_vec(&submitted).unwrap().len() <= 1_048_576);
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":submitted["request_id"]}),
+    );
+    assert_eq!(inspect(&f, p)["composer_open"], false);
+    control(&f, p, "msg_dir:personal:one");
     f.send(
         p,
         json!({"op":"test_composer_input","value":"Draft preserved"}),
@@ -1872,7 +1962,16 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         1,
         "Unrelated errors must not permit a duplicate send"
     );
-    f.send(p, json!({"op":"composer_result","ok":true}));
+    let submitted = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "send_signal")
+        .unwrap();
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":submitted["request_id"]}),
+    );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], false);
     assert_eq!(node(&s, "directory_items", "composer_input")["text"], "");
@@ -1926,6 +2025,15 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         f.send(p, json!({"op":"error","source_op":source_op,"request_id":failed["request_id"],"error":"Late send error"}));
     }
     f.send(p, json!({"op":"composer_result","ok":false,"request_id":failed["request_id"],"error":"Late result"}));
+    for frame in [
+        json!({"op":"composer_result","ok":true}),
+        json!({"op":"composer_result","ok":false,"error":"Untagged result"}),
+        json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+        json!({"op":"error","source_op":"send_signal","error":"Untagged send error"}),
+        json!({"op":"error","source_op":"send_reply_from_human","error":"Untagged reply error"}),
+    ] {
+        f.send(p, frame);
+    }
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
     assert_eq!(
@@ -1999,7 +2107,10 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         node(&s, "directory_items", "composer_input")["text"],
         "Same reply text"
     );
-    f.send(p, json!({"op":"composer_result","ok":true}));
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":replies[0]["request_id"]}),
+    );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
     assert_eq!(s["composer_target"], "personal:one");
@@ -2041,7 +2152,10 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         2,
         "Cancel must not allow a second send before the first result"
     );
-    f.send(p, json!({"op":"composer_result","ok":true}));
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":replies[1]["request_id"]}),
+    );
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
     assert_eq!(s["composer_reply_signal_id"], "");
@@ -2058,7 +2172,10 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         .collect();
     assert_eq!(replies.len(), 3);
     assert!(replies[2]["in_reply_to"].is_null());
-    f.send(p, json!({"op":"composer_result","ok":true}));
+    f.send(
+        p,
+        json!({"op":"composer_result","ok":true,"request_id":replies[2]["request_id"]}),
+    );
     assert_eq!(inspect(&f, p)["composer_open"], false);
     f.send(p, state());
     assert!(!node(&inspect(&f, p), "directory_items", "msg_dir:personal:one").is_null());
@@ -2459,7 +2576,7 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             .iter()
             .filter(|frame| frame["op"] == "composer_result")
             .count()
-            == 5
+            == 4
     });
     let frames = frames();
     assert_eq!(
@@ -2472,7 +2589,6 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
             json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
             json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
-            json!({"op":"composer_result","ok":false,"error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
             json!({"op":"composer_result","ok":true,"error":null,"request_id":null}),
         ]
     );

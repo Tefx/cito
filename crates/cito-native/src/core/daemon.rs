@@ -3301,7 +3301,6 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 let drained = reader.skip_until(b'\n');
                 if let Ok(s) = service.lock() {
                     let error = "INVALID_INPUT: UI action exceeds 1 MiB";
-                    s.emit(json!({"op":"composer_result","ok":false,"error":error}));
                     s.emit(json!({"op":"error","error":error}));
                 }
                 if drained.is_err() {
