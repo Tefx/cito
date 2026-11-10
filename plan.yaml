@@ -8456,7 +8456,7 @@ phases:
     name: 'V28 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & v0.20.3 Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '```yaml
 
       step_type: implementation
@@ -8514,6 +8514,37 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-10T10:54:11.056646Z'
+    done_at: '2026-11-10T12:56:09.673679+00:00'
+    evidence: "Artifact:\n- Commit: e59b835a9e8b6dad7562bee0feec537efa63300b (13 files\
+      \ changed, +279 / -57 lines; annotated release tag `v0.20.3` at build commit\
+      \ `04d25f002c956e46ec285bc411157f6a85f25b78`; `Tefx/homebrew-tap` commit `d89c1954bacc41f8d4a5859f0972416b631ae00c`)\n\
+      - Executor: rust-senior + fresh-context `pathway-auditor`, `structural-auditor`,\
+      \ and `uiux-auditor` under `[REQUIRES_SKILL: contract-and-simplicity]` `[GATE_MODE:\
+      \ ITERATIVE_CONVERGENCE]`.\n- Convergence Summary:\n  - Closed all Round 1–2\
+      \ findings (`V28-R1-M1` `matchesWakeSignal` & symmetric search/filter reset,\
+      \ `V28-R1-M2` multi-hub header subtitle / `hubStrip` reservation & `148pt` card\
+      \ title width + `<= 22`-char truncation oracle sensitivity, `V28-R1-M3` unified\
+      \ `\"Human Node (@<user>)\"` / `\"Human receiver\"` normalization across auto-enrollment,\
+      \ `cardMenu`, and `DirectoryPeerCellView` + `CITO_HOST_NAME=mac-studio`, `V28-R1-M4`\
+      \ clean Settings/Menu error banner lifecycle across all 47 Light/Dark Retina\
+      \ PNG snapshots, and `V28-R2-P1` `effectiveHub` gating across all branches of\
+      \ `matchesWakeSignal`).\n  - Round 3 fresh-context verdicts:\n    - `pathway-auditor`\
+      \ (`2026-11-10T12-23-58-175Z_01a1c56a-43de-76dc-9abf-4048561fb6f2.jsonl`): `Completeness:\
+      \ CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven: 0` | `Uninspected\
+      \ Gaps: NONE`\n    - `structural-auditor` (`2026-11-10T12-23-58-083Z_01a1c56a-4382-7054-80b3-bf3bb3c86c2a.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n    - `uiux-auditor` (`2026-11-10T12-23-58-005Z_01a1c56a-4334-7772-a554-2f00322507dd.jsonl`):\
+      \ `Completeness: CLEAN` | `Simplicity: ZERO_NEW_ISSUES` | `Holds / Unproven:\
+      \ 0` | `Uninspected Gaps: NONE`\n- Live Distribution Alignment (`v0.20.3`):\n\
+      \  - GitHub Release `v0.20.3` (`https://github.com/Tefx/cito/releases/tag/v0.20.3`,\
+      \ built on `macos-15` in Actions run `42817313361` with `0` `warning:` and `0`\
+      \ `linker_messages` lines): published `Cito-macos-arm64.zip` with SHA-256 `500160480383486ec1738841133e4fef147f8bc955252a87c5bc68f430f1dd5b`,\
+      \ synchronized to `packaging/homebrew/cito.rb` and `Tefx/homebrew-tap` (`Formula/cito.rb`\
+      \ & `Casks/cito.rb`, commit `d89c1954bacc41f8d4a5859f0972416b631ae00c`).\n\n\
+      Verification:\n- Run: `cargo test --workspace && cargo build --release && /usr/bin/ruby\
+      \ -c packaging/homebrew/cito.rb` -> 248 passed, 0 failed, 0 compiler/linker\
+      \ warnings, `Syntax OK`\n- Reclaimed worktree `/Users/tefx/Projects/cito/.vectl/worktrees/v28.hygiene`.\n\
+      \nSpec link:\n- docs/DESIGN.md (§13), docs/ROADMAP.md (Stage 11 v0.20.3)"
   - id: v28.gate
     name: V28 Independent Terminal Acceptance, C1–C5 Light/Dark Verification & v0.20.3
       Release Alignment Gate
