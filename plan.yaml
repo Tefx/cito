@@ -8621,3 +8621,21 @@ phases:
 
       - docs/DESIGN.md (§13), docs/ROADMAP.md (Stage 11 v0.20.3), packaging/homebrew/cito.rb,
       .github/workflows/release.yml'
+- id: v29
+  name: 'V29 Stage 12 (v0.21.0): Holistic UI/UX & Cross-Layer Pathway Remediation
+    (D01–D18)'
+  status: pending
+  gate: 'All D01–D18 requirements in docs/DESIGN.md §14 pass; all 6 inspectMenu()
+    mechanical invariants equal [] across all 4 surfaces (menu, directory, settings,
+    banner) in Light and Dark appearances; pathway-auditor, structural-auditor, and
+    uiux-auditor converge to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES;
+    cargo test --workspace passes with 0 warnings; v0.21.0 is published on GitHub
+    Releases and Tefx/homebrew-tap.'
+  context: Complete D01–D18 across all 4 UI surfaces (cardMenu, directoryPanel, settingsPanel,
+    WakeBanner) and Rust Core/Plugins per docs/DESIGN.md §14, enforce all 6 inspectMenu()
+    mechanical invariants (truncated_labels, overlapping_siblings, clipped_views,
+    low_contrast_labels, jargon_leaks, address_mismatches == []) in Light and Dark
+    modes, converge under 2D contract-and-simplicity iterative review, and release
+    v0.21.0.
+  depends_on:
+  - v28
