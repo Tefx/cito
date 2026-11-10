@@ -178,7 +178,7 @@ impl LocalState {
                 }
                 while !rows.is_empty() {
                     let card = format_wake_card(&listener,&rows,hub,qualify_ids);
-                    if serde_json::to_vec(&card).map_err(|e| e.to_string())?.len() <= 262_144 { break; }
+                    if serde_json::to_vec(&card).map_err(|e| e.to_string())?.len() <= 524_288 { break; }
                     if rows.len() == 1 {
                         c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='driver_unavailable' WHERE hub=? AND signal_id=?", &[json!(hub),rows[0]["signal_id"].clone()])?;
                     }
@@ -310,20 +310,21 @@ impl LocalState {
         } Ok(()) })
     }
     pub fn activity(&self) -> Result<(Vec<Value>, u64), String> {
-        let unread = self
-            .db
-            .query(
-                "SELECT COUNT(*) AS n FROM local_signals WHERE acknowledged_at_ms IS NULL",
-                &[],
-            )?
-            .first()
-            .and_then(|r| r["n"].as_u64())
-            .unwrap_or(0);
-        let rows = self.db.query(
-            "SELECT * FROM local_signals ORDER BY created_at DESC,signal_id ASC LIMIT 80",
-            &[],
-        )?;
+        let (rows, _, unread) = self.query_activity("all", "")?;
         Ok((rows, unread))
+    }
+    pub fn query_activity(
+        &self,
+        filter: &str,
+        query: &str,
+    ) -> Result<(Vec<Value>, u64, u64), String> {
+        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' '||s.from_user||' '||s.from_title||' '||COALESCE(l.title,'')),lower(?))>0)";
+        let params = [json!(filter), json!(filter), json!(query), json!(query)];
+        self.db.transaction(|c| {
+            let counts = c.query(&format!("SELECT COUNT(*) AS total,COUNT(CASE WHEN s.acknowledged_at_ms IS NULL THEN 1 END) AS unread{predicate}"), &params)?;
+            let rows = c.query(&format!("SELECT s.*{predicate} ORDER BY s.created_at DESC,s.signal_id ASC LIMIT 80"), &params)?;
+            Ok((rows,counts[0]["total"].as_u64().unwrap_or(0),counts[0]["unread"].as_u64().unwrap_or(0)))
+        })
     }
 }
 

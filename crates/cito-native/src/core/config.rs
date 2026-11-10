@@ -117,6 +117,7 @@ pub fn parse_config_object(raw: &str) -> Result<Map<String, Value>, String> {
 
 pub fn validate_user(user: &str) -> bool {
     !user.is_empty()
+        && !user.eq_ignore_ascii_case("self")
         && user.len() <= 64
         && user
             .bytes()

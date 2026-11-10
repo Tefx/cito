@@ -151,6 +151,7 @@ impl Fixture {
             ("CITO_USER", "alice".into()),
             ("CITO_HOST_NAME", "mac-studio".into()),
             ("CITO_PI_PROCESS_DISCOVERY", "0".into()),
+            ("CITO_PI_ALLOW_HEADLESS_DISCOVERY", "1".into()),
             ("CITO_DISABLE_UI", "1".into()),
             ("CITO_UI_HEADLESS", "1".into()),
             ("CITO_BANNER_HEADLESS", "1".into()),
@@ -291,7 +292,7 @@ impl Fixture {
                 return false;
             }
             let (s, h) = http(self.port, "/health", None);
-            s == 200 && h["version"] == "0.20.3" && h["stateDir"] == json!(self.state)
+            s == 200 && h["version"] == "0.21.0" && h["stateDir"] == json!(self.state)
         });
         index
     }

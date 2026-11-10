@@ -418,8 +418,14 @@ fn setup_request(
 }
 
 pub fn inspect_plugin_setup(plugin: &PluginDescriptor) -> (bool, bool, Vec<String>) {
+    try_inspect_plugin_setup(plugin).unwrap_or((false, false, Vec::new()))
+}
+
+pub fn try_inspect_plugin_setup(
+    plugin: &PluginDescriptor,
+) -> Result<(bool, bool, Vec<String>), String> {
     match setup_request(plugin, "setup_inspect", false, true) {
-        Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => (
+        Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => Ok((
             response
                 .get("installed")
                 .and_then(Value::as_bool)
@@ -439,8 +445,12 @@ pub fn inspect_plugin_setup(plugin: &PluginDescriptor) -> (bool, bool, Vec<Strin
                         .collect()
                 })
                 .unwrap_or_default(),
-        ),
-        _ => (false, false, Vec::new()),
+        )),
+        Ok(response) => Err(response["error"]
+            .as_str()
+            .unwrap_or("Plugin inspection failed")
+            .into()),
+        Err(error) => Err(error),
     }
 }
 

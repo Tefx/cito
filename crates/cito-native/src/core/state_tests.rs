@@ -49,6 +49,51 @@ fn admit(f: &Fixture, s: &Value, seq: u64) -> Result<bool, String> {
 }
 
 #[test]
+fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() -> Result<(), String>
+{
+    let f = Fixture::new()?;
+    f.seed("maximum", 1)?;
+    f.state.db.execute(
+        "UPDATE local_signals SET message=? WHERE signal_id='maximum'",
+        &[json!("😀".repeat(65_536))],
+    )?;
+    let rows = f.state.claim_wake_batch("local", "c_1")?;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0]["held_reason"].is_null());
+    assert_eq!(rows[0]["state"], "DISPATCHING");
+    let bytes = serde_json::to_vec(&rows[0]["batch_card"]).map_err(|e| e.to_string())?;
+    assert!(bytes.len() > 262_144 && bytes.len() <= 524_288);
+    Ok(())
+}
+
+#[test]
+fn activity_filters_before_paging_and_counts_full_matching_set() -> Result<(), String> {
+    let f = Fixture::new()?;
+    for i in 0..100 {
+        f.seed(&format!("new{i}"), i)?;
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET acknowledged_at_ms=1,created_at='2030-01-01'",
+        &[],
+    )?;
+    f.seed("old-match", 101)?;
+    f.state.db.execute(
+        "UPDATE local_signals SET message='unique needle' WHERE signal_id='old-match'",
+        &[],
+    )?;
+    let (rows, total, unread) = f.state.query_activity("unread", "needle")?;
+    assert_eq!((rows.len(), total, unread), (1, 1, 1));
+    assert_eq!(rows[0]["signal_id"], "old-match");
+    assert_eq!(f.state.query_activity("me", "")?.1, 0);
+    f.state
+        .db
+        .execute("UPDATE local_listeners SET harness='human'", &[])?;
+    let (rows, total, unread) = f.state.query_activity("me", "")?;
+    assert_eq!((rows.len(), total, unread), (80, 101, 1));
+    Ok(())
+}
+
+#[test]
 fn full_unread_count_and_non_destructive_v4_reopen() -> Result<(), String> {
     let f = Fixture::new()?;
     for i in 0..100 {

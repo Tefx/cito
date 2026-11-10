@@ -332,7 +332,7 @@ impl HubEngine {
         db.execute("PRAGMA busy_timeout=5000", &[])?;
         db.transaction(|c|{
             for stmt in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()){c.execute(stmt,&[])?;}
-            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","instruction","TEXT"),("hub_channel_deliveries","reservation_id","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
+            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_channel_deliveries","reservation_id","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
             for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
             c.execute("INSERT OR IGNORE INTO hub_meta(key,int_val) VALUES('kv_seq',0)",&[])?;
             // Existing single-message deliveries retain reply and acknowledgment mappings.
@@ -1074,11 +1074,13 @@ impl HubEngine {
         let instruction = required(&result, "instruction")?;
         self.inner.db.transaction(|c| {
             cancel_pair(c,id,caller)?;
-            c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction) VALUES(?,?,?,?,?,?,?)",
-                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction)])?;
+            c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command) VALUES(?,?,?,?,?,?,?,?)",
+                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone()])?;
             Ok(())
         })?;
-        Ok(json!({"code":code,"instruction":instruction,"expires_at_ms":expires}))
+        Ok(
+            json!({"code":code,"instruction":instruction,"pairing_command":result["pairing_command"],"expires_at_ms":expires}),
+        )
     }
     fn stop_process(&self, id: &str) -> Result<(), String> {
         let old = self
@@ -1109,7 +1111,7 @@ impl HubEngine {
                 let hub_ready=ready(&plugin,&cfg,"hub");
                 let user_ready=ready(&plugin,&user,"user");
                 let enabled=!binding.is_null() && n(&binding,"enabled")==1 && user_ready;
-                let pair=one(c,"SELECT code,instruction FROM hub_pairing_codes WHERE principal_id=? AND plugin_id=? AND consumed_ms IS NULL AND expires_ms>? ORDER BY created_ms DESC LIMIT 1", &[caller["principal_id"].clone(),json!(plugin.id),json!(now_ms())])?.unwrap_or(Value::Null);
+                let pair=one(c,"SELECT code,instruction,pairing_command FROM hub_pairing_codes WHERE principal_id=? AND plugin_id=? AND consumed_ms IS NULL AND expires_ms>? ORDER BY created_ms DESC LIMIT 1", &[caller["principal_id"].clone(),json!(plugin.id),json!(now_ms())])?.unwrap_or(Value::Null);
                 let status=if hub_ready && !pair.is_null() && !user_ready { "pairing_pending" }
                     else if hub_ready && user_ready && enabled { "ready" }
                     else if hub_ready && user_ready { "paused" }
@@ -1141,7 +1143,7 @@ impl HubEngine {
                     "pairing_help_text":plugin.manifest["pairing"]["helpText"].as_str(),
                     "pairing_supported":plugin.manifest["pairing"]["supported"]==true,
                     "pairing_action_label":plugin.manifest["pairing"]["actionLabel"].as_str().unwrap_or("Pair Account…"),
-                    "pairing_code":pair["code"],"pairing_instruction":pair["instruction"],"fields":fs}));
+                    "pairing_code":pair["code"],"pairing_instruction":pair["instruction"],"pairing_command":pair["pairing_command"],"fields":fs}));
             }
             Ok(json!({"channels":channels}))
         })
@@ -1332,7 +1334,7 @@ impl HubEngine {
         let update=required(f,"update_id")?;if one(c,"SELECT 1 AS n FROM hub_processed_replies WHERE plugin_id=? AND update_id=?",&[json!(id),json!(update)])?.is_some(){return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null}))}
         let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;
         let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(id)])?;let binding=bindings.into_iter().find(|b|{let cfg=parse(b,"user_config_json");s(&cfg,"_external_chat_id")==chat&&s(&cfg,"_external_user_id")==user}).ok_or("FORBIDDEN: external account is not bound")?;let pid=s(&binding,"principal_id");
-        let target=if let Some(ext)=f["reply_to_external_msg_id"].as_str(){one(c,"SELECT signal_id,from_listener_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND external_msg_id=?",&[json!(id),json!(pid),json!(ext)])?}else{one(c,"SELECT signal_id,from_listener_id FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND status='delivered' AND delivered_ms>=? AND from_listener_id IS NOT NULL ORDER BY delivered_ms DESC,seq DESC LIMIT 1",&[json!(id),json!(pid),json!(now_ms()-600_000)])?}.ok_or("LISTENER_NOT_FOUND: no recent sender to reply to")?;
+        let target=if let Some(ext)=f["reply_to_external_msg_id"].as_str(){one(c,"SELECT signal_id,from_listener_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND external_msg_id=? AND from_listener_id IS NOT NULL AND from_listener_id!=''",&[json!(id),json!(pid),json!(ext)])?}else{one(c,"SELECT signal_id,from_listener_id FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND status='delivered' AND delivered_ms>=? AND from_listener_id IS NOT NULL AND from_listener_id!='' ORDER BY delivered_ms DESC,seq DESC LIMIT 1",&[json!(id),json!(pid),json!(now_ms()-604_800_000)])?}.ok_or("LISTENER_NOT_FOUND: no recent sender to reply to")?;
         let request=json!({"to":required(&target,"from_listener_id")?,"message":required(f,"text")?,"in_reply_to":target["signal_id"]});
         let (reply, request)=publish_human_reply(c,&binding,id,&request,&mut events)?;
         ack_request=request;
@@ -1430,8 +1432,18 @@ fn publish_human_reply(
     .ok_or("Published reply missing")?;
     let (ack_request, acked_at_ms) = if let Some(source) = in_reply_to {
         let request = json!({"node_id":human,"signal_ids":[source],"channel_id":format!("{host_id}:{channel}")});
-        let acked = ack(c, &request, None, events)?;
-        (Some(request), acked["acked_at_ms"].clone())
+        if one(
+            c,
+            "SELECT 1 FROM hub_signals WHERE signal_id=?",
+            &[json!(source)],
+        )?
+        .is_some()
+        {
+            let acked = ack(c, &request, None, events)?;
+            (Some(request), acked["acked_at_ms"].clone())
+        } else {
+            (None, json!(now_ms()))
+        }
     } else {
         (None, Value::Null)
     };
@@ -1493,8 +1505,11 @@ fn prune(c: &Connection) -> Result<(), String> {
         "UPDATE hub_signals SET msg_id=NULL WHERE created_ms<?",
         &[json!(now - window.max(0))],
     )?;
-    c.execute("DELETE FROM hub_channel_delivery_msgs WHERE NOT EXISTS(SELECT 1 FROM hub_signals s WHERE s.signal_id=hub_channel_delivery_msgs.signal_id)",&[])?;
-    c.execute("DELETE FROM hub_channel_deliveries WHERE NOT EXISTS(SELECT 1 FROM hub_signals s WHERE s.signal_id=hub_channel_deliveries.signal_id)",&[])?;
+    c.execute(
+        "DELETE FROM hub_channel_deliveries WHERE delivered_ms<?",
+        &[json!(now - 604_800_000)],
+    )?;
+    c.execute("DELETE FROM hub_channel_delivery_msgs WHERE NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=hub_channel_delivery_msgs.plugin_id AND d.principal_id=hub_channel_delivery_msgs.principal_id AND d.signal_id=hub_channel_delivery_msgs.signal_id)",&[])?;
     c.execute("DELETE FROM hub_consumer_acks WHERE NOT EXISTS(SELECT 1 FROM hub_signals s WHERE s.seq=hub_consumer_acks.seq)",&[])?;
     c.execute(
         "DELETE FROM hub_pairing_codes WHERE expires_ms<?",

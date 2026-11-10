@@ -1,8 +1,8 @@
 class Cito < Formula
   desc "Cross-harness agent and human notification network for macOS"
   homepage "https://tefx.github.io/cito/"
-  url "https://github.com/Tefx/cito/releases/download/v0.20.3/Cito-macos-arm64.zip"
-  version "0.20.3"
+  url "https://github.com/Tefx/cito/releases/download/v0.21.0/Cito-macos-arm64.zip"
+  version "0.21.0"
   sha256 "ee1c94676031b941e253846b40f10fe9ef8bcb256ccbe474dbbc4fd1d445d272"
   license "MIT"
 

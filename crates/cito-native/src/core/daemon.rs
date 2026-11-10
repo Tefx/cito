@@ -98,7 +98,10 @@ fn bound_fields(v: &mut Value, key: &str) {
     }
 }
 pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
-    bound_fields(&mut frame, "");
+    // Full-message copy uses correlated bounded chunks rather than preview caps.
+    if frame["op"] != "activity_message" {
+        bound_fields(&mut frame, "");
+    }
     loop {
         let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
         if bytes.len() + 1 < FRAME_LIMIT {
@@ -265,6 +268,9 @@ pub struct DaemonService {
     last_app_action: HashMap<String, String>,
     last_host_hub_error: Option<String>,
     last_hub_errors: HashMap<String, (String, bool)>,
+    cached_remote_channels: Mutex<HashMap<String, Value>>,
+    activity_filter: String,
+    activity_query: String,
 }
 impl DaemonService {
     pub fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
@@ -313,6 +319,9 @@ impl DaemonService {
             last_app_action: HashMap::new(),
             last_host_hub_error: None,
             last_hub_errors: HashMap::new(),
+            cached_remote_channels: Mutex::new(HashMap::new()),
+            activity_filter: "all".into(),
+            activity_query: String::new(),
         };
         service.reload_slots()?;
         Ok(service)
@@ -405,6 +414,9 @@ impl DaemonService {
                         || (rejected_hash.is_none() && old.expires_at > now_ms() / 1000 + 30))
             }) {
                 continue;
+            }
+            if let Ok(mut cache) = self.cached_remote_channels.lock() {
+                cache.remove(&name);
             }
             let previous = self.slots.remove(&name);
             let registration = previous.as_ref().map(|old| old.registration.clone());
@@ -533,6 +545,9 @@ impl DaemonService {
             .cloned()
             .collect();
         for name in removed {
+            if let Ok(mut cache) = self.cached_remote_channels.lock() {
+                cache.remove(&name);
+            }
             if let Some(slot) = self.slots.remove(&name) {
                 slot.closed.store(true, Ordering::SeqCst);
             }
@@ -841,6 +856,7 @@ impl DaemonService {
                             continue;
                         }
                         let scoped_id = self.scoped(&name, string(&row, "public_id"));
+                        let display_address = self.display_address(&name, &row);
                         let haystack = [
                             string(&row, "title"),
                             string(&row, "about"),
@@ -853,6 +869,7 @@ impl DaemonService {
                             string(&row, "harness"),
                             string(&row, "public_id"),
                             &scoped_id,
+                            &display_address,
                             string(&row, "listener_id"),
                         ]
                         .join(" ")
@@ -894,11 +911,7 @@ impl DaemonService {
                         }) {
                             continue;
                         }
-                        let is_self_principal = super::auth::principal_ids_equal(
-                            string(&row, "principal_id"),
-                            string(&slot.identity, "principal_id"),
-                        );
-                        rows.push(json!({"hub":name,"listener_id":scoped_id,"public_id":row["public_id"],"scoped_id":scoped_id,"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"about":row["about"],"title":row["title"],"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"is_self_principal":is_self_principal}));
+                        rows.push(self.peer_dto(&name, &row));
                     }
                 }
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
@@ -906,8 +919,21 @@ impl DaemonService {
         }
         rows.retain(include);
         rows.sort_by_key(|r| format!("{}:{}", string(r, "hub"), string(r, "listener_id")));
+        let matched_count = rows.len();
+        let online_count = self
+            .slots
+            .values()
+            .map(|s| {
+                s.cached_directory()
+                    .into_iter()
+                    .filter(|r| super::lease::evaluate_node_lease(r, now_ms()) == "ACTIVE")
+                    .count()
+            })
+            .sum::<usize>();
         rows.truncate(limit as usize);
-        Ok(json!({"ok":true,"listeners":rows,"warnings":warnings}))
+        Ok(
+            json!({"ok":true,"listeners":rows,"warnings":warnings,"matched_count":matched_count,"online_count":online_count}),
+        )
     }
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
         validate_tool_input(name, args)?;
@@ -963,16 +989,20 @@ impl DaemonService {
                 let _ = self.caller(meta, false)?;
                 self.find_listeners(args, |_| true)
             }
-            "cito_send" => match self.send(&hub, args, meta) {
-                Err(e)
-                    if e.starts_with("UNAUTHORIZED:")
-                        || e.starts_with("AUTHORIZATION_VIOLATION:") =>
-                {
-                    self.reload_slots()?;
-                    self.send(&hub, args, meta)
-                }
-                result => result,
-            },
+            "cito_send" => {
+                let result = match self.send(&hub, args, meta) {
+                    Err(e)
+                        if e.starts_with("UNAUTHORIZED:")
+                            || e.starts_with("AUTHORIZATION_VIOLATION:") =>
+                    {
+                        self.reload_slots()?;
+                        self.send(&hub, args, meta)
+                    }
+                    result => result,
+                };
+                self.poll()?;
+                result
+            }
             "cito_inbox" => self.inbox(&hub, args, meta),
             _ => Err(format!("INVALID_INPUT: Unknown tool: {name}")),
         }
@@ -994,7 +1024,8 @@ impl DaemonService {
         let slot = self.slot(hub)?;
         let caller = self.caller(meta, false)?;
         let mut directory = slot.directory()?;
-        let canonical_target = if to.starts_with('@') {
+        let alias = super::identity::readable_alias(to);
+        let canonical_target = if to.starts_with('@') || alias.is_some() {
             None
         } else {
             Some(super::identity::canonical_node_id(to)?)
@@ -1037,6 +1068,11 @@ impl DaemonService {
                 directory = slot.directory()?;
             }
         }
+        let exact_handle = handle.is_some_and(|handle| {
+            directory.iter().any(|r| {
+                r["harness"] == "human" && string(r, "owner_user").eq_ignore_ascii_case(handle)
+            })
+        });
         let mut matches: Vec<Value> = if let Some(handle) = handle {
             let user = if own_handle {
                 string(&slot.identity, "owner_user")
@@ -1054,10 +1090,63 @@ impl DaemonService {
                             )
                         } else {
                             string(row, "owner_user").eq_ignore_ascii_case(user)
-                                || normalize_slug(string(row, "owner_user")) == normalize_slug(user)
+                                || (!exact_handle
+                                    && normalize_slug(string(row, "owner_user"))
+                                        == normalize_slug(user))
                         }
                 })
                 .collect()
+        } else if let Some((user, harness, prefix)) = alias {
+            let mut found: Vec<_> = directory
+                .into_iter()
+                .filter(|row| {
+                    matches!(
+                        super::lease::evaluate_node_lease(row, now_ms()),
+                        "ACTIVE" | "DISCONNECTED_RETAINED"
+                    ) && string(row, "listener_id")
+                        .strip_prefix("c_")
+                        .is_some_and(|s| s.starts_with(prefix))
+                        && match harness {
+                            Some(h) => {
+                                string(row, "harness") == h
+                                    && (string(row, "owner_user").eq_ignore_ascii_case(user)
+                                        || normalize_slug(string(row, "owner_user")) == user)
+                            }
+                            None => {
+                                string(row, "harness") == user
+                                    || string(row, "owner_user").eq_ignore_ascii_case(user)
+                                    || normalize_slug(string(row, "owner_user")) == user
+                            }
+                        }
+                })
+                .collect();
+            // Bare harness aliases prefer the caller's principal; ambiguity within
+            // that chosen scope still requires a full canonical ID.
+            if harness.is_none()
+                && found.iter().any(|row| {
+                    string(row, "harness") == user
+                        && super::auth::principal_ids_equal(
+                            string(row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        )
+                })
+            {
+                found.retain(|row| {
+                    string(row, "harness") == user
+                        && super::auth::principal_ids_equal(
+                            string(row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        )
+                });
+            }
+            if prefix.len() == 12
+                && found
+                    .iter()
+                    .any(|r| string(r, "listener_id").strip_prefix("c_") == Some(prefix))
+            {
+                found.retain(|r| string(r, "listener_id").strip_prefix("c_") == Some(prefix));
+            }
+            found
         } else {
             directory
                 .into_iter()
@@ -1089,6 +1178,9 @@ impl DaemonService {
             }
         }
         if matches.len() > 1 {
+            if handle.is_none() {
+                return Err("INVALID_INPUT: Ambiguous target; use full listener_id".into());
+            }
             let principal = string(&matches[0], "principal_id");
             if matches.iter().any(|row| {
                 !super::auth::principal_ids_equal(principal, string(row, "principal_id"))
@@ -1115,6 +1207,33 @@ impl DaemonService {
             return Err("FORBIDDEN_TARGET_SCOPE: Target is private".into());
         }
         let canonical = string(target, "listener_id");
+        if let Some(caller) = caller.as_ref().filter(|c| {
+            !string(c, "harness").is_empty()
+                && c["harness"] != "human"
+                && !string(c, "session_id").is_empty()
+        }) {
+            if super::registration::local_node(
+                &self.state,
+                slot,
+                string(caller, "harness"),
+                string(caller, "session_id"),
+            )?
+            .is_none()
+            {
+                let mut caller = caller.clone();
+                let title = string(&caller, "title")
+                    .trim()
+                    .chars()
+                    .take(500)
+                    .collect::<String>();
+                caller["title"] = json!(if title.is_empty() {
+                    "Agent session"
+                } else {
+                    &title
+                });
+                self.listen(hub, &json!({"about":caller["title"]}), &caller)?;
+            }
+        }
         let from_id = caller
             .as_ref()
             .map(|caller| {
@@ -1174,7 +1293,7 @@ impl DaemonService {
                     Some(id) => self.state.listener(hub, id)?,
                     None => None,
                 };
-                let signal = json!({"signal_id":signal_id,"to":canonical,"target_generation":target["binding_generation"],"sender_endpoint_key":endpoint,"from":{"principal_id":slot.identity["principal_id"],"user":slot.identity["owner_user"],"host_id":self.host_id,"host_name":local_host_name(),"harness":caller.as_ref().map(|c|c["harness"].clone()),"listener_id":local_sender.as_ref().map(|s|s["public_id"].clone()),"title":caller.as_ref().map(|c|string(c,"title")).unwrap_or(""),"about":local_sender.as_ref().map(|s|s["about"].clone())},"message":message,"in_reply_to":reply_to});
+                let signal = json!({"signal_id":signal_id,"to":canonical,"target_generation":target["binding_generation"],"sender_endpoint_key":endpoint,"from":{"principal_id":slot.identity["principal_id"],"user":slot.identity["owner_user"],"host_id":self.host_id,"host_name":local_host_name(),"harness":caller.as_ref().map(|c|c["harness"].clone()),"listener_id":from_id.as_deref().map(|id| local_sender.as_ref().and_then(|s|s["public_id"].as_str()).filter(|s|!s.is_empty()).map(str::to_string).unwrap_or_else(|| super::identity::public_listener_id(string(&slot.identity,"owner_user"),id))),"title":caller.as_ref().map(|c|string(c,"title")).unwrap_or(""),"about":local_sender.as_ref().map(|s|s["about"].clone())},"message":message,"in_reply_to":reply_to});
                 slot.rpc("js_publish",&json!({"subject":format!("cito.signal.{canonical}"),"data_b64":STANDARD.encode(serde_json::to_vec(&signal).map_err(|e|e.to_string())?),"opts":{"msgID":dedup}}))?
             };
             seq = published["seq"].as_u64().unwrap_or(0);
@@ -1383,6 +1502,7 @@ impl DaemonService {
             let host_id = self.host_id.clone();
             let ui = self.ui.clone().filter(|_| self.desktop_banner_enabled());
             let id_prefix = self.scoped(hub, "");
+            let default_hub = self.config.default_hub.clone();
             let plugin = self.plugins.find_by_id(string(&row, "harness")).cloned();
             self.receivers.insert(key,thread::spawn(move||{
                 let channel=format!("{}:{}",host_id,string(&row,"harness"));
@@ -1411,7 +1531,14 @@ impl DaemonService {
                                 "from_title":string(&signal["from"],"title"),"message":signal["message"],
                                 "effective_wake":signal["target_generation"]==row["binding_generation"],
                                 "signal_id":format!("{id_prefix}{}",string(signal,"signal_id")),"hub":slot.name,
-                                "from_scoped_id":signal["from"]["listener_id"].as_str().map(|id|format!("{id_prefix}{id}")),"count":1
+                                "from_harness":signal["from"]["harness"],
+                                "from_scoped_id":signal["from"]["listener_id"].as_str().filter(|id|!id.is_empty()).map(|id|format!("{id_prefix}{id}")).or_else(|| (signal["from"]["harness"]=="human").then(||format!("{id_prefix}@{}",string(&signal["from"],"user")))),
+                                "from_display_address":signal["from"]["listener_id"].as_str().filter(|id|!id.is_empty()).map(|id| {
+                                    let peers=slot.cached_directory();
+                                    let canonical=super::identity::canonical_node_id(id).unwrap_or_default();
+                                    peers.iter().find(|p|p["listener_id"]==canonical).map(|sender|super::identity::display_address(&slot.name,&default_hub,sender,&peers)).unwrap_or_else(|| if slot.name==default_hub {id.into()} else {format!("{}:{id}",slot.name)})
+                                }).or_else(|| (signal["from"]["harness"]=="human").then(||super::identity::display_address(&slot.name,&default_hub,&json!({"harness":"human","owner_user":signal["from"]["user"]}),&[]))),
+                                "target_display_address":super::identity::display_address(&slot.name,&default_hub,&row,&slot.cached_directory()),"count":1
                             }}));
                         }
                     }
@@ -1441,7 +1568,11 @@ impl DaemonService {
     }
     fn settings_for_hub(&self, channel_hub: &str) -> Value {
         let apps:Vec<Value>=self.plugins.agent_plugins().into_iter().map(|p| {
-            let (installed,configured_in_host,paths)=inspect_plugin_setup(p);
+            let inspection = super::setup::try_inspect_plugin_setup(p);
+            if let Err(error) = &inspection {
+                return json!({"id":p.id,"display_name":p.display_name,"tier":p.tier,"installed":false,"paths":[],"configured":Value::Null,"status":"error","detail":error});
+            }
+            let (installed,configured_in_host,paths)=inspection.unwrap_or_default();
             let repair=configured_in_host && (!self.config.state_dir.join("bin/cito-mcp").is_file() || !super::setup::is_staged_plugin_intact(&self.config.state_dir, p));
             let configured=configured_in_host && !repair;
             let detail=if repair { "Staged Cito files missing — click Repair to restore" }
@@ -1456,10 +1587,22 @@ impl DaemonService {
         for (name, slot) in &self.slots {
             hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"status":wire_status(&slot.connection_status()),"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
             if name == channel_hub {
-                if let Ok(res) = slot.rpc("human_channels_list", &json!({})) {
-                    if let Some(cs) = res["channels"].as_array() {
-                        channels = cs.clone();
-                    }
+                let inventory = if slot.local.is_some() {
+                    slot.rpc("human_channels_list", &json!({}))
+                        .unwrap_or_else(|e| json!({"status":"error","detail":e}))
+                } else {
+                    self.cached_remote_channels
+                        .lock()
+                        .ok()
+                        .and_then(|c| c.get(name).cloned())
+                        .unwrap_or_else(|| json!({"status":"loading"}))
+                };
+                channels = inventory["channels"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if inventory["status"] == "error" {
+                    channels.push(json!({"id":"inventory","display_name":"Channel inventory","sf_symbol":"exclamationmark.triangle","tint":"red","enabled":false,"configured":false,"hub_provided":false,"pairing_supported":false,"fields":[],"status":"error","detail":inventory["detail"]}));
                 }
             }
         }
@@ -1522,6 +1665,24 @@ impl DaemonService {
         invite_command.push_str(" --default");
         json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
+    fn refresh_channels(&self, hub: &str) {
+        if let Some(slot) = self.slots.get(hub).filter(|s| s.local.is_none()) {
+            let value = slot
+                .rpc("human_channels_list", &json!({}))
+                .unwrap_or_else(|e| json!({"status":"error","detail":e}));
+            if let Ok(mut cache) = self.cached_remote_channels.lock() {
+                cache.insert(hub.into(), value);
+            }
+        }
+    }
+    fn display_address(&self, hub: &str, row: &Value) -> String {
+        let peers = self
+            .slots
+            .get(hub)
+            .map(|s| s.cached_directory())
+            .unwrap_or_default();
+        super::identity::display_address(hub, &self.config.default_hub, row, &peers)
+    }
     fn activity_dto(&self, rows: Vec<Value>) -> Vec<Value> {
         rows.into_iter()
             .map(|mut row| {
@@ -1536,12 +1697,40 @@ impl DaemonService {
                 row["target_title"] = json!(string(&target, "title"));
                 row["target_scoped_id"] =
                     json!(self.scoped(string(&row, "hub"), string(&target, "public_id")));
-                row["from_scoped_id"] = json!(self.scoped(
-                    string(&row, "hub"),
-                    row["from_listener_id"]
-                        .as_str()
-                        .unwrap_or(&format!("@{}", string(&row, "from_user")))
-                ));
+                row["target_display_address"] =
+                    json!(self.display_address(string(&row, "hub"), &target));
+                let source = row["from_listener_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                row["from_scoped_id"] = source
+                    .as_deref()
+                    .map(|id| json!(self.scoped(string(&row, "hub"), id)))
+                    .unwrap_or_else(|| {
+                        if row["from_harness"] == "human" {
+                            json!(self.scoped(
+                                string(&row, "hub"),
+                                &format!("@{}", string(&row, "from_user"))
+                            ))
+                        } else {
+                            Value::Null
+                        }
+                    });
+                row["from_display_address"] = source
+                    .as_deref()
+                    .map(|id| {
+                        let canonical = super::identity::canonical_node_id(id).unwrap_or_default();
+                        let sender = self.slots.get(string(&row, "hub")).and_then(|s| {
+                            s.cached_directory()
+                                .into_iter()
+                                .find(|p| p["listener_id"] == canonical)
+                        });
+                        sender
+                            .map(|s| json!(self.display_address(string(&row, "hub"), &s)))
+                            .unwrap_or_else(|| row["from_scoped_id"].clone())
+                    })
+                    .unwrap_or_else(|| row["from_scoped_id"].clone());
+                row["message_truncated"] = json!(string(&row, "message").len() > 512);
                 row["for_me"] = json!(target["harness"] == "human");
                 row
             })
@@ -1570,10 +1759,18 @@ impl DaemonService {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|app| app["configured"] == false)
+            .filter(|app| app["configured"] == false && app["status"] != "error")
             .filter_map(|app| app["id"].as_str())
             .collect();
-        let (activity, unread) = self.state.activity()?;
+        let (activity, activity_total, activity_unread) = self
+            .state
+            .query_activity(&self.activity_filter, &self.activity_query)?;
+        let unread = self.state.db.query(
+            "SELECT COUNT(*) AS n FROM local_signals WHERE acknowledged_at_ms IS NULL",
+            &[],
+        )?[0]["n"]
+            .as_u64()
+            .unwrap_or(0);
         let mut sessions: Vec<Value> = self
             .state
             .active()?
@@ -1582,6 +1779,7 @@ impl DaemonService {
             .collect();
         for row in &mut sessions {
             row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
+            row["display_address"] = json!(self.display_address(string(row, "hub"), row));
         }
         let available = self
             .session_activity
@@ -1616,7 +1814,7 @@ impl DaemonService {
                 }
             }
         }
-        let harnesses:Vec<Value>=self.plugins.plugins.iter().enumerate().map(|(order,p)|json!({"id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order})).collect();
+        let harnesses:Vec<Value>=self.plugins.agent_plugins().into_iter().enumerate().map(|(order,p)|json!({"kind":"agent","id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order})).collect();
         let enabled_hubs: Vec<Value> = settings["hubs"]
             .as_array()
             .into_iter()
@@ -1624,11 +1822,11 @@ impl DaemonService {
             .cloned()
             .collect();
         Ok(
-            json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"sessions":sessions,"available":available,"my_remote_listeners":remote,"activity":activity,"unread_count":unread,"total_online":online,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),
+            json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"sessions":sessions,"available":available,"my_remote_listeners":remote,"activity":activity,"activity_total":activity_total,"activity_unread_count":activity_unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":unread,"total_online":online,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),
         )
     }
     fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()})
+        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.values().filter(|c| c["state"]=="ACTIVE").filter_map(|c| c["display_label"].as_str().or_else(|| c["host_name"].as_str()).or_else(|| c["display_name"].as_str())).filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default()})
     }
     fn emit(&self, frame: Value) {
         if let Some(ui) = &self.ui {
@@ -2107,6 +2305,7 @@ impl DaemonService {
                     }
                     _ => {}
                 }
+                self.refresh_channels(&hub);
                 self.emit(
                     json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":op,"request_id":action["request_id"],"settings":self.settings_for_hub(&hub)}),
                 );
@@ -2200,11 +2399,43 @@ impl DaemonService {
                 }
                 self.flush_acks();
             }
+            "copy_activity_message" => {
+                let row = self
+                    .state
+                    .db
+                    .query(
+                        "SELECT message FROM local_signals WHERE hub=? AND signal_id=?",
+                        &[json!(hub), action["signal_id"].clone()],
+                    )?
+                    .into_iter()
+                    .next()
+                    .ok_or("LISTENER_NOT_FOUND: Message no longer available")?;
+                let message = string(&row, "message");
+                let characters: Vec<_> = message.chars().collect();
+                let chunks: Vec<String> = if characters.is_empty() {
+                    vec![String::new()]
+                } else {
+                    characters
+                        .chunks(16_000)
+                        .map(|part| part.iter().collect())
+                        .collect()
+                };
+                for (index, chunk) in chunks.iter().enumerate() {
+                    self.emit(json!({"op":"activity_message","request_id":action["request_id"],"part":index,"complete":index+1==chunks.len(),"message":chunk}));
+                }
+                return Ok(json!({"ok":true}));
+            }
             "clear_activity_history" => {
-                self.state.db.execute(
-                    "DELETE FROM local_signals WHERE acknowledged_at_ms IS NOT NULL",
-                    &[],
-                )?;
+                self.state.db.transaction(|c| {
+                    let selected = action["hub"].as_str().unwrap_or("");
+                    let rows = c.query("SELECT * FROM local_signals WHERE (?='' OR hub=?)", &[json!(selected),json!(selected)])?;
+                    for row in rows {
+                        if row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES(?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms())])?; }
+                        c.execute("DELETE FROM local_signals WHERE hub=? AND signal_id=?", &[row["hub"].clone(),row["signal_id"].clone()])?;
+                    }
+                    Ok(())
+                })?;
+                self.flush_acks();
             }
             "listen_session" => {
                 let mut caller = action.clone();
@@ -2277,8 +2508,16 @@ impl DaemonService {
                 )?;
             }
             "open_directory" | "query_directory" => {
-                let args =
-                    json!({"hub":hub,"query":action["query"].as_str().unwrap_or(""),"limit":50});
+                self.activity_filter = action["filter"].as_str().unwrap_or("all").into();
+                self.activity_query = if action["mode"] == "activity" {
+                    string(action, "query").into()
+                } else {
+                    String::new()
+                };
+                let mut args = json!({"query":action["query"].as_str().unwrap_or(""),"limit":50});
+                if let Some(hub) = action["hub"].as_str().filter(|s| !s.is_empty()) {
+                    args["hub"] = json!(hub);
+                }
                 validate_tool_input("cito_find", &args)?;
                 self.slot(&hub)?;
                 let _ = self.caller(&json!({}), false)?;
@@ -2290,9 +2529,16 @@ impl DaemonService {
                     harness.is_none_or(|id| row["harness"] == id)
                         && (!mine || row["is_self_principal"] == true)
                 })?;
-                let (activity, unread) = self.state.activity()?;
+                let (activity, total, unread) = self.state.query_activity(
+                    action["filter"].as_str().unwrap_or("all"),
+                    if action["mode"] == "activity" {
+                        string(action, "query")
+                    } else {
+                        ""
+                    },
+                )?;
                 let activity = self.activity_dto(activity);
-                let frame = json!({"op":"directory","hub":hub,"peers":result["listeners"],"activity":activity,"unread_count":unread});
+                let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":action["query"].as_str().unwrap_or(""),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"activity":activity,"activity_total":total,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":self.state.activity()?.1});
                 self.emit(frame.clone());
                 return Ok(frame);
             }
@@ -2447,6 +2693,7 @@ impl DaemonService {
             }
             "quit" | "quit_daemon" => request_shutdown(),
             "open_settings" | "settings_select_hub" => {
+                self.refresh_channels(&hub);
                 self.active_settings_hub = Some(hub.clone());
                 self.emit(
                     json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
@@ -2770,7 +3017,7 @@ fn validate_tool_input(name: &str, args: &Value) -> Result<(), String> {
             {
                 return Err("INVALID_INPUT: Invalid Human address".into());
             }
-        } else {
+        } else if super::identity::readable_alias(address).is_none() {
             super::identity::canonical_node_id(address)?;
         }
     }
@@ -2809,7 +3056,7 @@ fn tools_list() -> Value {
      {"name":"cito_listen","description":"Enroll this session in the lightweight control plane for signaling and wake notifications.","inputSchema":{"type":"object","properties":{"about":{"type":"string","minLength":1,"maxLength":500},"tag":{"type":"string","maxLength":64},"hub":{"type":"string"},"scope":{"type":"string","enum":["self","workspace"]}},"required":["about"]}},
      {"name":"cito_unlisten","description":"Revoke this session on one or all hubs.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
      {"name":"cito_find","description":"Find opted-in active nodes.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"query":{"type":"string","maxLength":200},"user":{"type":"string","maxLength":64},"host":{"type":"string","maxLength":128},"harness":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,31}$"},"repo":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":50}}}},
-     {"name":"cito_send","description":"Send a lightweight control plane signal of 1..65,536 Unicode code points. Prefer external channels for long debates or large artifacts.","inputSchema":{"type":"object","properties":{"to":{"type":"string","pattern":"^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_(?:[a-f0-9]{16}|[a-z2-7]{12})|[a-z0-9]+(?:-[a-z0-9]+)*-(?:[a-f0-9]{16}|[a-z2-7]{12})|@[a-zA-Z0-9._-]{1,64})$"},"message":{"type":"string","minLength":1,"maxLength":65536},"hub":{"type":"string"},"in_reply_to":{"type":"string","minLength":1,"maxLength":161},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["to","message"]}},
+     {"name":"cito_send","description":"Send a lightweight control plane signal of 1..65,536 Unicode code points. Prefer external channels for long debates or large artifacts.","inputSchema":{"type":"object","properties":{"to":{"type":"string","pattern":"^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_(?:[a-f0-9]{16}|[a-z2-7]{12})|[a-z0-9]+(?:-[a-z0-9]+)*-(?:[a-f0-9]{16}|[a-z2-7]{12})|@[a-zA-Z0-9._-]{1,64}|[a-zA-Z0-9._-]{1,64}(?:/[a-z0-9][a-z0-9_-]{0,31})?#[a-z0-9]{1,16})$"},"message":{"type":"string","minLength":1,"maxLength":65536},"hub":{"type":"string"},"in_reply_to":{"type":"string","minLength":1,"maxLength":161},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["to","message"]}},
      {"name":"cito_inbox","description":"Read and acknowledge this node's inbox.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"ack_all":{"type":"boolean"},"ack_ids":{"type":"array","items":{"type":"string","minLength":1,"maxLength":161}},"limit":{"type":"integer","minimum":1,"maximum":1000}}}}
     ]});
     if let Some(list) = tools["tools"].as_array_mut() {

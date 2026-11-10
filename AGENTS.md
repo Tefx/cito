@@ -74,7 +74,7 @@ Integration subprocess tests share a process-test mutex and an environment-clear
 ## Versioning, Compatibility & Release Governance
 
 1. **Three Orthogonal Version Dimensions**:
-   - **Product Release Version (`SemVer 2.0.0`, `vMAJOR.MINOR.PATCH`)**: Single source of truth in `crates/cito-native/Cargo.toml` `version` (currently `0.20.3`), exported as `CITO_VERSION = env!("CARGO_PKG_VERSION")` from `crates/cito-native/src/core/plugins.rs`, paired with an annotated Git tag `vX.Y.Z` (e.g., `v0.10.0`).
+   - **Product Release Version (`SemVer 2.0.0`, `vMAJOR.MINOR.PATCH`)**: Single source of truth in `crates/cito-native/Cargo.toml` `version` (currently `0.21.0`), exported as `CITO_VERSION = env!("CARGO_PKG_VERSION")` from `crates/cito-native/src/core/plugins.rs`, paired with an annotated Git tag `vX.Y.Z` (e.g., `v0.10.0`).
    - **Internal Plan Phase (`v1`, `v2`, …)**: Tracked in `plan.yaml` for Vectl execution history only; never exposed as a runtime or wire version.
    - **Local SQLite Schema Version (`PRAGMA user_version`)**: Integer schema version in `crates/cito-native/src/core/state.rs`, incremented only on incompatible local table DDL changes.
 2. **SemVer Increment Rules**:

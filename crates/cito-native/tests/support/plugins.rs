@@ -68,6 +68,55 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(probe["status"], "alive", "{probe}");
     }
+    // Interactive discovery excludes background invocations, independently of caller resolution.
+    let flags: &[&[&str]] = &[
+        &["--mode", "rpc"],
+        &["--mode", "json"],
+        &["--print"],
+        &["-p"],
+        &["--no-session"],
+        &["--version"],
+        &["--help"],
+    ];
+    let mut background = Vec::new();
+    for flags in flags {
+        let mut args = vec![script.to_str().unwrap()];
+        args.extend_from_slice(flags);
+        let index = f.spawn("node", &args, &[]);
+        wait(|| f.output(index, false).contains("ready"));
+        background.push(index);
+    }
+    let interactive = discover(&f);
+    assert!(interactive["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| !background
+            .iter()
+            .any(|index| r["endpoint_pid"] == f.pid(*index))));
+    assert_eq!(
+        f.plugin(
+            PI,
+            json!({"op":"resolve_caller","endpoint_pid":f.pid(background[0]),"cwd":cwd})
+        )["ok"],
+        true
+    );
+    f.env.remove("CITO_PI_ALLOW_HEADLESS_DISCOVERY");
+    let no_tty = discover(&f);
+    assert!(no_tty["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["endpoint_pid"] != f.pid(first) && r["endpoint_pid"] != f.pid(second)));
+    assert_eq!(
+        f.plugin(
+            PI,
+            json!({"op":"resolve_caller","endpoint_pid":f.pid(first),"cwd":cwd})
+        )["ok"],
+        true
+    );
+    f.env
+        .insert("CITO_PI_ALLOW_HEADLESS_DISCOVERY".into(), "1".into());
     // Production readiness gating is distinct from the explicit process-only test mode.
     f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
     let gated = discover(&f);

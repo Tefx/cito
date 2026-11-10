@@ -288,18 +288,20 @@ impl SessionActivity {
             }
             if let Some(worker) = provider.worker.take() {
                 let rows = match worker.join() {
-                    Ok(Ok(rows)) => rows,
+                    Ok(Ok(rows)) => Some(rows),
                     Ok(Err(error)) => {
                         eprintln!("cito discovery {}: {error}", provider.plugin.id);
-                        Vec::new()
+                        None
                     }
                     Err(_) => {
                         eprintln!("cito discovery {}: worker panicked", provider.plugin.id);
-                        Vec::new()
+                        None
                     }
                 };
-                changed |= rows != provider.cached;
-                provider.cached = rows;
+                if let Some(rows) = rows {
+                    changed |= rows != provider.cached;
+                    provider.cached = rows;
+                }
                 provider.due = Instant::now() + REFRESH_INTERVAL;
             }
         }
@@ -823,6 +825,32 @@ print(json.dumps(response), flush=True)
         assert!(other_start < fast_end, "Providers ran sequentially");
         activity.shutdown()?;
         assert_reaped(&f);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_errors_and_panics_retain_last_confirmed_candidates() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider("agent", json!({}))?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        let confirmed = vec![json!({"harness":"agent","session_id":"kept","title":"Work"})];
+        activity.discovery[0].cached = confirmed.clone();
+        for panic in [false, true] {
+            activity.discovery[0].worker = Some(std::thread::spawn(move || {
+                if panic {
+                    panic!("discovery fixture panic");
+                }
+                Err("PLUGIN_TIMEOUT: fixture deadline".into())
+            }));
+            pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+            assert_eq!(activity.discovery[0].cached, confirmed);
+        }
+        activity.discovery[0].worker = Some(std::thread::spawn(|| Ok(vec![])));
+        pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+        assert!(
+            activity.discovery[0].cached.is_empty(),
+            "A confirmed empty inventory replaces old candidates"
+        );
         Ok(())
     }
 

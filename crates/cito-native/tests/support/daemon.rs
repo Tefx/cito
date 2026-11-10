@@ -1589,7 +1589,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.20.3");
+    assert_eq!(init["serverInfo"]["version"], "0.21.0");
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1637,6 +1637,143 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     assert_eq!(f.mcp("ping", json!({})), json!({}));
 }
 #[test]
+fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let target = enroll(&f, meta);
+    let canonical = target["canonical_listener_id"].as_str().unwrap();
+    let prefix = &canonical[2..6];
+    for to in [
+        format!("alice/fixture#{prefix}"),
+        format!("fixture#{prefix}"),
+        format!("alice#{prefix}"),
+        format!("local:alice/fixture#{prefix}"),
+    ] {
+        assert_eq!(
+            f.tool(
+                "cito_send",
+                json!({"to":to,"message":"Alias routing"}),
+                human()
+            )["to"],
+            target["listener_id"]
+        );
+    }
+    let duplicate = format!("c_{prefix}ffffffffffff");
+    let row = json!({"listener_id":duplicate,"public_id":format!("alice-{}",&duplicate[2..]),"owner_user":"alice","principal_id":"none#alice","harness":"fixture","state":"ACTIVE","scope":"workspace","updated_at_ms":cito_native::core::plugins::now_ms(),"binding_generation":1});
+    f.db("hub.sqlite").execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,?,CAST(? AS BLOB),'none#alice','workspace')",&[json!(duplicate),json!(cito_native::core::plugins::now_ms()),json!(row.to_string())]).unwrap();
+    wait(|| {
+        f.tool("cito_find", json!({"harness":"fixture"}), human())["listeners"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 2
+    });
+    for to in [
+        format!("alice/fixture#{prefix}"),
+        format!("fixture#{prefix}"),
+        format!("alice#{prefix}"),
+    ] {
+        let result = f.tool_result(
+            "cito_send",
+            json!({"to":to,"message":"Must disambiguate"}),
+            human(),
+        );
+        assert_eq!(result["isError"], true, "{result}");
+        let error: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(error["error"]["code"], "INVALID_INPUT");
+        assert_eq!(
+            error["error"]["message"],
+            "Ambiguous target; use full listener_id"
+        );
+    }
+}
+
+#[test]
+fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.provider("delivered");
+    fs::write(f.state.join("plugins/fixture/options.json"), "{").unwrap();
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    f.action(json!({"op":"open_settings"}));
+    let mut settings = Value::Null;
+    wait(|| {
+        settings = fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v["op"] == "settings")
+            .last()
+            .unwrap_or(Value::Null);
+        settings.is_object()
+    });
+    let app = settings["settings"]["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "fixture")
+        .unwrap();
+    assert_eq!(app["status"], "error", "{settings}");
+    assert!(app["configured"].is_null());
+    assert!(!app["detail"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let sent = f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Agent initiated"}),
+        meta.clone(),
+    );
+    assert_eq!(sent["ok"], true, "{sent}");
+    let sender = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    assert_eq!(sender["status"], "ACTIVE");
+    wait(|| {
+        f.rows("SELECT * FROM local_signals WHERE message='Agent initiated'")
+            .len()
+            == 1
+    });
+    let (status, snapshot) = f.action(json!({"op":"query_directory","filter":"all"}));
+    assert_eq!(status, 200, "{snapshot}");
+    let activity = &snapshot["activity"][0];
+    assert_eq!(activity["from_scoped_id"], sender["public_id"]);
+    assert!(activity["from_display_address"]
+        .as_str()
+        .unwrap()
+        .contains("/fixture#"));
+    let reply = f.tool("cito_send",json!({"to":activity["from_display_address"],"message":"Human reply","in_reply_to":activity["signal_id"]}),human());
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["to"], sender["public_id"]);
+    wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
+    assert_eq!(f.action(json!({"op":"clear_activity_history"})).0, 200);
+    assert!(f.rows("SELECT * FROM local_signals").is_empty());
+    f.tool("cito_unlisten", json!({}), meta.clone());
+    assert_eq!(
+        f.tool(
+            "cito_send",
+            json!({"to":"@self","message":"Explicitly paused"}),
+            meta
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
+        "UNLISTENED"
+    );
+}
+
+#[test]
 fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1650,7 +1787,8 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v["listener_id"] == target["listener_id"]));
+        .any(|v| v["scoped_id"] == target["listener_id"]
+            && v["listener_id"] == target["canonical_listener_id"]));
     let long = "Context payload segment ".repeat(100).trim().to_string();
     let args = json!({"to":target["listener_id"],"message":long,"idempotency_key":"stable"});
     let sent = f.tool("cito_send", args.clone(), human());
@@ -1710,7 +1848,7 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.20.3");
+    assert_eq!(http(p, "/health", None).1["version"], "0.21.0");
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -2525,6 +2663,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.20.3"
+        "cito v0.21.0"
     );
 }

@@ -101,6 +101,36 @@ fn allow_process_only(req: &Value) -> bool {
     env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("1")
         && env_value(req, "CITO_PI_REQUIRE_BRIDGE").as_deref() != Some("1")
 }
+fn interactive_candidate(req: &Value, pid: u32) -> bool {
+    if req["op"] != "discover_sessions" {
+        return true;
+    }
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "tty=,command="])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut words = text.split_whitespace();
+    let Some(tty) = words.next() else {
+        return false;
+    };
+    if matches!(tty, "?" | "??")
+        && env_value(req, "CITO_PI_ALLOW_HEADLESS_DISCOVERY").as_deref() != Some("1")
+    {
+        return false;
+    }
+    let args: Vec<_> = words.collect();
+    !args.iter().any(|a| {
+        matches!(
+            *a,
+            "--print" | "-p" | "--no-session" | "--version" | "--help"
+        ) || matches!(*a, "--mode=rpc" | "--mode=json")
+    }) && !args
+        .windows(2)
+        .any(|w| w[0] == "--mode" && matches!(w[1], "rpc" | "json"))
+}
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
     if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0")
@@ -124,7 +154,8 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
             let p = columns.next()?.parse().ok()?;
             (columns.next()?.parse::<u32>().ok()? == uid
                 && !out.iter().any(|(pid, _)| *pid == p)
-                && matches_process(&columns.collect::<Vec<_>>().join(" ")))
+                && matches_process(&columns.collect::<Vec<_>>().join(" "))
+                && interactive_candidate(req, p))
             .then_some(p)
         })
         .collect();
@@ -218,7 +249,8 @@ fn socket_candidates(req: &Value) -> Vec<(u32, Value)> {
                 .and_then(|s| s.parse::<u32>().ok())
             {
                 if let Ok(v) = identify(req, p) {
-                    if v["ok"] == true
+                    if interactive_candidate(req, p)
+                        && v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
                     {

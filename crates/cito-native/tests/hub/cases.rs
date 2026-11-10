@@ -1375,6 +1375,47 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
+fn reply_mappings_outlive_payloads_for_seven_days_and_ack_missing_sources() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    put(&e, "sender", "none#bob", "workspace");
+    let pid = "none#alice";
+    e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,'fixture','alice',?)",&[json!(pid),json!(json!({"_external_chat_id":"room","_external_user_id":"user"}).to_string())]).unwrap();
+    e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,delivered_ms) VALUES('fixture',?,'aged',1,'delivered','sender',?)",&[json!(pid),json!(now_ms()-86_400_000)]).unwrap();
+    e.inner.db.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES('fixture',?,'chunk','aged','sender')",&[json!(pid)]).unwrap();
+    e.inner.db.transaction(prune).unwrap();
+    let mut frame = json!({"update_id":"quoted","external_chat_id":"room","external_user_id":"user","reply_to_external_msg_id":"chunk","text":"Reply after a day"});
+    assert_eq!(e.inbound_reply("fixture", &frame).unwrap()["ok"], true);
+    frame
+        .as_object_mut()
+        .unwrap()
+        .remove("reply_to_external_msg_id");
+    frame["update_id"] = json!("fallback");
+    assert_eq!(e.inbound_reply("fixture", &frame).unwrap()["ok"], true);
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET delivered_ms=?",
+            &[json!(now_ms() - 604_800_001)],
+        )
+        .unwrap();
+    e.inner.db.transaction(prune).unwrap();
+    frame["update_id"] = json!("expired");
+    assert!(e
+        .inbound_reply("fixture", &frame)
+        .unwrap_err()
+        .starts_with("LISTENER_NOT_FOUND:"));
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_channel_delivery_msgs", &[])
+        .unwrap()
+        .is_empty());
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn reply_dedup_target_validation_and_ack_commit_together() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();
@@ -1384,6 +1425,7 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
     put(&e, &node, pid, "self");
     send(&e, &node, "original");
     e.inner.db.transaction(|c|{c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,'fixture','alice',?)",&[json!(pid),json!(json!({"_external_chat_id":"room","_external_user_id":"user"}).to_string())])?;c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES('fixture',?,'chunk-1','original','work:sender')",&[json!(pid)])?;Ok(())}).unwrap();
+    e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,delivered_ms) VALUES('fixture',?,'original',1,'delivered','work:sender',?)", &[json!(pid),json!(now_ms())]).unwrap();
     let frame = json!({"op":"inbound_reply","update_id":"u1","external_chat_id":"room","external_user_id":"user","reply_to_external_msg_id":"chunk-1","text":"Approved"});
     assert_eq!(e.inbound_reply("fixture", &frame).unwrap()["ok"], true);
     assert_eq!(
