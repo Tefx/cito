@@ -7796,7 +7796,7 @@ phases:
     name: Implement V26 Stage 10 (v0.20.2) Root-Cause Equivalence-Class Closure (R1–R5),
       True Progressive Disclosure, Full Mechanical Geometry Invariants, Closed-Loop
       Error Surfacing, Bridge Readiness & Daemon<->UI Closed-Loop Suite
-    status: claimed
+    status: done
     description: "```yaml\nstep_type: implementation\nrepo_change_policy: modifies_repo\n\
       ```\n\n- **Deliver:** Complete Stage 10 (`v0.20.2` — `R1`–`R5`) implementation\
       \ per `docs/DESIGN.md` §12:\n  1. **`R1` — True Two-Stratum Progressive Disclosure,\
@@ -7871,6 +7871,41 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-09T23:42:14.447385Z'
+    done_at: '2026-11-10T00:57:01.186227+00:00'
+    evidence: "Artifact:\n- Commit: 48cc2735541819a76e6436e87addcbd099537a9f (39 files\
+      \ changed, +1286 / -239 lines)\n- Executor: rust-senior (session `/Users/tefx/.pi/larva/child-sessions/2026-11-09T23-44-02-305Z_01a1c2b2-8700-77b9-b1cd-56ab5dfc1861.jsonl`)\n\
+      - Delivered (`docs/DESIGN.md` §12 `R1`–`R5` & `v0.20.2` version bump):\n  1.\
+      \ `R1`: Scope-filtered `collectValues(scopeFilter: \"hub\" | \"user\")`, `save_hub_service`\
+      \ RPC routing (`hub_config` only without touching `hub_human_channels`), progressive\
+      \ collapse of `stratum_hub:<id>` (`36pt`/`50pt` collapsed bar with `edit_hub_service:<id>`\
+      \ `\"Change Token…\"` and `clear_channel_service:<id>` `\"Clear Token\"` vs.\
+      \ expanded `save_hub_service:<id>` `\"Save Gateway Token\"` / `cancel_edit_hub_service:<id>`),\
+      \ Step-2 prerequisite gating in `stratum_user:<id>` (`MenuControl.isEnabled`\
+      \ guard, disabled personal controls when `!gatewayActive` except `skip_channel:<id>`),\
+      \ and request-correlated secret draft acknowledgement.\n  2. `R2`: Upgraded\
+      \ `inspectMenu()` to compute and assert `truncated_labels == []`, `overlapping_siblings\
+      \ == []`, and `clipped_views == []` across all 3 surfaces (`cardMenu`, `SettingsPanel`,\
+      \ `DirectoryPanel`), and fixed all `G1`–`G8` and dynamic-width geometry bounds.\n\
+      \  3. `R3`: Closed-loop error surfacing (`settings_error_banner` with `36pt`\
+      \ scroll viewport shift, `add_hub_error`, `menu_error_row`, `composerErrorLabel`,\
+      \ and `DaemonService.last_hub_errors` -> `hub.error`), client+server `submit_add_hub`\
+      \ validation keeping `addHubFormOpen = true` on error, unified `paste_hub_invite`\
+      \ (JSON, URL, CLI string) with error/success feedback, `hostHubPortDraft` retention,\
+      \ and `effectiveChannelHub` inventory validation.\n  4. `R4`: Pre-`session_start`\
+      \ `identify` fallback in `plugins/pi/cito-bridge.ts`, `needs_reload: true` candidate\
+      \ discovery and `resolve_caller`/`probe` gating in `plugins/pi/native.rs`, `46pt`\
+      \ vendor-neutral `needs_reload` row with `reload:<harness>:<sid>` (`\"/reload\"\
+      `) in `src/macos/cito-ui.swift`, and bounded exponential badge retry backoff\
+      \ (`250ms..15s`) + inactive badge retirement in `crates/cito-native/src/core/session_activity.rs`.\n\
+      \  5. `R5`: Real `DaemonService <-> Headless cito-ui` closed-loop integration\
+      \ suite in `crates/cito-native/tests/support/ui.rs` and 25 rendered 2x Retina\
+      \ PNG snapshots in `/tmp/cito-v26-snapshots/`, plus version bump to `0.20.2`.\n\
+      \nVerification:\n- Run: `cargo test --workspace && cargo build --release &&\
+      \ /usr/bin/ruby -c packaging/homebrew/cito.rb` -> 227 passed, 0 failed, 0 compiler\
+      \ warnings, `Syntax OK`\n- Run: `grep -rnE -i '\\b(pi|codex|claude|telegram|webhook|slack|teams|email|discord|feishu)\\\
+      b' crates/cito-native/src/core/ src/macos/` -> 0 matches\n- Reclaimed worktree\
+      \ `/Users/tefx/Projects/cito/.vectl/worktrees/v26.impl`.\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§12, V26 Stage 10 v0.20.2 R1–R5)\n- docs/ROADMAP.md"
   - id: v26.hygiene
     name: 'Multimodal Visual Snapshot Inspection, Iterative Contract-and-Simplicity
       Convergence & Live v0.20.2 Distribution Closure (GitHub Release v0.20.2 & Tefx/homebrew-tap
