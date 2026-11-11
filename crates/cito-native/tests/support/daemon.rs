@@ -399,7 +399,46 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
         let user_root = state.join("plugins");
         let ids = ["pi", "codex", "claude", "telegram", "human"];
         if mode == "native" {
-            let loaded = plugins::load_plugins(&state);
+            let config_path = std::path::PathBuf::from(std::env::var("CITO_CONFIG_PATH").unwrap());
+            let original_config = fs::read(&config_path).unwrap();
+            let legacy_manifest = fs::read(user_root.join("pi/plugin.json")).unwrap();
+            for hub in ["local", "work"] {
+                for user in [
+                    json!("invalid user"),
+                    json!("self"),
+                    json!(""),
+                    json!(" "),
+                    json!(" alice "),
+                    json!(42),
+                    json!(false),
+                    json!([]),
+                    json!({}),
+                ] {
+                    let mut raw =
+                        json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}});
+                    raw["hubs"][hub]["user"] = user;
+                    fs::write(&config_path, raw.to_string()).unwrap();
+                    assert_eq!(
+                        plugins::load_native_config().unwrap_err(),
+                        format!("Invalid user for hub {hub}")
+                    );
+                    assert_eq!(
+                        fs::read(user_root.join("pi/plugin.json")).unwrap(),
+                        legacy_manifest
+                    );
+                    for id in ids {
+                        assert!(user_root.join(id).is_dir(), "rejected config removed {id}");
+                    }
+                }
+            }
+            fs::write(
+                &config_path,
+                json!({"hubs":{"local":{"url":"local://","user":null}}}).to_string(),
+            )
+            .unwrap();
+            let (config, loaded) = plugins::load_native_config().unwrap();
+            assert_eq!(config.effective_user("local").unwrap(), config.user);
+            fs::write(config_path, original_config).unwrap();
             for id in ids {
                 let plugin = loaded.find_by_id(id).unwrap();
                 assert!(plugin.is_builtin, "{id}");
@@ -3305,6 +3344,21 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         assert_eq!(fs::read(&f.config).unwrap(), before);
     }
     assert!(!f.home.join(".pi").exists());
+    fs::write(&f.config, "{\"daemonPort\":0}").unwrap();
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--share-hub", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let resulting_config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    assert_eq!(resulting_config["daemonPort"], 0);
+    assert_eq!(resulting_config["host_hub"]["enabled"], true);
+    assert_eq!(
+        fs::read_to_string(legacy.join("plugin.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read_to_string(legacy.join("keep")).unwrap(),
+        "legacy payload"
+    );
+    fs::write(&f.config, &before).unwrap();
     assert!(
         f.command(
             NATIVE,

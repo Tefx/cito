@@ -1485,9 +1485,9 @@ pub fn run_setup_cli(args: &[String]) {
     };
 
     match run() {
-        Ok(Some(state_dir)) => {
-            // Only a successful mutating command authorizes the upgrade cleanup.
-            crate::plugins::load_plugins(&state_dir);
+        Ok(Some(_state_dir)) => {
+            // Cleanup also requires the resulting native configuration to be valid.
+            let _ = crate::plugins::load_native_config();
         }
         Ok(None) => {}
         Err(err) => {

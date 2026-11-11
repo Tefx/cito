@@ -80,15 +80,13 @@ impl NativeConfig {
             .filter(|value| !value.trim().is_empty())
             .or_else(|| rest.get("user").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| self.user.clone());
-        let user = hubs
-            .get(hub)
-            .and_then(|h| h.get("user"))
-            .and_then(Value::as_str)
-            .unwrap_or(&global_user);
-        if !validate_user(user) {
-            return Err(format!("Invalid user for hub {hub}"));
-        }
-        Ok(user.to_string())
+        let user = match hubs.get(hub).and_then(|h| h.get("user")) {
+            None | Some(Value::Null) => Some(global_user.as_str()),
+            Some(user) => user.as_str(),
+        };
+        user.filter(|user| validate_user(user))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Invalid user for hub {hub}"))
     }
 }
 
@@ -809,18 +807,21 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
         Err(_) => cfg_daemon_port.unwrap_or(4290),
     };
 
-    let plugins = load_plugins(&state_dir);
-    Ok((
-        NativeConfig {
-            state_dir,
-            config_path,
-            home_dir,
-            daemon_port,
-            user,
-            default_hub,
-        },
-        plugins,
-    ))
+    let config = NativeConfig {
+        state_dir,
+        config_path,
+        home_dir,
+        daemon_port,
+        user,
+        default_hub,
+    };
+    let raw = read_config_text(&config.config_path)?;
+    let (_, hubs, _) = try_normalize_existing_config(raw.as_deref())?;
+    for hub in hubs.keys() {
+        config.effective_user(hub)?;
+    }
+    let plugins = load_plugins(&config.state_dir);
+    Ok((config, plugins))
 }
 
 /// Build a subprocess without involving a shell. Relative executable paths belong to the plugin.
