@@ -9056,7 +9056,7 @@ phases:
 - id: v31
   name: 'V31 Stage 13 (v0.21.2): Declarative Bar/Strip Layout Engine, Single-Authority
     Human/Channel Lifecycle & Bounded Delivery Retry Architecture (M1–M5)'
-  status: in_progress
+  status: done
   gate: 'All M1–M5 requirements in docs/DESIGN.md §15 pass; all 6 inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; website
     screenshots in site/assets/screenshots/*.png match v0.21.2; pathway-auditor, structural-auditor,
@@ -9199,7 +9199,7 @@ phases:
   - id: v31.gate
     name: V31 Independent Terminal Acceptance, M1–M5 Verification & v0.21.2 Live Release
       Gate
-    status: claimed
+    status: done
     description: Independently verify all M1–M5 requirements in docs/DESIGN.md §15,
       all 6 inspectMenu() mechanical invariants in Light and Dark modes, §15.2 test
       economy, and live v0.21.2 GitHub Release / Tefx/homebrew-tap Cask alignment.
@@ -9213,3 +9213,19 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-11T12:07:51.684202Z'
+    done_at: '2026-11-11T12:15:53.483257+00:00'
+    evidence: "Artifact:\n- Gate Report: gate.report.v2 (status: PASS, review_kind:\
+      \ PHASE_GATE, review_mode: FULL, target_ref: git:627edd3508075ca0f0a012a6144c10f75a46f1f4,\
+      \ evidence_disposition: POSITIVE_GATE_EVIDENCE)\n- Release Commit & Annotated\
+      \ Tag: v0.21.2 -> 2451035351d787f938ef6b8a9d3b545c4f27116d\n- GitHub Release:\
+      \ https://github.com/Tefx/cito/releases/tag/v0.21.2 (Cito-macos-arm64.zip sha256:\
+      \ 7d968a9252071a1a6f2fec9c40aafb3b61f32fcd97b36b6d87cbe7ce1bee1d49)\n- Homebrew\
+      \ Tap: Tefx/homebrew-tap Casks/cito.rb v0.21.2\n\nVerification:\n- Run: `python3\
+      \ ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding /tmp/cito-v31-gate-binding.json\
+      \ /tmp/cito-v31-gate-report.json` -> PASS (`valid: true, binding_checked: true,\
+      \ evidence_disposition: \"POSITIVE_GATE_EVIDENCE\"`)\n- Proven Requirements\
+      \ (6/6 PROVEN):\n  - M1_DECLARATIVE_BAR_AND_PILL_STRIP_LAYOUT: PROVEN\n  - M2_SINGLE_MAC_AND_IDLE_AFFORDANCES:\
+      \ PROVEN\n  - M3_TERMINOLOGY_MONOCHROME_STATUS_AND_ORACLES: PROVEN\n  - M4_SINGLE_AUTHORITY_HUMAN_CHANNEL_LIFECYCLE:\
+      \ PROVEN\n  - M5_BOUNDED_DELIVERY_RETRY_AND_IO_TIMEOUTS: PROVEN\n  - S15_2_TEST_ECONOMY_AND_V0_21_2_RELEASE:\
+      \ PROVEN\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §15 (M1–M5 & §15.2 Anti-Over-Testing\
+      \ Policy) & docs/RELEASING.md"
