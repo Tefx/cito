@@ -1,4 +1,4 @@
-# Cito Architecture & Protocol Specification (V29 — Stage 12 `v0.21.0`: Holistic UI/UX & Cross-Layer Pathway Remediation — D01–D18)
+# Cito Architecture & Protocol Specification (V29 — Stage 12 `v0.21.0`: Holistic UI/UX & Cross-Layer Pathway Remediation — D01–D20)
 
 > **Normative Supersession Notice (`V28` / `v0.20.3`)**:
 > This specification is the authoritative contract for Cito `v0.20.3` (Stage 11 — Phase `v28`). Section 13 supersedes conflicting presentation and interaction rules in Sections 10–12. The Stage 10 (`v0.20.2`) two-stratum channel setup, independent scope saving, geometry checks, error handling, bridge readiness, and real daemon/UI integration contracts remain in force. All paths written with `~` in prose examples represent the user's home directory; runtime configuration files use expanded absolute paths.
@@ -1145,7 +1145,7 @@ Zone 4 contains two `174 × 28pt` controls, at `x = 12` and `x = 194`, within th
 
 ---
 
-## 14. V29 — Stage 12 v0.21.0: Holistic UI/UX & Cross-Layer Pathway Remediation (`D01`–`D18`)
+## 14. V29 — Stage 12 v0.21.0: Holistic UI/UX & Cross-Layer Pathway Remediation (`D01`–`D20`)
 
 Stage 12 resolves the 5 Fundamental UI/UX & Pathway Defect Essences identified across Round 1 and Round 2 full-scope discovery (`uiux-auditor`, `structural-auditor`, `pathway-auditor`) and user acceptance testing. It introduces sender auto-enrollment and reply-routing closure (`D18`), a backward-compatible human-readable address alias contract (`@<user>` and `<user>/<harness>#<prefix>`), a unified domain-to-UI presentation boundary, state-driven progressive disclosure, full-window AppKit keyboard/focus ownership, causal request/idempotency correlation, and a 6-invariant mechanical verification oracle covering all 4 UI surfaces (`cardMenu`, `directoryPanel`, `settingsPanel`, and `panel` / `WakeBanner`).
 
@@ -1297,6 +1297,23 @@ Stage 12 resolves the 5 Fundamental UI/UX & Pathway Defect Essences identified a
     6. `address_mismatches`: verifies that every visible node address copy control (`copy:*`, `copy_remote:*`, `copy_dir:*`) has a non-empty address label (using `accessibilityLabel()` when `feedbackTimer?.isValid == true` during the `"✓ Copied"` flash) matching the exact address copied to the clipboard.
 
 ---
+
+#### 6. AppKit Standard Edit Menu & Responder-Chain Shortcuts (`D19`)
+
+- `Companion` installs a standard `NSApp.mainMenu` with an **Edit** submenu: Undo (`⌘Z`), Redo (`⇧⌘Z`), Cut (`⌘X`), Copy (`⌘C`), Paste (`⌘V`), and Select All (`⌘A`). Menu actions use the AppKit responder chain.
+- `KeyPanel.performKeyEquivalent(with:)`, the local key monitor, and `handleSettingsKey` / `handleDirectoryKey` route those shortcuts to the active native field editor across Settings, Directory search, and the Composer. All editable `NSTextField` and `NSSearchField` controls support clipboard, selection, Undo, and Redo. `NSSecureTextField` permits Paste, Select All, Undo, and Redo while blocking Copy and Cut to prevent secret extraction. Marked IME text retains native ownership.
+- Synchronize field values with `validateEditing()` without detaching the active field editor. Assigning `stringValue` during editing can abort the editor and break later cut/undo operations. Paste and Cut own balanced undo gesture groups without directly closing AppKit's automatic event group; restore the prior event-grouping mode afterward.
+- This is native editing infrastructure only: no provider-specific token extraction, token regular expressions, or onboarding automation belongs in this path.
+
+#### 7. User Plugin Override Priority & Runtime Built-In Staging Separation (`D20`)
+
+- Internal built-in plugin staging uses `${CITO_STATE_DIR}/runtime/plugins/<id>/` (default `~/.cito/runtime/plugins/<id>/`). Reserve `${CITO_STATE_DIR}/plugins/<id>/` exclusively for user-authored plugins and user overrides; setup, repair, and ordinary uninstall must not overwrite or remove those sources. Explicit data purge remains separate.
+- Both `load_plugins` (`plugins.rs`) and `hub_plugins` select same-ID manifests with this priority, highest first:
+  1. `CITO_PLUGIN_PATH` roots, left-to-right;
+  2. `${CITO_STATE_DIR}/plugins/<id>/` user overrides;
+  3. bundled defaults or staged runtime built-ins (`Cito.app/Contents/Resources/plugins/<id>/`, `~/.cito/runtime/plugins/<id>/`).
+- A custom same-ID plugin replaces the built-in without a second active descriptor. Removing it restores the built-in automatically. Agent setup requests execute against the selected external source; built-ins use runtime staging and retain their bundled repair source. The standalone Hub also retains legacy `CITO_PLUGIN_DIR` precedence above its user directory and below `CITO_PLUGIN_PATH`.
+- Installed CLI shims export the runtime built-in root. Missing staged descriptors remain recoverable from the distribution, and App bundle assembly retains the bundled defaults even while a user override is active.
 
 ### 14.2 Implementation Notes & Hazard Map (`ADVISORY`)
 

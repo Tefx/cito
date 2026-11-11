@@ -60,7 +60,15 @@
 
       <h2 id="overview">1. Plugin Discovery &amp; Manifests</h2>
       <p>
-        On your Mac, install custom plugins under <code>${CITO_STATE_DIR}/plugins/&lt;id&gt;/</code> (default <code>~/.cito/plugins/&lt;id&gt;/</code>) or in colon-separated directories listed in <code>CITO_PLUGIN_PATH</code>. On a standalone <code>cito hub</code> server, install channel plugins under <code>&lt;data-dir&gt;/plugins/&lt;id&gt;/</code> or <code>CITO_PLUGIN_DIR</code>, with later roots overriding earlier manifests of the same ID.
+        Plugin discovery selects one manifest per ID using this priority, highest first:
+      </p>
+      <ol>
+        <li><code>CITO_PLUGIN_PATH</code>: colon-separated plugin-root directories, searched left-to-right.</li>
+        <li><code>${CITO_STATE_DIR}/plugins/&lt;id&gt;/</code> (default <code>~/.cito/plugins/&lt;id&gt;/</code>): reserved exclusively for user-authored plugins and same-ID overrides of built-in <code>pi</code>, <code>codex</code>, <code>claude</code>, or <code>telegram</code> plugins. Deleting an override falls back to the built-in plugin automatically.</li>
+        <li>Bundled defaults in <code>Cito.app/Contents/Resources/plugins/&lt;id&gt;/</code>, with internal CLI staging isolated under <code>~/.cito/runtime/plugins/&lt;id&gt;/</code>. Runtime staging never overwrites the user-plugin directory.</li>
+      </ol>
+      <p>
+        A standalone <code>cito hub</code> uses the same priority for channel plugins, with its <code>&lt;data-dir&gt;/plugins/&lt;id&gt;/</code> user directory. The legacy <code>CITO_PLUGIN_DIR</code> root overrides that directory but remains below <code>CITO_PLUGIN_PATH</code>.
       </p>
       <ul>
         <li><code>id</code>: <code>^[a-z0-9][a-z0-9_-]{0,31}$</code>; external plugin directory names must match the ID. <code>displayName</code> must be non-empty.</li>
@@ -147,7 +155,7 @@
         <li><code>pair_redeem</code>: provide <code>code</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>is_private_chat</code>, <code>display_label</code>, and <code>user_config_patch</code>.</li>
         <li><code>inbound_reply</code>: provide <code>update_id</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>reply_to_external_msg_id</code>, and <code>text</code>. The Hub resolves the reply target and routes a regular signal.</li>
         <li><code>cursor_save</code>: persist the channel's external update <code>cursor</code> after receiving <code>reply_ack</code>.</li>
-        <li><code>rpc_result</code>: echo <code>req_id</code>, <code>ok</code>, and <code>error</code>; pair formatting returns <code>instruction</code> and optionally <code>bot_username</code>, while testing returns <code>detail</code>.</li>
+        <li><code>rpc_result</code>: echo <code>req_id</code>, <code>ok</code>, and <code>error</code>; pair formatting returns <code>instruction</code>, an exact copyable <code>pairing_command</code> (for example, <code>/start cito-a1b2c3d4e5</code>), and optionally <code>bot_username</code>, while testing returns <code>detail</code>.</li>
       </ul>
       <pre><code>{"op":"delivered","delivery_id":"d_1","ok":true,"external_msg_id":"102","external_msg_ids":["101","102"],"error":null}
 {"op":"inbound_reply","update_id":"u_99","external_chat_id":"room-1","external_user_id":"user-1","reply_to_external_msg_id":"102","text":"Ship it"}
@@ -161,7 +169,7 @@
         The Settings UI renders manifest fields automatically: <code>fields[].scope: "hub"</code> holds shared Hub credentials, while <code>fields[].scope: "user"</code> holds each user's recipient binding. With <code>pairing.supported: true</code>, the Hub generates a 10-character Base32 pairing token displayed with the <code>cito-</code> prefix:
       </p>
       <pre><code>{"op":"format_pair","req_id":"r_1","code":"cito-a1b2c3d4e5","hub_config":{"apiToken":"example-token"}}
-{"op":"rpc_result","req_id":"r_1","ok":true,"instruction":"Send /start cito-a1b2c3d4e5 in a private chat","error":null}
+{"op":"rpc_result","req_id":"r_1","ok":true,"instruction":"Send /start cito-a1b2c3d4e5 in a private chat","pairing_command":"/start cito-a1b2c3d4e5","error":null}
 {"op":"pair_redeem","code":"cito-a1b2c3d4e5","external_chat_id":"room-1","external_user_id":"user-1","is_private_chat":true,"display_label":"alice","user_config_patch":{"recipientId":"room-1"}}
 {"op":"pair_ack","code":"cito-a1b2c3d4e5","ok":true,"owner_user":"alice","error":null}</code></pre>
       <p>

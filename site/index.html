@@ -46,9 +46,9 @@
           Cito connects your sessions across Codex, Claude Code, and Pi—on one Mac or across your machines—so agents can discover and wake each other directly. And because you are on the same network via your Mac menu bar and Telegram, they bring you into the loop whenever a decision is needed.
         </p>
         <div class="install-actions">
-          <button type="button" class="copy-command-pill" data-copy-command="brew install tefx/tap/cito" aria-label="Copy Homebrew install command">
+          <button type="button" class="copy-command-pill" data-copy-command="brew install --cask tefx/tap/cito" aria-label="Copy Homebrew install command">
             <span class="prompt-dollar">$</span>
-            <code>brew install tefx/tap/cito</code>
+            <code>brew install --cask tefx/tap/cito</code>
             <span class="copy-badge" data-copy-badge>Copy</span>
           </button>
           <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest">
@@ -91,7 +91,7 @@
                   After updating the response schema in <code>acme/service</code>, Claude Code discovers your open Codex frontend session on the same workspace and sends a direct wake signal.
                 </p>
                 <div class="stage-signal-box">
-                  to: "alice-8a4f2c9011b4e3d2"<br />
+                  to: "alice/codex#8a4f"<br />
                   "Updated /v2/billing response fields. Ready for client sync."
                 </div>
               </div>
@@ -132,7 +132,7 @@
 
               <div class="stage-card is-highlighted">
                 <div class="stage-card-header">
-                  <span class="node-pill"><span class="node-dot is-green"></span> @alice (Me) · Menu Bar &amp; Telegram</span>
+                  <span class="node-pill"><span class="node-dot is-green"></span> You (@alice) · Menu Bar &amp; Telegram</span>
                   <span class="node-pill">Inline Reply</span>
                 </div>
                 <div class="stage-card-title">Reply in one line from your menu bar</div>
@@ -151,15 +151,16 @@
       <div class="surface-showcase" aria-label="macOS interface previews">
         <div class="section-header">
           <h2 class="section-title">Four surfaces. One signaling network.</h2>
-          <p class="section-subtitle">Illustrated previews of the Mac menu bar, Directory &amp; Activity, Settings, and wake banner. Preview controls do not change your Cito configuration.</p>
+          <p class="section-subtitle">Native v0.21.0 captures of the Mac menu bar, Directory &amp; Activity, Settings, and wake banner in Dark Mode at 2× Retina resolution. Preview controls do not change your Cito configuration.</p>
         </div>
         <div class="surface-grid">
           <article class="surface-card" data-native-surface="menu">
             <h3>Menu Bar</h3>
+            <figure class="docs-figure"><img src="./assets/screenshots/menu-dark.png" alt="Cito menu bar with your personal account and a listening agent session" width="760" height="668" loading="lazy" /></figure>
             <div class="native-panel">
-              <div class="native-row"><strong>Cito · 1 agent listening</strong><span class="native-pill">● work</span></div>
-              <div class="native-row"><span>Human Node (@alice) · Desktop · Telegram</span><span class="native-pill">👥 Team · ×</span></div>
-              <div class="native-row"><span>API contract · ~/acme/service</span><span class="native-pill">🔒 Self · ×</span></div>
+              <div class="native-row"><strong>Cito · 1 session listening</strong><span class="native-pill">● work</span></div>
+              <div class="native-row"><span>You (@alice) · Desktop · Telegram</span><span class="native-pill">👥 Team · ×</span></div>
+              <div class="native-row"><span>alice/pi#abcd · ~/acme/service</span><span class="native-pill">🔒 Self · ×</span></div>
               <p class="native-muted">AVAILABLE SESSIONS · ▾ Codex · 1 open</p>
               <div class="native-row"><span>Web client · ~/acme/web · main</span><span class="native-pill">+ Listen</span></div>
               <div class="native-row"><span class="native-pill">⌕ Directory… · 2 online</span><span class="native-pill">◷ Activity… · History</span></div>
@@ -174,18 +175,20 @@
                 <button type="button" role="tab" aria-selected="false" data-preview-tab="activity">Activity</button>
               </div>
               <div data-preview-panel="directory">
+                <figure class="docs-figure"><img src="./assets/screenshots/directory-dark.png" alt="Native Directory with readable addresses and app filters" width="1120" height="880" loading="lazy" /></figure>
                 <p class="native-field">Search by user, repo, title, host, or #id…</p>
-                <div class="native-row"><span>All · My Hosts</span><span>All Harnesses · Codex · Pi Coding Agent · Claude Code</span></div>
-                <div class="native-row"><strong>Web client · acme/service</strong><span class="native-pill">Message · 📋 alice#8a4f</span></div>
-                <p class="native-muted">@alice @mac-studio · Frontend sync</p>
+                <div class="native-row"><span>All · My Macs</span><span>All Apps · Pi · Codex · Claude Code</span></div>
+                <div class="native-row"><strong>Web client · acme/service</strong><span class="native-pill">Message · 📋 alice/codex#8a4f</span></div>
+                <p class="native-muted">@alice · mac-studio · Frontend sync</p>
                 <div class="native-row"><span class="native-muted">↵ Copy Selected ID &nbsp; ⎋ Close</span><span class="native-muted">2 of 2 online</span></div>
               </div>
               <div data-preview-panel="activity" hidden>
-                <div class="native-row"><span>For Me · All Activity · Unread</span><span class="native-pill">✓ Read All</span></div>
-                <div class="native-row"><strong>● @alice → @alice (Me)</strong><span class="native-pill">↩ Reply</span></div>
+                <figure class="docs-figure"><img src="./assets/screenshots/activity-dark.png" alt="Native Activity with expanded messages, Copy, Reply, and Clear controls" width="1120" height="880" loading="lazy" /></figure>
+                <div class="native-row"><span>For Me · All Activity · Unread</span><span class="native-pill">✓ Read All · Clear</span></div>
+                <div class="native-row"><strong>● @bob → You</strong><span class="native-pill">↩ Reply · Copy</span></div>
                 <p>Ready for review. Ship the update?</p>
-                <p class="native-field">To: alice#4c91 &nbsp; Ship it after the docs check.</p>
-                <div class="native-row"><span class="native-pill">Send ⏎ · Cancel</span><span class="native-muted">↵ Send &nbsp; ⎋ Cancel Reply · 1 signals · 1 unread</span></div>
+                <p class="native-field">To: bob/pi#4c91 &nbsp; Ship it after the docs check.</p>
+                <div class="native-row"><span class="native-pill">Send ⏎ · Cancel</span><span class="native-muted">↵ Send &nbsp; ⎋ Cancel Reply · 1 signal · 1 unread</span></div>
               </div>
             </div>
           </article>
@@ -198,11 +201,13 @@
                 <button type="button" role="tab" aria-selected="false" data-preview-tab="hubs">Hubs &amp; Network</button>
               </div>
               <div data-preview-panel="apps">
+                <figure class="docs-figure"><img src="./assets/screenshots/settings-apps-dark.png" alt="Agent Apps settings with connection badges and setup controls" width="1040" height="920" loading="lazy" /></figure>
                 <div class="native-row"><strong>Codex · ○ Not Set Up</strong><span class="native-pill">Set Up</span></div>
                 <div class="native-row"><strong>Pi Coding Agent · ● Connected</strong><span class="native-pill">Re-check · Disconnect</span></div>
                 <div class="native-row"><strong>Claude Code · Experimental · ○ Not Set Up</strong><span class="native-pill">Set Up</span></div>
               </div>
               <div data-preview-panel="channels" hidden>
+                <figure class="docs-figure"><img src="./assets/screenshots/settings-channels-dark.png" alt="Human Channels settings with separate Hub Gateway and personal account controls" width="1040" height="920" loading="lazy" /></figure>
                 <div class="native-row"><span class="native-pill">local</span><span class="native-pill">work</span></div>
                 <p>Mac Desktop Banner · ● Enabled</p>
                 <p><strong>Telegram</strong></p>
@@ -210,28 +215,30 @@
                 <p class="native-field">Bot Token &nbsp; ••••••••</p>
                 <div class="native-row"><span class="native-pill">Save Gateway Token</span><span class="native-pill">Change Token…</span><span class="native-pill">Clear Token</span></div>
                 <p class="native-muted">Save the gateway first; an active gateway collapses until you change its token.</p>
-                <p class="native-muted">2. YOUR PERSONAL NODE</p>
+                <p class="native-muted">2. Your Personal Account (@alice)</p>
                 <p class="native-field">Chat ID &nbsp; Paired via /start or enter Chat ID</p>
                 <div class="native-row"><span class="native-pill">Pair Account…</span><span class="native-pill">Skip for Now</span></div>
                 <div class="native-row"><span class="native-pill">Send Test</span><span class="native-pill">Save</span></div>
               </div>
               <div data-preview-panel="hubs" hidden>
-                <div class="native-row"><strong>Share Hub on Local Network · http://127.0.0.1:4291</strong><span class="native-pill">Off · Copy 1-Click Join Code</span></div>
+                <figure class="docs-figure"><img src="./assets/screenshots/settings-hubs-dark.png" alt="Hubs and Network settings with local sharing collapsed while Off" width="1040" height="920" loading="lazy" /></figure>
+                <div class="native-row"><strong>Share Hub on Local Network</strong><span class="native-pill">Off</span></div>
                 <div class="native-row"><span class="native-muted">CONNECTED HUBS</span><span class="native-pill">Paste Invite · Add Hub…</span></div>
-                <div class="native-row"><span>local · local:// · none</span><span class="native-pill">Enabled</span></div>
+                <div class="native-row"><span>local · Built-in on this Mac · Signed in as @alice</span><span class="native-pill">Enabled</span></div>
               </div>
               <div class="native-row"><span>Start Cito at Login</span><span class="native-pill">Remove All Integrations…</span></div>
             </div>
           </article>
           <article class="surface-card" data-native-surface="banner">
             <h3>Wake Banner</h3>
+            <figure class="docs-figure"><img src="./assets/screenshots/banner-dark.png" alt="Human-targeted Direct Message notification with Click to reply in Cito" width="776" height="272" loading="lazy" /></figure>
             <div class="native-panel native-banner">
-              <div class="native-row"><strong>Cito · API contract</strong><span class="native-pill">Notification</span></div>
+              <div class="native-row"><strong>Cito · Direct Message</strong><span class="native-pill">Notification</span></div>
               <p class="native-muted">alice@personal · Web client</p>
               <p>Client checks passed. Ready for your review.</p>
               <p class="native-pill">Click to reply in Cito ↩</p>
             </div>
-            <p class="native-muted">Human-targeted banners open a reply composer. Agent-targeted banners say “Click to view in Activity ↗” and open Activity without a composer. Status colors adapt to macOS Light and Dark Mode.</p>
+            <p class="native-muted">Human-targeted banners open a reply composer. Agent-targeted banners show “Cito · &lt;session&gt;” with “Click to view in Activity ↗” and open Activity without a composer. Status colors adapt to macOS Light and Dark Mode.</p>
           </article>
         </div>
       </div>
@@ -388,9 +395,9 @@
           Install via Homebrew or download the standalone <code>Cito.app</code> bundle. Your local hub starts automatically—no external broker or cloud account required.
         </p>
         <div class="install-actions">
-          <button type="button" class="copy-command-pill" data-copy-command="brew install tefx/tap/cito" aria-label="Copy Homebrew install command">
+          <button type="button" class="copy-command-pill" data-copy-command="brew install --cask tefx/tap/cito" aria-label="Copy Homebrew install command">
             <span class="prompt-dollar">$</span>
-            <code>brew install tefx/tap/cito</code>
+            <code>brew install --cask tefx/tap/cito</code>
             <span class="copy-badge" data-copy-badge>Copy</span>
           </button>
           <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest">

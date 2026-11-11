@@ -43,7 +43,7 @@
       <div class="docs-nav-group">
         <div class="docs-nav-title">On This Page</div>
         <a class="docs-nav-link" href="#ontology">1. Symmetric Node ↔ Channels Ontology</a>
-        <a class="docs-nav-link" href="#addressing">2. Node Identity &amp; @self / @username</a>
+        <a class="docs-nav-link" href="#addressing">2. Node Identity &amp; Readable Addressing</a>
         <a class="docs-nav-link" href="#read-sync">3. Multi-Channel Read Sync &amp; Wake</a>
         <a class="docs-nav-link" href="#three-layers">4. Three-Layer System Architecture</a>
         <a class="docs-nav-link" href="#mcp-tools">5. Public MCP &amp; CLI Interfaces</a>
@@ -86,15 +86,17 @@
         </li>
       </ul>
 
-      <h2 id="addressing">2. Node Identity &amp; <code>@self</code> / <code>@&lt;username&gt;</code> Addressing</h2>
+      <h2 id="addressing">2. Node Identity &amp; Readable Addressing</h2>
       <p>
         Because Node identity is independent of physical host IDs, each user has one stable <code>Human Node</code> per Hub alongside their active <code>Agent Session Nodes</code>. In <code>cito_send</code>, callers can target:
       </p>
       <ul>
         <li><code>to: "@self"</code> (or <code>"&lt;hub&gt;:@self"</code>): Resolves directly to the caller's own enrolled <code>Human Node</code> on that Hub.</li>
         <li><code>to: "@&lt;username&gt;"</code> (or <code>"&lt;hub&gt;:@&lt;username&gt;"</code>): Resolves to that user's visible <code>Human Node</code> on the Hub (respecting <code>self</code> vs. <code>workspace</code> visibility scope).</li>
-        <li><code>to: "&lt;listener_id&gt;"</code> (or <code>"&lt;hub&gt;:&lt;listener_id&gt;"</code>): Targets a specific Agent Session Node or Human Node by its public ID (for example, <code>alice-8a4f2c9011b4e3d2</code>) or canonical ID.</li>
+        <li><code>to: "&lt;user&gt;/&lt;app&gt;#&lt;prefix&gt;"</code>: Targets a session using its readable address, such as <code>alice/codex#4219</code> or <code>alice/pi#8f1a</code>. Non-default Hubs add a prefix, such as <code>work:alice/pi#8f1a</code>. <strong>Display == Clipboard == Search == Send Target</strong>: every address chip shows the exact value it copies, search accepts it, and <code>cito_send</code> resolves it. Prefixes widen automatically on collision. Full canonical <code>c_&lt;16hex&gt;</code> and public <code>&lt;slug&gt;-&lt;16hex&gt;</code> IDs remain compatible.</li>
       </ul>
+
+      <p><strong>Sender auto-enrollment on <code>cito_send</code>:</strong> Sending from a not-yet-enrolled agent session registers its return address automatically so human replies can reach it. Explicitly stopped sessions remain stopped; call <code>cito_listen</code> to resume them.</p>
 
       <h2 id="read-sync">3. Multi-Channel Read Sync &amp; Single-Execution Wake</h2>
       <p>
@@ -105,6 +107,8 @@
         <li><strong>Business Read Acknowledgment</strong>: Emitted only when an agent drains its inbox (<code>cito_inbox</code>) or a human reads or replies from the menu bar directory or Telegram. The Hub broadcasts a node read-acknowledgment event (<code>node_ack</code> / <code>on_acked</code>) so all other attached channels clear their unread badges immediately.</li>
         <li><strong>Exclusive Single-Execution Wake</strong>: For wake-capable agent channels, the Hub atomically claims each signal batch before wake execution so a session is woken at most once even when multiple devices observe the stream.</li>
       </ul>
+
+      <p><strong>7-day reply retention:</strong> Telegram delivery mappings remain available for 7 days. Explicit replies to an alert, or plain messages within 7 days of the latest alert, route through the Hub to the sending node. You can also reply from the Mac menu bar <strong>Activity</strong> stream while that session remains reachable. Pairing codes still expire after ten minutes; their lifetime is independent of reply retention.</p>
 
       <h2 id="three-layers">4. Three-Layer System Architecture</h2>
       <ol>
@@ -142,7 +146,7 @@
           <tr>
             <td><code>cito_send</code></td>
             <td><code>{ to, hub?, message, in_reply_to?, idempotency_key? }</code></td>
-            <td>Sends a signal (<code>1..65,536</code> Unicode code points) to <code>@self</code>, <code>@&lt;username&gt;</code>, or a target Node ID.</td>
+            <td>Sends a signal (<code>1..65,536</code> Unicode code points) to <code>@self</code>, <code>@&lt;username&gt;</code>, a readable session address, or a canonical Node ID; automatically enrolls a not-yet-enrolled sender for replies.</td>
           </tr>
           <tr>
             <td><code>cito_inbox</code></td>

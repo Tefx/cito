@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
@@ -30,6 +31,13 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
             "App override",
         ),
         (dir.join("builtin"), "override-fixture", "Builtin override"),
+        (
+            dir.join("data/runtime/plugins"),
+            "override-fixture",
+            "Runtime override",
+        ),
+        (dir.join("first"), "override-fixture", "First override"),
+        (dir.join("second"), "override-fixture", "Second override"),
         (dir.join("extra"), "override-fixture", "Extra override"),
         (
             dir.join("data/plugins"),
@@ -57,6 +65,14 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
         .env("CITO_PLUGIN_ROOT_TEST", &dir)
         .env("CITO_BUILTIN_PLUGINS_DIR", dir.join("builtin"))
         .env("CITO_PLUGIN_DIR", dir.join("extra"))
+        .env(
+            "CITO_PLUGIN_PATH",
+            format!(
+                "{}:{}",
+                dir.join("first").display(),
+                dir.join("second").display()
+            ),
+        )
         .output()
         .unwrap();
     assert!(
@@ -86,15 +102,32 @@ fn packaged_roots_worker() {
 
     // The app layout is data only: no copied executable or launched application.
     let exe = dir.join("Cito.app/Contents/MacOS/cito");
-    let plugins = discover(&roots_for_executable(&data, Some(&exe))).unwrap();
+    let roots = roots_for_executable(&data, Some(&exe));
+    let plugins = discover(&roots).unwrap();
     assert_plugin(
         &plugins,
         "bundle-fixture",
         dir.join("Cito.app/Contents/Resources/plugins/bundle-fixture"),
     );
-    assert_plugin(
-        &plugins,
-        "override-fixture",
-        data.join("plugins/override-fixture"),
-    );
+    for relative in [
+        "first",
+        "second",
+        "extra",
+        "data/plugins",
+        "data/runtime/plugins",
+        "builtin",
+        "Cito.app/Contents/Resources/plugins",
+    ] {
+        let expected = dir.join(relative).join("override-fixture");
+        let plugins = discover(&roots).unwrap();
+        assert_plugin(&plugins, "override-fixture", expected.clone());
+        assert_eq!(
+            plugins
+                .iter()
+                .filter(|p| p.id == "override-fixture")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(expected).unwrap();
+    }
 }

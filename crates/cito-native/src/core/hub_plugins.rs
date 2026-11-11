@@ -124,10 +124,26 @@ fn roots_for_executable(data_dir: &Path, executable: Option<&Path>) -> Vec<PathB
     if let Ok(dir) = std::env::var("CITO_BUILTIN_PLUGINS_DIR") {
         roots.push(PathBuf::from(dir));
     }
+    roots.push(super::plugins::staged_plugins_dir(data_dir));
+    roots.push(data_dir.join("plugins"));
     if let Ok(dir) = std::env::var("CITO_PLUGIN_DIR") {
         roots.push(PathBuf::from(dir));
     }
-    roots.push(data_dir.join("plugins"));
+    if let Ok(extra) = std::env::var("CITO_PLUGIN_PATH") {
+        for part in extra
+            .split(':')
+            .rev()
+            .filter(|part| !part.trim().is_empty())
+        {
+            if let Ok(path) = super::plugins::expand_home_dir(
+                part.trim(),
+                "CITO_PLUGIN_PATH",
+                std::env::var("HOME").ok().as_deref(),
+            ) {
+                roots.push(path);
+            }
+        }
+    }
     roots
 }
 

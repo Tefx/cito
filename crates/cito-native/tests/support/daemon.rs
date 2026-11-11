@@ -170,6 +170,95 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
 }
 
 #[test]
+fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
+    if std::env::var_os("CITO_TEST_PLUGIN_PRIORITY").is_some() {
+        let (config, _) = cito_native::plugins::load_native_config().unwrap();
+        let dirs = [
+            config.home_dir.join("first/pi"),
+            config.home_dir.join("second/pi"),
+            config.state_dir.join("plugins/pi"),
+        ];
+        for (index, expected) in [
+            "First override",
+            "Second override",
+            "User override",
+            "builtin",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_, plugins) = cito_native::plugins::load_native_config().unwrap();
+            let plugin = plugins.find_by_id("pi").unwrap();
+            assert_eq!(plugins.plugins.iter().filter(|p| p.id == "pi").count(), 1);
+            assert_eq!(plugin.is_builtin, index == 3);
+            cito_native::setup::ensure_cli_shims_native(&config.state_dir, &plugins).unwrap();
+            if index < 3 {
+                assert_eq!(plugin.display_name, expected);
+                assert_eq!(plugin.plugin_dir, dirs[index]);
+                let actual =
+                    cito_native::plugins::plugin_request(plugin, &json!({"op":"probe"})).unwrap();
+                assert_eq!(actual["source"], expected);
+                assert_eq!(
+                    actual["cwd"],
+                    json!(fs::canonicalize(&dirs[index]).unwrap())
+                );
+                assert_eq!(
+                    cito_native::setup::inspect_plugin_setup(plugin),
+                    (true, true, vec![dirs[index].display().to_string()])
+                );
+                assert!(!config.state_dir.join("runtime/plugins/pi").exists());
+                let manifest: Value = serde_json::from_slice(
+                    &fs::read(config.state_dir.join("plugins/pi/plugin.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    manifest["displayName"], "User override",
+                    "Staging cannot overwrite a user plugin"
+                );
+                fs::remove_dir_all(&dirs[index]).unwrap();
+            } else {
+                assert_eq!(plugin.display_name, "Pi Coding Agent");
+                assert!(config
+                    .state_dir
+                    .join("runtime/plugins/pi/plugin.json")
+                    .is_file());
+                assert!(!config.state_dir.join("plugins/pi").exists());
+                assert!(cito_native::setup::is_staged_plugin_intact(
+                    &config.state_dir,
+                    plugin
+                ));
+            }
+        }
+        return;
+    }
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let driver = f.dir.join("override.py");
+    script(&driver, "# purpose: Report the actual selected plugin command and setup source.\n# usage: python3 override.py DISPLAY_NAME\n# effects: Reads one request; emits JSON only.\n# requires: Python standard library.\nimport json, os, sys\nr=json.loads(sys.stdin.readline())\nprint(json.dumps({'ok':True,'installed':True,'configured':True,'source':sys.argv[1],'cwd':os.getcwd(),'paths':[r.get('plugin_dir','')]}))\n");
+    for (dir, display) in [
+        (f.home.join("first/pi"), "First override"),
+        (f.home.join("second/pi"), "Second override"),
+        (f.state.join("plugins/pi"), "User override"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("plugin.json"), json!({"id":"pi","kind":"agent","displayName":display,"command":["python3",driver,display]}).to_string()).unwrap();
+    }
+    f.env
+        .insert("CITO_PLUGIN_PATH".into(), " ~/first : ~/second ".into());
+    f.env.insert("CITO_TEST_PLUGIN_PRIORITY".into(), "1".into());
+    let (ok, out, err) = f.command(
+        std::env::current_exe().unwrap().to_str().unwrap(),
+        &[
+            "--exact",
+            "daemon::user_plugin_overrides_take_precedence_and_fall_back_after_removal",
+            "--nocapture",
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+}
+
+#[test]
 fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     if std::env::var_os("CITO_TEST_STAGED_PLUGINS").is_some() {
         // Re-enter under the fixture environment without changing process-global
@@ -223,7 +312,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     };
     f.env.insert(
         "CITO_BUILTIN_PLUGINS_DIR".into(),
-        f.state.join("plugins").display().to_string(),
+        f.state.join("runtime/plugins").display().to_string(),
     );
     check_plugins(&mut f);
     let mut daemon = f.daemon(&[]);
@@ -247,7 +336,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         "plugin.json",
         "bin/cito-plugin-pi",
     ] {
-        let staged = f.state.join("plugins/pi").join(asset);
+        let staged = f.state.join("runtime/plugins/pi").join(asset);
         fs::remove_file(&staged).unwrap();
         assert_eq!(app(&f, "pi")["status"], "repair_needed", "{asset}");
         assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
@@ -258,15 +347,19 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         assert_eq!(app(&f, "pi")["status"], "ready", "{asset}");
     }
     let alias = f.dir.join("staged-plugins");
-    std::os::unix::fs::symlink(f.state.join("plugins"), &alias).unwrap();
-    for builtin_root in [f.state.join("plugins"), alias] {
+    std::os::unix::fs::symlink(f.state.join("runtime/plugins"), &alias).unwrap();
+    for builtin_root in [
+        f.state.join("runtime/plugins"),
+        alias,
+        f.state.join("plugins"),
+    ] {
         f.env.insert(
             "CITO_BUILTIN_PLUGINS_DIR".into(),
             builtin_root.display().to_string(),
         );
         for missing_manifest in [true, false] {
             f.stop(daemon);
-            let staged = f.state.join("plugins/pi");
+            let staged = f.state.join("runtime/plugins/pi");
             if missing_manifest {
                 fs::remove_file(staged.join("plugin.json")).unwrap();
             } else {
@@ -403,7 +496,7 @@ fn selected_remote_channel_refresh_is_nonblocking_and_recovers_invalidated_slots
 # usage: python3 inventory-proxy.py LISTEN_PORT HUB_PORT
 # effects: Loopback HTTP only; Fixture owns and reaps the process.
 # requires: Python standard library and the sandbox Hub.
-import http.server, json, sys, threading, urllib.request
+import http.server, json, socketserver, sys, threading, urllib.request
 lock = threading.Lock()
 hold = False
 pending = []
@@ -438,7 +531,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(result)
         if gate:
             with lock: completed.append(pending.index(gate) + 1)
-server = http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler)
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+server = socketserver.ThreadingTCPServer(('127.0.0.1', int(sys.argv[1])), Handler)
 print(json.dumps({'op': 'ready'}), flush=True)
 server.serve_forever()
 "#,
@@ -648,20 +742,19 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         "ready"
     );
     fs::remove_dir_all(f.state.join("bin")).unwrap();
-    fs::remove_dir_all(f.state.join("plugins")).unwrap();
+    fs::remove_dir_all(f.state.join("runtime/plugins")).unwrap();
+    assert!(f.state.join("plugins/fixture/plugin.json").is_file());
     assert_eq!(
         app(f.action(json!({"op":"get_snapshot"})).1)["status"],
         "repair_needed"
     );
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
     assert!(f.state.join("bin/cito-mcp").is_file());
-    assert!(f.state.join("plugins/pi/plugin.json").is_file());
+    assert!(f.state.join("runtime/plugins/pi/plugin.json").is_file());
     assert!(app(f.action(json!({"op":"get_snapshot"})).1)["detail"]
         .as_str()
         .unwrap()
         .contains("/reload"));
-    // Restore the test-owned external source after intentionally deleting all staging.
-    f.provider("delivered_unconfirmed");
     enroll(&f, meta.clone());
     assert_eq!(
         f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
@@ -684,7 +777,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert!(cito_native::plugins::pid_alive(ui_pid));
     assert_eq!(http(f.port, "/health", None).0, 200);
     assert!(f.state.join("bin/cito-mcp").is_file());
-    assert!(f.state.join("plugins/pi").is_dir());
+    assert!(f.state.join("runtime/plugins/pi").is_dir());
     let host: Value =
         serde_json::from_str(&fs::read_to_string(f.home.join(".pi/agent/settings.json")).unwrap())
             .unwrap();

@@ -288,7 +288,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     );
     let (ok, out, err) = f.command(
         f.state
-            .join("plugins/claude/bin/cito-claude-hook")
+            .join("runtime/plugins/claude/bin/cito-claude-hook")
             .to_str()
             .unwrap(),
         &[],
@@ -300,7 +300,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
 #[test]
 fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
     let _lock = serial();
-    let _f = Fixture::new(json!({}));
+    let f = Fixture::new(json!({}));
     let site = root().join("site");
     for page in [
         "index.html",
@@ -342,6 +342,13 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
     for (path, width, height) in [
         ("apple-touch-icon.png", 180, 180),
         ("assets/og-card.png", 1200, 630),
+        ("assets/screenshots/menu-dark.png", 760, 668),
+        ("assets/screenshots/directory-dark.png", 1120, 880),
+        ("assets/screenshots/activity-dark.png", 1120, 880),
+        ("assets/screenshots/settings-apps-dark.png", 1040, 920),
+        ("assets/screenshots/settings-channels-dark.png", 1040, 920),
+        ("assets/screenshots/settings-hubs-dark.png", 1040, 920),
+        ("assets/screenshots/banner-dark.png", 776, 272),
     ] {
         let bytes = fs::read(site.join(path)).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
@@ -350,6 +357,33 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
             u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
             height
         );
+        // Decode the pixel payload, not just the PNG metadata, through the native codec.
+        let decoded = f.dir.join("decoded.bmp");
+        let (ok, out, err) = f.command(
+            "/usr/bin/sips",
+            &[
+                "-s",
+                "format",
+                "bmp",
+                site.join(path).to_str().unwrap(),
+                "--out",
+                decoded.to_str().unwrap(),
+            ],
+            "",
+        );
+        assert!(ok, "{path}: {out}\n{err}");
+        let bitmap = fs::read(&decoded).unwrap();
+        assert_eq!(&bitmap[..2], b"BM", "{path}");
+        assert_eq!(
+            u32::from_le_bytes(bitmap[18..22].try_into().unwrap()),
+            width
+        );
+        assert_eq!(
+            i32::from_le_bytes(bitmap[22..26].try_into().unwrap()).unsigned_abs(),
+            height
+        );
+        assert!(bitmap.len() >= (width * height * 3) as usize, "{path}");
+        fs::remove_file(decoded).unwrap();
     }
     let css = fs::read_to_string(site.join("styles/main.css")).unwrap();
     for rule in [

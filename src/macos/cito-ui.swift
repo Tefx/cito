@@ -239,9 +239,35 @@ func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harn
     return badge
 }
 
+func panelShortcutKey(_ event: NSEvent) -> String? {
+    let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+    guard flags == [.command] || flags == [.command, .shift],
+          let character = event.charactersIgnoringModifiers?.lowercased(),
+          ["v", "c", "x", "a", "z", "w", ","].contains(character) else { return nil }
+    return (flags.contains(.shift) ? "shift-command-" : "command-") + (character == "," ? "comma" : character)
+}
+
 final class KeyPanel: NSPanel {
+    var onKey: ((String) -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if (firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return super.performKeyEquivalent(with: event) }
+        if let key = panelShortcutKey(event), let onKey = onKey { onKey(key); return true }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+final class OverlayScrollView: NSScrollView {
+    var nativeScrollerStyle: NSScroller.Style { super.scrollerStyle }
+    override var scrollerStyle: NSScroller.Style {
+        get { .overlay }
+        set { super.scrollerStyle = .overlay }
+    }
+    override func tile() {
+        if super.scrollerStyle != .overlay { super.scrollerStyle = .overlay }
+        super.tile()
+    }
 }
 
 /** Menu controls own their clicks so copy and scope changes keep native tracking open. */
@@ -818,8 +844,11 @@ final class DirectoryPeerCellView: NSTableCellView {
         badgeIcon.image = NSImage(systemSymbolName:visual.symbol,accessibilityDescription:visual.name)
         badgeIcon.contentTintColor = .white
         let canReply = item.for_me && !(item.from_display_address ?? item.from_scoped_id ?? "").isEmpty
+        let copyFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let copyW = max(66, ceil(measureTextWidth("✓ Copied", font: copyFont)) + 28)
+        let textW = canReply ? (544 - copyW - 6 - 68 - 58) : (544 - copyW - 58)
         msgControl.isHidden = !canReply
-        msgControl.frame = NSRect(x:404,y:rowHeight-36,width:68,height:22)
+        msgControl.frame = NSRect(x:544-copyW-6-68,y:rowHeight-36,width:68,height:22)
         msgControl.setLeadingSymbol("arrowshape.turn.up.left")
         msgControl.label.stringValue = "Reply"
         msgControl.setAccessibilityLabel("Reply")
@@ -828,9 +857,9 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.pressed = canReply ? onReply : nil
         copyControl.isHidden = false
         copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
-        copyControl.frame = NSRect(x:478,y:rowHeight-36,width:66,height:22)
+        copyControl.frame = NSRect(x:544-copyW,y:rowHeight-36,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
-        copyControl.label.font = .systemFont(ofSize:11,weight:.medium)
+        copyControl.label.font = copyFont
         copyControl.label.stringValue = "Copy"
         copyControl.setAccessibilityLabel("Copy message")
         copyControl.toolTip = "Copy message"
@@ -839,14 +868,14 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.applyVisualState()
         let held = ["stale_generation":" · Held (session reloaded)","driver_unavailable":" · Held (app unavailable)"][item.held_reason ?? ""] ?? ""
         line1TitleLabel.stringValue = (item.unread ? "● " : "") + "@\(item.from_user) → " + (item.target_harness == "human" ? "You" : item.target_title) + held
-        line1TitleLabel.frame = NSRect(x:52,y:rowHeight-26,width:canReply ? 346 : 418,height:18)
+        line1TitleLabel.frame = NSRect(x:52,y:rowHeight-26,width:textW,height:18)
         line1TitleLabel.identifier = NSUserInterfaceItemIdentifier("act_title:\(item.signal_id)")
         line1RepoLabel.isHidden = true; line2UserLabel.isHidden = true
         line2MetaLabel.toolTip = item.message
         line2MetaLabel.stringValue = expanded ? item.message : item.message.replacingOccurrences(of:"\\s*\\n+\\s*",with:"  ",options:.regularExpression)
         line2MetaLabel.maximumNumberOfLines = expanded ? 4 : 1
         line2MetaLabel.lineBreakMode = expanded ? .byWordWrapping : .byTruncatingTail
-        line2MetaLabel.frame = NSRect(x:52,y:7,width:expanded ? 492 : (canReply ? 346 : 418),height:expanded ? 64 : 16)
+        line2MetaLabel.frame = NSRect(x:52,y:7,width:expanded ? 492 : textW,height:expanded ? 64 : 16)
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("act_msg:\(item.signal_id)")
     }
 }
@@ -1097,7 +1126,80 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func menuDidClose(_ menu: NSMenu) {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
     }
+    func ensureEditMainMenu() {
+        let main = NSApp.mainMenu ?? NSMenu()
+        if main.items.isEmpty {
+            let appItem = NSMenuItem()
+            let appMenu = NSMenu(title: "Cito")
+            let quit = NSMenuItem(title: "Quit Cito", action: #selector(quitMenu), keyEquivalent: "q")
+            quit.target = self; appMenu.addItem(quit)
+            appItem.submenu = appMenu; main.addItem(appItem)
+        }
+        if !main.items.contains(where: { $0.submenu?.title == "Edit" }) {
+            let item = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+            let edit = NSMenu(title: "Edit")
+            for (title, action, key) in [("Undo", "undo:", "z"), ("Redo", "redo:", "Z"),
+                ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
+                let command = NSMenuItem(title: title, action: NSSelectorFromString(action), keyEquivalent: key)
+                command.keyEquivalentModifierMask = title == "Redo" ? [.command, .shift] : [.command]
+                edit.addItem(command)
+            }
+            item.submenu = edit; main.addItem(item)
+        }
+        if NSApp.mainMenu == nil { NSApp.mainMenu = main }
+    }
+
+    func handleTextEditShortcut(_ key: String, in window: NSWindow?) -> Bool {
+        guard let editor = window?.firstResponder as? NSTextView else { return false }
+        guard editor.isEditable, !editor.hasMarkedText() else { return false }
+        let field = editor.delegate as? NSTextField
+        func changeText(_ change: () -> Void) {
+            editor.allowsUndo = true
+            editor.breakUndoCoalescing()
+            let undo = editor.undoManager
+            let groupsByEvent = undo?.groupsByEvent ?? true
+            // Own only this gesture's group; never close AppKit's event group directly.
+            undo?.groupsByEvent = false
+            undo?.beginUndoGrouping()
+            defer {
+                editor.breakUndoCoalescing()
+                undo?.endUndoGrouping()
+                undo?.groupsByEvent = groupsByEvent
+            }
+            change()
+        }
+        switch key.lowercased() {
+        case "command-v":
+            // The pasteboard remains authoritative after a copy in another application.
+            if !headless { clipboardString = appPasteboard.string(forType: .string) ?? "" }
+            let text = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
+            changeText { editor.insertText(text, replacementRange: editor.selectedRange()) }
+        case "command-a": editor.selectAll(nil); return true
+        case "command-c", "command-x":
+            guard !(field is NSSecureTextField) else { return true }
+            let range = editor.selectedRange()
+            guard range.length > 0 else { return true }
+            copyText((editor.string as NSString).substring(with: range))
+            if key.lowercased() == "command-c" { return true }
+            changeText {
+                if editor.shouldChangeText(in: range, replacementString: "") {
+                    editor.replaceCharacters(in: range, with: "")
+                    editor.didChangeText()
+                }
+            }
+        case "command-z": editor.breakUndoCoalescing(); editor.undoManager?.undo()
+        case "shift-command-z": editor.breakUndoCoalescing(); editor.undoManager?.redo()
+        default: return false
+        }
+        if let field = field, field.stringValue != editor.string {
+            field.validateEditing()
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+        return true
+    }
+
     func start() {
+        ensureEditMainMenu()
         signal(SIGPIPE, SIG_IGN)
         signal(SIGUSR1, SIG_IGN)
         clickSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
@@ -1109,6 +1211,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard let self = self else { return event }
             let window = event.window ?? NSApp.keyWindow
             if (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return event }
+            if let key = panelShortcutKey(event), self.handleTextEditShortcut(key, in: window) { return nil }
             let command = event.modifierFlags.contains(.command)
             if command && event.charactersIgnoringModifiers == "," { self.openSettingsPanel(); return nil }
             if command && event.charactersIgnoringModifiers == "k" { self.openDirectoryPanel(mode:"directory"); return nil }
@@ -1234,6 +1337,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if op == "test_render_png", let surface = object["surface"] as? String, let path = object["path"] as? String {
                 renderPNG(surface: surface, path: path); return
             }
+            if op == "test_tile_scroll_views" {
+                func tile(_ view: NSView) {
+                    if let scroll = view as? OverlayScrollView { scroll.scrollerStyle = .legacy; scroll.tile() }
+                    for child in view.subviews { tile(child) }
+                }
+                for root in cardMenu.items.compactMap({ $0.view }) + [settingsPanel?.contentView, directoryPanel?.contentView].compactMap({ $0 }) { tile(root) }
+                return
+            }
             if op == "test_menu_open" { menuWillOpen(cardMenu); return }
             if op == "test_menu_close" { menuDidClose(cardMenu); return }
             if op == "test_appearance" { return }
@@ -1261,9 +1372,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 queryDirectory()
                 return
             }
-            if op == "test_directory_key", let key = object["key"] as? String {
-                handleDirectoryKey(key)
-                return
+            if op == "test_focus_field", let id = object["id"] as? String {
+                for window in [settingsPanel, directoryPanel].compactMap({ $0 }) {
+                    if let root = window.contentView, let field = findTextField(in: root, id: id), field.isEditable, field.isEnabled {
+                        window.makeFirstResponder(field)
+                        field.selectText(nil)
+                        return
+                    }
+                }
+                diagnostic("editable field not found: \(id)"); return
             }
             if op == "test_settings_scroll", let offset = object["offset"] as? Double {
                 for case let scroll as NSScrollView in settingsPanel?.contentView?.subviews ?? [] where !scroll.isHidden {
@@ -1297,11 +1414,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 appPasteboard.setString(text, forType: .string)
                 return
             }
-            if op == "test_settings_key", let key = object["key"] as? String {
-                if key.lowercased() == "command-comma", let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43) {
-                    _ = cardMenu.performKeyEquivalent(with: event)
+            if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
+                let window = op == "test_settings_key" ? settingsPanel : directoryPanel
+                if object["via"] as? String == "panel", let window = window {
+                    let character = key.hasSuffix("comma") ? "," : String(key.suffix(1))
+                    let flags: NSEvent.ModifierFlags = key.hasPrefix("shift-") ? [.command, .shift] : [.command]
+                    if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0), window.performKeyEquivalent(with: event) { return }
                 }
-                handleSettingsKey(key)
+                if op == "test_settings_key" { handleSettingsKey(key) } else { handleDirectoryKey(key) }
                 return
             }
             if op == "test_control", let id = object["id"] as? String {
@@ -1643,7 +1763,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         let stripX = max(138, 54 + subWidth)
         let stripWidth = max(44, 368 - stripX)
-        let hubStrip = NSScrollView(frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22))
+        let hubStrip = OverlayScrollView(frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22))
         hubStrip.scrollerStyle = .overlay
         hubStrip.identifier = NSUserInterfaceItemIdentifier("header_hub_strip")
         hubStrip.drawsBackground = false; hubStrip.hasHorizontalScroller = false
@@ -1845,7 +1965,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             for (id, row) in activeRows { _ = host(row, id: id) }
         } else {
             let totalHeight = activeRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 260))
+            let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 260))
             scroll.scrollerStyle = .overlay
             scroll.drawsBackground = false; scroll.hasVerticalScroller = true
             scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
@@ -1940,7 +2060,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     for (id, row) in remoteRows { _ = host(row, id: id) }
                 } else {
                     let totalHeight = CGFloat(remoteRows.count) * 34
-                    let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 102))
+                    let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 102))
                     scroll.scrollerStyle = .overlay
                     scroll.drawsBackground = false; scroll.hasVerticalScroller = true
                     scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
@@ -1961,7 +2081,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: hubs.count > 1 ? 124 : 220, height: 14),
                 size: 10, weight: .semibold, color: CitoPalette.secondaryText))
             if hubs.count > 1 {
-                let targetStrip = NSScrollView(frame: NSRect(x: 140, y: 2, width: 228, height: 18))
+                let targetStrip = OverlayScrollView(frame: NSRect(x: 140, y: 2, width: 228, height: 18))
                 targetStrip.scrollerStyle = .overlay
                 targetStrip.identifier = NSUserInterfaceItemIdentifier("targetStrip")
                 targetStrip.drawsBackground = false
@@ -2109,7 +2229,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         for (id, row) in candidateRows { _ = host(row, id: id) }
                     } else {
                         let totalHeight = candidateRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
-                        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 144))
+                        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 144))
                         // Overlay scrollers preserve the authored row width even
                         // when macOS is configured to always show scrollbars.
                         scroll.scrollerStyle = .overlay
@@ -2197,6 +2317,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     // MARK: - Surface 3: Native AppKit Settings Panel (520 × 460 pt KeyPanel: NSPanel)
 
     func ensureSettingsPanel() {
+        ensureEditMainMenu()
         if settingsPanel == nil {
             let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
                                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -2209,6 +2330,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             window.backgroundColor = .clear
             window.hasShadow = true
             window.isMovableByWindowBackground = true
+            window.onKey = { [weak self] key in self?.handleSettingsKey(key) }
             settingsPanel = window
         }
         rebuildSettingsPanel()
@@ -2216,6 +2338,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func handleSettingsKey(_ key: String) {
         if (settingsPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
+        if handleTextEditShortcut(key, in: settingsPanel) { return }
         switch key.lowercased() {
         case "command-comma": openSettingsPanel()
         case "command-w": closeSettingsPanel(emitAction:true)
@@ -2283,7 +2406,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         for child in content.subviews { child.frame.origin.y += extra }
         let viewport = content.frame
         content.frame = NSRect(x: 0, y: 0, width: viewport.width, height: viewport.height + extra)
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 44, width: 520, height: 368 - (settingsBannerError == nil ? 0 : 36)))
+        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 44, width: 520, height: 368 - (settingsBannerError == nil ? 0 : 36)))
         scroll.scrollerStyle = .overlay
         scroll.identifier = NSUserInterfaceItemIdentifier(id)
         scroll.hasVerticalScroller = true
@@ -2476,7 +2599,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let channelHubs = settings?.hubs.map { $0.name } ?? hubs.map { $0.name }
         if channelHubs.count > 1 { channelsView.addSubview(textLabel("TARGET HUB:", NSRect(x: 20, y: 342, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText)) }
         else { bannerCard.frame.origin.y += 36 }
-        let selector = NSScrollView(frame: NSRect(x: 102, y: 336, width: 398, height: 28))
+        let selector = OverlayScrollView(frame: NSRect(x: 102, y: 336, width: 398, height: 28))
         selector.scrollerStyle = .overlay
         selector.identifier = NSUserInterfaceItemIdentifier("selector")
         selector.drawsBackground = false
@@ -3166,6 +3289,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     // MARK: - Surface 2: Spotlight-Style Network Directory Panel (560 × 440 pt KeyPanel: NSPanel)
 
     func ensureDirectoryPanel() {
+        ensureEditMainMenu()
         if directoryPanel != nil { return }
         let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -3189,6 +3313,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         effect.blendingMode = .behindWindow
         effect.state = .active
         root.addSubview(effect)
+
+        window.onKey = { [weak self] key in self?.handleDirectoryKey(key) }
 
         // Top Search Bar (560 × 46 pt, y: 394)
         let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
@@ -3322,7 +3448,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         rebuildDirectoryFacetBar()
 
         // Virtualized Result List (560 × 334 pt, y: 28)
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 28, width: 560, height: 334))
+        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 28, width: 560, height: 334))
         scroll.scrollerStyle = .overlay
         scroll.identifier = NSUserInterfaceItemIdentifier("directory_scroll")
         scroll.drawsBackground = false
@@ -3562,7 +3688,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
         } else {
             let scrollWidth: CGFloat = 334
-            let scroll = NSScrollView(frame: NSRect(x: 210, y: 5, width: scrollWidth, height: 22))
+            let scroll = OverlayScrollView(frame: NSRect(x: 210, y: 5, width: scrollWidth, height: 22))
             scroll.identifier = NSUserInterfaceItemIdentifier("directory_harness_scroll")
             scroll.scrollerStyle = .overlay
             scroll.drawsBackground = false
@@ -3774,6 +3900,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func handleDirectoryKey(_ key: String) {
         if (directoryPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
+        if handleTextEditShortcut(key, in: directoryPanel) { return }
         switch key.lowercased() {
         case "down":
             let count = directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
@@ -4123,7 +4250,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 default: defaultLayout = false
                 }
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }
-                if ((scroll.hasVerticalScroller || scroll.hasHorizontalScroller) && scroll.scrollerStyle != .overlay) || (scroll.hasHorizontalScroller && scroll.frame.height < 34) { overlappingSiblings.append(name(scroll)+": scroller geometry") }
+                if ((scroll.hasVerticalScroller || scroll.hasHorizontalScroller) && ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle) != .overlay) || (scroll.hasHorizontalScroller && scroll.frame.height < 34) { overlappingSiblings.append(name(scroll)+": scroller geometry") }
                 if let doc = scroll.documentView {
                     for pill in doc.subviews.compactMap({ $0 as? MenuControl }) where pill.style == .prominent || selectedHubs.contains(String((pill.identifier?.rawValue ?? "").dropFirst(4))) {
                         if !scroll.contentView.bounds.contains(pill.frame) { clippedViews.append(name(scroll)+": selected pill") }
@@ -4176,6 +4303,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if let image = view as? NSImageView {
                 view.effectiveAppearance.performAsCurrentDrawingAppearance { result["tint"] = components(image.contentTintColor) }
             }
+            if let scroll = view as? NSScrollView { result["scroller_style"] = ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle).rawValue }
             if let cell = view as? DirectoryPeerCellView { result["reuse_identifier"] = cell.identifier?.rawValue ?? "" }
             if let label = view as? NSTextField {
                 result["text"] = label is NSSecureTextField ? "••••" : label.stringValue
@@ -4240,6 +4368,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
         let snapshot: [String: Any] = ["items": items, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "low_contrast_labels": lowContrastLabels, "jargon_leaks":jargonLeaks, "address_mismatches":addressMismatches, "banner_items":bannerItems, "wake_action_text": wakeActionText,
+            "edit_menu": NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "Edit" })?.submenu?.items.map { ["title": $0.title, "key": $0.keyEquivalent, "action": $0.action.map(NSStringFromSelector) ?? "", "shift": $0.keyEquivalentModifierMask.contains(.shift)] as [String: Any] } ?? [],
+            "field_editors": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in
+                guard let editor = window?.firstResponder as? NSTextView else { return nil }
+                return ["id": (editor.delegate as? NSTextField)?.identifier?.rawValue ?? "", "selection_length": editor.selectedRange().length,
+                    "selection_location": editor.selectedRange().location, "editable": editor.isEditable,
+                    "can_undo": editor.undoManager?.canUndo ?? false, "undo_groups": editor.undoManager?.groupingLevel ?? -1,
+                    "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
+                    "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
+            },
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),

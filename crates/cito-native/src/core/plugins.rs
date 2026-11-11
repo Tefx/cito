@@ -472,62 +472,24 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
     })
 }
 
+pub fn staged_plugins_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("runtime").join("plugins")
+}
+
+pub(super) fn is_staged_plugins_root(root: &Path, state_dir: &Path) -> bool {
+    [staged_plugins_dir(state_dir), state_dir.join("plugins")]
+        .iter()
+        .any(|staged| {
+            root == staged
+                || fs::canonicalize(root)
+                    .ok()
+                    .zip(fs::canonicalize(staged).ok())
+                    .is_some_and(|(builtin, staged)| builtin == staged)
+        })
+}
+
 pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
-    let mut plugins = Vec::new();
-    let mut builtin_ids = HashSet::new();
-    let mut rejected_ids = HashSet::new();
-
-    let staged_root = state_dir.join("plugins");
-    let mut builtin_roots: Vec<_> = resolve_builtin_plugins_dir().into_iter().collect();
-    let using_staged_root = builtin_roots.first().is_some_and(|root| {
-        root == &staged_root
-            || fs::canonicalize(root)
-                .ok()
-                .zip(fs::canonicalize(&staged_root).ok())
-                .is_some_and(|(builtin, staged)| builtin == staged)
-    });
-    if using_staged_root {
-        // Installed shims point at staged files; recover deleted descriptors from
-        // the distribution so a new process can still offer Repair.
-        builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
-    }
-    for builtin_root in builtin_roots {
-        if let Ok(rd) = fs::read_dir(&builtin_root) {
-            let mut subdirs: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect();
-            subdirs.sort();
-            for sub in subdirs {
-                // The staged directory also hosts custom plugins. Only bundled
-                // IDs belong here; leave the rest for external discovery below.
-                if using_staged_root
-                    && !sub.file_name().and_then(|s| s.to_str()).is_some_and(|id| {
-                        super::setup::resolve_bundled_plugin_dir(id)
-                            .join("plugin.json")
-                            .is_file()
-                    })
-                {
-                    continue;
-                }
-                if let Ok(desc) = parse_manifest_dir(&sub, true) {
-                    if builtin_ids.insert(desc.id.clone()) {
-                        plugins.push(desc);
-                    }
-                }
-            }
-        }
-    }
-
-    plugins.sort_by_key(|p| match (p.kind.as_str(), p.tier.as_str()) {
-        ("agent-harness", "stable") => (0, p.display_name.clone()),
-        ("agent-harness", "experimental") => (1, p.display_name.clone()),
-        ("agent-harness", _) => (2, p.display_name.clone()),
-        _ => (3, p.display_name.clone()),
-    });
-
-    let mut ext_roots = vec![state_dir.join("plugins")];
+    let mut external_roots = Vec::new();
     if let Ok(extra) = env::var("CITO_PLUGIN_PATH") {
         for part in extra.split(':').filter(|s| !s.trim().is_empty()) {
             if let Ok(path) = expand_home_dir(
@@ -535,45 +497,68 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
                 "CITO_PLUGIN_PATH",
                 env::var("HOME").ok().as_deref(),
             ) {
-                ext_roots.push(path);
+                external_roots.push(path);
             }
         }
     }
+    external_roots.push(state_dir.join("plugins"));
+    let mut builtin_roots: Vec<_> = resolve_builtin_plugins_dir().into_iter().collect();
+    if builtin_roots
+        .first()
+        .is_some_and(|root| is_staged_plugins_root(root, state_dir))
+    {
+        // A deleted staged descriptor must remain discoverable for Repair.
+        builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
+    }
+    load_plugins_from_roots(&external_roots, &builtin_roots)
+}
 
-    let mut seen_ext = HashSet::new();
-    for root in ext_roots {
-        let Ok(rd) = fs::read_dir(&root) else {
-            continue;
-        };
-        let mut subdirs: Vec<PathBuf> = rd
+fn load_plugins_from_roots(external_roots: &[PathBuf], builtin_roots: &[PathBuf]) -> LoadedPlugins {
+    let mut plugins = Vec::new();
+    let mut seen_ids = HashSet::new();
+    let mut rejected_ids = HashSet::new();
+    for (root, is_builtin) in external_roots
+        .iter()
+        .map(|root| (root, false))
+        .chain(builtin_roots.iter().map(|root| (root, true)))
+    {
+        let Ok(rd) = fs::read_dir(root) else { continue };
+        let mut subdirs: Vec<_> = rd
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_dir())
             .collect();
         subdirs.sort();
         for sub in subdirs {
-            let dir_name = sub
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            match parse_manifest_dir(&sub, false) {
+            match parse_manifest_dir(&sub, is_builtin) {
                 Ok(desc) => {
-                    if builtin_ids.contains(&desc.id) || seen_ext.contains(&desc.id) {
-                        continue;
-                    }
-                    seen_ext.insert(desc.id.clone());
-                    plugins.push(desc);
-                }
-                Err(_) => {
-                    if !builtin_ids.contains(&dir_name) {
-                        rejected_ids.insert(dir_name);
+                    if seen_ids.insert(desc.id.clone()) {
+                        plugins.push(desc);
                     }
                 }
+                Err(_) if !is_builtin => {
+                    let id = sub.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if !seen_ids.contains(id) {
+                        rejected_ids.insert(id.to_string());
+                    }
+                }
+                Err(_) => {}
             }
         }
     }
-
+    // An invalid higher-priority directory must not poison a valid fallback.
+    rejected_ids.retain(|id| !seen_ids.contains(id));
+    plugins.sort_by_key(|p| {
+        (
+            if p.kind == "agent-harness" { 0 } else { 1 },
+            match p.tier.as_str() {
+                "stable" => 0,
+                "experimental" => 1,
+                _ => 2,
+            },
+            p.display_name.clone(),
+        )
+    });
     LoadedPlugins {
         plugins,
         rejected_ids,
@@ -1258,6 +1243,55 @@ mod tests {
         fs::set_permissions(dir.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
         let descriptor = parse_manifest_dir(&dir, false).unwrap();
         (root, descriptor)
+    }
+
+    #[test]
+    fn external_priority_and_removal_preserve_builtin_fallback() {
+        let root = env::temp_dir().join(format!("cito-plugin-priority-{}", random_hex(8)));
+        let external: Vec<_> = ["first", "second", "user"]
+            .iter()
+            .map(|name| root.join(name))
+            .collect();
+        let builtin = root.join("bundled");
+        for dir in external.iter().chain(std::iter::once(&builtin)) {
+            let plugin = dir.join("sample");
+            fs::create_dir_all(&plugin).unwrap();
+            let name = dir.file_name().unwrap().to_str().unwrap();
+            fs::write(
+                plugin.join("plugin.json"),
+                json!({"id":"sample","kind":"agent","tier":"stable",
+                "displayName":name,"command":[format!("./{name}.sh")]})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        for (index, name) in ["first", "second", "user", "bundled"]
+            .into_iter()
+            .enumerate()
+        {
+            let loaded = load_plugins_from_roots(&external, std::slice::from_ref(&builtin));
+            assert_eq!(loaded.plugins.len(), 1);
+            let plugin = loaded.find_by_id("sample").unwrap();
+            assert_eq!(plugin.display_name, name);
+            assert_eq!(plugin.command, [format!("./{name}.sh")]);
+            assert_eq!(plugin.is_builtin, index == 3);
+            assert!(loaded.rejected_ids.is_empty());
+            if index < 3 {
+                fs::remove_dir_all(external[index].join("sample")).unwrap();
+            }
+        }
+        // Invalid high-priority copies do not reject a valid lower-priority descriptor.
+        let invalid = external[0].join("sample");
+        fs::create_dir_all(&invalid).unwrap();
+        fs::write(invalid.join("plugin.json"), "{").unwrap();
+        let loaded = load_plugins_from_roots(&external, std::slice::from_ref(&builtin));
+        assert!(loaded.find_by_id("sample").unwrap().is_builtin);
+        assert!(!loaded.rejected_ids.contains("sample"));
+        fs::remove_dir_all(builtin.join("sample")).unwrap();
+        assert!(load_plugins_from_roots(&external, &[builtin])
+            .rejected_ids
+            .contains("sample"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

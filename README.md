@@ -27,9 +27,10 @@ Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` signaling
 
 ### Key Capabilities
 - **Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`**: Every human user (`harness: "human", session_id: "default"`) and every coding agent session is a host-independent `Node` reachable via $1 \dots K$ attached `Channels` (multiple Macs, the macOS menu bar, and **Telegram**) without evicting other active devices.
-- **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub, with `to: "@self"` and `to: "@<username>"` shorthands, `[ Directory | Activity ]` feeds, and an inline reply composer in the Directory window.
+- **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub. Address people with `@self` or `@<user>` and sessions with `alice/codex#4219` or `alice/pi#8f1a`; prefix non-default Hubs, such as `work:alice/pi#8f1a`. Address chips display exactly what they copy, search accepts the same address, and prefixes widen automatically on collision. Full canonical listener IDs remain compatible. Use the `[ Directory | Activity ]` feeds and inline reply composer.
 - **Two-Scope Human Channels & 1-Click Pairing**: Configure shared Hub credentials (`scope: "hub"`) and personal bindings (`scope: "user"`) in the 3-tab `Settings…` (`⌘,`) window, pair via 10-character Base32 `/start cito-a1b2c3d4e5` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
 - **Menu Bar Control Plane**: Inspect your `Human Node (@user)`, local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`). The icon counts agent sessions only and shows unread signals separately; a Human-only idle setup has no numeric badge. Semantic status colors adapt to Light and Dark Mode.
+- **Sender Auto-Enrollment & Replies**: `cito_send` automatically enrolls a not-yet-enrolled agent sender as a listener so replies can reach it; explicitly stopped sessions remain stopped. Telegram keeps delivery mappings for **7 days**, independently of signal payload pruning, so replies from Telegram or the Mac menu bar **Activity** stream can reach the sender while its session remains available. Pairing codes still expire after ten minutes.
 - **Automatic Daemon Handover**: Upgrading Cito automatically replaces any older local `cito-daemon` on the next CLI, UI, or MCP invocation without manual restarts.
 
 ---
@@ -41,8 +42,6 @@ Choose either of the two official installation methods. `Cito.app` and `cito` ru
 ### Option 1: Homebrew (Recommended)
 
 ```sh
-brew install tefx/tap/cito
-# Explicit cask selection also works:
 brew install --cask tefx/tap/cito
 ```
 
@@ -67,7 +66,7 @@ cask to avoid conflicting command links:
 ```sh
 brew uninstall --formula tefx/tap/cito
 brew update
-brew install tefx/tap/cito
+brew install --cask tefx/tap/cito
 ```
 
 Use `--zap` only if you also want Homebrew to delete Cito's user data.
@@ -90,11 +89,13 @@ Open **`Settings…` (`⌘,`)** from the Cito menu bar dropdown to configure:
 - **Tab 2 — `Human Channels`**: Select the target Hub and toggle **`Mac Desktop Banner`**. Channel cards have two strata:
   1. **`1. HUB GATEWAY · ONCE PER HUB`**: Enter the shared credential (such as a Telegram Bot Token) and click **`Save Gateway Token`**. The active gateway collapses; **`Change Token…`** reopens it and **`Clear Token`** removes it. A managed Hub can provide the gateway for you.
   2. **`2. Your Personal Account (@<user>)`**: Once the gateway is ready, click **`Pair Account…`** and follow the displayed instruction, or enter your personal address, then use **`Send Test`** and **`Save`**. **`Skip for Now`** leaves pairing optional and makes no Hub changes.
-- **Tab 3 — `Hubs & Network`**: Toggle **`Share Hub on Local Network`** (`:4291`), click **`Copy 1-Click Join Code`**, or click **`Paste Invite`** / **`Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
+- **Tab 3 — `Hubs & Network`**: **`Share Hub on Local Network`** collapses when **`Off`**; enable it to reveal the endpoint, port (`:4291`), authentication controls, and **`Copy 1-Click Join Code`**. Use **`Paste Invite`** / **`Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
 - **Window Footer**: Toggle **`Start Cito at Login`** or click **`Remove All Integrations…`**. Choose **`Disconnect All`** to stop listeners and remove app registrations while keeping Cito running and staged files available, or **`Confirm Uninstall`** to remove Cito and quit (optionally deleting local data).
 - **Guided setup and repair**: Follow the inline steps in Agent Apps and Human Channels, then use Hubs & Network when you want to share or join a Hub. App cards show reload/restart instructions; **`Repair`** restores missing CLI shims, staged plugins, and individual plugin assets. Cito rediscovers configured built-in integrations through the bundled distribution when staged files or manifests are missing, including after restarting from an installed shim. Damaged integrations remain visible with **`Repair`** until you restore them.
 - **Channel lifecycle**: Saved secret fields stay blank with a saved-value placeholder. Leave them blank to retain credentials; type a new value to replace them. **`Send Test`** uses unsaved candidate values without saving them. Schema lookup and connection failures also appear as test results. Test details survive status refreshes even before the channel is configured; a failed test keeps an **`Error`** badge until another test replaces it or a channel action changes configuration. **`Pause`** retains your account binding, **`Unpair`** removes your binding, and **`Clear Token`** removes service credentials. Pairing commands expire after ten minutes; starting another pairing, cancelling, or unpairing invalidates earlier commands. Pairing preserves saved account fields and activates the channel only when all required service and account fields are configured.
 - **Hub lifecycle**: Edit hub settings inline without re-entering saved secrets. Disconnected hubs remain in the menu with **`Connect`**; OIDC **`Switch Account`** opens the account picker. LAN sharing supports port changes and token-auth controls, retaining the previous listener if a new port cannot bind. Message sends and port saves track their own acknowledgements, so delayed failures from an earlier attempt cannot settle a retry.
+
+All editable controls in Settings, Directory search, and the composer support the native **Edit** menu: `⌘V` Paste, `⌘A` Select All, `⌘C` Copy, `⌘X` Cut, `⌘Z` Undo, and `⇧⌘Z` Redo. Password fields allow paste, selection, undo, and redo while blocking Copy and Cut. Active field editors remain attached during editing.
 
 You can also inspect status or manage hubs from the CLI:
 
@@ -160,7 +161,7 @@ args = []
 
 ```json
 {
-  "packages": ["/Users/<you>/.cito/plugins/pi"]
+  "packages": ["/Users/<you>/.cito/runtime/plugins/pi"]
 }
 ```
 
@@ -180,9 +181,9 @@ The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live sessi
     }
   },
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.cito/plugins/claude/bin/cito-claude-hook" }] }],
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.cito/plugins/claude/bin/cito-claude-hook" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.cito/plugins/claude/bin/cito-claude-hook" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.cito/runtime/plugins/claude/bin/cito-claude-hook" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.cito/runtime/plugins/claude/bin/cito-claude-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.cito/runtime/plugins/claude/bin/cito-claude-hook" }] }]
   }
 }
 ```
@@ -238,7 +239,7 @@ The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live sessi
 | `CITO_DAEMON_PORT` | `4290` (loopback HTTP MCP & `/health` port). |
 | `CITO_CLAUDE_CHANNEL` | `0`; set to `1` in Claude Code's MCP server `env` to enable the Claude wake channel. |
 | `CITO_PI_HOME` / `CITO_CODEX_HOME` / `CITO_CLAUDE_HOME` | `~/.pi/agent` / `~/.codex` / `~/.claude` (local harness configuration directories). |
-| `CITO_PLUGIN_PATH` | Optional colon-separated list of additional plugin discovery directories. |
+| `CITO_PLUGIN_PATH` | Colon-separated plugin-root directories, searched left-to-right before user overrides and bundled defaults. |
 
 **Optional Login LaunchAgent**: Enable **`Start Cito at Login`** in **`Settings…` (`⌘,`)** (or run `cito setup --login-item`) so the menu bar transceiver icon runs immediately when you log into macOS.
 
@@ -247,6 +248,12 @@ The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live sessi
 ## Custom Agent & Human Channel Plugins (`~/.cito/plugins/`)
 
 Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and Human Channel plugins (`human` [Desktop UI], `telegram` [Telegram Bot API]). To integrate another coding agent (`kind: "agent-harness"`) or external human messaging channel (`kind: "human-channel"`), create `~/.cito/plugins/<id>/plugin.json` and provide an executable that exchanges NDJSON requests and responses over `stdin`/`stdout`. See the **[Subprocess Plugin Guide](https://tefx.github.io/cito/docs/plugins.html)** for protocol details and examples:
+
+Discovery chooses one plugin per ID in this order, highest priority first:
+
+1. **`CITO_PLUGIN_PATH`** roots, left-to-right.
+2. **`${CITO_STATE_DIR}/plugins/<id>/`** (default **`~/.cito/plugins/<id>/`**), reserved exclusively for user-authored plugins and same-ID overrides of built-ins. Remove an override to fall back to its bundled default automatically.
+3. **Bundled defaults**, including `Cito.app/Contents/Resources/plugins/<id>/`, with internal CLI staging under **`~/.cito/runtime/plugins/<id>/`**. Staging never overwrites user plugins.
 
 ```json
 {

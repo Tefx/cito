@@ -81,6 +81,186 @@ impl<'a> ClosedLoop<'a> {
 }
 
 #[test]
+fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_composer() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "edit_hub_service:channel");
+    control(&f, p, "open_directory");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"matched_count":1}),
+    );
+    f.send(p, json!({"op":"test_tile_scroll_views"}));
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "directory_items", "directory_scroll")["scroller_style"],
+        1
+    );
+    assert_eq!(
+        node(&s, "settings_items", "settings_channels_tab")["scroller_style"],
+        1
+    );
+    assert_eq!(
+        json!(&s["edit_menu"].as_array().unwrap()[..6]),
+        json!([
+            {"title":"Undo","key":"z","action":"undo:","shift":false},
+            {"title":"Redo","key":"Z","action":"redo:","shift":true},
+            {"title":"Cut","key":"x","action":"cut:","shift":false},
+            {"title":"Copy","key":"c","action":"copy:","shift":false},
+            {"title":"Paste","key":"v","action":"paste:","shift":false},
+            {"title":"Select All","key":"a","action":"selectAll:","shift":false}
+        ])
+    );
+    let focus = |id: &str| {
+        f.send(p, json!({"op":"test_focus_field","id":id}));
+        assert!(
+            inspect(&f, p)["field_editors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|editor| editor["id"] == id),
+            "{id} must own a native field editor"
+        );
+    };
+    let key = |op: &str, key: &str, via: &str| {
+        f.send(p, json!({"op":op,"key":key,"via":via}));
+        let snapshot = inspect(&f, p);
+        for editor in snapshot["field_editors"].as_array().unwrap() {
+            assert_eq!(editor["attached"], true, "{key}: {editor}");
+            assert_eq!(editor["automatic_groups"], true, "{key}: {editor}");
+        }
+        snapshot
+    };
+    let save_secret = |expected: &str| {
+        let before = f.frames(p).len();
+        control(&f, p, "save_hub_service:channel");
+        let mut saved = Value::Null;
+        wait(|| {
+            saved = f
+                .frames(p)
+                .into_iter()
+                .skip(before)
+                .find(|a| a["op"] == "save_hub_service")
+                .unwrap_or(Value::Null);
+            saved.is_object()
+        });
+        assert_eq!(saved["values"]["secret"], expected);
+    };
+    focus("channel_field:channel:secret");
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"opaque secure value / keep spaces"}),
+    );
+    key("test_settings_key", "command-v", "panel");
+    save_secret("opaque secure value / keep spaces");
+    key("test_settings_key", "command-a", "direct");
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"replacement secure value + punctuation"}),
+    );
+    key("test_settings_key", "command-v", "panel");
+    save_secret("replacement secure value + punctuation");
+    key("test_settings_key", "command-z", "direct");
+    save_secret("opaque secure value / keep spaces");
+    key("test_settings_key", "shift-command-z", "panel");
+    save_secret("replacement secure value + punctuation");
+    key("test_settings_key", "command-a", "panel");
+    f.send(p, json!({"op":"test_clipboard","text":"public clipboard"}));
+    for command in ["command-c", "command-x"] {
+        assert_eq!(
+            key("test_settings_key", command, "panel")["clipboard"],
+            "public clipboard"
+        );
+    }
+    save_secret("replacement secure value + punctuation");
+
+    for (id, op, surface) in [
+        (
+            "channel_field:channel:account",
+            "test_settings_key",
+            "settings_items",
+        ),
+        ("directory_search", "test_directory_key", "directory_items"),
+        ("composer_input", "test_directory_key", "directory_items"),
+    ] {
+        if id == "composer_input" {
+            control(&f, p, "msg_dir:personal:one");
+        }
+        focus(id);
+        let text = "café / ordinary text";
+        f.send(p, json!({"op":"test_clipboard","text":text}));
+        assert_eq!(
+            node(&key(op, "command-v", "panel"), surface, id)["text"],
+            text
+        );
+        let selected = key(op, "command-a", "direct");
+        let editor = selected["field_editors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap();
+        assert_eq!(
+            editor["selection_length"],
+            text.encode_utf16().count(),
+            "{id}: {editor}"
+        );
+        assert_eq!(editor["editable"], true, "{id}: {editor}");
+        f.send(
+            p,
+            json!({"op":"test_clipboard","text":"copy must replace this sentinel"}),
+        );
+        let copied = key(op, "command-c", "panel");
+        assert_eq!(copied["clipboard"], text);
+        let editor = copied["field_editors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap();
+        assert_eq!(
+            editor["selection_length"],
+            text.encode_utf16().count(),
+            "{id}: {editor}"
+        );
+        assert_eq!(
+            node(&key(op, "command-x", "panel"), surface, id)["text"],
+            "",
+            "{id}"
+        );
+        assert_eq!(
+            node(&key(op, "command-z", "direct"), surface, id)["text"],
+            text,
+            "{id}"
+        );
+        assert_eq!(
+            node(&key(op, "shift-command-z", "panel"), surface, id)["text"],
+            ""
+        );
+    }
+    f.send(
+        p,
+        json!({"op":"test_clipboard","text":"Final café message"}),
+    );
+    key("test_directory_key", "command-v", "panel");
+    let before = f.frames(p).len();
+    control(&f, p, "composer_send");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .skip(before)
+            .any(|a| a["op"] == "send_signal" && a["message"] == "Final café message")
+    });
+}
+
+#[test]
 fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() {
     let _lock = serial();
     let f = Fixture::new(json!({"host_hub":{"bind":"127.0.0.1"}}));
