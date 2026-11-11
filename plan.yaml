@@ -8732,7 +8732,7 @@ phases:
     name: 'V29 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       4-Surface Multimodal Review & v0.21.0 Release Alignment [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: 'Execute iterative 2D contract-and-simplicity convergence across
       all modified files and all Light/Dark 2x Retina PNG snapshots (covering menu,
       directory, activity, settings, and banner surfaces) with pathway-auditor, structural-auditor,
@@ -8751,6 +8751,71 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-10T21:40:42.203678Z'
+    done_at: '2026-11-11T05:38:21.422311+00:00'
+    evidence: "Artifact:\n- Commit: 254d417084fe7eefb56ae6a06e29a8c575026452 (retained\
+      \ ref refs/vectl/candidates/v29.hygiene; annotated release tag v0.21.0 at build\
+      \ commit 254d417084fe7eefb56ae6a06e29a8c575026452; Tefx/homebrew-tap Casks/cito.rb\
+      \ commit 7c3b753514295389ec339eaf9a5b2a17c282e2df)\n- Executor: rust-senior\
+      \ + fresh-context pathway-auditor, structural-auditor, and uiux-auditor under\
+      \ [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE].\n\
+      - Convergence Summary (Rounds 1–8):\n  - Closed all Round 1–7 findings across\
+      \ D01–D20:\n    1. M1 / R2-P2 (Readable addresses & collision set): address_peers\
+      \ merges local ACTIVE listeners over stale cached entries while preserving cached\
+      \ channels; sender_display_address synthesizes readable aliases before directory\
+      \ cache catch-up; find_listeners & matchesDirectoryPeer search full <user>/<harness>#<suffix>\
+      \ aliases.\n    2. M2 / R2-P4 / R6-M3 (Activity & Clipboard lifecycle): WakeBanner-to-Activity\
+      \ navigation recalculates multi-line row heights; PendingMessageCopy consolidates\
+      \ correlated chunked message copy; all 9 production copy controls route through\
+      \ copyText; showMessageCopyError surfaces copy errors when Composer is closed;\
+      \ SQLite & Swift trim search whitespace symmetrically; MenuControl.copied preserves\
+      \ restingTitle independently of accessibilityLabel.\n    3. M3 / R2-P1 / R2-P3\
+      \ / R3-P1 / R4-S1 (Settings, Channel Single-Flight & Scroll): OverlayScrollView\
+      \ enforces .overlay scrollers on VM runners; directory_harness_scroll scrolls\
+      \ active overflow pills into view; ChannelInventory serializes background poll,\
+      \ open_settings, and channel mutations outside service.lock() with generation\
+      \ coalescing and slot identity fencing; removed unreachable channel arms from\
+      \ DaemonService::action_inner.\n    4. M4 / R2-P5 / R3-P2 / R3-P3 (Oracle Calibration\
+      \ & Canonical Fixtures): DirectoryPeerCellView binds activityItem provenance\
+      \ directly to the rendered cell; unified D17 jargonPattern across UI chrome\
+      \ and generated Activity header text while excluding verified user-supplied\
+      \ title spans; updated canonical snapshot fixtures.\n    5. D19 (AppKit Standard\
+      \ Edit Menu & Field-Editor Shortcuts): ensureEditMainMenu installs NSApp.mainMenu\
+      \ with Undo/Redo/Cut/Copy/Paste/Select All; KeyPanel.performKeyEquivalent, settingsKeyMonitor,\
+      \ handleSettingsKey, and handleDirectoryKey route ⌘V/⌘C/⌘X/⌘A/⌘Z/⇧⌘Z through\
+      \ handleTextEditShortcut with field.validateEditing() and strict panel-mode\
+      \ testing.\n    6. D20 / R6-M1 / R6-M2 / R7-P1 (3-Tier Plugin Override Precedence\
+      \ & Staged Runtime Separation): staged_plugins_dir moves internal built-in staging\
+      \ to ~/.cito/runtime/plugins/<id>; load_plugins and hub_plugins::discover enforce\
+      \ 1. CITO_PLUGIN_PATH > 2. ~/.cito/plugins/<id> > 3. Bundled / runtime built-ins;\
+      \ selected_plugin_dir propagates across setup, SessionActivity, plugin_request,\
+      \ and pi/claude native plugins; non-purge uninstall protects ~/.cito/plugins.\n\
+      \    7. Website (site/**), Screenshots (site/assets/screenshots/*.png), and\
+      \ Documentation (README.md, docs/DESIGN.md §14, deploy/hub/README.md): rendered\
+      \ 7 canonical Dark-mode 2x Retina screenshots from v0.21.0 cito-ui into site/assets/screenshots/*.png\
+      \ and synchronized site/index.html, site/docs/{guide,plugins,architecture}.html,\
+      \ and README.md with D01–D20.\n  - Round 8 fresh-context convergence verdicts\
+      \ at 254d417084fe7eefb56ae6a06e29a8c575026452:\n    - pathway-auditor (2026-11-11T05-08-27-832Z_01a1c901-e837-76a3-abc4-009aacbd479e.jsonl):\
+      \ Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES | Holds / Unproven: 0 |\
+      \ Uninspected Gaps: NONE\n    - structural-auditor (2026-11-11T05-08-27-747Z_01a1c901-e7e2-73c4-a711-ff2128e98af8.jsonl):\
+      \ Completeness: CLEAN (ZERO_NEW_ISSUES) | Simplicity: CLEAN (ZERO_NEW_ISSUES)\
+      \ | Holds / Unproven: 0 | Uninspected Gaps: NONE\n    - uiux-auditor (2026-11-11T05-16-47-482Z_01a1c909-87f9-74a6-a0ad-4f163d21e9a9.jsonl):\
+      \ Completeness: CLEAN (ZERO_NEW_ISSUES) | Simplicity: CLEAN | Holds / Unproven:\
+      \ 0 | Uninspected Gaps: NONE\n- Live Distribution Alignment (v0.21.0):\n  -\
+      \ GitHub Actions CI run 42965127141 & Deploy Website to GitHub Pages run 42965127061:\
+      \ succeeded on 254d417084fe7eefb56ae6a06e29a8c575026452 (https://tefx.github.io/cito/\
+      \ live at 0.21.0).\n  - GitHub Release v0.21.0 (https://github.com/Tefx/cito/releases/tag/v0.21.0,\
+      \ signed with Developer ID Application, notarized by Apple, and stapled in Actions\
+      \ run 42965130632): published Cito-macos-arm64.zip with SHA-256 09724dd49db4db4577d7f90e2cf4b74465120bf68c48b05d8b78570f972ee17c\
+      \ and Cito-macos-arm64.zip.sha256, synchronized to Tefx/homebrew-tap Casks/cito.rb\
+      \ (commit 7c3b753514295389ec339eaf9a5b2a17c282e2df).\n\nVerification:\n- Run:\
+      \ python3 packaging/release.py check && python3 -m unittest discover -s packaging\
+      \ -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb && cargo\
+      \ fmt --all -- --check && cargo clippy --workspace --all-targets --locked --\
+      \ -D warnings && CITO_TEST_SNAPSHOT_DIR=/tmp/cito-v29-snapshots cargo test --workspace\
+      \ --locked -- --test-threads=1 && cargo build --release --locked -> 267 workspace\
+      \ tests passed, 13 packaging tests passed, 0 failed, 0 compiler/linker warnings,\
+      \ Syntax OK.\n- Reclaimed worktree /Users/tefx/Projects/cito/.vectl/worktrees/v29.hygiene\
+      \ (128 GiB -> 130 GiB free)."
   - id: v29.gate
     name: V29 Independent Terminal Acceptance, D01–D18 6-Invariant Verification &
       v0.21.0 Release Gate
