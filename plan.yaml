@@ -8865,7 +8865,7 @@ phases:
 - id: v30
   name: 'V30 Stage 12.1 (v0.21.1): Cito.app Symlink Launcher Resolution, cito-mcp
     Dispatch & Legacy ~/.cito/plugins Upgrade Cleanup'
-  status: in_progress
+  status: done
   gate: 'Cito.app/Contents/MacOS/Cito resolves Homebrew Cask symlinks (cito and cito-mcp)
     accurately and dispatches 0-arg cito-mcp to mcp-stdio with CITO_ENDPOINT_PID;
     legacy ~/.cito/plugins/<id> v0.20.x copies and ~/.cito/plugins/human overrides
@@ -9010,7 +9010,7 @@ phases:
   - id: v30.gate
     name: V30 Independent Terminal Acceptance & v0.21.1 Live Release / Homebrew Cask
       Gate
-    status: claimed
+    status: done
     description: Independent gate-reviewer terminal acceptance (gate.report.v2 PASS)
       over Phase v30 and live v0.21.1 release + Tefx/homebrew-tap Cask alignment.
     verification: cargo test --workspace && cargo build --release
@@ -9028,3 +9028,28 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-11T08:11:20.650318Z'
+    done_at: '2026-11-11T08:17:53.029311+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 2a787b7e529478e0485d76c4f0f8e41d98d84c2e (code commit b5b62c9be3b3e58bc37c7d03d36176a94b951dda;
+      annotated release tag v0.21.1 at build commit b5b62c9be3b3e58bc37c7d03d36176a94b951dda;
+      Tefx/homebrew-tap Casks/cito.rb commit 44ea7718cf7955623bc643d9af08426bc7f78f2c)
+
+      - Gate Report (gate.report.v2): fresh-context gate-reviewer session 2026-11-11T08-13-18-090Z_01a1c9ab-2189-72e6-9ed9-916782984d7e.jsonl,
+      status: PASS, review_kind: PHASE_GATE, review_mode: FULL, target_ref: git:2a787b7e529478e0485d76c4f0f8e41d98d84c2e,
+      4/4 requirements PROVEN, findings: [].
+
+
+      Verification:
+
+      - Run: python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v30-gate/binding.json /tmp/cito-v30-gate/report.json -> {"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}
+
+      - Run: GitHub Actions CI run 42981876865, Deploy Website to GitHub Pages run
+      42981876863, and Release run 42981878943 (job 130402217849) on b5b62c9be3b3e58bc37c7d03d36176a94b951dda
+      -> all succeeded (271 workspace tests passed, 14 packaging tests passed, 0 compiler/linker
+      warnings, Syntax OK, Developer ID signed + notarized + stapled Cito-macos-arm64.zip
+      SHA-256 85e8cb5b02ef11ac4b377c92d90d3f0761021f0f5fbcd0ceaf9996ee57b1ef63 published
+      to GitHub Release v0.21.1, smoke_cask passed, Tefx/homebrew-tap Casks/cito.rb
+      updated at commit 44ea7718cf7955623bc643d9af08426bc7f78f2c, https://tefx.github.io/cito/
+      live at 0.21.1).'
