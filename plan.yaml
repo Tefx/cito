@@ -9010,7 +9010,7 @@ phases:
   - id: v30.gate
     name: V30 Independent Terminal Acceptance & v0.21.1 Live Release / Homebrew Cask
       Gate
-    status: pending
+    status: claimed
     description: Independent gate-reviewer terminal acceptance (gate.report.v2 PASS)
       over Phase v30 and live v0.21.1 release + Tefx/homebrew-tap Cask alignment.
     verification: cargo test --workspace && cargo build --release
@@ -9026,3 +9026,5 @@ phases:
     depends_on:
     - v30.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T08:11:20.650318Z'
