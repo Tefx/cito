@@ -15,7 +15,7 @@ fn send(e: &HubEngine, id: &str, sig: &str) {
 fn stopped_channel_process_waits_for_its_reader_callback() {
     let dir = temp();
     let root = fixture(&dir);
-    let mut plugin = hub_plugins::discover(&[root]).unwrap().remove(0);
+    let mut plugin = hub_plugins::discover(&[root], None).unwrap().remove(0);
     plugin.command = vec![
         "/bin/sh".into(),
         "-c".into(),
@@ -1000,7 +1000,7 @@ fn subscriptions_unregister_on_drop_without_waiting_for_an_event() {
 fn channel_shutdown_kills_descendants_holding_stdout_open() {
     let dir = temp();
     let root = fixture(&dir);
-    let mut plugin = hub_plugins::discover(&[root]).unwrap().remove(0);
+    let mut plugin = hub_plugins::discover(&[root], None).unwrap().remove(0);
     plugin.command = vec![
         "/bin/sh".into(),
         "-c".into(),

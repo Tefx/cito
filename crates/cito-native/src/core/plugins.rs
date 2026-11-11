@@ -80,15 +80,13 @@ impl NativeConfig {
             .filter(|value| !value.trim().is_empty())
             .or_else(|| rest.get("user").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| self.user.clone());
-        let user = hubs
-            .get(hub)
-            .and_then(|h| h.get("user"))
-            .and_then(Value::as_str)
-            .unwrap_or(&global_user);
-        if !validate_user(user) {
-            return Err(format!("Invalid user for hub {hub}"));
-        }
-        Ok(user.to_string())
+        let user = match hubs.get(hub).and_then(|h| h.get("user")) {
+            None | Some(Value::Null) => Some(global_user.as_str()),
+            Some(user) => user.as_str(),
+        };
+        user.filter(|user| validate_user(user))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Invalid user for hub {hub}"))
     }
 }
 
@@ -494,7 +492,71 @@ pub(super) fn is_staged_plugins_root(root: &Path, state_dir: &Path) -> bool {
         })
 }
 
+/// Discovery skips legacy copies and aliases of the authoritative bundled source.
+pub(super) fn is_legacy_staged_plugin(sub: &Path, manifest: &Value) -> bool {
+    let dir_name = sub.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let manifest_id = manifest["id"].as_str().unwrap_or("");
+    let legacy_command = manifest["command"]
+        .as_array()
+        .and_then(|command| command.first())
+        .and_then(Value::as_str)
+        .is_some_and(|command| command.starts_with("./bin/cito-"));
+    [dir_name, manifest_id].into_iter().any(|id| {
+        let bundled = super::setup::resolve_bundled_plugin_dir(id);
+        !id.is_empty()
+            && bundled.join("plugin.json").is_file()
+            && (same_plugin_root(sub, &bundled)
+                || dir_name == "human"
+                || manifest_id == "human"
+                || (manifest["version"].as_str() != Some(CITO_VERSION) && legacy_command))
+    })
+}
+
+/// Even if cleanup is disabled or removal fails, discovery uses the bundled fallback.
+pub(super) fn remove_legacy_staged_plugin(sub: &Path, cleanup: bool) -> bool {
+    let Some(manifest) = fs::read(sub.join("plugin.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+    else {
+        return false;
+    };
+    if !is_legacy_staged_plugin(sub, &manifest) {
+        return false;
+    }
+    if cleanup {
+        if fs::symlink_metadata(sub).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            // Unlink the entry itself, never the plugin directory it points to.
+            let _ = fs::remove_file(sub);
+        } else {
+            let dir_name = sub.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let is_source = [dir_name, manifest["id"].as_str().unwrap_or("")]
+                .into_iter()
+                .any(|id| same_plugin_root(sub, &super::setup::resolve_bundled_plugin_dir(id)));
+            if !is_source {
+                let _ = fs::remove_dir_all(sub);
+            }
+        }
+    }
+    true
+}
+
+pub(super) fn same_plugin_root(left: &Path, right: &Path) -> bool {
+    left == right
+        || fs::canonicalize(left)
+            .ok()
+            .zip(fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
 pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
+    load_plugins_with_cleanup(state_dir, true)
+}
+
+pub fn load_plugins_readonly(state_dir: &Path) -> LoadedPlugins {
+    load_plugins_with_cleanup(state_dir, false)
+}
+
+fn load_plugins_with_cleanup(state_dir: &Path, cleanup_legacy: bool) -> LoadedPlugins {
     let mut external_roots = Vec::new();
     if let Ok(extra) = env::var("CITO_PLUGIN_PATH") {
         for part in extra.split(':').filter(|s| !s.trim().is_empty()) {
@@ -516,10 +578,20 @@ pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
         // A deleted staged descriptor must remain discoverable for Repair.
         builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
     }
-    load_plugins_from_roots(&external_roots, &builtin_roots)
+    load_plugins_from_roots(
+        &external_roots,
+        &builtin_roots,
+        Some(&state_dir.join("plugins")),
+        cleanup_legacy,
+    )
 }
 
-fn load_plugins_from_roots(external_roots: &[PathBuf], builtin_roots: &[PathBuf]) -> LoadedPlugins {
+fn load_plugins_from_roots(
+    external_roots: &[PathBuf],
+    builtin_roots: &[PathBuf],
+    user_root: Option<&Path>,
+    cleanup_legacy: bool,
+) -> LoadedPlugins {
     let mut plugins = Vec::new();
     let mut seen_ids = HashSet::new();
     let mut rejected_ids = HashSet::new();
@@ -535,7 +607,21 @@ fn load_plugins_from_roots(external_roots: &[PathBuf], builtin_roots: &[PathBuf]
             .filter(|p| p.is_dir())
             .collect();
         subdirs.sort();
+        let is_user_root =
+            !is_builtin && user_root.is_some_and(|user| same_plugin_root(root, user));
         for sub in subdirs {
+            if is_user_root && remove_legacy_staged_plugin(&sub, cleanup_legacy) {
+                continue;
+            }
+            if !is_builtin
+                && (sub.file_name().is_some_and(|name| name == "human")
+                    || fs::read(sub.join("plugin.json"))
+                        .ok()
+                        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                        .is_some_and(|manifest| manifest["id"].as_str() == Some("human")))
+            {
+                continue;
+            }
             match parse_manifest_dir(&sub, is_builtin) {
                 Ok(desc) => {
                     if seen_ids.insert(desc.id.clone()) {
@@ -652,7 +738,6 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
             return Err("Invalid host-id UUID".into());
         }
     }
-    let plugins = load_plugins(&state_dir);
     let mut cfg_daemon_port: Option<u16> = None;
     let mut default_hub = env::var("CITO_HUB")
         .ok()
@@ -722,17 +807,21 @@ pub fn load_native_config() -> Result<(NativeConfig, LoadedPlugins), String> {
         Err(_) => cfg_daemon_port.unwrap_or(4290),
     };
 
-    Ok((
-        NativeConfig {
-            state_dir,
-            config_path,
-            home_dir,
-            daemon_port,
-            user,
-            default_hub,
-        },
-        plugins,
-    ))
+    let config = NativeConfig {
+        state_dir,
+        config_path,
+        home_dir,
+        daemon_port,
+        user,
+        default_hub,
+    };
+    let raw = read_config_text(&config.config_path)?;
+    let (_, hubs, _) = try_normalize_existing_config(raw.as_deref())?;
+    for hub in hubs.keys() {
+        config.effective_user(hub)?;
+    }
+    let plugins = load_plugins(&config.state_dir);
+    Ok((config, plugins))
 }
 
 /// Build a subprocess without involving a shell. Relative executable paths belong to the plugin.
@@ -1288,7 +1377,8 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            let loaded = load_plugins_from_roots(&external, std::slice::from_ref(&builtin));
+            let loaded =
+                load_plugins_from_roots(&external, std::slice::from_ref(&builtin), None, false);
             assert_eq!(loaded.plugins.len(), 1);
             let plugin = loaded.find_by_id("sample").unwrap();
             assert_eq!(plugin.display_name, name);
@@ -1303,13 +1393,55 @@ mod tests {
         let invalid = external[0].join("sample");
         fs::create_dir_all(&invalid).unwrap();
         fs::write(invalid.join("plugin.json"), "{").unwrap();
-        let loaded = load_plugins_from_roots(&external, std::slice::from_ref(&builtin));
+        let loaded =
+            load_plugins_from_roots(&external, std::slice::from_ref(&builtin), None, false);
         assert!(loaded.find_by_id("sample").unwrap().is_builtin);
         assert!(!loaded.rejected_ids.contains("sample"));
         fs::remove_dir_all(builtin.join("sample")).unwrap();
-        assert!(load_plugins_from_roots(&external, &[builtin])
+        assert!(load_plugins_from_roots(&external, &[builtin], None, false)
             .rejected_ids
             .contains("sample"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn internal_companion_ignores_external_directory_and_manifest_ids() {
+        let root = env::temp_dir().join(format!("cito-companion-priority-{}", random_hex(8)));
+        let external = root.join("external");
+        let builtin = root.join("bundled");
+        for (dir, id, display) in [
+            (external.join("human"), "human", "External companion"),
+            (external.join("alias"), "human", "Aliased companion"),
+            (builtin.join("human"), "human", "Bundled companion"),
+        ] {
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("plugin.json"),
+                json!({"id":id,"kind":"human",
+                "displayName":display,"command":["./run.sh"]})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let loaded = load_plugins_from_roots(
+            std::slice::from_ref(&external),
+            std::slice::from_ref(&builtin),
+            None,
+            false,
+        );
+        let companion = loaded.find_by_id("human").unwrap();
+        assert!(companion.is_builtin);
+        assert_eq!(companion.plugin_dir, builtin.join("human"));
+        assert!(external.join("human/plugin.json").is_file());
+        assert!(!loaded.rejected_ids.contains("alias"));
+        // Even a malformed external companion directory must not reject the bundled one.
+        fs::write(external.join("human/plugin.json"), "{").unwrap();
+        assert!(
+            load_plugins_from_roots(&[external], &[builtin], None, false)
+                .find_by_id("human")
+                .unwrap()
+                .is_builtin
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

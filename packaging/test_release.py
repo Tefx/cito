@@ -121,6 +121,51 @@ class ArtifactTests(unittest.TestCase):
                     self.assertEqual(data["uninstall"], {"quit": "one.tefx.cito"})
                     self.assertIn("~/.cito", data["zap"]["trash"])
 
+    def test_cask_smoke_accepts_symlinked_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            work = root / "work"
+            work.mkdir()
+            alias = root / "temporary-alias"
+            alias.symlink_to(work, target_is_directory=True)
+            prefix = root / "prefix"
+            (prefix / "bin").mkdir(parents=True)
+            tap = root / "tap"
+            cask = root / "cito.rb"
+            cask.write_text("cask fixture\n")
+            links = [prefix / "bin" / name for name in ("cito", "cito-mcp")]
+            app = work / "Applications/Cito.app"
+            checked = []
+
+            def brew(command, **kwargs):
+                if command[:2] == ["brew", "--prefix"]:
+                    output = str(prefix)
+                elif command[:2] == ["brew", "--repo"]:
+                    output = str(tap)
+                elif command[:2] == ["brew", "install"]:
+                    launcher = app / "Contents/MacOS/Cito"
+                    launcher.parent.mkdir(parents=True)
+                    launcher.write_text("launcher fixture\n")
+                    for link in links:
+                        link.symlink_to(alias / "Applications/Cito.app/Contents/MacOS/Cito")
+                    output = ""
+                elif command[:2] == ["brew", "uninstall"]:
+                    for link in links:
+                        link.unlink(missing_ok=True)
+                    shutil.rmtree(app, ignore_errors=True)
+                    output = ""
+                elif command[0] in links:
+                    checked.append(command[0].name)
+                    output = "cito v1.2.3\n"
+                else:
+                    output = ""
+                return subprocess.CompletedProcess(command, 0, output, "")
+
+            with patch.object(release.tempfile, "TemporaryDirectory", return_value=contextlib.nullcontext(str(alias))), patch.object(release, "run", side_effect=brew), contextlib.redirect_stdout(io.StringIO()):
+                release.smoke_cask(cask, "acme/tap", "1.2.3")
+            self.assertEqual(checked, ["cito", "cito-mcp"])
+            self.assertEqual((work / "home/.cito/keep-on-uninstall").read_text(), "preserve\n")
+
     def test_renderer_rejects_bad_checksum_or_ambiguous_template(self):
         template = (release.ROOT / "packaging/homebrew/cito.rb").read_text()
         for checksum in ("a" * 63, "A" * 64, 'a"; exit'):
