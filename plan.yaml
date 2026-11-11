@@ -9232,7 +9232,7 @@ phases:
 - id: v32
   name: 'V32 Stage 14 (v0.21.3): Unified Spatial Grid (CitoMetrics), Real Brand Icons
     (icon.png), and Hubs & Network Tab Redesign (N1–N3)'
-  status: in_progress
+  status: done
   gate: 'All N1–N3 requirements in docs/DESIGN.md §16 pass; all 6 inspectMenu() mechanical
     invariants (including card inner-padding >= 5.5pt) equal [] across all 4 surfaces
     in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
@@ -9378,7 +9378,7 @@ phases:
   - id: v32.gate
     name: V32 Independent Terminal Acceptance, N1–N3 Verification & v0.21.3 Live Release
       Gate
-    status: claimed
+    status: done
     description: Independently verify all N1–N3 requirements in docs/DESIGN.md §16,
       all 6 inspectMenu() mechanical invariants in Light and Dark modes, §16.2 test
       economy, and live v0.21.3 GitHub Release / Tefx/homebrew-tap Cask alignment.
@@ -9392,3 +9392,19 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-11T17:33:54.640124Z'
+    done_at: '2026-11-11T17:38:46.492314+00:00'
+    evidence: "Artifact:\n- Gate Report: gate.report.v2 (status: PASS, review_kind:\
+      \ PHASE_GATE, review_mode: FULL, target_ref: git:2a79ca06d4f51397d9dad3fcb54402afa25f76e7,\
+      \ evidence_disposition: POSITIVE_GATE_EVIDENCE)\n- Release Commit & Annotated\
+      \ Tag: v0.21.3 -> ca882d8a4151ee0d4a188c13df2444bcdf868ca6\n- GitHub Release:\
+      \ https://github.com/Tefx/cito/releases/tag/v0.21.3 (Cito-macos-arm64.zip sha256:\
+      \ 386540fc95e15c4b8947930144e1c09a92866401a70a0fc1229cd9784ddcb87f)\n- Homebrew\
+      \ Tap: Tefx/homebrew-tap Casks/cito.rb v0.21.3\n\nVerification:\n- Run: `python3\
+      \ ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding /tmp/cito-v32-gate-binding.json\
+      \ /Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-11T17-37-58-983Z-2026-11-11T17-34-50-197Z_01a1cbad-3b54-70f7-9dd6-96291db0f35a.js-75893c6c07ae9200.txt`\
+      \ -> PASS (`valid: true, binding_checked: true, evidence_disposition: \"POSITIVE_GATE_EVIDENCE\"\
+      `)\n- Proven Requirements (5/5 PROVEN):\n  - N1_UNIFIED_SPATIAL_GRID_AND_CARD_PADDING:\
+      \ PROVEN\n  - N2_REAL_BUNDLED_BRAND_ICONS: PROVEN\n  - N3_HUBS_AND_NETWORK_REDESIGN:\
+      \ PROVEN\n  - N4_PURPOSE_DRIVEN_WEBSITE_WALKTHROUGH_AND_STAGE: PROVEN\n  - S16_2_TEST_ECONOMY_AND_V0_21_3_RELEASE:\
+      \ PROVEN\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §16 (N1–N4 & §16.2 Anti-Over-Testing\
+      \ Policy) & docs/RELEASING.md"
