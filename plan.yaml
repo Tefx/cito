@@ -9378,7 +9378,7 @@ phases:
   - id: v32.gate
     name: V32 Independent Terminal Acceptance, N1–N3 Verification & v0.21.3 Live Release
       Gate
-    status: pending
+    status: claimed
     description: Independently verify all N1–N3 requirements in docs/DESIGN.md §16,
       all 6 inspectMenu() mechanical invariants in Light and Dark modes, §16.2 test
       economy, and live v0.21.3 GitHub Release / Tefx/homebrew-tap Cask alignment.
@@ -9390,3 +9390,5 @@ phases:
     depends_on:
     - v32.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T17:33:54.640124Z'
