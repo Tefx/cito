@@ -41,7 +41,7 @@ fn setup(req: &Value) -> Result<Value> {
             .map(|a| {
                 a.iter().any(|x| {
                     x.as_str() == package.to_str()
-                        || (req.get("plugin_dir").is_none()
+                        || (req.get("plugin_dir").is_none_or(Value::is_null)
                             && x.as_str() == legacy_package.to_str())
                 })
             })
@@ -147,7 +147,7 @@ fn interactive_candidate(req: &Value, pid: u32) -> bool {
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
     if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0")
-        || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"]}))
+        || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"],"plugin_dir":req["plugin_dir"]}))
             .is_ok_and(|v| v["configured"] == true)
     {
         return;

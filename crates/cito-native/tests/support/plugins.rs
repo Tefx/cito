@@ -145,6 +145,30 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":p,"session_id":row["session_id"],"badge":null}))["ok"],true);
     }
+    let custom = f.dir.join("first/pi");
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_apply","plugin_dir":custom}))["ok"],
+        true
+    );
+    assert!(
+        discover(&f)["sessions"].as_array().unwrap().is_empty(),
+        "A different registered package must not match the default source"
+    );
+    let custom_discovery = f.plugin(PI, json!({"op":"discover_sessions","plugin_dir":custom}));
+    for pid in [f.pid(first), f.pid(second)] {
+        let row = custom_discovery["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["endpoint_pid"] == pid)
+            .unwrap();
+        assert_eq!(row["needs_reload"], true, "{custom_discovery}");
+    }
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_remove","plugin_dir":custom}))["ok"],
+        true
+    );
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
     f.env.remove("CITO_PI_REQUIRE_BRIDGE");
     // Socket-backed identities take precedence, including when resolving a process-only PID.
     let endpoint_script = f.dir.join("endpoint.cjs");
@@ -351,6 +375,10 @@ fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
         fs::write(&settings, json!({"packages":[old,"npm:other"]}).to_string()).unwrap();
         assert_eq!(
             f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+            true
+        );
+        assert_eq!(
+            f.plugin(PI, json!({"op":"setup_inspect","plugin_dir":null}))["configured"],
             true
         );
         assert_eq!(

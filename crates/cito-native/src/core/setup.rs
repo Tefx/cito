@@ -1,7 +1,7 @@
 use crate::plugins::{
     expand_home_dir, is_staged_plugins_root, now_ms, random_hex, resolve_builtin_plugins_dir,
-    staged_plugins_dir, validate_harness_id, validate_https_issuer, validate_hub_name,
-    validate_nats_url, LoadedPlugins, PluginDescriptor, CITO_VERSION,
+    selected_plugin_dir, staged_plugins_dir, validate_harness_id, validate_https_issuer,
+    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor, CITO_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -409,11 +409,7 @@ fn setup_request(
     dry_run: bool,
 ) -> Result<Value, String> {
     let (state_dir, _, _) = resolve_state_and_config_paths()?;
-    let plugin_dir = if plugin.is_builtin {
-        staged_plugins_dir(&state_dir).join(&plugin.id)
-    } else {
-        plugin.plugin_dir.clone()
-    };
+    let plugin_dir = selected_plugin_dir(&state_dir, plugin);
     crate::plugins::plugin_request(
         plugin,
         &json!({

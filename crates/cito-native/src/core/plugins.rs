@@ -1,7 +1,5 @@
 pub use super::config::*;
-#[cfg(test)]
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
@@ -476,6 +474,14 @@ pub fn staged_plugins_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("runtime").join("plugins")
 }
 
+pub fn selected_plugin_dir(state_dir: &Path, plugin: &PluginDescriptor) -> PathBuf {
+    if plugin.is_builtin {
+        staged_plugins_dir(state_dir).join(&plugin.id)
+    } else {
+        plugin.plugin_dir.clone()
+    }
+}
+
 pub(super) fn is_staged_plugins_root(root: &Path, state_dir: &Path) -> bool {
     [staged_plugins_dir(state_dir), state_dir.join("plugins")]
         .iter()
@@ -779,6 +785,19 @@ pub fn plugin_request_with_progress(
     mut progress: impl FnMut(Duration) -> Result<(), String>,
 ) -> Result<Value, String> {
     let mut execute = || -> Result<Value, String> {
+        let mut request = request.clone();
+        if request.is_object() && request.get("plugin_dir").is_none_or(Value::is_null) {
+            let plugin_dir = if plugin.is_builtin {
+                let state_dir = match request["state_dir"].as_str() {
+                    Some(path) => PathBuf::from(path),
+                    None => super::setup::resolve_state_and_config_paths()?.0,
+                };
+                selected_plugin_dir(&state_dir, plugin)
+            } else {
+                plugin.plugin_dir.clone()
+            };
+            request["plugin_dir"] = json!(plugin_dir);
+        }
         let mut command = plugin_command(plugin)?;
         command
             .stdin(Stdio::piped())
@@ -803,7 +822,7 @@ pub fn plugin_request_with_progress(
                     }
                 }
             }
-            let mut input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+            let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
             input.push(b'\n');
             let mut written = 0;
             let mut output = Vec::new();
@@ -1326,8 +1345,30 @@ mod tests {
     #[test]
     fn ndjson_request_round_trip_and_relative_command() {
         let (root, plugin) = fixture("/bin/cat");
-        let request = json!({"op":"setup_inspect","payload":"line\\nquoted \"value\""});
-        assert_eq!(plugin_request(&plugin, &request).unwrap(), request);
+        let state_dir = root.join("state");
+        assert_eq!(selected_plugin_dir(&state_dir, &plugin), plugin.plugin_dir);
+        let mut builtin = plugin.clone();
+        builtin.is_builtin = true;
+        assert_eq!(
+            selected_plugin_dir(&state_dir, &builtin),
+            state_dir.join("runtime/plugins/sample")
+        );
+        for provided in [None, Some(Value::Null), Some(json!(root.join("explicit")))] {
+            let mut request = json!({"op":"setup_inspect","payload":"line\\nquoted \"value\""});
+            if let Some(value) = &provided {
+                request["plugin_dir"] = value.clone();
+            }
+            let mut expected = request.clone();
+            if provided.as_ref().is_none_or(Value::is_null) {
+                expected["plugin_dir"] = json!(plugin.plugin_dir);
+            }
+            assert_eq!(plugin_request(&plugin, &request).unwrap(), expected);
+            assert_eq!(
+                request.get("plugin_dir"),
+                provided.as_ref(),
+                "Caller payload must not change"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

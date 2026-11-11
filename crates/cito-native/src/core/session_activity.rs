@@ -1,7 +1,8 @@
 //! Cached discovery and serialized, endpoint-local badge effects. No worker owns a DB lock.
 use super::{identity::string, state::LocalState};
 use crate::plugins::{
-    now_ms, plugin_request_with_progress, LoadedPlugins, NativeConfig, PluginDescriptor,
+    now_ms, plugin_request_with_progress, selected_plugin_dir, LoadedPlugins, NativeConfig,
+    PluginDescriptor,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -244,8 +245,8 @@ impl SessionActivity {
                 continue;
             }
             let plugin = provider.plugin.clone();
-            let request =
-                json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env});
+            let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
+                "plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
             provider.worker = Some(
                 thread::Builder::new()
@@ -590,6 +591,7 @@ import json, os, pathlib, subprocess, sys, time
 root = pathlib.Path(__file__).parent
 opts = json.loads((root / 'options.json').read_text())
 req = json.loads(sys.stdin.readline())
+assert req['plugin_dir'] == str(root)
 for key in ['HOME', 'CITO_STATE_DIR', 'CITO_CONFIG_PATH']:
     assert os.environ[key] == req['env'][key]
     assert str(root.parent) in os.environ[key]
