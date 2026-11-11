@@ -9320,7 +9320,7 @@ phases:
     name: 'V32 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & Live v0.21.3 Release [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: 'Execute iterative 2D contract-and-simplicity convergence across
       all modified files, site/assets/screenshots/*.png, and Light/Dark 2x Retina
       PNG snapshots with pathway-auditor, structural-auditor, and uiux-auditor until
@@ -9338,6 +9338,43 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T14:49:46.355265Z'
+    done_at: '2026-11-11T17:33:39.930313+00:00'
+    evidence: "Artifact:\n- Commits: 98b83071ba69a9c55230fa80064813fa55a9bf64 (Round\
+      \ 1 ledger closure V32-L1..V32-L7), f6d424224a1732b2cee1036beaad66165ade15a1\
+      \ (N4 1:1 DPI-proportional screenshot stage & ClosedLoop/banner_jargon hardening),\
+      \ and ca882d8a4151ee0d4a188c13df2444bcdf868ca6 (const Mutex Tailscale cache\
+      \ simplification, tagged as v0.21.3)\n- GitHub Release: https://github.com/Tefx/cito/releases/tag/v0.21.3\
+      \ (workflow run 43065443206, CI run 43065433737, Website run 43065433765)\n\
+      - Homebrew Tap: Tefx/homebrew-tap Casks/cito.rb updated to version 0.21.3 (sha256:\
+      \ 386540fc95e15c4b8947930144e1c09a92866401a70a0fc1229cd9784ddcb87f)\n\nVerification:\n\
+      - 2D Contract-and-Simplicity Iterative Convergence:\n  - Round 1 (git:1d4700ffc6f9088181db9ef632cfa612351572ea):\
+      \ pathway-auditor, structural-auditor, and uiux-auditor read 1..EOF of all modified\
+      \ files + 45 PNGs and produced the Frozen Finding Ledger (V32-L1..V32-L7: host_hub_card\
+      \ compaction when add_hub_form is open + settings_hubs_tab viewport oracle,\
+      \ toggle_my_remote & toggle_group 12pt menu rail, pluginIconImage ~ and whitespace\
+      \ path normalization, record_hub_result canonical error clearing, PendingHubSave\
+      \ settlement test, site/index.html preview copy, and canonical Telegram Chat\
+      \ ID / expanded Activity / Direct Message banner screenshots).\n  - Round 2\
+      \ (git:a0f44a2dd01beebfaef1e42a4ab0ebafadfc7429): uiux-auditor and structural-auditor\
+      \ returned Contract & Wiring: CLEAN | Simplicity & Economy: ZERO_NEW_ISSUES;\
+      \ pathway-auditor requested extending ClosedLoop with normalized/auto-derived\
+      \ Hub saves, alongside the user's mid-flight N4 (1:1 DPI-proportional screenshot\
+      \ stage in site/index.html, site/docs/guide.html, site/styles/main.css, site/scripts/hero-preview.js)\
+      \ and banner_jargon timer hardening.\n  - Round 3 (git:ca882d8a4151ee0d4a188c13df2444bcdf868ca6):\
+      \ structural-auditor and uiux-auditor returned Contract & Wiring: CLEAN | Simplicity\
+      \ & Economy: ZERO_NEW_ISSUES; pathway-auditor verified all Round 2/3 repairs\
+      \ (ClosedLoop settlement, banner_jargon timer cancel, const Mutex Tailscale\
+      \ cache, and N4 website runner) with 1 proportionality-exempted test observation\
+      \ (#1 on existing ui.rs:451 ClosedLoop config-save test URLs, exempted under\
+      \ the Proportionality Gate because hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub\
+      \ already tests live fixture-owned Hub ports while ui.rs:451 tests local config\
+      \ persistence and settings frame correlation).\n- Run: `cargo fmt --all -- --check`\
+      \ -> PASS\n- Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`\
+      \ (in CI run 43065433737) -> PASS (0 warnings)\n- Run: `cargo test --workspace\
+      \ --locked -- --test-threads=4` -> PASS (170 library, 100 integration, 3 plugin\
+      \ unit tests; 0 failed)\n- Run: `cargo build --release --locked` -> PASS\n-\
+      \ Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §16 (N1–N4 & §16.2 Anti-Over-Testing\
+      \ Policy) & docs/RELEASING.md"
   - id: v32.gate
     name: V32 Independent Terminal Acceptance, N1–N3 Verification & v0.21.3 Live Release
       Gate
