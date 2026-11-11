@@ -88,6 +88,15 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     let mut frame = state();
     frame["settings"] = settings();
     f.send(p, frame);
+    f.send(
+        p,
+        json!({"op":"test_settings_key","key":"command-comma","via":"panel"}),
+    );
+    assert_eq!(
+        inspect(&f, p)["settings_open"],
+        false,
+        "A missing panel must not fall through to the direct Settings handler"
+    );
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     control(&f, p, "edit_hub_service:channel");
@@ -195,7 +204,11 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
         }
         focus(id);
         let text = "café / ordinary text";
-        f.send(p, json!({"op":"test_clipboard","text":text}));
+        f.send(p, json!({"op":"test_clipboard","text":"stale cached text"}));
+        f.send(
+            p,
+            json!({"op":"test_clipboard","system_only":true,"text":text}),
+        );
         assert_eq!(
             node(&key(op, "command-v", "panel"), surface, id)["text"],
             text
@@ -251,6 +264,13 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     );
     key("test_directory_key", "command-v", "panel");
     let before = f.frames(p).len();
+    // A panel key-equivalent miss must not fall through to the direct Return handler.
+    key("test_directory_key", "return", "panel");
+    assert!(!f
+        .frames(p)
+        .iter()
+        .skip(before)
+        .any(|a| a["op"] == "send_signal"));
     control(&f, p, "composer_send");
     wait(|| {
         f.frames(p)
@@ -258,6 +278,14 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
             .skip(before)
             .any(|a| a["op"] == "send_signal" && a["message"] == "Final café message")
     });
+    assert_eq!(
+        key("test_settings_key", "command-w", "panel")["settings_open"],
+        false
+    );
+    assert_eq!(
+        key("test_directory_key", "command-comma", "panel")["settings_open"],
+        true
+    );
 }
 
 #[test]
@@ -3613,6 +3641,20 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     assert_eq!(inspect(&f, l.ui)["clipboard"], "old clipboard");
     let copied = l.until(|s| s["clipboard"] == message.trim());
     assert_eq!(copied["clipboard"], message.trim());
+    assert_eq!(
+        node(&copied, "directory_items", &control_id)["text"],
+        "✓ Copied"
+    );
+    l.control(&control_id);
+    l.pump();
+    f.send(
+        l.ui,
+        json!({"op":"test_expire_copy_feedback","id":control_id}),
+    );
+    let restored = inspect(&f, l.ui);
+    let button = node(&restored, "directory_items", &control_id);
+    assert_eq!(button["text"], "Copy");
+    assert_eq!(button["accessibility_label"], "Copy message");
     let frames: Vec<_> = l
         .frames
         .iter()

@@ -347,7 +347,14 @@ export default function citoBridge(pi: BridgeAPI): void {
     let configured = false;
     try {
       const settings = JSON.parse(readFileSync(join(piHome, "settings.json"), "utf8")) as { packages?: unknown[] };
-      configured = settings.packages?.includes(join(resolvedStateDir, "plugins", "pi")) === true;
+      configured = settings.packages?.some(entry => {
+        if (typeof entry !== "string") return false;
+        const directory = entry === "~" ? homedir() : entry.startsWith("~/")
+          ? join(homedir(), entry.slice(2)) : resolve(entry);
+        return directory === join(resolvedStateDir, "runtime", "plugins", "pi")
+          || directory === join(resolvedStateDir, "plugins", "pi")
+          || existsSync(join(directory, "cito-bridge.ts"));
+      }) === true;
     } catch {} // Disconnected packages must not recreate their sockets.
     if (!configured) return;
     repairing = true;

@@ -1,6 +1,6 @@
 //! Persistent, generic HumanChannel NDJSON subprocess transport.
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,9 @@ pub struct ChannelPlugin {
 }
 
 pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
-    let mut plugins: HashMap<String, ChannelPlugin> = HashMap::new();
+    let mut plugins = Vec::new();
+    let mut seen_dirs = HashSet::new();
+    let mut seen_ids = HashSet::new();
     for root in roots {
         if !root.exists() {
             continue;
@@ -32,6 +34,10 @@ pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
             let dir = entry.map_err(|e| e.to_string())?.path();
             let path = dir.join("plugin.json");
             if !path.exists() {
+                continue;
+            }
+            let dir_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if seen_ids.contains(dir_name) || !seen_dirs.insert(dir_name.to_owned()) {
                 continue;
             }
             let m: Value =
@@ -50,8 +56,10 @@ pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
                     path.display()
                 ));
             }
-            // A later external manifest supersedes a bundled manifest even when it changes kind.
-            plugins.remove(id);
+            // A higher-priority manifest owns its ID even if it changes kind.
+            if !seen_ids.insert(id.to_owned()) {
+                continue;
+            }
             if !matches!(m["kind"].as_str(), Some("human" | "human-channel"))
                 || m["scope"].as_str() == Some("user")
             {
@@ -93,18 +101,14 @@ pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
             if command[0].starts_with("./") || command[0].starts_with("../") {
                 command[0] = dir.join(&command[0]).to_string_lossy().into();
             }
-            plugins.insert(
-                id.into(),
-                ChannelPlugin {
-                    id: id.into(),
-                    dir,
-                    command,
-                    manifest: m,
-                },
-            );
+            plugins.push(ChannelPlugin {
+                id: id.into(),
+                dir,
+                command,
+                manifest: m,
+            });
         }
     }
-    let mut plugins: Vec<_> = plugins.into_values().collect();
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(plugins)
 }
@@ -115,26 +119,8 @@ pub fn default_roots(data_dir: &Path) -> Vec<PathBuf> {
 
 fn roots_for_executable(data_dir: &Path, executable: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(dir) = executable.and_then(Path::parent) {
-        roots.push(dir.join("../plugins"));
-        roots.push(dir.join("../Resources/plugins"));
-    }
-    // Also supports development without relying on the process working directory.
-    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
-    if let Ok(dir) = std::env::var("CITO_BUILTIN_PLUGINS_DIR") {
-        roots.push(PathBuf::from(dir));
-    }
-    roots.push(super::plugins::staged_plugins_dir(data_dir));
-    roots.push(data_dir.join("plugins"));
-    if let Ok(dir) = std::env::var("CITO_PLUGIN_DIR") {
-        roots.push(PathBuf::from(dir));
-    }
     if let Ok(extra) = std::env::var("CITO_PLUGIN_PATH") {
-        for part in extra
-            .split(':')
-            .rev()
-            .filter(|part| !part.trim().is_empty())
-        {
+        for part in extra.split(':').filter(|part| !part.trim().is_empty()) {
             if let Ok(path) = super::plugins::expand_home_dir(
                 part.trim(),
                 "CITO_PLUGIN_PATH",
@@ -144,6 +130,20 @@ fn roots_for_executable(data_dir: &Path, executable: Option<&Path>) -> Vec<PathB
             }
         }
     }
+    if let Ok(dir) = std::env::var("CITO_PLUGIN_DIR") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(data_dir.join("plugins"));
+    if let Ok(dir) = std::env::var("CITO_BUILTIN_PLUGINS_DIR") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(super::plugins::staged_plugins_dir(data_dir));
+    if let Some(dir) = executable.and_then(Path::parent) {
+        roots.push(dir.join("../Resources/plugins"));
+        roots.push(dir.join("../plugins"));
+    }
+    // Also supports development without relying on the process working directory.
+    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
     roots
 }
 

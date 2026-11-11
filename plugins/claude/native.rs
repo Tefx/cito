@@ -57,7 +57,10 @@ fn setup(req: &Value) -> Result<Value> {
     let path = dir.join("settings.json");
     let op = str_at(req, "op").unwrap_or("");
     let command = state(req).join("bin/cito-mcp");
-    let hook = state(req).join("plugins/claude/bin/cito-claude-hook");
+    let hook = str_at(req, "plugin_dir")
+        .map(|s| expand(req, s))
+        .unwrap_or_else(|| state(req).join("runtime/plugins/claude"))
+        .join("bin/cito-claude-hook");
     let desired = json!({"command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
     let v = read_json(&path)?;
     if op == "setup_inspect" {
@@ -68,7 +71,12 @@ fn setup(req: &Value) -> Result<Value> {
                     groups.iter().any(|g| {
                         g["hooks"]
                             .as_array()
-                            .map(|h| h.iter().any(hook_cmd))
+                            .map(|h| {
+                                h.iter().any(|entry| {
+                                    entry["type"] == "command"
+                                        && entry["command"].as_str() == hook.to_str()
+                                })
+                            })
                             .unwrap_or(false)
                     })
                 })

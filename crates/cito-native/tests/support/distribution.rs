@@ -286,14 +286,16 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
         fs::read(app.join("Contents/Resources/AppIcon.icns")).unwrap(),
         fs::read(root().join("bin/AppIcon.icns")).unwrap()
     );
-    let (ok, out, err) = f.command(
-        f.state
-            .join("runtime/plugins/claude/bin/cito-claude-hook")
-            .to_str()
-            .unwrap(),
-        &[],
-        "{\"hook_event_name\":\"Stop\"}\n",
+    let settings: Value =
+        serde_json::from_slice(&fs::read(f.home.join(".claude/settings.json")).unwrap()).unwrap();
+    let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(command),
+        f.state.join("runtime/plugins/claude/bin/cito-claude-hook")
     );
+    let (ok, out, err) = f.command(command, &[], "{\"hook_event_name\":\"Stop\"}\n");
     assert!(ok, "{err}");
     assert_eq!(out, "{}\n");
 }

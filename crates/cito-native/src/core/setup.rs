@@ -861,6 +861,9 @@ pub fn uninstall_setup_native(
         }
     }
     for p in &plugins.plugins {
+        if matches!(p.id.as_str(), "plugins" | "bin" | "runtime" | "sockets") {
+            continue;
+        }
         let dir = state_dir.join(&p.id);
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -2085,8 +2088,15 @@ mod tests {
             return;
         }
         use std::io::{Read, Write};
-        let (root, plugins) = fixture();
+        let (root, mut plugins) = fixture();
         let state = root.join("installed");
+        let user_dir = state.join("plugins/plugins");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_manifest = json!({"id":"plugins","kind":"human","displayName":"User plugin","command":["./driver"]}).to_string();
+        fs::write(user_dir.join("plugin.json"), &user_manifest).unwrap();
+        plugins
+            .plugins
+            .push(crate::plugins::parse_manifest_dir(&user_dir, false).unwrap());
         for sub in ["bin", "runtime/plugins", "plugins", "sockets", "sample"] {
             fs::create_dir_all(state.join(sub)).unwrap();
             fs::write(state.join(sub).join("sentinel"), "present until shutdown").unwrap();
@@ -2175,6 +2185,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(state.join("plugins/sentinel")).unwrap(),
             "present until shutdown"
+        );
+        assert_eq!(
+            fs::read_to_string(user_dir.join("plugin.json")).unwrap(),
+            user_manifest
         );
         assert!(!state.join("daemon.lock").exists());
         fs::remove_dir_all(root).unwrap();

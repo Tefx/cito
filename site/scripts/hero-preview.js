@@ -3,7 +3,7 @@
   const copyButtons = document.querySelectorAll("[data-copy-command]");
   for (const btn of copyButtons) {
     btn.addEventListener("click", async () => {
-      const command = btn.getAttribute("data-copy-command") || "brew install tefx/tap/cito";
+      const command = btn.getAttribute("data-copy-command") || "brew install --cask tefx/tap/cito";
       const badge = btn.querySelector("[data-copy-badge]");
       if (btn.disabled) return;
       btn.disabled = true;

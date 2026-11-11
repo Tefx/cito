@@ -55,6 +55,17 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
         )
         .unwrap();
     }
+    let runtime = dir.join("data/runtime/plugins/telegram");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("plugin.json"), "{malformed").unwrap();
+    let user = dir.join("data/plugins/telegram");
+    fs::create_dir_all(&user).unwrap();
+    fs::write(
+        user.join("plugin.json"),
+        json!({"id":"telegram","kind":"human","displayName":"User channel","command":["./driver"]})
+            .to_string(),
+    )
+    .unwrap();
     let result = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -114,8 +125,8 @@ fn packaged_roots_worker() {
         "second",
         "extra",
         "data/plugins",
-        "data/runtime/plugins",
         "builtin",
+        "data/runtime/plugins",
         "Cito.app/Contents/Resources/plugins",
     ] {
         let expected = dir.join(relative).join("override-fixture");
@@ -130,4 +141,13 @@ fn packaged_roots_worker() {
         );
         fs::remove_dir_all(expected).unwrap();
     }
+    let user = data.join("plugins/telegram");
+    assert_plugin(&discover(&roots).unwrap(), "telegram", user.clone());
+    fs::write(user.join("plugin.json"), json!({"id":"telegram","kind":"agent","displayName":"Agent override","command":["./driver"]}).to_string()).unwrap();
+    assert!(!discover(&roots).unwrap().iter().any(|p| p.id == "telegram"));
+    fs::remove_dir_all(user).unwrap();
+    assert!(
+        discover(&roots).is_err(),
+        "An unshadowed malformed manifest must still fail"
+    );
 }

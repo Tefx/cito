@@ -20,7 +20,9 @@ fn matches_process(command: &str) -> bool {
 fn paths(req: &Value) -> (PathBuf, PathBuf) {
     (
         config_home(req, "CITO_PI_HOME", "~/.pi/agent"),
-        state(req).join("plugins/pi"),
+        str_at(req, "plugin_dir")
+            .map(|s| expand(req, s))
+            .unwrap_or_else(|| state(req).join("runtime/plugins/pi")),
     )
 }
 fn setup(req: &Value) -> Result<Value> {
@@ -28,12 +30,21 @@ fn setup(req: &Value) -> Result<Value> {
     let settings = home.join("settings.json");
     let mcp_paths = [home.join("mcp.json"), home.join("mcp/global.mcp.json")];
     let legacy = home.join("extensions/cito-bridge.ts");
+    let legacy_package = state(req).join("plugins/pi");
+    let runtime_package = state(req).join("runtime/plugins/pi");
     let op = str_at(req, "op").unwrap_or("");
     if op == "setup_inspect" {
         let v = read_json(&settings)?;
+        // Host registration survives missing staged assets; setup owns integrity checks.
         let mut configured = v["packages"]
             .as_array()
-            .map(|a| a.iter().any(|x| x.as_str() == package.to_str()))
+            .map(|a| {
+                a.iter().any(|x| {
+                    x.as_str() == package.to_str()
+                        || (req.get("plugin_dir").is_none()
+                            && x.as_str() == legacy_package.to_str())
+                })
+            })
             .unwrap_or(false)
             && !legacy.exists();
         for path in &mcp_paths {
@@ -57,6 +68,8 @@ fn setup(req: &Value) -> Result<Value> {
             x.as_str() != Some("npm:@tefx/cito")
                 && x.as_str() != Some("@tefx/cito")
                 && x.as_str() != package.to_str()
+                && x.as_str() != legacy_package.to_str()
+                && x.as_str() != runtime_package.to_str()
         });
         if !remove {
             packages.push(json!(package));

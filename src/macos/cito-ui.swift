@@ -241,8 +241,8 @@ func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harn
 
 func panelShortcutKey(_ event: NSEvent) -> String? {
     let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
-    guard flags == [.command] || flags == [.command, .shift],
-          let character = event.charactersIgnoringModifiers?.lowercased(),
+    guard let character = event.charactersIgnoringModifiers?.lowercased(),
+          flags == [.command] || (flags == [.command, .shift] && character == "z"),
           ["v", "c", "x", "a", "z", "w", ","].contains(character) else { return nil }
     return (flags.contains(.shift) ? "shift-command-" : "command-") + (character == "," ? "comma" : character)
 }
@@ -282,6 +282,7 @@ final class MenuControl: NSControl {
     var style: Style = .neutral { didSet { applyVisualState() } }
     var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
     var feedbackTimer: Timer?
+    var restingTitle: String?
     private(set) var isHovered = false
     private var trackingArea: NSTrackingArea?
     static weak var activeHovered: MenuControl?
@@ -435,6 +436,7 @@ final class MenuControl: NSControl {
         applyVisualState()
     }
     func copied(_ message: String = "✓ Copied") {
+        if feedbackTimer == nil { restingTitle = label.stringValue }
         feedbackTimer?.invalidate()
         leadingSymbolView?.isHidden = true
         label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
@@ -446,7 +448,8 @@ final class MenuControl: NSControl {
                 self.label.frame = NSRect(x: 20, y: (self.bounds.height - 15) / 2, width: self.bounds.width - 24, height: 15)
             }
             self.feedbackTimer = nil
-            self.label.stringValue = self.accessibilityLabel() ?? ""
+            self.label.stringValue = self.restingTitle ?? self.accessibilityLabel() ?? ""
+            self.restingTitle = nil
             self.applyVisualState()
         }
         feedbackTimer = restore
@@ -769,6 +772,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
         copyControl.feedbackTimer?.invalidate()
         copyControl.feedbackTimer = nil
+        copyControl.restingTitle = nil
         copyControl.isHidden = false
         copyControl.setHovered(false)
         copyControl.frame = NSRect(x: 544 - copyWidth, y: 16, width: copyWidth, height: 22)
@@ -857,6 +861,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.pressed = canReply ? onReply : nil
         copyControl.isHidden = false
         copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
+        copyControl.restingTitle = nil
         copyControl.frame = NSRect(x:544-copyW,y:rowHeight-36,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
@@ -1171,8 +1176,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         switch key.lowercased() {
         case "command-v":
             // The pasteboard remains authoritative after a copy in another application.
-            if !headless { clipboardString = appPasteboard.string(forType: .string) ?? "" }
-            let text = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
+            let systemText = appPasteboard.string(forType: .string) ?? ""
+            let text = systemText.isEmpty && headless ? clipboardString : systemText
+            clipboardString = text
             changeText { editor.insertText(text, replacementRange: editor.selectedRange()) }
         case "command-a": editor.selectAll(nil); return true
         case "command-c", "command-x":
@@ -1416,12 +1422,25 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
                 let window = op == "test_settings_key" ? settingsPanel : directoryPanel
-                if object["via"] as? String == "panel", let window = window {
+                if object["via"] as? String == "panel" {
                     let character = key.hasSuffix("comma") ? "," : String(key.suffix(1))
                     let flags: NSEvent.ModifierFlags = key.hasPrefix("shift-") ? [.command, .shift] : [.command]
-                    if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0), window.performKeyEquivalent(with: event) { return }
+                    if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window?.windowNumber ?? 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0) {
+                        _ = window?.performKeyEquivalent(with: event)
+                    }
+                    return
                 }
                 if op == "test_settings_key" { handleSettingsKey(key) } else { handleDirectoryKey(key) }
+                return
+            }
+            if op == "test_expire_copy_feedback", let id = object["id"] as? String {
+                let roots = cardMenu.items.compactMap { $0.view } + [settingsPanel?.contentView, directoryPanel?.contentView].compactMap { $0 }
+                for root in roots {
+                    if let control = findControl(in: root, id: id), let timer = control.feedbackTimer {
+                        timer.fire(); timer.invalidate()
+                        return
+                    }
+                }
                 return
             }
             if op == "test_control", let id = object["id"] as? String {
@@ -3936,6 +3955,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                let cell = table.view(atColumn: 0, row: directorySelectedIndex, makeIfNecessary: true) as? DirectoryPeerCellView {
                 cell.copyControl.copied()
             }
+        case "command-comma": openSettingsPanel()
         case "command-w": closeDirectoryPanel(emitAction:true)
         case "escape":
             if !(directoryComposerBar?.isHidden ?? true) {
@@ -4314,6 +4334,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if let control = view as? NSControl { result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
+                result["accessibility_label"] = control.accessibilityLabel() ?? ""
                 result["label_width"] = control.label.frame.width
                 result["label_measured_width"] = measureTextWidth(control.label.stringValue,font:control.label.font ?? .systemFont(ofSize:12))
                 result["green"] = control.label.textColor == CitoPalette.successText
