@@ -8865,7 +8865,7 @@ phases:
 - id: v30
   name: 'V30 Stage 12.1 (v0.21.1): Cito.app Symlink Launcher Resolution, cito-mcp
     Dispatch & Legacy ~/.cito/plugins Upgrade Cleanup'
-  status: pending
+  status: in_progress
   gate: 'Cito.app/Contents/MacOS/Cito resolves Homebrew Cask symlinks (cito and cito-mcp)
     accurately and dispatches 0-arg cito-mcp to mcp-stdio with CITO_ENDPOINT_PID;
     legacy ~/.cito/plugins/<id> v0.20.x copies and ~/.cito/plugins/human overrides
@@ -8885,7 +8885,7 @@ phases:
   - id: v30.impl
     name: V30 Cito.app Symlink Launcher Resolution, cito-mcp Dispatch, Legacy ~/.cito/plugins
       Upgrade Cleanup & v0.21.1 Version Bump
-    status: pending
+    status: claimed
     description: 'Update docs/DESIGN.md §14 (D20 / v0.21.1) and docs/ROADMAP.md for
       v0.21.1. Fix Contents/MacOS/Cito launcher script in crates/cito-native/src/core/setup.rs:688
       to save INVOKED_AS="$(basename "$0")", resolve symlinks on $0 via a while [
@@ -8926,6 +8926,8 @@ phases:
     - crates/cito-native/Cargo.toml
     - README.md
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T05:52:10.042205Z'
   - id: v30.hygiene
     name: 'V30 2D Contract-and-Simplicity Iterative Convergence Audit & Live v0.21.1
       Release Publication [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
