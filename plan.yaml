@@ -9053,3 +9053,30 @@ phases:
       to GitHub Release v0.21.1, smoke_cask passed, Tefx/homebrew-tap Casks/cito.rb
       updated at commit 44ea7718cf7955623bc643d9af08426bc7f78f2c, https://tefx.github.io/cito/
       live at 0.21.1).'
+- id: v31
+  name: 'V31 Stage 13 (v0.21.2): Declarative Bar/Strip Layout Engine, Single-Authority
+    Human/Channel Lifecycle & Bounded Delivery Retry Architecture (M1–M5)'
+  status: pending
+  gate: 'All M1–M5 requirements in docs/DESIGN.md §15 pass; all 6 inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; website
+    screenshots in site/assets/screenshots/*.png match v0.21.2; pathway-auditor, structural-auditor,
+    and uiux-auditor converge to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES;
+    cargo test --workspace passes with 0 warnings under strict §15.2 test economy;
+    v0.21.2 is published via release.yml and Tefx/homebrew-tap.'
+  context: 'Implement docs/DESIGN.md §15 (M1–M5 & §15.2 strict test economy): (1)
+    M1 declarative layoutBar and mountPillStrip layout engine across all 16 horizontal
+    bars and 4 pill strips in cito-ui.swift; (2) M2 default single-Mac local hub &
+    Idle state affordances (hide redundant hub:local dropdown/drawer, gate Stop All
+    on uniqueSessionCount > 0 and scope unlisten_all to non-human sessions, neutral
+    Pause button on You (@user) card, protect sole enabled local hub in Hubs & Network);
+    (3) M3 complete terminology sibling sweep, monochrome macOS status bar icon/count,
+    and upgraded inspectMenu() horizontal edge-anchoring & emoji/jargon oracles; (4)
+    M4 single-authority reconcile_registration_state in core/lease.rs and explicit
+    Hub-wide human_paused gating HubEngine::replay() while preserving unread signals;
+    (5) M5 persistent ureq::Agent with 3s connect / 25s read timeouts, effect_unknown
+    classification on post-transmit read timeouts, multipart progress resumption,
+    hub_channel_deliveries exponential backoff & failed_permanent error surfacing,
+    2500ms SSE read-idle timeout, URL-scoped sent dedup hash, transient driver_unavailable
+    recovery in restore_passive, and permanent .cito.lock inode retention.'
+  depends_on:
+  - v30
