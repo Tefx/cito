@@ -51,7 +51,7 @@ pub fn register_listener(
         .registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-    register_locked(state, client, host_id, args, caller)
+    register_locked(state, client, host_id, args, caller, true)
 }
 
 pub fn register_automatic_human(
@@ -70,7 +70,7 @@ pub fn register_automatic_human(
     {
         return Err("BINDING_REQUIRED: Human enrollment was explicitly disabled".into());
     }
-    register_locked(state, client, host_id, args, caller)
+    register_locked(state, client, host_id, args, caller, false)
 }
 
 fn register_locked(
@@ -79,6 +79,7 @@ fn register_locked(
     host_id: &str,
     args: &Value,
     caller: &Value,
+    resume_human: bool,
 ) -> Result<Value, String> {
     let hub = &client.name;
     let about = string(args, "about");
@@ -177,6 +178,9 @@ fn register_locked(
         if !matches!(scope, "self" | "workspace") {
             return Err("INVALID_INPUT: Invalid scope".into());
         }
+        if harness == "human" && !resume_human && previous["human_paused"] == true {
+            return Err("BINDING_REQUIRED: Personal notifications are paused on this Hub".into());
+        }
         let sibling = previous["channels"].as_object().is_some_and(|channels| {
             channels
                 .iter()
@@ -221,7 +225,13 @@ fn register_locked(
             .cloned()
             .unwrap_or_default();
         channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":if harness=="human"{"notify_fanout"}else{"wake_exclusive"},"priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":now_ms()}));
-        let value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
+        let mut value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
+        value["human_paused"] = if harness == "human" && resume_human {
+            json!(false)
+        } else {
+            previous["human_paused"].clone()
+        };
+        super::lease::reconcile_registration_state(&mut value, now_ms());
         match client.kv_save(&id, &value, remote.map(|r| r.1)) {
             Ok(_) => {}
             Err(error) if error.starts_with("10071:") => continue,
@@ -385,6 +395,42 @@ mod tests {
                     second_row["binding_generation"]
                 );
                 assert_eq!(refreshed["owner_token"], second_row["owner_token"]);
+                let (mut reg, rev) = client.kv_get(id)?.ok_or("Missing registration")?;
+                reg["channels"]["hub:fixture"] =
+                    json!({"host_id":"hub","state":"ACTIVE","updated_at_ms":0});
+                client.kv_save(id, &reg, Some(rev))?;
+                super::super::receiver::detach_channel_expected(
+                    &client,
+                    id,
+                    "first-host:human",
+                    &first_row,
+                )?;
+                let paused = client.kv_get(id)?.ok_or("Missing paused registration")?.0;
+                assert_eq!(paused["human_paused"], true);
+                assert_eq!(paused["state"], "UNLISTENED");
+                assert_eq!(paused["channels"]["second-host:human"]["state"], "ACTIVE");
+                assert!(register_automatic_human(
+                    &second,
+                    &client,
+                    "second-host",
+                    &json!({"about":"Human"}),
+                    &caller
+                )
+                .is_err());
+                register_listener(
+                    &second,
+                    &client,
+                    "second-host",
+                    &json!({"about":"Human"}),
+                    &caller,
+                )?;
+                let resumed = client.kv_get(id)?.ok_or("Missing resumed registration")?.0;
+                assert_eq!(resumed["human_paused"], false);
+                assert_eq!(resumed["state"], "ACTIVE");
+                assert_eq!(
+                    resumed["channels"]["hub:fixture"],
+                    reg["channels"]["hub:fixture"]
+                );
                 Ok(())
             })();
             engine.shutdown();

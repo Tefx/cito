@@ -10,6 +10,7 @@ import socketserver
 
 sent = []
 polls = 0
+attempts = {}
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -21,6 +22,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if method == 'getMe':
             result = dict(username='example_bot')
         elif method == 'sendMessage':
+            chat = str(body['chat_id'])
+            attempts[chat] = attempts.get(chat, 0) + 1
+            status = int(chat.split(':')[1]) if chat.startswith('status:') else (429 if chat == 'partial' and attempts[chat] == 2 else None)
+            if status:
+                data = json.dumps(dict(ok=False, description='Rejected by fixture', error_code=status)).encode()
+                self.send_response(status)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if chat == 'uncertain':
+                self.close_connection = True
+                self.connection.shutdown(2)
+                return
             sent.append(body)
             with (pathlib.Path(os.environ['HOME']) / 'api-sends.jsonl').open('a') as log:
                 log.write(json.dumps(body) + '\n')

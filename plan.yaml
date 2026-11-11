@@ -8865,7 +8865,7 @@ phases:
 - id: v30
   name: 'V30 Stage 12.1 (v0.21.1): Cito.app Symlink Launcher Resolution, cito-mcp
     Dispatch & Legacy ~/.cito/plugins Upgrade Cleanup'
-  status: in_progress
+  status: done
   gate: 'Cito.app/Contents/MacOS/Cito resolves Homebrew Cask symlinks (cito and cito-mcp)
     accurately and dispatches 0-arg cito-mcp to mcp-stdio with CITO_ENDPOINT_PID;
     legacy ~/.cito/plugins/<id> v0.20.x copies and ~/.cito/plugins/human overrides
@@ -8950,7 +8950,7 @@ phases:
   - id: v30.hygiene
     name: 'V30 2D Contract-and-Simplicity Iterative Convergence Audit & Live v0.21.1
       Release Publication [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '[REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]
       Run 2D contract-and-simplicity review (pathway-auditor, structural-auditor,
       uiux-auditor) over the v30 delta until a single round returns Completeness:
@@ -8974,10 +8974,43 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T06:26:28.687190Z'
+    done_at: '2026-11-11T08:11:20.051490+00:00'
+    evidence: "Artifact:\n- Commit: b5b62c9be3b3e58bc37c7d03d36176a94b951dda (retained\
+      \ ref refs/vectl/candidates/v30.hygiene; annotated release tag v0.21.1 at build\
+      \ commit b5b62c9be3b3e58bc37c7d03d36176a94b951dda; Tefx/homebrew-tap Casks/cito.rb\
+      \ commit 44ea7718cf7955623bc643d9af08426bc7f78f2c)\n- Executor: rust-senior\
+      \ + fresh-context pathway-auditor, structural-auditor, and uiux-auditor under\
+      \ [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE].\n\
+      - Convergence Summary (Rounds 1–3):\n  - Closed R1-P1 / R2-P1 (separating read-only\
+      \ discovery from post-validation legacy cleanup and using NativeConfig::effective_user\
+      \ as the single validation authority in load_native_config and run_setup_cli)\
+      \ and R1-P2 (protecting canonical bundled plugin sources when ~/.cito/plugins\
+      \ aliases the distribution).\n  - Round 3 fresh-context convergence verdicts\
+      \ at b5b62c9be3b3e58bc37c7d03d36176a94b951dda:\n    - pathway-auditor (2026-11-11T07-37-05-191Z_01a1c989-f9a6-74f0-80a2-d1afa3502f1b.jsonl):\
+      \ Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES | Holds: 0 | Uninspected\
+      \ Gaps: NONE\n    - structural-auditor (2026-11-11T07-37-05-273Z_01a1c989-f9f8-7357-9b62-506dcb0960b4.jsonl):\
+      \ Completeness: CLEAN (0 gaps) | Simplicity: CLEAN (0 trims) | Holds: 0 | Uninspected\
+      \ Gaps: NONE\n    - uiux-auditor (2026-11-11T07-37-05-360Z_01a1c989-fa4f-73b9-b496-aeea16836e40.jsonl):\
+      \ Completeness: CLEAN | Simplicity: CLEAN | Holds: 0 | Uninspected Gaps: NONE\n\
+      - Live Distribution Alignment (v0.21.1):\n  - GitHub Actions CI run 42981876865\
+      \ & Deploy Website to GitHub Pages run 42981876863: succeeded on b5b62c9be3b3e58bc37c7d03d36176a94b951dda\
+      \ (https://tefx.github.io/cito/ live at 0.21.1).\n  - GitHub Actions Release\
+      \ run 42981878943 (job 130402217849): succeeded end-to-end (Developer ID signing,\
+      \ Apple notarization, stapling, GitHub Release v0.21.1 publication with Cito-macos-arm64.zip\
+      \ SHA-256 85e8cb5b02ef11ac4b377c92d90d3f0761021f0f5fbcd0ceaf9996ee57b1ef63,\
+      \ Homebrew Cask install/symlink/uninstall smoke test, and push to Tefx/homebrew-tap\
+      \ Casks/cito.rb at commit 44ea7718cf7955623bc643d9af08426bc7f78f2c).\n\nVerification:\n\
+      - Run: python3 packaging/release.py check && python3 -m unittest discover -s\
+      \ packaging -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings && cargo test --workspace --locked -- --test-threads=1 && cargo\
+      \ build --release --locked -> 271 workspace tests passed, 14 packaging tests\
+      \ passed, 0 failed, 0 compiler/linker warnings, Syntax OK.\n- Reclaimed worktree\
+      \ /Users/tefx/Projects/cito/.vectl/worktrees/v30.hygiene."
   - id: v30.gate
     name: V30 Independent Terminal Acceptance & v0.21.1 Live Release / Homebrew Cask
       Gate
-    status: pending
+    status: done
     description: Independent gate-reviewer terminal acceptance (gate.report.v2 PASS)
       over Phase v30 and live v0.21.1 release + Tefx/homebrew-tap Cask alignment.
     verification: cargo test --workspace && cargo build --release
@@ -8992,4 +9025,161 @@ phases:
     - packaging/homebrew/cito.rb
     depends_on:
     - v30.hygiene
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T08:11:20.650318Z'
+    done_at: '2026-11-11T08:17:53.029311+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 2a787b7e529478e0485d76c4f0f8e41d98d84c2e (code commit b5b62c9be3b3e58bc37c7d03d36176a94b951dda;
+      annotated release tag v0.21.1 at build commit b5b62c9be3b3e58bc37c7d03d36176a94b951dda;
+      Tefx/homebrew-tap Casks/cito.rb commit 44ea7718cf7955623bc643d9af08426bc7f78f2c)
+
+      - Gate Report (gate.report.v2): fresh-context gate-reviewer session 2026-11-11T08-13-18-090Z_01a1c9ab-2189-72e6-9ed9-916782984d7e.jsonl,
+      status: PASS, review_kind: PHASE_GATE, review_mode: FULL, target_ref: git:2a787b7e529478e0485d76c4f0f8e41d98d84c2e,
+      4/4 requirements PROVEN, findings: [].
+
+
+      Verification:
+
+      - Run: python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v30-gate/binding.json /tmp/cito-v30-gate/report.json -> {"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}
+
+      - Run: GitHub Actions CI run 42981876865, Deploy Website to GitHub Pages run
+      42981876863, and Release run 42981878943 (job 130402217849) on b5b62c9be3b3e58bc37c7d03d36176a94b951dda
+      -> all succeeded (271 workspace tests passed, 14 packaging tests passed, 0 compiler/linker
+      warnings, Syntax OK, Developer ID signed + notarized + stapled Cito-macos-arm64.zip
+      SHA-256 85e8cb5b02ef11ac4b377c92d90d3f0761021f0f5fbcd0ceaf9996ee57b1ef63 published
+      to GitHub Release v0.21.1, smoke_cask passed, Tefx/homebrew-tap Casks/cito.rb
+      updated at commit 44ea7718cf7955623bc643d9af08426bc7f78f2c, https://tefx.github.io/cito/
+      live at 0.21.1).'
+- id: v31
+  name: 'V31 Stage 13 (v0.21.2): Declarative Bar/Strip Layout Engine, Single-Authority
+    Human/Channel Lifecycle & Bounded Delivery Retry Architecture (M1–M5)'
+  status: in_progress
+  gate: 'All M1–M5 requirements in docs/DESIGN.md §15 pass; all 6 inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; website
+    screenshots in site/assets/screenshots/*.png match v0.21.2; pathway-auditor, structural-auditor,
+    and uiux-auditor converge to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES;
+    cargo test --workspace passes with 0 warnings under strict §15.2 test economy;
+    v0.21.2 is published via release.yml and Tefx/homebrew-tap.'
+  context: 'Implement docs/DESIGN.md §15 (M1–M5 & §15.2 strict test economy): (1)
+    M1 declarative layoutBar and mountPillStrip layout engine across all 16 horizontal
+    bars and 4 pill strips in cito-ui.swift; (2) M2 default single-Mac local hub &
+    Idle state affordances (hide redundant hub:local dropdown/drawer, gate Stop All
+    on uniqueSessionCount > 0 and scope unlisten_all to non-human sessions, neutral
+    Pause button on You (@user) card, protect sole enabled local hub in Hubs & Network);
+    (3) M3 complete terminology sibling sweep, monochrome macOS status bar icon/count,
+    and upgraded inspectMenu() horizontal edge-anchoring & emoji/jargon oracles; (4)
+    M4 single-authority reconcile_registration_state in core/lease.rs and explicit
+    Hub-wide human_paused gating HubEngine::replay() while preserving unread signals;
+    (5) M5 persistent ureq::Agent with 3s connect / 25s read timeouts, effect_unknown
+    classification on post-transmit read timeouts, multipart progress resumption,
+    hub_channel_deliveries exponential backoff & failed_permanent error surfacing,
+    2500ms SSE read-idle timeout, URL-scoped sent dedup hash, transient driver_unavailable
+    recovery in restore_passive, and permanent .cito.lock inode retention.'
+  depends_on:
+  - v30
+  steps:
+  - id: v31.impl
+    name: V31 M1–M5 Systemic UI Layout Engine, Single-Authority Human/Channel State,
+      Bounded Delivery Retry & v0.21.2 Alignment
+    status: done
+    description: Implement docs/DESIGN.md §15 (M1–M5) and align version to 0.21.2
+      while strictly enforcing §15.2 test economy (update existing unit/UI tests in
+      place; do NOT add slow multi-process E2E test bloat). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/telegram/native.rs
+    - plugins/telegram/plugin.json
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T09:36:18.543150Z'
+    done_at: '2026-11-11T10:27:50.947463+00:00'
+    evidence: 'Artifact:
+
+      - Commit: e2c611ff5c2bd55a521e346a9f320e5209cc4df4 (retained ref: refs/vectl-retained/v31.impl,
+      fast-forwarded onto main)
+
+      - Modified files: src/macos/cito-ui.swift, crates/cito-native/src/core/{lease.rs,registration.rs,receiver.rs,receiver_tests.rs,hub.rs,daemon.rs,transport.rs,auth.rs,state.rs},
+      crates/cito-native/src/plugin_support.rs, plugins/telegram/{native.rs,plugin.json},
+      crates/cito-native/tests/hub/cases.rs, crates/cito-native/tests/support/{ui.rs,plugins.rs,telegram-api.py},
+      version metadata across Cargo.toml/Cargo.lock/plugins/site/docs, and 7 regenerated
+      site/assets/screenshots/*.png assets.
+
+      - Worktree cleanup: Removed /Users/tefx/Projects/cito/.vectl/worktrees/v31-impl
+      and transient test logs; free space increased from 128 GiB to 130 GiB (+2 GiB
+      reclaimed).
+
+
+      Verification:
+
+      - Run: `cargo fmt --all -- --check` -> PASS (exit 0)
+
+      - Run: `cargo test --workspace -- --test-threads=4` -> PASS (170 library tests,
+      100 integration tests, 3 plugin unit tests; 0 failed; 4 ignored)
+
+      - Run: `cargo build --release` -> PASS (0 compiler warnings; rebuilt bin/* and
+      plugins/*/bin/*)
+
+      - Run: `python3 packaging/release.py check && bin/cito --version` -> PASS (`0.21.2`
+      / `cito v0.21.2`)
+
+      - Gaps: `cargo-clippy` not installed in local toolchain; Telegram verified via
+      loopback Bot API fixture and deterministic in-memory retry/backoff tests.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §15 (M1–M5 & §15.2 Anti-Over-Testing Policy)'
+  - id: v31.hygiene
+    name: 'V31 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
+      Multimodal Review & Live v0.21.2 Release [REQUIRES_SKILL: contract-and-simplicity]
+      [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: claimed
+    description: 'Execute iterative 2D contract-and-simplicity convergence across
+      all modified files, site/assets/screenshots/*.png, and Light/Dark 2x Retina
+      PNG snapshots with pathway-auditor, structural-auditor, and uiux-auditor until
+      a single round returns Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES (enforcing
+      §15.2 anti-over-testing). Push main and annotated tag v0.21.2 so CI and release.yml
+      publish v0.21.2 and update Tefx/homebrew-tap Casks/cito.rb.'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon.rs
+    - plugins/telegram/native.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v31.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T10:27:59.520770Z'
+  - id: v31.gate
+    name: V31 Independent Terminal Acceptance, M1–M5 Verification & v0.21.2 Live Release
+      Gate
+    status: pending
+    description: Independently verify all M1–M5 requirements in docs/DESIGN.md §15,
+      all 6 inspectMenu() mechanical invariants in Light and Dark modes, §15.2 test
+      economy, and live v0.21.2 GitHub Release / Tefx/homebrew-tap Cask alignment.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v31.hygiene
     agent: gate-reviewer

@@ -126,7 +126,10 @@ impl HubClient {
             status: Arc::new(Mutex::new(status.into())),
             closed: Arc::new(AtomicBool::new(false)),
             registration: Arc::new(Mutex::new(())),
-            agent: ureq::agent(),
+            agent: ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout_connect(Duration::from_secs(5))
+                .build(),
         }
     }
     pub fn rpc(&self, op: &str, params: &Value) -> Result<Value, String> {
@@ -163,7 +166,8 @@ impl HubClient {
                         "connected".into()
                     };
                 }
-                let body: Value = response.into_json().unwrap_or(Value::Null);
+                let body: Value = serde_json::from_reader(response.into_reader().take(65_536))
+                    .unwrap_or(Value::Null);
                 let code = body["error"]["code"].as_str().unwrap_or(if status == 401 {
                     "UNAUTHORIZED"
                 } else if status == 403 {
@@ -303,7 +307,12 @@ impl HubClient {
         if self.local.is_some() {
             return None;
         }
-        let client = self.clone();
+        let mut client = self.clone();
+        client.agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_millis(2500))
+            .build();
         Some(thread::spawn(move || {
             let mut delay = 250;
             while !client.closed.load(Ordering::SeqCst) {
@@ -311,8 +320,9 @@ impl HubClient {
                     "{}/v1/events",
                     string(&client.config, "url").trim_end_matches('/')
                 );
-                let mut request = ureq::get(&url)
-                    .timeout(Duration::from_millis(500))
+                let mut request = client
+                    .agent
+                    .get(&url)
                     .set("X-Cito-User", string(&client.identity, "owner_user"));
                 if let Some(token) = client.bearer.as_deref().filter(|s| !s.is_empty()) {
                     request = request.set("Authorization", &format!("Bearer {token}"));
@@ -322,12 +332,14 @@ impl HubClient {
                         *s = "connected".into();
                     }
                     delay = 250;
-                    let reader = BufReader::new(response.into_reader());
-                    for line in reader.lines() {
+                    let mut reader = BufReader::new(response.into_reader());
+                    loop {
+                        let mut line = String::new();
+                        let result = reader.by_ref().take(65_536).read_line(&mut line);
                         if client.closed.load(Ordering::SeqCst) {
                             break;
                         }
-                        if line.is_err() {
+                        if !matches!(result, Ok(n) if n > 0 && line.ends_with('\n')) {
                             break;
                         }
                         // The durable consumer backlog is authoritative; events only reduce

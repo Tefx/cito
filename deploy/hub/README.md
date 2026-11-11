@@ -19,7 +19,7 @@ CITO_OIDC_ADMIN_USERS=alice \
 Flags also accept `--key=value`. Their environment equivalents are `CITO_HUB_PORT`, `CITO_HUB_BIND`, `CITO_AUTH_MODE`, `CITO_HUB_TOKEN`, `CITO_OIDC_ISSUER`, `CITO_OIDC_CLIENT_ID`, and `CITO_HUB_DATA_DIR`. Blank environment variables count as unset; explicitly empty CLI values are rejected. The default data directory is `~/.cito/hub`. `SIGTERM` and `SIGINT` gracefully stop the HTTP listener, close SSE connections, and terminate managed channel subprocesses.
 
 ### HTTP & Security Contract
-- **`GET /health`**: Unauthenticated health probe returning `{ "ok": true, "pid": <u32>, "version": "0.21.1", "auth_mode": "none" | "token" | "oidc" }`.
+- **`GET /health`**: Unauthenticated health probe returning `{ "ok": true, "pid": <u32>, "version": "0.21.2", "auth_mode": "none" | "token" | "oidc" }`.
 - **`POST /v1/rpc`**: JSON RPC endpoint accepting `{ "op": "...", ...params }` (or `{ "op": "...", "params": {...} }`).
 - **`GET /v1/events`**: Server-Sent Events stream delivering real-time `kv`, `signal`, and `nc` (`node_ack`) frames.
 - **OIDC Verification & Row-Level Security (`RLS`)**:

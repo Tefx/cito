@@ -657,6 +657,10 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
 ) -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s")?;
+    f.state
+        .db
+        .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
+    let before = now_ms();
     f.dispatch(&f.plugin(
         "print(json.dumps({'ok':True,'outcome':'driver_unavailable','queue_written':False}))",
     ))?;
@@ -665,6 +669,43 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
     assert_eq!(row["held_reason"], "driver_unavailable");
     assert_eq!(row["queue_written"], 0);
     assert!(row["acknowledged_at_ms"].is_null());
+    let retries = f.state.db.query(
+        "SELECT retry_at_ms FROM wake_retries WHERE hub='local' AND listener_id=?",
+        &[f.row["listener_id"].clone()],
+    )?;
+    assert!(
+        retries[0]["retry_at_ms"]
+            .as_u64()
+            .ok_or("Missing retry deadline")?
+            >= before + 1500
+    );
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
+    assert_eq!(f.requests()?.len(), 1);
+    assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    f.state
+        .db
+        .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
+    assert_eq!(f.rows()?[0]["state"], "RECEIVED");
+    assert!(f.rows()?[0]["held_reason"].is_null());
+    assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
+    for reason in ["stale_generation", "session_switched", "unlistened"] {
+        f.state.db.execute(
+            "UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?",
+            &[json!(reason)],
+        )?;
+        f.state.restore_passive("local", &f.row)?;
+        assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    }
+    f.state.db.execute(
+        "UPDATE local_signals SET state='RECEIVED',held_reason=NULL",
+        &[],
+    )?;
+    let plugin = f.plugin(DELIVER);
+    poll_listener(&f.state, &f.client, &f.row, Some(&plugin), &f.dir, |_| {})?;
+    assert_eq!(f.requests()?.len(), 2);
+    assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
+    assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
     Ok(())
 }
 

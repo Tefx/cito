@@ -27,7 +27,7 @@ impl LocalState {
             let version=c.query("PRAGMA user_version",&[])?.first().and_then(|v|v["user_version"].as_i64()).unwrap_or(0);
             if version>4 { return Err(format!("Unsupported state schema version {version}")); }
             if version < 4 {
-                c.execute("DROP TABLE IF EXISTS local_pairwise_wakes; DROP TABLE IF EXISTS local_signals; DROP TABLE IF EXISTS local_listeners; DROP TABLE IF EXISTS local_sent_idempotency; DROP TABLE IF EXISTS pending_hub_acks; DROP TABLE IF EXISTS wake_retries; DROP TABLE IF EXISTS daemon_owner;", &[])?;
+                c.execute("DROP TABLE IF EXISTS local_pairwise_wakes; DROP TABLE IF EXISTS local_signals; DROP TABLE IF EXISTS local_listeners; DROP TABLE IF EXISTS local_sent_idempotency; DROP TABLE IF EXISTS pending_hub_acks; DROP TABLE IF EXISTS pending_hub_detaches; DROP TABLE IF EXISTS wake_retries; DROP TABLE IF EXISTS daemon_owner;", &[])?;
             }
             c.execute("CREATE TABLE IF NOT EXISTS local_listeners (
                 hub TEXT NOT NULL DEFAULT 'default', listener_id TEXT NOT NULL, public_id TEXT NOT NULL DEFAULT '', tag TEXT,
@@ -57,6 +57,7 @@ impl LocalState {
                 held_reason TEXT, expires_at_iso TEXT NOT NULL, expires_at_ms INTEGER NOT NULL, PRIMARY KEY(hub,dedup_id));
                 CREATE TABLE IF NOT EXISTS daemon_owner(singleton INTEGER PRIMARY KEY CHECK(singleton=1),pid INTEGER NOT NULL,port INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS pending_hub_acks(hub TEXT NOT NULL,node_id TEXT NOT NULL,signal_id TEXT NOT NULL,channel_id TEXT NOT NULL,acked_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,node_id,signal_id));
+                CREATE TABLE IF NOT EXISTS pending_hub_detaches(hub TEXT NOT NULL,listener_id TEXT NOT NULL,hub_url TEXT,PRIMARY KEY(hub,listener_id));
                 CREATE TABLE IF NOT EXISTS wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id));
                 PRAGMA user_version=4;",&[])?;
             // Additive V4 extension: a successful insertion and an unknown insertion
@@ -298,7 +299,7 @@ impl LocalState {
         })
     }
     pub fn restore_passive(&self, hub: &str, listener: &Value) -> Result<(), String> {
-        self.db.execute("UPDATE local_signals SET state='RECEIVED' WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND held_reason IS NULL AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
+        self.db.execute("UPDATE local_signals SET state='RECEIVED',held_reason=NULL WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND (held_reason IS NULL OR (held_reason='driver_unavailable' AND NOT EXISTS(SELECT 1 FROM wake_retries w WHERE w.hub=local_signals.hub AND w.listener_id=local_signals.listener_id AND w.retry_at_ms>?))) AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(now_ms()), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
         Ok(())
     }
     pub fn schedule_wake_retry_for(&self, listener: &Value, delay: u64) -> Result<(), String> {

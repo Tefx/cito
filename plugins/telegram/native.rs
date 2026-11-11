@@ -9,31 +9,104 @@ fn id(v: &Value) -> Option<String> {
         .or_else(|| v.as_i64().map(|n| n.to_string()))
         .or_else(|| v.as_u64().map(|n| n.to_string()))
 }
-fn api(config: &Value, method: &str, body: Value) -> Result<Value> {
-    let token = str_at(config, "botToken").ok_or("Bot Token is required")?;
+#[derive(Debug)]
+struct ApiFailure {
+    message: String,
+    retryable: bool,
+    effect_unknown: bool,
+}
+impl std::fmt::Display for ApiFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl From<ApiFailure> for String {
+    fn from(e: ApiFailure) -> Self {
+        e.message
+    }
+}
+fn agent(poll: bool) -> &'static ureq::Agent {
+    static SEND: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    static POLL: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    (if poll { &POLL } else { &SEND }).get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .redirects(0)
+            .timeout_connect(Duration::from_secs(3))
+            .timeout_read(Duration::from_secs(if poll { 35 } else { 25 }))
+            .build()
+    })
+}
+fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, ApiFailure> {
+    use std::io::Read;
+    let token = str_at(config, "botToken").ok_or_else(|| ApiFailure {
+        message: "Bot Token is required".into(),
+        retryable: false,
+        effect_unknown: false,
+    })?;
     let base = str_at(config, "apiBaseUrl")
         .unwrap_or("https://api.telegram.org")
         .trim_end_matches('/');
-    let response = ureq::post(&format!("{base}/bot{token}/{method}"))
-        .timeout(Duration::from_secs(if method == "getUpdates" {
-            35
-        } else {
-            10
-        }))
+    let response = match agent(method == "getUpdates")
+        .post(&format!("{base}/bot{token}/{method}"))
         .send_json(body)
-        .map_err(|_| format!("Telegram {method} request failed"))?;
-    let v: Value = response.into_json().map_err(|e| e.to_string())?;
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(status, response)) => {
+            let v: Value =
+                serde_json::from_reader(response.into_reader().take(65_536)).unwrap_or(Value::Null);
+            return Err(ApiFailure {
+                message: str_at(&v, "description")
+                    .unwrap_or("Telegram rejected the request")
+                    .into(),
+                retryable: matches!(status, 408 | 429 | 500..=599),
+                effect_unknown: false,
+            });
+        }
+        Err(ureq::Error::Transport(e)) => {
+            // ureq reports ConnectionFailed/Dns before writing the request. Other transport
+            // errors cannot prove that sendMessage was rejected, so never retry them blindly.
+            let before_send = matches!(
+                e.kind(),
+                ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns
+            ) || std::error::Error::source(&e)
+                .and_then(|e| e.downcast_ref::<std::io::Error>())
+                .is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::AddrNotAvailable
+                    )
+                });
+            return Err(ApiFailure {
+                message: format!("Telegram {method} request failed"),
+                retryable: before_send,
+                effect_unknown: !before_send && method == "sendMessage",
+            });
+        }
+    };
+    let v: Value =
+        serde_json::from_reader(response.into_reader().take(1_048_576)).map_err(|_| {
+            ApiFailure {
+                message: format!("Telegram {method} response was incomplete"),
+                retryable: false,
+                effect_unknown: method == "sendMessage",
+            }
+        })?;
     if v["ok"] != true {
-        return Err(str_at(&v, "description")
-            .unwrap_or("Telegram API returned an error")
-            .into());
+        let status = v["error_code"].as_u64().unwrap_or(400);
+        return Err(ApiFailure {
+            message: str_at(&v, "description")
+                .unwrap_or("Telegram API returned an error")
+                .into(),
+            retryable: matches!(status, 408 | 429 | 500..=599),
+            effect_unknown: false,
+        });
     }
     Ok(v["result"].clone())
 }
 fn send(config: &Value, chat: &str, text: &str) -> Result<Vec<String>> {
-    let chars: Vec<char> = text.chars().collect();
     let mut ids = vec![];
-    for chunk in chars.chunks(4096) {
+    for chunk in text.chars().collect::<Vec<_>>().chunks(4096) {
         let text: String = chunk.iter().collect();
         let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
         ids.push(id(&r["message_id"]).ok_or("Telegram message_id is missing")?);
@@ -41,8 +114,18 @@ fn send(config: &Value, chat: &str, text: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 fn delivery(config: &Value, req: &Value) -> Value {
-    let result = (|| {
-        let chat = str_at(&req["config"], "chatId").ok_or("Chat ID is required")?;
+    let mut ids: Vec<String> = req["already_sent_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(id)
+        .collect();
+    let result = (|| -> std::result::Result<(), ApiFailure> {
+        let chat = str_at(&req["config"], "chatId").ok_or_else(|| ApiFailure {
+            message: "Chat ID is required".into(),
+            retryable: false,
+            effect_unknown: false,
+        })?;
         let s = &req["signal"];
         let from = str_at(&s["from"], "title")
             .or_else(|| str_at(&s["from"], "listener_id"))
@@ -51,16 +134,26 @@ fn delivery(config: &Value, req: &Value) -> Value {
             "🔔 Cito · {from}\n\n{}",
             s["message"].as_str().unwrap_or("")
         );
-        send(config, chat, &text)
+        let chars: Vec<char> = text.chars().collect();
+        for chunk in chars.chunks(4096).skip(ids.len()) {
+            let text: String = chunk.iter().collect();
+            let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
+            ids.push(id(&r["message_id"]).ok_or_else(|| ApiFailure {
+                message: "Telegram message_id is missing".into(),
+                retryable: false,
+                effect_unknown: true,
+            })?);
+            emit(
+                &json!({"op":"delivered","delivery_id":req["delivery_id"],"progress":true,"external_msg_ids":ids}),
+            );
+        }
+        Ok(())
     })();
-    match result {
-        Ok(ids) => {
-            json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":true,"external_msg_id":ids.last(),"external_msg_ids":ids,"error":null})
-        }
-        Err(e) => {
-            json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":false,"external_msg_id":null,"external_msg_ids":[],"error":e})
-        }
-    }
+    let (ok, retryable, effect_unknown, error) = match result {
+        Ok(()) => (true, false, false, None),
+        Err(e) => (false, e.retryable, e.effect_unknown, Some(e.message)),
+    };
+    json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":ok,"retryable":retryable,"effect_unknown":effect_unknown,"external_msg_id":ids.last(),"external_msg_ids":ids,"error":error})
 }
 fn rpc(config: &Value, req: &Value) -> Value {
     let c = if req["hub_config"].is_object() {

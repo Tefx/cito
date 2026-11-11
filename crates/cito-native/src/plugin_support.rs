@@ -124,16 +124,12 @@ pub fn clean_sidecars(path: &Path) {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return;
     };
-    let lock_name = format!("{name}.cito.lock");
     let bak_prefix = format!("{name}.bak.");
     let tmp_prefix = format!("{name}.tmp-");
     if let Ok(entries) = fs::read_dir(parent) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().into_owned();
-            if fname == lock_name
-                || fname.starts_with(&bak_prefix)
-                || fname.starts_with(&tmp_prefix)
-            {
+            if fname.starts_with(&bak_prefix) || fname.starts_with(&tmp_prefix) {
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -231,14 +227,11 @@ pub fn mutate(
                 }
             }
         }
-        (status, backup)
-    };
-    if !dry {
-        let _ = fs::remove_file(&lock_path);
-        if remove {
+        if !dry && remove {
             clean_sidecars(path);
         }
-    }
+        (status, backup)
+    };
     Ok(
         json!({"target":id,"path":path,"status":old.0,"backupPath":old.1,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
     )

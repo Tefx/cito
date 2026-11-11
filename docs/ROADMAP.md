@@ -1,6 +1,6 @@
 # Cito Product & Architecture Roadmap
 
-Cito's evolution from `v0.11.3` through `v0.21.1` is organized into **thirteen `0.x` stages (`Stage 0` through `Stage 12`)**:
+Cito's evolution from `v0.11.3` through `v0.21.2` is organized into **fourteen `0.x` stages (`Stage 0` through `Stage 13`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
@@ -14,8 +14,14 @@ Cito's evolution from `v0.11.3` through `v0.21.1` is organized into **thirteen `
 - **Stage 10 (`v0.20.2` — Phase `v26`)**: Root-Cause Equivalence-Class Closure (`R1`–`R5`), True Progressive Disclosure, Full Mechanical Geometry Invariants (`truncated_labels`, `overlapping_siblings`, `clipped_views`), Closed-Loop Error Surfacing, Bridge Readiness & `Daemon<->UI` Closed-Loop Verification
 
 - **Stage 11 (`v0.20.3` — Phase `v28`)**: Light/Dark semantic contrast, agent-only menu counter, normalized Human Node cards, Human-only Activity replies, and explicit Directory / Activity menu entries (`C1`–`C5`).
+- **Stage 12 (`v0.21.1` — Phases `v29` / `v30`)**: Holistic UI/UX and cross-layer pathway remediation (`D01`–`D20`).
+- **Stage 13 (`v0.21.2` — Phase `v31`)**: Declarative bar/strip layout, single-authority personal notification lifecycle, and bounded external delivery retries (`M1`–`M5`).
 
 ---
+
+## Stage 13 (`v0.21.2` — Phase `v31`)
+
+Declarative bar and pill-strip layout replaces conditional coordinate tables. A single lease reconciler preserves explicit personal notification pauses across channel attachment and restart. External delivery retains confirmed multipart progress, bounds retries with exponential backoff, and quarantines uncertain effects. SSE uses read-idle deadlines, while transient agent wake failures recover after their retry deadline. See `DESIGN.md` Section 15.
 
 ## Stage 12 (`v0.21.1` — Phases `v29` / `v30`)
 
