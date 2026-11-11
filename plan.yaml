@@ -9256,7 +9256,7 @@ phases:
   - id: v32.impl
     name: V32 N1–N3 Unified Spatial Grid, Real Brand Icons, Hubs & Network Redesign
       & v0.21.3 Alignment
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §16 (N1–N3) and align version to 0.21.3
       while strictly enforcing §16.2 test economy (update existing unit/UI assertions
       in place; do NOT add new multi-process E2E test functions). Regenerate site/assets/screenshots/*.png.
@@ -9275,6 +9275,47 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T13:37:18.403904Z'
+    done_at: '2026-11-11T14:49:23.444745+00:00'
+    evidence: 'Artifact:
+
+      - Commit: d0d56c0c5a90f277f237dc13ed0b7a434375e473 (retained ref: refs/vectl-retained/v32.impl,
+      fast-forwarded onto main)
+
+      - Modified files: src/macos/cito-ui.swift, crates/cito-native/src/core/daemon.rs,
+      crates/cito-native/tests/support/{ui.rs,daemon.rs,distribution.rs}, plugins/telegram/{icon.png,README.md,plugin.json},
+      version metadata across Cargo.toml/Cargo.lock/plugins/site/docs, and 7 regenerated
+      site/assets/screenshots/*.png assets.
+
+      - Worktree cleanup: Removed /Users/tefx/Projects/cito/.vectl/worktrees/v32-impl
+      and transient test logs; free space increased from 128 GiB to 129 GiB (+1 GiB
+      reclaimed).
+
+
+      Verification:
+
+      - Run: `cargo fmt --all -- --check` -> PASS (exit 0)
+
+      - Run: `cargo test --workspace -- --test-threads=4` -> PASS (170 library tests,
+      100 integration tests, 3 plugin unit tests; 0 failed; 4 ignored)
+
+      - Run: `cargo build --release` -> PASS (0 compiler warnings; rebuilt bin/* and
+      plugins/*/bin/*)
+
+      - Run: `python3 packaging/release.py check && bin/cito --version` -> PASS (`0.21.3`
+      / `cito v0.21.3`)
+
+      - Parent-verified Level 2 design prescription adjustments recorded in docs/DESIGN.md
+      §16.1: (1) placed expanded error-free host_hub_card invite guidance on the full-width
+      452pt row (`x = 14, y = 78`) so the 408.68pt sentence fits without single-line
+      truncation; (2) excluded top-level window roots (`settings_panel`, `directory_panel`,
+      `banner_root`) from the `card_padding` predicate so full-bleed window headers/footers/tabs
+      are not falsely flagged while every nested bordered card and stratum container
+      is enforced at `>= 5.5pt`.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §16 (N1–N3 & §16.2 Anti-Over-Testing Policy)'
   - id: v32.hygiene
     name: 'V32 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & Live v0.21.3 Release [REQUIRES_SKILL: contract-and-simplicity]
