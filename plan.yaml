@@ -9273,3 +9273,23 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+  - id: v32.hygiene
+    name: 'V32 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
+      Multimodal Review & Live v0.21.3 Release [REQUIRES_SKILL: contract-and-simplicity]
+      [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: 'Execute iterative 2D contract-and-simplicity convergence across
+      all modified files, site/assets/screenshots/*.png, and Light/Dark 2x Retina
+      PNG snapshots with pathway-auditor, structural-auditor, and uiux-auditor until
+      a single round returns Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.
+      Push main and annotated tag v0.21.3 so CI and release.yml publish v0.21.3 and
+      update Tefx/homebrew-tap Casks/cito.rb.'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v32.impl
+    agent: rust-senior
