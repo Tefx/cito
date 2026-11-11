@@ -1,5 +1,6 @@
 {
   "id": "pi",
+  "order": 0,
   "kind": "agent-harness",
   "displayName": "Pi Coding Agent",
   "tier": "stable",

@@ -1182,10 +1182,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("open_settings");
     l.control("settings_tab:hubs");
     let s = l.until(|s| !node(s, "settings_items", "settings_hub:archive").is_null());
-    assert_eq!(
-        node(&s, "settings_items", "toggle_hub:local")["hidden"],
-        true
-    );
+    assert!(node(&s, "settings_items", "toggle_hub:local").is_null());
     let edit = node(&s, "settings_items", "edit_hub:local");
     assert_eq!(
         edit["x"].as_f64().unwrap() + edit["width"].as_f64().unwrap(),
@@ -1225,7 +1222,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     );
     assert_eq!(
         node(&s, "directory_items", &format!("dir_meta:{id}"))["text"],
-        " · mac-studio"
+        "Human · mac-studio"
     );
 }
 
@@ -1267,9 +1264,9 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         assert_eq!(
             node(&s, "directory_items", "dir_meta:personal:human")["text"],
             if expected_about.is_empty() {
-                " · laptop".into()
+                "Human · laptop".into()
             } else {
-                format!(" · laptop · {expected_about}")
+                format!("Human · laptop · {expected_about}")
             }
         );
         assert_eq!(
@@ -1660,7 +1657,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert!(node(&s, "settings_items", "onboarding_banner").is_null());
     assert_eq!(
         node(&s, "settings_items", "settings_channel_status:channel")["text"],
-        "○ Not Configured"
+        "○ Not Set Up"
     );
     let hub = node(&s, "settings_items", "stratum_hub:channel");
     let user = node(&s, "settings_items", "stratum_user:channel");
@@ -1729,6 +1726,57 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, json!({"op":"test_settings_scroll","offset":100000}));
     control(&f, p, "copy_pair_command:channel");
     assert_eq!(inspect(&f, p)["clipboard"], "/start cito-abc123def4");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["pairing_instruction"] = json!("");
+    cfg["channels"][0]["pairing_command"] = json!("");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("account-42");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let paired = inspect(&f, p);
+    assert_eq!(
+        node(&paired, "settings_items", "stratum_user:channel")["height"],
+        36
+    );
+    assert!(node(&paired, "settings_items", "channel_field:channel:account").is_null());
+    assert_eq!(
+        node(&paired, "settings_items", "channel_summary:channel")["text"],
+        "● Paired (@alice · account-42)"
+    );
+    control(&f, p, "edit_user_channel:channel");
+    assert!(!node(
+        &inspect(&f, p),
+        "settings_items",
+        "channel_field:channel:account"
+    )
+    .is_null());
+    control(&f, p, "save_channel:channel");
+    wait(|| f.frames(p).iter().any(|v| v["op"] == "channel_save"));
+    let save = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "channel_save")
+        .unwrap();
+    assert!(!node(&inspect(&f, p), "settings_items", "save_channel:channel").is_null());
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_save","channel_id":"channel","hub":save["hub"],"request_id":save["request_id"],"settings":cfg}));
+    let saved = inspect(&f, p);
+    assert_eq!(
+        node(&saved, "settings_items", "channel_summary:channel")["text"],
+        "✓ Saved"
+    );
+    assert!(node(&saved, "settings_items", "save_channel:channel").is_null());
+    render_png(&f, p, "settings", "settings_channels_paired.png");
+    // An active pairing command always expands even an already configured account.
+    cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-abc123def4 to @bot");
+    cfg["channels"][0]["pairing_command"] = json!("/start cito-abc123def4");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert!(!node(
+        &inspect(&f, p),
+        "settings_items",
+        "pairing_instruction:channel"
+    )
+    .is_null());
     // Non-admin schemas keep ownership explanation but never reveal gateway fields.
     cfg["channels"][0]["hub_provided"] = json!(true);
     cfg["channels"][0]["fields"][0]["hidden"] = json!(true);
@@ -1746,9 +1794,35 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .as_str()
             .is_some_and(|s| s.contains("administrator"))
     );
+    let channel = cfg["channels"][0].clone();
+    cfg["channels"][0]["status"] = json!("error");
+    cfg["channels"][0]["configured"] = json!(false);
+    cfg["channels"][0]["fields"] = json!([]);
+    cfg["channels"][0]["detail"] = json!("Unable to load channel settings.");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let unavailable = inspect(&f, p);
+    assert!(node(&unavailable, "settings_items", "stratum_hub:channel").is_null());
+    assert!(node(&unavailable, "settings_items", "save_channel:channel").is_null());
+    assert_eq!(
+        node(
+            &unavailable,
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        "Unable to load channel settings."
+    );
+    cfg["channels"][0] = channel;
     cfg["host_hub"]["auth_mode"] = json!("token");
     cfg["host_hub"]["token"] = json!("12345678abcdef0123456789");
     cfg["host_hub"]["enabled"] = json!(true);
+    cfg["host_hub"]["endpoint_url"] = json!("http://mac-studio.tailnet.ts.net:4291");
+    cfg["host_hub"]["tailscale_url"] = cfg["host_hub"]["endpoint_url"].clone();
+    cfg["host_hub"]["tailscale_invite_command"] =
+        json!("cito setup --hub mac-studio --url http://mac-studio.tailnet.ts.net:4291");
+    cfg["host_hub"]["invite_command"] = cfg["host_hub"]["tailscale_invite_command"].clone();
+    cfg["host_hub"]["lan_url"] = json!("http://192.168.1.10:4291");
+    cfg["host_hub"]["lan_invite_command"] =
+        json!("cito setup --hub mac-studio --url http://192.168.1.10:4291");
     cfg["hubs"][1]["auth_mode"] = json!("oidc");
     cfg["hubs"][1]["status"] = json!("auth_required");
     f.send(p, json!({"op":"settings","settings":cfg}));
@@ -1759,18 +1833,25 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert_eq!(node(&s, "settings_items", "remove_hub:work")["x"], 396);
     assert_eq!(node(&s, "settings_items", "edit_hub:work")["x"], 260);
     assert_eq!(node(&s, "settings_items", "login_hub:work")["x"], 184);
-    assert_eq!(
-        node(&s, "settings_items", "copy_host_hub_token")["text"],
-        "Copy Token"
-    );
+    assert!(node(&s, "settings_items", "copy_host_hub_token").is_null());
     render_png(&f, p, "settings", "settings_hubs_token.png");
-    control(&f, p, "copy_host_hub_token");
-    let s = inspect(&f, p);
-    assert_eq!(s["clipboard"], cfg["host_hub"]["token"]);
+    control(&f, p, "copy_hub_invite");
     assert_eq!(
-        node(&s, "settings_items", "copy_host_hub_token")["text"],
-        "✓ Token Copied"
+        inspect(&f, p)["clipboard"],
+        cfg["host_hub"]["invite_command"]
     );
+    for address in ["lan", "tailscale"] {
+        control(&f, p, &format!("host_hub_addr:{address}"));
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "host_hub_endpoint")["text"],
+            cfg["host_hub"][format!("{address}_url")]
+        );
+        control(&f, p, "copy_hub_invite");
+        assert_eq!(
+            inspect(&f, p)["clipboard"],
+            cfg["host_hub"][format!("{address}_invite_command")]
+        );
+    }
     for invalid in ["0", "65536", "word", ""] {
         let before = f.frames(p).len();
         f.send(
@@ -2000,9 +2081,9 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .into_iter()
             .filter_map(|n| n["text"].as_str().map(String::from))
             .collect();
-        assert!(labels.contains(&"HUB NAME (OPTIONAL)".to_owned()));
-        assert!(labels.contains(&"HUB URL (http://ip:4291 or https://host)".to_owned()));
-        assert!(labels.contains(&"ACCESS".to_owned()));
+        assert!(labels.contains(&"Hub Name (Optional)".to_owned()));
+        assert!(labels.contains(&"Hub URL".to_owned()));
+        assert!(labels.contains(&"Access".to_owned()));
     }
     control(&f, p, "open_directory");
     for mode in ["directory", "activity"] {
@@ -2093,7 +2174,14 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         let s = stress_inspect();
         tooltip(&s, "settings_items", &display_name);
         tooltip(&s, "settings_items", &format!("● Connected ({handle})"));
-        let title = node(&s, "settings_items", "stratum_user_title:channel");
+        let summary = node(&s, "settings_items", "channel_summary:channel");
+        assert!(summary["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("@{handle}")));
+        control(&f, p, "edit_user_channel:channel");
+        let expanded = stress_inspect();
+        let title = node(&expanded, "settings_items", "stratum_user_title:channel");
         assert_eq!(
             title["text"],
             format!("2. Your Personal Account (@{handle})")
@@ -2182,7 +2270,9 @@ fn d12_onboarding_uses_inline_guidance_without_redundant_controls() {
     f.send(p, frame);
     control(&f, p, "open_settings");
     let apps = inspect(&f, p);
-    assert!(nodes(&apps["settings_items"]).iter().any(|n| n["text"]=="Step 1: Click Set Up on your coding app below, then click + Listen in the Cito menu bar."));
+    assert!(nodes(&apps["settings_items"])
+        .iter()
+        .any(|n| n["text"] == "Click Set Up below, then + Listen in the Cito menu bar."));
     for tab in ["apps", "channels", "hubs"] {
         control(&f, p, &format!("settings_tab:{tab}"));
         let s = inspect(&f, p);
@@ -2239,11 +2329,13 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             "⚠ Error",
             "{action}"
         );
+        if ["save_channel", "pair_channel"].contains(&action) {
+            control(&f, p, "edit_user_channel:channel");
+        }
         control(&f, p, &format!("{action}:channel"));
         let s = inspect(&f, p);
-        assert_eq!(
-            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
-            "Ready",
+        assert!(
+            node(&s, "settings_items", "settings_channel_detail:channel").is_null(),
             "{action} must clear the previous result"
         );
         assert_eq!(
@@ -2251,7 +2343,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             if configured {
                 "● Connected"
             } else {
-                "● Bot Ready"
+                "● Bot Gateway Ready"
             }
         );
     }
@@ -2291,11 +2383,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             );
             assert_eq!(
                 node(&s, "settings_items", "settings_channel_status:channel")["text"],
-                if ok {
-                    "○ Not Configured"
-                } else {
-                    "⚠ Error"
-                }
+                if ok { "○ Not Set Up" } else { "⚠ Error" }
             );
             if action == "clear_channel_service" {
                 // Clear Token becomes available once the hub service is configured.
@@ -2313,17 +2401,16 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             }
             control(&f, p, &format!("{action}:channel"));
             let s = inspect(&f, p);
-            assert_eq!(
-                node(&s, "settings_items", "settings_channel_detail:channel")["text"],
-                "Ready",
+            assert!(
+                node(&s, "settings_items", "settings_channel_detail:channel").is_null(),
                 "{action} must clear the candidate test result, ok={ok}"
             );
             assert_eq!(
                 node(&s, "settings_items", "settings_channel_status:channel")["text"],
                 if action == "clear_channel_service" {
-                    "● Bot Ready"
+                    "● Bot Gateway Ready"
                 } else {
-                    "○ Not Configured"
+                    "○ Not Set Up"
                 }
             );
         }
@@ -2606,7 +2693,12 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
         ("Work", "http://127.0.0.1:4291", "work"),
         ("", "https://work.example.com", "work-2"),
         ("", "https://local.example.com", "local-2"),
-        ("", "http://192.0.2.10:4291", "192-0-2-10"),
+        ("", "http://192.0.2.10:4291", "remote"),
+        ("", "http://192.168.1.10:4291", "lan"),
+        ("", "http://10.1.2.3:4291", "lan-2"),
+        ("", "http://172.31.0.1:4291", "lan-3"),
+        ("", "http://100.100.0.1:4291", "tailscale"),
+        ("", "  https://studio.example.com/  ", "studio"),
     ] {
         control(&f, p, "open_add_hub");
         f.send(
@@ -2637,8 +2729,8 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
             .find(|v| v["op"] == "setup_save_hub")
             .unwrap();
         assert_eq!(action["name"], expected);
-        assert_eq!(action["url"], url);
-        let saved = json!({"name":expected,"url":url,"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
+        assert_eq!(action["url"], url.trim());
+        let saved = json!({"name":expected,"url":url.trim(),"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
         let hubs = cfg["hubs"].as_array_mut().unwrap();
         if let Some(hub) = hubs.iter_mut().find(|hub| hub["name"] == expected) {
             *hub = saved;
@@ -3355,6 +3447,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             ("card_padding", "clipped_views"),
             ("strip_anchor", "clipped_views"),
             ("status_emoji", "jargon_leaks"),
+            ("hit_test", "overlapping_siblings"),
         ] {
             f.send(p, json!({"op":"test_oracle_calibration","kind":kind}));
             assert!(
@@ -3584,6 +3677,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let mut cfg = settings();
     cfg["apps"][2]["id"] = json!("claude");
     cfg["apps"][2]["display_name"] = json!("Claude Code");
+    cfg["apps"][2]["installed"] = json!(true);
     cfg["apps"][0]["display_name"] = json!("Pi Coding Agent");
     cfg["channels"][0]["id"] = json!("telegram");
     cfg["channels"][0]["display_name"] = json!("Telegram");
@@ -3593,7 +3687,12 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     cfg["host_hub"]["running"] = json!(true);
     cfg["host_hub"]["endpoint_url"] = json!("http://mac-studio.tailnet.ts.net:4291");
     cfg["host_hub"]["invite_command"] =
-        json!("cito setup --hub lan --url http://mac-studio.tailnet.ts.net:4291 --default");
+        json!("cito setup --hub mac-studio --url http://mac-studio.tailnet.ts.net:4291 --default");
+    cfg["host_hub"]["tailscale_url"] = cfg["host_hub"]["endpoint_url"].clone();
+    cfg["host_hub"]["tailscale_invite_command"] = cfg["host_hub"]["invite_command"].clone();
+    cfg["host_hub"]["lan_url"] = json!("http://192.168.1.10:4291");
+    cfg["host_hub"]["lan_invite_command"] =
+        json!("cito setup --hub lan --url http://192.168.1.10:4291 --default");
     cfg["hubs"][0]["name"] = json!("local");
     cfg["hubs"][1]["url"] = json!("https://hub.example.com");
     cfg["hubs"][1]["auth_mode"] = json!("oidc");
@@ -3612,7 +3711,8 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     agent["hub"] = json!("local");
     agent["harness"] = json!("pi");
     agent["display_address"] = json!("alice/pi#abcd");
-    agent["title"] = json!("Schema review");
+    agent["title"] = json!("Release orchestration");
+    agent["cwd"] = json!("~/Projects/acme/service");
     let mut human = listener();
     human["hub"] = json!("local");
     human["harness"] = json!("human");
@@ -3624,7 +3724,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     human["scoped_id"] = json!("local:alice-76e846d115ce642f");
     human["display_address"] = json!("@alice");
     frame["listeners"] = json!([agent, human]);
-    frame["available"] = json!([{"harness":"codex","session_id":"review","title":"Design review","cwd":"/tmp/acme/service","branch":"main"}]);
+    frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);
     f.send(p, frame);
     let s = inspect(&f, p);
@@ -3642,7 +3742,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     remote_agent["hub"] = json!("local");
     remote_agent["scoped_id"] = json!("local:review");
     remote_agent["harness"] = json!("pi");
-    remote_agent["display_address"] = json!("bob/pi#abcd");
+    remote_agent["display_address"] = json!("bob/pi#8a4f");
     remote_agent["title"] = json!("Review session");
     let mut remote_human = peer("human");
     remote_human["hub"] = json!("local");
@@ -3654,7 +3754,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     remote_human["repo"] = Value::Null;
     remote_human["branch"] = Value::Null;
     let peers = json!([remote_agent, remote_human]);
-    let short = json!({"hub":"local","signal_id":"local:short","listener_id":"c_76e846d115ce642f","from_user":"bob","from_host_name":"laptop","from_harness":"pi","from_title":"Review","from_scoped_id":"local:review","from_display_address":"bob/pi#abcd","target_harness":"human","target_title":"Human","target_scoped_id":"local:alice-76e846d115ce642f","target_display_address":"@alice","message":"Review ready.","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true});
+    let short = json!({"hub":"local","signal_id":"local:short","listener_id":"c_76e846d115ce642f","from_user":"bob","from_host_name":"laptop","from_harness":"pi","from_title":"Review","from_scoped_id":"local:review","from_display_address":"bob/pi#8a4f","target_harness":"human","target_title":"Human","target_scoped_id":"local:alice-76e846d115ce642f","target_display_address":"@alice","message":"All checks passed on release branch. Ship v2.4 now or hold for docs?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true});
     let mut expanded = short.clone();
     expanded["signal_id"] = json!("local:expanded");
     expanded["message"] =
@@ -3680,7 +3780,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         p,
         json!({"op":"test_composer_input","value":"Ready to review"}),
     );
-    assert_eq!(inspect(&f, p)["composer_target"], "bob/pi#abcd");
+    assert_eq!(inspect(&f, p)["composer_target"], "bob/pi#8a4f");
     capture("directory", "directory_composer");
     control(&f, p, "composer_cancel");
     control(&f, p, "dir_mode:activity");
@@ -3693,14 +3793,38 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(s["directory_selected_id"], "local:short");
     assert_eq!(
         node(&s, "directory_items", "activity_row:local:short")["height"],
-        52
+        108
     );
     assert_eq!(
         node(&s, "directory_items", "plugin_icon:pi")["tint"],
         json!([])
     );
     assert_eq!(node(&s, "directory_items", "plugin_icon:pi")["x"], 0);
+    let mut clean = activity.clone();
+    clean[1].as_object_mut().unwrap().remove("held_reason");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":peers,"activity":clean,"matched_count":2,"online_count":2,"unread_count":2}),
+    );
+    control(&f, p, "reply_activity:local:short");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Ship v2.4 now — docs can follow."}),
+    );
+    let reply = inspect(&f, p);
+    assert_eq!(reply["composer_open"], true);
+    assert_eq!(reply["composer_target"], "bob/pi#8a4f");
+    assert_eq!(
+        node(&reply, "directory_items", "composer_target")["text"],
+        "To: bob/pi#8a4f"
+    );
+    assert_eq!(
+        node(&reply, "directory_items", "composer_input")["text"],
+        "Ship v2.4 now — docs can follow."
+    );
     capture("directory", "activity");
+    control(&f, p, "composer_cancel");
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     let s = inspect(&f, p);
     assert_eq!(s["directory_selected_id"], "local:expanded");
@@ -3759,7 +3883,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 "On another Mac, click Paste Invite Code below (or run in Terminal) to connect."
             );
             assert_eq!(guidance["x"], 14);
-            assert_eq!(guidance["y"], 78);
+            assert_eq!(guidance["y"], 110);
             assert_eq!(guidance["width"], 452);
             assert_eq!(
                 node(&s, "settings_items", "paste_hub_invite")["text"],
@@ -4038,12 +4162,14 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     state["settings"]["host_hub"]["auth_mode"] = json!("token");
     state["settings"]["host_hub"]["invite_command"] =
         json!("cito setup --hub work --url http://127.0.0.1:4291");
+    state["settings"]["host_hub"]["lan_url"] = Value::Null;
+    state["settings"]["host_hub"]["tailscale_url"] = Value::Null;
+    state["settings"]["host_hub"]["lan_invite_command"] = Value::Null;
     state["available"] = json!([{"harness":"fixture","session_id":"reload","title":"Reload bridge","cwd":"/tmp","needs_reload":true}]);
     f.send(l.ui, state);
     l.control("open_settings");
     l.control("settings_tab:hubs");
     for (id, expected) in [
-        ("copy_host_hub_token", "fixture-token"),
         (
             "copy_hub_invite",
             "cito setup --hub work --url http://127.0.0.1:4291",
@@ -4107,6 +4233,21 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
                 .any(|v| v["op"] == "setup_apply" && v["harness"] == id)
         });
     }
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "setup_app:pi")["text"],
+        "Re-check",
+        "A click alone cannot confirm a check"
+    );
+    let checked = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "setup_apply" && v["harness"] == "pi")
+        .unwrap();
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_apply","request_id":checked["request_id"],"settings":settings()}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "setup_app:pi")["text"],
+        "✓ Checked"
+    );
     assert!(!node(&s, "settings_items", "settings_app_tier:cursor").is_null());
     assert!(node(&s, "settings_items", "settings_app_tier:pi").is_null());
     control(&f, p, "remove_app:pi");
@@ -4220,7 +4361,7 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     assert_eq!(
         hosted["invite_command"],
         format!(
-            "cito setup --hub lan --url {endpoint} --auth token --token lan-test-token --default"
+            "cito setup --hub remote --url {endpoint} --auth token --token lan-test-token --default"
         )
     );
     let anonymous = ureq::get(&format!("{endpoint}/v1/rpc"))
@@ -4320,21 +4461,21 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     assert_eq!(action["invite"], hosted["invite_command"]);
     let (status, result) = client.action(action);
     assert_eq!(status, 200, "{result}");
-    let (status, result) = client.action(json!({"op":"test_hub","hub":"lan"}));
+    let (status, result) = client.action(json!({"op":"test_hub","hub":"remote"}));
     assert_eq!(status, 200, "{result}");
     assert!(result["streams"].is_number());
     let configured: Value =
         serde_json::from_str(&fs::read_to_string(&client.config).unwrap()).unwrap();
-    assert_eq!(configured["default_hub"], "lan");
-    assert_eq!(configured["hubs"]["lan"]["url"], endpoint);
-    assert_eq!(configured["hubs"]["lan"]["authMode"], "token");
-    assert_eq!(configured["hubs"]["lan"]["token"], "lan-test-token");
-    let (status, exported) = client.action(json!({"op":"generate_hub_invite","hub":"lan"}));
+    assert_eq!(configured["default_hub"], "remote");
+    assert_eq!(configured["hubs"]["remote"]["url"], endpoint);
+    assert_eq!(configured["hubs"]["remote"]["authMode"], "token");
+    assert_eq!(configured["hubs"]["remote"]["token"], "lan-test-token");
+    let (status, exported) = client.action(json!({"op":"generate_hub_invite","hub":"remote"}));
     assert_eq!(status, 200);
     assert_eq!(exported["invite"]["url"], endpoint);
     assert_eq!(exported["invite"]["authMode"], "token");
     assert_eq!(exported["invite"]["token"], "lan-test-token");
-    assert_eq!(exported["invite"]["name"], "lan");
+    assert_eq!(exported["invite"]["name"], "remote");
     let prior = client
         .frames(ui)
         .iter()
@@ -4381,7 +4522,7 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         );
         assert_eq!(
             snapshot["settings"]["host_hub"]["invite_command"],
-            format!("cito setup --hub lan --url http://{authority}:{port} --default")
+            format!("cito setup --hub remote --url http://{authority}:{port} --default")
         );
     }
     for bind in ["0.0.0.0", "::"] {

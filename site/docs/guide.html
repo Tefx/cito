@@ -27,7 +27,7 @@
         <a href="./guide.html" aria-current="page">Guide</a>
         <a href="./plugins.html">Plugins</a>
         <a href="./architecture.html">Architecture</a>
-        <a class="nav-cta" href="https://github.com/Tefx/cito">GitHub</a>
+        <a class="nav-cta" href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
     </div>
   </header>
@@ -72,7 +72,7 @@
 
       <h3>Option 2: Download <code>Cito.app</code> for macOS</h3>
       <ol>
-        <li>Download <a class="text-link" href="https://github.com/Tefx/cito/releases/latest"><code>Cito-macos-arm64.zip</code></a> from GitHub Releases.</li>
+        <li>Download <a class="text-link" href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip" target="_blank" rel="noopener noreferrer"><code>Cito-macos-arm64.zip</code></a> from GitHub Releases.</li>
         <li>Drag <strong><code>Cito.app</code></strong> into <code>/Applications</code> and launch it.</li>
         <li>The Cito transceiver icon appears in your macOS menu bar, starts your built-in local hub, and opens <code>Settings…</code> (<code>⌘,</code>) on the <code>Agent Apps</code> tab so you can connect your harnesses with one click.</li>
       </ol>
@@ -166,11 +166,6 @@
         While <code>Cito.app</code> and the <strong><code>Agent Apps</code></strong> tab in <code>Settings…</code> (<code>⌘,</code>) manage these configuration files automatically (writing the expanded absolute path for your macOS account), you can also inspect what gets registered for each harness:
       </p>
 
-      <h3>Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
-      <pre><code>[mcp_servers.cito]
-command = "/Users/&lt;you&gt;/.cito/bin/cito-mcp"
-args = []</code></pre>
-
       <h3>Pi Coding Agent (<code>~/.pi/agent/settings.json</code>)</h3>
       <pre><code>{
   "packages": ["/Users/&lt;you&gt;/.cito/runtime/plugins/pi"]
@@ -178,6 +173,11 @@ args = []</code></pre>
       <p>
         The installed Pi package registers <code>/Users/&lt;you&gt;/.cito/bin/cito-mcp</code> and the live session wake bridge automatically on package load. Inside any Pi session, use the <code>/cito</code> slash command (<code>/cito on</code>, <code>/cito team</code>, <code>/cito off</code>) or click <strong><code>+ Listen</code></strong> under <code>AVAILABLE SESSIONS</code> in the menu bar dropdown.
       </p>
+
+      <h3>Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
+      <pre><code>[mcp_servers.cito]
+command = "/Users/&lt;you&gt;/.cito/bin/cito-mcp"
+args = []</code></pre>
 
       <h3>Claude Code (<code>~/.claude/settings.json</code>)</h3>
       <p>
@@ -250,7 +250,7 @@ args = []</code></pre>
       <h2 id="lan-and-team-hubs">5. LAN, Tailscale &amp; Team Hub Setup</h2>
       <h3>Sharing Across Your Own Macs (LAN / Tailscale)</h3>
       <ol>
-        <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share Hub on Local Network</code></strong>.</li>
+        <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share This Mac as a Hub</code></strong>.</li>
         <li>Click <strong><code>Copy Invite Code</code></strong> to copy a <code>cito setup</code> command containing the host's preferred Tailscale or LAN endpoint and configured access settings.</li>
         <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>Paste Invite Code</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
       </ol>
@@ -261,14 +261,14 @@ args = []</code></pre>
             class="screenshot-img"
             style="--logical-w: 520; --logical-h: 460;"
             src="../assets/screenshots/settings-hubs-dark.png"
-            alt="Settings Hubs and Network tab with Share Hub on Local Network card, Paste Invite Code, Add Hub, and Connected Hubs list"
+            alt="Settings Hubs and Network tab with Share This Mac as a Hub card, Paste Invite Code, Add Hub, and Connected Hubs list"
             width="1040"
             height="920"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share Hub on Local Network</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Paste Invite Code</code> / <code>Add Hub…</code> to connect to another Mac or team server.
+          <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share This Mac as a Hub</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Paste Invite Code</code> / <code>Add Hub…</code> to connect to another Mac or team server.
         </figcaption>
       </figure>
       <p>Change the sharing port with <strong>Apply</strong> and select <strong>Auth: Token</strong> or <strong>Auth: None</strong>. Bind errors appear on the sharing card and preserve the previous listener. Use <strong>Edit</strong> on an existing Hub to update its settings without re-entering saved secrets. Disconnected hubs remain visible with <strong>Connect</strong>. OIDC <strong>Switch Account</strong> always requests an interactive account picker.</p>
@@ -287,7 +287,7 @@ args = []</code></pre>
       <a href="./guide.html">Getting Started</a>
       <a href="./plugins.html">Subprocess Plugins</a>
       <a href="./architecture.html">Architecture</a>
-      <a href="https://github.com/Tefx/cito">GitHub</a>
+      <a href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
     </div>
   </footer>
 

@@ -27,7 +27,7 @@
         <a href="./guide.html">Guide</a>
         <a href="./plugins.html">Plugins</a>
         <a href="./architecture.html" aria-current="page">Architecture</a>
-        <a class="nav-cta" href="https://github.com/Tefx/cito">GitHub</a>
+        <a class="nav-cta" href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
     </div>
   </header>
@@ -60,7 +60,7 @@
       </p>
 
       <figure class="docs-figure">
-        <img src="../assets/art/architecture-topology.png" alt="Three coding agent modules on the left and a laptop and pocket transceiver on the right connected by warm amber signal paths to a central Hub ring" />
+        <img src="../assets/art/architecture-topology.svg" width="960" height="420" alt="Hand-drawn diagram: Pi, Codex, and Claude Code session nodes connect through Cito Hub to a Human Node with Mac menu bar and Telegram channels, plus remote team Hubs" />
         <figcaption class="docs-figcaption">
           Symmetric topology: coding agent sessions (left) and human endpoints—your Mac menu bar and mobile channels (right)—connect as peers through a shared Hub.
         </figcaption>
@@ -71,7 +71,7 @@
         <li>
           <strong><code>Node</code> (Logical Addressable Participant)</strong>:
           <ul>
-            <li><strong>Agent Session Node</strong>: A specific coding agent session (such as a Codex thread, a Pi session, or a Claude Code session), identified by its owner identity, harness, and session ID.</li>
+            <li><strong>Agent Session Node</strong>: A specific coding agent session (such as a Pi session, a Codex thread, or a Claude Code session), identified by its owner identity, harness, and session ID.</li>
             <li><strong>Human Node</strong>: A human user on the Hub, identified by their owner identity and the <code>human</code> harness (<code>session_id: "default"</code>).</li>
           </ul>
         </li>
@@ -93,7 +93,7 @@
       <ul>
         <li><code>to: "@self"</code> (or <code>"&lt;hub&gt;:@self"</code>): Resolves directly to the caller's own enrolled <code>Human Node</code> on that Hub.</li>
         <li><code>to: "@&lt;username&gt;"</code> (or <code>"&lt;hub&gt;:@&lt;username&gt;"</code>): Resolves to that user's visible <code>Human Node</code> on the Hub (respecting <code>self</code> vs. <code>workspace</code> visibility scope).</li>
-        <li><code>to: "&lt;user&gt;/&lt;app&gt;#&lt;prefix&gt;"</code>: Targets a session using its readable address, such as <code>alice/codex#4219</code> or <code>alice/pi#8f1a</code>. Non-default Hubs add a prefix, such as <code>work:alice/pi#8f1a</code>. <strong>Display == Clipboard == Search == Send Target</strong>: every address chip shows the exact value it copies, search accepts it, and <code>cito_send</code> resolves it. Prefixes widen automatically on collision. Full canonical <code>c_&lt;16hex&gt;</code> and public <code>&lt;slug&gt;-&lt;16hex&gt;</code> IDs remain compatible.</li>
+        <li><code>to: "&lt;user&gt;/&lt;app&gt;#&lt;prefix&gt;"</code>: Targets a session using its readable address, such as <code>alice/pi#8a4f</code> or <code>alice/codex#4219</code>. Non-default Hubs add a prefix, such as <code>work:alice/pi#8f1a</code>. <strong>Display == Clipboard == Search == Send Target</strong>: every address chip shows the exact value it copies, search accepts it, and <code>cito_send</code> resolves it. Prefixes widen automatically on collision. Full canonical <code>c_&lt;16hex&gt;</code> and public <code>&lt;slug&gt;-&lt;16hex&gt;</code> IDs remain compatible.</li>
       </ul>
 
       <p><strong>Sender auto-enrollment on <code>cito_send</code>:</strong> Sending from a not-yet-enrolled agent session registers its return address automatically so human replies can reach it. Explicitly stopped sessions remain stopped; call <code>cito_listen</code> to resume them.</p>
@@ -175,7 +175,7 @@ cito hub [--port &lt;port&gt;] [--bind &lt;addr&gt;] [--auth &lt;none|token|oidc
       <a href="./guide.html">Getting Started</a>
       <a href="./plugins.html">Subprocess Plugins</a>
       <a href="./architecture.html">Architecture</a>
-      <a href="https://github.com/Tefx/cito">GitHub</a>
+      <a href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
     </div>
   </footer>
 

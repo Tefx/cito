@@ -93,6 +93,13 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
         .as_str()
         .unwrap()
         .contains("--url http://mac-studio.tailnet.ts.net:4291"));
+    assert!(host["invite_command"]
+        .as_str()
+        .unwrap()
+        .contains("--hub mac-studio "));
+    assert_eq!(host["tailscale_url"], host["endpoint_url"]);
+    assert!(host["lan_url"].as_str().unwrap().starts_with("http://"));
+    assert_eq!(host["tailscale_invite_command"], host["invite_command"]);
     let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(saved["host_hub"]["token"], host["token"]);
     assert_eq!(
@@ -1025,7 +1032,11 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     ]);
     wait(|| f.home.join("ui-pid").exists());
     enroll(&f, meta.clone());
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"pi","request_id":"app-setup"}))
+            .0,
+        200
+    );
     let app = |snapshot: Value| {
         snapshot["settings"]["apps"]
             .as_array()
@@ -1055,17 +1066,38 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         .contains("/reload"));
     enroll(&f, meta.clone());
     assert_eq!(
-        f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
+        f.action(json!({"op":"setup_remove_app","harness":"fixture","request_id":"app-remove"}))
             .0,
         200
     );
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
+    for (op, request) in [
+        ("setup_apply", "app-setup"),
+        ("setup_remove_app", "app-remove"),
+    ] {
+        wait(|| {
+            fs::read_to_string(f.home.join("ui-frames"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|frame| {
+                    frame["op"] == "settings"
+                        && frame["ok"] == true
+                        && frame["source_op"] == op
+                        && frame["request_id"] == request
+                        && frame["settings"]["apps"].is_array()
+                })
+        });
+    }
     enroll(&f, meta);
     assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
     assert!(f
-        .rows("SELECT * FROM local_listeners WHERE status='ACTIVE'")
+        .rows("SELECT * FROM local_listeners WHERE harness!='human' AND status='ACTIVE'")
+        .is_empty());
+    assert!(!f
+        .rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
         .is_empty());
     assert!(!f.exited(daemon));
     let ui_pid = fs::read_to_string(f.home.join("ui-pid"))
@@ -2748,7 +2780,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     assert_eq!(config["desktopBannerEnabled"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
     for (name,invite) in [
-        ("127-0-0-1",format!("http://127.0.0.1:{}",port())),
+        ("remote",format!("http://127.0.0.1:{}",port())),
         ("joined",format!("cito setup --hub joined --url http://127.0.0.1:{} --auth token --token fixture-token --default",port())),
         ("json",json!({"name":"json","url":format!("http://127.0.0.1:{}",port()),"auth_mode":"none"}).to_string()),
         ("equals",format!("cito setup --hub=equals --url=http://127.0.0.1:{} --default",port())),

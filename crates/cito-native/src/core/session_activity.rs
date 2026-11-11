@@ -673,6 +673,7 @@ print(json.dumps(response), flush=True)
                 kind: "agent".into(),
                 display_name: id.into(),
                 tier: "custom".into(),
+                order: i64::MAX,
                 sf_symbol: "bolt".into(),
                 tint: "blue".into(),
                 cli_flag: false,

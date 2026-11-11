@@ -90,9 +90,15 @@ fn parse(s: Option<&str>) -> Result<DocumentMut> {
 fn configured(doc: &DocumentMut, cmd: &str) -> bool {
     doc.get("mcp_servers")
         .and_then(|v| v.get("cito"))
-        .and_then(|v| v.get("command"))
-        .and_then(Item::as_str)
-        == Some(cmd)
+        .is_some_and(|cito| {
+            cito.get("enabled").and_then(Item::as_bool) != Some(false)
+                && cito
+                    .get("command")
+                    .and_then(Item::as_str)
+                    .is_some_and(|entry| {
+                        entry == cmd || entry == "cito-mcp" || entry.ends_with("/cito-mcp")
+                    })
+        })
 }
 fn setup(req: &Value) -> Result<Value> {
     let path = config_home(req, "CITO_CODEX_HOME", "~/.codex").join("config.toml");
@@ -146,6 +152,9 @@ fn setup(req: &Value) -> Result<Value> {
         if remove {
             if let Some(t) = d.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
                 t.remove("cito");
+                if t.is_empty() {
+                    d.remove("mcp_servers");
+                }
             }
         } else {
             if !d.contains_key("mcp_servers") {
@@ -154,10 +163,16 @@ fn setup(req: &Value) -> Result<Value> {
             if d["mcp_servers"].as_table_like().is_none() {
                 return Err("mcp_servers must be a table".into());
             }
-            let mut t = Table::new();
+            if d["mcp_servers"].get("cito").is_none() {
+                d["mcp_servers"]["cito"] = Item::Table(Table::new());
+            }
+            let t = &mut d["mcp_servers"]["cito"];
+            if t.as_table_like().is_none() {
+                return Err("mcp_servers.cito must be a table".into());
+            }
             t["command"] = value(command);
             t["args"] = value(toml_edit::Array::new());
-            d["mcp_servers"]["cito"] = Item::Table(t);
+            t["enabled"] = value(true);
         }
         let next = d.to_string();
         Ok(if old.is_none() && next.is_empty() {

@@ -49,6 +49,20 @@ assert.equal(missing.badge.textContent, 'Copy failed');
 assert.equal(missing.button.disabled, false);
 
 const homepage = readFileSync(new URL('index.html', site), 'utf8');
+const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
+for (const page of ['index.html', 'docs/guide.html', 'docs/plugins.html', 'docs/architecture.html']) {
+  const html = readFileSync(new URL(page, site), 'utf8');
+  for (const anchor of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)) {
+    const attrs = Object.fromEntries([...anchor[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
+    if (!attrs.href?.startsWith('https://github.com/Tefx/cito')) continue;
+    assert.equal(attrs.target, '_blank', page);
+    assert.ok(attrs.rel.split(' ').includes('noopener') && attrs.rel.split(' ').includes('noreferrer'), page);
+    if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(anchor[2])) assert.equal(attrs.href, download, page);
+  }
+}
+const diagram = readFileSync(new URL('assets/art/architecture-topology.svg', site), 'utf8');
+assert.match(diagram, /<title id="title">[^<]+<\/title>/);
+assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
 const expected = [
   ['menu-dark.png', 'directory-dark.png'],
   ['banner-dark.png', 'activity-dark.png'],
@@ -105,17 +119,12 @@ const previews = moments.map((moment, index) => {
   return {tabs, panels, querySelectorAll: selector => selector === '[data-preview-tab]' ? tabs : panels};
 });
 assert.equal([...homepage.matchAll(/src="\.\/assets\/screenshots\//g)].length, 7);
-const sceneTabs = [...homepage.matchAll(/<button\b([^>]*data-scene-target[^>]*)>/g)].map(match => element(match[1]));
-const scenePanels = [...homepage.matchAll(/<div\b([^>]*data-scene-panel[^>]*)>/g)].map(match => element(match[1]));
-const status = {textContent: ''};
 runInNewContext(source, {
   document: {
     querySelectorAll: selector => ({
-      '[data-surface-preview]': previews,
-      '[data-scene-target]': sceneTabs,
-      '[data-scene-panel]': scenePanels
+      '[data-surface-preview]': previews
     }[selector] || []),
-    querySelector: () => status
+    querySelector: () => null
   }, navigator: {}
 });
 function active(preview, index) {
@@ -144,32 +153,6 @@ for (const [index, preview] of previews.entries()) {
   preview.tabs[selected[index]].dispatch('keydown', {key: 'Tab', preventDefault() { assert.fail('Tab must keep native focus navigation'); }});
   active(preview, selected[index]);
 }
-assert.equal(sceneTabs.length, 2);
-for (const [i, tab] of sceneTabs.entries()) {
-  tab.dispatch('click');
-  for (const [j, panel] of scenePanels.entries()) {
-    assert.equal(sceneTabs[j].getAttribute('aria-selected'), String(i === j));
-    assert.equal(panel.getAttribute('hidden') === undefined, i === j);
-  }
-  assert.match(status.textContent, new RegExp(`^Scene ${i + 1} ·`));
-  for (const [other, group] of previews.entries()) active(group, selected[other]);
-}
-
-let selectedScene = sceneTabs.length - 1;
-for (const [key, target] of [['Home', 0], ['ArrowLeft', 1], ['ArrowRight', 0], ['End', 1]]) {
-  let prevented = false;
-  sceneTabs[selectedScene].dispatch('keydown', {key, preventDefault() { prevented = true; }});
-  selectedScene = target;
-  assert.equal(prevented, true);
-  assert.equal(focused, sceneTabs[target]);
-  for (const [i, panel] of scenePanels.entries()) {
-    assert.equal(sceneTabs[i].tabIndex, i === target ? 0 : -1);
-    assert.equal(sceneTabs[i].getAttribute('aria-selected'), String(i === target));
-    assert.equal(panel.getAttribute('hidden') === undefined, i === target);
-  }
-  for (const [other, group] of previews.entries()) active(group, selected[other]);
-}
-
 const guide = readFileSync(new URL('docs/guide.html', site), 'utf8');
 const headings = [...guide.matchAll(/<h2 id="([^"]+)">/g)];
 const sections = Object.fromEntries(headings.map((heading, index) => [

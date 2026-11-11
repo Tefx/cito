@@ -90,6 +90,7 @@ impl Fixture {
             kind: "agent-harness".into(),
             display_name: "Fixture".into(),
             tier: "test".into(),
+            order: i64::MAX,
             sf_symbol: String::new(),
             tint: String::new(),
             cli_flag: false,

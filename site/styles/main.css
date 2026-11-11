@@ -16,7 +16,6 @@ html {
 }
 
 body {
-  overflow-wrap: anywhere;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
   min-height: 100vh;
@@ -37,6 +36,13 @@ img {
 code, pre {
   font-family: var(--font-mono);
 }
+
+.docs-content p, .docs-content li, .docs-table td, pre { overflow-wrap: break-word; }
+.node-pill, .scene-tab, .step-tab, .preview-tabs button, .text-link,
+.nav-cta, .secondary-button, .eyebrow, .moment-index, .harness-tag,
+.copy-command-pill .copy-badge { white-space: nowrap; flex-shrink: 0; }
+.node-dot, .step-num { flex-shrink: 0; }
+.docs-content a.text-link code { color: var(--accent-amber); }
 
 :focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 
@@ -553,8 +559,10 @@ code, pre {
 }
 
 .moment-stage-panel[hidden] {
-  display: flex;
+  display: flex !important;
   visibility: hidden;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* Fixed 560:460 Reference Viewport prevents height jumps across tabs */
@@ -668,7 +676,7 @@ code, pre {
 /* Section 3: Built for Your Favorite Harnesses */
 .harness-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15.5rem), 1fr));
   gap: 1.25rem;
 }
 
@@ -717,6 +725,9 @@ code, pre {
 }
 
 .text-link {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
   color: var(--accent-amber);
   font-weight: 550;
 }
@@ -726,6 +737,7 @@ code, pre {
 }
 
 /* Section 4: Closing CTA & Footer */
+.cta-banner,
 .closing-card {
   max-width: var(--container-narrow);
   margin: 0 auto;
@@ -893,6 +905,7 @@ code, pre {
 
 .docs-table th,
 .docs-table td {
+  overflow-wrap: anywhere;
   text-align: left;
   padding: 0.75rem 0.9rem;
   border-bottom: 1px solid var(--border-subtle);

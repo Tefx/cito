@@ -1,5 +1,6 @@
 {
   "id": "claude",
+  "order": 2,
   "kind": "agent-harness",
   "displayName": "Claude Code",
   "tier": "experimental",

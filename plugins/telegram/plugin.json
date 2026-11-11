@@ -19,7 +19,7 @@
       "required": true,
       "placeholder": "123456:ABC-DEF...",
       "configuredPlaceholder": "•••••••• (Saved — enter new token to replace)",
-      "helpText": "From @BotFather on Telegram"
+      "helpText": "Shared once for everyone on this Hub"
     },
     {
       "key": "chatId",
@@ -28,17 +28,16 @@
       "type": "string",
       "required": true,
       "placeholder": "Paired via /start or enter Chat ID",
-      "helpText": "Your personal Chat ID, paired via /start"
+      "helpText": "Destination for your personal notifications"
     }
   ],
   "pairing": {
     "supported": true,
     "actionLabel": "Pair Account…",
-    "helpText": "Pair your personal account: send the 10-minute /start command to the shared bot on Telegram."
+    "helpText": "Generate a one-time /start code to link your Telegram chat (expires in 10 minutes)."
   },
   "version": "0.21.3",
   "setupGuide": [
-    "1. Message @BotFather on Telegram (/newbot) to create a bot and copy its Bot Token.",
-    "2. Paste the Bot Token below. Save once for this Hub; everyone on this Hub shares this gateway."
+    "Create a bot via @BotFather on Telegram and paste its token below."
   ]
 }

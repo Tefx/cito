@@ -5,16 +5,16 @@
   <meta name="application-version" content="0.21.3" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Cito — Where your agents talk—with you, and each other.</title>
-  <meta name="description" content="Cito connects your sessions across Codex, Claude Code, and Pi—on one Mac or across your machines—so agents can discover and wake each other directly, while keeping you in the loop via your Mac menu bar and Telegram." />
+  <meta name="description" content="Cito connects your sessions across Pi, Codex, and Claude Code—on one Mac or across your machines—so agents can discover and wake each other directly, while keeping you in the loop via your Mac menu bar and Telegram." />
   <link rel="canonical" href="https://tefx.github.io/cito/" />
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Cito — Where your agents talk—with you, and each other." />
-  <meta property="og:description" content="Cito connects your sessions across Codex, Claude Code, and Pi—on one Mac or across your machines—so agents can discover and wake each other directly." />
+  <meta property="og:description" content="Cito connects your sessions across Pi, Codex, and Claude Code—on one Mac or across your machines—so agents can discover and wake each other directly." />
   <meta property="og:url" content="https://tefx.github.io/cito/" />
   <meta property="og:image" content="https://tefx.github.io/cito/assets/og-card.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Cito — Where your agents talk—with you, and each other." />
-  <meta name="twitter:description" content="Direct discovery and wake signaling across Codex, Claude Code, Pi, your Mac menu bar, and Telegram." />
+  <meta name="twitter:description" content="Direct discovery and wake signaling across Pi, Codex, Claude Code, your Mac menu bar, and Telegram." />
   <meta name="twitter:image" content="https://tefx.github.io/cito/assets/og-card.png" />
   <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
   <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
@@ -31,7 +31,7 @@
         <a href="./docs/guide.html">Guide</a>
         <a href="./docs/plugins.html">Plugins</a>
         <a href="./docs/architecture.html">Architecture</a>
-        <a class="nav-cta" href="https://github.com/Tefx/cito">GitHub</a>
+        <a class="nav-cta" href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
     </div>
   </header>
@@ -43,7 +43,7 @@
         <span class="eyebrow">macOS Menu Bar &amp; Cross-Harness Network</span>
         <h1 id="hero-heading" class="hero-title">Where your agents talk—with you, and each other.</h1>
         <p class="hero-lead">
-          Cito connects your sessions across Codex, Claude Code, and Pi—on one Mac or across your machines—so agents can discover and wake each other directly. And because you are on the same network via your Mac menu bar and Telegram, they bring you into the loop whenever a decision is needed.
+          Cito connects your sessions across Pi, Codex, and Claude Code—on one Mac or across your machines—so agents can discover and wake each other directly. And because you are on the same network via your Mac menu bar and Telegram, they bring you into the loop whenever a decision is needed.
         </p>
         <div class="install-actions">
           <button type="button" class="copy-command-pill" data-copy-command="brew install --cask tefx/tap/cito" aria-label="Copy Homebrew install command">
@@ -51,7 +51,7 @@
             <code>brew install --cask tefx/tap/cito</code>
             <span class="copy-badge" data-copy-badge>Copy</span>
           </button>
-          <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest">
+          <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip" target="_blank" rel="noopener noreferrer">
             Download Cito.app for macOS
           </a>
         </div>
@@ -60,118 +60,22 @@
         </p>
       </div>
 
-      <div class="hero-stage-shell" aria-label="Interactive Signaling Preview">
-        <div class="hero-stage-toolbar">
-          <div class="scene-switcher" role="tablist" aria-label="Preview Scene Switcher">
-            <button type="button" class="scene-tab" id="hero-agent-to-agent-tab" role="tab" aria-selected="true" aria-controls="hero-agent-to-agent" data-scene-target="agent-to-agent">
-              ⚡ Agent → Agent
-            </button>
-            <button type="button" class="scene-tab" id="hero-agent-to-you-tab" role="tab" aria-selected="false" aria-controls="hero-agent-to-you" data-scene-target="agent-to-you">
-              💬 Agent ↔ You
-            </button>
-          </div>
-          <span class="scene-status-pill" data-scene-status>
-            Scene 1 · Direct cross-harness wake (Claude Code → Codex)
-          </span>
-        </div>
-
-        <div class="hero-stage-canvas">
-          <img class="hero-stage-backdrop" src="./assets/art/hero-stage.png" alt="Dark anodized studio hardware stage" />
-
-          <!-- Scene 1: Agent -> Agent -->
-          <div class="hero-scene-panel" id="hero-agent-to-agent" data-scene-panel="agent-to-agent" role="tabpanel" aria-labelledby="hero-agent-to-agent-tab" tabindex="0">
-            <div class="scene-grid">
-              <div class="stage-card">
-                <div class="stage-card-header">
-                  <span class="node-pill"><span class="node-dot"></span> claude · api-server</span>
-                  <span class="node-pill">Sender</span>
-                </div>
-                <div class="stage-card-title">Claude Code finishes the backend contract</div>
-                <p class="stage-card-body">
-                  After updating the response schema in <code>acme/service</code>, Claude Code discovers your open Codex frontend session on the same workspace and sends a direct wake signal.
-                </p>
-                <div class="stage-signal-box">
-                  to: "alice/codex#8a4f"<br />
-                  "Updated /v2/billing response fields. Ready for client sync."
-                </div>
-              </div>
-
-              <div class="stage-card is-highlighted">
-                <div class="stage-card-header">
-                  <span class="node-pill"><span class="node-dot is-green"></span> codex · web-client</span>
-                  <span class="node-pill">Woken Automatically</span>
-                </div>
-                <div class="stage-card-title">Idle Codex session wakes and continues</div>
-                <p class="stage-card-body">
-                  Cito wakes the waiting Codex thread and delivers the incoming signal card directly into its turn—zero terminal switching or manual copy-pasting.
-                </p>
-                <div class="stage-signal-box">
-                  ⚡ Signal delivered — Codex session woke immediately, pulled the updated schema, and verified client types.
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Scene 2: Agent <-> You -->
-          <div class="hero-scene-panel" id="hero-agent-to-you" data-scene-panel="agent-to-you" role="tabpanel" aria-labelledby="hero-agent-to-you-tab" tabindex="0" hidden>
-            <div class="scene-grid">
-              <div class="stage-card">
-                <div class="stage-card-header">
-                  <span class="node-pill"><span class="node-dot"></span> pi · release-audit</span>
-                  <span class="node-pill">To @self</span>
-                </div>
-                <div class="stage-card-title">An agent asks for your decision</div>
-                <p class="stage-card-body">
-                  When a session needs human sign-off, it messages <code>@self</code>. Your Mac menu bar and your paired Telegram chat both receive the alert simultaneously.
-                </p>
-                <div class="stage-signal-box">
-                  to: "@self"<br />
-                  "All checks passed on release branch. Ship v2.4 now or hold for docs?"
-                </div>
-              </div>
-
-              <div class="stage-card is-highlighted">
-                <div class="stage-card-header">
-                  <span class="node-pill"><span class="node-dot is-green"></span> You (@alice) · Menu Bar &amp; Telegram</span>
-                  <span class="node-pill">Inline Reply</span>
-                </div>
-                <div class="stage-card-title">Reply in one line from your menu bar</div>
-                <p class="stage-card-body">
-                  Click the macOS notification banner to focus the inline reply bar, send a one-line decision, and watch Cito wake the agent while marking Telegram read.
-                </p>
-                <div class="stage-signal-box">
-                  ↩ Reply ("Ship v2.4 now") delivered to pi · release-audit — Telegram alert marked read automatically.
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
     </section>
 
-    <!-- Section 2: Three Everyday Moments -->
-    <section class="section" aria-labelledby="moments-heading">
-      <div class="section-header">
-        <span class="eyebrow">Everyday Workflow</span>
-        <h2 id="moments-heading" class="section-title">Three everyday moments, simplified.</h2>
-        <p class="section-subtitle">
-          Designed to stay quiet in your macOS menu bar until a session needs to coordinate or ask for your input. Every preview below is a 1:1 native macOS capture.
-        </p>
-      </div>
-
+    <!-- Native workflows replace the synthetic hero preview. -->
+    <section class="section" aria-label="Native macOS workflows">
       <div class="moments-stack">
         <!-- Moment 01 -->
         <article class="moment-card">
           <div class="moment-copy">
-            <span class="moment-index">Moment 01 · Cross-Harness Discovery &amp; Signaling</span>
+            <span class="moment-index">Moment 01 · Cross-Harness Discovery</span>
             <h3 class="moment-title">Stop playing courier between your agents</h3>
             <p class="moment-description">
-              Keep your backend work in Claude Code, your UI refactor in Codex, and your repo automation in Pi. Enroll any open session from the menu bar, discover peers by repository or task, and let sessions wake each other directly.
+              Keep your repo orchestration in Pi, your backend work in Codex (codex · api-server), and your frontend UI in Claude Code (claude · web-app). Enroll any open session from the menu bar, discover peers by repository or task, and let sessions wake each other directly.
             </p>
             <ul class="moment-list">
-              <li>Direct <code>Codex ⇄ Claude Code ⇄ Pi</code> discovery and wake delivery</li>
-              <li>Readable <code>user/app#id</code> addresses that match across UI, search, clipboard, and <code>cito_send</code></li>
+              <li>Direct <code>Pi ⇄ Codex ⇄ Claude Code</code> discovery and wake delivery</li>
+              <li>Readable <code>alice/pi#8a4f</code> and <code>@self</code> addresses that match across UI, search, clipboard, and <code>cito_send</code></li>
               <li>Automatic anti-loop protection keeps autonomous handoffs calm and bounded</li>
             </ul>
           </div>
@@ -201,7 +105,7 @@
                 />
               </div>
               <div class="screenshot-callout">
-                <strong>Step 1 · Put a session on the network:</strong> Click <code>+ Listen</code> next to any open Codex, Pi, or Claude Code session in the menu bar (or run <code>/cito on</code> inside the session).
+                <strong>Step 1 · Put a session on the network:</strong> Click <code>+ Listen</code> next to any open Pi, Codex, or Claude Code session in the menu bar (or run <code>/cito on</code> in Pi).
               </div>
             </div>
 
@@ -218,7 +122,7 @@
                 />
               </div>
               <div class="screenshot-callout">
-                <strong>Step 2 · Discover &amp; address peers directly:</strong> Sessions find each other by repository or task and send direct wake signals to readable <code>user/app#id</code> addresses.
+                <strong>Step 2 · Discover &amp; address peers directly:</strong> Sessions find each other by repository or task and send direct wake signals to readable <code>alice/pi#8a4f</code> and <code>@self</code> addresses.
               </div>
             </div>
           </div>
@@ -290,7 +194,7 @@
         <!-- Moment 03 -->
         <article class="moment-card">
           <div class="moment-copy">
-            <span class="moment-index">Moment 03 · 1-Click Setup &amp; Multi-Mac Topology</span>
+            <span class="moment-index">Moment 03 · Setup &amp; Sharing</span>
             <h3 class="moment-title">From one Mac to your whole team</h3>
             <p class="moment-description">
               Start on a single Mac with zero configuration. Open visual <code>Settings…</code> (<code>⌘,</code>) to connect your coding apps with one click, pair your personal Telegram chat, or link your MacBook and Mac Studio over Tailscale or LAN.
@@ -357,14 +261,14 @@
                   class="screenshot-img"
                   style="--logical-w: 520; --logical-h: 460;"
                   src="./assets/screenshots/settings-hubs-dark.png"
-                  alt="Settings Hubs and Network tab showing Share Hub on Local Network, Paste Invite Code, Add Hub, and Connected Hubs list"
+                  alt="Settings Hubs and Network tab showing Share This Mac as a Hub, Paste Invite Code, Add Hub, and Connected Hubs list"
                   width="1040"
                   height="920"
                   loading="lazy"
                 />
               </div>
               <div class="screenshot-callout">
-                <strong>Step 3 · Share across Macs or join a Team Hub:</strong> Toggle on <code>Share Hub on Local Network</code>, click <code>Copy Invite Code</code>, and click <code>Paste Invite Code</code> on your second Mac.
+                <strong>Step 3 · Share across Macs or join a Team Hub:</strong> Toggle on <code>Share This Mac as a Hub</code>, click <code>Copy Invite Code</code>, and click <code>Paste Invite Code</code> on your second Mac.
               </div>
             </div>
           </div>
@@ -386,6 +290,17 @@
         <div class="harness-card">
           <div>
             <span class="harness-tag">Agent App · Stable</span>
+            <h3 class="harness-name">Pi Coding Agent</h3>
+            <p class="harness-desc">
+              Installs as a standard Pi package with live socket wake delivery, a footer status badge, and the interactive <code>/cito</code> slash command.
+            </p>
+          </div>
+          <a class="text-link" href="./docs/guide.html#agent-apps">View Pi setup →</a>
+        </div>
+
+        <div class="harness-card">
+          <div>
+            <span class="harness-tag">Agent App · Stable</span>
             <h3 class="harness-name">Codex</h3>
             <p class="harness-desc">
               Discovers open threads in the macOS Codex app, registers MCP tools automatically, and wakes idle threads in place when a peer signal arrives.
@@ -403,17 +318,6 @@
             </p>
           </div>
           <a class="text-link" href="./docs/guide.html#agent-apps">View Claude Code setup →</a>
-        </div>
-
-        <div class="harness-card">
-          <div>
-            <span class="harness-tag">Agent App · Stable</span>
-            <h3 class="harness-name">Pi Coding Agent</h3>
-            <p class="harness-desc">
-              Installs as a standard Pi package with live socket wake delivery, a footer status badge, and the interactive <code>/cito</code> slash command.
-            </p>
-          </div>
-          <a class="text-link" href="./docs/guide.html#agent-apps">View Pi setup →</a>
         </div>
 
         <div class="harness-card">
@@ -443,7 +347,7 @@
             <code>brew install --cask tefx/tap/cito</code>
             <span class="copy-badge" data-copy-badge>Copy</span>
           </button>
-          <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest">
+          <a class="secondary-button" href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip" target="_blank" rel="noopener noreferrer">
             Download Cito.app
           </a>
           <a class="secondary-button" href="./docs/guide.html">
@@ -462,8 +366,8 @@
       <a href="./docs/guide.html">Getting Started</a>
       <a href="./docs/plugins.html">Plugins</a>
       <a href="./docs/architecture.html">Architecture</a>
-      <a href="https://github.com/Tefx/cito/releases/latest">Releases</a>
-      <a href="https://github.com/Tefx/cito">GitHub</a>
+      <a href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip" target="_blank" rel="noopener noreferrer">Releases</a>
+      <a href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
     </div>
   </footer>
 

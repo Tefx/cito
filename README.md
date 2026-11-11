@@ -18,16 +18,16 @@
   <a href="https://tefx.github.io/cito/docs/guide.html">Getting Started Guide</a> ·
   <a href="https://tefx.github.io/cito/docs/plugins.html">Subprocess Plugins</a> ·
   <a href="https://tefx.github.io/cito/docs/architecture.html">Architecture &amp; Protocol</a> ·
-  <a href="https://github.com/Tefx/cito/releases/latest">Download Cito.app</a>
+  <a href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip">Download Cito.app</a>
 </p>
 
 ---
 
-Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` signaling and wake network for coding agents and humans on macOS. It connects **Human Nodes** (`@self` / `@<username>`, reachable via the macOS menu bar and external channels like **Telegram**) and **Agent Session Nodes** (**Codex Desktop (`ChatGPT.app` / `Codex.app`)**, **Claude Code**, and **Pi Coding Agent**) across a built-in zero-config **`local`** hub (`local://`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted LAN, `token` for pre-shared key, and `oidc` for team single sign-on).
+Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` signaling and wake network for coding agents and humans on macOS. It connects **Human Nodes** (`@self` / `@<username>`, reachable via the macOS menu bar and external channels like **Telegram**) and **Agent Session Nodes** (**Pi Coding Agent**, **Codex Desktop (`ChatGPT.app` / `Codex.app`)**, and **Claude Code**) across a built-in zero-config **`local`** hub (`local://`) and remote **`cito hub`** HTTP/SSE hubs (`none` for Tailscale/trusted LAN, `token` for pre-shared key, and `oidc` for team single sign-on).
 
 ### Key Capabilities
 - **Symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)`**: Every human user (`harness: "human", session_id: "default"`) and every coding agent session is a host-independent `Node` reachable via $1 \dots K$ attached `Channels` (multiple Macs, the macOS menu bar, and **Telegram**) without evicting other active devices.
-- **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub. Address people with `@self` or `@<user>` and sessions with `alice/codex#4219` or `alice/pi#8f1a`; prefix non-default Hubs, such as `work:alice/pi#8f1a`. Address chips display exactly what they copy, search accepts the same address, and prefixes widen automatically on collision. Full canonical listener IDs remain compatible. Use the `[ Directory | Activity ]` feeds and inline reply composer.
+- **Pure Hub-Routed Interaction & Inline Reply Composer**: All `Human ⇄ Agent`, `Agent ⇄ Agent`, and `Human ⇄ Human` signaling flows through the Hub. Address people with `@self` or `@<user>` and sessions with `alice/pi#8a4f` or `alice/codex#4219`; prefix non-default Hubs, such as `work:alice/pi#8f1a`. Address chips display exactly what they copy, search accepts the same address, and prefixes widen automatically on collision. Full canonical listener IDs remain compatible. Use the `[ Directory | Activity ]` feeds and inline reply composer.
 - **Two-Scope Human Channels & 1-Click Pairing**: Configure shared Hub credentials (`scope: "hub"`) and personal bindings (`scope: "user"`) in the 3-tab `Settings…` (`⌘,`) window, pair via 10-character Base32 `/start cito-a1b2c3d4e5` codes, and reply directly from Telegram (swipe-to-reply or implicit recent-sender reply).
 - **Menu Bar Control Plane**: Inspect your `Human Node (@user)`, local active agent sessions, remote personal hosts (`MY OTHER HOSTS`), and open local sessions (`AVAILABLE SESSIONS`), or toggle visibility between **`🔒 Self`** and **`👥 Team`** (`workspace`). The icon counts agent sessions only and shows unread signals separately; a Human-only idle setup has no numeric badge. Semantic status colors adapt to Light and Dark Mode.
 - **Sender Auto-Enrollment & Replies**: `cito_send` automatically enrolls a not-yet-enrolled agent sender as a listener so replies can reach it; explicitly stopped sessions remain stopped. Telegram keeps delivery mappings for **7 days**, independently of signal payload pruning, so replies from Telegram or the Mac menu bar **Activity** stream can reach the sender while its session remains available. Pairing codes still expire after ten minutes.
@@ -37,7 +37,7 @@ Cito is a symmetric `Node (Human | Agent) ↔ Hub ↔ Channels (1..K)` signaling
 
 ## Installation (macOS Apple Silicon)
 
-Choose either of the two official installation methods. `Cito.app` and `cito` run natively with zero Node.js dependency. On first launch, `Cito.app` opens `Settings…` (`⌘,`) on the `Agent Apps` tab so you can connect `Codex`, `Pi Coding Agent`, or `Claude Code` with one click (and disconnect or uninstall cleanly at any time).
+Choose either of the two official installation methods. `Cito.app` and `cito` run natively with zero Node.js dependency. On first launch, `Cito.app` opens `Settings…` (`⌘,`) on the `Agent Apps` tab so you can connect `Pi Coding Agent`, `Codex`, or `Claude Code` with one click (and disconnect or uninstall cleanly at any time).
 
 ### Option 1: Homebrew (Recommended)
 
@@ -73,9 +73,9 @@ Use `--zap` only if you also want Homebrew to delete Cito's user data.
 
 ### Option 2: Download `Cito.app` for macOS
 
-1. Download **[`Cito-macos-arm64.zip`](https://github.com/Tefx/cito/releases/latest)** from the latest GitHub Release.
+1. Download **[`Cito-macos-arm64.zip`](https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip)** from the latest GitHub Release.
 2. Move **`Cito.app`** into `/Applications` and open it.
-3. Click the Cito transceiver icon in the macOS menu bar and open **`Settings…` (`⌘,`)** to inspect or toggle **Agent Apps**, pair **Human Channels** (such as **Telegram**), or enable **Share Hub on Local Network**.
+3. Click the Cito transceiver icon in the macOS menu bar and open **`Settings…` (`⌘,`)** to inspect or toggle **Agent Apps**, pair **Human Channels** (such as **Telegram**), or enable **Share This Mac as a Hub**.
 
 ---
 
@@ -85,15 +85,15 @@ Out of the box (without `~/.cito/config.json`), Cito runs an in-process **`local
 
 Open **`Settings…` (`⌘,`)** from the Cito menu bar dropdown to configure:
 
-- **Tab 1 — `Agent Apps`**: One-click **`Set Up`**, **`Re-check`**, and **`Disconnect`** for installed coding harnesses (`Codex`, `Pi Coding Agent`, and experimental `Claude Code`).
+- **Tab 1 — `Agent Apps`**: One-click **`Set Up`**, **`Re-check`**, and **`Disconnect`** for installed coding harnesses (`Pi Coding Agent`, `Codex`, and experimental `Claude Code`).
 - **Tab 2 — `Human Channels`**: Select the target Hub and toggle **`Mac Desktop Banner`**. Channel cards have two strata:
   1. **`1. Shared Bot Gateway`**: Enter the shared credential (such as a Telegram Bot Token) and click **`Save Gateway Token`**. The active gateway collapses; **`Change Token…`** reopens it and **`Clear Token`** removes it. A managed Hub can provide the gateway for you.
-  2. **`2. Your Personal Account (@<user>)`**: Once the gateway is ready, click **`Pair Account…`** and follow the displayed instruction, or enter your personal address, then use **`Send Test`** and **`Save`**. **`Skip for Now`** leaves pairing optional and makes no Hub changes.
-- **Tab 3 — `Hubs & Network`**: **`Share Hub on Local Network`** collapses when **`Off`**; enable it to reveal the endpoint, port (`:4291`), authentication controls, and **`Copy Invite Code`**. Use **`Paste Invite Code`** / **`Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
-- **Window Footer**: Toggle **`Start Cito at Login`** or click **`Remove All Integrations…`**. Choose **`Disconnect All`** to stop listeners and remove app registrations while keeping Cito running and staged files available, or **`Confirm Uninstall`** to remove Cito and quit (optionally deleting local data).
+  2. **`2. Your Personal Account (@<user>)`**: Once the gateway is ready, click **`Pair Account…`** and follow the displayed instruction, or enter your personal address, then use **`Send Test`** and **`Save`**. Paired accounts collapse to a summary; **`Edit…`** reveals the Chat ID and **`Save`** controls.
+- **Tab 3 — `Hubs & Network`**: **`Share This Mac as a Hub`** collapses when **`Off`**; enable it to reveal the endpoint, port (`:4291`), authentication controls, and **`Copy Invite Code`**. Use **`Paste Invite Code`** / **`Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
+- **Window Footer**: Toggle **`Start Cito at Login`** or click **`Remove All Integrations…`**. Choose **`Disconnect All`** to stop agent listeners and remove app registrations while keeping Cito running and staged files available, or **`Confirm Uninstall`** to remove Cito and quit (optionally deleting local data).
 - **Guided setup and repair**: Follow the inline steps in Agent Apps and Human Channels, then use Hubs & Network when you want to share or join a Hub. App cards show reload/restart instructions; **`Repair`** restores missing CLI shims, staged plugins, and individual plugin assets. Cito rediscovers configured built-in integrations through the bundled distribution when staged files or manifests are missing, including after restarting from an installed shim. Damaged integrations remain visible with **`Repair`** until you restore them.
 - **Channel lifecycle**: Saved secret fields stay blank with a saved-value placeholder. Leave them blank to retain credentials; type a new value to replace them. **`Send Test`** uses unsaved candidate values without saving them. Schema lookup and connection failures also appear as test results. Test details survive status refreshes even before the channel is configured; a failed test keeps an **`Error`** badge until another test replaces it or a channel action changes configuration. **`Pause`** retains your account binding, **`Unpair`** removes your binding, and **`Clear Token`** removes service credentials. Pairing commands expire after ten minutes; starting another pairing, cancelling, or unpairing invalidates earlier commands. Pairing preserves saved account fields and activates the channel only when all required service and account fields are configured.
-- **Hub names and invites**: Leave **`HUB NAME (OPTIONAL)`** blank to derive a name from the URL, or enter a name such as `Office Mac` to save it as `office-mac`. Automatically derived names receive a numeric suffix when needed; an explicit name cannot replace a different Hub. Shared endpoints prefer a running Tailscale MagicDNS name, then a Tailscale IPv4 address, then the LAN address. `CITO_TAILSCALE_HOST` overrides discovery; `CITO_DISABLE_TAILSCALE_PROBE=1` disables the Tailscale CLI probe.
+- **Hub names and invites**: Leave **`Hub Name (Optional)`** blank to derive a name from the URL, or enter a name such as `Office Mac` to save it as `office-mac`. Automatically derived names receive a numeric suffix when needed; an explicit name cannot replace a different Hub. Private IPv4 addresses derive `lan`, Tailscale addresses derive `tailscale`, and other IP literals derive `remote`; hostnames derive their first slug label. Shared endpoints prefer an online Tailscale MagicDNS name when enabled, then a Tailscale IPv4 address, then the LAN address. When both are available, use **`Tailscale`** / **`Local IP`** to choose the address displayed and copied. `CITO_TAILSCALE_HOST` overrides discovery; `CITO_DISABLE_TAILSCALE_PROBE=1` disables the Tailscale CLI probe.
 - **Hub lifecycle**: Edit hub settings inline without re-entering saved secrets. Disconnected hubs remain in the menu with **`Connect`**; OIDC **`Switch Account`** opens the account picker. LAN sharing supports port changes and token-auth controls, retaining the previous listener if a new port cannot bind. Message sends and port saves track their own acknowledgements, so delayed failures from an earlier attempt cannot settle a retry. Hub saves preserve newer form edits; after the matching acknowledgement, further changes to the same named Hub use explicit edit mode.
 
 All editable controls in Settings, Directory search, and the composer support the native **Edit** menu: `⌘V` Paste, `⌘A` Select All, `⌘C` Copy, `⌘X` Cut, `⌘Z` Undo, and `⇧⌘Z` Redo. Password fields allow paste, selection, undo, and redo while blocking Copy and Cut. Active field editors remain attached during editing.
@@ -150,14 +150,6 @@ Or edit `~/.cito/config.json` directly:
 
 `Cito.app` and `Settings…` (`⌘,`) manage these files automatically (writing the expanded absolute path for your macOS account), or you can inspect their entries manually:
 
-### Codex Desktop (`~/.codex/config.toml`)
-
-```toml
-[mcp_servers.cito]
-command = "/Users/<you>/.cito/bin/cito-mcp"
-args = []
-```
-
 ### Pi Coding Agent (`~/.pi/agent/settings.json`)
 
 ```json
@@ -167,6 +159,14 @@ args = []
 ```
 
 The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live session wake delivery, the footer `🔔` status badge, and the `/cito` slash command automatically on package load. Before a session hook supplies context, the bridge uses the latest session file for the working directory (or a process-scoped identity) for discovery, wake delivery, and badge updates. When context arrives for that same session, it displays the stored badge and retains delivery deduplication.
+
+### Codex Desktop (`~/.codex/config.toml`)
+
+```toml
+[mcp_servers.cito]
+command = "/Users/<you>/.cito/bin/cito-mcp"
+args = []
+```
 
 ### Claude Code (`~/.claude/settings.json`)
 

@@ -468,10 +468,29 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     assert!(fs::read_to_string(&p).unwrap().contains(prefix));
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_remove"}))["ok"], true);
-    let text = fs::read_to_string(p).unwrap();
+    let text = fs::read_to_string(&p).unwrap();
     assert!(text.contains(prefix));
     assert!(!text.contains("KEEP ="));
     assert!(text.contains("[mcp_servers.other]"));
+    for command in ["cito-mcp", "/opt/cito/bin/cito-mcp"] {
+        for enabled in [true, false] {
+            fs::write(&p,format!("[mcp_servers.cito]\ncommand = {command:?}\nenabled = {enabled}\n[mcp_servers.cito.env]\nKEEP = \"retained\"\n")).unwrap();
+            assert_eq!(
+                f.plugin(CODEX, json!({"op":"setup_inspect"}))["configured"],
+                enabled
+            );
+            assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+            assert_eq!(
+                f.plugin(CODEX, json!({"op":"setup_inspect"}))["configured"],
+                true
+            );
+            assert!(fs::read_to_string(&p)
+                .unwrap()
+                .contains("KEEP = \"retained\""));
+            assert_eq!(f.plugin(CODEX, json!({"op":"setup_remove"}))["ok"], true);
+            assert!(!fs::read_to_string(&p).unwrap().contains("mcp_servers"));
+        }
+    }
 }
 #[test]
 fn codex_metadata_validation_and_sqlite_thread_projection() {

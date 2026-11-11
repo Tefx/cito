@@ -388,6 +388,20 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         }
         assert!(html.contains("https://tefx.github.io/cito/assets/og-card.png"));
     }
+    let architecture = fs::read_to_string(site.join("docs/architecture.html")).unwrap();
+    assert!(architecture.contains("src=\"../assets/art/architecture-topology.svg\""));
+    let diagram = fs::read_to_string(site.join("assets/art/architecture-topology.svg")).unwrap();
+    for attribute in [
+        "viewBox=\"0 0 960 420\"",
+        "width=\"960\"",
+        "height=\"420\"",
+        "aria-labelledby=\"title desc\"",
+    ] {
+        assert!(
+            diagram.contains(attribute),
+            "Missing SVG image contract: {attribute}"
+        );
+    }
     for (path, width, height) in [
         ("apple-touch-icon.png", 180, 180),
         ("assets/og-card.png", 1200, 630),

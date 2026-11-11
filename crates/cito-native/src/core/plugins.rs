@@ -21,6 +21,7 @@ pub struct PluginDescriptor {
     pub kind: String,
     pub display_name: String,
     pub tier: String,
+    pub order: i64,
     pub sf_symbol: String,
     pub tint: String,
     pub cli_flag: bool,
@@ -448,6 +449,7 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         id,
         kind,
         display_name,
+        order: map.get("order").and_then(Value::as_i64).unwrap_or(i64::MAX),
         tier,
         sf_symbol,
         tint,
@@ -643,6 +645,7 @@ fn load_plugins_from_roots(
     plugins.sort_by_key(|p| {
         (
             if p.kind == "agent-harness" { 0 } else { 1 },
+            p.order,
             match p.tier.as_str() {
                 "stable" => 0,
                 "experimental" => 1,

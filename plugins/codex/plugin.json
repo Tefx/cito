@@ -1,5 +1,6 @@
 {
   "id": "codex",
+  "order": 1,
   "kind": "agent-harness",
   "displayName": "Codex",
   "tier": "stable",

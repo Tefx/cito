@@ -1941,19 +1941,30 @@ impl DaemonService {
             item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
         }
         let token = string(host, "token");
-        let advertised = advertised_hub_host(string(host, "bind"));
-        let authority = if advertised.contains(':') {
-            format!("[{advertised}]")
-        } else {
-            advertised
+        let endpoint = |host: &str| {
+            let authority = if host.contains(':') {
+                format!("[{host}]")
+            } else {
+                host.to_owned()
+            };
+            format!("http://{authority}:{port}")
         };
-        let endpoint_url = format!("http://{authority}:{port}");
-        let mut invite_command = format!("cito setup --hub lan --url {endpoint_url}");
-        if host_hub_auth_mode(host) == "token" && !token.is_empty() {
-            invite_command.push_str(&format!(" --auth token --token {token}"));
-        }
-        invite_command.push_str(" --default");
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
+        let endpoint_url = endpoint(&advertised_hub_host(string(host, "bind")));
+        let invite = |url: &str| {
+            let name = hub_name_from_url(url);
+            let mut command = format!("cito setup --hub {name} --url {url}");
+            if host_hub_auth_mode(host) == "token" && !token.is_empty() {
+                command.push_str(&format!(" --auth token --token {token}"));
+            }
+            command.push_str(" --default");
+            command
+        };
+        let invite_command = invite(&endpoint_url);
+        let tailscale_url = tailscale_advertised_host().map(|host| endpoint(&host));
+        let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
+        let tailscale_invite_command = tailscale_url.as_deref().map(invite);
+        let lan_invite_command = invite(&lan_url);
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
     fn channel_inventory(&mut self, slot: &HubClient) -> Arc<ChannelInventory> {
         let identity = remote_channels_identity(slot);
@@ -2319,6 +2330,7 @@ impl DaemonService {
                 if let Some(activity) = self.session_activity.as_mut() {
                     activity.refresh_discovery();
                 }
+                self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
             "setup_remove_app" | "disable_app" => {
                 let id = action["harness"]
@@ -2351,6 +2363,7 @@ impl DaemonService {
                 if let Some(activity) = self.session_activity.as_mut() {
                     activity.refresh_discovery();
                 }
+                self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
                 self.push_ui();
                 return Ok(json!({"ok":true,"notice":notice}));
             }
@@ -2408,18 +2421,22 @@ impl DaemonService {
                         }
                         cfg = base;
                     }
+                    cfg["url"] = json!(crate::plugins::validate_nats_url(
+                        string(&cfg, "url").trim()
+                    )
+                    .map_err(|error| format!("INVALID_INPUT: {error}"))?);
                     let base_name = if requested_name.is_empty() {
                         hub_name_from_url(string(&cfg, "url"))
                     } else {
                         normalize_slug(requested_name)
                     };
                     let mut name = base_name.clone();
-                    if !editing && requested_name.is_empty() {
+                    if requested_name.is_empty() {
                         let mut suffix = 2;
                         while name == "local"
-                            || v["hubs"]
-                                .get(&name)
-                                .is_some_and(|existing| existing["url"] != cfg["url"])
+                            || v["hubs"].get(&name).is_some_and(|existing| {
+                                (!editing || name != original) && existing["url"] != cfg["url"]
+                            })
                         {
                             let ending = format!("-{suffix}");
                             name = format!(
@@ -2459,8 +2476,6 @@ impl DaemonService {
                         return Err("INVALID_INPUT: Invalid authMode".into());
                     }
                     cfg["authMode"] = json!(auth);
-                    crate::plugins::validate_nats_url(string(&cfg, "url"))
-                        .map_err(|error| format!("INVALID_INPUT: {error}"))?;
                     if auth == "token"
                         && cfg["token"]
                             .as_str()
@@ -2568,7 +2583,31 @@ impl DaemonService {
             }
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
             "paste_hub_invite" => {
-                return self.action(&parse_hub_invite(string(action, "invite"))?);
+                let mut invite = parse_hub_invite(string(action, "invite"))?;
+                let raw = self.raw_config()?;
+                let base = normalize_slug(string(&invite, "name"));
+                if !string(&invite, "name").is_empty() {
+                    let mut name = base.clone();
+                    let mut suffix = 2;
+                    while name == "local"
+                        || raw["hubs"]
+                            .get(&name)
+                            .is_some_and(|hub| hub["url"] != invite["url"])
+                    {
+                        let ending = format!("-{suffix}");
+                        name = format!(
+                            "{}{}",
+                            base.chars()
+                                .take(32 - ending.len())
+                                .collect::<String>()
+                                .trim_end_matches('-'),
+                            ending
+                        );
+                        suffix += 1;
+                    }
+                    invite["name"] = json!(name);
+                }
+                return self.action(&invite);
             }
             "generate_hub_invite" => {
                 let mut invite = self.slot(&hub)?.config.clone();
@@ -2929,7 +2968,12 @@ impl DaemonService {
                 })?;
             }
             "setup_disconnect_all" => {
-                for row in self.state.active()? {
+                for row in self
+                    .state
+                    .active()?
+                    .into_iter()
+                    .filter(|row| action["purge_data"] == true || row["harness"] != "human")
+                {
                     self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
                 }
                 for p in self.plugins.agent_plugins() {
@@ -3128,11 +3172,14 @@ fn host_hub_auth_mode(host: &Value) -> &str {
 }
 
 fn tailscale_host_from_status(status: &Value) -> Option<String> {
-    if status["BackendState"] != "Running" {
+    if status["BackendState"] != "Running" || status["Self"]["Online"] == Value::Bool(false) {
         return None;
     }
     let dns = string(&status["Self"], "DNSName").trim_end_matches('.');
-    if !dns.is_empty() {
+    if !dns.is_empty()
+        && !dns.ends_with(".local")
+        && status["CurrentTailnet"]["MagicDNSEnabled"] != Value::Bool(false)
+    {
         return Some(dns.to_owned());
     }
     status["Self"]["TailscaleIPs"]
@@ -3244,6 +3291,13 @@ fn advertised_hub_host(bind: &str) -> String {
     if let Some(host) = tailscale_advertised_host() {
         return host;
     }
+    lan_advertised_host(bind)
+}
+
+fn lan_advertised_host(bind: &str) -> String {
+    if !matches!(bind, "" | "0.0.0.0" | "::") {
+        return bind.into();
+    }
     // A UDP connect selects the default route's source IPv4 without sending traffic.
     let routed_ip = UdpSocket::bind("0.0.0.0:0")
         .ok()
@@ -3259,7 +3313,9 @@ fn advertised_hub_host(bind: &str) -> String {
     if !hostname.is_empty()
         && (hostname.as_str(), 0)
             .to_socket_addrs()
-            .is_ok_and(|mut addresses| addresses.next().is_some())
+            .is_ok_and(|mut addresses| {
+                addresses.any(|addr| !addr.ip().is_loopback() && !addr.ip().is_unspecified())
+            })
     {
         return hostname;
     }
@@ -3483,15 +3539,26 @@ fn http_client_pid(stream: &TcpStream) -> Option<u32> {
     }
 }
 fn hub_name_from_url(raw: &str) -> String {
-    let candidate = url::Url::parse(raw)
+    let candidate = url::Url::parse(raw.trim())
         .ok()
         .and_then(|url| match url.host()? {
             url::Host::Domain(host) => host
                 .split('.')
-                .next()
-                .filter(|label| !label.chars().all(|c| c.is_ascii_digit()))
+                .find(|label| label.chars().any(|c| c.is_ascii_alphanumeric()))
                 .map(str::to_owned),
-            url::Host::Ipv4(ip) => Some(ip.to_string().replace('.', "-")),
+            url::Host::Ipv4(ip) => {
+                let octets = ip.octets();
+                Some(
+                    if ip.is_private() {
+                        "lan"
+                    } else if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                        "tailscale"
+                    } else {
+                        "remote"
+                    }
+                    .into(),
+                )
+            }
             _ => None,
         })
         .unwrap_or_else(|| "remote".into());
@@ -4955,14 +5022,29 @@ mod tests {
                     ("", "https://node.example.com", "node"),
                     ("", "https://node.other.example.com", "node-2"),
                     ("", "https://local.example.com", "local-2"),
-                    ("", "http://192.0.2.8:4291", "192-0-2-8"),
-                    ("", "http://[::1]:4291", "remote"),
+                    ("", "http://192.0.2.8:4291", "remote"),
+                    ("", "http://[::1]:4291", "remote-2"),
+                    ("", "http://192.168.1.2:4291", "lan"),
+                    ("", "http://10.1.2.3:4291", "lan-2"),
+                    ("", "http://172.16.0.2:4291", "lan-3"),
+                    ("", "http://100.64.0.2:4291", "tailscale"),
                 ] {
                     service.action(
                         &json!({"op":"setup_save_hub","name":requested,"url":url,"enabled":false}),
                     )?;
                     assert_eq!(service.raw_config()?["hubs"][expected]["url"], url);
                 }
+                service.mutate_config(|v| {
+                    v["host_hub"] = json!({"bind":"::1","enabled":false});
+                    Ok(())
+                })?;
+                let settings = service.settings();
+                assert_eq!(settings["host_hub"]["endpoint_url"], "http://[::1]:4291");
+                assert_eq!(settings["host_hub"]["lan_url"], "http://[::1]:4291");
+                assert!(settings["host_hub"]["lan_invite_command"]
+                    .as_str()
+                    .unwrap()
+                    .contains("--url http://[::1]:4291"));
                 service.action(
                     &json!({"op":"setup_save_hub","name":"user","url":"local://","enabled":false}),
                 )?;
@@ -5089,6 +5171,30 @@ mod tests {
             ),
         ] {
             assert_eq!(tailscale_host_from_status(&status).as_deref(), expected);
+            if status["BackendState"] == "Running" {
+                let mut offline = status.clone();
+                offline["Self"]["Online"] = json!(false);
+                assert_eq!(tailscale_host_from_status(&offline), None);
+                for magic in [false, true] {
+                    let mut candidate = status.clone();
+                    candidate["CurrentTailnet"] = json!({"MagicDNSEnabled":magic});
+                    candidate["Self"]["DNSName"] = json!("studio.local.");
+                    candidate["Self"]["TailscaleIPs"] = json!(["100.64.0.9"]);
+                    assert_eq!(
+                        tailscale_host_from_status(&candidate).as_deref(),
+                        Some("100.64.0.9")
+                    );
+                    candidate["Self"]["DNSName"] = json!("studio.tailnet.ts.net.");
+                    assert_eq!(
+                        tailscale_host_from_status(&candidate).as_deref(),
+                        Some(if magic {
+                            "studio.tailnet.ts.net"
+                        } else {
+                            "100.64.0.9"
+                        })
+                    );
+                }
+            }
         }
         assert_eq!(advertised_hub_host("127.0.0.1"), "127.0.0.1");
         let dir = std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4()));
