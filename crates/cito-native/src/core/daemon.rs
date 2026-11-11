@@ -2405,17 +2405,6 @@ impl DaemonService {
                 invite["name"] = json!(hub);
                 return Ok(json!({"ok":true,"invite":invite}));
             }
-            _ if channel_action_kind(action) == Some(ChannelActionKind::Mutation) => {
-                channel_id(action)?;
-                self.active_settings_hub = Some(hub.clone());
-                let result = (|| {
-                    let slot = self.slot(&hub)?.clone();
-                    self.channel_inventory(&slot)
-                        .mutate(&slot, &self.plugins, action)
-                })();
-                self.finish_channel_action(&hub, action, &result);
-                return result;
-            }
             "send_signal" | "send_reply_from_human" => {
                 let meta = json!({"expected_harness":"human","expected_session_id":"default"});
                 let mut send_args = action.clone();
@@ -2796,21 +2785,6 @@ impl DaemonService {
                 request_shutdown();
             }
             "quit" | "quit_daemon" => request_shutdown(),
-            _ if channel_action_kind(action) == Some(ChannelActionKind::Read) => {
-                self.active_settings_hub = Some(hub.clone());
-                if let Ok(slot) = self.slot(&hub).cloned() {
-                    let inventory = self.channel_inventory(&slot);
-                    let observed_gen = inventory
-                        .cached
-                        .lock()
-                        .map_err(|e| e.to_string())?
-                        .completed_gen;
-                    inventory.refresh(&slot, observed_gen)?;
-                }
-                self.emit(
-                    json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
-                );
-            }
             "refresh_available" => {
                 if let Some(activity) = self.session_activity.as_mut() {
                     activity.refresh_discovery();
