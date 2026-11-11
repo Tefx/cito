@@ -1420,5 +1420,73 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
   - Keep `M1`–`M3` UI layout, bar reflow, single-Mac `local` header/footer, monochrome status button, and `inspectMenu()` checks inside the existing headless UI test pass in `ui.rs` (and only write PNG files to disk when `CITO_TEST_SNAPSHOT_DIR` is set or updating the 7 `site/assets/screenshots/*.png` assets).
   - Verify `M4`–`M5` backend state transitions (`reconcile_registration_state`, `human_paused` gating `replay()`, `hub_channel_deliveries` exponential backoff & `failed_permanent`, and URL-scoped `dedup`) with fast, deterministic unit/in-memory tests (zero multi-second `sleep` calls).
 
+---
+
+## 16. Stage 14 (`v0.21.3`) Unified Spatial Grid (`CitoMetrics`), Real App Icons (`icon.png`), and `Hubs & Network` Tab Redesign (`N1`–`N3`)
+
+### 16.1 Binding Contract (`MUST`)
+
+#### 1. `N1` — Unified Spatial Grid (`CitoMetrics`), Card Padding Symmetry & Mechanical `inspectMenu()` Padding Gate (`src/macos/cito-ui.swift`)
+- **Basis**: Eliminate inconsistent outer keylines (`10pt` vs `12pt` in `cardMenu`, `4pt` vs `6pt` tab gaps and `x = 486` close button in `settings_header`) and zero/near-zero vertical card padding (`0pt` top padding on `toggle_host_hub`, `2pt` top padding on `host_hub_card` title, `3pt` top padding on `settings_hub:<name>` buttons, `5pt` top padding on `chCard` title, `0pt` error-to-button gap in `add_hub_form`).
+- **Spatial Token Grid (`CitoMetrics`) & Outer Keyline Alignment**:
+  - **Menu (`cardMenu`, `width: 380pt`)**: All rows (`header`, `human_paused_card`, `session:<id>`, `empty`, section headers, `directory_row`, `footer`) MUST share a uniform **`12pt` outer horizontal keyline (`x = 12..368`, `width = 356pt`)**. Increase `human_paused_card` from `46pt` (in a `52pt` row) to **`50pt`** (in a `56pt` row) with `title` at `y = 26, height = 16` (`8pt` top padding), `subtitle` at `y = 8, height = 14` (`8pt` bottom padding), and `Resume` at `y = 14, height = 22` (`14pt` top/bottom padding).
+  - **Settings (`settingsPanel`, `width: 520pt`)**:
+    - In `settings_header`, lay out the three tab pills with uniform `6pt` horizontal spacing (`hubsTab` at `x = 336`) and align `closeBtn` (`24 × 24`) to `x = 476` (`maxX = 500`, flush with the `x = 20..500` card rail below).
+    - Standardize inner horizontal padding across all bordered Settings cards (`settings_app:<id>`, `bannerCard`, `chCard`, `host_hub_card`, `settings_hub:<name>`, `add_hub_form`, `uninstall_confirm_box`) so every visible child satisfies `minX >= 8pt` and `maxX <= card.width - 8pt` (with standard `12..14pt` inset).
+- **Card Vertical Padding Symmetry Across All Tabs**:
+  - **`Settings -> Hubs & Network -> host_hub_card` (`width: 480pt`, `height: 56pt` collapsed / `136pt` expanded, `y = hostExpanded ? 220 : 300`)**:
+    - Anchor the top header band relative to `H = hostCard.bounds.height` so collapsed and expanded states share identical top padding without post-hoc `-68` coordinate shifting:
+      - `title` (`"Share Hub on Local Network"`, `13pt .semibold`): `NSRect(x: 14, y: H - 27, width: 350, height: 18)` (`9pt` top inset).
+      - `subtitle` / `host_hub_error` (`11pt .regular`, `height: 15`): `NSRect(x: 14, y: H - 46, width: 350, height: 15)` (`10pt` bottom inset when collapsed at `H = 56`). When `hostHubPortError ?? hostHub.error` is non-empty, render `host_hub_error` in this subtitle slot in `CitoPalette.dangerText` (preventing any overlap with expanded rows).
+      - `toggle_host_hub` (`width: 80, height: 24`): placed via `layoutBar(in: hostCard, insetLeft: 14, insetRight: 14, y: H - 40, height: 24, trailing: [toggleHostBtn])` (**`16pt` top inset** in both collapsed `H = 56` and expanded `H = 136` states).
+    - When `hostExpanded == true` (`H = 136`):
+      - Row 1 (Endpoint & Invite bar): `layoutBar(in: hostCard, insetLeft: 14, insetRight: 14, y: 48, height: 24, flexible: endpointLabel, trailing: (showToken ? [tokenBtn] : []) + [copyInviteBtn])`.
+      - Row 2 (Port & Access bar): `layoutBar(in: hostCard, insetLeft: 14, insetRight: 14, y: 12, height: 24, leading: [portLabel, portField, applyBtn], trailing: [authBtn])` (`12pt` bottom inset).
+  - **`Settings -> Hubs & Network -> settings_hub:<name>` Rows**:
+    - Increase base 2-line `rowHeight` from `48pt` to **`56pt`** (`max(56, subtitleHeight + 42)` so wrapped subtitles at `y = 9..9+subtitleHeight` always keep `>= 2pt` separation below the top bar at `y = rowHeight - 31`):
+      - Status dot (`8 × 8 pt`) at `NSRect(x: 14, y: rowHeight - 24, width: 8, height: 8)`.
+      - Top bar (`nameLabel` + trailing action buttons, `height: 22`) via `layoutBar(in: row, insetLeft: 28, insetRight: 12, y: rowHeight - 31, height: 22, flexible: nameLabel, trailing: signIn + [edit, toggleBtn] + remove)` (**`9pt` top inset**).
+      - `subtitleLabel` at `NSRect(x: 28, y: 9, width: subtitleWidth, height: subtitleHeight)` (**`9pt` bottom inset**).
+  - **`Settings -> Hubs & Network -> add_hub_form`**:
+    - Set `height = 156pt` for `local` username edit and `height = 204pt` for remote Hub add/edit (`12pt` top inset for Row 1 labels, `10pt` bottom inset for action buttons at `y = 10, height = 24`, and `add_hub_error` at `y = 38, height = 15` so error text never touches buttons or inputs).
+  - **`Settings -> Human Channels` (`bannerCard`, `TARGET HUB:`, `chCard` Header & Strata)**:
+    - Give `bannerCard` `height = 54pt` at `y = 304` (`title` at `y = 29, height = 17` with `8pt` top inset; `subtitle` at `y = 9, height = 15` with `9pt` bottom inset; `toggleBanner` at `y = 15, height = 24` with `15pt` top/bottom inset).
+    - When `channelHubs.count > 1`, place `TARGET HUB:` strip at `y = 270, height = 26` (`8pt` below `bannerCard`) and start `chCursorY = 262` (`8pt` below strip; `296` when `channelHubs.count == 1`).
+    - Increase `chCard` header band from `42pt` to **`48pt`** (`chBadge` `24 × 24` at `y = cardHeight - 34`; `chTitle` + `chStatusLabel` via `layoutBar` at `y = cardHeight - 26, height = 16` with **`10pt` top inset**; `chDetail` at `y = cardHeight - 42, height = 14` with `6pt` gap above `hubStratum`). Maintain `>= 8pt` top/bottom padding inside `hubStratum` and `userStratum` while keeping total `chCard` height `<= 254pt` in the default 2-hub / 1-channel state so `settings_channels_tab` remains scroll-free in the `368pt` viewport.
+- **Mechanical `inspectMenu()` Card Inner-Padding Oracle**:
+  - In `inspectMenu()`, for every visible bordered card/stratum container (`view is SurfaceView && (view.layer?.borderWidth ?? 0) > 0 && view.frame.width >= 60 && view.frame.height >= 32`, excluding `34 × 34` icon badges):
+    - Verify that every visible child (`!child.isHidden && !(child is NSVisualEffectView)`) has **`minY >= 5.5` and `maxY <= parentBounds.height - 5.5` and `minX >= 5.5` and `maxX <= parentBounds.width - 5.5`**.
+    - Append `"\(name(view)) > \(name(child)): card padding < 6pt"` to `clipped_views` on any violation, and add `"card_padding"` to `test_oracle_calibration`.
+
+#### 2. `N2` — Real Bundled Brand Icons (`plugins/{codex,pi,claude,telegram}/icon.png`) with Vendor-Neutral Core Fallback (`plugins/*/icon.png`, `src/macos/cito-ui.swift`)
+- **Basis**: Replace generic tinted SF Symbol placeholders for built-in Agent Apps (`codex`, `pi`, `claude`) and Human Channels (`telegram`) with crisp `128 × 128` RGBA brand icons while keeping Core (`crates/cito-native/src/core/` and `cito-ui.swift`) vendor-neutral.
+- **Plugin-Scoped Icon Assets & Resolution (`pluginIconImage(for id: String) -> NSImage?`)**:
+  - Ship `plugins/codex/icon.png`, `plugins/pi/icon.png`, `plugins/claude/icon.png`, and `plugins/telegram/icon.png` in their respective plugin directories (staged automatically by `setup.rs` and `packaging/release.py`).
+  - In `cito-ui.swift`, resolve `<id>/icon.png` across `CITO_PLUGIN_PATH`, `${CITO_STATE_DIR}/plugins/<id>/icon.png`, `${CITO_STATE_DIR}/runtime/plugins/<id>/icon.png`, `CITO_BUILTIN_PLUGINS_DIR/<id>/icon.png`, and bundle-relative `../Resources/plugins/<id>/icon.png` / `../../plugins/<id>/icon.png`, caching the loaded `NSImage` by plugin `id`.
+  - In `makeHarnessBadge`, `DirectoryPeerCellView` (`configure` & `configureActivity`), and `settings_channel:<id>` `chBadge`:
+    - When `pluginIconImage(for: id)` returns an `NSImage`, render it full-bleed (`icon.frame = badge.bounds`, `imageScaling = .scaleProportionallyUpOrDown`, `contentTintColor = nil`) inside the continuous rounded-rect `badge` (`fillColor = .clear`, `strokeColor = .labelColor.withAppearanceAlpha(0.14)`, `cornerRadius = radius`, `masksToBounds = true`).
+    - When no `icon.png` exists (`human` or custom third-party plugins), retain the tinted `SurfaceView` and white SF Symbol fallback.
+
+#### 3. `N3` — `Hubs & Network` Tab Cohesive Invite Workflow, Tailscale MagicDNS Priority & Frictionless Hub Name Normalization (`crates/cito-native/src/core/daemon.rs`, `src/macos/cito-ui.swift`)
+- **Basis**: Make cross-Mac Hub sharing and joining self-explanatory, prefer stable Tailscale MagicDNS hostnames over ephemeral LAN DHCP IPs, and remove the arbitrary lowercase-only `HUB NAME` rejection.
+- **Unified `Invite Code` Terminology & Actionable Inline Guidance**:
+  - Rename `copy_hub_invite` button text to **`"Copy Invite Code"`** (copied feedback: `"✓ Invite Copied"`) and `paste_hub_invite` button text to **`"Paste Invite Code"`** (pasted feedback: `"✓ Joined"`).
+  - When `host_hub_card` is expanded (`hostHub.enabled == true` and no error is active), display actionable subtitle text: **`"On another Mac, click Paste Invite Code below (or run in Terminal) to connect."`**
+- **Tailscale MagicDNS / IPv4 Priority in `advertised_hub_host(bind: &str)` (`crates/cito-native/src/core/daemon.rs:3058`)**:
+  - When `bind` is wildcard/empty (`"" | "0.0.0.0" | "::"`):
+    1. Check `CITO_TAILSCALE_HOST` (for deterministic tests) or query Tailscale (`tailscale status --json` via `/opt/homebrew/bin/tailscale`, `/usr/local/bin/tailscale`, `/Applications/Tailscale.app/Contents/MacOS/Tailscale`, or `PATH` when `CITO_UI_HEADLESS != "1"` and `CITO_DISABLE_TAILSCALE_PROBE != "1"`, cached with a 30s TTL so `snapshot()` never blocks on repeated subprocess spawns): if `BackendState == "Running"`, return `Self.DNSName` trimmed of trailing `.` (e.g., `mac-studio.tailnet.ts.net`), or the first IPv4 in `Self.TailscaleIPs` if `DNSName` is empty.
+    2. Fall back to the existing UDP default-route LAN IPv4 probe (`192.0.2.1:9`), then resolvable `local_host_name()`, then `"127.0.0.1"`.
+- **Frictionless `HUB NAME (OPTIONAL)` Normalization & Auto-Derivation (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`)**:
+  - In `add_hub_form` (for remote Hubs), label the field **`"HUB NAME (OPTIONAL)"`** with placeholder **`"Auto-filled from URL"`**.
+  - On submit in `cito-ui.swift` and in `DaemonService::setup_save_hub` (`daemon.rs:2324`):
+    - If `name` is empty, derive it automatically from the URL host (taking the first hostname label before `.` when non-numeric, or replacing `.` with `-` for IPv4 literals, fallback `"remote"`), and if creating a new Hub (`original_hub` is empty) whose derived name is `"local"` or already belongs to an existing Hub with a different URL, disambiguate with a numeric suffix (`<name>-2`, `<name>-3`, matching `parse_hub_invite`).
+    - Normalize any explicitly provided `name` via `normalize_slug` (lowercasing ASCII letters and collapsing spaces/punctuation into `-`, trimmed to 32 chars) before calling `validate_hub_name`, so mixed-case or spaced names like `"Office Mac"` or `"Work"` succeed seamlessly as `"office-mac"` / `"work"` (while still rejecting an empty post-normalization slug such as `"!!!"` or a new Hub explicitly named `"local"`).
+
+### 16.2 Verification & Anti-Over-Testing Policy (`MUST`)
+
+- Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place (including `"Copy Invite Code"`, `"Paste Invite Code"`, `"HUB NAME (OPTIONAL)"`, and `"card_padding"` in `test_oracle_calibration`); do **NOT** add new multi-process/daemon E2E test functions.
+- Regenerate the 7 canonical website screenshots in `site/assets/screenshots/*.png` so they showcase the unified card spacing, real app icons (`Codex`, `Pi Coding Agent`, `Claude Code`, `Telegram`), and redesigned `Hubs & Network` tab.
+
+
 
 
