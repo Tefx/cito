@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {createConnection} from 'node:net';
 import {createServer} from 'node:http';
-import {mkdirSync, writeFileSync, existsSync, statSync, unlinkSync} from 'node:fs';
+import {mkdirSync, writeFileSync, readFileSync, existsSync, statSync, unlinkSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
 import bridge from '../../../../plugins/pi/cito-bridge.ts';
@@ -18,7 +18,11 @@ function request(value,fragment=false){return new Promise((resolve,reject)=>{con
 const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;calls.push(JSON.parse(body));res.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'alice-agent',scope:'self'})}]}}));});
 try {
  mkdirSync(join(state,'sockets'),{recursive:true});execFileSync('python3',['-c','import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()',path]);
- bridge(api);
+ let repairTick;
+ const interval=globalThis.setInterval;
+ globalThis.setInterval=(callback,delay,...args)=>delay===2000
+  ? (repairTick=()=>callback(...args),{unref(){return this;}}) : interval(callback,delay,...args);
+ try { bridge(api); } finally { globalThis.setInterval=interval; }
  // Startup must recover an F58 stale socket, even before session_start.
  for(let i=0;i<100;i++){try{if((await request({op:'ping'})).ok)break;}catch{}await new Promise(r=>setTimeout(r,10));}
  const fallback=await request({op:'identify'});assert.equal(fallback.ok,true);assert.equal(fallback.session_id,`pid-${process.pid}`);assert.equal(fallback.cwd,process.cwd());
@@ -59,12 +63,18 @@ try {
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
  // U2: recover an unlinked socket only while the package remains configured.
  const home=join(process.env.HOME,'.pi','agent');mkdirSync(home,{recursive:true});
- writeFileSync(join(home,'settings.json'),JSON.stringify({packages:[join(state,'plugins','pi')]}));
- unlinkSync(path);
- for(let i=0;i<80&&!existsSync(path);i++)await new Promise(r=>setTimeout(r,50));
- assert.equal((await request({op:'identify'})).session_id,session);
- writeFileSync(join(home,'settings.json'),JSON.stringify({packages:[]}));unlinkSync(path);
- await new Promise(r=>setTimeout(r,2200));assert.equal(existsSync(path),false);
+ const custom=join(process.env.HOME,'custom-pi');mkdirSync(custom,{recursive:true});
+ writeFileSync(join(custom,'cito-bridge.ts'),readFileSync(new URL('../../../../plugins/pi/cito-bridge.ts',import.meta.url)));
+ for(const entry of [join(state,'runtime','plugins','pi'),join(state,'plugins','pi'),'~/custom-pi']) {
+  writeFileSync(join(home,'settings.json'),JSON.stringify({packages:[entry]}));unlinkSync(path);repairTick();
+  for(let i=0;i<100&&!existsSync(path);i++)await new Promise(r=>setTimeout(r,10));
+  assert.equal((await request({op:'identify'})).session_id,session,entry);
+ }
+ for(const packages of [[],[join(process.env.HOME,'unrelated-package')]]) {
+  writeFileSync(join(home,'settings.json'),JSON.stringify({packages}));
+  if(existsSync(path))unlinkSync(path);
+  repairTick();await new Promise(r=>setImmediate(r));assert.equal(existsSync(path),false);
+ }
 } finally {await handlers.get('session_shutdown')?.({},context);server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}
 assert.equal(existsSync(path),false);
 const broken=new Map();bridge({...api,on:(n,f)=>broken.set(n,f),registerMcpServer:()=>{throw Error('Registry failed')}});await assert.rejects(()=>broken.get('session_start')({},context),/Registry failed/);await broken.get('session_shutdown')({},context);

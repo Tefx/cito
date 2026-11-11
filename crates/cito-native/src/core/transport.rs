@@ -12,6 +12,14 @@ use std::time::{Duration, Instant};
 #[path = "transport_tests.rs"]
 mod tests;
 
+fn hub_error(code: &str, message: &str) -> String {
+    if message.starts_with(&format!("{code}:")) {
+        message.into()
+    } else {
+        format!("{code}: {message}")
+    }
+}
+
 struct InterruptibleStream<'a> {
     socket: std::net::TcpStream,
     client: &'a HubClient,
@@ -163,11 +171,11 @@ impl HubClient {
                 } else {
                     "INVALID_INPUT"
                 });
-                return Err(format!(
-                    "{code}: {}",
+                return Err(hub_error(
+                    code,
                     body["error"]["message"]
                         .as_str()
-                        .unwrap_or("Hub rejected request")
+                        .unwrap_or("Hub rejected request"),
                 ));
             }
             Err(error) => {
@@ -250,7 +258,7 @@ impl HubClient {
                     }
                     .into();
                 }
-                return Err(format!("{code}: {}", string(&response["error"], "message")));
+                return Err(hub_error(code, string(&response["error"], "message")));
             }
             if let Ok(mut status) = self.status.lock() {
                 *status = "connected".into();

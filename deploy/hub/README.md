@@ -19,7 +19,7 @@ CITO_OIDC_ADMIN_USERS=alice \
 Flags also accept `--key=value`. Their environment equivalents are `CITO_HUB_PORT`, `CITO_HUB_BIND`, `CITO_AUTH_MODE`, `CITO_HUB_TOKEN`, `CITO_OIDC_ISSUER`, `CITO_OIDC_CLIENT_ID`, and `CITO_HUB_DATA_DIR`. Blank environment variables count as unset; explicitly empty CLI values are rejected. The default data directory is `~/.cito/hub`. `SIGTERM` and `SIGINT` gracefully stop the HTTP listener, close SSE connections, and terminate managed channel subprocesses.
 
 ### HTTP & Security Contract
-- **`GET /health`**: Unauthenticated health probe returning `{ "ok": true, "pid": <u32>, "version": "0.20.3", "auth_mode": "none" | "token" | "oidc" }`.
+- **`GET /health`**: Unauthenticated health probe returning `{ "ok": true, "pid": <u32>, "version": "0.21.0", "auth_mode": "none" | "token" | "oidc" }`.
 - **`POST /v1/rpc`**: JSON RPC endpoint accepting `{ "op": "...", ...params }` (or `{ "op": "...", "params": {...} }`).
 - **`GET /v1/events`**: Server-Sent Events stream delivering real-time `kv`, `signal`, and `nc` (`node_ack`) frames.
 - **OIDC Verification & Row-Level Security (`RLS`)**:
@@ -52,4 +52,4 @@ Hub-scoped channel plugins run as persistent subprocesses over the `human-channe
 
 1. **Server Bot Token**: Set `CITO_PLUGIN_TELEGRAM_BOT_TOKEN='<bot-token>'` on the Hub server (forwarded automatically by `deploy/hub/docker-compose.yml`), or configure it from `Settings…` (`⌘,`) → `Human Channels` as a user listed in `CITO_OIDC_ADMIN_USERS`. Channel list responses never expose raw Hub secrets.
 2. **User Pairing**: Each user selects the target Hub in `Settings…` (`⌘,`) → `Human Channels`, clicks **`Pair Account…`**, and sends the displayed 10-character Base32 `/start cito-a1b2c3d4e5` command to the bot in a private Telegram chat.
-3. **Bidirectional Delivery & Replies**: Outgoing notifications are reserved before delivery, chunked automatically if longer than 4,096 characters, and mapped so users can swipe-to-reply (or send a plain reply within 10 minutes) to route messages back to the originating agent session while synchronizing read state across all attached devices.
+3. **Bidirectional Delivery & Replies**: Outgoing notifications are reserved before delivery, chunked automatically if longer than 4,096 characters, and mapped so users can swipe-to-reply (or send a plain reply within 7 days) to route messages back to the originating agent session while synchronizing read state across all attached devices.

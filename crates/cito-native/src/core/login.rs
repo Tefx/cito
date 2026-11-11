@@ -626,7 +626,7 @@ fn recover_inner(
                 .as_str()
                 .is_some_and(|sub| previous == format!("{}#{sub}", settings.issuer))
     });
-    let refresh = body["refresh_token"].as_str().or_else(|| {
+    let refresh = body["refresh_token"].as_str().or({
         if is_refresh && same_principal {
             old_refresh
         } else {

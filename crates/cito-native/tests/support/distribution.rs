@@ -193,37 +193,34 @@ fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
         .contains(".tmp.")));
 }
 #[test]
-fn distribution_versions_native_manifests_formula_and_signed_ui() {
+fn distribution_versions_native_manifests_cask_and_signed_ui() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let r = root();
-    let formula = r.join("packaging/homebrew/cito.rb");
+    let producer = r.join("packaging/release.py");
+    let producer = producer.to_str().unwrap();
+    let (ok, out, err) = f.command("python3", &[producer, "check"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(out.trim(), env!("CARGO_PKG_VERSION"));
+    let cask = f.dir.join("cito.rb");
+    let checksum = "a".repeat(64);
+    let (ok, out, err) = f.command(
+        "python3",
+        &[
+            producer,
+            "render-cask",
+            "--sha256",
+            &checksum,
+            "--output",
+            cask.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
     assert!(
-        f.command("/usr/bin/ruby", &["-c", formula.to_str().unwrap()], "")
+        f.command("/usr/bin/ruby", &["-c", cask.to_str().unwrap()], "")
             .0
     );
-    let text = fs::read_to_string(formula).unwrap();
-    assert!(text.contains("version \"0.20.3\""));
-    assert!(text.contains("v0.20.3"));
-    assert!(!text.contains("depends_on \"node\""));
-    assert!(
-        text.contains("(prefix/\"Cito.app\").install \"Contents\""),
-        "Formula must handle Homebrew's single-top-level-directory stripping when unpacking Cito.app"
-    );
-    for path in [
-        ".agents/plugins/marketplace.json",
-        "plugins/codex/.codex-plugin/plugin.json",
-        "plugins/claude/.claude-plugin/plugin.json",
-        "plugins/pi/package.json",
-        "plugins/pi/plugin.json",
-        "plugins/codex/plugin.json",
-        "plugins/claude/plugin.json",
-        "plugins/human/plugin.json",
-        "plugins/telegram/plugin.json",
-    ] {
-        let v: Value = serde_json::from_str(&fs::read_to_string(r.join(path)).unwrap()).unwrap();
-        assert_eq!(v["version"], "0.20.3", "{path}");
-    }
     let v: Value =
         serde_json::from_str(&fs::read_to_string(r.join("plugins/pi/package.json")).unwrap())
             .unwrap();
@@ -275,7 +272,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     for path in [app.join("Contents/MacOS/Cito"), f.state.join("bin/cito")] {
         let (ok, out, err) = f.command(path.to_str().unwrap(), &["--version"], "");
         assert!(ok, "{err}");
-        assert_eq!(out, "cito v0.20.3\n");
+        assert_eq!(out, format!("cito v{}\n", env!("CARGO_PKG_VERSION")));
     }
     assert!(
         f.command(
@@ -289,21 +286,23 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
         fs::read(app.join("Contents/Resources/AppIcon.icns")).unwrap(),
         fs::read(root().join("bin/AppIcon.icns")).unwrap()
     );
-    let (ok, out, err) = f.command(
-        f.state
-            .join("plugins/claude/bin/cito-claude-hook")
-            .to_str()
-            .unwrap(),
-        &[],
-        "{\"hook_event_name\":\"Stop\"}\n",
+    let settings: Value =
+        serde_json::from_slice(&fs::read(f.home.join(".claude/settings.json")).unwrap()).unwrap();
+    let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(command),
+        f.state.join("runtime/plugins/claude/bin/cito-claude-hook")
     );
+    let (ok, out, err) = f.command(command, &[], "{\"hook_event_name\":\"Stop\"}\n");
     assert!(ok, "{err}");
     assert_eq!(out, "{}\n");
 }
 #[test]
 fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
     let _lock = serial();
-    let _f = Fixture::new(json!({}));
+    let f = Fixture::new(json!({}));
     let site = root().join("site");
     for page in [
         "index.html",
@@ -314,7 +313,10 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         let file = site.join(page);
         let html = fs::read_to_string(&file).unwrap();
         assert!(
-            html.contains("name=\"application-version\" content=\"0.20.3\""),
+            html.contains(&format!(
+                "name=\"application-version\" content=\"{}\"",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{page}"
         );
         for attr in ["href=\"", "src=\""] {
@@ -342,6 +344,13 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
     for (path, width, height) in [
         ("apple-touch-icon.png", 180, 180),
         ("assets/og-card.png", 1200, 630),
+        ("assets/screenshots/menu-dark.png", 760, 668),
+        ("assets/screenshots/directory-dark.png", 1120, 880),
+        ("assets/screenshots/activity-dark.png", 1120, 880),
+        ("assets/screenshots/settings-apps-dark.png", 1040, 920),
+        ("assets/screenshots/settings-channels-dark.png", 1040, 920),
+        ("assets/screenshots/settings-hubs-dark.png", 1040, 920),
+        ("assets/screenshots/banner-dark.png", 776, 272),
     ] {
         let bytes = fs::read(site.join(path)).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
@@ -350,6 +359,33 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
             u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
             height
         );
+        // Decode the pixel payload, not just the PNG metadata, through the native codec.
+        let decoded = f.dir.join("decoded.bmp");
+        let (ok, out, err) = f.command(
+            "/usr/bin/sips",
+            &[
+                "-s",
+                "format",
+                "bmp",
+                site.join(path).to_str().unwrap(),
+                "--out",
+                decoded.to_str().unwrap(),
+            ],
+            "",
+        );
+        assert!(ok, "{path}: {out}\n{err}");
+        let bitmap = fs::read(&decoded).unwrap();
+        assert_eq!(&bitmap[..2], b"BM", "{path}");
+        assert_eq!(
+            u32::from_le_bytes(bitmap[18..22].try_into().unwrap()),
+            width
+        );
+        assert_eq!(
+            i32::from_le_bytes(bitmap[22..26].try_into().unwrap()).unsigned_abs(),
+            height
+        );
+        assert!(bitmap.len() >= (width * height * 3) as usize, "{path}");
+        fs::remove_file(decoded).unwrap();
     }
     let css = fs::read_to_string(site.join("styles/main.css")).unwrap();
     for rule in [

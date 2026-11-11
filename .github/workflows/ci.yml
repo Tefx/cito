@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check and build arm64 candidate
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Check platform, toolchain, and release metadata
+        run: |
+          test "$(uname -m)" = arm64
+          rustc --version
+          cargo --version
+          python3 packaging/release.py check
+          python3 -m unittest discover -s packaging -p 'test_*.py' -v
+          /usr/bin/ruby -c packaging/homebrew/cito.rb
+          cargo fmt --all -- --check
+      - name: Lint, test, and build
+        run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked -- --test-threads=4
+          cargo build --release --locked
+      - name: Build and verify relocatable candidate
+        run: python3 packaging/release.py bundle build/candidate.zip
+      - name: Retain the exact source commit candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: cito-candidate-${{ github.sha }}
+          path: build/candidate.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -20,7 +20,9 @@ fn matches_process(command: &str) -> bool {
 fn paths(req: &Value) -> (PathBuf, PathBuf) {
     (
         config_home(req, "CITO_PI_HOME", "~/.pi/agent"),
-        state(req).join("plugins/pi"),
+        str_at(req, "plugin_dir")
+            .map(|s| expand(req, s))
+            .unwrap_or_else(|| state(req).join("runtime/plugins/pi")),
     )
 }
 fn setup(req: &Value) -> Result<Value> {
@@ -28,12 +30,21 @@ fn setup(req: &Value) -> Result<Value> {
     let settings = home.join("settings.json");
     let mcp_paths = [home.join("mcp.json"), home.join("mcp/global.mcp.json")];
     let legacy = home.join("extensions/cito-bridge.ts");
+    let legacy_package = state(req).join("plugins/pi");
+    let runtime_package = state(req).join("runtime/plugins/pi");
     let op = str_at(req, "op").unwrap_or("");
     if op == "setup_inspect" {
         let v = read_json(&settings)?;
+        // Host registration survives missing staged assets; setup owns integrity checks.
         let mut configured = v["packages"]
             .as_array()
-            .map(|a| a.iter().any(|x| x.as_str() == package.to_str()))
+            .map(|a| {
+                a.iter().any(|x| {
+                    x.as_str() == package.to_str()
+                        || (req.get("plugin_dir").is_none_or(Value::is_null)
+                            && x.as_str() == legacy_package.to_str())
+                })
+            })
             .unwrap_or(false)
             && !legacy.exists();
         for path in &mcp_paths {
@@ -57,6 +68,8 @@ fn setup(req: &Value) -> Result<Value> {
             x.as_str() != Some("npm:@tefx/cito")
                 && x.as_str() != Some("@tefx/cito")
                 && x.as_str() != package.to_str()
+                && x.as_str() != legacy_package.to_str()
+                && x.as_str() != runtime_package.to_str()
         });
         if !remove {
             packages.push(json!(package));
@@ -101,10 +114,40 @@ fn allow_process_only(req: &Value) -> bool {
     env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("1")
         && env_value(req, "CITO_PI_REQUIRE_BRIDGE").as_deref() != Some("1")
 }
+fn interactive_candidate(req: &Value, pid: u32) -> bool {
+    if req["op"] != "discover_sessions" {
+        return true;
+    }
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "tty=,command="])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut words = text.split_whitespace();
+    let Some(tty) = words.next() else {
+        return false;
+    };
+    if matches!(tty, "?" | "??")
+        && env_value(req, "CITO_PI_ALLOW_HEADLESS_DISCOVERY").as_deref() != Some("1")
+    {
+        return false;
+    }
+    let args: Vec<_> = words.collect();
+    !args.iter().any(|a| {
+        matches!(
+            *a,
+            "--print" | "-p" | "--no-session" | "--version" | "--help"
+        ) || matches!(*a, "--mode=rpc" | "--mode=json")
+    }) && !args
+        .windows(2)
+        .any(|w| w[0] == "--mode" && matches!(w[1], "rpc" | "json"))
+}
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
     if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0")
-        || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"]}))
+        || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"],"plugin_dir":req["plugin_dir"]}))
             .is_ok_and(|v| v["configured"] == true)
     {
         return;
@@ -124,7 +167,8 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
             let p = columns.next()?.parse().ok()?;
             (columns.next()?.parse::<u32>().ok()? == uid
                 && !out.iter().any(|(pid, _)| *pid == p)
-                && matches_process(&columns.collect::<Vec<_>>().join(" ")))
+                && matches_process(&columns.collect::<Vec<_>>().join(" "))
+                && interactive_candidate(req, p))
             .then_some(p)
         })
         .collect();
@@ -218,7 +262,8 @@ fn socket_candidates(req: &Value) -> Vec<(u32, Value)> {
                 .and_then(|s| s.parse::<u32>().ok())
             {
                 if let Ok(v) = identify(req, p) {
-                    if v["ok"] == true
+                    if interactive_candidate(req, p)
+                        && v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
                     {
@@ -249,12 +294,10 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
                     if v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
-                    {
-                        if v.get("pi_pid")
+                        && v.get("pi_pid")
                             .is_none_or(|id| id.as_u64() == Some(p as u64))
-                        {
-                            return (vec![(p, v)], true);
-                        }
+                    {
+                        return (vec![(p, v)], true);
                     }
                 }
                 let Some(parent) = process_parent(p) else {

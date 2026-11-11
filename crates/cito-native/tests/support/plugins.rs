@@ -68,6 +68,55 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(probe["status"], "alive", "{probe}");
     }
+    // Interactive discovery excludes background invocations, independently of caller resolution.
+    let flags: &[&[&str]] = &[
+        &["--mode", "rpc"],
+        &["--mode", "json"],
+        &["--print"],
+        &["-p"],
+        &["--no-session"],
+        &["--version"],
+        &["--help"],
+    ];
+    let mut background = Vec::new();
+    for flags in flags {
+        let mut args = vec![script.to_str().unwrap()];
+        args.extend_from_slice(flags);
+        let index = f.spawn("node", &args, &[]);
+        wait(|| f.output(index, false).contains("ready"));
+        background.push(index);
+    }
+    let interactive = discover(&f);
+    assert!(interactive["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| !background
+            .iter()
+            .any(|index| r["endpoint_pid"] == f.pid(*index))));
+    assert_eq!(
+        f.plugin(
+            PI,
+            json!({"op":"resolve_caller","endpoint_pid":f.pid(background[0]),"cwd":cwd})
+        )["ok"],
+        true
+    );
+    f.env.remove("CITO_PI_ALLOW_HEADLESS_DISCOVERY");
+    let no_tty = discover(&f);
+    assert!(no_tty["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["endpoint_pid"] != f.pid(first) && r["endpoint_pid"] != f.pid(second)));
+    assert_eq!(
+        f.plugin(
+            PI,
+            json!({"op":"resolve_caller","endpoint_pid":f.pid(first),"cwd":cwd})
+        )["ok"],
+        true
+    );
+    f.env
+        .insert("CITO_PI_ALLOW_HEADLESS_DISCOVERY".into(), "1".into());
     // Production readiness gating is distinct from the explicit process-only test mode.
     f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
     let gated = discover(&f);
@@ -96,6 +145,30 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(f.plugin(PI,json!({"op":"update_badge","endpoint_pid":p,"session_id":row["session_id"],"badge":null}))["ok"],true);
     }
+    let custom = f.dir.join("first/pi");
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_apply","plugin_dir":custom}))["ok"],
+        true
+    );
+    assert!(
+        discover(&f)["sessions"].as_array().unwrap().is_empty(),
+        "A different registered package must not match the default source"
+    );
+    let custom_discovery = f.plugin(PI, json!({"op":"discover_sessions","plugin_dir":custom}));
+    for pid in [f.pid(first), f.pid(second)] {
+        let row = custom_discovery["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["endpoint_pid"] == pid)
+            .unwrap();
+        assert_eq!(row["needs_reload"], true, "{custom_discovery}");
+    }
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_remove","plugin_dir":custom}))["ok"],
+        true
+    );
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
     f.env.remove("CITO_PI_REQUIRE_BRIDGE");
     // Socket-backed identities take precedence, including when resolving a process-only PID.
     let endpoint_script = f.dir.join("endpoint.cjs");
@@ -245,7 +318,8 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
     let pi = f.home.join(".pi/agent");
     fs::create_dir_all(pi.join("extensions")).unwrap();
     fs::create_dir_all(pi.join("mcp")).unwrap();
-    let before = json!({"theme":"dark","packages":["npm:@tefx/cito","npm:other"]});
+    let package = f.state.join("runtime/plugins/pi");
+    let before = json!({"theme":"dark","packages":["npm:@tefx/cito","npm:other",f.state.join("plugins/pi")]});
     fs::write(pi.join("settings.json"), before.to_string()).unwrap();
     fs::write(pi.join("extensions/cito-bridge.ts"), "legacy").unwrap();
     for p in ["mcp.json", "mcp/global.mcp.json"] {
@@ -263,10 +337,7 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
     assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
     let v: Value =
         serde_json::from_str(&fs::read_to_string(pi.join("settings.json")).unwrap()).unwrap();
-    assert_eq!(
-        v,
-        json!({"theme":"dark","packages":["npm:other",f.state.join("plugins/pi")]})
-    );
+    assert_eq!(v, json!({"theme":"dark","packages":["npm:other",package]}));
     assert!(!pi.join("extensions/cito-bridge.ts").exists());
     for p in ["mcp.json", "mcp/global.mcp.json"] {
         let v: Value = serde_json::from_str(&fs::read_to_string(pi.join(p)).unwrap()).unwrap();
@@ -289,6 +360,103 @@ fn pi_package_setup_preserves_unrelated_settings_and_removes_legacy_mcp() {
         serde_json::from_str(&fs::read_to_string(pi.join("settings.json")).unwrap()).unwrap();
     assert_eq!(v, json!({"theme":"dark","packages":["npm:other"]}));
 }
+#[test]
+fn setup_uses_selected_plugin_sources_and_rejects_stale_registrations() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let package = f.home.join("custom/pi");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), "{}").unwrap();
+    let settings = f.home.join(".pi/agent/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let legacy = f.state.join("plugins/pi");
+    let runtime = f.state.join("runtime/plugins/pi");
+    for old in [&legacy, &runtime] {
+        fs::write(&settings, json!({"packages":[old,"npm:other"]}).to_string()).unwrap();
+        assert_eq!(
+            f.plugin(PI, json!({"op":"setup_inspect"}))["configured"],
+            true
+        );
+        assert_eq!(
+            f.plugin(PI, json!({"op":"setup_inspect","plugin_dir":null}))["configured"],
+            true
+        );
+        assert_eq!(
+            f.plugin(PI, json!({"op":"setup_inspect","plugin_dir":"~/custom/pi"}))["configured"],
+            false
+        );
+    }
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_apply","plugin_dir":"~/custom/pi"}))["ok"],
+        true
+    );
+    let configured: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(configured["packages"], json!(["npm:other", package]));
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_inspect","plugin_dir":"~/custom/pi"}))["configured"],
+        true
+    );
+    fs::remove_file(package.join("package.json")).unwrap();
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_inspect","plugin_dir":"~/custom/pi"}))["configured"],
+        true,
+        "Missing staged assets must not erase host registration"
+    );
+    assert_eq!(
+        f.plugin(PI, json!({"op":"setup_remove","plugin_dir":"~/custom/pi"}))["ok"],
+        true
+    );
+    let configured: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+    assert_eq!(configured["packages"], json!(["npm:other"]));
+
+    let hook = f.home.join("custom/claude/bin/cito-claude-hook");
+    script(&hook, "#!/bin/sh\nexit 0\n");
+    assert_eq!(
+        f.plugin(
+            CLAUDE,
+            json!({"op":"setup_apply","plugin_dir":"~/custom/claude"})
+        )["ok"],
+        true
+    );
+    let inspect = || {
+        f.plugin(
+            CLAUDE,
+            json!({"op":"setup_inspect","plugin_dir":"~/custom/claude"}),
+        )["configured"]
+            .clone()
+    };
+    assert_eq!(inspect(), true);
+    let settings = f.home.join(".claude/settings.json");
+    let original: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    for event in ["Stop", "SessionStart", "UserPromptSubmit"] {
+        assert_eq!(
+            original["hooks"][event][0]["hooks"][0]["command"],
+            json!(hook)
+        );
+        let mut stale = original.clone();
+        stale["hooks"][event][0]["hooks"][0]["command"] =
+            json!(f.state.join("plugins/claude/bin/cito-claude-hook"));
+        fs::write(&settings, stale.to_string()).unwrap();
+        assert_eq!(inspect(), false, "{event} must reference the selected hook");
+    }
+    fs::write(&settings, original.to_string()).unwrap();
+    fs::remove_file(&hook).unwrap();
+    assert_eq!(
+        inspect(),
+        true,
+        "Missing staged assets must not erase host registration"
+    );
+    assert_eq!(
+        f.plugin(
+            CLAUDE,
+            json!({"op":"setup_remove","plugin_dir":"~/custom/claude"})
+        )["ok"],
+        true
+    );
+    let removed: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+    assert!(removed.get("hooks").is_none());
+}
+
 #[test]
 fn codex_multiline_toml_and_complete_subtree_removal() {
     let _lock = serial();
@@ -516,7 +684,7 @@ fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
     );
     assert!(v.to_string().contains(
         f.state
-            .join("plugins/claude/bin/cito-claude-hook")
+            .join("runtime/plugins/claude/bin/cito-claude-hook")
             .to_str()
             .unwrap()
     ));

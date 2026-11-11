@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
@@ -30,6 +31,13 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
             "App override",
         ),
         (dir.join("builtin"), "override-fixture", "Builtin override"),
+        (
+            dir.join("data/runtime/plugins"),
+            "override-fixture",
+            "Runtime override",
+        ),
+        (dir.join("first"), "override-fixture", "First override"),
+        (dir.join("second"), "override-fixture", "Second override"),
         (dir.join("extra"), "override-fixture", "Extra override"),
         (
             dir.join("data/plugins"),
@@ -47,6 +55,17 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
         )
         .unwrap();
     }
+    let runtime = dir.join("data/runtime/plugins/telegram");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("plugin.json"), "{malformed").unwrap();
+    let user = dir.join("data/plugins/telegram");
+    fs::create_dir_all(&user).unwrap();
+    fs::write(
+        user.join("plugin.json"),
+        json!({"id":"telegram","kind":"human","displayName":"User channel","command":["./driver"]})
+            .to_string(),
+    )
+    .unwrap();
     let result = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -57,6 +76,14 @@ fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
         .env("CITO_PLUGIN_ROOT_TEST", &dir)
         .env("CITO_BUILTIN_PLUGINS_DIR", dir.join("builtin"))
         .env("CITO_PLUGIN_DIR", dir.join("extra"))
+        .env(
+            "CITO_PLUGIN_PATH",
+            format!(
+                "{}:{}",
+                dir.join("first").display(),
+                dir.join("second").display()
+            ),
+        )
         .output()
         .unwrap();
     assert!(
@@ -86,15 +113,41 @@ fn packaged_roots_worker() {
 
     // The app layout is data only: no copied executable or launched application.
     let exe = dir.join("Cito.app/Contents/MacOS/cito");
-    let plugins = discover(&roots_for_executable(&data, Some(&exe))).unwrap();
+    let roots = roots_for_executable(&data, Some(&exe));
+    let plugins = discover(&roots).unwrap();
     assert_plugin(
         &plugins,
         "bundle-fixture",
         dir.join("Cito.app/Contents/Resources/plugins/bundle-fixture"),
     );
-    assert_plugin(
-        &plugins,
-        "override-fixture",
-        data.join("plugins/override-fixture"),
+    for relative in [
+        "first",
+        "second",
+        "extra",
+        "data/plugins",
+        "builtin",
+        "data/runtime/plugins",
+        "Cito.app/Contents/Resources/plugins",
+    ] {
+        let expected = dir.join(relative).join("override-fixture");
+        let plugins = discover(&roots).unwrap();
+        assert_plugin(&plugins, "override-fixture", expected.clone());
+        assert_eq!(
+            plugins
+                .iter()
+                .filter(|p| p.id == "override-fixture")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(expected).unwrap();
+    }
+    let user = data.join("plugins/telegram");
+    assert_plugin(&discover(&roots).unwrap(), "telegram", user.clone());
+    fs::write(user.join("plugin.json"), json!({"id":"telegram","kind":"agent","displayName":"Agent override","command":["./driver"]}).to_string()).unwrap();
+    assert!(!discover(&roots).unwrap().iter().any(|p| p.id == "telegram"));
+    fs::remove_dir_all(user).unwrap();
+    assert!(
+        discover(&roots).is_err(),
+        "An unshadowed malformed manifest must still fail"
     );
 }

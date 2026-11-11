@@ -86,6 +86,87 @@ pub fn listener_id_candidates(identity: &Value, harness: &str, session: &str) ->
     ids
 }
 
+/// Readable aliases are presentation-only; storage and fencing retain canonical IDs.
+pub fn readable_alias(raw: &str) -> Option<(&str, Option<&str>, &str)> {
+    let (owner, prefix) = raw.split_once('#')?;
+    if prefix.is_empty()
+        || prefix.len() > 16
+        || !prefix
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return None;
+    }
+    let (user, harness) = owner
+        .split_once('/')
+        .map_or((owner, None), |(u, h)| (u, Some(h)));
+    if user.is_empty()
+        || user.len() > 64
+        || !user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        || harness.is_some_and(|h| !crate::plugins::validate_harness_id(h))
+    {
+        return None;
+    }
+    Some((user, harness, prefix))
+}
+
+pub(crate) fn is_live_peer(row: &Value, now: u64) -> bool {
+    // A fresh local registration can precede the Hub's attachment lease update.
+    row["status"] == "ACTIVE"
+        || matches!(
+            super::lease::evaluate_node_lease(row, now),
+            "ACTIVE" | "DISCONNECTED_RETAINED"
+        )
+}
+
+pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value]) -> String {
+    let user = normalize_slug(string(row, "owner_user"));
+    let harness = string(row, "harness");
+    let suffix = string(row, "listener_id").strip_prefix("c_").unwrap_or("");
+    let address = if harness == "human" {
+        format!("@{}", string(row, "owner_user"))
+    } else {
+        let mut chosen = None;
+        for length in [4, 8, 12, 16] {
+            let prefix = &suffix[..suffix.len().min(length)];
+            if prefix.is_empty() {
+                break;
+            }
+            // The projected row may precede directory-cache enrollment. Count it
+            // exactly once even when peers contains duplicate canonical rows.
+            let mut candidates = std::collections::HashSet::from([string(row, "listener_id")]);
+            candidates.extend(
+                peers
+                    .iter()
+                    .filter(|p| {
+                        normalize_slug(string(p, "owner_user")) == user
+                            && string(p, "harness") == harness
+                            && is_live_peer(p, crate::plugins::now_ms())
+                            && string(p, "listener_id")
+                                .strip_prefix("c_")
+                                .is_some_and(|s| s.starts_with(prefix))
+                    })
+                    .map(|p| string(p, "listener_id")),
+            );
+            if candidates.len() <= 1 || (length == 12 && suffix.len() == 12) {
+                chosen = Some(prefix);
+                break;
+            }
+        }
+        match chosen {
+            Some(fp) => format!("{user}/{harness}#{fp}"),
+            None => public_listener_id(&user, string(row, "listener_id")),
+        }
+    };
+    if hub == default_hub {
+        address
+    } else {
+        format!("{hub}:{address}")
+    }
+}
+
 pub fn canonical_node_id(raw: &str) -> Result<String, String> {
     let suffix = if let Some(suffix) = raw.strip_prefix("c_") {
         suffix
@@ -106,8 +187,8 @@ pub fn canonical_node_id(raw: &str) -> Result<String, String> {
     if !(suffix.len() == 16
         && suffix
             .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        && !(suffix.len() == 12
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || suffix.len() == 12
             && suffix
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)))
@@ -179,6 +260,73 @@ mod tests {
             listener_id("p", "human", "default"),
             listener_id("p", "human", "default")
         );
+    }
+    #[test]
+    fn readable_addresses_preserve_hub_routing_and_disambiguate_live_collisions() {
+        let row = |id: &str| json!({"listener_id":id,"owner_user":"Alice","harness":"agent","state":"ACTIVE","updated_at_ms":crate::plugins::now_ms()});
+        let first = row("c_abcd123456789012");
+        let second = row("c_abcd987654321098");
+        assert_eq!(
+            display_address("work", "work", &first, std::slice::from_ref(&first)),
+            "alice/agent#abcd"
+        );
+        assert_eq!(
+            display_address("local", "work", &first, &[first.clone(), second]),
+            "local:alice/agent#abcd1234"
+        );
+        assert_eq!(
+            display_address("work", "work", &first, &[row("c_abcd987654321098")]),
+            "alice/agent#abcd1234"
+        );
+        assert_eq!(
+            display_address("work", "work", &first, &[first.clone(), first.clone()]),
+            "alice/agent#abcd"
+        );
+        for (other, expected) in [
+            ("c_abcd123498765432", "alice/agent#abcd12345678"),
+            ("c_abcd123456789099", "alice/agent#abcd123456789012"),
+        ] {
+            assert_eq!(
+                display_address("work", "work", &first, &[row(other)]),
+                expected
+            );
+        }
+        let mut stale = first.clone();
+        stale["state"] = json!("UNLISTENED");
+        assert_eq!(
+            display_address("work", "work", &first, &[stale, row("c_abcd987654321098")]),
+            "alice/agent#abcd1234"
+        );
+        let mut expired = row("c_abcd987654321098");
+        expired["updated_at_ms"] = json!(crate::plugins::now_ms() - 1_800_001);
+        assert_eq!(
+            display_address("work", "work", &first, &[expired]),
+            "alice/agent#abcd"
+        );
+        let legacy = row("c_abcdefabcdef");
+        let extended = row("c_abcdefabcdef1234");
+        let peers = [legacy.clone(), extended.clone()];
+        assert_eq!(
+            display_address("work", "work", &legacy, &peers),
+            "alice/agent#abcdefabcdef"
+        );
+        assert_eq!(
+            display_address("work", "work", &extended, &peers),
+            "alice/agent#abcdefabcdef1234"
+        );
+        assert_eq!(
+            display_address(
+                "local",
+                "work",
+                &json!({"harness":"human","owner_user":"alice"}),
+                &[]
+            ),
+            "local:@alice"
+        );
+        assert!(readable_alias("alice/agent#abcd").is_some());
+        assert!(readable_alias("agent#abcd").is_some());
+        assert!(readable_alias("alice/agent#").is_none());
+        assert!(!super::super::config::validate_user("SELF"));
     }
     #[test]
     fn message_validation() {

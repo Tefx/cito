@@ -170,6 +170,95 @@ fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
 }
 
 #[test]
+fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
+    if std::env::var_os("CITO_TEST_PLUGIN_PRIORITY").is_some() {
+        let (config, _) = cito_native::plugins::load_native_config().unwrap();
+        let dirs = [
+            config.home_dir.join("first/pi"),
+            config.home_dir.join("second/pi"),
+            config.state_dir.join("plugins/pi"),
+        ];
+        for (index, expected) in [
+            "First override",
+            "Second override",
+            "User override",
+            "builtin",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_, plugins) = cito_native::plugins::load_native_config().unwrap();
+            let plugin = plugins.find_by_id("pi").unwrap();
+            assert_eq!(plugins.plugins.iter().filter(|p| p.id == "pi").count(), 1);
+            assert_eq!(plugin.is_builtin, index == 3);
+            cito_native::setup::ensure_cli_shims_native(&config.state_dir, &plugins).unwrap();
+            if index < 3 {
+                assert_eq!(plugin.display_name, expected);
+                assert_eq!(plugin.plugin_dir, dirs[index]);
+                let actual =
+                    cito_native::plugins::plugin_request(plugin, &json!({"op":"probe"})).unwrap();
+                assert_eq!(actual["source"], expected);
+                assert_eq!(
+                    actual["cwd"],
+                    json!(fs::canonicalize(&dirs[index]).unwrap())
+                );
+                assert_eq!(
+                    cito_native::setup::inspect_plugin_setup(plugin),
+                    (true, true, vec![dirs[index].display().to_string()])
+                );
+                assert!(!config.state_dir.join("runtime/plugins/pi").exists());
+                let manifest: Value = serde_json::from_slice(
+                    &fs::read(config.state_dir.join("plugins/pi/plugin.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    manifest["displayName"], "User override",
+                    "Staging cannot overwrite a user plugin"
+                );
+                fs::remove_dir_all(&dirs[index]).unwrap();
+            } else {
+                assert_eq!(plugin.display_name, "Pi Coding Agent");
+                assert!(config
+                    .state_dir
+                    .join("runtime/plugins/pi/plugin.json")
+                    .is_file());
+                assert!(!config.state_dir.join("plugins/pi").exists());
+                assert!(cito_native::setup::is_staged_plugin_intact(
+                    &config.state_dir,
+                    plugin
+                ));
+            }
+        }
+        return;
+    }
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let driver = f.dir.join("override.py");
+    script(&driver, "# purpose: Report the actual selected plugin command and setup source.\n# usage: python3 override.py DISPLAY_NAME\n# effects: Reads one request; emits JSON only.\n# requires: Python standard library.\nimport json, os, sys\nr=json.loads(sys.stdin.readline())\nprint(json.dumps({'ok':True,'installed':True,'configured':True,'source':sys.argv[1],'cwd':os.getcwd(),'paths':[r.get('plugin_dir','')]}))\n");
+    for (dir, display) in [
+        (f.home.join("first/pi"), "First override"),
+        (f.home.join("second/pi"), "Second override"),
+        (f.state.join("plugins/pi"), "User override"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("plugin.json"), json!({"id":"pi","kind":"agent","displayName":display,"command":["python3",driver,display]}).to_string()).unwrap();
+    }
+    f.env
+        .insert("CITO_PLUGIN_PATH".into(), " ~/first : ~/second ".into());
+    f.env.insert("CITO_TEST_PLUGIN_PRIORITY".into(), "1".into());
+    let (ok, out, err) = f.command(
+        std::env::current_exe().unwrap().to_str().unwrap(),
+        &[
+            "--exact",
+            "daemon::user_plugin_overrides_take_precedence_and_fall_back_after_removal",
+            "--nocapture",
+        ],
+        "",
+    );
+    assert!(ok, "{out}\n{err}");
+}
+
+#[test]
 fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     if std::env::var_os("CITO_TEST_STAGED_PLUGINS").is_some() {
         // Re-enter under the fixture environment without changing process-global
@@ -223,7 +312,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     };
     f.env.insert(
         "CITO_BUILTIN_PLUGINS_DIR".into(),
-        f.state.join("plugins").display().to_string(),
+        f.state.join("runtime/plugins").display().to_string(),
     );
     check_plugins(&mut f);
     let mut daemon = f.daemon(&[]);
@@ -247,7 +336,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         "plugin.json",
         "bin/cito-plugin-pi",
     ] {
-        let staged = f.state.join("plugins/pi").join(asset);
+        let staged = f.state.join("runtime/plugins/pi").join(asset);
         fs::remove_file(&staged).unwrap();
         assert_eq!(app(&f, "pi")["status"], "repair_needed", "{asset}");
         assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
@@ -258,15 +347,19 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         assert_eq!(app(&f, "pi")["status"], "ready", "{asset}");
     }
     let alias = f.dir.join("staged-plugins");
-    std::os::unix::fs::symlink(f.state.join("plugins"), &alias).unwrap();
-    for builtin_root in [f.state.join("plugins"), alias] {
+    std::os::unix::fs::symlink(f.state.join("runtime/plugins"), &alias).unwrap();
+    for builtin_root in [
+        f.state.join("runtime/plugins"),
+        alias,
+        f.state.join("plugins"),
+    ] {
         f.env.insert(
             "CITO_BUILTIN_PLUGINS_DIR".into(),
             builtin_root.display().to_string(),
         );
         for missing_manifest in [true, false] {
             f.stop(daemon);
-            let staged = f.state.join("plugins/pi");
+            let staged = f.state.join("runtime/plugins/pi");
             if missing_manifest {
                 fs::remove_file(staged.join("plugin.json")).unwrap();
             } else {
@@ -348,8 +441,280 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
             .1["channels"][0]["status"],
         "hub_ready"
     );
+    let paired =
+        f.action(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}));
+    assert_eq!(paired.0, 200, "{paired:?}");
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"],
+        "pairing_pending"
+    );
+    let code = db
+        .query(
+            "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+            &[],
+        )
+        .unwrap()[0]["code"]
+        .clone();
+    // The plugin redeems on the remote Hub, outside the daemon's action path.
+    rpc(
+        port,
+        "human_channels_test",
+        json!({"plugin_id":"remote-channel","user_config":{"address":format!("redeem:{}", code.as_str().unwrap())}}),
+    );
+    wait(|| {
+        db.query(
+            "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+            &[],
+        )
+        .unwrap()
+        .is_empty()
+    });
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "ready"
+    });
     assert_eq!(f.action(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true})).1["channels"][0]["status"],"not_configured");
 }
+#[test]
+fn selected_remote_channel_refresh_is_nonblocking_and_recovers_invalidated_slots() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let plugin = host.state.join("hub/plugins/remote-channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), json!({"id":"remote-channel","kind":"human-channel","displayName":"Remote channel","scope":"hub",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let (_, hub_port) = host.hub();
+    let proxy_port = port();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"shared":{"url":format!("http://127.0.0.1:{proxy_port}"),"user":"alice"}},"default_hub":"local"}),
+    );
+    let proxy_script = f.dir.join("inventory-proxy.py");
+    script(
+        &proxy_script,
+        r#"#!/usr/bin/env python3
+# purpose: Hold real inventory responses until the test releases each request.
+# usage: python3 inventory-proxy.py LISTEN_PORT HUB_PORT
+# effects: Loopback HTTP only; Fixture owns and reaps the process.
+# requires: Python standard library and the sandbox Hub.
+import http.server, json, socketserver, sys, threading, urllib.request
+lock = threading.Lock()
+hold = False
+pending = []
+completed = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def reply(self, body):
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        try: self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError): pass
+    def do_GET(self):
+        global hold
+        with lock:
+            if self.path == '/hold': hold = True
+            if self.path.startswith('/release/'):
+                pending[int(self.path.rsplit('/', 1)[1]) - 1].set()
+            body = json.dumps({'waiting': len(pending), 'completed': completed}).encode()
+        self.reply(body)
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers['Content-Length']))
+        request = urllib.request.Request('http://127.0.0.1:' + sys.argv[2] + '/v1/rpc', data=body,
+            headers={k: v for k, v in self.headers.items() if k.lower() in ('authorization', 'x-cito-user', 'content-type')})
+        with urllib.request.urlopen(request, timeout=2) as response: result = response.read()
+        gate = None
+        if json.loads(body)['op'] == 'human_channels_list':
+            with lock:
+                gate = threading.Event() if hold else None
+                if gate: pending.append(gate)
+            if gate and not gate.wait(10): return
+        self.reply(result)
+        if gate:
+            with lock: completed.append(pending.index(gate) + 1)
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+server = socketserver.ThreadingTCPServer(('127.0.0.1', int(sys.argv[1])), Handler)
+print(json.dumps({'op': 'ready'}), flush=True)
+server.serve_forever()
+"#,
+    );
+    let proxy = f.spawn(
+        "python3",
+        &[
+            proxy_script.to_str().unwrap(),
+            &proxy_port.to_string(),
+            &hub_port.to_string(),
+        ],
+        &[],
+    );
+    wait(|| f.frames(proxy).iter().any(|frame| frame["op"] == "ready"));
+    f.daemon(&[]);
+    assert_eq!(f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}})).1["channels"][0]["status"], "ready");
+    let query = "  remote-mac-42  ";
+    let (status, response) = f.action(
+        json!({"op":"query_directory","mode":"activity","query":query,"request_id":"padded-query"}),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(response["query"], query);
+    assert_eq!(response["request_id"], "padded-query");
+    assert_eq!(http(proxy_port, "/hold", None).0, 200);
+    let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    config["hubs"]["shared"]["token"] = json!("rotated-credential");
+    fs::write(&f.config, config.to_string()).unwrap();
+    wait(|| http(proxy_port, "/status", None).1["waiting"] == 1);
+    // The server has accepted the RPC and holds its response until explicit release.
+    let local = |path: &str| -> Value {
+        ureq::get(&format!("http://127.0.0.1:{}{path}", f.port))
+            .timeout(std::time::Duration::from_millis(750))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap()
+    };
+    assert_eq!(local("/health")["ok"], true);
+    let daemon_port = f.port;
+    for op in ["open_settings", "settings_select_hub"] {
+        let opened = std::thread::spawn(move || {
+            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+                .timeout(std::time::Duration::from_millis(750))
+                .send_json(json!({"op":op,"hub":"shared"}))
+                .and_then(|response| response.into_json::<Value>().map_err(Into::into))
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(opened["ok"], true);
+        assert_eq!(
+            http(proxy_port, "/status", None).1["waiting"],
+            1,
+            "{op} must share the held inventory request"
+        );
+        assert_eq!(local("/health")["ok"], true);
+    }
+    let snapshot: Value = ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+        .timeout(std::time::Duration::from_millis(750))
+        .send_json(json!({"op":"get_snapshot"}))
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(snapshot["settings"]["settings_hub"], "shared");
+    assert_eq!(
+        snapshot["settings"]["channels"],
+        json!([]),
+        "Invalidated inventory must be loading"
+    );
+    // Replace the slot again while Alice's response is in flight. Bob must never
+    // receive Alice's configured personal binding, including after its late reply.
+    config["hubs"]["shared"]["user"] = json!("bob");
+    fs::write(&f.config, config.to_string()).unwrap();
+    wait(|| http(proxy_port, "/status", None).1["waiting"] == 2);
+    assert_eq!(local("/health")["ok"], true);
+    assert_eq!(http(proxy_port, "/release/2", None).0, 200);
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
+    });
+    assert_eq!(http(proxy_port, "/release/1", None).0, 200);
+    wait(|| {
+        http(proxy_port, "/status", None).1["completed"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(1)))
+    });
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["settings"]["channels"][0]["configured"], false);
+    assert_eq!(snapshot["settings"]["channels"][0]["status"], "hub_ready");
+
+    // A mutation queued behind an old inventory must await its own schema and
+    // post-mutation inventory before acknowledging, without retaining service.
+    config["hubs"]["shared"]["token"] = json!("next-credential");
+    fs::write(&f.config, config.to_string()).unwrap();
+    wait(|| http(proxy_port, "/status", None).1["waiting"] == 3);
+    std::thread::scope(|scope| {
+        let saved = scope.spawn(move || {
+            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send_json(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"address":"bob-room"}}))
+                .and_then(|response| response.into_json::<Value>().map_err(Into::into))
+        });
+        assert_eq!(local("/health")["ok"], true);
+        assert_eq!(http(proxy_port, "/status", None).1["waiting"], 3);
+        assert_eq!(http(proxy_port, "/release/3", None).0, 200);
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 4);
+        assert_eq!(
+            local("/health")["ok"],
+            true,
+            "Schema lookup must release service"
+        );
+        assert_eq!(http(proxy_port, "/release/4", None).0, 200);
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 5);
+        assert!(
+            !saved.is_finished(),
+            "The acknowledgement must await post-mutation inventory"
+        );
+        assert_eq!(
+            local("/health")["ok"],
+            true,
+            "Post-mutation inventory must release service"
+        );
+        assert_eq!(
+            f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
+            false
+        );
+        assert_eq!(http(proxy_port, "/release/5", None).0, 200);
+        let result = saved.join().unwrap().unwrap();
+        assert_eq!(result["channels"][0]["status"], "ready");
+    });
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["settings"]["channels"][0]["status"], "ready");
+    assert_eq!(snapshot["settings"]["channels"][0]["configured"], true);
+
+    // A replaced slot cannot acknowledge an in-flight mutation against the new
+    // identity, even when its remote mutation already committed before replacement.
+    std::thread::scope(|scope| {
+        let changed = scope.spawn(move || {
+            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send_json(
+                    json!({"op":"channel_unpair","hub":"shared","channel_id":"remote-channel"}),
+                )
+        });
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 6);
+        config["hubs"]["shared"]["token"] = json!("replacement-credential");
+        fs::write(&f.config, config.to_string()).unwrap();
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 7);
+        let failure = changed.join().unwrap().unwrap_err();
+        match failure {
+            ureq::Error::Status(400, response) => assert!(response
+                .into_string()
+                .unwrap()
+                .contains("Hub changed during channel request")),
+            other => panic!("Unexpected mutation failure: {other}"),
+        }
+    });
+    assert_eq!(local("/health")["ok"], true);
+    assert_eq!(http(proxy_port, "/release/7", None).0, 200);
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
+    });
+    assert_eq!(http(proxy_port, "/release/6", None).0, 200);
+    wait(|| {
+        http(proxy_port, "/status", None).1["completed"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(6)))
+    });
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
+        false
+    );
+    config["hubs"]["shared"]["enabled"] = json!(false);
+    fs::write(&f.config, config.to_string()).unwrap();
+    for op in ["open_settings", "settings_select_hub"] {
+        assert_eq!(
+            f.action(json!({"op":op,"hub":"shared"})).0,
+            200,
+            "Disabled hubs must remain configurable"
+        );
+    }
+}
+
 #[test]
 fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive() {
     let _lock = serial();
@@ -377,20 +742,19 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         "ready"
     );
     fs::remove_dir_all(f.state.join("bin")).unwrap();
-    fs::remove_dir_all(f.state.join("plugins")).unwrap();
+    fs::remove_dir_all(f.state.join("runtime/plugins")).unwrap();
+    assert!(f.state.join("plugins/fixture/plugin.json").is_file());
     assert_eq!(
         app(f.action(json!({"op":"get_snapshot"})).1)["status"],
         "repair_needed"
     );
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
     assert!(f.state.join("bin/cito-mcp").is_file());
-    assert!(f.state.join("plugins/pi/plugin.json").is_file());
+    assert!(f.state.join("runtime/plugins/pi/plugin.json").is_file());
     assert!(app(f.action(json!({"op":"get_snapshot"})).1)["detail"]
         .as_str()
         .unwrap()
         .contains("/reload"));
-    // Restore the test-owned external source after intentionally deleting all staging.
-    f.provider("delivered_unconfirmed");
     enroll(&f, meta.clone());
     assert_eq!(
         f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
@@ -413,7 +777,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert!(cito_native::plugins::pid_alive(ui_pid));
     assert_eq!(http(f.port, "/health", None).0, 200);
     assert!(f.state.join("bin/cito-mcp").is_file());
-    assert!(f.state.join("plugins/pi").is_dir());
+    assert!(f.state.join("runtime/plugins/pi").is_dir());
     let host: Value =
         serde_json::from_str(&fs::read_to_string(f.home.join(".pi/agent/settings.json")).unwrap())
             .unwrap();
@@ -1307,7 +1671,10 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     );
     assert_eq!(
         hub_db
-            .query("SELECT scope FROM hub_kv WHERE key=?", &[id.clone()])
+            .query(
+                "SELECT scope FROM hub_kv WHERE key=?",
+                std::slice::from_ref(&id)
+            )
             .unwrap()[0]["scope"],
         "workspace"
     );
@@ -1325,7 +1692,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         let registration = hub_db
             .query(
                 "SELECT scope,CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
-                &[id.clone()],
+                std::slice::from_ref(&id),
             )
             .unwrap();
         assert_eq!(registration[0]["scope"], scope);
@@ -1589,7 +1956,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.20.3");
+    assert_eq!(init["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1637,6 +2004,156 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     assert_eq!(f.mcp("ping", json!({})), json!({}));
 }
 #[test]
+fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let target = enroll(&f, meta);
+    let canonical = target["canonical_listener_id"].as_str().unwrap();
+    let prefix = &canonical[2..6];
+    for length in [8, 12, 16] {
+        let query = format!("alice/fixture#{}", &canonical[2..2 + length]);
+        let found = f.tool("cito_find", json!({"query":query}), human());
+        assert_eq!(found["matched_count"], 1, "{found}");
+        assert_eq!(found["listeners"][0]["listener_id"], canonical);
+    }
+    for to in [
+        format!("alice/fixture#{prefix}"),
+        format!("fixture#{prefix}"),
+        format!("alice#{prefix}"),
+        format!("local:alice/fixture#{prefix}"),
+    ] {
+        assert_eq!(
+            f.tool(
+                "cito_send",
+                json!({"to":to,"message":"Alias routing"}),
+                human()
+            )["to"],
+            target["listener_id"]
+        );
+    }
+    let duplicate = format!("c_{prefix}ffffffffffff");
+    let row = json!({"listener_id":duplicate,"public_id":format!("alice-{}",&duplicate[2..]),"owner_user":"alice","principal_id":"none#alice","harness":"fixture","state":"ACTIVE","scope":"workspace","updated_at_ms":cito_native::core::plugins::now_ms(),"binding_generation":1});
+    f.db("hub.sqlite").execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,?,CAST(? AS BLOB),'none#alice','workspace')",&[json!(duplicate),json!(cito_native::core::plugins::now_ms()),json!(row.to_string())]).unwrap();
+    wait(|| {
+        f.tool("cito_find", json!({"harness":"fixture"}), human())["listeners"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 2
+    });
+    for to in [
+        format!("alice/fixture#{prefix}"),
+        format!("fixture#{prefix}"),
+        format!("alice#{prefix}"),
+    ] {
+        let result = f.tool_result(
+            "cito_send",
+            json!({"to":to,"message":"Must disambiguate"}),
+            human(),
+        );
+        assert_eq!(result["isError"], true, "{result}");
+        let error: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(error["error"]["code"], "INVALID_INPUT");
+        assert_eq!(
+            error["error"]["message"],
+            "Ambiguous target; use full listener_id"
+        );
+    }
+}
+
+#[test]
+fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.provider("delivered");
+    fs::write(f.state.join("plugins/fixture/options.json"), "{").unwrap();
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    f.action(json!({"op":"open_settings"}));
+    let mut settings = Value::Null;
+    wait(|| {
+        settings = fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .rfind(|v| v["op"] == "settings")
+            .unwrap_or(Value::Null);
+        settings.is_object()
+    });
+    let app = settings["settings"]["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "fixture")
+        .unwrap();
+    assert_eq!(app["status"], "error", "{settings}");
+    assert!(app["configured"].is_null());
+    assert!(!app["detail"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let sent = f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Agent initiated"}),
+        meta.clone(),
+    );
+    assert_eq!(sent["ok"], true, "{sent}");
+    let sender = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    assert_eq!(sender["status"], "ACTIVE");
+    wait(|| {
+        f.rows("SELECT * FROM local_signals WHERE message='Agent initiated'")
+            .len()
+            == 1
+    });
+    let early = f.action(json!({"op":"get_snapshot"})).1;
+    assert!(
+        early["activity"][0]["from_display_address"]
+            .as_str()
+            .unwrap()
+            .contains("/fixture#"),
+        "{early}"
+    );
+    let (status, snapshot) = f.action(json!({"op":"query_directory","filter":"all"}));
+    assert_eq!(status, 200, "{snapshot}");
+    let activity = &snapshot["activity"][0];
+    assert_eq!(activity["from_scoped_id"], sender["public_id"]);
+    assert!(activity["from_display_address"]
+        .as_str()
+        .unwrap()
+        .contains("/fixture#"));
+    let reply = f.tool("cito_send",json!({"to":activity["from_display_address"],"message":"Human reply","in_reply_to":activity["signal_id"]}),human());
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["to"], sender["public_id"]);
+    wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
+    assert_eq!(f.action(json!({"op":"clear_activity_history"})).0, 200);
+    assert!(f.rows("SELECT * FROM local_signals").is_empty());
+    f.tool("cito_unlisten", json!({}), meta.clone());
+    assert_eq!(
+        f.tool(
+            "cito_send",
+            json!({"to":"@self","message":"Explicitly paused"}),
+            meta
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
+        "UNLISTENED"
+    );
+}
+
+#[test]
 fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1650,7 +2167,8 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v["listener_id"] == target["listener_id"]));
+        .any(|v| v["scoped_id"] == target["listener_id"]
+            && v["listener_id"] == target["canonical_listener_id"]));
     let long = "Context payload segment ".repeat(100).trim().to_string();
     let args = json!({"to":target["listener_id"],"message":long,"idempotency_key":"stable"});
     let sent = f.tool("cito_send", args.clone(), human());
@@ -1710,7 +2228,10 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.20.3");
+    assert_eq!(
+        http(p, "/health", None).1["version"],
+        env!("CARGO_PKG_VERSION")
+    );
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -2049,8 +2570,7 @@ fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_e
             .unwrap_or_default()
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|frame| frame["op"] == "settings" && frame["hub"] == "shared")
-            .last()
+            .rfind(|frame| frame["op"] == "settings" && frame["hub"] == "shared")
             .map(|frame| frame["settings"].clone())
             .unwrap_or(Value::Null);
         settings.is_object()
@@ -2525,6 +3045,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.20.3"
+        format!("cito v{}", env!("CARGO_PKG_VERSION"))
     );
 }

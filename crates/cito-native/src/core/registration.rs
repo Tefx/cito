@@ -222,8 +222,10 @@ fn register_locked(
             .unwrap_or_default();
         channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":if harness=="human"{"notify_fanout"}else{"wake_exclusive"},"priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":now_ms()}));
         let value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
-        if client.kv_save(&id, &value, remote.map(|r| r.1)).is_err() {
-            continue;
+        match client.kv_save(&id, &value, remote.map(|r| r.1)) {
+            Ok(_) => {}
+            Err(error) if error.starts_with("10071:") => continue,
+            Err(error) => return Err(error),
         }
         state.db.transaction(|connection| {
             // Close precedes profile fencing under this same database mutex.

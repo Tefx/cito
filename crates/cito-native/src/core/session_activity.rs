@@ -1,7 +1,8 @@
 //! Cached discovery and serialized, endpoint-local badge effects. No worker owns a DB lock.
 use super::{identity::string, state::LocalState};
 use crate::plugins::{
-    now_ms, plugin_request_with_progress, LoadedPlugins, NativeConfig, PluginDescriptor,
+    now_ms, plugin_request_with_progress, selected_plugin_dir, LoadedPlugins, NativeConfig,
+    PluginDescriptor,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -244,8 +245,8 @@ impl SessionActivity {
                 continue;
             }
             let plugin = provider.plugin.clone();
-            let request =
-                json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env});
+            let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
+                "plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
             provider.worker = Some(
                 thread::Builder::new()
@@ -288,18 +289,20 @@ impl SessionActivity {
             }
             if let Some(worker) = provider.worker.take() {
                 let rows = match worker.join() {
-                    Ok(Ok(rows)) => rows,
+                    Ok(Ok(rows)) => Some(rows),
                     Ok(Err(error)) => {
                         eprintln!("cito discovery {}: {error}", provider.plugin.id);
-                        Vec::new()
+                        None
                     }
                     Err(_) => {
                         eprintln!("cito discovery {}: worker panicked", provider.plugin.id);
-                        Vec::new()
+                        None
                     }
                 };
-                changed |= rows != provider.cached;
-                provider.cached = rows;
+                if let Some(rows) = rows {
+                    changed |= rows != provider.cached;
+                    provider.cached = rows;
+                }
                 provider.due = Instant::now() + REFRESH_INTERVAL;
             }
         }
@@ -588,6 +591,7 @@ import json, os, pathlib, subprocess, sys, time
 root = pathlib.Path(__file__).parent
 opts = json.loads((root / 'options.json').read_text())
 req = json.loads(sys.stdin.readline())
+assert req['plugin_dir'] == str(root)
 for key in ['HOME', 'CITO_STATE_DIR', 'CITO_CONFIG_PATH']:
     assert os.environ[key] == req['env'][key]
     assert str(root.parent) in os.environ[key]
@@ -823,6 +827,32 @@ print(json.dumps(response), flush=True)
         assert!(other_start < fast_end, "Providers ran sequentially");
         activity.shutdown()?;
         assert_reaped(&f);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_errors_and_panics_retain_last_confirmed_candidates() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider("agent", json!({}))?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        let confirmed = vec![json!({"harness":"agent","session_id":"kept","title":"Work"})];
+        activity.discovery[0].cached = confirmed.clone();
+        for panic in [false, true] {
+            activity.discovery[0].worker = Some(std::thread::spawn(move || {
+                if panic {
+                    panic!("discovery fixture panic");
+                }
+                Err("PLUGIN_TIMEOUT: fixture deadline".into())
+            }));
+            pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+            assert_eq!(activity.discovery[0].cached, confirmed);
+        }
+        activity.discovery[0].worker = Some(std::thread::spawn(|| Ok(vec![])));
+        pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+        assert!(
+            activity.discovery[0].cached.is_empty(),
+            "A confirmed empty inventory replaces old candidates"
+        );
         Ok(())
     }
 

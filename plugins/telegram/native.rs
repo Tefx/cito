@@ -73,7 +73,7 @@ fn rpc(config: &Value, req: &Value) -> Value {
         let username = str_at(&me, "username").ok_or("Bot username is unavailable")?;
         if req["op"] == "format_pair" {
             return Ok(
-                json!({"instruction":format!("Send \"/start {}\" to @{username}",str_at(req,"code").ok_or("Pairing code is required")?),"bot_username":username}),
+                json!({"pairing_command":format!("/start {}",str_at(req,"code").ok_or("Pairing code is required")?),"instruction":format!("Send \"/start {}\" to @{username}",str_at(req,"code").ok_or("Pairing code is required")?),"bot_username":username}),
             );
         }
         let detail = if let Some(chat) = str_at(&req["user_config"], "chatId") {

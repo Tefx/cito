@@ -1,6 +1,6 @@
 # Cito Product & Architecture Roadmap
 
-Cito's evolution from `v0.11.3` through `v0.20.3` is organized into **twelve `0.x` stages (`Stage 0` through `Stage 11`)**:
+Cito's evolution from `v0.11.3` through `v0.21.0` is organized into **thirteen `0.x` stages (`Stage 0` through `Stage 12`)**:
 - **Stage 0 (`v0.12.0` — Completed)**: Unified Plugin Architecture, Built-in Plugin Extraction (`plugins/{pi,codex,claude}`) & Data-Driven macOS UI
 - **Stage 1 (`v0.13.0` — Completed)**: NATS-Free Native `HubEngine` (`local://` In-Process + `cito hub` HTTP/SSE Server), Control-Plane Guidance Without Hard Message Caps & `cito setup` CLI Onboarding
 - **Stage 2 (`v0.14.0` — Completed)**: Rust Hot-Path Multi-Call Binary (`cito-native`), Surface 3 AppKit `Settings…` (`⌘,`) Window, In-Process LAN Hub Sharing (`:4291`) & `< 5 MB` `Cito.app` Packaging
@@ -16,6 +16,10 @@ Cito's evolution from `v0.11.3` through `v0.20.3` is organized into **twelve `0.
 - **Stage 11 (`v0.20.3` — Phase `v28`)**: Light/Dark semantic contrast, agent-only menu counter, normalized Human Node cards, Human-only Activity replies, and explicit Directory / Activity menu entries (`C1`–`C5`).
 
 ---
+
+## Stage 12 (`v0.21.0` — Phase `v29`)
+
+[DESIGN §14](DESIGN.md#14-v29--stage-12-v0210-holistic-uiux--cross-layer-pathway-remediation-d01d18) defines readable Node addresses, sender auto-enrollment and reply closure, presentation-only error formatting, progressive Settings layouts, correlated Directory queries, logical-send idempotency, Activity filtering/clearing/full-message copy, interactive session discovery, and four-surface Light/Dark inspection. Canonical IDs and SQLite schema versions remain unchanged. Release publication and archive checksum synchronization remain separate distribution work.
 
 ## Stage 11 (`v0.20.3` — Phase `v28`)
 

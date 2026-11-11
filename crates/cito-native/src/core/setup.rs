@@ -1,7 +1,7 @@
 use crate::plugins::{
-    expand_home_dir, now_ms, random_hex, resolve_builtin_plugins_dir, validate_harness_id,
-    validate_https_issuer, validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
-    CITO_VERSION,
+    expand_home_dir, is_staged_plugins_root, now_ms, random_hex, resolve_builtin_plugins_dir,
+    selected_plugin_dir, staged_plugins_dir, validate_harness_id, validate_https_issuer,
+    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor, CITO_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -104,7 +104,11 @@ fn bundled_plugin_dir(root: &Path, id: &str) -> PathBuf {
 }
 
 pub fn is_staged_plugin_intact(state_dir: &Path, plugin: &PluginDescriptor) -> bool {
-    is_plugin_dir_intact(&state_dir.join("plugins").join(&plugin.id), plugin)
+    if plugin.is_builtin {
+        is_plugin_dir_intact(&staged_plugins_dir(state_dir).join(&plugin.id), plugin)
+    } else {
+        is_plugin_dir_intact(&plugin.plugin_dir, plugin)
+    }
 }
 
 pub(super) fn is_plugin_dir_intact(dir: &Path, plugin: &PluginDescriptor) -> bool {
@@ -159,9 +163,9 @@ pub fn ensure_cli_shims_native(
     fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let exe_str = resolve_stable_package_root(&exe.to_string_lossy());
-    let plugins_dir = state_dir.join("plugins");
+    let plugins_dir = staged_plugins_dir(state_dir);
     let mut written = Vec::new();
-    for plugin in &plugins.plugins {
+    for plugin in plugins.plugins.iter().filter(|plugin| plugin.is_builtin) {
         let target = plugins_dir.join(&plugin.id);
         let bundled = resolve_bundled_plugin_dir(&plugin.id);
         let source = if plugin.is_builtin
@@ -172,8 +176,7 @@ pub fn ensure_cli_shims_native(
         } else if plugin.plugin_dir.is_dir() {
             &plugin.plugin_dir
         } else {
-            // A deleted external plugin cannot be reconstructed. It must not block
-            // repairs of bundled plugins; applying that missing target still fails.
+            // No packaged or staged source remains to reconstruct this plugin.
             continue;
         };
         if !target.exists()
@@ -406,7 +409,7 @@ fn setup_request(
     dry_run: bool,
 ) -> Result<Value, String> {
     let (state_dir, _, _) = resolve_state_and_config_paths()?;
-    let plugin_dir = state_dir.join("plugins").join(&plugin.id);
+    let plugin_dir = selected_plugin_dir(&state_dir, plugin);
     crate::plugins::plugin_request(
         plugin,
         &json!({
@@ -418,8 +421,14 @@ fn setup_request(
 }
 
 pub fn inspect_plugin_setup(plugin: &PluginDescriptor) -> (bool, bool, Vec<String>) {
+    try_inspect_plugin_setup(plugin).unwrap_or((false, false, Vec::new()))
+}
+
+pub fn try_inspect_plugin_setup(
+    plugin: &PluginDescriptor,
+) -> Result<(bool, bool, Vec<String>), String> {
     match setup_request(plugin, "setup_inspect", false, true) {
-        Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => (
+        Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => Ok((
             response
                 .get("installed")
                 .and_then(Value::as_bool)
@@ -439,8 +448,12 @@ pub fn inspect_plugin_setup(plugin: &PluginDescriptor) -> (bool, bool, Vec<Strin
                         .collect()
                 })
                 .unwrap_or_default(),
-        ),
-        _ => (false, false, Vec::new()),
+        )),
+        Ok(response) => Err(response["error"]
+            .as_str()
+            .unwrap_or("Plugin inspection failed")
+            .into()),
+        Err(error) => Err(error),
     }
 }
 
@@ -709,7 +722,11 @@ fn build_mac_app_bundle_from_root(
         }
     }
 
-    if let Some(plugins_src) = resolve_builtin_plugins_dir() {
+    if let Some(mut plugins_src) = resolve_builtin_plugins_dir() {
+        if is_staged_plugins_root(&plugins_src, state_dir) {
+            // Runtime staging may omit overridden IDs; keep their bundled fallback in the App.
+            plugins_src = resolve_bundled_plugins_root().unwrap_or(plugins_src);
+        }
         copy_dir_recursive(&plugins_src, &resources_dir.join("plugins"))?;
     }
 
@@ -824,7 +841,7 @@ pub fn uninstall_setup_native(
 
     for (sub, label) in [
         ("bin", "Removed CLI shims directory"),
-        ("plugins", "Removed staged plugins directory"),
+        ("runtime", "Removed staged runtime directory"),
         ("sockets", "Removed local sockets directory"),
     ] {
         let dir = state_dir.join(sub);
@@ -840,6 +857,9 @@ pub fn uninstall_setup_native(
         }
     }
     for p in &plugins.plugins {
+        if matches!(p.id.as_str(), "plugins" | "bin" | "runtime" | "sockets") {
+            continue;
+        }
         let dir = state_dir.join(&p.id);
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1949,15 +1969,29 @@ mod tests {
     }
 
     #[test]
-    fn shim_install_copies_plugin_binaries_and_preserves_executable_mode() {
-        let (root, plugins) = fixture();
+    fn shim_install_stages_only_builtins_and_preserves_external_sources() {
+        let (root, mut plugins) = fixture();
+        let external = plugins.plugins[0].clone();
+        let builtin = crate::plugins::load_plugins(&root)
+            .plugins
+            .into_iter()
+            .find(|p| p.is_builtin && p.command[0].starts_with("./"))
+            .unwrap();
+        plugins.plugins.push(builtin.clone());
         let installed = root.join("installed");
         ensure_cli_shims_native(&installed, &plugins).unwrap();
-        let binary = installed.join("plugins/sample/bin/sample");
+        let staged = staged_plugins_dir(&installed).join(&builtin.id);
+        let binary = staged.join(&builtin.command[0]);
         assert!(binary.is_file());
         assert_eq!(
             fs::metadata(binary).unwrap().permissions().mode() & 0o111,
             0o111
+        );
+        assert!(!installed.join("plugins").exists());
+        assert!(is_staged_plugin_intact(&installed, &external));
+        assert_eq!(
+            fs::read(external.plugin_dir.join("bin/sample")).unwrap(),
+            b"#!/bin/sh\nprintf '{\"ok\":true,\"actions\":[]}\\n'\n"
         );
         let mut names = fs::read_dir(installed.join("bin"))
             .unwrap()
@@ -1965,22 +1999,18 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(names, vec!["cito", "cito-mcp"]);
-        assert!(fs::read_to_string(installed.join("bin/cito"))
-            .unwrap()
-            .contains(&installed.join("plugins").to_string_lossy().to_string()));
-        // Reinstalling from the installed source must not copy a directory onto itself.
-        let installed_plugin = crate::plugins::load_plugins(&installed)
-            .find_by_id("sample")
-            .unwrap()
-            .clone();
-        ensure_cli_shims_native(
-            &installed,
-            &LoadedPlugins {
-                plugins: vec![installed_plugin],
-                rejected_ids: HashSet::new(),
-            },
-        )
-        .unwrap();
+        for name in names {
+            assert!(fs::read_to_string(installed.join("bin").join(name))
+                .unwrap()
+                .contains(&format!(
+                    "export CITO_BUILTIN_PLUGINS_DIR='{}'",
+                    staged_plugins_dir(&installed).display()
+                )));
+        }
+        // Reinstalling a staged descriptor keeps the package as its repair source.
+        plugins.plugins[1] = crate::plugins::parse_manifest_dir(&staged, true).unwrap();
+        ensure_cli_shims_native(&installed, &plugins).unwrap();
+        assert!(is_staged_plugin_intact(&installed, &builtin));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2054,9 +2084,16 @@ mod tests {
             return;
         }
         use std::io::{Read, Write};
-        let (root, plugins) = fixture();
+        let (root, mut plugins) = fixture();
         let state = root.join("installed");
-        for sub in ["bin", "plugins", "sockets", "sample"] {
+        let user_dir = state.join("plugins/plugins");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_manifest = json!({"id":"plugins","kind":"human","displayName":"User plugin","command":["./driver"]}).to_string();
+        fs::write(user_dir.join("plugin.json"), &user_manifest).unwrap();
+        plugins
+            .plugins
+            .push(crate::plugins::parse_manifest_dir(&user_dir, false).unwrap());
+        for sub in ["bin", "runtime/plugins", "plugins", "sockets", "sample"] {
             fs::create_dir_all(state.join(sub)).unwrap();
             fs::write(state.join(sub).join("sentinel"), "present until shutdown").unwrap();
         }
@@ -2074,6 +2111,10 @@ mod tests {
             json!({"daemonPort":port,"hubs":{"local":{"url":"local://"}}}).to_string(),
         )
         .unwrap();
+        #[expect(
+            clippy::zombie_processes,
+            reason = "The production uninstall path reaps the verified daemon PID with waitpid."
+        )]
         let mut child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
         let pid = child.id();
         let server_state = state.clone();
@@ -2131,12 +2172,20 @@ mod tests {
         result.unwrap();
         assert_eq!(server.join().unwrap(), ["health", "unlisten_all", "health"]);
         assert!(!crate::plugins::pid_alive(pid as i32));
-        for sub in ["bin", "plugins", "sockets", "sample"] {
+        for sub in ["bin", "runtime", "sockets", "sample"] {
             assert!(
                 !state.join(sub).exists(),
                 "{sub} should be removed on uninstall"
             );
         }
+        assert_eq!(
+            fs::read_to_string(state.join("plugins/sentinel")).unwrap(),
+            "present until shutdown"
+        );
+        assert_eq!(
+            fs::read_to_string(user_dir.join("plugin.json")).unwrap(),
+            user_manifest
+        );
         assert!(!state.join("daemon.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
