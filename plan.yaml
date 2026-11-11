@@ -8950,7 +8950,7 @@ phases:
   - id: v30.hygiene
     name: 'V30 2D Contract-and-Simplicity Iterative Convergence Audit & Live v0.21.1
       Release Publication [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: '[REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]
       Run 2D contract-and-simplicity review (pathway-auditor, structural-auditor,
       uiux-auditor) over the v30 delta until a single round returns Completeness:
@@ -8974,6 +8974,39 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T06:26:28.687190Z'
+    done_at: '2026-11-11T08:11:20.051490+00:00'
+    evidence: "Artifact:\n- Commit: b5b62c9be3b3e58bc37c7d03d36176a94b951dda (retained\
+      \ ref refs/vectl/candidates/v30.hygiene; annotated release tag v0.21.1 at build\
+      \ commit b5b62c9be3b3e58bc37c7d03d36176a94b951dda; Tefx/homebrew-tap Casks/cito.rb\
+      \ commit 44ea7718cf7955623bc643d9af08426bc7f78f2c)\n- Executor: rust-senior\
+      \ + fresh-context pathway-auditor, structural-auditor, and uiux-auditor under\
+      \ [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE].\n\
+      - Convergence Summary (Rounds 1–3):\n  - Closed R1-P1 / R2-P1 (separating read-only\
+      \ discovery from post-validation legacy cleanup and using NativeConfig::effective_user\
+      \ as the single validation authority in load_native_config and run_setup_cli)\
+      \ and R1-P2 (protecting canonical bundled plugin sources when ~/.cito/plugins\
+      \ aliases the distribution).\n  - Round 3 fresh-context convergence verdicts\
+      \ at b5b62c9be3b3e58bc37c7d03d36176a94b951dda:\n    - pathway-auditor (2026-11-11T07-37-05-191Z_01a1c989-f9a6-74f0-80a2-d1afa3502f1b.jsonl):\
+      \ Completeness: CLEAN | Simplicity: ZERO_NEW_ISSUES | Holds: 0 | Uninspected\
+      \ Gaps: NONE\n    - structural-auditor (2026-11-11T07-37-05-273Z_01a1c989-f9f8-7357-9b62-506dcb0960b4.jsonl):\
+      \ Completeness: CLEAN (0 gaps) | Simplicity: CLEAN (0 trims) | Holds: 0 | Uninspected\
+      \ Gaps: NONE\n    - uiux-auditor (2026-11-11T07-37-05-360Z_01a1c989-fa4f-73b9-b496-aeea16836e40.jsonl):\
+      \ Completeness: CLEAN | Simplicity: CLEAN | Holds: 0 | Uninspected Gaps: NONE\n\
+      - Live Distribution Alignment (v0.21.1):\n  - GitHub Actions CI run 42981876865\
+      \ & Deploy Website to GitHub Pages run 42981876863: succeeded on b5b62c9be3b3e58bc37c7d03d36176a94b951dda\
+      \ (https://tefx.github.io/cito/ live at 0.21.1).\n  - GitHub Actions Release\
+      \ run 42981878943 (job 130402217849): succeeded end-to-end (Developer ID signing,\
+      \ Apple notarization, stapling, GitHub Release v0.21.1 publication with Cito-macos-arm64.zip\
+      \ SHA-256 85e8cb5b02ef11ac4b377c92d90d3f0761021f0f5fbcd0ceaf9996ee57b1ef63,\
+      \ Homebrew Cask install/symlink/uninstall smoke test, and push to Tefx/homebrew-tap\
+      \ Casks/cito.rb at commit 44ea7718cf7955623bc643d9af08426bc7f78f2c).\n\nVerification:\n\
+      - Run: python3 packaging/release.py check && python3 -m unittest discover -s\
+      \ packaging -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings && cargo test --workspace --locked -- --test-threads=1 && cargo\
+      \ build --release --locked -> 271 workspace tests passed, 14 packaging tests\
+      \ passed, 0 failed, 0 compiler/linker warnings, Syntax OK.\n- Reclaimed worktree\
+      \ /Users/tefx/Projects/cito/.vectl/worktrees/v30.hygiene."
   - id: v30.gate
     name: V30 Independent Terminal Acceptance & v0.21.1 Live Release / Homebrew Cask
       Gate
