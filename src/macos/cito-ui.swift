@@ -1473,7 +1473,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                    let cell = table.view(atColumn:0,row:row,makeIfNecessary:true) as? DirectoryPeerCellView {
                     cell.line1TitleLabel.stringValue = object["text"] as? String ?? "@bob → Human Node"
                 }
-                if kind == "banner_jargon", labels.count > 1 { labels[1].stringValue = "[Passive] " + labels[1].stringValue }
+                if kind == "banner_jargon", labels.count > 1 {
+                    visible = true; timer?.cancel()
+                    labels[1].stringValue = "[Passive] " + labels[1].stringValue
+                }
                 if let header = roots.first(where: { $0.identifier?.rawValue == "header" }) {
                     if kind == "strip_anchor", let scroll = header.subviews.first(where: { $0.identifier?.rawValue == "header_hub_strip" }) as? NSScrollView {
                         for pill in scroll.documentView?.subviews ?? [] { pill.frame.origin.x -= 8 }

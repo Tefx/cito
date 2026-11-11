@@ -20,21 +20,41 @@
     });
   }
 
-  // Tabbed previews reflect the native panel labels; they never change local Cito state.
+  // Tabbed workflow step previews (Moments 01-03)
   for (const preview of document.querySelectorAll("[data-surface-preview]")) {
-    const tabs = preview.querySelectorAll("[data-preview-tab]");
-    const panels = preview.querySelectorAll("[data-preview-panel]");
-    for (const tab of tabs) {
-      tab.addEventListener("click", () => {
-        const target = tab.getAttribute("data-preview-tab");
-        for (const item of tabs) item.setAttribute("aria-selected", String(item === tab));
-        for (const panel of panels) panel.hidden = panel.getAttribute("data-preview-panel") !== target;
+    const tabs = Array.from(preview.querySelectorAll("[data-preview-tab]"));
+    const panels = Array.from(preview.querySelectorAll("[data-preview-panel]"));
+
+    function activateStep(tab) {
+      const target = tab.getAttribute("data-preview-tab");
+      for (const item of tabs) {
+        const selected = item === tab;
+        item.setAttribute("aria-selected", String(selected));
+        item.tabIndex = selected ? 0 : -1;
+      }
+      for (const panel of panels) {
+        panel.hidden = panel.getAttribute("data-preview-panel") !== target;
+      }
+    }
+
+    for (const [index, tab] of tabs.entries()) {
+      tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
+      tab.addEventListener("click", () => activateStep(tab));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const nextIndex =
+          event.key === "Home" ? 0 :
+          event.key === "End" ? tabs.length - 1 :
+          (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[nextIndex].focus();
+        activateStep(tabs[nextIndex]);
       });
     }
   }
 
   // Interactive 2-Scene Hero Stage Switcher
-  const tabs = document.querySelectorAll("[data-scene-target]");
+  const tabs = Array.from(document.querySelectorAll("[data-scene-target]"));
   const panels = document.querySelectorAll("[data-scene-panel]");
   const statusEl = document.querySelector("[data-scene-status]");
 
@@ -47,6 +67,7 @@
     for (const tab of tabs) {
       const isMatch = tab.getAttribute("data-scene-target") === sceneId;
       tab.setAttribute("aria-selected", isMatch ? "true" : "false");
+      tab.tabIndex = isMatch ? 0 : -1;
     }
     for (const panel of panels) {
       const isMatch = panel.getAttribute("data-scene-panel") === sceneId;
@@ -61,10 +82,21 @@
     }
   }
 
-  for (const tab of tabs) {
+  for (const [index, tab] of tabs.entries()) {
+    tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
     tab.addEventListener("click", () => {
       const target = tab.getAttribute("data-scene-target");
       if (target) activateScene(target);
+    });
+    tab.addEventListener("keydown", event => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextIndex =
+        event.key === "Home" ? 0 :
+        event.key === "End" ? tabs.length - 1 :
+        (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[nextIndex].focus();
+      activateScene(tabs[nextIndex].getAttribute("data-scene-target"));
     });
   }
 })();

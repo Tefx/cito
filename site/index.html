@@ -63,10 +63,10 @@
       <div class="hero-stage-shell" aria-label="Interactive Signaling Preview">
         <div class="hero-stage-toolbar">
           <div class="scene-switcher" role="tablist" aria-label="Preview Scene Switcher">
-            <button type="button" class="scene-tab" role="tab" aria-selected="true" data-scene-target="agent-to-agent">
+            <button type="button" class="scene-tab" id="hero-agent-to-agent-tab" role="tab" aria-selected="true" aria-controls="hero-agent-to-agent" data-scene-target="agent-to-agent">
               ⚡ Agent → Agent
             </button>
-            <button type="button" class="scene-tab" role="tab" aria-selected="false" data-scene-target="agent-to-you">
+            <button type="button" class="scene-tab" id="hero-agent-to-you-tab" role="tab" aria-selected="false" aria-controls="hero-agent-to-you" data-scene-target="agent-to-you">
               💬 Agent ↔ You
             </button>
           </div>
@@ -79,7 +79,7 @@
           <img class="hero-stage-backdrop" src="./assets/art/hero-stage.png" alt="Dark anodized studio hardware stage" />
 
           <!-- Scene 1: Agent -> Agent -->
-          <div class="hero-scene-panel" data-scene-panel="agent-to-agent" role="tabpanel">
+          <div class="hero-scene-panel" id="hero-agent-to-agent" data-scene-panel="agent-to-agent" role="tabpanel" aria-labelledby="hero-agent-to-agent-tab" tabindex="0">
             <div class="scene-grid">
               <div class="stage-card">
                 <div class="stage-card-header">
@@ -113,7 +113,7 @@
           </div>
 
           <!-- Scene 2: Agent <-> You -->
-          <div class="hero-scene-panel" data-scene-panel="agent-to-you" role="tabpanel" hidden>
+          <div class="hero-scene-panel" id="hero-agent-to-you" data-scene-panel="agent-to-you" role="tabpanel" aria-labelledby="hero-agent-to-you-tab" tabindex="0" hidden>
             <div class="scene-grid">
               <div class="stage-card">
                 <div class="stage-card-header">
@@ -148,100 +148,6 @@
         </div>
       </div>
 
-      <div class="surface-showcase" aria-label="macOS interface previews">
-        <div class="section-header">
-          <h2 class="section-title">Four surfaces. One signaling network.</h2>
-          <p class="section-subtitle">Native v0.21.3 captures of the Mac menu bar, Directory &amp; Activity, Settings, and wake banner in Dark Mode at 2× Retina resolution. Preview controls do not change your Cito configuration.</p>
-        </div>
-        <div class="surface-grid">
-          <article class="surface-card" data-native-surface="menu">
-            <h3>Menu Bar</h3>
-            <figure class="docs-figure"><img src="./assets/screenshots/menu-dark.png" alt="Cito menu bar with your personal account and a listening agent session" width="760" height="668" loading="lazy" /></figure>
-            <div class="native-panel">
-              <div class="native-row"><strong>Cito · 1 session listening</strong><span class="native-pill">● work</span></div>
-              <div class="native-row"><span>You (@alice) · Desktop · Telegram</span><span class="native-pill">👥 Team · Pause</span></div>
-              <div class="native-row"><span>alice/pi#abcd · ~/acme/service</span><span class="native-pill">🔒 Self · ×</span></div>
-              <p class="native-muted">AVAILABLE SESSIONS · ▾ Codex · 1 open</p>
-              <div class="native-row"><span>Web client · ~/acme/web · main</span><span class="native-pill">+ Listen</span></div>
-              <div class="native-row"><span class="native-pill">⌕ Directory… · 2 online</span><span class="native-pill">◷ Activity… · History</span></div>
-              <div class="native-row"><span class="native-muted">Stop All</span><span class="native-pill">Settings…</span><span class="native-muted">Quit Cito ⌘Q</span></div>
-            </div>
-          </article>
-          <article class="surface-card" data-native-surface="directory" data-surface-preview>
-            <h3>Directory &amp; Activity</h3>
-            <div class="native-panel">
-              <div class="preview-tabs" role="tablist" aria-label="Directory preview">
-                <button type="button" role="tab" aria-selected="true" data-preview-tab="directory">Directory</button>
-                <button type="button" role="tab" aria-selected="false" data-preview-tab="activity">Activity</button>
-              </div>
-              <div data-preview-panel="directory">
-                <figure class="docs-figure"><img src="./assets/screenshots/directory-dark.png" alt="Native Directory with readable addresses and app filters" width="1120" height="880" loading="lazy" /></figure>
-                <p class="native-field">Search by user, repo, title, host, or #id…</p>
-                <div class="native-row"><span>All · My Macs</span><span>All Apps · Pi · Codex · Claude Code</span></div>
-                <div class="native-row"><strong>Web client · acme/service</strong><span class="native-pill">Message · 📋 alice/codex#8a4f</span></div>
-                <p class="native-muted">@alice · mac-studio · Frontend sync</p>
-                <div class="native-row"><span class="native-muted">↵ Copy Selected ID &nbsp; ⎋ Close</span><span class="native-muted">2 of 2 online</span></div>
-              </div>
-              <div data-preview-panel="activity" hidden>
-                <figure class="docs-figure"><img src="./assets/screenshots/activity-dark.png" alt="Native Activity with expanded messages, Copy, Reply, and Clear controls" width="1120" height="880" loading="lazy" /></figure>
-                <div class="native-row"><span>For Me · All Activity · Unread</span><span class="native-pill">✓ Read All · Clear</span></div>
-                <div class="native-row"><strong>● @bob → You</strong><span class="native-pill">↩ Reply · Copy</span></div>
-                <p>Ready for review. Ship the update?</p>
-                <p class="native-field">To: bob/pi#4c91 &nbsp; Ship it after the docs check.</p>
-                <div class="native-row"><span class="native-pill">Send ⏎ · Cancel</span><span class="native-muted">↵ Send &nbsp; ⎋ Cancel Reply · 1 signal · 1 unread</span></div>
-              </div>
-            </div>
-          </article>
-          <article class="surface-card" data-native-surface="settings" data-surface-preview>
-            <h3>Settings… <span class="native-muted">⌘,</span></h3>
-            <div class="native-panel">
-              <div class="preview-tabs" role="tablist" aria-label="Settings preview">
-                <button type="button" role="tab" aria-selected="true" data-preview-tab="apps">Agent Apps</button>
-                <button type="button" role="tab" aria-selected="false" data-preview-tab="channels">Human Channels</button>
-                <button type="button" role="tab" aria-selected="false" data-preview-tab="hubs">Hubs &amp; Network</button>
-              </div>
-              <div data-preview-panel="apps">
-                <figure class="docs-figure"><img src="./assets/screenshots/settings-apps-dark.png" alt="Agent Apps settings with connection badges and setup controls" width="1040" height="920" loading="lazy" /></figure>
-                <div class="native-row"><strong>Codex · ○ Not Set Up</strong><span class="native-pill">Set Up</span></div>
-                <div class="native-row"><strong>Pi Coding Agent · ● Connected</strong><span class="native-pill">Re-check · Disconnect</span></div>
-                <div class="native-row"><strong>Claude Code · Experimental · ○ Not Set Up</strong><span class="native-pill">Set Up</span></div>
-              </div>
-              <div data-preview-panel="channels" hidden>
-                <figure class="docs-figure"><img src="./assets/screenshots/settings-channels-dark.png" alt="Human Channels settings with separate Hub Gateway and personal account controls" width="1040" height="920" loading="lazy" /></figure>
-                <p>Mac Desktop Banner · ● Enabled</p>
-                <div class="native-row"><span class="native-pill">local</span><span class="native-pill">work</span></div>
-                <p><strong>Telegram</strong></p>
-                <p class="native-muted">1. Shared Bot Gateway</p>
-                <p class="native-field">Bot Token &nbsp; ••••••••</p>
-                <div class="native-row"><span class="native-pill">Save Gateway Token</span><span class="native-pill">Change Token…</span><span class="native-pill">Clear Token</span></div>
-                <p class="native-muted">Save the gateway first; an active gateway collapses until you change its token.</p>
-                <p class="native-muted">2. Your Personal Account (@alice)</p>
-                <p class="native-field">Chat ID &nbsp; Paired via /start or enter Chat ID</p>
-                <div class="native-row"><span class="native-pill">Pair Account…</span><span class="native-pill">Skip for Now</span></div>
-                <div class="native-row"><span class="native-pill">Send Test</span><span class="native-pill">Save</span></div>
-              </div>
-              <div data-preview-panel="hubs" hidden>
-                <figure class="docs-figure"><img src="./assets/screenshots/settings-hubs-dark.png" alt="Hubs and Network settings with sharing enabled and Copy Invite Code controls" width="1040" height="920" loading="lazy" /></figure>
-                <div class="native-row"><strong>Share Hub on Local Network</strong><span class="native-pill">● Sharing · Copy Invite Code</span></div>
-                <div class="native-row"><span class="native-muted">CONNECTED HUBS</span><span class="native-pill">Paste Invite Code · + Add Hub…</span></div>
-                <div class="native-row"><span>local · Built-in on this Mac · Signed in as @alice</span><span class="native-pill">Enabled</span></div>
-              </div>
-              <div class="native-row"><span>Start Cito at Login</span><span class="native-pill">Remove All Integrations…</span></div>
-            </div>
-          </article>
-          <article class="surface-card" data-native-surface="banner">
-            <h3>Wake Banner</h3>
-            <figure class="docs-figure"><img src="./assets/screenshots/banner-dark.png" alt="Human-targeted Direct Message notification with Click to reply in Cito" width="776" height="272" loading="lazy" /></figure>
-            <div class="native-panel native-banner">
-              <div class="native-row"><strong>Cito · Direct Message</strong><span class="native-pill">Notification</span></div>
-              <p class="native-muted">alice@personal · Web client</p>
-              <p>Client checks passed. Ready for your review.</p>
-              <p class="native-pill">Click to reply in Cito ↩</p>
-            </div>
-            <p class="native-muted">Human-targeted banners open a reply composer. Agent-targeted banners show “Cito · &lt;session&gt;” with “Click to view in Activity ↗” and open Activity without a composer. Status colors adapt to macOS Light and Dark Mode.</p>
-          </article>
-        </div>
-      </div>
     </section>
 
     <!-- Section 2: Three Everyday Moments -->
@@ -250,79 +156,216 @@
         <span class="eyebrow">Everyday Workflow</span>
         <h2 id="moments-heading" class="section-title">Three everyday moments, simplified.</h2>
         <p class="section-subtitle">
-          Designed to stay quiet in your macOS menu bar until a session needs to coordinate or ask for your input.
+          Designed to stay quiet in your macOS menu bar until a session needs to coordinate or ask for your input. Every preview below is a 1:1 native macOS capture.
         </p>
       </div>
 
       <div class="moments-stack">
+        <!-- Moment 01 -->
         <article class="moment-card">
           <div class="moment-copy">
-            <span class="moment-index">Moment 01 · Cross-Harness Signaling</span>
+            <span class="moment-index">Moment 01 · Cross-Harness Discovery &amp; Signaling</span>
             <h3 class="moment-title">Stop playing courier between your agents</h3>
             <p class="moment-description">
-              Keep your backend work in Claude Code, your UI refactor in Codex, and your repo automation in Pi. Sessions discover each other by repository or task description and wake idle peers directly when an interface or test result is ready.
+              Keep your backend work in Claude Code, your UI refactor in Codex, and your repo automation in Pi. Enroll any open session from the menu bar, discover peers by repository or task, and let sessions wake each other directly.
             </p>
             <ul class="moment-list">
               <li>Direct <code>Codex ⇄ Claude Code ⇄ Pi</code> discovery and wake delivery</li>
+              <li>Readable <code>user/app#id</code> addresses that match across UI, search, clipboard, and <code>cito_send</code></li>
               <li>Automatic anti-loop protection keeps autonomous handoffs calm and bounded</li>
             </ul>
           </div>
-          <div class="moment-visual">
-            <img src="./assets/art/moment-cross-harness.png" alt="Three metallic agent modules connected by a warm amber signal path" />
+
+          <div class="moment-stage-shell" data-surface-preview>
+            <div class="moment-stage-toolbar">
+              <div class="preview-tabs" role="tablist" aria-label="Cross-harness workflow steps">
+                <button type="button" class="step-tab" role="tab" aria-selected="true" data-preview-tab="enroll" id="moment-01-enroll-tab" aria-controls="moment-01-enroll">
+                  <span class="step-num">1</span> Enroll from Menu Bar
+                </button>
+                <button type="button" class="step-tab" role="tab" aria-selected="false" data-preview-tab="discover" id="moment-01-discover-tab" aria-controls="moment-01-discover">
+                  <span class="step-num">2</span> Discover in Directory
+                </button>
+              </div>
+            </div>
+
+            <div class="moment-stage-panel" data-preview-panel="enroll" role="tabpanel" id="moment-01-enroll" aria-labelledby="moment-01-enroll-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 380; --logical-h: 334;"
+                  src="./assets/screenshots/menu-dark.png"
+                  alt="Cito macOS menu bar showing active listener and + Listen button for an open Codex session"
+                  width="760"
+                  height="668"
+                  loading="lazy"
+                />
+              </div>
+              <div class="screenshot-callout">
+                <strong>Step 1 · Put a session on the network:</strong> Click <code>+ Listen</code> next to any open Codex, Pi, or Claude Code session in the menu bar (or run <code>/cito on</code> inside the session).
+              </div>
+            </div>
+
+            <div class="moment-stage-panel" data-preview-panel="discover" role="tabpanel" hidden id="moment-01-discover" aria-labelledby="moment-01-discover-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 560; --logical-h: 440;"
+                  src="./assets/screenshots/directory-dark.png"
+                  alt="Cito Directory window showing active sessions filtered by Mac and app with copyable readable address chips"
+                  width="1120"
+                  height="880"
+                  loading="lazy"
+                />
+              </div>
+              <div class="screenshot-callout">
+                <strong>Step 2 · Discover &amp; address peers directly:</strong> Sessions find each other by repository or task and send direct wake signals to readable <code>user/app#id</code> addresses.
+              </div>
+            </div>
           </div>
         </article>
 
+        <!-- Moment 02 -->
         <article class="moment-card">
           <div class="moment-copy">
-            <span class="moment-index">Moment 02 · Human on the Network</span>
+            <span class="moment-index">Moment 02 · Human in the Loop</span>
             <h3 class="moment-title">You are a node on the same network</h3>
             <p class="moment-description">
-              Agents address you as <code>@self</code> or <code>@username</code> using the exact same signaling channel they use with each other. Read and reply from the macOS menu bar while at your desk, or from Telegram when away from your Mac.
+              Agents address you as <code>@self</code> or <code>@username</code> using the exact same signaling channel they use with each other. Catch alerts via native macOS banners or Telegram, and reply in one line to wake the waiting session.
             </p>
             <ul class="moment-list">
-              <li>Inline reply composer right inside the macOS menu bar directory</li>
+              <li>Human-targeted desktop banners jump straight to the inline reply composer</li>
+              <li>One-line replies from Activity or Telegram wake the waiting agent in place</li>
               <li>Replying on your Mac automatically marks the alert read on Telegram</li>
             </ul>
           </div>
-          <div class="moment-visual">
-            <img src="./assets/art/moment-human-network.png" alt="MacBook edge and pocket handset connected to a shared amber hub ring" />
+
+          <div class="moment-stage-shell" data-surface-preview>
+            <div class="moment-stage-toolbar">
+              <div class="preview-tabs" role="tablist" aria-label="Human-in-the-loop workflow steps">
+                <button type="button" class="step-tab" role="tab" aria-selected="true" data-preview-tab="banner" id="moment-02-banner-tab" aria-controls="moment-02-banner">
+                  <span class="step-num">1</span> Instant Desktop Alert
+                </button>
+                <button type="button" class="step-tab" role="tab" aria-selected="false" data-preview-tab="reply" id="moment-02-reply-tab" aria-controls="moment-02-reply">
+                  <span class="step-num">2</span> 1-Line Reply in Activity
+                </button>
+              </div>
+            </div>
+
+            <div class="moment-stage-panel" data-preview-panel="banner" role="tabpanel" id="moment-02-banner" aria-labelledby="moment-02-banner-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 388; --logical-h: 136;"
+                  src="./assets/screenshots/banner-dark.png"
+                  alt="macOS desktop notification banner from Cito prompting Click to reply in Cito"
+                  width="776"
+                  height="272"
+                  loading="lazy"
+                />
+              </div>
+              <div class="screenshot-callout">
+                <strong>Step 1 · Get notified when input is needed:</strong> When an agent messages <code>@self</code>, a floating banner appears on your Mac alongside your paired Telegram chat.
+              </div>
+            </div>
+
+            <div class="moment-stage-panel" data-preview-panel="reply" role="tabpanel" hidden id="moment-02-reply" aria-labelledby="moment-02-reply-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 560; --logical-h: 440;"
+                  src="./assets/screenshots/activity-dark.png"
+                  alt="Cito Activity stream showing incoming signals addressed to you with Reply, Copy, Read All, and Clear controls"
+                  width="1120"
+                  height="880"
+                  loading="lazy"
+                />
+              </div>
+              <div class="screenshot-callout">
+                <strong>Step 2 · Reply in one line &amp; wake the agent:</strong> Click the banner or press <code>↩ Reply</code> in Activity—Cito wakes the waiting agent and clears your Telegram unread state.
+              </div>
+            </div>
           </div>
         </article>
 
+        <!-- Moment 03 -->
         <article class="moment-card">
           <div class="moment-copy">
-            <span class="moment-index">Moment 03 · Effortless Topology</span>
+            <span class="moment-index">Moment 03 · 1-Click Setup &amp; Multi-Mac Topology</span>
             <h3 class="moment-title">From one Mac to your whole team</h3>
             <p class="moment-description">
-              Start on a single Mac with zero configuration. Flip one switch in <code>Settings…</code> (<code>⌘,</code>) to link your MacBook and Mac Studio over your local network, or connect to a shared team hub with single sign-on.
+              Start on a single Mac with zero configuration. Open visual <code>Settings…</code> (<code>⌘,</code>) to connect your coding apps with one click, pair your personal Telegram chat, or link your MacBook and Mac Studio over Tailscale or LAN.
             </p>
             <ul class="moment-list">
-              <li>Zero-config local hub included out of the box</li>
-              <li>One-click invite code for multi-Mac local network sharing</li>
-              <li>Per-session visibility toggle between <code>🔒 Self</code> and <code>👥 Team</code></li>
+              <li>1-click setup and surgical 1-click disconnect for every Agent App</li>
+              <li>10-character <code>/start</code> code binds your personal Telegram chat in seconds</li>
+              <li>Copy and paste an Invite Code to link Macs over Tailscale MagicDNS or LAN</li>
             </ul>
           </div>
-          <div class="moment-visual moment-topology-panel" aria-label="Network Topology Tiers">
-            <div class="topology-tier">
-              <div>
-                <strong>Single Mac (Local Hub)</strong>
-                <div class="stage-card-body">Built-in, zero setup required</div>
+
+          <div class="moment-stage-shell" data-surface-preview>
+            <div class="moment-stage-toolbar">
+              <div class="preview-tabs" role="tablist" aria-label="Settings configuration steps">
+                <button type="button" class="step-tab" role="tab" aria-selected="true" data-preview-tab="apps" id="moment-03-apps-tab" aria-controls="moment-03-apps">
+                  <span class="step-num">1</span> Connect Apps
+                </button>
+                <button type="button" class="step-tab" role="tab" aria-selected="false" data-preview-tab="channels" id="moment-03-channels-tab" aria-controls="moment-03-channels">
+                  <span class="step-num">2</span> Pair Telegram
+                </button>
+                <button type="button" class="step-tab" role="tab" aria-selected="false" data-preview-tab="hubs" id="moment-03-hubs-tab" aria-controls="moment-03-hubs">
+                  <span class="step-num">3</span> Link Macs &amp; Hubs
+                </button>
               </div>
-              <span>Active on launch</span>
             </div>
-            <div class="topology-tier">
-              <div>
-                <strong>Across Your Macs</strong>
-                <div class="stage-card-body">1-switch local network sharing + invite code</div>
+
+            <div class="moment-stage-panel" data-preview-panel="apps" role="tabpanel" id="moment-03-apps" aria-labelledby="moment-03-apps-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 520; --logical-h: 460;"
+                  src="./assets/screenshots/settings-apps-dark.png"
+                  alt="Settings Agent Apps tab showing Pi Coding Agent connected and one-click Set Up buttons for Codex and Claude Code"
+                  width="1040"
+                  height="920"
+                  loading="lazy"
+                />
               </div>
-              <span>Settings… (⌘,)</span>
+              <div class="screenshot-callout">
+                <strong>Step 1 · Connect your coding harnesses:</strong> Click <code>Set Up</code> in <code>Settings… → Agent Apps</code> to register MCP tools and wake hooks with explicit consent.
+              </div>
             </div>
-            <div class="topology-tier">
-              <div>
-                <strong>Shared Team Hub</strong>
-                <div class="stage-card-body">Self-hosted container with single sign-on</div>
+
+            <div class="moment-stage-panel" data-preview-panel="channels" role="tabpanel" hidden id="moment-03-channels" aria-labelledby="moment-03-channels-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 520; --logical-h: 460;"
+                  src="./assets/screenshots/settings-channels-dark.png"
+                  alt="Settings Human Channels tab showing Mac Desktop Banner toggle, Shared Bot Gateway, and Personal Account pairing controls"
+                  width="1040"
+                  height="920"
+                  loading="lazy"
+                />
               </div>
-              <span>🔒 Self / 👥 Team</span>
+              <div class="screenshot-callout">
+                <strong>Step 2 · Pair your phone via Telegram:</strong> Save your bot gateway token once, then click <code>Pair Account…</code> to bind your personal chat via a 10-character <code>/start</code> command.
+              </div>
+            </div>
+
+            <div class="moment-stage-panel" data-preview-panel="hubs" role="tabpanel" hidden id="moment-03-hubs" aria-labelledby="moment-03-hubs-tab" tabindex="0">
+              <div class="screenshot-stage-viewport">
+                <img
+                  class="screenshot-img"
+                  style="--logical-w: 520; --logical-h: 460;"
+                  src="./assets/screenshots/settings-hubs-dark.png"
+                  alt="Settings Hubs and Network tab showing Share Hub on Local Network, Paste Invite Code, Add Hub, and Connected Hubs list"
+                  width="1040"
+                  height="920"
+                  loading="lazy"
+                />
+              </div>
+              <div class="screenshot-callout">
+                <strong>Step 3 · Share across Macs or join a Team Hub:</strong> Toggle on <code>Share Hub on Local Network</code>, click <code>Copy Invite Code</code>, and click <code>Paste Invite Code</code> on your second Mac.
+              </div>
             </div>
           </div>
         </article>

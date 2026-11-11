@@ -38,21 +38,6 @@ code, pre {
   font-family: var(--font-mono);
 }
 
-/* Native surface illustrations use the same labels as the macOS panels. */
-.surface-showcase { margin-top: var(--space-xl); }
-.surface-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; }
-.surface-card { min-width: 0; padding: 1.25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-elevated); }
-.surface-card h3 { font-size: 1rem; margin-bottom: 1rem; }
-.native-panel { min-width: 0; border: 1px solid var(--border-strong); border-radius: 0.75rem; background: var(--bg-surface); padding: 1rem; font-size: 0.85rem; }
-.native-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.65rem; margin: 0.75rem 0; }
-.native-row > * { min-width: 0; }
-.native-muted { color: var(--text-secondary); font-size: 0.8rem; }
-.native-pill, .preview-tabs button { display: inline-block; padding: 0.25rem 0.6rem; border: 1px solid var(--border-strong); border-radius: 0.45rem; background: var(--bg-surface-hover); font: inherit; color: var(--text-primary); }
-.preview-tabs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.8rem; }
-.preview-tabs button { cursor: pointer; min-height: 2.75rem; }
-.preview-tabs button[aria-selected="true"] { border-color: var(--accent-blue); color: var(--accent-blue); }
-.native-field { padding: 0.5rem 0.7rem; border: 1px solid var(--border-strong); border-radius: 0.4rem; margin: 0.6rem 0; }
-.native-banner { border-left: 3px solid var(--accent-amber); }
 :focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 
 /* Top Navigation */
@@ -414,27 +399,6 @@ code, pre {
   color: var(--text-primary);
 }
 
-.docs-figure {
-  margin: 0.5rem 0;
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elevated);
-}
-
-.docs-figure img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.docs-figcaption {
-  padding: 0.75rem 1.1rem;
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  border-top: 1px solid var(--border-subtle);
-}
-
 /* Section 2: Three Everyday Moments */
 .moments-stack {
   display: flex;
@@ -496,40 +460,209 @@ code, pre {
   font-family: var(--font-mono);
 }
 
-.moment-visual {
+/* ==========================================================================
+   Unified 1:1 DPI-Proportional Screenshot Stage System
+   Reference Envelope: 560pt (max logical width) × 460pt (max logical height)
+   ========================================================================== */
+
+/* Interactive Step Tabs inside Everyday Moments */
+.moment-stage-shell {
+  display: grid;
+  min-width: 0;
   border-radius: var(--radius-lg);
-  overflow: hidden;
   border: 1px solid var(--border-strong);
   background: var(--bg-canvas);
+  overflow: hidden;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
 }
 
-.moment-topology-panel {
-  padding: 1.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.topology-tier {
-  padding: 1rem 1.15rem;
-  border-radius: var(--radius-md);
+.moment-stage-toolbar {
+  grid-area: 1 / 1;
+  padding: 0.75rem 1rem;
   background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
-.topology-tier strong {
-  font-size: 0.95rem;
+.preview-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.step-tab,
+.preview-tabs button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.42rem 0.8rem;
+  min-height: 2.35rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-canvas);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 550;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.step-tab:hover,
+.preview-tabs button:hover {
   color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
-.topology-tier span {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
+.step-tab[aria-selected="true"],
+.preview-tabs button[aria-selected="true"] {
+  background: var(--accent-amber-soft);
+  border-color: var(--border-amber);
   color: var(--accent-amber);
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.step-tab[aria-selected="true"] .step-num {
+  background: var(--accent-amber);
+  color: var(--bg-canvas);
+}
+
+/* Overlapping panels reserve the tallest responsive caption, including hidden steps. */
+.moment-stage-panel {
+  grid-area: 2 / 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.moment-stage-panel[hidden] {
+  display: flex;
+  visibility: hidden;
+}
+
+/* Fixed 560:460 Reference Viewport prevents height jumps across tabs */
+.screenshot-stage-viewport,
+.docs-figure-stage {
+  position: relative;
+  width: 100%;
+  padding: 1.25rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #090B0F;
+  background-image:
+    radial-gradient(circle at 50% 35%, rgba(245, 158, 11, 0.08), transparent 70%),
+    radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 100% 100%, 20px 20px;
+}
+
+.screenshot-stage-viewport {
+  aspect-ratio: 560 / 460;
+  padding: calc(1.5rem * 460 / 560) 1.5rem;
+  flex: none;
+}
+
+.docs-figure-stage {
+  min-height: 18rem;
+}
+
+.docs-figure-stage--compact {
+  min-height: 10.5rem;
+  padding: 1.75rem 1.5rem;
+}
+
+/* 1:1 Proportional Logical Sizing:
+   Every screenshot scales strictly by (--logical-w / 560) so 1pt of macOS UI
+   has the exact same visual size across Menu (380pt), Banner (388pt),
+   Settings (520pt), and Directory/Activity (560pt). */
+.screenshot-img {
+  display: block;
+  width: calc((var(--logical-w, 560) / 560) * 100%);
+  max-width: calc(var(--logical-w, 560) * 1px);
+  max-height: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  outline: 1px solid rgba(255, 255, 255, 0.16);
+  outline-offset: -1px;
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.68),
+    0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+.screenshot-callout {
+  flex: 1;
+  padding: 0.85rem 1.15rem;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.screenshot-callout strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.screenshot-callout code {
+  font-size: 0.84em;
+  padding: 0.12rem 0.38rem;
+  border-radius: 0.28rem;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Documentation Figures (site/docs/guide.html & architecture.html) */
+.docs-figure {
+  margin: 0.75rem 0;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+}
+
+/* Staged screenshots in guide.html share the exact 560px inner reference canvas
+   (38rem = 608px outer max-width minus 2 × 1.5rem = 48px stage padding = 560px) */
+.docs-figure--staged {
+  max-width: 38rem;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+
+.docs-figure:not(.docs-figure--staged) img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.docs-figcaption {
+  padding: 0.8rem 1.15rem;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.docs-figcaption strong {
+  color: var(--text-primary);
 }
 
 /* Section 3: Built for Your Favorite Harnesses */
@@ -780,13 +913,16 @@ code, pre {
   .nav-inner { flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 1rem; }
   .nav-links { width: 100%; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: 0.85rem; }
   .nav-links a { min-height: 2.75rem; display: inline-flex; align-items: center; }
-  .surface-grid { grid-template-columns: minmax(0, 1fr); }
   .section { padding: 3rem 1rem; }
   .moment-card { padding: 1.25rem; }
-  .topology-tier, .hero-stage-toolbar { flex-wrap: wrap; }
+  .hero-stage-toolbar { flex-wrap: wrap; }
   .copy-command-pill { flex-wrap: wrap; justify-content: center; width: 100%; }
   .copy-command-pill code { font-size: 0.78rem; }
-  .moment-topology-panel { padding: 1rem; }
+  .screenshot-stage-viewport,
+  .docs-figure-stage { padding: 0.85rem; }
+  .screenshot-stage-viewport { padding: calc(0.85rem * 460 / 560) 0.85rem; }
+  .step-tab,
+  .preview-tabs button { min-height: 2.75rem; }
   .scene-switcher { flex-wrap: wrap; }
 }
 

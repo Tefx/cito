@@ -2,7 +2,7 @@ use super::support::*;
 use serde_json::{json, Value};
 use std::fs;
 #[test]
-fn website_clipboard_promises_failure_retry_and_duplicate_suppression() {
+fn website_clipboard_and_workflow_previews_preserve_dom_interactions() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let file = root().join("crates/cito-native/tests/support/site-clipboard.mjs");

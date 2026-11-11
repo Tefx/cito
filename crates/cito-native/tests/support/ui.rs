@@ -456,6 +456,36 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
             == "Enter a valid Hub URL (http://ip:4291 or https://host)."
     });
     l.snapshot("settings", "r3_add_hub_daemon_error.png");
+    for (name, url, canonical) in [
+        ("Office Mac", "http://127.0.0.1:4291", "office-mac"),
+        ("", "https://studio.example.com", "studio"),
+    ] {
+        if name.is_empty() {
+            l.control("open_add_hub");
+        }
+        l.input("settings_hub_name", name);
+        l.input("settings_hub_url", url);
+        l.control("submit_add_hub");
+        l.until(|s| {
+            node(s, "settings_items", "add_hub_form").is_null()
+                && !node(s, "settings_items", &format!("settings_hub:{canonical}")).is_null()
+        });
+        let (action, status, _) = l
+            .results
+            .iter()
+            .rev()
+            .find(|(action, _, _)| action["op"] == "setup_save_hub" && action["name"] == canonical)
+            .unwrap();
+        assert_eq!(*status, 200);
+        assert!(action["request_id"].is_string());
+        assert!(l.frames.iter().any(|frame| frame["op"] == "settings"
+            && frame["ok"] == true
+            && frame["source_op"] == action["op"]
+            && frame["request_id"] == action["request_id"]));
+        l.control(&format!("remove_hub:{canonical}"));
+        l.until(|s| node(s, "settings_items", &format!("settings_hub:{canonical}")).is_null());
+    }
+    l.control("open_add_hub");
     l.input("settings_hub_name", "scratch");
     l.input("settings_hub_url", "local://");
     l.control("submit_add_hub");
@@ -3295,7 +3325,11 @@ fn settings() -> Value {
 fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let p = start(&f);
+    let p = f.spawn(
+        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
+        &[],
+        &[("CITO_BANNER_DISMISS_MS", "60000")],
+    );
     f.send(p, state());
     for appearance in ["light", "dark"] {
         for kind in [
