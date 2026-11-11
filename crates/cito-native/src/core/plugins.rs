@@ -1410,6 +1410,10 @@ mod tests {
             let (root, _) = fixture("/bin/cat");
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
+            #[expect(
+                clippy::zombie_processes,
+                reason = "Stale handover reaps the verified PID with waitpid; the current-version branch waits below."
+            )]
             let mut child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
             let pid = child.id();
             let config = NativeConfig {

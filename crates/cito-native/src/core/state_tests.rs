@@ -608,7 +608,7 @@ fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
     let target = json!({"title":" <Target> "});
     let one = json!({"from_user":"alice","from_host_name":"host.LOCAL","from_title":"Alice Smith","from_listener_id":"alice-smith-abcdefghijkl","message":"<x> & hello"});
     assert_eq!(
-        format_wake_card(&target, &[one.clone()], "cloud", true),
+        format_wake_card(&target, std::slice::from_ref(&one), "cloud", true),
         "🔔 Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl]\n\n&lt;x&gt; & hello"
     );
     for suffix in ["abcdefghijkl", "0123456789abcdef"] {

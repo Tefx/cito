@@ -1578,7 +1578,10 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
     );
     assert_eq!(
         hub_db
-            .query("SELECT scope FROM hub_kv WHERE key=?", &[id.clone()])
+            .query(
+                "SELECT scope FROM hub_kv WHERE key=?",
+                std::slice::from_ref(&id)
+            )
             .unwrap()[0]["scope"],
         "workspace"
     );
@@ -1596,7 +1599,7 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         let registration = hub_db
             .query(
                 "SELECT scope,CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
-                &[id.clone()],
+                std::slice::from_ref(&id),
             )
             .unwrap();
         assert_eq!(registration[0]["scope"], scope);
@@ -1860,7 +1863,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     let f = Fixture::new(json!({}));
     f.daemon(&[]);
     let init=f.mcp("initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}));
-    assert_eq!(init["serverInfo"]["version"], "0.21.0");
+    assert_eq!(init["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     let list = f.mcp("tools/list", json!({}));
     let names: Vec<_> = list["tools"]
         .as_array()
@@ -1986,8 +1989,7 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
             .unwrap_or_default()
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|v| v["op"] == "settings")
-            .last()
+            .rfind(|v| v["op"] == "settings")
             .unwrap_or(Value::Null);
         settings.is_object()
     });
@@ -2133,7 +2135,10 @@ fn standalone_http_hub_dedup_atomic_batch_claims_and_business_ack() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let (_, p) = f.hub();
-    assert_eq!(http(p, "/health", None).1["version"], "0.21.0");
+    assert_eq!(
+        http(p, "/health", None).1["version"],
+        env!("CARGO_PKG_VERSION")
+    );
     let id = "c_1111111111111111";
     rpc(
         p,
@@ -2472,8 +2477,7 @@ fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_e
             .unwrap_or_default()
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|frame| frame["op"] == "settings" && frame["hub"] == "shared")
-            .last()
+            .rfind(|frame| frame["op"] == "settings" && frame["hub"] == "shared")
             .map(|frame| frame["settings"].clone())
             .unwrap_or(Value::Null);
         settings.is_object()
@@ -2948,6 +2952,6 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .1
         .trim(),
-        "cito v0.21.0"
+        format!("cito v{}", env!("CARGO_PKG_VERSION"))
     );
 }

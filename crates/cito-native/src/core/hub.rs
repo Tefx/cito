@@ -586,15 +586,12 @@ impl HubEngine {
                     if s(&data, "harness") == "human" && s(&data, "session_id") != "default" {
                         return Err("INVALID_INPUT: Human node session_id must be 'default'".into());
                     }
-                    if oidc(caller) {
-                        if data["principal_id"]
+                    if oidc(caller)
+                        && data["principal_id"]
                             .as_str()
                             .is_some_and(|pid| !owns_principal(pid, caller))
-                        {
-                            return Err(
-                                "PERMISSIONS_VIOLATION: registration principal mismatch".into()
-                            );
-                        }
+                    {
+                        return Err("PERMISSIONS_VIOLATION: registration principal mismatch".into());
                     }
                 }
                 let revision = next_revision(c)?;
@@ -1643,7 +1640,7 @@ fn backlog_from(
     let mut items = Vec::new();
     let mut page_bytes = 0;
     for item in rows {
-        if matches(s(&item, "subject"), s(&row, "filter_subject"))
+        if matches(s(&item, "subject"), s(row, "filter_subject"))
             && can_consume(c, subject_target(s(&item, "subject")).unwrap_or(""), p)?
         {
             let wire = signal_wire(&item)?;

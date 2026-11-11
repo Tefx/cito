@@ -187,8 +187,8 @@ pub fn canonical_node_id(raw: &str) -> Result<String, String> {
     if !(suffix.len() == 16
         && suffix
             .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        && !(suffix.len() == 12
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || suffix.len() == 12
             && suffix
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)))
@@ -267,7 +267,7 @@ mod tests {
         let first = row("c_abcd123456789012");
         let second = row("c_abcd987654321098");
         assert_eq!(
-            display_address("work", "work", &first, &[first.clone()]),
+            display_address("work", "work", &first, std::slice::from_ref(&first)),
             "alice/agent#abcd"
         );
         assert_eq!(

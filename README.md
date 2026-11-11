@@ -42,14 +42,35 @@ Choose either of the two official installation methods. `Cito.app` and `cito` ru
 
 ```sh
 brew install tefx/tap/cito
+# Explicit cask selection also works:
+brew install --cask tefx/tap/cito
 ```
 
-This installs `Cito.app` and places `cito` and `cito-mcp` on your `PATH`:
+Cito is distributed as a Homebrew cask only. This installs `Cito.app` in
+`/Applications` (or your configured Homebrew app directory) and places
+`cito` and `cito-mcp` on your `PATH`:
 
 ```sh
 cito --version
 # -> cito v0.21.0
 ```
+
+To uninstall the app and both command symlinks while keeping your settings:
+
+```sh
+brew uninstall --cask tefx/tap/cito
+```
+
+If you previously installed the legacy formula, remove it before installing the
+cask to avoid conflicting command links:
+
+```sh
+brew uninstall --formula tefx/tap/cito
+brew update
+brew install tefx/tap/cito
+```
+
+Use `--zap` only if you also want Homebrew to delete Cito's user data.
 
 ### Option 2: Download `Cito.app` for macOS
 
@@ -247,22 +268,38 @@ Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude`
 - **Product Website & Guides**: **[https://tefx.github.io/cito/](https://tefx.github.io/cito/)** (**[Getting Started](https://tefx.github.io/cito/docs/guide.html)** · **[Subprocess Plugins](https://tefx.github.io/cito/docs/plugins.html)** · **[Architecture](https://tefx.github.io/cito/docs/architecture.html)**)
 - **Hub Server Deployment (`cito hub`)**: See **[`deploy/hub/README.md`](deploy/hub/README.md)** for standalone CLI and single-container Docker Compose deployment across `none`, `token`, and `oidc` authentication modes.
 - **Architecture & Protocol Specification**: See **[`docs/DESIGN.md`](docs/DESIGN.md)** and **[`docs/ROADMAP.md`](docs/ROADMAP.md)**.
+- **CI, Signing & Releases**: See **[`docs/RELEASING.md`](docs/RELEASING.md)** for main-based development, Developer ID credentials, version tags, and automatic Homebrew updates.
 
 ---
 
 ## Development (`Build & Test`)
 
-Cito is a pure Rust + Swift workspace with zero root Node.js or npm dependencies:
+Cito is a Rust + Swift workspace with zero root npm dependencies. The Rust
+toolchain is pinned in `rust-toolchain.toml`. Contributor checks use Python 3.11+
+and Node.js 24+ for release tooling and the dependency-free Pi extension tests;
+installed applications do not require either runtime.
 
 ```sh
-cargo test --workspace && cargo build --release
+python3 packaging/release.py check
+python3 -m unittest discover -s packaging -p 'test_*.py' -v
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked -- --test-threads=4
+cargo build --release --locked
 /usr/bin/ruby -c packaging/homebrew/cito.rb
 ```
 
 To retain 2× Retina AppKit snapshots in both Light and Dark appearances:
 
 ```sh
-CITO_TEST_SNAPSHOT_DIR=/tmp/cito-snapshots cargo test --workspace -- --test-threads=1
+CITO_TEST_SNAPSHOT_DIR=/tmp/cito-snapshots cargo test --workspace --locked -- --test-threads=1
 ```
 
 The snapshot matrix covers the menu, Directory and Activity (including expanded rows and Composer), all Settings tabs and Hub forms, the uninstall overlay, and human/agent wake banners. Every exported state passes the six real-view checks for truncation, overlap, clipping, contrast, jargon, and address consistency before and after rendering. The separate extreme-length stress test requires detected truncation and complete cleaned text/tooltips; it exports no snapshots.
+
+Direct pushes to `main` run CI and retain an ad-hoc candidate tied to the source
+commit. Publishing requires an annotated `vMAJOR.MINOR.PATCH` tag; the release
+workflow signs, notarizes, and verifies the final App before publishing and
+install-testing the generated Homebrew Cask. The Cask in this repository is a
+template; its version and SHA-256 are filled from the final release artifact.
+See [CI and releases](docs/RELEASING.md) before preparing or retrying a release.

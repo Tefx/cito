@@ -193,37 +193,34 @@ fn release_linker_stages_production_binaries_but_never_libtest_harnesses() {
         .contains(".tmp.")));
 }
 #[test]
-fn distribution_versions_native_manifests_formula_and_signed_ui() {
+fn distribution_versions_native_manifests_cask_and_signed_ui() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let r = root();
-    let formula = r.join("packaging/homebrew/cito.rb");
+    let producer = r.join("packaging/release.py");
+    let producer = producer.to_str().unwrap();
+    let (ok, out, err) = f.command("python3", &[producer, "check"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(out.trim(), env!("CARGO_PKG_VERSION"));
+    let cask = f.dir.join("cito.rb");
+    let checksum = "a".repeat(64);
+    let (ok, out, err) = f.command(
+        "python3",
+        &[
+            producer,
+            "render-cask",
+            "--sha256",
+            &checksum,
+            "--output",
+            cask.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
     assert!(
-        f.command("/usr/bin/ruby", &["-c", formula.to_str().unwrap()], "")
+        f.command("/usr/bin/ruby", &["-c", cask.to_str().unwrap()], "")
             .0
     );
-    let text = fs::read_to_string(formula).unwrap();
-    assert!(text.contains("version \"0.21.0\""));
-    assert!(text.contains("v0.21.0"));
-    assert!(!text.contains("depends_on \"node\""));
-    assert!(
-        text.contains("(prefix/\"Cito.app\").install \"Contents\""),
-        "Formula must handle Homebrew's single-top-level-directory stripping when unpacking Cito.app"
-    );
-    for path in [
-        ".agents/plugins/marketplace.json",
-        "plugins/codex/.codex-plugin/plugin.json",
-        "plugins/claude/.claude-plugin/plugin.json",
-        "plugins/pi/package.json",
-        "plugins/pi/plugin.json",
-        "plugins/codex/plugin.json",
-        "plugins/claude/plugin.json",
-        "plugins/human/plugin.json",
-        "plugins/telegram/plugin.json",
-    ] {
-        let v: Value = serde_json::from_str(&fs::read_to_string(r.join(path)).unwrap()).unwrap();
-        assert_eq!(v["version"], "0.21.0", "{path}");
-    }
     let v: Value =
         serde_json::from_str(&fs::read_to_string(r.join("plugins/pi/package.json")).unwrap())
             .unwrap();
@@ -275,7 +272,7 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     for path in [app.join("Contents/MacOS/Cito"), f.state.join("bin/cito")] {
         let (ok, out, err) = f.command(path.to_str().unwrap(), &["--version"], "");
         assert!(ok, "{err}");
-        assert_eq!(out, "cito v0.21.0\n");
+        assert_eq!(out, format!("cito v{}\n", env!("CARGO_PKG_VERSION")));
     }
     assert!(
         f.command(
@@ -314,7 +311,10 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         let file = site.join(page);
         let html = fs::read_to_string(&file).unwrap();
         assert!(
-            html.contains("name=\"application-version\" content=\"0.21.0\""),
+            html.contains(&format!(
+                "name=\"application-version\" content=\"{}\"",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{page}"
         );
         for attr in ["href=\"", "src=\""] {

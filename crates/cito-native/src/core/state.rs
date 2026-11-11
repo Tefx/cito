@@ -84,6 +84,10 @@ impl LocalState {
         self.db
             .query("SELECT * FROM local_listeners WHERE status='ACTIVE'", &[])
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the existing typed persistence transition API."
+    )]
     pub fn admit(
         &self,
         hub: &str,
@@ -247,6 +251,10 @@ impl LocalState {
     }
     /// Commit only the owning dispatch's result. A stale child cannot mutate its
     /// successor's rows or clear its lease. Acks always survive completion.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the existing typed persistence transition API."
+    )]
     pub fn finish_wake_batch(
         &self,
         listener: &Value,

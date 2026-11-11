@@ -2084,6 +2084,10 @@ mod tests {
             json!({"daemonPort":port,"hubs":{"local":{"url":"local://"}}}).to_string(),
         )
         .unwrap();
+        #[expect(
+            clippy::zombie_processes,
+            reason = "The production uninstall path reaps the verified daemon PID with waitpid."
+        )]
         let mut child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
         let pid = child.id();
         let server_state = state.clone();

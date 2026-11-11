@@ -1,61 +1,122 @@
-name: Release Cito.app & Distribution Bundle
+name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated stable tag to publish or retry (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: cito-release
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Build, Sign, Notarize & Package Cito.app (macOS arm64)
+    name: Sign, notarize, publish, and update Homebrew
     runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      HOMEBREW_TAP_REPOSITORY: Tefx/homebrew-tap
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Build & verify native Rust workspace and Homebrew formula
+      - name: Require a stable version tag
         run: |
-          cargo test --workspace -- --test-threads=4
-          cargo build --release
+          python3 - <<'PY'
+          import os, re, sys
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
+              sys.exit('Select an existing stable vMAJOR.MINOR.PATCH tag.')
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch' and os.environ['GITHUB_REF'] != f'refs/tags/{tag}':
+              sys.exit('Run the selected tag workflow with --ref matching the tag input.')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate the selected source and metadata
+        id: source
+        run: |
+          test "$(uname -m)" = arm64
+          git fetch origin main
+          python3 packaging/release.py validate-tag "$RELEASE_TAG"
+      - name: Require the scoped tap credential before publishing
+        env:
+          HOMEBREW_TAP_SSH_KEY: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_SSH_KEY" ]; then
+            echo '::error::Configure HOMEBREW_TAP_SSH_KEY with the write-enabled deploy key for the declared tap.'
+            exit 1
+          fi
+      - name: Reuse immutable release assets on retry
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 packaging/release.py assets "$RELEASE_TAG" dist
+      - name: Locate passing main CI for this exact commit
+        if: steps.assets.outputs.reused != 'true'
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: python3 packaging/release.py candidate "$SOURCE_SHA" build/candidate.zip
+      - uses: actions/setup-node@v4
+        if: steps.assets.outputs.reused != 'true' && steps.candidate.outputs.reused != 'true'
+        with:
+          node-version: "24"
+      - name: Cache Cargo downloads for a required rebuild
+        if: steps.assets.outputs.reused != 'true' && steps.candidate.outputs.reused != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Rebuild and check the same commit if its candidate is unavailable
+        if: steps.assets.outputs.reused != 'true' && steps.candidate.outputs.reused != 'true'
+        run: |
+          python3 -m unittest discover -s packaging -p 'test_*.py' -v
           /usr/bin/ruby -c packaging/homebrew/cito.rb
-
-      - name: Build relocatable Cito.app bundle
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked -- --test-threads=4
+          cargo build --release --locked
+          python3 packaging/release.py bundle build/candidate.zip
+      - name: Sign, notarize, staple, and create the final ZIP
+        if: steps.assets.outputs.reused != 'true'
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          ./bin/cito setup --build-app ./build
-
-      - name: Conditional Developer ID Hardened Runtime Signing & Notarization
-        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
-          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-            codesign --force --options runtime --timestamp --deep --sign "$APPLE_SIGNING_IDENTITY" ./build/Cito.app
-            ditto -c -k --keepParent ./build/Cito.app ./build/Cito-notarize.zip
-            xcrun notarytool submit ./build/Cito-notarize.zip \
-              --apple-id "$APPLE_ID" \
-              --team-id "$APPLE_TEAM_ID" \
-              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-              --wait
-            xcrun stapler staple ./build/Cito.app
-            rm -f ./build/Cito-notarize.zip
-          else
-            codesign -s - --force --deep ./build/Cito.app
-          fi
-          ditto -c -k --keepParent ./build/Cito.app Cito-macos-arm64.zip
-          shasum -a 256 Cito-macos-arm64.zip > Cito-macos-arm64.zip.sha256
-
-      - name: Upload Release Artifacts
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            Cito-macos-arm64.zip
-            Cito-macos-arm64.zip.sha256
+          ditto -x -k build/candidate.zip build/unsigned
+          python3 packaging/release.py sign build/unsigned/Cito.app dist/Cito-macos-arm64.zip
+      - name: Generate the Cask from the final archive checksum
+        run: |
+          checksum=$(awk '{print $1}' dist/Cito-macos-arm64.zip.sha256)
+          python3 packaging/release.py render-cask --sha256 "$checksum" --output build/cito.rb
+          /usr/bin/ruby -c build/cito.rb
+      - name: Publish the verified immutable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 packaging/release.py publish "$RELEASE_TAG" dist
+      - name: Verify the public Cask install and push the tap update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_SSH_KEY: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+        run: python3 packaging/release.py tap "$RELEASE_TAG" build/cito.rb
