@@ -9411,7 +9411,7 @@ phases:
 - id: v33
   name: 'V33 Stage 15 (v0.21.4 Candidate): Crafted macOS Utility De-Boxing, Hit-Test
     Reachability, Progressive Disclosure & Minimalist Web Architecture (P1–P4)'
-  status: pending
+  status: in_progress
   gate: All P1–P4 requirements in docs/DESIGN.md §17 pass; all inspectMenu() mechanical
     invariants (including hit-test reachability and card inner-padding) equal [] across
     all 4 surfaces in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
@@ -9439,7 +9439,7 @@ phases:
   - id: v33.impl
     name: V33 P1–P4 Crafted macOS Utility De-Boxing, Hit-Test Reachability, Progressive
       Disclosure & Minimalist Website Implementation
-    status: pending
+    status: claimed
     description: Implement docs/DESIGN.md §17 (P1–P4) while strictly enforcing §17.2
       test economy (update existing unit/UI assertions in place; do NOT add new multi-process
       E2E test functions). Regenerate site/assets/screenshots/*.png and create site/assets/art/architecture-topology.svg.
@@ -9462,6 +9462,8 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/distribution.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T19:23:06.100686Z'
   - id: v33.review
     name: 'V33 Single-Pass Fast Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
