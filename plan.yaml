@@ -9084,7 +9084,7 @@ phases:
   - id: v31.impl
     name: V31 M1–M5 Systemic UI Layout Engine, Single-Authority Human/Channel State,
       Bounded Delivery Retry & v0.21.2 Alignment
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §15 (M1–M5) and align version to 0.21.2
       while strictly enforcing §15.2 test economy (update existing unit/UI tests in
       place; do NOT add slow multi-process E2E test bloat). Regenerate site/assets/screenshots/*.png.
@@ -9107,6 +9107,43 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T09:36:18.543150Z'
+    done_at: '2026-11-11T10:27:50.947463+00:00'
+    evidence: 'Artifact:
+
+      - Commit: e2c611ff5c2bd55a521e346a9f320e5209cc4df4 (retained ref: refs/vectl-retained/v31.impl,
+      fast-forwarded onto main)
+
+      - Modified files: src/macos/cito-ui.swift, crates/cito-native/src/core/{lease.rs,registration.rs,receiver.rs,receiver_tests.rs,hub.rs,daemon.rs,transport.rs,auth.rs,state.rs},
+      crates/cito-native/src/plugin_support.rs, plugins/telegram/{native.rs,plugin.json},
+      crates/cito-native/tests/hub/cases.rs, crates/cito-native/tests/support/{ui.rs,plugins.rs,telegram-api.py},
+      version metadata across Cargo.toml/Cargo.lock/plugins/site/docs, and 7 regenerated
+      site/assets/screenshots/*.png assets.
+
+      - Worktree cleanup: Removed /Users/tefx/Projects/cito/.vectl/worktrees/v31-impl
+      and transient test logs; free space increased from 128 GiB to 130 GiB (+2 GiB
+      reclaimed).
+
+
+      Verification:
+
+      - Run: `cargo fmt --all -- --check` -> PASS (exit 0)
+
+      - Run: `cargo test --workspace -- --test-threads=4` -> PASS (170 library tests,
+      100 integration tests, 3 plugin unit tests; 0 failed; 4 ignored)
+
+      - Run: `cargo build --release` -> PASS (0 compiler warnings; rebuilt bin/* and
+      plugins/*/bin/*)
+
+      - Run: `python3 packaging/release.py check && bin/cito --version` -> PASS (`0.21.2`
+      / `cito v0.21.2`)
+
+      - Gaps: `cargo-clippy` not installed in local toolchain; Telegram verified via
+      loopback Bot API fixture and deterministic in-memory retry/backoff tests.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §15 (M1–M5 & §15.2 Anti-Over-Testing Policy)'
   - id: v31.hygiene
     name: 'V31 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & Live v0.21.2 Release [REQUIRES_SKILL: contract-and-simplicity]
