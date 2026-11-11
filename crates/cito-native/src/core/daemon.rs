@@ -735,10 +735,8 @@ impl DaemonService {
                 clear()?;
                 continue;
             };
-            if pending["hub_url"]
-                .as_str()
-                .is_some_and(|url| url != string(&client.config, "url"))
-            {
+            if pending["hub_url"].as_str() != Some(string(&client.config, "url")) {
+                clear()?;
                 continue;
             }
             if !super::auth::principal_ids_equal(
@@ -975,6 +973,16 @@ impl DaemonService {
     }
     fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
         let client = self.slots.get(hub);
+        let hub_url = if let Some(client) = client {
+            Some(string(&client.config, "url").to_owned())
+        } else {
+            // Disabled Hubs have no live slot; their normalized configuration
+            // still identifies the only target a deferred detach may affect.
+            let raw = self.raw_config()?;
+            let (_, hubs, _) =
+                crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+            hubs.get(hub).map(|config| string(config, "url").to_owned())
+        };
         let registration = client
             .map(|client| {
                 client
@@ -995,7 +1003,9 @@ impl DaemonService {
                     json!(hub),json!(id),json!(super::identity::public_listener_id(string(&client.identity,"owner_user"),id)),
                     client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name())])?;
             } else { return Ok(()); }
-            c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url",&[json!(hub),json!(id),client.map(|client|client.config["url"].clone()).unwrap_or(Value::Null)])?;
+            if let Some(url) = &hub_url {
+                c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url",&[json!(hub),json!(id),json!(url)])?;
+            }
             Ok(())
         })?;
         drop(registration);
@@ -4413,6 +4423,98 @@ mod tests {
                     .ok_or("Missing resumed registration")?
                     .0["human_paused"],
                 false
+            );
+            assert!(service
+                .state
+                .db
+                .query("SELECT * FROM pending_hub_detaches", &[])?
+                .is_empty());
+            assert!(service.local.rpc(
+                "stream_get_message",
+                &json!({"stream":"CITO_SIGNALS","seq":personal_signal["seq"]}),
+                None
+            )?["acked_at_ms"]
+                .is_null());
+            let client = HubClient::new(
+                "local".into(),
+                service.slot("local")?.config.clone(),
+                string(&personal, "owner_user"),
+                Some(service.local.clone()),
+            );
+            let mut raw = service.raw_config()?;
+            raw["hubs"]["local"]["enabled"] = json!(false);
+            fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+            service.reload_slots()?;
+            assert!(!service.slots.contains_key("local"));
+            service.unlisten_id("local", string(&personal, "listener_id"))?;
+            assert_eq!(
+                service
+                    .state
+                    .db
+                    .query("SELECT hub_url FROM pending_hub_detaches", &[])?[0]["hub_url"],
+                "local://"
+            );
+
+            raw["hubs"]["local"]["url"] = json!("https://other.example.com");
+            fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+            let mut edited = client.clone();
+            // Preserve the embedded transport as a sentinel: URL fencing must
+            // reject the detach before it can mutate even an available Hub.
+            edited.config["url"] = raw["hubs"]["local"]["url"].clone();
+            DaemonService::reconcile_unlistened(&service.state, &edited, &service.host_id)?;
+            assert!(service
+                .state
+                .db
+                .query("SELECT * FROM pending_hub_detaches", &[])?
+                .is_empty());
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing personal registration")?
+                    .0["human_paused"],
+                false
+            );
+
+            // Historical unknown targets must never act as wildcard URLs.
+            service.state.db.execute(
+                "INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES('local',?,NULL)",
+                &[personal["listener_id"].clone()],
+            )?;
+            DaemonService::reconcile_unlistened(&service.state, &client, &service.host_id)?;
+            assert!(service
+                .state
+                .db
+                .query("SELECT * FROM pending_hub_detaches", &[])?
+                .is_empty());
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing personal registration")?
+                    .0["human_paused"],
+                false
+            );
+
+            // Rejected work was discarded. Restoring the original URL permits
+            // a fresh explicit pause to reconcile against its captured target.
+            raw["hubs"]["local"]["url"] = json!("local://");
+            fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+            service.unlisten_id("local", string(&personal, "listener_id"))?;
+            assert_eq!(
+                service
+                    .state
+                    .db
+                    .query("SELECT hub_url FROM pending_hub_detaches", &[])?[0]["hub_url"],
+                "local://"
+            );
+            raw["hubs"]["local"]["enabled"] = json!(true);
+            fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+            service.reload_slots()?;
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing paused registration")?
+                    .0["human_paused"],
+                true
             );
             assert!(service
                 .state

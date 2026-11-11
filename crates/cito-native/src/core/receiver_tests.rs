@@ -657,6 +657,10 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
 ) -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s")?;
+    f.state
+        .db
+        .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
+    let before = now_ms();
     f.dispatch(&f.plugin(
         "print(json.dumps({'ok':True,'outcome':'driver_unavailable','queue_written':False}))",
     ))?;
@@ -673,7 +677,7 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
         retries[0]["retry_at_ms"]
             .as_u64()
             .ok_or("Missing retry deadline")?
-            > now_ms()
+            >= before + 1500
     );
     poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
     assert_eq!(f.requests()?.len(), 1);
