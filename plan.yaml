@@ -9411,7 +9411,7 @@ phases:
 - id: v33
   name: 'V33 Stage 15 (v0.21.4 Candidate): Crafted macOS Utility De-Boxing, Hit-Test
     Reachability, Progressive Disclosure & Minimalist Web Architecture (P1–P4)'
-  status: in_progress
+  status: done
   gate: All P1–P4 requirements in docs/DESIGN.md §17 pass; all inspectMenu() mechanical
     invariants (including hit-test reachability and card inner-padding) equal [] across
     all 4 surfaces in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
@@ -9513,7 +9513,7 @@ phases:
   - id: v33.review
     name: 'V33 Single-Pass Fast Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a SINGLE-PASS fast contract-and-simplicity review across the
       modified files and regenerated screenshots, apply any direct fixes in one pass
       (do NOT run multi-round review loops per user instruction), verify cargo test
@@ -9533,3 +9533,59 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T20:38:46.001975Z'
+    done_at: '2026-11-11T20:59:56.278063+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 89020018ad41b472a7b9ce457b50d099f2c8a745 (14 files changed, 47 insertions(+),
+      186 deletions(-))
+
+      - Candidate ref: refs/vectl/candidates/v33.review -> 89020018ad41b472a7b9ce457b50d099f2c8a745
+
+      - Worktree cleanup: removed .vectl/worktrees/v33.review and /tmp/cito-v33-review;
+      free space 129Gi (unchanged delta).
+
+
+      Single-Pass Contract-and-Simplicity Review & Fixes Applied:
+
+      1. [CONTRACT / WIRE] Normalized Hub URL comparison across trailing slashes (`normalizedHubURL`
+      in `src/macos/cito-ui.swift:22,3348`): ensures trailing-slash URLs (`http://127.0.0.1:4291/`)
+      submitted in `add_hub_form` match the daemon''s normalized URL on save acknowledgement
+      and close the form cleanly. Verified in `r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states`
+      and `lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions`.
+
+      2. [CONTRACT / WIRE] Wildcard-bind guard for `tailscale_url` (`crates/cito-native/src/core/daemon.rs:1965`):
+      only advertise a Tailscale alternative URL when `host_hub.bind` is wildcard
+      (`""`, `"0.0.0.0"`, `"::"`), preventing unreachable Tailscale invite URLs when
+      explicitly bound to `127.0.0.1`, `::1`, or a specific interface IP. Verified
+      in `u8_token_auth_generates_and_persists_token_while_sharing_is_off`.
+
+      3. [CONTRACT / DOCS] Synchronized `site/docs/guide.html` with V33 UI: updated
+      Agent ordering (`Pi Coding Agent`, `Codex`, `Claude Code`), replaced removed
+      `Skip for Now` wording with optional personal pairing guidance, and documented
+      the collapsed personal summary row (`Edit…`) and `Disconnect All` human-node
+      preservation.
+
+      4. [SIMPLICITY / TRIM] Removed 164 lines of dead `.hero-stage-*` / `.scene-tab`
+      / `.node-pill` CSS from `site/styles/main.css` left behind after landing-page
+      consolidation, and deleted 5 redundant `.isHidden = !hostExpanded` assignments
+      inside the `if hostExpanded` block in `src/macos/cito-ui.swift:3205–3249`.
+
+
+      Verification:
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> PASS
+
+      - Run: cargo fmt --check && git diff --check -> PASS
+
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)
+
+      - Run: PATH="/opt/homebrew/opt/python@3.11/libexec/bin:$PATH" RUST_TEST_THREADS=1
+      cargo test --workspace -> PASS (170 unit + 100 native integration + 3 doc/bin
+      tests passed, 4 ignored, 0 failed)
+
+      - Version kept at 0.21.3 (no release tag created).
+
+
+      Spec link:
+
+      - docs/DESIGN.md §17 (P1–P4 & §17.2)'
