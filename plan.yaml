@@ -8819,7 +8819,7 @@ phases:
   - id: v29.gate
     name: V29 Independent Terminal Acceptance, D01–D18 6-Invariant Verification &
       v0.21.0 Release Gate
-    status: pending
+    status: claimed
     description: Independently verify all D01–D18 requirements in docs/DESIGN.md §14,
       all 6 inspectMenu() mechanical invariants (truncated_labels, overlapping_siblings,
       clipped_views, low_contrast_labels, jargon_leaks, address_mismatches == [])
@@ -8833,3 +8833,5 @@ phases:
     depends_on:
     - v29.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T05:38:22.008293Z'
