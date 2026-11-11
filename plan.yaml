@@ -9435,3 +9435,30 @@ phases:
     review & fix (NO multi-round loops) and do NOT create a formal release tag yet.'
   depends_on:
   - v32
+  steps:
+  - id: v33.impl
+    name: V33 P1–P4 Crafted macOS Utility De-Boxing, Hit-Test Reachability, Progressive
+      Disclosure & Minimalist Website Implementation
+    status: pending
+    description: Implement docs/DESIGN.md §17 (P1–P4) while strictly enforcing §17.2
+      test economy (update existing unit/UI assertions in place; do NOT add new multi-process
+      E2E test functions). Regenerate site/assets/screenshots/*.png and create site/assets/art/architecture-topology.svg.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/daemon.rs
+    - plugins/pi/plugin.json
+    - plugins/codex/plugin.json
+    - plugins/codex/native.rs
+    - plugins/claude/plugin.json
+    - plugins/telegram/plugin.json
+    - site/index.html
+    - site/docs/guide.html
+    - site/docs/plugins.html
+    - site/docs/architecture.html
+    - site/styles/main.css
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/distribution.rs
+    agent: rust-senior
