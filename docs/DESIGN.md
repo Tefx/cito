@@ -1325,4 +1325,100 @@ Stage 12 resolves the 5 Fundamental UI/UX & Pathway Defect Essences identified a
 - **Full-message copy framing (`F08`)**: A maximum Unicode message plus its JSON envelope can exceed one outgoing frame. The implementation returns ordered `activity_message` chunks (`part`, `complete`, and the original `request_id`), each below the outgoing byte budget. The Companion assembles the authoritative message and changes the clipboard only after the final correlated chunk.
 - **Hazard 3 (`D06` Backward Compatibility in Existing Tests)**: Keep full `listener_id` (`c_<16hex>`) and `public_id` (`<slug>-<16hex>`) in all JSON fields (`listener_id`, `public_id`, `scoped_id`) and add `"display_address"` alongside them; update synthetic test fixtures in `crates/cito-native/tests/support/ui.rs` to include `display_address` (or canonical hash suffixes) so production Swift code has a single clean `display_address` authority without test-only shims.
 
+---
+
+## 15. V31 — Stage 13 v0.21.2: Declarative Bar/Strip Layout Engine, Single-Authority Human/Channel Lifecycle & Bounded Delivery Retry Architecture (`M1`–`M5`)
+
+Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry loops with five orthogonal mechanisms (`M1`–`M5`), governed by strict test economy (updating existing tests in place at the lightest hermetic boundary without adding slow multi-process test bloat).
+
+### 15.1 Binding Contract (`MUST`)
+
+#### 1. `M1` — Declarative Horizontal Bar & Pill Strip Layout Engine (`src/macos/cito-ui.swift`)
+- **Basis**: Eliminate hand-authored `NSRect(x: ...)` coordinate cascades and left-pinned pill strips that strand controls in the middle of headers, cards, or footers when conditional items hide or labels resize.
+- **Declarative Bar Layout Primitive (`layoutBar`)**:
+  - Introduce a single horizontal bar layout primitive (`layoutBar(in:insetLeft:insetRight:y:height:spacing:leading:flexible:trailing:)`) in `src/macos/cito-ui.swift` that:
+    1. Packs visible `leading` items left-to-right starting at `insetLeft`;
+    2. Packs visible `trailing` items right-to-left starting at `container.bounds.width - insetRight`;
+    3. Stretches the optional `flexible` primary/secondary label span across the remaining `[leadingMaxX, trailingMinX]` interval.
+  - All horizontal bars and action rows—including `cardMenu` `footer`, `drawer:<hub>`, `session:<id>` card header/meta row, `remote:<id>` row, `candidate:<h>:<s>` row, `settings_app:<id>` header, `stratum_hub:<id>` header/footer, `stratum_user:<id>` action row, `settings_hub:<name>` row, `settings_footer`, `directory_search_bar` (dynamically sizing `actPill` width when `"Activity · N"` changes), and `directory_footer`—MUST compute their horizontal positions via `layoutBar` (or equivalent edge-packing helper) rather than hardcoded conditional `x` ternary tables.
+- **Declarative Pill Strip Primitive (`mountPillStrip`)**:
+  - Introduce a single scrollable pill-strip primitive (`mountPillStrip(in:frame:id:alignment:spacing:pills:activePredicate:)`) used by all horizontal pill strips (`header_hub_strip`, `targetStrip`, `channel_hub_selector`, and `directory_harness_scroll`).
+  - When `alignment == .trailing` and total pill width `< frame.width` (such as `header_hub_strip` and `targetStrip`), `mountPillStrip` MUST start at `cursorX = frame.width - totalWidth` so the rightmost pill is always flush with `frame.maxX` (`x = 368` in `cardMenu`), never stranded at `x = 138` in the middle of the header.
+  - When total pill width `> frame.width`, `mountPillStrip` uses `OverlayScrollView` (`scrollerStyle = .overlay`, `hasHorizontalScroller = false`) and scrolls the active pill into view.
+  - In `directory_facet_bar`, render a `1 × 14 pt` vertical separator (`x = 132, y = 9`, hidden in Activity mode) between the Scope pills (`All`, `My Macs`) and App pills (`All Apps`, ...), and give `activity_clear` the same capsule radius (`11`) and `.medium` font as `activity_mark_all_read`.
+  - In `Human Channels`, place `Mac Desktop Banner` (global to this Mac) at the top of the tab above `TARGET HUB:` (which scopes per-Hub channel cards below it).
+
+#### 2. `M2` — Default Single-Mac & Idle State Affordance Invariants (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`)
+- **Basis**: Never expose controls in the default single-Mac (`local`) or `Idle` (`uniqueSessionCount == 0`) states that contradict the header status or disconnect/disable the user's own local Mac.
+- **Single Healthy `local` Hub Header Suppression**:
+  - When `hubs.count == 1 && (hubs[0].name == "local" || hubs[0].name == "default") && hubs[0].auth_mode == "none" && hubs[0].status == "connected" && hubs[0].error == nil`, `cardMenu` MUST NOT render `header_hub_strip` (`hub:local` `[ ● 🌐 ⌄ ]`) or `drawer:local` (`[Disconnect]`). `header_hub_strip` and hub drawers appear only when `hubs.count > 1` or when the single hub is remote, authenticated (`auth_mode != "none"`), connecting/disconnected, or has `error != nil`.
+- **Agent-Only `Stop All` Gating (`uniqueSessionCount > 0`)**:
+  - In `cardMenu` `footer`, `stop_all` (`[ ■ Stop All ]`) MUST be shown if and only if `uniqueSessionCount > 0` (when at least one coding agent session is listening). When `uniqueSessionCount == 0`, `stop_all` is hidden and `layoutBar` anchors `Settings…` at `x = 12` and `Quit Cito ⌘Q` at `maxX = 368`.
+  - In `DaemonService::action_inner("unlisten_all")` (`daemon.rs`), `Stop All` MUST unlisten only non-human agent sessions (`row["harness"] != "human"`), preserving the user's `You (@<user>)` personal notification state. (Full `setup_disconnect_all` and `setup_uninstall_all` continue to unlisten all rows including `human`.)
+- **Personal Card (`You (@<user>)`) Affordances**:
+  - On active `harness == "human"` cards in `cardMenu`, replace the destructive-red `"xmark"` (`"Stop listening"`) button with a neutral `"Pause"` control (`identifier = "stop:\(listener.scoped_id)"`, `toolTip = "Pause personal notifications"`), omit `switch_hub` on `human` cards, and display active channel names (`chs.joined(separator: " · ")` or `"Desktop notifications"`, never raw filesystem `cwd` like `~` or `/tmp`) in the metadata label.
+- **Sole Enabled `local` Hub Protection in `Hubs & Network`**:
+  - On `settings_hub:local`, when `local` is the only enabled Hub (`resolvedHubs.filter { $0.enabled }.count <= 1 && hub.enabled`), hide the `[Enabled]` disable toggle (`toggle_hub:local`) so `layoutBar` right-aligns `[Edit]` at `maxX = 468`. In `add_hub_form`, label `submit_add_hub` as `"Save"` when `editingExistingHub && editingOriginalHub == "local"`.
+  - In `DaemonService::settings_for_hub` (`daemon.rs:1803`), resolve `user` via `self.config.effective_user(name)` for disabled hubs just like active hubs.
+
+#### 3. `M3` — Complete Terminology Sweep, Monochrome Status Bar & Calibrated Layout/Jargon Oracles (`src/macos/cito-ui.swift`, `plugins/telegram/plugin.json`)
+- **Basis**: Close all sibling branches missed in earlier terminology sweeps, comply with macOS HIG monochrome status bar rules, and upgrade `inspectMenu()` to catch unanchored horizontal bars and emoji/jargon regressions mechanically.
+- **Sibling Terminology Closure**:
+  - `add_hub_form`: use `"YOUR USERNAME (OPTIONAL)"` on all auth branches (`none`, `token`, and `local`), `"ACCESS"` in uppercase, and `"Hub URL must start with http:// or https://."` in client URL validation.
+  - `Human Channels` & `plugins/telegram/plugin.json`: use consistent Title Case headers (`"1. Shared Bot Gateway"` and `"2. Your Personal Account (@<user>)"`), status `"● Bot Ready"`, `"everyone on this Hub"` (instead of `"all human nodes"` / `"every human"`), `"receive notifications and reply"` (instead of `"receive wakes"`), `"Show floating banners on this Mac when notifications arrive."`, `"Paused · Click Resume to receive notifications"`, and omit `"on 'local'"` when `channelHubs.count <= 1`.
+  - Empty states & Composer: replace `"Call cito_listen in a session..."` with `"Open a coding session in your app or configure Human Channels"`, `"Message via Hub…"` with `"Write a message…"`, `"UI action exceeds 1 MiB"` with `"Message is too large to send"`, `"No matching nodes"` / `"No active nodes on this Hub"` with `"No matching sessions or people"` / `"No active listeners"`, and `"Channel inventory"` with `"Human Channels"`.
+- **Monochrome macOS Status Bar (`formatStatusButton`) & `WakeBanner` Pill Centering**:
+  - `formatStatusButton` MUST NOT use the color emoji `🔔` (`U+1F514`). Render unread counts in the status bar using a monochrome template SF Symbol attachment (`bell.fill` with `isTemplate = true`) or plain monospaced digits.
+  - In `WakeBanner`, center `labels[4]` (`"Notification"` / `"Passive"`) vertically inside a `20pt` `SurfaceView` pill container (`y: 3, height: 14`).
+- **Upgraded `inspectMenu()` Mechanical Oracles**:
+  - Expand `jargon_leaks` regex on visible non-editable UI chrome labels to include `(?i)(\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bui action exceeds\\b)`, plus `"on 'local'"` when `hubs.count <= 1`, and flag any non-template color emoji scalar (`value > 0x27BF && isEmoji`) in `status?.button`.
+  - In `clipped_views` (or `overlapping_siblings`), verify horizontal edge-anchoring: for `header_hub_strip` and `targetStrip` with visible children, require `maxChildX >= scroll.contentSize.width - 2.0`; for `footer`, `settings_footer`, `directory_footer`, `stratum_hub:*`, `stratum_user:*`, `settings_hub:*`, and `settings_app:*`, require the rightmost visible top-row item to reach `maxX >= parentBounds.width - 20.5`.
+
+#### 4. `M4` — Single-Authority Human/Channel Lifecycle & Lease Reconciliation (`crates/cito-native/src/core/{lease.rs,registration.rs,receiver.rs,hub.rs,daemon.rs}`)
+- **Basis**: Eliminate the three-way state split-brain across `local_listeners`, `hub_kv` (`state` + `channels[*]`), and `hub_human_channels` that allowed Telegram to keep receiving messages when `You (@<user>)` was paused (`UNLISTENED`) in the menu bar and caused `receiver.rs`, `hub.rs`, and `lease.rs` to compute divergent node `state` values.
+- **Unified Registration State & Lease Authority (`core/lease.rs`)**:
+  - Extract a single authoritative function `pub fn reconcile_registration_state(reg: &mut Value, now: u64)` in `core/lease.rs` and call it from `registration::register_locked`, `receiver::detach_channel_expected`, and `hub::attach`:
+    - Mark any non-`hub` channel in `reg["channels"]` whose `now.saturating_sub(updated_at_ms) > 1_800_000` as `"UNLISTENED"`.
+    - Set `reg["state"] = "ACTIVE"` if and only if `!reg["human_paused"].as_bool().unwrap_or(false)` and at least one channel in `reg["channels"]` has `state == "ACTIVE"` (with `host_id == "hub"` or `now.saturating_sub(updated_at_ms) <= 1_800_000`); otherwise set `reg["state"] = "UNLISTENED"`.
+- **Master Human Node Pause/Enable vs. Individual Channel Pause**:
+  - Pausing `You (@<user>)` in `cardMenu` (`unlisten` on `harness == "human"`) represents an explicit Hub-wide pause of the user's Human Node: `detach_channel_expected` (when `channel.ends_with(":human")`) sets `reg["human_paused"] = json!(true)` and `reconcile_registration_state` sets `reg["state"] = json!("UNLISTENED")` (even if another host or `hub:<plugin>` channel exists in `reg["channels"]`), while preserving `hub_human_channels` credentials/bindings. `hub::attach` and `restore_attachments` MUST preserve `reg["human_paused"]` so background channel reconciliation never silently resumes a paused Human Node.
+  - Re-enabling `You (@<user>)` (`register_listener` for `harness == "human"`) clears `reg["human_paused"] = json!(false)` and preserves any existing `hub:<plugin>` entries in `reg["channels"]` (`registration.rs:212`).
+  - `HubEngine::replay()` (`hub.rs:1199`) MUST check that the principal's Human Node in `hub_kv` is not paused (`reg["human_paused"] != true` and `reg["state"] != "UNLISTENED"` when a `hub_kv` row exists) before dispatching new channel deliveries to Telegram!
+  - Conversely, turning `Mac Desktop Banner` to `Off` only suppresses the floating HUD banner on this Mac while keeping `You (@<user>)`, `Activity`, and `Telegram` active.
+- **Human Channel Delivery Acknowledgment Reconciliation**:
+  - Pausing `You (@<user>)` preserves unread signals and never implicitly marks them acknowledged (`acked_at_ms` remains `NULL`). Only an explicit consumer action—replying via `inbound_reply` / `send_reply_from_human` or acknowledging on Desktop (`ack_signals` / `clear_activity_history`)—updates `hub_signals.acked_at_ms`, and `local_signals` reconciles `acked_at_ms` when the Mac listener polls.
+
+#### 5. `M5` — External I/O Timeout Separation, `EFFECT_UNKNOWN` Classification, Multipart Progress Checkpointing & Bounded Exponential-Backoff Delivery State Machine (`plugins/telegram/native.rs`, `crates/cito-native/src/core/{hub.rs,transport.rs,auth.rs,login.rs,state.rs,receiver.rs}`)
+- **Basis**: Eliminate duplicate Telegram messages caused by post-send read timeouts + immediate 250 ms retries (`T1`), multipart partial-send re-execution, 500 ms SSE reconnect loops in `transport.rs`, and permanently stranded `driver_unavailable` agent signals.
+- **Persistent `ureq::Agent` with Separated Connect/Read Timeouts, `EFFECT_UNKNOWN` Classification & Multipart Progress (`plugins/telegram/native.rs`)**:
+  - Replace ephemeral `ureq::post(...)` calls in `plugins/telegram/native.rs` with a persistent `ureq::Agent` configured via `ureq::AgentBuilder::new().redirects(0).timeout_connect(Duration::from_secs(3)).timeout_read(Duration::from_secs(25))` (`35s` for `getUpdates`).
+  - Partition `sendMessage` failures into three distinct outcomes on the returned `delivered` frame:
+    1. **Confirmed Retryable Rejection (`retryable: true, effect_unknown: false`)**: HTTP status `408 | 429 | 500..=599` or pre-transmit connection failure (`io::ErrorKind::ConnectionRefused | AddrNotAvailable` / connect error before request body write);
+    2. **Permanent Rejection (`retryable: false, effect_unknown: false`)**: HTTP status `400 | 401 | 403 | 404` (extracting Telegram's JSON `"description"` field);
+    3. **Effect Unknown (`effect_unknown: true, retryable: false`)**: post-transmit socket read `TimedOut` / `UnexpectedEof` after `sendMessage` request bytes were written, where Telegram may have already accepted the message.
+  - In `delivery()`, accept `already_sent_ids: Vec<String>` (resuming at `chars.chunks(4096).skip(already_sent_ids.len())`) and always return the confirmed prefix `external_msg_ids` alongside `ok`, `retryable`, and `effect_unknown`.
+- **Bounded Exponential-Backoff Delivery State Machine in `HubEngine` (`core/hub.rs`)**:
+  - Add `attempts INTEGER NOT NULL DEFAULT 0`, `next_retry_ms INTEGER NOT NULL DEFAULT 0`, and `last_error TEXT` to `hub_channel_deliveries` via the additive `PRAGMA table_info` migration in `HubEngine::open`.
+  - Both subprocess crash recovery on `in_flight` rows (`ensure_process`) and `delivery_result()` frames with `f["effect_unknown"] == true` transition the row to `status = 'effect_unknown'` (recording any confirmed prefix in `hub_channel_delivery_msgs`) so `replay()` never blindly re-sends a chunk whose effect is unknown:
+    - When `ok == false` and `effect_unknown == true`: set `status = 'effect_unknown'` and `last_error = error`.
+    - When `ok == false` and `effect_unknown != true` and `retryable != false` and `attempts < 5`: set `status = 'failed'`, `next_retry_ms = now_ms() + (2_000_i64 << attempts.min(5)).min(60_000)` (`2s, 4s, 8s, 16s, 32s, 60s`), and `last_error = error`.
+    - When `ok == false` and `effect_unknown != true` and (`retryable == false` or `attempts >= 5`): set `status = 'failed_permanent'` and `last_error = error`.
+  - In `HubEngine::replay()`, exclude rows where `d.status IN ('delivered', 'failed_permanent', 'effect_unknown') OR (d.status = 'in_flight' AND d.delivered_ms > now - 60_000) OR (d.status = 'failed' AND d.next_retry_ms > now)`.
+  - Reset `failed` / `failed_permanent` rows (`attempts = 0, next_retry_ms = 0`, preserving `hub_channel_delivery_msgs` confirmed chunks) when the user updates channel credentials in `human_channels_configure`, and surface `last_error` in `channel_list()` when the latest delivery for that binding failed after `binding.updated_ms`.
+- **Unified `ureq` Client Hygiene & SSE Read-Idle Timeout Fix (`core/transport.rs`, `core/auth.rs`)**:
+  - Configure `HubClient::new` with `redirects(0)` and `timeout_connect(Duration::from_secs(5))`, and bound error-response JSON reads with `.take(...)`.
+  - In `HubClient::start_events` (`transport.rs:274`), use `client.agent.get(&url)` (configured on an SSE agent with `timeout_connect(5s)` and `timeout_read(Duration::from_millis(2500))`, NOT overall request `.timeout(...)`) and `.take(65_536)` per line so `2500ms` acts strictly as a per-read idle timeout (> `1000ms` server `:keepalive` interval) and healthy SSE streams stay connected indefinitely.
+- **Hub Instance Scope for Sent Idempotency (`core/daemon.rs`), Transient Agent Wake Recovery (`core/state.rs`) & Stable Lockfile Inodes (`plugin_support.rs`)**:
+  - Include the Hub's normalized target URL (`slot.config["url"]`) in the `dedup` hash input in `DaemonService::send` (`daemon.rs:1435`: `hash(&format!("{endpoint}|{}|{canonical}|{key}", string(&slot.config, "url")))`) so editing a Hub's URL under the same name never collides with sent idempotency records from the old URL.
+  - In `LocalState::restore_passive` (`state.rs:293`), allowunread signals held with transient `held_reason = 'driver_unavailable'` on an `ACTIVE` listener to be restored to `'RECEIVED'` after the wake retry backoff (`wake_retries`) elapses (while keeping `stale_generation`, `session_switched`, and `unlistened` held).
+  - In `plugin_support.rs:mutate` (`line 233`) and `clean_sidecars` (`line 125`), never unlink `.cito.lock` (keep lockfile inodes permanent across both ordinary updates and `setup_remove`, cleaning only `.bak.*` and `.tmp-*` sidecars, matching `core/login.rs:FileLock`).
+
+### 15.2 Verification & Anti-Over-Testing Policy (`MUST`)
+
+- **Strict Test Economy (No Test Bloat)**:
+  - Do **NOT** create new multi-process/daemon E2E test functions for individual UI coordinate or label tweaks; update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` and `crates/cito-native/src/core/*_tests.rs` in place.
+  - Keep `M1`–`M3` UI layout, bar reflow, single-Mac `local` header/footer, monochrome status button, and `inspectMenu()` checks inside the existing headless UI test pass in `ui.rs` (and only write PNG files to disk when `CITO_TEST_SNAPSHOT_DIR` is set or updating the 7 `site/assets/screenshots/*.png` assets).
+  - Verify `M4`–`M5` backend state transitions (`reconcile_registration_state`, `human_paused` gating `replay()`, `hub_channel_deliveries` exponential backoff & `failed_permanent`, and URL-scoped `dedup`) with fast, deterministic unit/in-memory tests (zero multi-second `sleep` calls).
+
+
 
