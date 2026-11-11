@@ -3047,6 +3047,56 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             .unwrap()
             .contains("Human Node"));
         assert_eq!(s["jargon_leaks"], json!([]));
+        for title in ["Human Node", "Human listening"] {
+            let mut shared = state();
+            shared["activity"] = json!([
+                {"hub":"personal","signal_id":"shared","listener_id":"first","from_user":"Session","from_host_name":"host","from_title":"[Passive] Worker","target_harness":"fixture","target_title":"Review","target_scoped_id":"personal:first","message":"Message","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true},
+                {"hub":"work","signal_id":"shared","listener_id":"second","from_user":"alice","from_host_name":"host","from_title":"Sender","target_harness":"fixture","target_title":title,"target_scoped_id":"work:second","message":"Message","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}
+            ]);
+            f.send(p, shared.clone());
+            let s = inspect_as(&f, p, Some(appearance));
+            assert_eq!(
+                nodes(&s["directory_items"])
+                    .iter()
+                    .filter(|n| n["id"] == "act_title:shared")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                s["jargon_leaks"],
+                json!([]),
+                "User title on the second Hub: {title}"
+            );
+            // The excluded title cannot hide a generated suffix with the same token.
+            f.send(p, json!({"op":"test_oracle_calibration","kind":"activity_jargon","row":1,"text":format!("@alice → {title} · Human receiver")}));
+            assert!(inspect_unchecked(&f, p, Some(appearance))["jargon_leaks"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("act_title:shared")));
+            shared["activity"][1]["target_harness"] = json!("human");
+            f.send(p, shared);
+            assert_eq!(
+                inspect_as(&f, p, Some(appearance))["jargon_leaks"],
+                json!([])
+            );
+            for text in [
+                "@alice → Human Node",
+                "@alice → Human listening",
+                "@alice → Session",
+                "ERROR: invalid",
+            ] {
+                f.send(p, json!({"op":"test_oracle_calibration","kind":"activity_jargon","row":1,"text":text}));
+                assert!(
+                    inspect_unchecked(&f, p, Some(appearance))["jargon_leaks"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("act_title:shared")),
+                    "Generated chrome must be checked: {text}"
+                );
+                f.send(p, json!({"op":"test_oracle_calibration","kind":"activity_jargon","row":1,"text":"@alice → You"}));
+                inspect_as(&f, p, Some(appearance));
+            }
+        }
     }
 }
 

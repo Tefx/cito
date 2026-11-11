@@ -673,6 +673,7 @@ struct Frame: Decodable {
 final class DirectoryPeerCellView: NSTableCellView {
     let badgeView: SurfaceView
     var inspectionId = ""
+    private(set) var activityItem: ActivityItem?
     private var isSelectedRow = false
     override var wantsUpdateLayer: Bool { true }
     let badgeIcon: NSImageView
@@ -723,6 +724,7 @@ final class DirectoryPeerCellView: NSTableCellView {
     }
 
     func configure(with peer: RemotePeer, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (String, MenuControl) -> Void, onMessage: (() -> Void)? = nil) {
+        activityItem = nil
         badgeView.frame.origin.y = 12
         line2MetaLabel.maximumNumberOfLines = 1
         line2MetaLabel.lineBreakMode = .byTruncatingTail
@@ -802,6 +804,7 @@ final class DirectoryPeerCellView: NSTableCellView {
     }
 
     func configureActivity(with item: ActivityItem, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onReply: @escaping () -> Void) {
+        activityItem = item
         inspectionId = "activity_row:\(item.signal_id)"
         isSelectedRow = selected
         let expanded = selected && (item.message.contains("\n") || measureTextWidth(item.message,font:.systemFont(ofSize:11.5)) > 330)
@@ -1213,8 +1216,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
                 }
                 if kind == "address_mismatches", let listener = listeners.first { control("copy:\(listener.scoped_id)")?.label.stringValue = "wrong address" }
-                if kind == "activity_jargon", let cell = directoryTableView?.view(atColumn:0,row:0,makeIfNecessary:true) as? DirectoryPeerCellView {
-                    cell.line1TitleLabel.stringValue = "@bob → Human Node"
+                let row = object["row"] as? Int ?? 0
+                if kind == "activity_jargon", let table = directoryTableView, row >= 0, row < table.numberOfRows,
+                   let cell = table.view(atColumn:0,row:row,makeIfNecessary:true) as? DirectoryPeerCellView {
+                    cell.line1TitleLabel.stringValue = object["text"] as? String ?? "@bob → Human Node"
                 }
                 if kind == "banner_jargon", labels.count > 1 { labels[1].stringValue = "[Passive] " + labels[1].stringValue }
                 if let header = roots.first(where: { $0.identifier?.rawValue == "header" }) {
@@ -3999,6 +4004,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var lowContrastLabels: [String] = []
         var jargonLeaks: [String] = []
         var addressMismatches: [String] = []
+        let jargonPattern = "local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
         func name(_ view: NSView) -> String {
             view.identifier?.rawValue ?? (view as? NSTextField)?.stringValue ?? String(describing:type(of:view))
         }
@@ -4077,15 +4083,21 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let id = name(label)
                 let data = isDataRow(label) && !(label.superview is MenuControl) && !id.hasPrefix("dir_user:")
                 var generatedText = label.stringValue
-                if id.hasPrefix("act_title:"), let item = activityAllItems.first(where: { $0.signal_id == String(id.dropFirst("act_title:".count)) }), item.target_harness != "human" {
-                    // This line interpolates only the target title. Exclude its exact span,
-                    // retaining generated prefixes/suffixes even if they repeat that title.
-                    let prefix = (item.unread ? "● " : "") + "@\(item.from_user) → "
-                    let titleSpan = prefix + item.target_title
-                    if generatedText.hasPrefix(titleSpan) { generatedText = prefix + String(generatedText.dropFirst(titleSpan.count)) }
+                if id.hasPrefix("act_title:"), let item = (label.superview as? DirectoryPeerCellView)?.activityItem {
+                    // Provenance comes from the rendered cell, including its Hub. Remove
+                    // only verified user spans; generated targets and held suffixes remain.
+                    let unread = item.unread ? "● " : ""
+                    let senderSpan = unread + "@\(item.from_user) → "
+                    if generatedText.hasPrefix(senderSpan) {
+                        var target = String(generatedText.dropFirst(senderSpan.count))
+                        if item.target_harness != "human", target.hasPrefix(item.target_title) {
+                            target = String(target.dropFirst(item.target_title.count))
+                        }
+                        generatedText = unread + "→ " + target
+                    }
                 }
-                let dataJargon = (id == "banner_data:1" && label.stringValue.hasPrefix("[Passive]")) || (id.hasPrefix("act_title:") && generatedText.range(of:"Human Node|Human receiver|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil)
-                if dataJargon || !data && label.stringValue.range(of:"local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil { jargonLeaks.append(id) }
+                let dataJargon = (id == "banner_data:1" && label.stringValue.hasPrefix("[Passive]")) || (id.hasPrefix("act_title:") && generatedText.range(of:jargonPattern,options:.regularExpression) != nil)
+                if dataJargon || !data && label.stringValue.range(of:jargonPattern,options:.regularExpression) != nil { jargonLeaks.append(id) }
             }
             if visible, let control = view as? MenuControl {
                 let id = control.identifier?.rawValue ?? ""

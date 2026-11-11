@@ -316,11 +316,78 @@ struct InteractiveLogin {
     serial: Mutex<()>,
 }
 
-struct RemoteChannelsCache {
+struct ChannelInventory {
     identity: Value,
-    request: Arc<()>,
-    inventory: Value,
+    serial: Mutex<()>,
+    cached: Mutex<CachedChannelInventory>,
+}
+struct CachedChannelInventory {
+    value: Value,
+    completed_gen: u64,
     retry_at: Instant,
+}
+impl ChannelInventory {
+    fn new(identity: Value) -> Self {
+        Self {
+            identity,
+            serial: Mutex::new(()),
+            cached: Mutex::new(CachedChannelInventory {
+                value: json!({"status":"loading"}),
+                completed_gen: 0,
+                retry_at: Instant::now(),
+            }),
+        }
+    }
+    fn refresh(&self, slot: &HubClient, observed_gen: u64) -> Result<(), String> {
+        let _serial = self.serial.lock().map_err(|e| e.to_string())?;
+        // A read queued behind an inventory request or mutation shares its result.
+        if self.cached.lock().map_err(|e| e.to_string())?.completed_gen == observed_gen {
+            self.fetch_locked(slot)?;
+        }
+        Ok(())
+    }
+    fn mutate(
+        &self,
+        slot: &HubClient,
+        plugins: &LoadedPlugins,
+        action: &Value,
+    ) -> Result<Value, String> {
+        let _serial = self.serial.lock().map_err(|e| e.to_string())?;
+        if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
+            return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
+        }
+        let result = run_channel_action(slot, plugins, action);
+        // The same owner spans schema lookup, mutation, and the post-mutation read.
+        // No pre-mutation inventory can satisfy or overwrite this acknowledgement.
+        let refresh = self.fetch_locked(slot);
+        match result {
+            Ok(value) => {
+                refresh?;
+                Ok(value)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    // Both callers hold serial; cached is never held across remote I/O.
+    fn fetch_locked(&self, slot: &HubClient) -> Result<(), String> {
+        if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
+            return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
+        }
+        let value = slot
+            .rpc("human_channels_list", &json!({}))
+            .unwrap_or_else(|e| json!({"status":"error","detail":e}));
+        if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
+            return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
+        }
+        let mut cached = self.cached.lock().map_err(|e| e.to_string())?;
+        cached.completed_gen = cached
+            .completed_gen
+            .checked_add(1)
+            .ok_or("Channel inventory generation exhausted")?;
+        cached.value = value;
+        cached.retry_at = Instant::now() + Duration::from_secs(1);
+        Ok(())
+    }
 }
 fn remote_channels_identity(slot: &HubClient) -> Value {
     json!([
@@ -356,7 +423,7 @@ pub struct DaemonService {
     last_app_action: HashMap<String, String>,
     last_host_hub_error: Option<String>,
     last_hub_errors: HashMap<String, (String, bool)>,
-    cached_remote_channels: Arc<Mutex<HashMap<String, RemoteChannelsCache>>>,
+    channel_inventories: HashMap<String, Arc<ChannelInventory>>,
     activity_filter: String,
     activity_query: String,
 }
@@ -407,7 +474,7 @@ impl DaemonService {
             last_app_action: HashMap::new(),
             last_host_hub_error: None,
             last_hub_errors: HashMap::new(),
-            cached_remote_channels: Arc::new(Mutex::new(HashMap::new())),
+            channel_inventories: HashMap::new(),
             activity_filter: "all".into(),
             activity_query: String::new(),
         };
@@ -503,9 +570,7 @@ impl DaemonService {
             }) {
                 continue;
             }
-            if let Ok(mut cache) = self.cached_remote_channels.lock() {
-                cache.remove(&name);
-            }
+            self.channel_inventories.remove(&name);
             let previous = self.slots.remove(&name);
             let registration = previous.as_ref().map(|old| old.registration.clone());
             let previous_principal = previous
@@ -633,9 +698,7 @@ impl DaemonService {
             .cloned()
             .collect();
         for name in removed {
-            if let Ok(mut cache) = self.cached_remote_channels.lock() {
-                cache.remove(&name);
-            }
+            self.channel_inventories.remove(&name);
             if let Some(slot) = self.slots.remove(&name) {
                 slot.closed.store(true, Ordering::SeqCst);
             }
@@ -1538,39 +1601,38 @@ impl DaemonService {
                 let _ = thread.join();
             }
         }
-        // The worker registry owns/join-reaps the single inventory request per hub.
-        // Only scheduling and cache access run under the service mutex, never remote I/O.
+        // The registry owns background tasks; the per-hub owner serializes these
+        // tasks with explicit reads and mutations outside the service mutex.
         if let Some(slot) = self
             .active_settings_hub
             .as_ref()
             .and_then(|hub| self.slots.get(hub))
             .filter(|slot| slot.local.is_none())
+            .cloned()
         {
             let key = format!("channels:{}", slot.name);
-            let due = self
-                .cached_remote_channels
-                .lock()
-                .map(|cache| {
-                    cache.get(&slot.name).is_none_or(|entry| {
-                        entry.identity != remote_channels_identity(slot)
-                            || (entry.retry_at <= Instant::now()
-                                && (entry.inventory["status"] == "error"
-                                    || entry.inventory["channels"].as_array().is_some_and(
-                                        |channels| {
-                                            channels.iter().any(|ch| {
-                                                matches!(
-                                                    string(ch, "status"),
-                                                    "pairing_pending" | "error"
-                                                )
-                                            })
-                                        },
-                                    )))
-                    })
-                })
-                .unwrap_or(false);
+            let inventory = self.channel_inventory(&slot);
+            let (due, observed_gen) = {
+                let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
+                (
+                    cached.value["status"] == "loading"
+                        || (cached.retry_at <= Instant::now()
+                            && (cached.value["status"] == "error"
+                                || cached.value["channels"].as_array().is_some_and(|channels| {
+                                    channels.iter().any(|ch| {
+                                        matches!(string(ch, "status"), "pairing_pending" | "error")
+                                    })
+                                }))),
+                    cached.completed_gen,
+                )
+            };
             if due && !self.receivers.contains_key(&key) {
-                let refresh = self.prepare_channel_refresh(slot.clone())?;
-                self.receivers.insert(key, thread::spawn(refresh));
+                self.receivers.insert(
+                    key,
+                    thread::spawn(move || {
+                        let _ = inventory.refresh(&slot, observed_gen);
+                    }),
+                );
             }
         }
         for (hub, slot) in &self.slots {
@@ -1719,13 +1781,11 @@ impl DaemonService {
                     slot.rpc("human_channels_list", &json!({}))
                         .unwrap_or_else(|e| json!({"status":"error","detail":e}))
                 } else {
-                    self.cached_remote_channels
-                        .lock()
-                        .ok()
-                        .and_then(|c| {
-                            c.get(name)
-                                .filter(|entry| entry.identity == remote_channels_identity(slot))
-                                .map(|entry| entry.inventory.clone())
+                    self.channel_inventories
+                        .get(name)
+                        .filter(|entry| entry.identity == remote_channels_identity(slot))
+                        .and_then(|entry| {
+                            entry.cached.lock().ok().map(|cached| cached.value.clone())
                         })
                         .unwrap_or_else(|| json!({"status":"loading"}))
                 };
@@ -1797,52 +1857,33 @@ impl DaemonService {
         invite_command.push_str(" --default");
         json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
-    fn prepare_channel_refresh(
-        &self,
-        slot: HubClient,
-    ) -> Result<impl FnOnce() + Send + 'static, String> {
-        let identity = remote_channels_identity(&slot);
-        let request = Arc::new(());
-        let cache = self.cached_remote_channels.clone();
-        {
-            let mut entries = cache.lock().map_err(|e| e.to_string())?;
-            let inventory = entries
-                .get(&slot.name)
-                .filter(|entry| entry.identity == identity)
-                .map(|entry| entry.inventory.clone())
-                .unwrap_or_else(|| json!({"status":"loading"}));
-            entries.insert(
-                slot.name.clone(),
-                RemoteChannelsCache {
-                    identity: identity.clone(),
-                    request: request.clone(),
-                    inventory,
-                    retry_at: Instant::now(),
-                },
-            );
+    fn channel_inventory(&mut self, slot: &HubClient) -> Arc<ChannelInventory> {
+        let identity = remote_channels_identity(slot);
+        let entry = self
+            .channel_inventories
+            .entry(slot.name.clone())
+            .or_insert_with(|| Arc::new(ChannelInventory::new(identity.clone())));
+        if entry.identity != identity {
+            *entry = Arc::new(ChannelInventory::new(identity));
         }
-        Ok(move || {
-            let value = slot
-                .rpc("human_channels_list", &json!({}))
-                .unwrap_or_else(|e| json!({"status":"error","detail":e}));
-            if let Ok(mut entries) = cache.lock() {
-                if let Some(entry) = entries.get_mut(&slot.name).filter(|entry| {
-                    !slot.closed.load(Ordering::SeqCst)
-                        && entry.identity == identity
-                        && Arc::ptr_eq(&entry.request, &request)
-                }) {
-                    entry.inventory = value;
-                    entry.retry_at = Instant::now() + Duration::from_secs(1);
-                }
-            }
-        })
+        entry.clone()
     }
-    fn refresh_channels(&self, hub: &str) {
-        if let Some(slot) = self.slots.get(hub).filter(|s| s.local.is_none()) {
-            if let Ok(refresh) = self.prepare_channel_refresh(slot.clone()) {
-                refresh();
+    fn finish_channel_action(&self, hub: &str, action: &Value, result: &Result<Value, String>) {
+        let id = channel_id(action).unwrap_or_default();
+        let rpc = channel_rpc(action);
+        match result {
+            Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
+                let mut frame = result.clone();
+                frame["op"] = json!(if rpc == "human_channel_pair_start" { "pair_code" } else { "channel_test_result" });
+                frame["channel_id"] = json!(id);
+                frame["hub"] = json!(hub);
+                self.emit(frame);
             }
+            Err(error) => self.emit(json!({"op":"channel_test_result","channel_id":id,"hub":hub,"ok":false,"error":error,"detail":error})),
+            _ => {}
         }
+        self.emit(json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings_for_hub(hub)}));
+        self.push_ui();
     }
     fn display_address(&self, hub: &str, row: &Value) -> String {
         let peers = self
@@ -2364,123 +2405,15 @@ impl DaemonService {
                 invite["name"] = json!(hub);
                 return Ok(json!({"ok":true,"invite":invite}));
             }
-            "channel_save"
-            | "save_hub_service"
-            | "configure_human_channel"
-            | "disconnect_human_channel"
-            | "channel_toggle"
-            | "channel_unpair"
-            | "channel_cancel_pair"
-            | "clear_channel_service"
-            | "channel_test"
-            | "test_human_channel"
-            | "channel_pair"
-            | "pair_human_channel" => {
-                let id = action["channel_id"]
-                    .as_str()
-                    .or_else(|| action["plugin_id"].as_str())
-                    .ok_or("INVALID_INPUT: channel_id required")?;
+            _ if channel_action_kind(action) == Some(ChannelActionKind::Mutation) => {
+                channel_id(action)?;
                 self.active_settings_hub = Some(hub.clone());
-                let hub_only = op == "save_hub_service" || action["scope"] == "hub";
-                let rpc = if hub_only {
-                    "human_channels_configure"
-                } else {
-                    match op {
-                        "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
-                        "channel_test" | "test_human_channel" => "human_channels_test",
-                        _ => "human_channels_configure",
-                    }
-                };
-                let result: Result<Value, String> = (|| {
-                    let mut params = action.clone();
-                    params["plugin_id"] = json!(id);
-                    if let Some(values) = action["values"].as_object() {
-                        // The selected Hub owns the schema, including remote-only plugins
-                        // and remote schemas that differ from a locally installed plugin.
-                        let schema = self.slot(&hub)?.rpc("human_channels_list", &json!({}))?;
-                        let fields = schema["channels"]
-                            .as_array()
-                            .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
-                            .and_then(|ch| ch["fields"].as_array())
-                            .cloned()
-                            .or_else(|| self.plugins.find_by_id(id).map(|p| p.fields.clone()))
-                            .ok_or_else(|| {
-                                format!("INVALID_INPUT: Unknown human channel plugin: {id}")
-                            })?;
-                        let mut hub_config = Map::new();
-                        let mut user_config = Map::new();
-                        for field in &fields {
-                            let key = string(field, "key");
-                            if let Some(value) = values.get(key) {
-                                if field["scope"] == "hub" {
-                                    hub_config.insert(key.into(), value.clone());
-                                } else {
-                                    user_config.insert(key.into(), value.clone());
-                                }
-                            }
-                        }
-                        if !hub_config.is_empty() {
-                            params["hub_config"] = Value::Object(hub_config);
-                        }
-                        if !user_config.is_empty() {
-                            params["user_config"] = Value::Object(user_config);
-                        }
-                    }
-                    if op == "channel_cancel_pair" {
-                        params["cancel_pair"] = json!(true);
-                    }
-                    if op == "channel_unpair"
-                        || (op == "disconnect_human_channel" && action["reset_hub"] != true)
-                    {
-                        params["reset_user"] = json!(action["reset_user"] != false);
-                    }
-                    if op == "clear_channel_service" {
-                        params["reset_hub"] = json!(true);
-                        params["reset_user"] = json!(true);
-                    }
-                    if hub_only {
-                        // Hub-only saves cannot create, edit, or resume a personal binding,
-                        // even if a caller supplies unrelated personal mutation parameters.
-                        let hub_config = params
-                            .get("hub_config")
-                            .cloned()
-                            .unwrap_or_else(|| json!({}));
-                        params = json!({"plugin_id":id,"hub_config":hub_config});
-                    }
-                    self.slot(&hub)?.rpc(rpc, &params).and_then(|result| {
-                        if matches!(rpc, "human_channel_pair_start" | "human_channels_test")
-                            && !result.is_object()
-                        {
-                            Err("INVALID_INPUT: Channel result must be an object".into())
-                        } else {
-                            Ok(result)
-                        }
-                    })
+                let result = (|| {
+                    let slot = self.slot(&hub)?.clone();
+                    self.channel_inventory(&slot)
+                        .mutate(&slot, &self.plugins, action)
                 })();
-                match &result {
-                    Ok(result)
-                        if matches!(rpc, "human_channel_pair_start" | "human_channels_test") =>
-                    {
-                        let mut frame = result.clone();
-                        frame["op"] = json!(if rpc == "human_channel_pair_start" {
-                            "pair_code"
-                        } else {
-                            "channel_test_result"
-                        });
-                        frame["channel_id"] = json!(id);
-                        frame["hub"] = json!(hub);
-                        self.emit(frame);
-                    }
-                    Err(error) => {
-                        self.emit(json!({"op":"channel_test_result","channel_id":id,"hub":hub,"ok":false,"error":error,"detail":error}));
-                    }
-                    _ => {}
-                }
-                self.refresh_channels(&hub);
-                self.emit(
-                    json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":op,"request_id":action["request_id"],"settings":self.settings_for_hub(&hub)}),
-                );
-                self.push_ui();
+                self.finish_channel_action(&hub, action, &result);
                 return result;
             }
             "send_signal" | "send_reply_from_human" => {
@@ -2863,9 +2796,17 @@ impl DaemonService {
                 request_shutdown();
             }
             "quit" | "quit_daemon" => request_shutdown(),
-            "open_settings" | "settings_select_hub" => {
-                self.refresh_channels(&hub);
+            _ if channel_action_kind(action) == Some(ChannelActionKind::Read) => {
                 self.active_settings_hub = Some(hub.clone());
+                if let Ok(slot) = self.slot(&hub).cloned() {
+                    let inventory = self.channel_inventory(&slot);
+                    let observed_gen = inventory
+                        .cached
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .completed_gen;
+                    inventory.refresh(&slot, observed_gen)?;
+                }
                 self.emit(
                     json!({"op":"settings","hub":hub,"settings":self.settings_for_hub(&hub)}),
                 );
@@ -3370,6 +3311,193 @@ fn parse_hub_invite(raw: &str) -> Result<Value, String> {
     }
     Ok(value)
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChannelActionKind {
+    Read,
+    Mutation,
+}
+fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
+    match string(action, "op") {
+        "open_settings" | "settings_select_hub" => Some(ChannelActionKind::Read),
+        "channel_save"
+        | "save_hub_service"
+        | "configure_human_channel"
+        | "disconnect_human_channel"
+        | "channel_toggle"
+        | "channel_unpair"
+        | "channel_cancel_pair"
+        | "clear_channel_service"
+        | "channel_test"
+        | "test_human_channel"
+        | "channel_pair"
+        | "pair_human_channel" => Some(ChannelActionKind::Mutation),
+        _ => None,
+    }
+}
+fn channel_id(action: &Value) -> Result<&str, String> {
+    action["channel_id"]
+        .as_str()
+        .or_else(|| action["plugin_id"].as_str())
+        .ok_or_else(|| "INVALID_INPUT: channel_id required".into())
+}
+fn channel_rpc(action: &Value) -> &'static str {
+    if action["op"] == "save_hub_service" || action["scope"] == "hub" {
+        "human_channels_configure"
+    } else {
+        match string(action, "op") {
+            "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
+            "channel_test" | "test_human_channel" => "human_channels_test",
+            _ => "human_channels_configure",
+        }
+    }
+}
+fn run_channel_action(
+    slot: &HubClient,
+    plugins: &LoadedPlugins,
+    action: &Value,
+) -> Result<Value, String> {
+    let id = channel_id(action)?;
+    let op = string(action, "op");
+    let mut params = action.clone();
+    params["plugin_id"] = json!(id);
+    if let Some(values) = action["values"].as_object() {
+        // The selected Hub owns the schema, including remote-only plugins
+        // and remote schemas that differ from a locally installed plugin.
+        let schema = slot.rpc("human_channels_list", &json!({}))?;
+        let fields = schema["channels"]
+            .as_array()
+            .and_then(|cs| cs.iter().find(|ch| ch["id"] == id))
+            .and_then(|ch| ch["fields"].as_array())
+            .cloned()
+            .or_else(|| plugins.find_by_id(id).map(|p| p.fields.clone()))
+            .ok_or_else(|| format!("INVALID_INPUT: Unknown human channel plugin: {id}"))?;
+        let mut hub_config = Map::new();
+        let mut user_config = Map::new();
+        for field in &fields {
+            let key = string(field, "key");
+            if let Some(value) = values.get(key) {
+                if field["scope"] == "hub" {
+                    hub_config.insert(key.into(), value.clone());
+                } else {
+                    user_config.insert(key.into(), value.clone());
+                }
+            }
+        }
+        if !hub_config.is_empty() {
+            params["hub_config"] = Value::Object(hub_config);
+        }
+        if !user_config.is_empty() {
+            params["user_config"] = Value::Object(user_config);
+        }
+    }
+    if op == "channel_cancel_pair" {
+        params["cancel_pair"] = json!(true);
+    }
+    if op == "channel_unpair" || (op == "disconnect_human_channel" && action["reset_hub"] != true) {
+        params["reset_user"] = json!(action["reset_user"] != false);
+    }
+    if op == "clear_channel_service" {
+        params["reset_hub"] = json!(true);
+        params["reset_user"] = json!(true);
+    }
+    if op == "save_hub_service" || action["scope"] == "hub" {
+        // Hub-only saves cannot create, edit, or resume a personal binding.
+        let hub_config = params
+            .get("hub_config")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        params = json!({"plugin_id":id,"hub_config":hub_config});
+    }
+    let rpc = channel_rpc(action);
+    let result = slot.rpc(rpc, &params)?;
+    if matches!(rpc, "human_channel_pair_start" | "human_channels_test") && !result.is_object() {
+        Err("INVALID_INPUT: Channel result must be an object".into())
+    } else {
+        Ok(result)
+    }
+}
+fn dispatch_channel_action(
+    service: &Arc<Mutex<DaemonService>>,
+    action: &Value,
+    kind: ChannelActionKind,
+) -> Result<Value, String> {
+    let (slot, inventory, plugins, observed_gen) = {
+        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        if s.closing || shutdown_requested() {
+            return Err("Shutting down".into());
+        }
+        if kind == ChannelActionKind::Mutation {
+            channel_id(action)?;
+        }
+        s.reload_slots()?;
+        let hub = action["hub"]
+            .as_str()
+            .unwrap_or(&s.config.default_hub)
+            .to_string();
+        s.active_settings_hub = Some(hub.clone());
+        let slot = match s.slot(&hub).cloned() {
+            Ok(slot) => slot,
+            Err(error) => {
+                if kind == ChannelActionKind::Read {
+                    // Settings still opens for disabled hubs so they can be restored.
+                    s.emit(json!({"op":"settings","hub":hub,"settings":s.settings_for_hub(&hub)}));
+                    return Ok(json!({"ok":true}));
+                }
+                let result = Err(error);
+                s.finish_channel_action(&hub, action, &result);
+                return result;
+            }
+        };
+        let inventory = s.channel_inventory(&slot);
+        // Pure reads can use the cached projection while this slot's owner is
+        // busy. Its completion publishes fresh settings, without another RPC.
+        if kind == ChannelActionKind::Read
+            && matches!(
+                inventory.serial.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            )
+        {
+            s.emit(json!({"op":"settings","hub":hub,"settings":s.settings_for_hub(&hub)}));
+            return Ok(json!({"ok":true}));
+        }
+        let observed_gen = inventory
+            .cached
+            .lock()
+            .map_err(|e| e.to_string())?
+            .completed_gen;
+        (slot, inventory, s.plugins.clone(), observed_gen)
+    };
+    // All waits and channel I/O use the shared per-hub owner without service.
+    let result = match kind {
+        ChannelActionKind::Read => inventory
+            .refresh(&slot, observed_gen)
+            .map(|_| json!({"ok":true})),
+        ChannelActionKind::Mutation => inventory.mutate(&slot, &plugins, action),
+    };
+    let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+    if s.closing || shutdown_requested() {
+        return Err("Shutting down".into());
+    }
+    s.reload_slots()?;
+    if slot.closed.load(Ordering::SeqCst)
+        || !s
+            .slots
+            .get(&slot.name)
+            .is_some_and(|current| remote_channels_identity(current) == inventory.identity)
+    {
+        let result = Err("NATS_UNAVAILABLE: Hub changed during channel request".into());
+        if kind == ChannelActionKind::Mutation {
+            s.finish_channel_action(&slot.name, action, &result);
+        }
+        return result;
+    }
+    if kind == ChannelActionKind::Mutation {
+        s.finish_channel_action(&slot.name, action, &result);
+    } else {
+        s.emit(json!({"op":"settings","hub":slot.name,"settings":s.settings_for_hub(&slot.name)}));
+    }
+    result
+}
 fn interactive_login(action: &Value) -> bool {
     action["op"] == "login_hub"
         || (action["op"] == "hub_action"
@@ -3394,6 +3522,9 @@ fn dispatch_action_inner(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
 ) -> Result<Value, String> {
+    if let Some(kind) = channel_action_kind(action) {
+        return dispatch_channel_action(service, action, kind);
+    }
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
         if s.closing || shutdown_requested() {

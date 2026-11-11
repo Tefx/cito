@@ -477,7 +477,31 @@ server.serve_forever()
             .unwrap()
     };
     assert_eq!(local("/health")["ok"], true);
-    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let daemon_port = f.port;
+    for op in ["open_settings", "settings_select_hub"] {
+        let opened = std::thread::spawn(move || {
+            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+                .timeout(std::time::Duration::from_millis(750))
+                .send_json(json!({"op":op,"hub":"shared"}))
+                .and_then(|response| response.into_json::<Value>().map_err(Into::into))
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(opened["ok"], true);
+        assert_eq!(
+            http(proxy_port, "/status", None).1["waiting"],
+            1,
+            "{op} must share the held inventory request"
+        );
+        assert_eq!(local("/health")["ok"], true);
+    }
+    let snapshot: Value = ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+        .timeout(std::time::Duration::from_millis(750))
+        .send_json(json!({"op":"get_snapshot"}))
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(snapshot["settings"]["settings_hub"], "shared");
     assert_eq!(
         snapshot["settings"]["channels"],
@@ -503,6 +527,98 @@ server.serve_forever()
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], false);
     assert_eq!(snapshot["settings"]["channels"][0]["status"], "hub_ready");
+
+    // A mutation queued behind an old inventory must await its own schema and
+    // post-mutation inventory before acknowledging, without retaining service.
+    config["hubs"]["shared"]["token"] = json!("next-credential");
+    fs::write(&f.config, config.to_string()).unwrap();
+    wait(|| http(proxy_port, "/status", None).1["waiting"] == 3);
+    std::thread::scope(|scope| {
+        let saved = scope.spawn(move || {
+            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send_json(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"address":"bob-room"}}))
+                .and_then(|response| response.into_json::<Value>().map_err(Into::into))
+        });
+        assert_eq!(local("/health")["ok"], true);
+        assert_eq!(http(proxy_port, "/status", None).1["waiting"], 3);
+        assert_eq!(http(proxy_port, "/release/3", None).0, 200);
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 4);
+        assert_eq!(
+            local("/health")["ok"],
+            true,
+            "Schema lookup must release service"
+        );
+        assert_eq!(http(proxy_port, "/release/4", None).0, 200);
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 5);
+        assert!(
+            !saved.is_finished(),
+            "The acknowledgement must await post-mutation inventory"
+        );
+        assert_eq!(
+            local("/health")["ok"],
+            true,
+            "Post-mutation inventory must release service"
+        );
+        assert_eq!(
+            f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
+            false
+        );
+        assert_eq!(http(proxy_port, "/release/5", None).0, 200);
+        let result = saved.join().unwrap().unwrap();
+        assert_eq!(result["channels"][0]["status"], "ready");
+    });
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["settings"]["channels"][0]["status"], "ready");
+    assert_eq!(snapshot["settings"]["channels"][0]["configured"], true);
+
+    // A replaced slot cannot acknowledge an in-flight mutation against the new
+    // identity, even when its remote mutation already committed before replacement.
+    std::thread::scope(|scope| {
+        let changed = scope.spawn(move || {
+            ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send_json(
+                    json!({"op":"channel_unpair","hub":"shared","channel_id":"remote-channel"}),
+                )
+        });
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 6);
+        config["hubs"]["shared"]["token"] = json!("replacement-credential");
+        fs::write(&f.config, config.to_string()).unwrap();
+        wait(|| http(proxy_port, "/status", None).1["waiting"] == 7);
+        let failure = changed.join().unwrap().unwrap_err();
+        match failure {
+            ureq::Error::Status(400, response) => assert!(response
+                .into_string()
+                .unwrap()
+                .contains("Hub changed during channel request")),
+            other => panic!("Unexpected mutation failure: {other}"),
+        }
+    });
+    assert_eq!(local("/health")["ok"], true);
+    assert_eq!(http(proxy_port, "/release/7", None).0, 200);
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
+    });
+    assert_eq!(http(proxy_port, "/release/6", None).0, 200);
+    wait(|| {
+        http(proxy_port, "/status", None).1["completed"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(6)))
+    });
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
+        false
+    );
+    config["hubs"]["shared"]["enabled"] = json!(false);
+    fs::write(&f.config, config.to_string()).unwrap();
+    for op in ["open_settings", "settings_select_hub"] {
+        assert_eq!(
+            f.action(json!({"op":op,"hub":"shared"})).0,
+            200,
+            "Disabled hubs must remain configurable"
+        );
+    }
 }
 
 #[test]
