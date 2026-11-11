@@ -9232,7 +9232,7 @@ phases:
 - id: v32
   name: 'V32 Stage 14 (v0.21.3): Unified Spatial Grid (CitoMetrics), Real Brand Icons
     (icon.png), and Hubs & Network Tab Redesign (N1–N3)'
-  status: pending
+  status: in_progress
   gate: 'All N1–N3 requirements in docs/DESIGN.md §16 pass; all 6 inspectMenu() mechanical
     invariants (including card inner-padding >= 5.5pt) equal [] across all 4 surfaces
     in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
@@ -9256,7 +9256,7 @@ phases:
   - id: v32.impl
     name: V32 N1–N3 Unified Spatial Grid, Real Brand Icons, Hubs & Network Redesign
       & v0.21.3 Alignment
-    status: pending
+    status: claimed
     description: Implement docs/DESIGN.md §16 (N1–N3) and align version to 0.21.3
       while strictly enforcing §16.2 test economy (update existing unit/UI assertions
       in place; do NOT add new multi-process E2E test functions). Regenerate site/assets/screenshots/*.png.
@@ -9273,6 +9273,8 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T13:37:18.403904Z'
   - id: v32.hygiene
     name: 'V32 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & Live v0.21.3 Release [REQUIRES_SKILL: contract-and-simplicity]
