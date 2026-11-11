@@ -1480,7 +1480,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
   - In `add_hub_form` (for remote Hubs), label the field **`"HUB NAME (OPTIONAL)"`** with placeholder **`"Auto-filled from URL"`**.
   - On submit in `cito-ui.swift` and in `DaemonService::setup_save_hub` (`daemon.rs:2324`):
     - If `name` is empty, derive it automatically from the URL host (taking the first hostname label before `.` when non-numeric, or replacing `.` with `-` for IPv4 literals, fallback `"remote"`), and if creating a new Hub (`original_hub` is empty) whose derived name is `"local"` or already belongs to an existing Hub with a different URL, disambiguate with a numeric suffix (`<name>-2`, `<name>-3`, matching `parse_hub_invite`).
-    - Normalize any explicitly provided `name` via `normalize_slug` (lowercasing ASCII letters and collapsing spaces/punctuation into `-`, trimmed to 32 chars) before calling `validate_hub_name`, so mixed-case or spaced names like `"Office Mac"` or `"Work"` succeed seamlessly as `"office-mac"` / `"work"` (while still rejecting an empty post-normalization slug such as `"!!!"` or a new Hub explicitly named `"local"`).
+    - Normalize any explicitly provided `name` via `normalize_slug` (lowercasing ASCII letters and collapsing spaces/punctuation into `-`, trimmed to 32 chars) before calling `validate_hub_name`, so mixed-case or spaced names like `"Office Mac"` or `"Work"` succeed seamlessly as `"office-mac"` / `"work"` (while rejecting an empty post-normalization slug such as `"!!!"`, a new Hub explicitly named `"local"`, or a create operation where `original_hub` is empty and the normalized `name` already belongs to an existing Hub with a different URL).
 
 ### 16.2 Verification & Anti-Over-Testing Policy (`MUST`)
 
