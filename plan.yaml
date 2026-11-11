@@ -9199,7 +9199,7 @@ phases:
   - id: v31.gate
     name: V31 Independent Terminal Acceptance, M1–M5 Verification & v0.21.2 Live Release
       Gate
-    status: pending
+    status: claimed
     description: Independently verify all M1–M5 requirements in docs/DESIGN.md §15,
       all 6 inspectMenu() mechanical invariants in Light and Dark modes, §15.2 test
       economy, and live v0.21.2 GitHub Release / Tefx/homebrew-tap Cask alignment.
@@ -9211,3 +9211,5 @@ phases:
     depends_on:
     - v31.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T12:07:51.684202Z'
