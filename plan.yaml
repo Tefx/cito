@@ -9056,7 +9056,7 @@ phases:
 - id: v31
   name: 'V31 Stage 13 (v0.21.2): Declarative Bar/Strip Layout Engine, Single-Authority
     Human/Channel Lifecycle & Bounded Delivery Retry Architecture (M1–M5)'
-  status: in_progress
+  status: done
   gate: 'All M1–M5 requirements in docs/DESIGN.md §15 pass; all 6 inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; website
     screenshots in site/assets/screenshots/*.png match v0.21.2; pathway-auditor, structural-auditor,
@@ -9148,7 +9148,7 @@ phases:
     name: 'V31 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & Live v0.21.2 Release [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: 'Execute iterative 2D contract-and-simplicity convergence across
       all modified files, site/assets/screenshots/*.png, and Light/Dark 2x Retina
       PNG snapshots with pathway-auditor, structural-auditor, and uiux-auditor until
@@ -9168,10 +9168,38 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T10:27:59.520770Z'
+    done_at: '2026-11-11T12:07:23.364528+00:00'
+    evidence: "Artifact:\n- Commits: 8114559ccc19ff9ab20c5037ebf52635a2ac1085 (Round\
+      \ 1 ledger closure L1–L9) and 2451035351d787f938ef6b8a9d3b545c4f27116d (Round\
+      \ 2 delta closure R2-1/R2-2, tagged as v0.21.2)\n- GitHub Release: https://github.com/Tefx/cito/releases/tag/v0.21.2\
+      \ (workflow run 43015680117, CI run 43015643375, Website run 43015643429)\n\
+      - Homebrew Tap: Tefx/homebrew-tap Casks/cito.rb updated to version 0.21.2 (sha256:\
+      \ 7d968a9252071a1a6f2fec9c40aafb3b61f32fcd97b36b6d87cbe7ce1bee1d49)\n\nVerification:\n\
+      - 2D Contract-and-Simplicity Iterative Convergence:\n  - Round 1 (git:fd9dab06f1aeef759e5e6461bac6c63e28401d86):\
+      \ pathway-auditor, structural-auditor, and uiux-auditor read 1..EOF of all modified\
+      \ files + 41 PNGs and produced the Frozen Finding Ledger (L1–L9: Clear pill\
+      \ truncation & inspectMenu() +0.5pt slack, \"Channel inventory\" error fallback\
+      \ & regex, README/site preview alignment, unwritten driver_unavailable backoff\
+      \ scheduling, durable pending_hub_detaches reconciliation on reconnect, unconditional\
+      \ ensure_process crash recovery, redeem() retry/boundary symmetry with human_channels_configure,\
+      \ multipart content-integrity assertions, and gatewayStatus right-alignment\
+      \ + bottom-row edge checks).\n  - Round 2 (git:e548d602a38d7fdd4060167b921f64e506236f5c):\
+      \ uiux-auditor and structural-auditor returned Contract & Wiring: CLEAN | Simplicity\
+      \ & Economy: ZERO_NEW_ISSUES; pathway-auditor identified 2 residual edge cases\
+      \ (R2-1 absent-slot URL lookup in unlisten_id and R2-2 expiring admission wake_retries\
+      \ before dispatch in receiver_tests.rs).\n  - Round 3 (git:2451035351d787f938ef6b8a9d3b545c4f27116d):\
+      \ pathway-auditor, structural-auditor, and uiux-auditor all converged at Contract\
+      \ & Wiring: CLEAN | Simplicity & Economy: ZERO_NEW_ISSUES | Uninspected Gaps:\
+      \ NONE.\n- Run: `cargo fmt --all -- --check` -> PASS\n- Run: `cargo test --workspace\
+      \ --locked -- --test-threads=4` -> PASS (170 library, 100 integration, 3 plugin\
+      \ unit tests; 0 failed)\n- Run: `cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings` (in CI run 43015643375) -> PASS (0 warnings)\n- Run: `cargo\
+      \ build --release --locked` -> PASS\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md\
+      \ §15 (M1–M5 & §15.2 Anti-Over-Testing Policy) & docs/RELEASING.md"
   - id: v31.gate
     name: V31 Independent Terminal Acceptance, M1–M5 Verification & v0.21.2 Live Release
       Gate
-    status: pending
+    status: done
     description: Independently verify all M1–M5 requirements in docs/DESIGN.md §15,
       all 6 inspectMenu() mechanical invariants in Light and Dark modes, §15.2 test
       economy, and live v0.21.2 GitHub Release / Tefx/homebrew-tap Cask alignment.
@@ -9182,4 +9210,146 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     depends_on:
     - v31.hygiene
+    agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T12:07:51.684202Z'
+    done_at: '2026-11-11T12:15:53.483257+00:00'
+    evidence: "Artifact:\n- Gate Report: gate.report.v2 (status: PASS, review_kind:\
+      \ PHASE_GATE, review_mode: FULL, target_ref: git:627edd3508075ca0f0a012a6144c10f75a46f1f4,\
+      \ evidence_disposition: POSITIVE_GATE_EVIDENCE)\n- Release Commit & Annotated\
+      \ Tag: v0.21.2 -> 2451035351d787f938ef6b8a9d3b545c4f27116d\n- GitHub Release:\
+      \ https://github.com/Tefx/cito/releases/tag/v0.21.2 (Cito-macos-arm64.zip sha256:\
+      \ 7d968a9252071a1a6f2fec9c40aafb3b61f32fcd97b36b6d87cbe7ce1bee1d49)\n- Homebrew\
+      \ Tap: Tefx/homebrew-tap Casks/cito.rb v0.21.2\n\nVerification:\n- Run: `python3\
+      \ ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding /tmp/cito-v31-gate-binding.json\
+      \ /tmp/cito-v31-gate-report.json` -> PASS (`valid: true, binding_checked: true,\
+      \ evidence_disposition: \"POSITIVE_GATE_EVIDENCE\"`)\n- Proven Requirements\
+      \ (6/6 PROVEN):\n  - M1_DECLARATIVE_BAR_AND_PILL_STRIP_LAYOUT: PROVEN\n  - M2_SINGLE_MAC_AND_IDLE_AFFORDANCES:\
+      \ PROVEN\n  - M3_TERMINOLOGY_MONOCHROME_STATUS_AND_ORACLES: PROVEN\n  - M4_SINGLE_AUTHORITY_HUMAN_CHANNEL_LIFECYCLE:\
+      \ PROVEN\n  - M5_BOUNDED_DELIVERY_RETRY_AND_IO_TIMEOUTS: PROVEN\n  - S15_2_TEST_ECONOMY_AND_V0_21_2_RELEASE:\
+      \ PROVEN\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §15 (M1–M5 & §15.2 Anti-Over-Testing\
+      \ Policy) & docs/RELEASING.md"
+- id: v32
+  name: 'V32 Stage 14 (v0.21.3): Unified Spatial Grid (CitoMetrics), Real Brand Icons
+    (icon.png), and Hubs & Network Tab Redesign (N1–N3)'
+  status: in_progress
+  gate: 'All N1–N3 requirements in docs/DESIGN.md §16 pass; all 6 inspectMenu() mechanical
+    invariants (including card inner-padding >= 5.5pt) equal [] across all 4 surfaces
+    in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
+    showcase real brand icons and v0.21.3 layout; pathway-auditor, structural-auditor,
+    and uiux-auditor converge to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES;
+    cargo test --workspace passes with 0 warnings under strict §16.2 test economy;
+    v0.21.3 is published via release.yml and Tefx/homebrew-tap.'
+  context: 'Implement docs/DESIGN.md §16 (N1–N3 & §16.2 strict test economy): (1)
+    N1 unified spatial grid (CitoMetrics), 12pt menu outer keyline alignment, symmetric
+    vertical card padding across host_hub_card (56pt collapsed / 136pt expanded anchored
+    to H), settings_hub:<name> (max(56, subtitleHeight + 42)), add_hub_form (156pt
+    / 204pt), bannerCard (54pt), chCard (48pt header), and mechanical inspectMenu()
+    card inner-padding >= 5.5pt oracle; (2) N2 real 128x128 brand icons in plugins/{codex,pi,claude,telegram}/icon.png
+    with vendor-neutral pluginIconImage resolution and full-bleed squircle rendering;
+    (3) N3 cohesive Copy Invite Code / Paste Invite Code workflow with inline instructions,
+    Tailscale MagicDNS/IPv4 priority in advertised_hub_host (cached 30s TTL), and
+    frictionless HUB NAME (OPTIONAL) auto-derivation & normalize_slug normalization.'
+  depends_on:
+  - v31
+  steps:
+  - id: v32.impl
+    name: V32 N1–N3 Unified Spatial Grid, Real Brand Icons, Hubs & Network Redesign
+      & v0.21.3 Alignment
+    status: done
+    description: Implement docs/DESIGN.md §16 (N1–N3) and align version to 0.21.3
+      while strictly enforcing §16.2 test economy (update existing unit/UI assertions
+      in place; do NOT add new multi-process E2E test functions). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/setup.rs
+    - plugins/codex/icon.png
+    - plugins/pi/icon.png
+    - plugins/claude/icon.png
+    - plugins/telegram/icon.png
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T13:37:18.403904Z'
+    done_at: '2026-11-11T14:49:23.444745+00:00'
+    evidence: 'Artifact:
+
+      - Commit: d0d56c0c5a90f277f237dc13ed0b7a434375e473 (retained ref: refs/vectl-retained/v32.impl,
+      fast-forwarded onto main)
+
+      - Modified files: src/macos/cito-ui.swift, crates/cito-native/src/core/daemon.rs,
+      crates/cito-native/tests/support/{ui.rs,daemon.rs,distribution.rs}, plugins/telegram/{icon.png,README.md,plugin.json},
+      version metadata across Cargo.toml/Cargo.lock/plugins/site/docs, and 7 regenerated
+      site/assets/screenshots/*.png assets.
+
+      - Worktree cleanup: Removed /Users/tefx/Projects/cito/.vectl/worktrees/v32-impl
+      and transient test logs; free space increased from 128 GiB to 129 GiB (+1 GiB
+      reclaimed).
+
+
+      Verification:
+
+      - Run: `cargo fmt --all -- --check` -> PASS (exit 0)
+
+      - Run: `cargo test --workspace -- --test-threads=4` -> PASS (170 library tests,
+      100 integration tests, 3 plugin unit tests; 0 failed; 4 ignored)
+
+      - Run: `cargo build --release` -> PASS (0 compiler warnings; rebuilt bin/* and
+      plugins/*/bin/*)
+
+      - Run: `python3 packaging/release.py check && bin/cito --version` -> PASS (`0.21.3`
+      / `cito v0.21.3`)
+
+      - Parent-verified Level 2 design prescription adjustments recorded in docs/DESIGN.md
+      §16.1: (1) placed expanded error-free host_hub_card invite guidance on the full-width
+      452pt row (`x = 14, y = 78`) so the 408.68pt sentence fits without single-line
+      truncation; (2) excluded top-level window roots (`settings_panel`, `directory_panel`,
+      `banner_root`) from the `card_padding` predicate so full-bleed window headers/footers/tabs
+      are not falsely flagged while every nested bordered card and stratum container
+      is enforced at `>= 5.5pt`.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §16 (N1–N3 & §16.2 Anti-Over-Testing Policy)'
+  - id: v32.hygiene
+    name: 'V32 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
+      Multimodal Review & Live v0.21.3 Release [REQUIRES_SKILL: contract-and-simplicity]
+      [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: claimed
+    description: 'Execute iterative 2D contract-and-simplicity convergence across
+      all modified files, site/assets/screenshots/*.png, and Light/Dark 2x Retina
+      PNG snapshots with pathway-auditor, structural-auditor, and uiux-auditor until
+      a single round returns Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES.
+      Push main and annotated tag v0.21.3 so CI and release.yml publish v0.21.3 and
+      update Tefx/homebrew-tap Casks/cito.rb.'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v32.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T14:49:46.355265Z'
+  - id: v32.gate
+    name: V32 Independent Terminal Acceptance, N1–N3 Verification & v0.21.3 Live Release
+      Gate
+    status: pending
+    description: Independently verify all N1–N3 requirements in docs/DESIGN.md §16,
+      all 6 inspectMenu() mechanical invariants in Light and Dark modes, §16.2 test
+      economy, and live v0.21.3 GitHub Release / Tefx/homebrew-tap Cask alignment.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v32.hygiene
     agent: gate-reviewer
