@@ -38,10 +38,10 @@ code, pre {
 }
 
 .docs-content p, .docs-content li, .docs-table td, pre { overflow-wrap: break-word; }
-.node-pill, .scene-tab, .step-tab, .preview-tabs button, .text-link,
+.step-tab, .preview-tabs button, .text-link,
 .nav-cta, .secondary-button, .eyebrow, .moment-index, .harness-tag,
 .copy-command-pill .copy-badge { white-space: nowrap; flex-shrink: 0; }
-.node-dot, .step-num { flex-shrink: 0; }
+.step-num { flex-shrink: 0; }
 .docs-content a.text-link code { color: var(--accent-amber); }
 
 :focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
@@ -243,166 +243,6 @@ code, pre {
   margin-top: 0.875rem;
   font-size: 0.84rem;
   color: var(--text-muted);
-}
-
-/* Interactive Hero Stage */
-.hero-stage-shell {
-  margin-top: var(--space-xl);
-  border-radius: var(--radius-xl);
-  border: 1px solid var(--border-strong);
-  background-color: var(--bg-elevated);
-  overflow: hidden;
-  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.55);
-}
-
-.hero-stage-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1rem 1.5rem;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.scene-switcher {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: var(--bg-canvas);
-  padding: 0.28rem;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border-subtle);
-}
-
-.scene-tab {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font-sans);
-  font-size: 0.875rem;
-  font-weight: 550;
-  padding: 0.48rem 1rem;
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.scene-tab[aria-selected="true"] {
-  background: var(--accent-amber-soft);
-  color: var(--accent-amber);
-}
-
-.scene-status-pill {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.hero-stage-canvas {
-  position: relative;
-  padding: 2.25rem 1.75rem;
-  text-align: left;
-}
-
-.hero-stage-backdrop {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.34;
-  pointer-events: none;
-}
-
-.hero-scene-panel {
-  position: relative;
-  z-index: 2;
-  max-width: 56rem;
-  margin: 0 auto;
-}
-
-.hero-scene-panel[hidden] {
-  display: none;
-}
-
-.scene-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
-  gap: 1.25rem;
-  align-items: stretch;
-}
-
-.stage-card {
-  background: rgba(18, 21, 28, 0.9);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  padding: 1.35rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-}
-
-.stage-card.is-highlighted {
-  border-color: var(--accent-amber);
-  box-shadow: 0 0 0 1px var(--accent-amber-soft);
-}
-
-.stage-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.node-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  padding: 0.22rem 0.6rem;
-  border-radius: var(--radius-pill);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
-}
-
-.node-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--accent-amber);
-}
-
-.node-dot.is-green {
-  background: var(--accent-green);
-}
-
-.stage-card-title {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.stage-card-body {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
-  line-height: 1.55;
-}
-
-.stage-signal-box {
-  font-family: var(--font-mono);
-  font-size: 0.82rem;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 0.75rem 0.9rem;
-  color: var(--text-primary);
 }
 
 /* Section 2: Three Everyday Moments */
@@ -928,7 +768,6 @@ code, pre {
   .nav-links a { min-height: 2.75rem; display: inline-flex; align-items: center; }
   .section { padding: 3rem 1rem; }
   .moment-card { padding: 1.25rem; }
-  .hero-stage-toolbar { flex-wrap: wrap; }
   .copy-command-pill { flex-wrap: wrap; justify-content: center; width: 100%; }
   .copy-command-pill code { font-size: 0.78rem; }
   .screenshot-stage-viewport,
@@ -936,7 +775,6 @@ code, pre {
   .screenshot-stage-viewport { padding: calc(0.85rem * 460 / 560) 0.85rem; }
   .step-tab,
   .preview-tabs button { min-height: 2.75rem; }
-  .scene-switcher { flex-wrap: wrap; }
 }
 
 @media (max-width: 52rem) {

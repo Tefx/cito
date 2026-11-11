@@ -19,8 +19,13 @@ enum CitoMetrics {
     static let headerInset: CGFloat = 14
 }
 
+func normalizedHubURL(_ raw: String) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.hasSuffix("://") ? trimmed : trimmed.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+}
+
 func proposedHubName(_ raw: String, url: String, existing: [HubConfigItem], creating: Bool, original: String = "") -> String {
-    let url = url.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+    let url = normalizedHubURL(url)
     let automatic = raw.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
     var source = raw
     if automatic {
@@ -44,7 +49,7 @@ func proposedHubName(_ raw: String, url: String, existing: [HubConfigItem], crea
         if slug.isEmpty { slug = "remote" }
         let base = slug
         var suffix = 2
-        while slug == "local" || existing.contains(where:{(creating || $0.name != original) && $0.name == slug && $0.url.trimmingCharacters(in: CharacterSet(charactersIn: "/")) != url}) {
+        while slug == "local" || existing.contains(where:{(creating || $0.name != original) && $0.name == slug && normalizedHubURL($0.url) != url}) {
             let ending = "-\(suffix)"
             slug = String(base.prefix(32-ending.count)).trimmingCharacters(in:CharacterSet(charactersIn:"-")) + ending
             suffix += 1
@@ -3200,7 +3205,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         endpointLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
         endpointLabel.lineBreakMode = .byTruncatingMiddle; endpointLabel.toolTip = endpointLabel.stringValue
         endpointLabel.identifier = NSUserInterfaceItemIdentifier("host_hub_endpoint")
-        endpointLabel.isHidden = !hostExpanded
         hostCard.addSubview(endpointLabel)
         var inviteActions: [NSView] = []
 
@@ -3211,11 +3215,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         copyInvite.pressed = { [weak self, weak copyInvite] in
             self?.copyText(inviteCmd, control:copyInvite, feedback:"✓ Invite Copied")
         }
-        copyInvite.isHidden = !hostExpanded
         hostCard.addSubview(copyInvite); inviteActions.append(copyInvite)
         let portLabel = textLabel("Port:",NSRect(x:0,y:12,width:34,height:15),size:11)
         let portField = makeEditableField("host_hub_port",frame:NSRect(x:0,y:12,width:58,height:24),placeholder:"Port",value:hostHubPortDraft ?? "\(hostHub.port)")
-        portLabel.isHidden = !hostExpanded; portField.isHidden = !hostExpanded
         hostCard.addSubview(portLabel); hostCard.addSubview(portField)
         let auth=MenuControl(authMode=="none" ? "Access: Trusted" : "Access: Token",frame:NSRect(x:286,y:12,width:112,height:24),radius:6)
         auth.style = .subtleHeader
@@ -3224,7 +3226,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard let self=self else{return}
             self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":hostHub.port,"auth_mode":authMode=="none" ? "token" : "none"])
         }
-        auth.isHidden = !hostExpanded
         hostCard.addSubview(auth)
         let apply=MenuControl("Apply",frame:NSRect(x:394,y:12,width:72,height:24),radius:6)
         apply.identifier=NSUserInterfaceItemIdentifier("apply_host_hub_port")
@@ -3243,12 +3244,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.submittedHostHubRequestId = requestId
             self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"request_id":requestId])
         }
-        apply.isHidden = !hostExpanded
         hostCard.addSubview(apply)
-        if hostExpanded {
-            layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:48,height:24,flexible:endpointLabel,trailing:inviteActions)
-            layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:12,height:24,leading:[portLabel,portField,apply],trailing:[auth])
-        }
+        layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:48,height:24,flexible:endpointLabel,trailing:inviteActions)
+        layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:12,height:24,leading:[portLabel,portField,apply],trailing:[auth])
         }
         hubsView.addSubview(hostCard)
         let hubOffset: CGFloat = hostExpanded ? -(hostHeight - 136) : 80
@@ -3350,7 +3348,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             submitBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.syncAddHubFieldsFromControls()
-                let url = self.addHubUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+                let url = normalizedHubURL(self.addHubUrl)
                 let knownHubs = self.settings?.hubs ?? []
                 let name = proposedHubName(self.addHubName,url:url,existing:knownHubs,creating:!self.editingExistingHub,original:self.editingOriginalHub)
                 let validation: String?

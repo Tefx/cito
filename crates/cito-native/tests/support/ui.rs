@@ -457,8 +457,8 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     });
     l.snapshot("settings", "r3_add_hub_daemon_error.png");
     for (name, url, canonical) in [
-        ("Office Mac", "http://127.0.0.1:4291", "office-mac"),
-        ("", "https://studio.example.com", "studio"),
+        ("Office Mac", "http://127.0.0.1:4291/", "office-mac"),
+        ("", "  https://studio.example.com/  ", "studio"),
     ] {
         if name.is_empty() {
             l.control("open_add_hub");
@@ -2729,8 +2729,9 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
             .find(|v| v["op"] == "setup_save_hub")
             .unwrap();
         assert_eq!(action["name"], expected);
-        assert_eq!(action["url"], url.trim());
-        let saved = json!({"name":expected,"url":url.trim(),"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
+        let canonical_url = url.trim().trim_end_matches('/');
+        assert_eq!(action["url"], canonical_url);
+        let saved = json!({"name":expected,"url":canonical_url,"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
         let hubs = cfg["hubs"].as_array_mut().unwrap();
         if let Some(hub) = hubs.iter_mut().find(|hub| hub["name"] == expected) {
             *hub = saved;

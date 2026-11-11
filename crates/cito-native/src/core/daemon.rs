@@ -1960,7 +1960,13 @@ impl DaemonService {
             command
         };
         let invite_command = invite(&endpoint_url);
-        let tailscale_url = tailscale_advertised_host().map(|host| endpoint(&host));
+        // Explicit binds only accept traffic on that interface. A Tailscale
+        // alternative is valid only when the listener accepts all interfaces.
+        let tailscale_url = if matches!(string(host, "bind"), "" | "0.0.0.0" | "::") {
+            tailscale_advertised_host().map(|host| endpoint(&host))
+        } else {
+            None
+        };
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);

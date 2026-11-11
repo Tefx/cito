@@ -111,6 +111,24 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"]["token"],
         host["token"]
     );
+    // An explicit listener interface must not advertise an unrelated Tailscale address.
+    for bind in ["127.0.0.1", "192.0.2.10", "::1"] {
+        assert_eq!(
+            f.action(json!({"op":"set_host_hub","enabled":false,"bind":bind}))
+                .0,
+            200
+        );
+        let host = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+        let authority = if bind.contains(':') {
+            format!("[{bind}]")
+        } else {
+            bind.into()
+        };
+        assert_eq!(host["endpoint_url"], format!("http://{authority}:4291"));
+        assert_eq!(host["lan_url"], host["endpoint_url"]);
+        assert!(host["tailscale_url"].is_null());
+        assert!(host["tailscale_invite_command"].is_null());
+    }
 }
 
 #[test]
