@@ -9293,3 +9293,18 @@ phases:
     depends_on:
     - v32.impl
     agent: rust-senior
+  - id: v32.gate
+    name: V32 Independent Terminal Acceptance, N1–N3 Verification & v0.21.3 Live Release
+      Gate
+    status: pending
+    description: Independently verify all N1–N3 requirements in docs/DESIGN.md §16,
+      all 6 inspectMenu() mechanical invariants in Light and Dark modes, §16.2 test
+      economy, and live v0.21.3 GitHub Release / Tefx/homebrew-tap Cask alignment.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v32.hygiene
+    agent: gate-reviewer
