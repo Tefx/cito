@@ -177,16 +177,24 @@ fn repair_default_hub(v: &mut Value) {
 // cache catches up. Cached Hub rows retain their lease and attachment metadata.
 fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
     let mut peers = slot.cached_directory();
-    let mut ids: HashSet<String> = peers
-        .iter()
-        .map(|p| string(p, "listener_id").into())
-        .collect();
+    let now = now_ms();
     if let Ok(rows) = state.db.query(
         "SELECT * FROM local_listeners WHERE hub=? AND status='ACTIVE'",
         &[json!(slot.name)],
     ) {
         for mut row in rows {
-            if ids.insert(string(&row, "listener_id").into()) {
+            if let Some(cached) = peers
+                .iter_mut()
+                .find(|p| p["listener_id"] == row["listener_id"])
+            {
+                if !super::identity::is_live_peer(cached, now) {
+                    // Local registration is authoritative while the directory catches up.
+                    // Preserve cached attachments, including their original lease metadata.
+                    cached["state"] = json!("ACTIVE");
+                    cached["status"] = json!("ACTIVE");
+                    cached["updated_at_ms"] = json!(now);
+                }
+            } else {
                 row["state"] = json!("ACTIVE");
                 peers.push(row);
             }
@@ -308,6 +316,22 @@ struct InteractiveLogin {
     serial: Mutex<()>,
 }
 
+struct RemoteChannelsCache {
+    identity: Value,
+    request: Arc<()>,
+    inventory: Value,
+    retry_at: Instant,
+}
+fn remote_channels_identity(slot: &HubClient) -> Value {
+    json!([
+        slot.config["url"],
+        slot.config["authMode"],
+        slot.bearer,
+        slot.identity["owner_user"],
+        slot.identity["principal_id"]
+    ])
+}
+
 pub struct DaemonService {
     pub config: NativeConfig,
     pub plugins: LoadedPlugins,
@@ -332,7 +356,7 @@ pub struct DaemonService {
     last_app_action: HashMap<String, String>,
     last_host_hub_error: Option<String>,
     last_hub_errors: HashMap<String, (String, bool)>,
-    cached_remote_channels: Mutex<HashMap<String, Value>>,
+    cached_remote_channels: Arc<Mutex<HashMap<String, RemoteChannelsCache>>>,
     activity_filter: String,
     activity_query: String,
 }
@@ -383,7 +407,7 @@ impl DaemonService {
             last_app_action: HashMap::new(),
             last_host_hub_error: None,
             last_hub_errors: HashMap::new(),
-            cached_remote_channels: Mutex::new(HashMap::new()),
+            cached_remote_channels: Arc::new(Mutex::new(HashMap::new())),
             activity_filter: "all".into(),
             activity_query: String::new(),
         };
@@ -1494,28 +1518,6 @@ impl DaemonService {
     pub fn poll(&mut self) -> Result<(), String> {
         self.reload_slots()?;
         self.flush_acks();
-        // Only the selected Settings hub needs retrying. Snapshot remains cache-only;
-        // poll performs at most one bounded inventory RPC per iteration.
-        if let Some(hub) = self.active_settings_hub.as_deref() {
-            let refresh = self
-                .cached_remote_channels
-                .lock()
-                .ok()
-                .and_then(|cache| {
-                    cache.get(hub).map(|inventory| {
-                        inventory["status"] == "error"
-                            || inventory["channels"].as_array().is_some_and(|channels| {
-                                channels.iter().any(|ch| {
-                                    matches!(string(ch, "status"), "pairing_pending" | "error")
-                                })
-                            })
-                    })
-                })
-                .unwrap_or(false);
-            if refresh {
-                self.refresh_channels(hub);
-            }
-        }
         // Successful background RPCs or event reconnection supersede transport
         // errors, but cannot resolve a rejected configuration edit.
         self.last_hub_errors.retain(|hub, (_, transient)| {
@@ -1534,6 +1536,41 @@ impl DaemonService {
         for key in finished {
             if let Some(thread) = self.receivers.remove(&key) {
                 let _ = thread.join();
+            }
+        }
+        // The worker registry owns/join-reaps the single inventory request per hub.
+        // Only scheduling and cache access run under the service mutex, never remote I/O.
+        if let Some(slot) = self
+            .active_settings_hub
+            .as_ref()
+            .and_then(|hub| self.slots.get(hub))
+            .filter(|slot| slot.local.is_none())
+        {
+            let key = format!("channels:{}", slot.name);
+            let due = self
+                .cached_remote_channels
+                .lock()
+                .map(|cache| {
+                    cache.get(&slot.name).is_none_or(|entry| {
+                        entry.identity != remote_channels_identity(slot)
+                            || (entry.retry_at <= Instant::now()
+                                && (entry.inventory["status"] == "error"
+                                    || entry.inventory["channels"].as_array().is_some_and(
+                                        |channels| {
+                                            channels.iter().any(|ch| {
+                                                matches!(
+                                                    string(ch, "status"),
+                                                    "pairing_pending" | "error"
+                                                )
+                                            })
+                                        },
+                                    )))
+                    })
+                })
+                .unwrap_or(false);
+            if due && !self.receivers.contains_key(&key) {
+                let refresh = self.prepare_channel_refresh(slot.clone())?;
+                self.receivers.insert(key, thread::spawn(refresh));
             }
         }
         for (hub, slot) in &self.slots {
@@ -1685,7 +1722,11 @@ impl DaemonService {
                     self.cached_remote_channels
                         .lock()
                         .ok()
-                        .and_then(|c| c.get(name).cloned())
+                        .and_then(|c| {
+                            c.get(name)
+                                .filter(|entry| entry.identity == remote_channels_identity(slot))
+                                .map(|entry| entry.inventory.clone())
+                        })
                         .unwrap_or_else(|| json!({"status":"loading"}))
                 };
                 channels = inventory["channels"]
@@ -1756,13 +1797,50 @@ impl DaemonService {
         invite_command.push_str(" --default");
         json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
     }
-    fn refresh_channels(&self, hub: &str) {
-        if let Some(slot) = self.slots.get(hub).filter(|s| s.local.is_none()) {
+    fn prepare_channel_refresh(
+        &self,
+        slot: HubClient,
+    ) -> Result<impl FnOnce() + Send + 'static, String> {
+        let identity = remote_channels_identity(&slot);
+        let request = Arc::new(());
+        let cache = self.cached_remote_channels.clone();
+        {
+            let mut entries = cache.lock().map_err(|e| e.to_string())?;
+            let inventory = entries
+                .get(&slot.name)
+                .filter(|entry| entry.identity == identity)
+                .map(|entry| entry.inventory.clone())
+                .unwrap_or_else(|| json!({"status":"loading"}));
+            entries.insert(
+                slot.name.clone(),
+                RemoteChannelsCache {
+                    identity: identity.clone(),
+                    request: request.clone(),
+                    inventory,
+                    retry_at: Instant::now(),
+                },
+            );
+        }
+        Ok(move || {
             let value = slot
                 .rpc("human_channels_list", &json!({}))
                 .unwrap_or_else(|e| json!({"status":"error","detail":e}));
-            if let Ok(mut cache) = self.cached_remote_channels.lock() {
-                cache.insert(hub.into(), value);
+            if let Ok(mut entries) = cache.lock() {
+                if let Some(entry) = entries.get_mut(&slot.name).filter(|entry| {
+                    !slot.closed.load(Ordering::SeqCst)
+                        && entry.identity == identity
+                        && Arc::ptr_eq(&entry.request, &request)
+                }) {
+                    entry.inventory = value;
+                    entry.retry_at = Instant::now() + Duration::from_secs(1);
+                }
+            }
+        })
+    }
+    fn refresh_channels(&self, hub: &str) {
+        if let Some(slot) = self.slots.get(hub).filter(|s| s.local.is_none()) {
+            if let Ok(refresh) = self.prepare_channel_refresh(slot.clone()) {
+                refresh();
             }
         }
     }
@@ -3988,8 +4066,45 @@ mod tests {
                     .iter()
                     .any(|peer| peer["listener_id"] == row["listener_id"]));
             }
-            // A registration absent from the Hub cache still participates locally.
             let id = listener_id("none#alice", "fixture", "session-324");
+            for state in ["UNLISTENED", "ACTIVE"] {
+                let slot = service.slot("local")?;
+                let (mut stale, revision) = slot.kv_get(&id)?.ok_or("Missing collision peer")?;
+                stale["state"] = json!(state);
+                stale["updated_at_ms"] = json!(1);
+                for channel in stale["channels"]
+                    .as_object_mut()
+                    .ok_or("Missing channels")?
+                    .values_mut()
+                {
+                    channel["state"] = json!("UNLISTENED");
+                    channel["updated_at_ms"] = json!(1);
+                }
+                slot.kv_save(&id, &stale, Some(revision))?;
+                slot.directory()?;
+                let merged = address_peers(&service.state, slot)
+                    .into_iter()
+                    .find(|peer| peer["listener_id"] == id)
+                    .ok_or("Missing merged witness")?;
+                assert_eq!(merged["channels"], stale["channels"]);
+                assert!(super::super::identity::is_live_peer(&merged, now_ms()));
+                let snapshot = service.snapshot()?;
+                for (session, address) in [
+                    ("session-26", "alice/fixture#a5705540"),
+                    ("session-324", "alice/fixture#a5706e4d"),
+                ] {
+                    assert_eq!(
+                        snapshot["listeners"]
+                            .as_array()
+                            .ok_or("Missing listeners")?
+                            .iter()
+                            .find(|row| row["session_id"] == session)
+                            .ok_or("Missing session")?["display_address"],
+                        address
+                    );
+                }
+            }
+            // A registration absent from the Hub cache still participates locally.
             service.local.rpc(
                 "kv_delete",
                 &json!({"key":id}),

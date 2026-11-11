@@ -1213,6 +1213,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
                 }
                 if kind == "address_mismatches", let listener = listeners.first { control("copy:\(listener.scoped_id)")?.label.stringValue = "wrong address" }
+                if kind == "activity_jargon", let cell = directoryTableView?.view(atColumn:0,row:0,makeIfNecessary:true) as? DirectoryPeerCellView {
+                    cell.line1TitleLabel.stringValue = "@bob → Human Node"
+                }
+                if kind == "banner_jargon", labels.count > 1 { labels[1].stringValue = "[Passive] " + labels[1].stringValue }
                 if let header = roots.first(where: { $0.identifier?.rawValue == "header" }) {
                     if kind == "overlapping_siblings" || kind == "clipped_views" {
                         let probe = MenuControl("Probe",frame:NSRect(x:kind == "clipped_views" ? 370 : 12,y:12,width:60,height:18))
@@ -4072,7 +4076,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if visible, let label = view as? NSTextField, !label.isEditable {
                 let id = name(label)
                 let data = isDataRow(label) && !(label.superview is MenuControl) && !id.hasPrefix("dir_user:")
-                let dataJargon = (id == "banner_data:1" && label.stringValue.contains("[Passive]")) || (id.hasPrefix("act_title:") && label.stringValue.range(of:"Human Node|Human receiver|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil)
+                var generatedText = label.stringValue
+                if id.hasPrefix("act_title:"), let item = activityAllItems.first(where: { $0.signal_id == String(id.dropFirst("act_title:".count)) }), item.target_harness != "human" {
+                    // This line interpolates only the target title. Exclude its exact span,
+                    // retaining generated prefixes/suffixes even if they repeat that title.
+                    let prefix = (item.unread ? "● " : "") + "@\(item.from_user) → "
+                    let titleSpan = prefix + item.target_title
+                    if generatedText.hasPrefix(titleSpan) { generatedText = prefix + String(generatedText.dropFirst(titleSpan.count)) }
+                }
+                let dataJargon = (id == "banner_data:1" && label.stringValue.hasPrefix("[Passive]")) || (id.hasPrefix("act_title:") && generatedText.range(of:"Human Node|Human receiver|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil)
                 if dataJargon || !data && label.stringValue.range(of:"local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:",options:.regularExpression) != nil { jargonLeaks.append(id) }
             }
             if visible, let control = view as? MenuControl {

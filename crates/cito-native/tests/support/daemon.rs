@@ -382,6 +382,130 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     assert_eq!(f.action(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true})).1["channels"][0]["status"],"not_configured");
 }
 #[test]
+fn selected_remote_channel_refresh_is_nonblocking_and_recovers_invalidated_slots() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let plugin = host.state.join("hub/plugins/remote-channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), json!({"id":"remote-channel","kind":"human-channel","displayName":"Remote channel","scope":"hub",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let (_, hub_port) = host.hub();
+    let proxy_port = port();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"shared":{"url":format!("http://127.0.0.1:{proxy_port}"),"user":"alice"}},"default_hub":"local"}),
+    );
+    let proxy_script = f.dir.join("inventory-proxy.py");
+    script(
+        &proxy_script,
+        r#"#!/usr/bin/env python3
+# purpose: Hold real inventory responses until the test releases each request.
+# usage: python3 inventory-proxy.py LISTEN_PORT HUB_PORT
+# effects: Loopback HTTP only; Fixture owns and reaps the process.
+# requires: Python standard library and the sandbox Hub.
+import http.server, json, sys, threading, urllib.request
+lock = threading.Lock()
+hold = False
+pending = []
+completed = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def reply(self, body):
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        try: self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError): pass
+    def do_GET(self):
+        global hold
+        with lock:
+            if self.path == '/hold': hold = True
+            if self.path.startswith('/release/'):
+                pending[int(self.path.rsplit('/', 1)[1]) - 1].set()
+            body = json.dumps({'waiting': len(pending), 'completed': completed}).encode()
+        self.reply(body)
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers['Content-Length']))
+        request = urllib.request.Request('http://127.0.0.1:' + sys.argv[2] + '/v1/rpc', data=body,
+            headers={k: v for k, v in self.headers.items() if k.lower() in ('authorization', 'x-cito-user', 'content-type')})
+        with urllib.request.urlopen(request, timeout=2) as response: result = response.read()
+        gate = None
+        if json.loads(body)['op'] == 'human_channels_list':
+            with lock:
+                gate = threading.Event() if hold else None
+                if gate: pending.append(gate)
+            if gate and not gate.wait(10): return
+        self.reply(result)
+        if gate:
+            with lock: completed.append(pending.index(gate) + 1)
+server = http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler)
+print(json.dumps({'op': 'ready'}), flush=True)
+server.serve_forever()
+"#,
+    );
+    let proxy = f.spawn(
+        "python3",
+        &[
+            proxy_script.to_str().unwrap(),
+            &proxy_port.to_string(),
+            &hub_port.to_string(),
+        ],
+        &[],
+    );
+    wait(|| f.frames(proxy).iter().any(|frame| frame["op"] == "ready"));
+    f.daemon(&[]);
+    assert_eq!(f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}})).1["channels"][0]["status"], "ready");
+    let query = "  remote-mac-42  ";
+    let (status, response) = f.action(
+        json!({"op":"query_directory","mode":"activity","query":query,"request_id":"padded-query"}),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(response["query"], query);
+    assert_eq!(response["request_id"], "padded-query");
+    assert_eq!(http(proxy_port, "/hold", None).0, 200);
+    let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    config["hubs"]["shared"]["token"] = json!("rotated-credential");
+    fs::write(&f.config, config.to_string()).unwrap();
+    wait(|| http(proxy_port, "/status", None).1["waiting"] == 1);
+    // The server has accepted the RPC and holds its response until explicit release.
+    let local = |path: &str| -> Value {
+        ureq::get(&format!("http://127.0.0.1:{}{path}", f.port))
+            .timeout(std::time::Duration::from_millis(750))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap()
+    };
+    assert_eq!(local("/health")["ok"], true);
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["settings"]["settings_hub"], "shared");
+    assert_eq!(
+        snapshot["settings"]["channels"],
+        json!([]),
+        "Invalidated inventory must be loading"
+    );
+    // Replace the slot again while Alice's response is in flight. Bob must never
+    // receive Alice's configured personal binding, including after its late reply.
+    config["hubs"]["shared"]["user"] = json!("bob");
+    fs::write(&f.config, config.to_string()).unwrap();
+    wait(|| http(proxy_port, "/status", None).1["waiting"] == 2);
+    assert_eq!(local("/health")["ok"], true);
+    assert_eq!(http(proxy_port, "/release/2", None).0, 200);
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
+    });
+    assert_eq!(http(proxy_port, "/release/1", None).0, 200);
+    wait(|| {
+        http(proxy_port, "/status", None).1["completed"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(1)))
+    });
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["settings"]["channels"][0]["configured"], false);
+    assert_eq!(snapshot["settings"]["channels"][0]["status"], "hub_ready");
+}
+
+#[test]
 fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

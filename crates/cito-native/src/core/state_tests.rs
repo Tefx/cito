@@ -90,6 +90,16 @@ fn activity_filters_before_paging_and_counts_full_matching_set() -> Result<(), S
         assert_eq!((rows.len(), total, unread), (1, 1, 1), "{query}");
         assert_eq!(rows[0]["signal_id"], "old-match");
     }
+    f.state.db.execute(
+        "UPDATE local_signals SET from_host_name='remote-mac-42' WHERE signal_id='old-match'",
+        &[],
+    )?;
+    for query in ["  remote-mac-42  ", "\tREMOTE-MAC-42\n"] {
+        let (rows, total, unread) = f.state.query_activity("all", query)?;
+        assert_eq!((rows.len(), total, unread), (1, 1, 1));
+        assert_eq!(rows[0]["signal_id"], "old-match");
+    }
+    assert_eq!(f.state.query_activity("all", "   ")?.1, 101);
     assert_eq!(f.state.query_activity("all", "you")?.1, 0);
     assert_eq!(f.state.query_activity("all", "c_1")?.1, 101);
     assert_eq!(f.state.query_activity("me", "")?.1, 0);

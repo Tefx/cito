@@ -112,6 +112,15 @@ pub fn readable_alias(raw: &str) -> Option<(&str, Option<&str>, &str)> {
     Some((user, harness, prefix))
 }
 
+pub(crate) fn is_live_peer(row: &Value, now: u64) -> bool {
+    // A fresh local registration can precede the Hub's attachment lease update.
+    row["status"] == "ACTIVE"
+        || matches!(
+            super::lease::evaluate_node_lease(row, now),
+            "ACTIVE" | "DISCONNECTED_RETAINED"
+        )
+}
+
 pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value]) -> String {
     let user = normalize_slug(string(row, "owner_user"));
     let harness = string(row, "harness");
@@ -134,10 +143,7 @@ pub fn display_address(hub: &str, default_hub: &str, row: &Value, peers: &[Value
                     .filter(|p| {
                         normalize_slug(string(p, "owner_user")) == user
                             && string(p, "harness") == harness
-                            && matches!(
-                                super::lease::evaluate_node_lease(p, crate::plugins::now_ms()),
-                                "ACTIVE" | "DISCONNECTED_RETAINED"
-                            )
+                            && is_live_peer(p, crate::plugins::now_ms())
                             && string(p, "listener_id")
                                 .strip_prefix("c_")
                                 .is_some_and(|s| s.starts_with(prefix))
@@ -285,6 +291,12 @@ mod tests {
                 expected
             );
         }
+        let mut stale = first.clone();
+        stale["state"] = json!("UNLISTENED");
+        assert_eq!(
+            display_address("work", "work", &first, &[stale, row("c_abcd987654321098")]),
+            "alice/agent#abcd1234"
+        );
         let mut expired = row("c_abcd987654321098");
         expired["updated_at_ms"] = json!(crate::plugins::now_ms() - 1_800_001);
         assert_eq!(

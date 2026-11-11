@@ -2984,10 +2984,18 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             );
         }
         let mut invalid = state();
-        invalid["activity"] = json!([{"hub":"personal","signal_id":"jargon","listener_id":"target","from_user":"alice","from_host_name":"host","from_title":"Sender","target_harness":"fixture","target_title":"Human Node","target_scoped_id":"personal:target","message":"Message","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}]);
+        invalid["activity"] = json!([{"hub":"personal","signal_id":"jargon","listener_id":"target","from_user":"alice","from_host_name":"host","from_title":"Human Node","target_harness":"human","target_title":"Human Node","target_scoped_id":"personal:target","message":"Message","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}]);
         f.send(p, invalid);
         control(&f, p, "open_activity");
         control(&f, p, "act_filter:all");
+        assert_eq!(
+            inspect_as(&f, p, Some(appearance))["jargon_leaks"],
+            json!([])
+        );
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":"activity_jargon"}),
+        );
         let s = inspect_unchecked(&f, p, Some(appearance));
         assert!(s["jargon_leaks"]
             .as_array()
@@ -3003,6 +3011,14 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
         let mut invalid = banner();
         invalid["payload"]["from_title"] = json!("[Passive] Sender");
         f.send(p, invalid);
+        assert_eq!(
+            inspect_as(&f, p, Some(appearance))["jargon_leaks"],
+            json!([])
+        );
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":"banner_jargon"}),
+        );
         assert!(inspect_unchecked(&f, p, Some(appearance))["jargon_leaks"]
             .as_array()
             .unwrap()
@@ -3019,6 +3035,18 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             )["text"],
             "Cito · Direct Message"
         );
+        let mut user_titles = state();
+        user_titles["listeners"][0]["title"] = json!("Human Node");
+        user_titles["listeners"][0]["about"] = json!("[Passive] build");
+        user_titles["activity"] = json!([{"hub":"personal","signal_id":"user-title","listener_id":"target","from_user":"alice","from_host_name":"host","from_title":"[Passive] Worker","target_harness":"fixture","target_title":"Human Node","target_scoped_id":"personal:target","message":"[Passive] build","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}]);
+        f.send(p, user_titles);
+        control(&f, p, "act_filter:all");
+        let s = inspect_as(&f, p, Some(appearance));
+        assert!(node(&s, "directory_items", "act_title:user-title")["text"]
+            .as_str()
+            .unwrap()
+            .contains("Human Node"));
+        assert_eq!(s["jargon_leaks"], json!([]));
     }
 }
 
