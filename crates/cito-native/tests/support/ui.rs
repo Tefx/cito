@@ -2608,7 +2608,15 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
             .unwrap();
         assert_eq!(action["name"], expected);
         assert_eq!(action["url"], url);
-        control(&f, p, "cancel_add_hub");
+        let saved = json!({"name":expected,"url":url,"auth_mode":action["auth_mode"],"enabled":true,"is_default":false,"status":"connected","user":"alice","error":null});
+        let hubs = cfg["hubs"].as_array_mut().unwrap();
+        if let Some(hub) = hubs.iter_mut().find(|hub| hub["name"] == expected) {
+            *hub = saved;
+        } else {
+            hubs.push(saved);
+        }
+        f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":action["request_id"],"settings":cfg}));
+        assert!(node(&inspect(&f, p), "settings_items", "add_hub_form").is_null());
     }
     control(&f, p, "open_add_hub");
     f.send(
@@ -2907,9 +2915,18 @@ fn banner() -> Value {
 #[test]
 fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let mut f = Fixture::new(json!({}));
+    let icon = f.home.join("second/fixture/icon.png");
+    fs::create_dir_all(icon.parent().unwrap()).unwrap();
+    fs::copy(root().join("plugins/pi/icon.png"), icon).unwrap();
+    f.env
+        .insert("CITO_PLUGIN_PATH".into(), " ~/first : ~/second ".into());
     let p = start(&f);
-    f.send(p, state());
+    let mut initial = state();
+    initial["my_remote_listeners"] = json!([peer("remote")]);
+    initial["available"] =
+        json!([{"harness":"fixture","session_id":"candidate","title":"Candidate","cwd":"/tmp"}]);
+    f.send(p, initial);
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert_eq!(s["icon_template"], true);
@@ -2920,6 +2937,11 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
         .unwrap()
         .iter()
         .all(|v| v["width"] == 380));
+    assert_eq!(node(&s, "items", "plugin_icon:fixture")["tint"], json!([]));
+    for id in ["toggle_my_remote", "toggle_group:fixture"] {
+        assert_eq!(node(&s, "items", id)["x"], 12);
+        assert_eq!(node(&s, "items", id)["width"], 356);
+    }
     assert_eq!(node(&s, "items", "header")["height"], 40);
     assert_eq!(node(&s, "items", "footer")["height"], 36);
     assert_eq!(node(&s, "items", "drawer:personal")["hidden"], true);
@@ -3531,6 +3553,8 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     cfg["apps"][0]["display_name"] = json!("Pi Coding Agent");
     cfg["channels"][0]["id"] = json!("telegram");
     cfg["channels"][0]["display_name"] = json!("Telegram");
+    cfg["channels"][0]["fields"][1]["label"] = json!("Chat ID");
+    cfg["channels"][0]["fields"][1]["placeholder"] = json!("Paired via /start or enter Chat ID");
     cfg["host_hub"]["enabled"] = json!(true);
     cfg["host_hub"]["running"] = json!(true);
     cfg["host_hub"]["endpoint_url"] = json!("http://mac-studio.tailnet.ts.net:4291");
@@ -3716,7 +3740,11 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         json!({"op":"test_settings_input","id":"settings_hub_name","value":"studio"}),
     );
     f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
-    assert!(!node(&inspect(&f, p), "settings_items", "add_hub_form").is_null());
+    let s = inspect(&f, p);
+    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 56);
+    assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 56);
+    assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 204);
+    assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
     capture("settings", "settings_add_hub");
     control(&f, p, "cancel_add_hub");
     control(&f, p, "edit_hub:local");
@@ -3727,6 +3755,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "settings_hub_issuer")["text"],
         "https://id.example.com"
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "add_hub_form")["y"],
+        56
     );
     capture("settings", "settings_edit_remote");
     control(&f, p, "cancel_add_hub");

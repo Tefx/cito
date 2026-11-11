@@ -322,10 +322,17 @@ private var pluginIconCache: [String: NSImage] = [:]
 func pluginIconImage(for id: String) -> NSImage? {
     if let image = pluginIconCache[id] { return image }
     let env = ProcessInfo.processInfo.environment
-    var roots = (env["CITO_PLUGIN_PATH"] ?? "").split(separator: ":").map { URL(fileURLWithPath:String($0)) }
-    let state = URL(fileURLWithPath:env["CITO_STATE_DIR"] ?? NSHomeDirectory()+"/.cito")
+    func rootURL(_ raw: String) -> URL? {
+        let path = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !path.isEmpty else { return nil }
+        let home = env["HOME"] ?? NSHomeDirectory()
+        let expanded = path == "~" ? home : path.hasPrefix("~/") ? home + String(path.dropFirst()) : path
+        return URL(fileURLWithPath:expanded)
+    }
+    var roots = (env["CITO_PLUGIN_PATH"] ?? "").split(separator: ":").compactMap { rootURL(String($0)) }
+    let state = rootURL(env["CITO_STATE_DIR"] ?? NSHomeDirectory()+"/.cito") ?? URL(fileURLWithPath:NSHomeDirectory()+"/.cito")
     roots += [state.appendingPathComponent("plugins"),state.appendingPathComponent("runtime/plugins")]
-    if let builtin = env["CITO_BUILTIN_PLUGINS_DIR"] { roots.append(URL(fileURLWithPath:builtin)) }
+    if let builtin = env["CITO_BUILTIN_PLUGINS_DIR"].flatMap(rootURL) { roots.append(builtin) }
     let executable = URL(fileURLWithPath:CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
     roots += [executable.appendingPathComponent("../Resources/plugins"),executable.appendingPathComponent("../../plugins")]
     for root in roots {
@@ -2171,7 +2178,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if !myRemote.isEmpty {
             let remoteHeader = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 26))
             remoteHeader.addSubview(roundedView(NSRect(x: 12, y: 24, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-            let toggleRemote = MenuControl("MY OTHER HOSTS · \(myRemote.count)", frame: NSRect(x: 8, y: 1, width: 364, height: 22),
+            let toggleRemote = MenuControl("MY OTHER HOSTS · \(myRemote.count)", frame: NSRect(x: CitoMetrics.menuInset, y: 1, width: CitoMetrics.menuRailWidth, height: 22),
                 leadingSymbol: myRemoteCollapsed ? "chevron.right" : "chevron.down", color: CitoPalette.secondaryText, radius: 6)
             toggleRemote.identifier = NSUserInterfaceItemIdentifier("toggle_my_remote")
             toggleRemote.style = .subtleHeader
@@ -2298,7 +2305,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 let groupTitle = "\(visual.name) · \(items.count) \(noun)"
                 let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 28))
-                let groupControl = MenuControl(groupTitle, frame: NSRect(x: 8, y: 2, width: 364, height: 24), radius: 6)
+                let groupControl = MenuControl(groupTitle, frame: NSRect(x: CitoMetrics.menuInset, y: 2, width: CitoMetrics.menuRailWidth, height: 24), radius: 6)
                 groupControl.identifier = NSUserInterfaceItemIdentifier("toggle_group:\(harness)")
                 groupControl.toolTip = visual.tier == "experimental" ? "\(groupTitle) (Experimental)" : groupTitle
                 groupControl.style = .subtleHeader
@@ -3047,13 +3054,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             invite_command: "cito setup --hub lan --url http://127.0.0.1:4291 --default", auth_mode: nil, error: nil
         )
         let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 }
-        let hostExpanded = hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil
+        let hostExpanded = !addHubFormOpen && (hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil)
         let hostHeight: CGFloat = hostExpanded ? 136 : 56
         let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: hostExpanded ? 220 : 300, width: 480, height: hostHeight), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.06), border: .labelColor.withAppearanceAlpha(0.12))
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
         hostCard.addSubview(textLabel("Share Hub on Local Network", NSRect(x: 14, y: hostHeight - 27, width: 350, height: 18), size: 13, weight: .semibold))
-        let showingInviteGuidance = hostHub.enabled && hostError == nil
+        let showingInviteGuidance = hostExpanded && hostHub.enabled && hostError == nil
         let hostSubtitle = textLabel(hostError.map(presentationError) ?? (showingInviteGuidance ? "On another Mac, click Paste Invite Code below (or run in Terminal) to connect." : "Let your other Macs or teammates connect to this Mac."),
             showingInviteGuidance ? NSRect(x: 14, y: 78, width: 452, height: 15) : NSRect(x: 14, y: hostHeight - 46, width: 350, height: 15),
             size: 11, color: hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
@@ -4409,7 +4416,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
                 case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && editingHubGateway.isEmpty && (settings?.channels?.first?.fields.count ?? 0) <= 2
-                case "settings_hubs_tab": defaultLayout = (settings?.hubs.count ?? 0) <= 2 && settings?.host_hub.enabled != true && settings?.host_hub.error == nil && !hostHubPortPending && hostHubPortDraft == nil && hostHubPortError == nil && !addHubFormOpen
+                case "settings_hubs_tab": defaultLayout = (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }

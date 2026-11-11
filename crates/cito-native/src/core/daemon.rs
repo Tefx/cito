@@ -2203,15 +2203,21 @@ impl DaemonService {
         })
     }
     pub fn action(&mut self, action: &Value) -> Result<Value, String> {
-        let result = self.action_inner(action);
-        self.record_hub_result(action, &result);
+        let mut resolved_hub = None;
+        let result = self.action_inner(action, &mut resolved_hub);
+        self.record_hub_result(action, &result, resolved_hub.as_deref());
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
             self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
         }
         self.push_ui();
         result
     }
-    fn record_hub_result(&mut self, action: &Value, result: &Result<Value, String>) {
+    fn record_hub_result(
+        &mut self,
+        action: &Value,
+        result: &Result<Value, String>,
+        resolved_hub: Option<&str>,
+    ) {
         if matches!(
             string(action, "op"),
             "login_hub"
@@ -2221,25 +2227,52 @@ impl DaemonService {
                 | "save_hub"
                 | "setup_toggle_hub"
         ) {
-            let hub = action["hub"]
+            let saving = matches!(string(action, "op"), "setup_save_hub" | "save_hub");
+            let mut hubs = Vec::new();
+            if let Some(hub) = action["hub"]
                 .as_str()
                 .or_else(|| action["name"].as_str())
-                .unwrap_or(&self.config.default_hub)
-                .to_owned();
-            match result {
-                Ok(_) => {
-                    self.last_hub_errors.remove(&hub);
+                .filter(|hub| !hub.is_empty())
+            {
+                hubs.push(hub.to_owned());
+            } else if !saving {
+                hubs.push(self.config.default_hub.clone());
+            }
+            if saving {
+                if let Some(hub) = resolved_hub {
+                    hubs.push(hub.to_owned());
                 }
-                Err(error) => {
-                    let transient = ["NATS_UNAVAILABLE:", "AUTH_UNAVAILABLE:", "UNAUTHORIZED:"]
-                        .iter()
-                        .any(|prefix| error.starts_with(prefix));
-                    self.last_hub_errors.insert(hub, (error.clone(), transient));
+                let original = string(action, "original_name");
+                if !original.is_empty() {
+                    hubs.push(original.to_owned());
+                }
+                let requested = string(action, "name").trim();
+                if requested.chars().any(|c| c.is_ascii_alphanumeric()) {
+                    hubs.push(normalize_slug(requested));
+                }
+            }
+            hubs.sort_unstable();
+            hubs.dedup();
+            for hub in hubs {
+                match result {
+                    Ok(_) => {
+                        self.last_hub_errors.remove(&hub);
+                    }
+                    Err(error) => {
+                        let transient = ["NATS_UNAVAILABLE:", "AUTH_UNAVAILABLE:", "UNAUTHORIZED:"]
+                            .iter()
+                            .any(|prefix| error.starts_with(prefix));
+                        self.last_hub_errors.insert(hub, (error.clone(), transient));
+                    }
                 }
             }
         }
     }
-    fn action_inner(&mut self, action: &Value) -> Result<Value, String> {
+    fn action_inner(
+        &mut self,
+        action: &Value,
+        resolved_hub: &mut Option<String>,
+    ) -> Result<Value, String> {
         if !action.is_object() {
             return Err("INVALID_INPUT: Action must be an object".into());
         }
@@ -2476,6 +2509,9 @@ impl DaemonService {
                             }
                         }
                     }
+                    // Retain the identity resolved under the config lock without
+                    // adding an internal bookkeeping field to the public response.
+                    *resolved_hub = Some(name.clone());
                     v["hubs"][&name] = cfg;
                     if set_default {
                         v["default_hub"] = json!(name);
@@ -3729,7 +3765,7 @@ fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Resul
     let result = dispatch_action_inner(service, action);
     if let Ok(mut s) = service.lock() {
         if interactive_login(action) {
-            s.record_hub_result(action, &result);
+            s.record_hub_result(action, &result, None);
         }
         if let Err(error) = &result {
             s.emit(
@@ -4927,6 +4963,11 @@ mod tests {
                     )?;
                     assert_eq!(service.raw_config()?["hubs"][expected]["url"], url);
                 }
+                service.action(
+                    &json!({"op":"setup_save_hub","name":"user","url":"local://","enabled":false}),
+                )?;
+                assert!(service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"user","name":"user","url":"http://"})).is_err());
+                let user_error = service.last_hub_errors["user"].clone();
                 for requested in ["!!!", "local", "Office Mac"] {
                     let before = fs::read(&config.config_path).map_err(|e| e.to_string())?;
                     assert!(service.action(&json!({"op":"setup_save_hub","name":requested,"url":"https://different.example.com","enabled":false})).is_err());
@@ -4934,6 +4975,42 @@ mod tests {
                         fs::read(&config.config_path).map_err(|e| e.to_string())?,
                         before
                     );
+                }
+                assert_eq!(service.last_hub_errors["user"], user_error);
+                assert!(service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"work","url":"http://"})).is_err());
+                let work_error = service.last_hub_errors["work"].clone();
+                for (op, requested, canonical, url) in [
+                    (
+                        "setup_save_hub",
+                        Some("Office Mac"),
+                        "office-mac",
+                        "https://office.example.com",
+                    ),
+                    ("save_hub", None, "node-2", "https://node.other.example.com"),
+                ] {
+                    assert!(service.action(&json!({"op":op,"edit":true,"original_name":canonical,"name":canonical,"url":"http://"})).is_err());
+                    let failed = service.settings_for_hub(canonical);
+                    assert!(failed["hubs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|hub| hub["name"] == canonical)
+                        .unwrap()["error"]
+                        .is_string());
+                    let mut retry = json!({"op":op,"url":url,"enabled":false});
+                    if let Some(requested) = requested {
+                        retry["name"] = json!(requested);
+                    }
+                    assert_eq!(service.action(&retry)?, json!({"ok":true}));
+                    let recovered = service.settings_for_hub(canonical);
+                    assert!(recovered["hubs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|hub| hub["name"] == canonical)
+                        .unwrap()["error"]
+                        .is_null());
+                    assert_eq!(service.last_hub_errors["work"], work_error);
                 }
                 service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"office-mac","name":"Office Mac","url":"https://updated.example.com","enabled":false}))?;
                 assert_eq!(
