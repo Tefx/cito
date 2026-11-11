@@ -9439,7 +9439,7 @@ phases:
   - id: v33.impl
     name: V33 P1–P4 Crafted macOS Utility De-Boxing, Hit-Test Reachability, Progressive
       Disclosure & Minimalist Website Implementation
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §17 (P1–P4) while strictly enforcing §17.2
       test economy (update existing unit/UI assertions in place; do NOT add new multi-process
       E2E test functions). Regenerate site/assets/screenshots/*.png and create site/assets/art/architecture-topology.svg.
@@ -9464,6 +9464,52 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T19:23:06.100686Z'
+    done_at: '2026-11-11T20:38:37.588053+00:00'
+    evidence: "Artifact:\n- Commit: 0f1443a5ece334e8b9e5627db012869087287f1e (41 files\
+      \ changed, 932 insertions(+), 533 deletions(-))\n- Candidate ref: refs/vectl/candidates/v33.impl\
+      \ -> 0f1443a5ece334e8b9e5627db012869087287f1e\n- Worktree cleanup: removed .vectl/worktrees/v33.impl\
+      \ and temporary target/v33-* / /tmp/cito-v33-*.log artifacts; free space 129Gi\
+      \ (unchanged delta).\n\nDelivered (docs/DESIGN.md §17 P1–P4 & §17.2):\n1. P1\
+      \ AppKit Hit-Test Reachability & Action Feedback Symmetry:\n   - MenuControl.hitTest\
+      \ and ClickView.hitTest guard !isHidden && !isHiddenOrHasHiddenAncestor && alphaValue\
+      \ > 0.01; non-interactive MenuControl instances (pressed == nil) pass through\
+      \ without hover/click interception.\n   - Collapsed subviews in host_hub_card\
+      \ are only mounted when hostExpanded == true; activity_clear is hidden in Directory\
+      \ mode; single enabled local hub omits Disable button.\n   - inspectMenu() mechanical\
+      \ root.hitTest oracle verifies every visible interactive MenuControl across\
+      \ all 4 surfaces and reports \"hit_test\" in test_oracle_calibration.\n   -\
+      \ Request-correlated channelSavedUntil (\"✓ Saved\") and appCheckedUntil (\"\
+      ✓ Checked\" on Re-check) feedback with daemon settings frame emission; Codex\
+      \ plugin configured() checks enabled != false, accepts cito-mcp or */cito-mcp,\
+      \ and removes empty [mcp_servers] on setup_remove.\n2. P2 Crafted macOS Utility\
+      \ De-Boxing & 3-State Progressive Disclosure:\n   - Softened card surfaces,\
+      \ .subtleHeader ghost controls, segmented tab tracks in Settings and Directory/Activity,\
+      \ compact 52pt single-row Agent Apps cards with leading Experimental pill, and\
+      \ 3-state Telegram progressive disclosure collapsing paired personal Chat ID\
+      \ row into a clean summary bar with [Send Test] [Pause/Resume] [Edit…] [Unpair].\n\
+      3. P3 Canonical Ordering, Tailscale vs LAN Switcher, Smart Hub Naming & Polish:\n\
+      \   - Declarative order: 0/1/2 sorting Pi -> Codex -> Claude Code in plugins.rs\
+      \ and plugin manifests.\n   - Tailscale online/MagicDNS validity check, LAN\
+      \ non-loopback filter, [Tailscale] [Local IP] address switcher in host_hub_card,\
+      \ smart Hub Name derivation (\"lan\", \"tailscale\", \"remote\", domain slug)\
+      \ with live placeholder and sentence-case labels, Directory human row deduplication,\
+      \ centered empty states, uninstall confirmation subtitle, and sanitized OIDC/HTTP\
+      \ error phrasing.\n4. P4 Minimalist Website Consolidation, Equal-Height Grid\
+      \ Tabs, Direct Download Links & Architecture SVG:\n   - Direct Cito-macos-arm64.zip\
+      \ download links, target=\"_blank\" rel=\"noopener noreferrer\" on external\
+      \ GitHub links, nowrap pills/links, 0px height delta CSS Grid tab stacking,\
+      \ Pi -> Codex -> Claude Code ordering, refreshed screenshots (activity-dark.png\
+      \ with open inline reply composer), and hand-drawn Excalidraw-style site/assets/art/architecture-topology.svg.\n\
+      \nVerification:\n- Run: PATH=\"/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\"\
+      \ RUST_TEST_THREADS=1 cargo test --workspace -> PASS (273 passed, 4 ignored,\
+      \ 0 failed across unit, native integration, and doc tests)\n- Run: cargo build\
+      \ --release -> PASS (0 warnings, rebuilt staged native/UI/plugin binaries)\n\
+      - Run: PATH=\"/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\" python3 packaging/release.py\
+      \ check -> PASS (reports 0.21.3)\n- Run: Headless Chrome layout & tab height\
+      \ delta probe across index.html, docs/guide.html, docs/plugins.html, docs/architecture.html\
+      \ at 1200/768/390px -> PASS (0px horizontal overflow, 0 broken images, [0, 0,\
+      \ 0] tab height deltas, 0 SVG text overflow)\n\nSpec link:\n- docs/DESIGN.md\
+      \ §17 (P1–P4 & §17.2)"
   - id: v33.review
     name: 'V33 Single-Pass Fast Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
