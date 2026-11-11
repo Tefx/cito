@@ -2770,8 +2770,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let map = harnessMap
         var appTop: CGFloat = needsOnboarding ? 308 : 328
         for app in resolvedApps {
-            let diagnostic = !["Click Set Up to connect", "Connected", ""].contains(app.detail)
-            let expanded = !app.installed || app.status == "error" || diagnostic
+            let diagnostic = !["Click Set Up to connect", "Connected", "Connected and ready", ""].contains(app.detail)
+                && !app.detail.hasPrefix("Connected · ")
+                && !app.detail.hasPrefix("Disconnected · ")
+            let expanded = !app.installed || app.status == "error" || app.status == "repair_needed" || diagnostic
             let cardHeight: CGFloat = expanded ? 76 : 52
             appTop -= cardHeight
             let card = roundedView(NSRect(x:20,y:appTop,width:480,height:cardHeight),radius:10,
@@ -2798,10 +2800,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 card.addSubview(detail)
             }
             let statusText = app.isConfigured ? "● Connected" : (app.status == "error" ? "Inspection failed" : (app.status == "repair_needed" ? "⚠ Repair Needed" : "○ Not Set Up"))
-            let status = textLabel(statusText,NSRect(x:0,y:0,width:app.isConfigured ? 82 : 100,height:16),size:11,weight:.medium,color:app.isConfigured ? CitoPalette.successText : CitoPalette.secondaryText)
+            let status = textLabel(statusText,NSRect(x:0,y:0,width:app.isConfigured ? 76 : 100,height:16),size:11,weight:.medium,color:app.isConfigured ? CitoPalette.successText : CitoPalette.secondaryText)
             status.alignment = .right; status.identifier = NSUserInterfaceItemIdentifier("settings_app_status:\(app.id)")
             card.addSubview(status)
-            let btn = MenuControl(app.isConfigured || app.status == "error" ? "Re-check" : (app.status == "repair_needed" ? "Repair" : "Set Up"),frame:NSRect(x:0,y:0,width:76,height:24))
+            let btn = MenuControl(app.isConfigured || app.status == "error" ? "Re-check" : (app.status == "repair_needed" ? "Repair" : "Set Up"),frame:NSRect(x:0,y:0,width:app.isConfigured ? 70 : 76,height:24))
             btn.identifier = NSUserInterfaceItemIdentifier("setup_app:\(app.id)")
             btn.style = app.isConfigured ? .subtleHeader : .prominent
             if Date() < (appCheckedUntil[app.id] ?? .distantPast) { btn.copied("✓ Checked") }
@@ -2821,10 +2823,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 remove.pressed = { [weak self] in self?.emit(["op":"setup_remove_app","harness":app.id]) }
                 card.addSubview(remove); trailing.append(remove)
             }
-            let trailingWidth = trailing.reduce(CGFloat(0)) { $0 + $1.frame.width + 8 }
-            let tierWidth: CGFloat = leading.count > 1 ? 96 : 0
+            let barSpacing: CGFloat = 5
+            let trailingWidth = trailing.reduce(CGFloat(0)) { $0 + $1.frame.width + barSpacing }
+            let tierWidth: CGFloat = leading.count > 1 ? (88 + barSpacing) : 0
             title.frame.size.width = max(0,min(titleW,418 - trailingWidth - tierWidth))
-            layoutBar(in:card,insetLeft:50,y:barY,height:24,spacing:8,leading:leading,trailing:trailing)
+            layoutBar(in:card,insetLeft:50,y:barY,height:24,spacing:barSpacing,leading:leading,trailing:trailing)
             appsView.addSubview(card); appTop -= 8
         }
         mountSettingsCards(appsView, in: root)
