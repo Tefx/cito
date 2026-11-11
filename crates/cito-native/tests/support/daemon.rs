@@ -259,6 +259,139 @@ fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
 }
 
 #[test]
+fn legacy_cleanup_rejects_invalid_native_config_without_deleting_plugins() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    f.env.remove("CITO_USER");
+    let legacy = f.state.join("plugins/pi");
+    fs::create_dir_all(&legacy).unwrap();
+    let manifest = json!({"id":"pi","kind":"agent","displayName":"Legacy copy",
+        "version":"0.20.3","command":["./bin/cito-plugin-pi"]})
+    .to_string();
+    fs::write(legacy.join("plugin.json"), &manifest).unwrap();
+    for raw in [
+        "{",
+        "[]",
+        "{\"daemonPort\":0}",
+        "{\"user\":\"invalid user\"}",
+        "{\"hubs\":{\"work\":{\"url\":\"invalid\"}}}",
+    ] {
+        fs::write(&f.config, raw).unwrap();
+        let (ok, out, err) = f.command(NATIVE, &["daemon"], "");
+        assert!(!ok, "{raw}: {out} {err}");
+        assert_eq!(
+            fs::read_to_string(legacy.join("plugin.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read_to_string(&f.config).unwrap(), raw);
+    }
+    fs::write(&f.config, "{}").unwrap();
+    f.env.insert("CITO_DAEMON_PORT".into(), "invalid".into());
+    let (ok, out, err) = f.command(NATIVE, &["daemon"], "");
+    assert!(!ok, "{out} {err}");
+    assert!(err.contains("CITO_DAEMON_PORT"), "{err}");
+    assert_eq!(
+        fs::read_to_string(legacy.join("plugin.json")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
+    if std::env::var_os("CITO_TEST_SOURCE_ALIASES").is_some() {
+        use cito_native::{core::hub_plugins, plugins, setup};
+        let state = std::path::PathBuf::from(std::env::var("CITO_STATE_DIR").unwrap());
+        let source = std::path::PathBuf::from(std::env::var("CITO_BUILTIN_PLUGINS_DIR").unwrap());
+        let user = state.join("plugins");
+        assert_eq!(
+            setup::resolve_bundled_plugin_dir("human"),
+            source.join("human")
+        );
+        let originals: Vec<_> = ["human", "telegram", "pi"]
+            .into_iter()
+            .map(|id| (id, fs::read(source.join(id).join("plugin.json")).unwrap()))
+            .collect();
+        for parent_alias in [true, false] {
+            for native in [true, false] {
+                if parent_alias {
+                    std::os::unix::fs::symlink(&source, &user).unwrap();
+                } else {
+                    fs::create_dir_all(&user).unwrap();
+                    for (id, _) in &originals {
+                        std::os::unix::fs::symlink(source.join(id), user.join(id)).unwrap();
+                    }
+                }
+                let readonly = plugins::load_plugins_readonly(&state);
+                assert!(readonly.find_by_id("human").unwrap().is_builtin);
+                assert!(user.join("human").exists());
+                if native {
+                    let loaded = plugins::load_plugins(&state);
+                    for (id, _) in &originals {
+                        let plugin = loaded.find_by_id(id).unwrap();
+                        assert!(plugin.is_builtin, "{id}");
+                        assert_eq!(plugin.plugin_dir, source.join(id));
+                    }
+                } else {
+                    let channels =
+                        hub_plugins::discover(&[user.clone(), source.clone()], Some(&user))
+                            .unwrap();
+                    assert_eq!(
+                        channels.iter().find(|p| p.id == "telegram").unwrap().dir,
+                        source.join("telegram")
+                    );
+                }
+                for (id, original) in &originals {
+                    assert_eq!(
+                        fs::read(source.join(id).join("plugin.json")).unwrap(),
+                        *original
+                    );
+                }
+                if parent_alias {
+                    assert!(user.is_symlink());
+                    fs::remove_file(&user).unwrap();
+                } else {
+                    assert!(fs::read_dir(&user).unwrap().next().is_none());
+                    fs::remove_dir(&user).unwrap();
+                }
+            }
+        }
+        return;
+    }
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    // Relocate our own libtest binary so the real packaged-root resolver uses sandbox data.
+    // No system binary, desktop application, daemon, or network service is launched.
+    let package = f.dir.join("package");
+    let executable = package.join("bin/plugin-test");
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    let source = package.join("plugins");
+    for id in ["human", "telegram", "pi"] {
+        fs::create_dir_all(source.join(id)).unwrap();
+        fs::copy(
+            root().join("plugins").join(id).join("plugin.json"),
+            source.join(id).join("plugin.json"),
+        )
+        .unwrap();
+    }
+    f.env.insert(
+        "CITO_BUILTIN_PLUGINS_DIR".into(),
+        source.display().to_string(),
+    );
+    f.env.insert("CITO_TEST_SOURCE_ALIASES".into(), "1".into());
+    let (ok, out, err) = f.command(
+        executable.to_str().unwrap(),
+        &[
+            "--exact",
+            "daemon::bundled_plugin_sources_survive_user_root_and_child_symlinks",
+            "--nocapture",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+}
+
+#[test]
 fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
     if let Ok(mode) = std::env::var("CITO_TEST_LEGACY_PLUGINS") {
         use cito_native::{core::hub_plugins, plugins};
@@ -3119,30 +3252,58 @@ fn stdio_signal_handlers_exit_cleanly_and_daemon_health_owns_sandbox() {
 fn cli_validation_dry_run_and_selective_harness_configuration() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
+    let legacy = f.state.join("plugins/pi");
+    fs::create_dir_all(&legacy).unwrap();
+    let manifest = json!({"id":"pi","kind":"agent","displayName":"Legacy copy",
+        "version":"0.20.3","command":["./bin/cito-plugin-pi"]})
+    .to_string();
+    fs::write(legacy.join("plugin.json"), &manifest).unwrap();
+    fs::write(legacy.join("keep"), "legacy payload").unwrap();
+    let before = fs::read(&f.config).unwrap();
     for args in [
         vec!["setup", "--bogus"],
-        vec!["listen", "--session", "orphan"],
-        vec!["listen", "--harness", "missing"],
+        vec!["setup", "--enable", "missing"],
+        vec!["setup", "--hub", "work", "--url", "invalid"],
+        vec!["setup", "--enable-hub", "missing"],
+        vec!["setup", "--share-port", "invalid"],
     ] {
-        assert!(!f.command(NATIVE, &args, "").0);
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(!ok, "{args:?}: {out} {err}");
+        assert_eq!(
+            fs::read_to_string(legacy.join("plugin.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read_to_string(legacy.join("keep")).unwrap(),
+            "legacy payload"
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), before);
     }
-    let before = fs::read(&f.config).unwrap();
-    assert!(
-        f.command(
-            NATIVE,
-            &[
-                "setup",
-                "--enable",
-                "pi",
-                "--dry-run",
-                "--json",
-                "--no-login-item"
-            ],
-            ""
-        )
-        .0
-    );
-    assert_eq!(fs::read(&f.config).unwrap(), before);
+    for args in [
+        vec![
+            "setup",
+            "--enable",
+            "pi",
+            "--dry-run",
+            "--json",
+            "--no-login-item",
+        ],
+        vec!["setup", "--dry-run", "--build-app", "--json"],
+        vec!["setup", "--status", "--json"],
+        vec!["setup", "--status", "--build-app", "--json"],
+    ] {
+        let (ok, out, err) = f.command(NATIVE, &args, "");
+        assert!(ok, "{args:?}: {out} {err}");
+        assert_eq!(
+            fs::read_to_string(legacy.join("plugin.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read_to_string(legacy.join("keep")).unwrap(),
+            "legacy payload"
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), before);
+    }
     assert!(!f.home.join(".pi").exists());
     assert!(
         f.command(
@@ -3152,6 +3313,7 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         )
         .0
     );
+    assert!(!legacy.exists());
     assert!(f.home.join(".pi/agent/settings.json").exists());
     assert!(!f.home.join(".codex/config.toml").exists());
     assert!(!f.home.join(".claude/settings.json").exists());
@@ -3165,4 +3327,10 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         .trim(),
         format!("cito v{}", env!("CARGO_PKG_VERSION"))
     );
+    for args in [
+        vec!["listen", "--session", "orphan"],
+        vec!["listen", "--harness", "missing"],
+    ] {
+        assert!(!f.command(NATIVE, &args, "").0);
+    }
 }

@@ -29,8 +29,14 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
         if !root.exists() {
             continue;
         }
-        let is_user_root =
-            user_root.is_some_and(|user| super::plugins::same_plugin_root(root, user));
+        // A bundled fallback may share the user root's target without being a user copy.
+        let is_user_root = user_root.is_some_and(|user| {
+            root == user
+                || (super::plugins::same_plugin_root(root, user)
+                    && !bundled_companion
+                        .parent()
+                        .is_some_and(|bundled| super::plugins::same_plugin_root(root, bundled)))
+        });
         for entry in std::fs::read_dir(root)
             .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", root.display()))?
         {
@@ -40,7 +46,7 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
                 continue;
             }
             let dir_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            if is_user_root && super::plugins::remove_legacy_staged_plugin(&dir) {
+            if is_user_root && super::plugins::remove_legacy_staged_plugin(&dir, true) {
                 continue;
             }
             if dir_name == "human" && !super::plugins::same_plugin_root(&dir, &bundled_companion) {

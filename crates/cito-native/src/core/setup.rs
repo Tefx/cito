@@ -973,9 +973,8 @@ pub fn uninstall_setup_native(
 }
 
 pub fn run_setup_cli(args: &[String]) {
-    let run = || -> Result<(), String> {
+    let run = || -> Result<Option<PathBuf>, String> {
         let (state_dir, config_path, home_dir) = resolve_state_and_config_paths()?;
-        let plugins = crate::plugins::load_plugins(&state_dir);
 
         let mut status_only = false;
         let mut dry_run = false;
@@ -1117,6 +1116,7 @@ pub fn run_setup_cli(args: &[String]) {
 
         let raw_config = crate::plugins::read_config_text(&config_path)?;
         let (current_default, _, _) = try_normalize_existing_config(raw_config.as_deref())?;
+        let plugins = crate::plugins::load_plugins_readonly(&state_dir);
         if dry_run && (build_app || uninstall) {
             let action = SetupAction {
                 target: "cito".to_string(),
@@ -1139,10 +1139,10 @@ pub fn run_setup_cli(args: &[String]) {
                 },
             };
             emit_setup_result(&config_path, &current_default, true, &[action], json_output);
-            return Ok(());
+            return Ok(None);
         }
 
-        if build_app {
+        if build_app && !status_only {
             let (app_path, bytes) =
                 build_mac_app_bundle_native(build_app_dest.as_deref(), &state_dir, &plugins)?;
             if json_output {
@@ -1154,7 +1154,7 @@ pub fn run_setup_cli(args: &[String]) {
             } else {
                 println!("Built {} ({} bytes)", app_path.display(), bytes);
             }
-            return Ok(());
+            return Ok(Some(state_dir));
         }
 
         if status_only {
@@ -1202,14 +1202,14 @@ pub fn run_setup_cli(args: &[String]) {
                     }
                 }
             }
-            return Ok(());
+            return Ok(None);
         }
 
         if uninstall {
             let (default_hub, actions) =
                 uninstall_setup_native(&state_dir, &config_path, &home_dir, &plugins, purge_data)?;
             emit_setup_result(&config_path, &default_hub, false, &actions, json_output);
-            return Ok(());
+            return Ok(Some(state_dir));
         }
 
         for h in enable_harnesses.iter().chain(disable_harnesses.iter()) {
@@ -1243,7 +1243,7 @@ pub fn run_setup_cli(args: &[String]) {
                 }
             }
             emit_setup_result(&config_path, &default_hub, dry_run, &actions, json_output);
-            return Ok(());
+            return Ok((!dry_run).then_some(state_dir));
         }
 
         for n in enable_hubs
@@ -1481,12 +1481,19 @@ pub fn run_setup_cli(args: &[String]) {
         if !ok {
             std::process::exit(1);
         }
-        Ok(())
+        Ok((!dry_run).then_some(state_dir))
     };
 
-    if let Err(err) = run() {
-        eprintln!("cito setup: {err}");
-        std::process::exit(1);
+    match run() {
+        Ok(Some(state_dir)) => {
+            // Only a successful mutating command authorizes the upgrade cleanup.
+            crate::plugins::load_plugins(&state_dir);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("cito setup: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
