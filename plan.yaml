@@ -8624,7 +8624,7 @@ phases:
 - id: v29
   name: 'V29 Stage 12 (v0.21.0): Holistic UI/UX & Cross-Layer Pathway Remediation
     (D01–D18)'
-  status: in_progress
+  status: done
   gate: 'All D01–D18 requirements in docs/DESIGN.md §14 pass; all 6 inspectMenu()
     mechanical invariants equal [] across all 4 surfaces (menu, directory, settings,
     banner) in Light and Dark appearances; pathway-auditor, structural-auditor, and
@@ -8819,7 +8819,7 @@ phases:
   - id: v29.gate
     name: V29 Independent Terminal Acceptance, D01–D18 6-Invariant Verification &
       v0.21.0 Release Gate
-    status: claimed
+    status: done
     description: Independently verify all D01–D18 requirements in docs/DESIGN.md §14,
       all 6 inspectMenu() mechanical invariants (truncated_labels, overlapping_siblings,
       clipped_views, low_contrast_labels, jargon_leaks, address_mismatches == [])
@@ -8835,3 +8835,30 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-11T05:38:22.008293Z'
+    done_at: '2026-11-11T05:47:02.264132+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 4cd0f994ad98a3755fbccffc743c2051aac779a1 (code commit 254d417084fe7eefb56ae6a06e29a8c575026452;
+      annotated release tag v0.21.0 at build commit 254d417084fe7eefb56ae6a06e29a8c575026452;
+      Tefx/homebrew-tap Casks/cito.rb commit 7c3b753514295389ec339eaf9a5b2a17c282e2df)
+
+      - Gate Report (gate.report.v2): /Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-11T05-46-06-881Z-2026-11-11T05-40-25-006Z_01a1c91f-292d-7690-aae8-c9496d0abc9e.js-4636f7598e94c2dc.txt
+      (fresh-context gate-reviewer session 2026-11-11T05-40-25-006Z_01a1c91f-292d-7690-aae8-c9496d0abc9e.jsonl,
+      status: PASS, review_kind: PHASE_GATE, review_mode: FULL, target_ref: git:4cd0f994ad98a3755fbccffc743c2051aac779a1,
+      5/5 requirements PROVEN, findings: []).
+
+
+      Verification:
+
+      - Run: python3 ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding
+      /tmp/cito-v29-gate/binding.json /tmp/cito-v29-gate/report.json -> {"valid":true,"binding_checked":true,"kind":"gate","schema_version":"gate.report.v2","evidence_disposition":"POSITIVE_GATE_EVIDENCE","errors":[]}
+
+      - Run: GitHub Actions CI run 42965127141 & Deploy Website to GitHub Pages run
+      42965127061 on 254d417084fe7eefb56ae6a06e29a8c575026452 -> 267 workspace tests
+      passed, 13 packaging tests passed, 0 failed, 0 compiler/linker warnings, Syntax
+      OK, https://tefx.github.io/cito/ live at 0.21.0.
+
+      - Live Release & Homebrew Tap: GitHub Release v0.21.0 (https://github.com/Tefx/cito/releases/tag/v0.21.0)
+      published with Developer ID signed + notarized + stapled Cito-macos-arm64.zip
+      (SHA-256 09724dd49db4db4577d7f90e2cf4b74465120bf68c48b05d8b78570f972ee17c),
+      synchronized to Tefx/homebrew-tap Casks/cito.rb (commit 7c3b753514295389ec339eaf9a5b2a17c282e2df).'
