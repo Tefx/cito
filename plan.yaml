@@ -9080,3 +9080,28 @@ phases:
     recovery in restore_passive, and permanent .cito.lock inode retention.'
   depends_on:
   - v30
+  steps:
+  - id: v31.impl
+    name: V31 M1–M5 Systemic UI Layout Engine, Single-Authority Human/Channel State,
+      Bounded Delivery Retry & v0.21.2 Alignment
+    status: pending
+    description: Implement docs/DESIGN.md §15 (M1–M5) and align version to 0.21.2
+      while strictly enforcing §15.2 test economy (update existing unit/UI tests in
+      place; do NOT add slow multi-process E2E test bloat). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/telegram/native.rs
+    - plugins/telegram/plugin.json
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
