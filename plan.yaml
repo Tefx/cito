@@ -9408,3 +9408,30 @@ phases:
       \ PROVEN\n  - N4_PURPOSE_DRIVEN_WEBSITE_WALKTHROUGH_AND_STAGE: PROVEN\n  - S16_2_TEST_ECONOMY_AND_V0_21_3_RELEASE:\
       \ PROVEN\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §16 (N1–N4 & §16.2 Anti-Over-Testing\
       \ Policy) & docs/RELEASING.md"
+- id: v33
+  name: 'V33 Stage 15 (v0.21.4 Candidate): Crafted macOS Utility De-Boxing, Hit-Test
+    Reachability, Progressive Disclosure & Minimalist Web Architecture (P1–P4)'
+  status: pending
+  gate: All P1–P4 requirements in docs/DESIGN.md §17 pass; all inspectMenu() mechanical
+    invariants (including hit-test reachability and card inner-padding) equal [] across
+    all 4 surfaces in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
+    and architecture-topology.svg are updated; single-pass contract-and-simplicity
+    review & fix completes; cargo test --workspace && cargo build --release pass with
+    0 warnings; changes are pushed to origin/main (NO release tag).
+  context: 'Implement docs/DESIGN.md §17 (P1–P4 & §17.2): (1) P1 AppKit hit-test reachability
+    (MenuControl.hitTest & ClickView.hitTest !isHidden guard, unmounted collapsed
+    subviews, inspectMenu hit-test oracle) and Save/Re-check visual feedback symmetry;
+    (2) P2 Crafted macOS utility de-boxing (.subtleHeader ghost controls, segmented
+    tab tracks, compact 52pt single-row Agent Apps cards, Experimental badge leading
+    alignment, and 3-state Telegram progressive disclosure that collapses personal
+    Chat ID form when paired); (3) P3 canonical Pi -> Codex -> Claude Code ordering
+    in plugins.rs & manifests, Tailscale vs LAN address switcher & online/MagicDNS
+    check, smart Hub Name derivation from IP/domain URLs with live placeholder & sentence-case
+    labels, Directory human row deduplication, centered empty states, and sanitized
+    OIDC errors; (4) P4 website consolidation, equal-height CSS Grid tab stacking,
+    nowrap pills/links, direct Cito-macos-arm64.zip download URLs + target=_blank
+    external links, open reply composer in activity-dark.png, and hand-drawn Excalidraw-style
+    architecture-topology.svg. Per user mandate: run a single-pass fast contract-and-simplicity
+    review & fix (NO multi-round loops) and do NOT create a formal release tag yet.'
+  depends_on:
+  - v32
