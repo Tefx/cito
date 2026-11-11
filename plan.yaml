@@ -8885,7 +8885,7 @@ phases:
   - id: v30.impl
     name: V30 Cito.app Symlink Launcher Resolution, cito-mcp Dispatch, Legacy ~/.cito/plugins
       Upgrade Cleanup & v0.21.1 Version Bump
-    status: claimed
+    status: done
     description: 'Update docs/DESIGN.md §14 (D20 / v0.21.1) and docs/ROADMAP.md for
       v0.21.1. Fix Contents/MacOS/Cito launcher script in crates/cito-native/src/core/setup.rs:688
       to save INVOKED_AS="$(basename "$0")", resolve symlinks on $0 via a while [
@@ -8928,6 +8928,25 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T05:52:10.042205Z'
+    done_at: '2026-11-11T06:26:28.129389+00:00'
+    evidence: "Artifact:\n- Commit: 8efd959dd7d436f1e3a1a5472b1bdab7ca6ab67d (37 files\
+      \ changed, +408 / -49 lines; retained ref refs/vectl/candidates/v30.impl)\n\
+      - Executor: rust-senior (session 2026-11-11T05-53-15-617Z_01a1c92a-eb60-7353-9b6e-8bb5d5a670a0.jsonl)\n\
+      - Delivered:\n  1. Cito.app/Contents/MacOS/Cito symlink resolution & cito-mcp\
+      \ dispatch (crates/cito-native/src/core/setup.rs, crates/cito-native/tests/support/distribution.rs).\n\
+      \  2. Automatic cleanup of legacy v0.20.x ~/.cito/plugins/<id> copies & always-bundled\
+      \ human companion (crates/cito-native/src/core/plugins.rs, crates/cito-native/src/core/hub_plugins.rs,\
+      \ crates/cito-native/tests/support/daemon.rs).\n  3. packaging/release.py smoke_cask\
+      \ path normalization (packaging/release.py, packaging/test_release.py).\n  4.\
+      \ Bumped version to 0.21.1 across Cargo.toml, Cargo.lock, plugin manifests,\
+      \ website, README.md, docs/DESIGN.md, docs/ROADMAP.md, and deploy/hub/README.md.\n\
+      \nVerification:\n- Run: python3 packaging/release.py check && python3 -m unittest\
+      \ discover -s packaging -p 'test_*.py' -v && /usr/bin/ruby -c packaging/homebrew/cito.rb\
+      \ && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked\
+      \ -- -D warnings && cargo test --workspace --locked -- --test-threads=1 && cargo\
+      \ build --release --locked -> 269 workspace tests passed, 14 packaging tests\
+      \ passed, 0 failed, 0 compiler/linker warnings, Syntax OK.\n- Reclaimed worktree\
+      \ /Users/tefx/Projects/cito/.vectl/worktrees/v30.impl (127 GiB -> 130 GiB free)."
   - id: v30.hygiene
     name: 'V30 2D Contract-and-Simplicity Iterative Convergence Audit & Live v0.21.1
       Release Publication [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
