@@ -75,7 +75,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
 fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    f.daemon(&[]);
+    f.daemon(&[("CITO_TAILSCALE_HOST", "mac-studio.tailnet.ts.net.")]);
     assert_eq!(
         f.action(json!({"op":"set_host_hub","enabled":false,"auth_mode":"token"}))
             .0,
@@ -85,6 +85,14 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
     assert_eq!(host["enabled"], false);
     assert_eq!(host["running"], false);
     assert_eq!(host["token"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        host["endpoint_url"],
+        "http://mac-studio.tailnet.ts.net:4291"
+    );
+    assert!(host["invite_command"]
+        .as_str()
+        .unwrap()
+        .contains("--url http://mac-studio.tailnet.ts.net:4291"));
     let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(saved["host_hub"]["token"], host["token"]);
     assert_eq!(
@@ -2762,7 +2770,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         error["error"]
     );
     assert_eq!(
-        f.action(json!({"op":"setup_save_hub","name":"json","url":"local://","auth_mode":"none"}))
+        f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"json","name":"json","url":"local://","auth_mode":"none"}))
             .0,
         200
     );

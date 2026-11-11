@@ -443,18 +443,21 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     l.control("settings_tab:hubs");
     l.control("open_add_hub");
     l.control("submit_add_hub");
-    l.until(|s| node(s, "settings_items", "add_hub_error")["text"] == "Hub name is required.");
+    l.until(|s| {
+        node(s, "settings_items", "add_hub_error")["text"]
+            == "Hub URL must start with http:// or https://."
+    });
     l.snapshot("settings", "r3_add_hub_validation.png");
-    l.input("settings_hub_name", "INVALID!");
-    l.input("settings_hub_url", "local://");
+    l.input("settings_hub_name", "Office Mac");
+    l.input("settings_hub_url", "http://");
     l.control("submit_add_hub");
     l.until(|s| {
         node(s, "settings_items", "add_hub_error")["text"]
-            .as_str()
-            .is_some_and(|t| t.contains("Invalid hub name"))
+            == "Enter a valid Hub URL (http://ip:4291 or https://host)."
     });
     l.snapshot("settings", "r3_add_hub_daemon_error.png");
     l.input("settings_hub_name", "scratch");
+    l.input("settings_hub_url", "local://");
     l.control("submit_add_hub");
     l.until(|s| {
         node(s, "settings_items", "add_hub_form").is_null()
@@ -471,7 +474,17 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     let busy = occupied.local_addr().unwrap().port().to_string();
     l.input("host_hub_port", &busy);
     l.control("apply_host_hub_port");
-    l.until(|s| !node(s, "settings_items", "settings_error_banner").is_null());
+    let failed_port = l.until(|s| !node(s, "settings_items", "settings_error_banner").is_null());
+    assert_eq!(
+        node(&failed_port, "settings_items", "host_hub_error")["text"],
+        "Cannot start sharing: Address already in use"
+    );
+    assert!(
+        node(&failed_port, "settings_items", "host_hub_error")["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot bind host hub listener:")
+    );
     l.snapshot("settings", "r3_settings_error_banner.png");
     l.control("settings_tab:apps");
     l.control("settings_tab:hubs");
@@ -490,7 +503,11 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     // the invite round-trip and parser tests, without connecting to real services.
     f.send(l.ui,json!({"op":"test_clipboard","text":json!({"name":"pasted","url":format!("http://127.0.0.1:{}",port())}).to_string()}));
     l.control("paste_hub_invite");
-    l.until(|s| !node(s, "settings_items", "settings_hub:pasted").is_null());
+    let joined = l.until(|s| !node(s, "settings_items", "settings_hub:pasted").is_null());
+    assert_eq!(
+        node(&joined, "settings_items", "paste_hub_invite")["text"],
+        "✓ Joined"
+    );
     l.control("remove_hub:pasted");
     l.until(|s| node(s, "settings_items", "settings_hub:pasted").is_null());
     l.control("remove_hub:scratch");
@@ -614,7 +631,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
                 && frame["request_id"] == action["request_id"]));
         }
     }
-    for (name, op) in [("INVALID!", "error"), ("scratch", "settings")] {
+    for (name, op) in [("office-mac", "error"), ("scratch", "settings")] {
         let (action, _, _) = l
             .results
             .iter()
@@ -893,6 +910,10 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             field.strip_prefix("settings_hub_").unwrap()
         };
         assert_eq!(resubmitted[key], newer, "Preserve the newer {field} draft");
+        if field != "settings_hub_name" {
+            assert_eq!(resubmitted["edit"], true);
+            assert_eq!(resubmitted["original_name"], "submitted");
+        }
     }
 
     for retry_after_error in [false, true] {
@@ -1555,7 +1576,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         json!([{"harness":"fixture","session_id":"s1","title":"Work session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "items", "human_paused_card")["height"], 52);
+    assert_eq!(node(&s, "items", "human_paused_card")["height"], 56);
     assert_eq!(node(&s, "items", "listen_human")["text"], "Resume");
     render_png(&f, p, "menu", "menu_human_paused.png");
     let rendered = inspect(&f, p);
@@ -1710,7 +1731,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert_eq!(node(&s, "settings_items", "login_hub:work")["x"], 184);
     assert_eq!(
         node(&s, "settings_items", "copy_host_hub_token")["text"],
-        "Token: 12345678… Copy"
+        "Copy Token"
     );
     render_png(&f, p, "settings", "settings_hubs_token.png");
     control(&f, p, "copy_host_hub_token");
@@ -1949,7 +1970,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .into_iter()
             .filter_map(|n| n["text"].as_str().map(String::from))
             .collect();
-        assert!(labels.contains(&"HUB NAME".to_owned()));
+        assert!(labels.contains(&"HUB NAME (OPTIONAL)".to_owned()));
         assert!(labels.contains(&"HUB URL (http://ip:4291 or https://host)".to_owned()));
         assert!(labels.contains(&"ACCESS".to_owned()));
     }
@@ -2549,6 +2570,62 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
                 && v["original_name"] == "work"
         })
     });
+    control(&f, p, "cancel_add_hub");
+    for (requested, url, expected) in [
+        ("Office Mac", "https://office.example.com", "office-mac"),
+        ("Work", "http://127.0.0.1:4291", "work"),
+        ("", "https://work.example.com", "work-2"),
+        ("", "https://local.example.com", "local-2"),
+        ("", "http://192.0.2.10:4291", "192-0-2-10"),
+    ] {
+        control(&f, p, "open_add_hub");
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"settings_hub_name","value":requested}),
+        );
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"settings_hub_url","value":url}),
+        );
+        let before = f
+            .frames(p)
+            .iter()
+            .filter(|v| v["op"] == "setup_save_hub")
+            .count();
+        control(&f, p, "submit_add_hub");
+        wait(|| {
+            f.frames(p)
+                .iter()
+                .filter(|v| v["op"] == "setup_save_hub")
+                .count()
+                > before
+        });
+        let action = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == "setup_save_hub")
+            .unwrap();
+        assert_eq!(action["name"], expected);
+        assert_eq!(action["url"], url);
+        control(&f, p, "cancel_add_hub");
+    }
+    control(&f, p, "open_add_hub");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"settings_hub_name","value":"!!!"}),
+    );
+    f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
+    inspect(&f, p);
+    let before = f.frames(p).len();
+    control(&f, p, "submit_add_hub");
+    let rejected = inspect(&f, p);
+    assert_eq!(f.frames(p).len(), before);
+    assert_eq!(
+        node(&rejected, "settings_items", "add_hub_error")["text"],
+        "Hub name must contain a letter or number."
+    );
+    control(&f, p, "cancel_add_hub");
     control(&f, p, "open_uninstall_confirm");
     control(&f, p, "confirm_disconnect_all");
     wait(|| {
@@ -2770,8 +2847,9 @@ fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
         snapshot["truncated_labels"],
         json!([]),
         "{:?}",
-        nodes(&snapshot["items"])
+        ["items", "directory_items", "settings_items", "banner_items"]
             .into_iter()
+            .flat_map(|key| nodes(&snapshot[key]))
             .filter(|n| snapshot["truncated_labels"]
                 .as_array()
                 .is_some_and(|ids| ids.contains(&n["id"])))
@@ -3218,6 +3296,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
         for (kind, oracle) in [
             ("bar_anchor", "clipped_views"),
             ("fractional_truncation", "truncated_labels"),
+            ("card_padding", "clipped_views"),
             ("strip_anchor", "clipped_views"),
             ("status_emoji", "jargon_leaks"),
         ] {
@@ -3449,6 +3528,14 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let mut cfg = settings();
     cfg["apps"][2]["id"] = json!("claude");
     cfg["apps"][2]["display_name"] = json!("Claude Code");
+    cfg["apps"][0]["display_name"] = json!("Pi Coding Agent");
+    cfg["channels"][0]["id"] = json!("telegram");
+    cfg["channels"][0]["display_name"] = json!("Telegram");
+    cfg["host_hub"]["enabled"] = json!(true);
+    cfg["host_hub"]["running"] = json!(true);
+    cfg["host_hub"]["endpoint_url"] = json!("http://mac-studio.tailnet.ts.net:4291");
+    cfg["host_hub"]["invite_command"] =
+        json!("cito setup --hub lan --url http://mac-studio.tailnet.ts.net:4291 --default");
     cfg["hubs"][0]["name"] = json!("local");
     cfg["hubs"][1]["url"] = json!("https://hub.example.com");
     cfg["hubs"][1]["auth_mode"] = json!("oidc");
@@ -3482,7 +3569,15 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"Design review","cwd":"/tmp/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);
     f.send(p, frame);
-    assert_eq!(inspect(&f, p)["count"], 1);
+    let s = inspect(&f, p);
+    assert_eq!(s["count"], 1);
+    assert_eq!(node(&s, "items", "plugin_icon:pi")["tint"], json!([]));
+    assert_eq!(node(&s, "items", "plugin_icon:pi")["x"], 0);
+    assert_eq!(node(&s, "items", "plugin_icon:pi")["width"], 28);
+    assert_eq!(
+        node(&s, "items", "plugin_symbol:human")["tint"],
+        json!([1, 1, 1, 1])
+    );
     capture("menu", "menu_active");
 
     let mut remote_agent = peer("review");
@@ -3514,7 +3609,13 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         p,
         json!({"op":"directory","peers":peers,"activity":activity,"matched_count":2,"online_count":2,"unread_count":2}),
     );
-    assert_eq!(inspect(&f, p)["directory_mode"], "directory");
+    let s = inspect(&f, p);
+    assert_eq!(s["directory_mode"], "directory");
+    assert_eq!(
+        node(&s, "directory_items", "plugin_icon:pi")["tint"],
+        json!([])
+    );
+    assert_eq!(node(&s, "directory_items", "plugin_icon:pi")["width"], 28);
     capture("directory", "directory");
     control(&f, p, "msg_dir:local:review");
     f.send(
@@ -3536,6 +3637,11 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         node(&s, "directory_items", "activity_row:local:short")["height"],
         52
     );
+    assert_eq!(
+        node(&s, "directory_items", "plugin_icon:pi")["tint"],
+        json!([])
+    );
+    assert_eq!(node(&s, "directory_items", "plugin_icon:pi")["x"], 0);
     capture("directory", "activity");
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     let s = inspect(&f, p);
@@ -3559,7 +3665,49 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     control(&f, p, "open_settings");
     for tab in ["apps", "channels", "hubs"] {
         control(&f, p, &format!("settings_tab:{tab}"));
-        assert_eq!(inspect(&f, p)["settings_tab"], tab);
+        let s = inspect(&f, p);
+        assert_eq!(s["settings_tab"], tab);
+        if tab == "apps" {
+            for id in ["pi", "codex", "claude"] {
+                let icon = node(&s, "settings_items", &format!("plugin_icon:{id}"));
+                assert_eq!(icon["tint"], json!([]));
+                assert_eq!(icon["x"], 0);
+                assert_eq!(icon["y"], 0);
+                assert_eq!(icon["width"], 28);
+            }
+        } else if tab == "channels" {
+            assert_eq!(
+                node(&s, "settings_items", "plugin_icon:telegram")["tint"],
+                json!([])
+            );
+            assert_eq!(
+                node(&s, "settings_items", "plugin_icon:telegram")["width"],
+                24
+            );
+            assert!(
+                node(&s, "settings_items", "settings_channel:telegram")["height"]
+                    .as_f64()
+                    .unwrap()
+                    <= 254.0
+            );
+        } else {
+            assert_eq!(
+                node(&s, "settings_items", "copy_hub_invite")["text"],
+                "Copy Invite Code"
+            );
+            let guidance = node(&s, "settings_items", "host_hub_guidance");
+            assert_eq!(
+                guidance["text"],
+                "On another Mac, click Paste Invite Code below (or run in Terminal) to connect."
+            );
+            assert_eq!(guidance["x"], 14);
+            assert_eq!(guidance["y"], 78);
+            assert_eq!(guidance["width"], 452);
+            assert_eq!(
+                node(&s, "settings_items", "paste_hub_invite")["text"],
+                "Paste Invite Code"
+            );
+        }
         capture("settings", &format!("settings_{tab}"));
     }
     control(&f, p, "open_add_hub");
@@ -3845,7 +3993,14 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             .unwrap();
         l.control(id);
         f.send(l.ui, json!({"op":"activity_message","request_id":request["request_id"],"part":0,"message":"late full message","complete":true}));
-        assert_eq!(inspect(&f, l.ui)["clipboard"], expected, "{id}");
+        let copied = inspect(&f, l.ui);
+        assert_eq!(copied["clipboard"], expected, "{id}");
+        if id == "copy_hub_invite" {
+            assert_eq!(
+                node(&copied, "settings_items", id)["text"],
+                "✓ Invite Copied"
+            );
+        }
     }
 }
 

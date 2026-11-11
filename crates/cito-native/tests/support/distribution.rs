@@ -267,6 +267,22 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     assert!(ok, "{out} {err}");
     let v: Value = serde_json::from_str(&out).unwrap();
     let app = std::path::Path::new(v["appPath"].as_str().unwrap());
+    for id in ["codex", "pi", "claude", "telegram"] {
+        let source = fs::read(root().join("plugins").join(id).join("icon.png")).unwrap();
+        assert_eq!(
+            fs::read(
+                app.join("Contents/Resources/plugins")
+                    .join(id)
+                    .join("icon.png")
+            )
+            .unwrap(),
+            source
+        );
+        assert_eq!(
+            fs::read(f.state.join("runtime/plugins").join(id).join("icon.png")).unwrap(),
+            source
+        );
+    }
     // Cargo tests use debug executables. Release archive size is checked after release staging.
     assert!(v["bytes"].as_u64().unwrap() > 100_000);
     let cask_bin = f.dir.join("cask-bin");

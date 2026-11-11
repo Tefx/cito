@@ -21,7 +21,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -2322,8 +2322,10 @@ impl DaemonService {
                 return Ok(json!({"ok":true,"notice":notice}));
             }
             "setup_save_hub" | "save_hub" => {
-                let name = action["name"].as_str().unwrap_or(&hub).to_string();
-                if !crate::plugins::validate_hub_name(&name) {
+                let requested_name = string(action, "name").trim();
+                if !requested_name.is_empty()
+                    && !requested_name.chars().any(|c| c.is_ascii_alphanumeric())
+                {
                     return Err("INVALID_INPUT: Invalid hub name".into());
                 }
                 let mut cfg = action["config"]
@@ -2344,10 +2346,7 @@ impl DaemonService {
                     }
                 }
                 let editing = action["edit"] == true;
-                let original = action["original_name"]
-                    .as_str()
-                    .unwrap_or(&name)
-                    .to_string();
+                let original = action["original_name"].as_str().unwrap_or(&hub).to_string();
                 self.mutate_config(|v| {
                     // Materialize the implicit local Hub before saving/editing a
                     // first explicit Hub, so first-run edits cannot discard it.
@@ -2362,9 +2361,6 @@ impl DaemonService {
                         if !base.is_object() {
                             return Err("INVALID_INPUT: Unknown hub to edit".into());
                         }
-                        if original == "local" && name != "local" {
-                            return Err("INVALID_INPUT: Cannot rename the local hub".into());
-                        }
                         if let Some(patch) = cfg.as_object() {
                             for (key, value) in patch {
                                 if matches!(
@@ -2378,6 +2374,46 @@ impl DaemonService {
                             }
                         }
                         cfg = base;
+                    }
+                    let base_name = if requested_name.is_empty() {
+                        hub_name_from_url(string(&cfg, "url"))
+                    } else {
+                        normalize_slug(requested_name)
+                    };
+                    let mut name = base_name.clone();
+                    if !editing && requested_name.is_empty() {
+                        let mut suffix = 2;
+                        while name == "local"
+                            || v["hubs"]
+                                .get(&name)
+                                .is_some_and(|existing| existing["url"] != cfg["url"])
+                        {
+                            let ending = format!("-{suffix}");
+                            name = format!(
+                                "{}{}",
+                                base_name
+                                    .chars()
+                                    .take(32 - ending.len())
+                                    .collect::<String>()
+                                    .trim_end_matches('-'),
+                                ending
+                            );
+                            suffix += 1;
+                        }
+                    }
+                    if !crate::plugins::validate_hub_name(&name) {
+                        return Err("INVALID_INPUT: Invalid hub name".into());
+                    }
+                    if editing && original == "local" && name != "local" {
+                        return Err("INVALID_INPUT: Cannot rename the local hub".into());
+                    }
+                    if !editing
+                        && (name == "local"
+                            || v["hubs"]
+                                .get(&name)
+                                .is_some_and(|existing| existing["url"] != cfg["url"]))
+                    {
+                        return Err("INVALID_INPUT: Hub name already exists".into());
                     }
                     let auth = cfg
                         .get("authMode")
@@ -3055,9 +3091,122 @@ fn host_hub_auth_mode(host: &Value) -> &str {
     })
 }
 
+fn tailscale_host_from_status(status: &Value) -> Option<String> {
+    if status["BackendState"] != "Running" {
+        return None;
+    }
+    let dns = string(&status["Self"], "DNSName").trim_end_matches('.');
+    if !dns.is_empty() {
+        return Some(dns.to_owned());
+    }
+    status["Self"]["TailscaleIPs"]
+        .as_array()?
+        .iter()
+        .filter_map(|ip| ip.as_str()?.parse::<std::net::Ipv4Addr>().ok())
+        .next()
+        .map(|ip| ip.to_string())
+}
+
+fn probe_tailscale_status() -> Option<Value> {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    let executable = [
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ]
+    .into_iter()
+    .find(|path| std::path::Path::new(path).is_file())
+    .unwrap_or("tailscale");
+    let (mut output, writer) = UnixStream::pair().ok()?;
+    output.set_nonblocking(true).ok()?;
+    let mut child = Command::new(executable)
+        .args(["status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let mut failed = false;
+        loop {
+            match output.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if bytes.len() > 4 * 1024 * 1024 {
+                        failed = true;
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() || failed {
+                    return None;
+                }
+                output
+                    .take((4 * 1024 * 1024 - bytes.len()) as u64)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                return serde_json::from_slice(&bytes).ok();
+            }
+            Ok(None) if !failed && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            _ => {
+                // Every timeout/read/wait failure reaps the owned CLI process.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn tailscale_advertised_host() -> Option<String> {
+    if let Ok(host) = std::env::var("CITO_TAILSCALE_HOST") {
+        let host = host.trim().trim_end_matches('.');
+        if !host.is_empty() {
+            return Some(host.to_owned());
+        }
+    }
+    // Unit tests use the pure JSON projection; integration fixtures are headless.
+    if cfg!(test)
+        || std::env::var("CITO_UI_HEADLESS").as_deref() == Ok("1")
+        || std::env::var("CITO_DISABLE_TAILSCALE_PROBE").as_deref() == Ok("1")
+    {
+        return None;
+    }
+    static CACHE: OnceLock<Mutex<Option<(Instant, Option<String>)>>> = OnceLock::new();
+    let mut cached = CACHE.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    if let Some((_, host)) = cached
+        .as_ref()
+        .filter(|(time, _)| time.elapsed() < Duration::from_secs(30))
+    {
+        return host.clone();
+    }
+    let host = probe_tailscale_status()
+        .as_ref()
+        .and_then(tailscale_host_from_status);
+    *cached = Some((Instant::now(), host.clone()));
+    host
+}
+
 fn advertised_hub_host(bind: &str) -> String {
     if !matches!(bind, "" | "0.0.0.0" | "::") {
         return bind.into();
+    }
+    if let Some(host) = tailscale_advertised_host() {
+        return host;
     }
     // A UDP connect selects the default route's source IPv4 without sending traffic.
     let routed_ip = UdpSocket::bind("0.0.0.0:0")
@@ -3297,6 +3446,22 @@ fn http_client_pid(stream: &TcpStream) -> Option<u32> {
         None
     }
 }
+fn hub_name_from_url(raw: &str) -> String {
+    let candidate = url::Url::parse(raw)
+        .ok()
+        .and_then(|url| match url.host()? {
+            url::Host::Domain(host) => host
+                .split('.')
+                .next()
+                .filter(|label| !label.chars().all(|c| c.is_ascii_digit()))
+                .map(str::to_owned),
+            url::Host::Ipv4(ip) => Some(ip.to_string().replace('.', "-")),
+            _ => None,
+        })
+        .unwrap_or_else(|| "remote".into());
+    normalize_slug(&candidate)
+}
+
 fn parse_hub_invite(raw: &str) -> Result<Value, String> {
     let raw = raw.trim();
     let invalid = || "INVALID_INPUT: Invalid hub invite".to_owned();
@@ -3308,18 +3473,8 @@ fn parse_hub_invite(raw: &str) -> Result<Value, String> {
         value
     } else if raw.starts_with("http://") || raw.starts_with("https://") {
         let url = url::Url::parse(raw).map_err(|_| invalid())?;
-        let host = url.host_str().ok_or_else(invalid)?;
-        let name = host
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>();
-        json!({"name":name.trim_matches('-').chars().take(32).collect::<String>(),"url":raw,"auth_mode":"none"})
+        url.host_str().ok_or_else(invalid)?;
+        json!({"url":raw,"auth_mode":"none"})
     } else {
         // Join codes generated by Cito contain no shell quoting or expansion.
         // Reject malformed/unknown options rather than executing clipboard text.
@@ -3357,23 +3512,13 @@ fn parse_hub_invite(raw: &str) -> Result<Value, String> {
     if value["name"].is_null() {
         value["name"] = value["hub"].clone();
     }
-    if string(&value, "name").is_empty() {
-        let url = url::Url::parse(string(&value, "url")).map_err(|_| invalid())?;
-        let name: String = url
-            .host_str()
-            .ok_or_else(invalid)?
+    // Leave absent names for setup_save_hub to derive and disambiguate under
+    // the configuration lock. Explicit names use the same normalization there.
+    if !string(&value, "name").is_empty()
+        && !string(&value, "name")
             .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        value["name"] = json!(name.trim_matches('-').chars().take(32).collect::<String>());
-    }
-    if !crate::plugins::validate_hub_name(string(&value, "name")) {
+            .any(|c| c.is_ascii_alphanumeric())
+    {
         return Err(invalid());
     }
     if string(&value, "url") != "local://" {
@@ -4768,6 +4913,33 @@ mod tests {
                     })?;
                     assert_eq!(service.raw_config()?, candidate);
                 }
+                for (requested, url, expected) in [
+                    ("Office Mac", "https://office.example.com", "office-mac"),
+                    ("Work", "local://", "work"),
+                    ("", "https://node.example.com", "node"),
+                    ("", "https://node.other.example.com", "node-2"),
+                    ("", "https://local.example.com", "local-2"),
+                    ("", "http://192.0.2.8:4291", "192-0-2-8"),
+                    ("", "http://[::1]:4291", "remote"),
+                ] {
+                    service.action(
+                        &json!({"op":"setup_save_hub","name":requested,"url":url,"enabled":false}),
+                    )?;
+                    assert_eq!(service.raw_config()?["hubs"][expected]["url"], url);
+                }
+                for requested in ["!!!", "local", "Office Mac"] {
+                    let before = fs::read(&config.config_path).map_err(|e| e.to_string())?;
+                    assert!(service.action(&json!({"op":"setup_save_hub","name":requested,"url":"https://different.example.com","enabled":false})).is_err());
+                    assert_eq!(
+                        fs::read(&config.config_path).map_err(|e| e.to_string())?,
+                        before
+                    );
+                }
+                service.action(&json!({"op":"setup_save_hub","edit":true,"original_name":"office-mac","name":"Office Mac","url":"https://updated.example.com","enabled":false}))?;
+                assert_eq!(
+                    service.raw_config()?["hubs"]["office-mac"]["url"],
+                    "https://updated.example.com"
+                );
                 Ok(())
             })();
             service.shutdown();
@@ -4821,6 +4993,27 @@ mod tests {
     }
     #[test]
     fn invalid_host_hub_reload_preserves_running_server() -> Result<(), String> {
+        for (status, expected) in [
+            (
+                json!({"BackendState":"Running","Self":{"DNSName":"mac-studio.tailnet.ts.net.","TailscaleIPs":["100.64.0.2"]}}),
+                Some("mac-studio.tailnet.ts.net"),
+            ),
+            (
+                json!({"BackendState":"Running","Self":{"DNSName":"","TailscaleIPs":["fd7a:115c:a1e0::2","100.64.0.2"]}}),
+                Some("100.64.0.2"),
+            ),
+            (
+                json!({"BackendState":"Stopped","Self":{"DNSName":"offline.tailnet.ts.net."}}),
+                None,
+            ),
+            (
+                json!({"BackendState":"Running","Self":{"TailscaleIPs":["fd7a:115c:a1e0::2"]}}),
+                None,
+            ),
+        ] {
+            assert_eq!(tailscale_host_from_status(&status).as_deref(), expected);
+        }
+        assert_eq!(advertised_hub_host("127.0.0.1"), "127.0.0.1");
         let dir = std::env::temp_dir().join(format!("cito-host-validation-{}", random_uuid_v4()));
         let result = (|| {
             fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
