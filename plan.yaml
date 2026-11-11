@@ -9229,3 +9229,26 @@ phases:
       \ PROVEN\n  - M5_BOUNDED_DELIVERY_RETRY_AND_IO_TIMEOUTS: PROVEN\n  - S15_2_TEST_ECONOMY_AND_V0_21_2_RELEASE:\
       \ PROVEN\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §15 (M1–M5 & §15.2 Anti-Over-Testing\
       \ Policy) & docs/RELEASING.md"
+- id: v32
+  name: 'V32 Stage 14 (v0.21.3): Unified Spatial Grid (CitoMetrics), Real Brand Icons
+    (icon.png), and Hubs & Network Tab Redesign (N1–N3)'
+  status: pending
+  gate: 'All N1–N3 requirements in docs/DESIGN.md §16 pass; all 6 inspectMenu() mechanical
+    invariants (including card inner-padding >= 5.5pt) equal [] across all 4 surfaces
+    in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
+    showcase real brand icons and v0.21.3 layout; pathway-auditor, structural-auditor,
+    and uiux-auditor converge to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES;
+    cargo test --workspace passes with 0 warnings under strict §16.2 test economy;
+    v0.21.3 is published via release.yml and Tefx/homebrew-tap.'
+  context: 'Implement docs/DESIGN.md §16 (N1–N3 & §16.2 strict test economy): (1)
+    N1 unified spatial grid (CitoMetrics), 12pt menu outer keyline alignment, symmetric
+    vertical card padding across host_hub_card (56pt collapsed / 136pt expanded anchored
+    to H), settings_hub:<name> (max(56, subtitleHeight + 42)), add_hub_form (156pt
+    / 204pt), bannerCard (54pt), chCard (48pt header), and mechanical inspectMenu()
+    card inner-padding >= 5.5pt oracle; (2) N2 real 128x128 brand icons in plugins/{codex,pi,claude,telegram}/icon.png
+    with vendor-neutral pluginIconImage resolution and full-bleed squircle rendering;
+    (3) N3 cohesive Copy Invite Code / Paste Invite Code workflow with inline instructions,
+    Tailscale MagicDNS/IPv4 priority in advertised_hub_host (cached 30s TTL), and
+    frictionless HUB NAME (OPTIONAL) auto-derivation & normalize_slug normalization.'
+  depends_on:
+  - v31
