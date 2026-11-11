@@ -51,7 +51,7 @@ Cito is distributed as a Homebrew cask only. This installs `Cito.app` in
 
 ```sh
 cito --version
-# -> cito v0.21.0
+# -> cito v0.21.1
 ```
 
 To uninstall the app and both command symlinks while keeping your settings:
@@ -254,6 +254,10 @@ Discovery chooses one plugin per ID in this order, highest priority first:
 1. **`CITO_PLUGIN_PATH`** roots, left-to-right.
 2. **`${CITO_STATE_DIR}/plugins/<id>/`** (default **`~/.cito/plugins/<id>/`**), reserved exclusively for user-authored plugins and same-ID overrides of built-ins. Remove an override to fall back to its bundled default automatically.
 3. **Bundled defaults**, including `Cito.app/Contents/Resources/plugins/<id>/`, with internal CLI staging under **`~/.cito/runtime/plugins/<id>/`**. Staging never overwrites user plugins.
+
+The internal `human` desktop companion always comes from the bundled built-ins; external plugins cannot replace it. During upgrade, Cito removes legacy staged built-in copies from `~/.cito/plugins/<id>/` when their command starts with `./bin/cito-` and their manifest version differs from the running release. Legacy `human` copies are always removed. Custom commands and current-version overrides remain intact.
+
+Both Homebrew command links resolve through the App launcher. Invoking `cito-mcp` without arguments starts MCP stdio; invoking `cito` without arguments starts the daemon.
 
 ```json
 {

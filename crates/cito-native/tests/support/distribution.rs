@@ -269,11 +269,42 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     let app = std::path::Path::new(v["appPath"].as_str().unwrap());
     // Cargo tests use debug executables. Release archive size is checked after release staging.
     assert!(v["bytes"].as_u64().unwrap() > 100_000);
-    for path in [app.join("Contents/MacOS/Cito"), f.state.join("bin/cito")] {
+    let cask_bin = f.dir.join("cask-bin");
+    fs::create_dir_all(&cask_bin).unwrap();
+    for name in ["cito", "cito-mcp"] {
+        std::os::unix::fs::symlink(app.join("Contents/MacOS/Cito"), cask_bin.join(name)).unwrap();
+    }
+    for path in [
+        app.join("Contents/MacOS/Cito"),
+        f.state.join("bin/cito"),
+        cask_bin.join("cito"),
+        cask_bin.join("cito-mcp"),
+    ] {
         let (ok, out, err) = f.command(path.to_str().unwrap(), &["--version"], "");
         assert!(ok, "{err}");
         assert_eq!(out, format!("cito v{}\n", env!("CARGO_PKG_VERSION")));
     }
+    // A relative hop must retain the original command name for MCP dispatch.
+    let relative = cask_bin.join("relative-target");
+    std::os::unix::fs::symlink(app.join("Contents/MacOS/Cito"), &relative).unwrap();
+    let initialize = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"cask-symlink\",\"version\":\"1.0\"}}}\n";
+    let (ok, out, err) = f.command(cask_bin.join("cito-mcp").to_str().unwrap(), &[], initialize);
+    assert!(ok, "{out} {err}");
+    let response: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(response["id"], 1);
+    assert_eq!(
+        response["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    fs::remove_file(cask_bin.join("cito-mcp")).unwrap();
+    std::os::unix::fs::symlink("relative-target", cask_bin.join("cito-mcp")).unwrap();
+    let (ok, out, err) = f.command(cask_bin.join("cito-mcp").to_str().unwrap(), &[], initialize);
+    assert!(ok, "{out} {err}");
+    let response: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        response["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
         f.command(
             "/usr/bin/codesign",

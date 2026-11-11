@@ -688,7 +688,38 @@ fn build_mac_app_bundle_from_root(
     );
     fs::write(contents_dir.join("Info.plist"), info_plist).map_err(|e| e.to_string())?;
 
-    let launcher = "#!/bin/sh\nset -e\nAPP_CONTENTS=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"\nexport CITO_BUILTIN_PLUGINS_DIR=\"${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}\"\nif [ \"$#\" -eq 0 ]; then\n  exec \"$APP_CONTENTS/Helpers/cito-native\" daemon\nfi\ncase \"$1\" in\n  -psn_*)\n    shift\n    exec \"$APP_CONTENTS/Helpers/cito-native\" daemon \"$@\"\n    ;;\nesac\nexec \"$APP_CONTENTS/Helpers/cito-native\" \"$@\"\n";
+    let launcher = r#"#!/bin/sh
+set -e
+INVOKED_AS="$(basename "$0")"
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$DIR/$TARGET" ;;
+  esac
+done
+APP_CONTENTS="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+export CITO_BUILTIN_PLUGINS_DIR="${CITO_BUILTIN_PLUGINS_DIR:-$APP_CONTENTS/Resources/plugins}"
+if [ "$INVOKED_AS" = "cito-mcp" ]; then
+  export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
+  if [ "$#" -eq 0 ]; then
+    exec "$APP_CONTENTS/Helpers/cito-native" mcp-stdio
+  fi
+  exec "$APP_CONTENTS/Helpers/cito-native" "$@"
+fi
+if [ "$#" -eq 0 ]; then
+  exec "$APP_CONTENTS/Helpers/cito-native" daemon
+fi
+case "$1" in
+  -psn_*)
+    shift
+    exec "$APP_CONTENTS/Helpers/cito-native" daemon "$@"
+    ;;
+esac
+exec "$APP_CONTENTS/Helpers/cito-native" "$@"
+"#;
     let launcher_path = macos_dir.join("Cito");
     fs::write(&launcher_path, launcher).map_err(|e| e.to_string())?;
     let _ = fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755));

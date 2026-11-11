@@ -259,6 +259,124 @@ fn user_plugin_overrides_take_precedence_and_fall_back_after_removal() {
 }
 
 #[test]
+fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
+    if let Ok(mode) = std::env::var("CITO_TEST_LEGACY_PLUGINS") {
+        use cito_native::{core::hub_plugins, plugins};
+        let state = std::path::PathBuf::from(std::env::var("CITO_STATE_DIR").unwrap());
+        let user_root = state.join("plugins");
+        let ids = ["pi", "codex", "claude", "telegram", "human"];
+        if mode == "native" {
+            let loaded = plugins::load_plugins(&state);
+            for id in ids {
+                let plugin = loaded.find_by_id(id).unwrap();
+                assert!(plugin.is_builtin, "{id}");
+                let manifest: Value = serde_json::from_slice(
+                    &fs::read(plugin.plugin_dir.join("plugin.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(manifest["version"], plugins::CITO_VERSION);
+            }
+        } else {
+            let loaded =
+                hub_plugins::discover(&hub_plugins::default_roots(&state), Some(&user_root))
+                    .unwrap();
+            let channel = loaded.iter().find(|p| p.id == "telegram").unwrap();
+            assert_eq!(channel.manifest["version"], plugins::CITO_VERSION);
+            assert!(channel.dir.ends_with("plugins/telegram"));
+            assert_ne!(channel.dir, user_root.join("telegram"));
+            assert!(!loaded.iter().any(|p| p.id == "human"));
+        }
+        for id in ids {
+            assert!(!user_root.join(id).exists(), "legacy copy remains: {id}");
+        }
+        let external = std::path::PathBuf::from(std::env::var("CITO_PLUGIN_DIR").unwrap());
+        assert!(external.join("human/plugin.json").is_file());
+        assert!(external.join("alias/plugin.json").is_file());
+        // The companion stays reserved even for a current-version custom command.
+        let companion = user_root.join("human");
+        fs::create_dir_all(&companion).unwrap();
+        fs::write(companion.join("plugin.json"), json!({"id":"human","kind":"human",
+            "displayName":"Custom companion","version":plugins::CITO_VERSION,"command":["./run.sh"]}).to_string()).unwrap();
+        let loaded = plugins::load_plugins(&state);
+        assert!(loaded.find_by_id("human").unwrap().is_builtin);
+        assert!(!companion.exists());
+        // Custom commands survive any version; native-shaped commands survive at the current version.
+        for (version, command) in [
+            (Value::Null, json!(["./run.sh"])),
+            (json!("custom"), json!(["node", "custom.js"])),
+            (
+                json!(plugins::CITO_VERSION),
+                json!(["./bin/cito-plugin-custom"]),
+            ),
+        ] {
+            for (id, kind) in [("pi", "agent"), ("telegram", "human-channel")] {
+                let dir = user_root.join(id);
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(
+                    dir.join("plugin.json"),
+                    json!({"id":id,"kind":kind,
+                    "displayName":"Custom override","version":version,"command":command})
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            let loaded = plugins::load_plugins(&state);
+            for id in ["pi", "telegram"] {
+                let plugin = loaded.find_by_id(id).unwrap();
+                assert!(!plugin.is_builtin);
+                assert_eq!(plugin.plugin_dir, user_root.join(id));
+            }
+            let channels =
+                hub_plugins::discover(&hub_plugins::default_roots(&state), Some(&user_root))
+                    .unwrap();
+            assert_eq!(
+                channels.iter().find(|p| p.id == "telegram").unwrap().dir,
+                user_root.join("telegram")
+            );
+        }
+        return;
+    }
+    let _lock = serial();
+    for mode in ["native", "hub"] {
+        let mut f = Fixture::new(json!({}));
+        for id in ["pi", "codex", "claude", "telegram", "human"] {
+            let dir = f.state.join("plugins").join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("plugin.json"), json!({"id":id,"kind":if id == "human" || id == "telegram" {"human-channel"} else {"agent"},
+                "displayName":"Legacy staged copy","version":"0.20.3",
+                "command":[format!("./bin/cito-plugin-{id}")]}).to_string()).unwrap();
+        }
+        let external = f.dir.join("external");
+        for name in ["human", "alias"] {
+            let dir = external.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("plugin.json"),
+                json!({"id":"human","kind":"human-channel",
+                "displayName":"External companion","command":["./run.sh"]})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        f.env
+            .insert("CITO_PLUGIN_PATH".into(), external.display().to_string());
+        f.env
+            .insert("CITO_PLUGIN_DIR".into(), external.display().to_string());
+        f.env.insert("CITO_TEST_LEGACY_PLUGINS".into(), mode.into());
+        let (ok, out, err) = f.command(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            &[
+                "--exact",
+                "daemon::legacy_staged_plugins_migrate_without_discarding_custom_overrides",
+                "--nocapture",
+            ],
+            "",
+        );
+        assert!(ok, "{mode}: {out}\n{err}");
+    }
+}
+
+#[test]
 fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     if std::env::var_os("CITO_TEST_STAGED_PLUGINS").is_some() {
         // Re-enter under the fixture environment without changing process-global

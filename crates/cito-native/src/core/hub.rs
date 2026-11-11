@@ -304,6 +304,7 @@ impl Drop for Subscription {
 }
 struct Inner {
     db: Database,
+    user_plugins_dir: PathBuf,
     closed: AtomicBool,
     subscribers: Mutex<Vec<Subscriber>>,
     plugins: Mutex<Vec<ChannelPlugin>>,
@@ -344,6 +345,7 @@ impl HubEngine {
         let engine = Self {
             inner: Arc::new(Inner {
                 db,
+                user_plugins_dir: data_dir.join("plugins"),
                 closed: AtomicBool::new(false),
                 subscribers: Mutex::new(Vec::new()),
                 plugins: Mutex::new(Vec::new()),
@@ -375,7 +377,7 @@ impl HubEngine {
         Ok(engine)
     }
     pub fn set_plugin_roots(&self, roots: &[PathBuf]) -> Result<(), String> {
-        let plugins = hub_plugins::discover(roots)?;
+        let plugins = hub_plugins::discover(roots, Some(&self.inner.user_plugins_dir))?;
         *self
             .inner
             .plugins

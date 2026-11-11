@@ -20,14 +20,17 @@ pub struct ChannelPlugin {
     pub command: Vec<String>,
 }
 
-pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
+pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<ChannelPlugin>, String> {
     let mut plugins = Vec::new();
     let mut seen_dirs = HashSet::new();
     let mut seen_ids = HashSet::new();
+    let bundled_companion = super::setup::resolve_bundled_plugin_dir("human");
     for root in roots {
         if !root.exists() {
             continue;
         }
+        let is_user_root =
+            user_root.is_some_and(|user| super::plugins::same_plugin_root(root, user));
         for entry in std::fs::read_dir(root)
             .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", root.display()))?
         {
@@ -37,12 +40,25 @@ pub fn discover(roots: &[PathBuf]) -> Result<Vec<ChannelPlugin>, String> {
                 continue;
             }
             let dir_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            if seen_ids.contains(dir_name) || !seen_dirs.insert(dir_name.to_owned()) {
+            if is_user_root && super::plugins::remove_legacy_staged_plugin(&dir) {
+                continue;
+            }
+            if dir_name == "human" && !super::plugins::same_plugin_root(&dir, &bundled_companion) {
+                // The internal companion is never supplied by an external root.
+                continue;
+            }
+            if seen_ids.contains(dir_name) || seen_dirs.contains(dir_name) {
                 continue;
             }
             let m: Value =
                 serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
                     .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", path.display()))?;
+            if m["id"].as_str() == Some("human")
+                && !super::plugins::same_plugin_root(&dir, &bundled_companion)
+            {
+                continue;
+            }
+            seen_dirs.insert(dir_name.to_owned());
             let id = m["id"].as_str().ok_or("PLUGIN_LOAD_ERROR: missing id")?;
             if id.is_empty()
                 || id.len() > 32

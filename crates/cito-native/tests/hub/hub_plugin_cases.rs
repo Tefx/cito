@@ -106,7 +106,7 @@ fn packaged_roots_worker() {
             expected.canonicalize().unwrap()
         );
     };
-    let plugins = discover(&default_roots(&data)).unwrap();
+    let plugins = discover(&default_roots(&data), Some(&data.join("plugins"))).unwrap();
     assert_plugin(&plugins, "brew-fixture", dir.join("builtin/brew-fixture"));
     assert_plugin(&plugins, "extra-fixture", dir.join("extra/extra-fixture"));
     assert_plugin(&plugins, "data-fixture", data.join("plugins/data-fixture"));
@@ -114,7 +114,7 @@ fn packaged_roots_worker() {
     // The app layout is data only: no copied executable or launched application.
     let exe = dir.join("Cito.app/Contents/MacOS/cito");
     let roots = roots_for_executable(&data, Some(&exe));
-    let plugins = discover(&roots).unwrap();
+    let plugins = discover(&roots, Some(&data.join("plugins"))).unwrap();
     assert_plugin(
         &plugins,
         "bundle-fixture",
@@ -130,7 +130,7 @@ fn packaged_roots_worker() {
         "Cito.app/Contents/Resources/plugins",
     ] {
         let expected = dir.join(relative).join("override-fixture");
-        let plugins = discover(&roots).unwrap();
+        let plugins = discover(&roots, Some(&data.join("plugins"))).unwrap();
         assert_plugin(&plugins, "override-fixture", expected.clone());
         assert_eq!(
             plugins
@@ -142,12 +142,19 @@ fn packaged_roots_worker() {
         fs::remove_dir_all(expected).unwrap();
     }
     let user = data.join("plugins/telegram");
-    assert_plugin(&discover(&roots).unwrap(), "telegram", user.clone());
+    assert_plugin(
+        &discover(&roots, Some(&data.join("plugins"))).unwrap(),
+        "telegram",
+        user.clone(),
+    );
     fs::write(user.join("plugin.json"), json!({"id":"telegram","kind":"agent","displayName":"Agent override","command":["./driver"]}).to_string()).unwrap();
-    assert!(!discover(&roots).unwrap().iter().any(|p| p.id == "telegram"));
+    assert!(!discover(&roots, Some(&data.join("plugins")))
+        .unwrap()
+        .iter()
+        .any(|p| p.id == "telegram"));
     fs::remove_dir_all(user).unwrap();
     assert!(
-        discover(&roots).is_err(),
+        discover(&roots, Some(&data.join("plugins"))).is_err(),
         "An unshadowed malformed manifest must still fail"
     );
 }

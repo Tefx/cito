@@ -430,7 +430,7 @@ def publish(tag, directory):
 
 def smoke_cask(cask, tap, expected):
     with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         home = root / "home"
         home.mkdir()
         env = {**isolated_env(home), "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1", "HOMEBREW_NO_ANALYTICS": "1"}
@@ -460,7 +460,7 @@ def smoke_cask(cask, tap, expected):
             if not app.is_dir():
                 raise ReleaseError("Cask did not install the App into its configured appdir.")
             for link in links:
-                if not link.is_symlink() or link.resolve() != app / "Contents/MacOS/Cito":
+                if not link.is_symlink() or link.resolve() != (app / "Contents/MacOS/Cito").resolve():
                     raise ReleaseError("Cask command link does not point into the installed App.")
                 if run([link, "--version"], env=env).stdout.strip() != f"cito v{expected}":
                     raise ReleaseError("Installed command reported the wrong version.")
@@ -472,7 +472,7 @@ def smoke_cask(cask, tap, expected):
         finally:
             run(["brew", "uninstall", "--cask", f"{tap}/cito"], env=env, check=False)
             for link in links:
-                if link.is_symlink() and link.readlink() == app / "Contents/MacOS/Cito":
+                if link.is_symlink() and link.resolve() == (app / "Contents/MacOS/Cito").resolve():
                     link.unlink()
             if original is None:
                 destination.unlink(missing_ok=True)

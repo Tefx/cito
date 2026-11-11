@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V29 — Stage 12 `v0.21.0`: Holistic UI/UX & Cross-Layer Pathway Remediation — D01–D20)
+# Cito Architecture & Protocol Specification (V29 — Stage 12 `v0.21.1`: Holistic UI/UX & Cross-Layer Pathway Remediation — D01–D20)
 
-> **Normative Supersession Notice (`V29` / `v0.21.0`)**:
-> This specification is the authoritative contract for Cito `v0.21.0` (Stage 12 — Phase `v29`). Section 14 supersedes conflicting presentation and interaction rules in Sections 10–13. The Stage 10 (`v0.20.2`) two-stratum channel setup, independent scope saving, geometry checks, error handling, bridge readiness, and real daemon/UI integration contracts remain in force. All paths written with `~` in prose examples represent the user's home directory; runtime configuration files use expanded absolute paths.
+> **Normative Supersession Notice (`V29` / `v0.21.1`)**:
+> This specification is the authoritative contract for Cito `v0.21.1` (Stage 12 — Phase `v29`). Section 14 supersedes conflicting presentation and interaction rules in Sections 10–13. The Stage 10 (`v0.20.2`) two-stratum channel setup, independent scope saving, geometry checks, error handling, bridge readiness, and real daemon/UI integration contracts remain in force. All paths written with `~` in prose examples represent the user's home directory; runtime configuration files use expanded absolute paths.
 
 ---
 
@@ -299,7 +299,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 
 ### 7.2 Historical Stage 6 Transition (`F1, F43, F46, F50`)
 
-The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.21.0` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
+The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.21.1` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
 1. **Root `package.json` Contract**:
    - `"version": "0.18.0"`, `"license": "MIT"`, `"type": "module"`.
    - `"bin": { "cito": "bin/cito", "cito-mcp": "bin/cito-mcp" }` (`cito-claude-hook` removed from top-level `bin`).
@@ -1145,7 +1145,7 @@ Zone 4 contains two `174 × 28pt` controls, at `x = 12` and `x = 194`, within th
 
 ---
 
-## 14. V29 — Stage 12 v0.21.0: Holistic UI/UX & Cross-Layer Pathway Remediation (`D01`–`D20`)
+## 14. V29 — Stage 12 v0.21.1: Holistic UI/UX & Cross-Layer Pathway Remediation (`D01`–`D20`)
 
 Stage 12 resolves the 5 Fundamental UI/UX & Pathway Defect Essences identified across Round 1 and Round 2 full-scope discovery (`uiux-auditor`, `structural-auditor`, `pathway-auditor`) and user acceptance testing. It introduces sender auto-enrollment and reply-routing closure (`D18`), a backward-compatible human-readable address alias contract (`@<user>` and `<user>/<harness>#<prefix>`), a unified domain-to-UI presentation boundary, state-driven progressive disclosure, full-window AppKit keyboard/focus ownership, causal request/idempotency correlation, and a 6-invariant mechanical verification oracle covering all 4 UI surfaces (`cardMenu`, `directoryPanel`, `settingsPanel`, and `panel` / `WakeBanner`).
 
@@ -1308,6 +1308,8 @@ Stage 12 resolves the 5 Fundamental UI/UX & Pathway Defect Essences identified a
 #### 7. User Plugin Override Priority & Runtime Built-In Staging Separation (`D20`)
 
 - Internal built-in plugin staging uses `${CITO_STATE_DIR}/runtime/plugins/<id>/` (default `~/.cito/runtime/plugins/<id>/`). Reserve `${CITO_STATE_DIR}/plugins/<id>/` exclusively for user-authored plugins and user overrides; setup, repair, and ordinary uninstall must not overwrite or remove those sources. Explicit data purge remains separate.
+- The `v0.21.1` upgrade migration removes legacy Cito-staged copies only from `${CITO_STATE_DIR}/plugins/<id>/`. Identify built-in IDs through the bundled manifests, never a concrete plugin-name list. Remove a matching built-in when its command begins with `./bin/cito-` and its manifest version differs from `CITO_VERSION`; missing versions also differ. Skip stale copies even if removal fails. Preserve custom commands (including scripts and Node entrypoints) at any version and preserve current-version overrides.
+- The internal `human` desktop companion is reserved for bundled built-ins. Ignore external candidates named `human` by directory or manifest ID in `CITO_PLUGIN_PATH`, `CITO_PLUGIN_DIR`, and the user plugin root; remove matching legacy user-root companion copies regardless of version or command. This exception applies to both native and standalone Hub discovery.
 - Both `load_plugins` (`plugins.rs`) and `hub_plugins` select same-ID manifests with this priority, highest first:
   1. `CITO_PLUGIN_PATH` roots, left-to-right;
   2. `${CITO_STATE_DIR}/plugins/<id>/` user overrides;
