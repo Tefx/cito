@@ -74,13 +74,13 @@ fills both fields only after the signed, notarized, stapled ZIP is final. The ta
 stores the concrete installable Cask.
 
 Push the version commit, wait for its CI, then tag that exact commit. For example,
-if the canonical version has been updated to `0.20.4`:
+if the canonical version has been updated to `0.21.2`:
 
 ```sh
 git push origin main
 # Wait for CI to pass for this exact commit.
-git tag -a v0.20.4 -m "Release v0.20.4"
-git push origin v0.20.4
+git tag -a v0.21.2 -m "Release v0.21.2"
+git push origin v0.21.2
 ```
 
 The release workflow requires:
@@ -167,7 +167,7 @@ For a tag created after this workflow was introduced, retry with its own workflo
 revision and explicit tag:
 
 ```sh
-gh workflow run release.yml --repo Tefx/cito --ref v0.20.4 -f tag=v0.20.4
+gh workflow run release.yml --repo Tefx/cito --ref v0.21.2 -f tag=v0.21.2
 ```
 
 Tags predating this workflow are not supported by this command. A workflow run

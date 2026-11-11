@@ -719,13 +719,20 @@ impl DaemonService {
             let args = json!({"about":"Human receiver"});
             let caller = json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
             if client.local.is_some() {
-                super::registration::register_automatic_human(
+                match super::registration::register_automatic_human(
                     &self.state,
                     &client,
                     &self.host_id,
                     &args,
                     &caller,
-                )?;
+                ) {
+                    // A Hub-wide pause can predate this local profile. Enrollment is
+                    // optional; preserving that pause must not reject unrelated settings.
+                    Err(error) if error.starts_with("BINDING_REQUIRED:") => {}
+                    result => {
+                        result?;
+                    }
+                }
                 continue;
             }
             let key = format!("auto:{slot_name}");
@@ -920,6 +927,16 @@ impl DaemonService {
                 self.state.db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','','self','UNLISTENED')",&[
                     json!(hub),json!(id),json!(super::identity::public_listener_id(string(&client.identity,"owner_user"),id)),
                     client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name())])?;
+                if let Some((mut captured, _)) = client.kv_get(id)? {
+                    let channel = format!("{}:human", self.host_id);
+                    if let Some(owner) = captured["channels"][&channel]["owner_token"]
+                        .as_str()
+                        .map(str::to_owned)
+                    {
+                        captured["owner_token"] = json!(owner);
+                    }
+                    detach_channel_expected(client, id, &channel, &captured)?;
+                }
             }
         }
         Ok(false)
@@ -1430,7 +1447,10 @@ impl DaemonService {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(random_uuid_v4);
-        let dedup = hash(&format!("{endpoint}|{canonical}|{key}"));
+        let dedup = hash(&format!(
+            "{endpoint}|{}|{canonical}|{key}",
+            string(&slot.config, "url")
+        ));
         let request_hash = hash(&format!("{message}|{}", reply_to));
         let now = now_ms();
         let reservation=self.state.db.transaction(|c|{
@@ -1804,7 +1824,7 @@ impl DaemonService {
         {
             for (name, cfg) in &configured {
                 if !self.slots.contains_key(name) {
-                    hubs.push(json!({"name":name,"url":cfg["url"],"auth_mode":cfg.get("authMode").or_else(||cfg.get("auth_mode")).or_else(||cfg.get("auth")).and_then(Value::as_str).unwrap_or("none").to_ascii_lowercase(),"enabled":cfg["enabled"].as_bool().unwrap_or(true),"status":"disconnected","user":cfg["user"],"is_default":name==&self.config.default_hub,"error":null}));
+                    hubs.push(json!({"name":name,"url":cfg["url"],"auth_mode":cfg.get("authMode").or_else(||cfg.get("auth_mode")).or_else(||cfg.get("auth")).and_then(Value::as_str).unwrap_or("none").to_ascii_lowercase(),"enabled":cfg["enabled"].as_bool().unwrap_or(true),"status":"disconnected","user":self.config.effective_user(name).ok(),"is_default":name==&self.config.default_hub,"error":null}));
                 }
             }
         }
@@ -2566,7 +2586,12 @@ impl DaemonService {
                 self.unlisten_id(&hub, string(action, "listener_id"))?;
             }
             "unlisten_all" => {
-                for row in self.state.active()? {
+                for row in self
+                    .state
+                    .active()?
+                    .into_iter()
+                    .filter(|row| row["harness"] != "human")
+                {
                     self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
                 }
             }
@@ -3891,7 +3916,7 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 // Discard the rest without allocating or interpreting a partial UTF-8 action.
                 let drained = reader.skip_until(b'\n');
                 if let Ok(s) = service.lock() {
-                    let error = "INVALID_INPUT: UI action exceeds 1 MiB";
+                    let error = "INVALID_INPUT: Message is too large to send";
                     s.emit(json!({"op":"error","error":error}));
                 }
                 if drained.is_err() {
@@ -4129,6 +4154,98 @@ pub use super::cli::run_cli_command;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state(
+    ) -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cito-daemon-unit-{}", random_uuid_v4()));
+        fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+        let config = NativeConfig {
+            state_dir: dir.join("state"),
+            config_path: dir.join("config.json"),
+            home_dir: dir.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        fs::write(&config.config_path, json!({"user":"alice","hubs":{"local":{"url":"local://"},"archive":{"url":"https://hub.example.com","enabled":false}}}).to_string()).map_err(|e| e.to_string())?;
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: HashSet::new(),
+        };
+        let mut service = DaemonService::open(&config, &plugins)?;
+        service.local.set_plugin_roots(&[])?;
+        let result = (|| {
+            for harness in ["human", "fixture"] {
+                super::super::registration::register_listener(
+                    &service.state,
+                    service.slot("local")?,
+                    &service.host_id,
+                    &json!({"about":"Receiver","scope":"workspace"}),
+                    &json!({"harness":harness,"session_id":"default","title":"Receiver"}),
+                )?;
+            }
+            let target = service
+                .state
+                .active()?
+                .into_iter()
+                .find(|row| row["harness"] == "fixture")
+                .ok_or("Missing agent")?;
+            let args = json!({"to":target["listener_id"],"message":"Review ready","idempotency_key":"same"});
+            let first = service.send("local", &args, &json!({}))?;
+            assert_eq!(
+                service.send("local", &args, &json!({}))?["signal_id"],
+                first["signal_id"]
+            );
+            // Keep the embedded transport hermetic while changing the target URL input
+            // used by the real send reservation path under the same Hub name.
+            service
+                .slots
+                .get_mut("local")
+                .ok_or("Missing local slot")?
+                .config["url"] = json!("https://hub.example.com");
+            let second = service.send("local", &args, &json!({}))?;
+            assert_ne!(second["signal_id"], first["signal_id"]);
+            assert_eq!(
+                service
+                    .state
+                    .db
+                    .query("SELECT * FROM local_sent_idempotency", &[])?
+                    .len(),
+                2
+            );
+            service
+                .slots
+                .get_mut("local")
+                .ok_or("Missing local slot")?
+                .config["url"] = json!("local://");
+            service.action(&json!({"op":"unlisten_all"}))?;
+            let remaining = service.state.active()?;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0]["harness"], "human");
+            assert_eq!(
+                service
+                    .slot("local")?
+                    .kv_get(string(&remaining[0], "listener_id"))?
+                    .ok_or("Missing personal registration")?
+                    .0["human_paused"],
+                false
+            );
+            let settings = service.settings_for_hub("local");
+            let disabled = settings["hubs"]
+                .as_array()
+                .ok_or("Missing hubs")?
+                .iter()
+                .find(|hub| hub["name"] == "archive")
+                .ok_or("Missing disabled Hub")?;
+            assert_eq!(disabled["user"], service.config.effective_user("archive")?);
+            Ok(())
+        })();
+        service.shutdown();
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        result
+    }
+
     #[test]
     fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Result<(), String>
     {

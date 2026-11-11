@@ -1,7 +1,7 @@
-# Cito Architecture & Protocol Specification (V29 — Stage 12 `v0.21.1`: Holistic UI/UX & Cross-Layer Pathway Remediation — D01–D20)
+# Cito Architecture & Protocol Specification (V31 — Stage 13 `v0.21.2`: Declarative Layout, Human Lifecycle & Bounded Delivery Retry — M1–M5)
 
-> **Normative Supersession Notice (`V29` / `v0.21.1`)**:
-> This specification is the authoritative contract for Cito `v0.21.1` (Stage 12 — Phase `v29`). Section 14 supersedes conflicting presentation and interaction rules in Sections 10–13. The Stage 10 (`v0.20.2`) two-stratum channel setup, independent scope saving, geometry checks, error handling, bridge readiness, and real daemon/UI integration contracts remain in force. All paths written with `~` in prose examples represent the user's home directory; runtime configuration files use expanded absolute paths.
+> **Normative Supersession Notice (`V31` / `v0.21.2`)**:
+> This specification is the authoritative contract for Cito `v0.21.2` (Stage 13 — Phase `v31`). Section 15 supersedes conflicting layout, lifecycle, and delivery rules in Sections 1–14. Section 14 otherwise retains its presentation and interaction requirements. The Stage 10 (`v0.20.2`) two-stratum channel setup, independent scope saving, geometry checks, error handling, bridge readiness, and real daemon/UI integration contracts remain in force. All paths written with `~` in prose examples represent the user's home directory; runtime configuration files use expanded absolute paths.
 
 ---
 
@@ -299,7 +299,7 @@ All public CLI flags/outputs, MCP tools (`cito_listen`, `cito_unlisten`, `cito_f
 
 ### 7.2 Historical Stage 6 Transition (`F1, F43, F46, F50`)
 
-The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.21.1` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
+The following transition was used for v0.18.0 and is superseded by Section 9. It does not describe the current build, test, or distribution entrypoints. The current product version is `0.21.2` in `crates/cito-native/Cargo.toml`; only `plugins/pi/package.json` remains as a host extension manifest.
 1. **Root `package.json` Contract**:
    - `"version": "0.18.0"`, `"license": "MIT"`, `"type": "module"`.
    - `"bin": { "cito": "bin/cito", "cito-mcp": "bin/cito-mcp" }` (`cito-claude-hook` removed from top-level `bin`).

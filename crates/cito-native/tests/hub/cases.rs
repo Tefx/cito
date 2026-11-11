@@ -962,6 +962,7 @@ fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
             &[],
         )
         .unwrap();
+    e.restore_attachments().unwrap();
     e.replay(&plugin, &process).unwrap();
     assert_eq!(
         e.inner
@@ -1973,7 +1974,7 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn reservations_renew_while_process_is_live_and_replay_after_exit() {
+fn reservations_renew_while_process_is_live_and_quarantine_after_exit() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
@@ -2022,9 +2023,16 @@ fn reservations_renew_while_process_is_live_and_replay_after_exit() {
         e.ensure_process(&plugin, true).unwrap()
     };
     e.replay(&plugin, &replacement).unwrap();
-    wait_for(|| {
-        e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
-    });
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT status FROM hub_channel_deliveries WHERE signal_id='concurrent'",
+                &[]
+            )
+            .unwrap()[0]["status"],
+        "effect_unknown"
+    );
     e.shutdown();
     let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
     assert_eq!(
@@ -2033,10 +2041,184 @@ fn reservations_renew_while_process_is_live_and_replay_after_exit() {
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|f| f["op"] == "deliver" && f["signal"]["signal_id"] == "concurrent")
             .count(),
-        2
+        1
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    let plugin = ChannelPlugin {
+        id: "fixture".into(),
+        dir: dir.clone(),
+        manifest: json!({"fields":[{"key":"credential","scope":"hub","type":"secret"}]}),
+        command: vec![],
+    };
+    let binding = json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"fixture"});
+    e.inner.db.transaction(|c| {
+        c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES('none#alice','fixture','alice')",&[])?;
+        attach(c,&binding,true,false)
+    }).unwrap();
+    let node = listener_id("none#alice", "human", "default");
+    send(&e, &node, "retry");
+    e.inner
+        .db
+        .transaction(|c| {
+            let mut reg = parse(&kv_row(c, &node)?.unwrap(), "value");
+            reg["human_paused"] = json!(true);
+            c.execute(
+                "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+                &[json!(reg.to_string()), json!(node)],
+            )?;
+            attach(c, &binding, true, false)?;
+            assert_eq!(
+                parse(&kv_row(c, &node)?.unwrap(), "value")["state"],
+                "UNLISTENED"
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert!(e.reserve_deliveries(&plugin).unwrap().is_empty());
+    assert!(e
+        .inner
+        .db
+        .query("SELECT acked_at_ms FROM hub_signals", &[])
+        .unwrap()[0]["acked_at_ms"]
+        .is_null());
+    e.inner
+        .db
+        .transaction(|c| {
+            let mut reg = parse(&kv_row(c, &node)?.unwrap(), "value");
+            reg["human_paused"] = json!(false);
+            super::super::lease::reconcile_registration_state(&mut reg, now_ms() as u64);
+            c.execute(
+                "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+                &[json!(reg.to_string()), json!(node)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for attempts in 0..=5 {
+        let sends = e.reserve_deliveries(&plugin).unwrap();
+        assert_eq!(sends.len(), 1);
+        if attempts > 0 {
+            assert_eq!(sends[0]["already_sent_ids"], json!(["101"]));
+        }
+        let token = &sends[0]["delivery_id"];
+        e.delivery_result(
+            "fixture",
+            &json!({"delivery_id":token,"progress":true,"external_msg_ids":["101"]}),
+        )
+        .unwrap();
+        e.delivery_result("fixture",&json!({"delivery_id":token,"ok":false,"retryable":true,"external_msg_ids":["101"],"error":"busy"})).unwrap();
+        let row = e
+            .inner
+            .db
+            .query("SELECT * FROM hub_channel_deliveries", &[])
+            .unwrap()
+            .remove(0);
+        assert_eq!(row["attempts"], attempts + 1);
+        if attempts < 5 {
+            assert_eq!(row["status"], "failed");
+            assert_eq!(
+                delivery_transition(&json!({"ok":false}), attempts, 1_000),
+                ("failed", 1_000 + (2_000_i64 << attempts))
+            );
+            assert!(n(&row, "next_retry_ms") > 0);
+        } else {
+            assert_eq!(row["status"], "failed_permanent");
+        }
+        assert!(e.reserve_deliveries(&plugin).unwrap().is_empty());
+        e.inner
+            .db
+            .execute("UPDATE hub_channel_deliveries SET next_retry_ms=0", &[])
+            .unwrap();
+    }
+    assert_eq!(
+        delivery_transition(&json!({"ok":false,"retryable":false}), 0, 1),
+        ("failed_permanent", 0)
+    );
+    assert_eq!(
+        delivery_transition(&json!({"effect_unknown":true}), 0, 1),
+        ("effect_unknown", 0)
+    );
+    assert_eq!(
+        delivery_transition(&json!({"ok":true}), 5, 1),
+        ("delivered", 0)
+    );
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET status='in_flight',reservation_id='uncertain'",
+            &[],
+        )
+        .unwrap();
+    e.delivery_result("fixture",&json!({"delivery_id":"uncertain","effect_unknown":true,"external_msg_ids":["101","102"],"error":"Response lost"})).unwrap();
+    assert!(e.reserve_deliveries(&plugin).unwrap().is_empty());
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_channel_delivery_msgs", &[])
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT status,last_error FROM hub_channel_deliveries", &[])
+            .unwrap()[0],
+        json!({"status":"effect_unknown","last_error":"Response lost"})
+    );
+    e.inner.plugins.lock().unwrap().push(plugin.clone());
+    // Freeze background execution; configuration and ledger reconciliation need no child.
+    e.inner.closed.store(true, Ordering::SeqCst);
+    e.human_rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","hub_config":{"credential":"new"}}),
+        Some(&json!({"principal_id":"none#alice","owner_user":"alice"})),
+    )
+    .unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT status FROM hub_channel_deliveries", &[])
+            .unwrap()[0]["status"],
+        "effect_unknown"
+    );
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='failed_permanent',attempts=6,next_retry_ms=9000",&[]).unwrap();
+    e.human_rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","user_config":{}}),
+        Some(&json!({"principal_id":"none#alice","owner_user":"alice"})),
+    )
+    .unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT status,attempts,next_retry_ms FROM hub_channel_deliveries",
+                &[]
+            )
+            .unwrap()[0],
+        json!({"status":"failed","attempts":0,"next_retry_ms":0})
+    );
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_channel_delivery_msgs", &[])
+            .unwrap()
+            .len(),
+        2
+    );
+    e.inner.closed.store(false, Ordering::SeqCst);
+    e.inner.plugins.lock().unwrap().clear();
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn retention_and_dedup_expire() {
     let dir = temp();

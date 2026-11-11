@@ -333,7 +333,7 @@ impl HubEngine {
         db.execute("PRAGMA busy_timeout=5000", &[])?;
         db.transaction(|c|{
             for stmt in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()){c.execute(stmt,&[])?;}
-            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_channel_deliveries","reservation_id","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
+            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
             for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
             c.execute("INSERT OR IGNORE INTO hub_meta(key,int_val) VALUES('kv_seq',0)",&[])?;
             // Existing single-message deliveries retain reply and acknowledgment mappings.
@@ -870,7 +870,7 @@ impl HubEngine {
         // Recovery belongs to the supervisor; a transient test must never mutate the delivery ledger.
         if recover_deliveries {
             self.inner.db.execute(
-                "UPDATE hub_channel_deliveries SET status='failed' WHERE plugin_id=? AND status='in_flight'",
+                "UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Channel process exited during delivery' WHERE plugin_id=? AND status='in_flight'",
                 &[json!(plugin.id)],
             )?;
         }
@@ -1013,6 +1013,9 @@ impl HubEngine {
                     c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET owner_user=excluded.owner_user,enabled=excluded.enabled,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
                         &[caller["principal_id"].clone(),json!(id),caller["owner_user"].clone(),json!(if enabled{1}else{0}),json!(config.to_string()),label,json!(boundary),json!(now_ms())])?;
                 }
+                if changed || p.get("user_config").is_some() {
+                    c.execute("UPDATE hub_channel_deliveries SET status='failed',attempts=0,next_retry_ms=0,last_error=NULL WHERE plugin_id=? AND status IN ('failed','failed_permanent') AND (? OR principal_id=?)", &[json!(id),json!(changed),caller["principal_id"].clone()])?;
+                }
                 // Reconcile every binding when service readiness changes, including other principals.
                 for b in c.query("SELECT * FROM hub_human_channels WHERE plugin_id=?", &[json!(id)])? {
                     let active = n(&b,"enabled")==1 && ready(&plugin,&cfg,"hub") && ready(&plugin,&parse(&b,"user_config_json"),"user");
@@ -1116,13 +1119,16 @@ impl HubEngine {
                     else if hub_ready && user_ready { "paused" }
                     else if hub_ready { "hub_ready" } else { "not_configured" };
                 let label=binding["display_label"].as_str().filter(|s| !s.is_empty());
-                let detail=match status {
+                let mut detail=match status {
                     "ready"=>label.map(|l|format!("Connected as {l} · Ready for notifications")).unwrap_or("Connected and ready for notifications".into()),
                     "paused"=>label.map(|l|format!("Paused ({l}) · Enable to resume notifications")).unwrap_or("Paused · Enable to resume notifications".into()),
                     "pairing_pending"=>"Pairing in progress · Send the pairing command below to finish linking".into(),
                     "hub_ready"=>"Service ready · Pair your account or enter your destination below".into(),
                     _=>"Configure service credentials and pair your account".into(),
                 };
+                if let Some(failed) = one(c,"SELECT status,last_error FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND delivered_ms>=? ORDER BY delivered_ms DESC,rowid DESC LIMIT 1",&[json!(plugin.id),caller["principal_id"].clone(),json!(n(&binding,"updated_ms"))])? {
+                    if matches!(s(&failed,"status"),"failed"|"failed_permanent"|"effect_unknown") && !s(&failed,"last_error").is_empty() { detail = s(&failed,"last_error").into(); }
+                }
                 let fs=fields(&plugin).iter().map(|f| {
                     let hub=s(f,"scope")=="hub";
                     let val=if hub { &cfg[s(f,"key")] } else { &user[s(f,"key")] };
@@ -1198,22 +1204,18 @@ impl HubEngine {
                 &[json!(now_ms()), json!(plugin.id)],
             )?;
         }
-        let reservations=self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,s(&b,"principal_id"))?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status='delivered' OR d.status='in_flight' AND d.delivered_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000)])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})?;
+        let reservations = self.reserve_deliveries(plugin)?;
         let mut send_error = None;
         for send in reservations {
             if let Err(err) = process.send(&send) {
-                self.inner.db.execute(
-                    "UPDATE hub_channel_deliveries SET status='failed' WHERE reservation_id=? AND status='in_flight'",
-                    &[send["delivery_id"].clone()],
-                )?;
+                self.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Channel pipe failed during delivery' WHERE reservation_id=? AND status='in_flight'", &[send["delivery_id"].clone()])?;
                 send_error = Some(err);
             }
         }
-        if let Some(err) = send_error {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        send_error.map_or(Ok(()), Err)
+    }
+    fn reserve_deliveries(&self, plugin: &ChannelPlugin) -> Result<Vec<Value>, String> {
+        self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,s(&b,"principal_id"))?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
@@ -1241,8 +1243,25 @@ impl HubEngine {
         }
     }
     fn delivery_result(&self, id: &str, f: &Value) -> Result<Value, String> {
-        self.inner.db.transaction(|c|{let token=required(f,"delivery_id")?;let Some(row)=one(c,"SELECT * FROM hub_channel_deliveries WHERE plugin_id=? AND reservation_id=? AND status='in_flight'",&[json!(id),json!(token)])?else{return Ok(Value::Null)};let ok=f["ok"]==true;let mut external=f["external_msg_ids"].as_array().cloned().unwrap_or_default();if let Some(primary)=f["external_msg_id"].as_str(){if !external.contains(&json!(primary)){external.push(json!(primary))}}
-        c.execute("UPDATE hub_channel_deliveries SET status=?,external_msg_id=?,delivered_ms=? WHERE plugin_id=? AND reservation_id=?",&[json!(if ok{"delivered"}else{"failed"}),f["external_msg_id"].clone(),json!(now_ms()),json!(id),json!(token)])?;if ok{for ext in external{let ext=ext.as_str().ok_or("INVALID_INPUT: external message IDs must be strings")?;c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES(?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,external_msg_id) DO UPDATE SET signal_id=excluded.signal_id,from_listener_id=excluded.from_listener_id",&[json!(id),row["principal_id"].clone(),json!(ext),row["signal_id"].clone(),json!(s(&row,"from_listener_id"))])?;}}Ok(Value::Null)})
+        self.inner.db.transaction(|c| {
+            let token = required(f, "delivery_id")?;
+            let Some(row) = one(c, "SELECT * FROM hub_channel_deliveries WHERE plugin_id=? AND reservation_id=? AND status='in_flight'", &[json!(id),json!(token)])? else { return Ok(Value::Null); };
+            let mut external = f["external_msg_ids"].as_array().cloned().unwrap_or_default();
+            if let Some(primary) = f["external_msg_id"].as_str() {
+                if !external.contains(&json!(primary)) { external.push(json!(primary)); }
+            }
+            for ext in external {
+                let ext = ext.as_str().ok_or("INVALID_INPUT: external message IDs must be strings")?;
+                c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES(?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,external_msg_id) DO UPDATE SET signal_id=excluded.signal_id,from_listener_id=excluded.from_listener_id",
+                    &[json!(id),row["principal_id"].clone(),json!(ext),row["signal_id"].clone(),json!(s(&row,"from_listener_id"))])?;
+            }
+            if f["progress"] == true { return Ok(Value::Null); }
+            let attempts = n(&row, "attempts").max(0);
+            let (status, retry_at) = delivery_transition(f, attempts, now_ms());
+            c.execute("UPDATE hub_channel_deliveries SET status=?,external_msg_id=?,delivered_ms=?,attempts=attempts+1,next_retry_ms=?,last_error=? WHERE plugin_id=? AND reservation_id=?",
+                &[json!(status),f["external_msg_id"].clone(),json!(now_ms()),json!(retry_at),f["error"].clone(),json!(id),json!(token)])?;
+            Ok(Value::Null)
+        })
     }
     fn redeem(&self, id: &str, f: &Value) -> Result<Value, String> {
         let plugin = self.plugin(id)?;
@@ -1801,14 +1820,7 @@ fn save_service(c: &Connection, id: &str, cfg: &Value) -> Result<bool, String> {
             "DELETE FROM hub_processed_replies WHERE plugin_id=?",
             &[json!(id)],
         )?;
-        c.execute(
-            "DELETE FROM hub_channel_delivery_msgs WHERE plugin_id=?",
-            &[json!(id)],
-        )?;
-        c.execute(
-            "DELETE FROM hub_channel_deliveries WHERE plugin_id=?",
-            &[json!(id)],
-        )?;
+        // Credential edits retain confirmed chunk IDs and terminal unknown effects.
         c.execute(
             "UPDATE hub_pairing_codes SET consumed_ms=? WHERE plugin_id=? AND consumed_ms IS NULL",
             &[json!(now_ms()), json!(id)],
@@ -1858,6 +1870,21 @@ fn max_seq(c: &Connection) -> Result<i64, String> {
     .map(|r| n(&r, "seq"))
     .unwrap_or(0))
 }
+fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str, i64) {
+    if frame["ok"] == true {
+        ("delivered", 0)
+    } else if frame["effect_unknown"] == true {
+        ("effect_unknown", 0)
+    } else if frame["retryable"] == false || attempts >= 5 {
+        ("failed_permanent", 0)
+    } else {
+        (
+            "failed",
+            now + (2_000_i64 << attempts.clamp(0, 5)).min(60_000),
+        )
+    }
+}
+
 fn find_human(c: &Connection, pid: &str) -> Result<Option<String>, String> {
     for row in c.query(&format!("{KV_SELECT} ORDER BY revision DESC"), &[])? {
         if !principal_ids_equal(s(&row, "principal_id"), pid) {
@@ -1895,15 +1922,7 @@ fn attach(c: &Connection, b: &Value, enabled: bool, remote: bool) -> Result<(), 
     }
     let channel = format!("hub:{}", s(b, "plugin_id"));
     reg["channels"][&channel] = json!({"channel_id":channel,"kind":"human","host_id":"hub","host_name":"Hub","delivery_mode":"notify_fanout","priority":100,"state":if enabled{"ACTIVE"}else{"UNLISTENED"},"updated_at_ms":now_ms()});
-    reg["state"] = json!(if reg["channels"]
-        .as_object()
-        .is_some_and(|m| m.values().any(|v| v["state"] == "ACTIVE"
-            && (v["host_id"] == "hub" || now_ms() - n(v, "updated_at_ms") < 60_000)))
-    {
-        "ACTIVE"
-    } else {
-        "UNLISTENED"
-    });
+    super::lease::reconcile_registration_state(&mut reg, now_ms().max(0) as u64);
     reg["updated_at_ms"] = json!(now_ms());
     let rev = next_revision(c)?;
     c.execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,?,?,CAST(? AS BLOB),?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,created_ms=excluded.created_ms,value=excluded.value,principal_id=excluded.principal_id,scope=excluded.scope",&[json!(id),json!(rev),json!(now_ms()),json!(reg.to_string()),json!(pid),reg["scope"].clone()])?;

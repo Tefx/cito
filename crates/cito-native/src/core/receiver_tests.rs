@@ -665,6 +665,24 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
     assert_eq!(row["held_reason"], "driver_unavailable");
     assert_eq!(row["queue_written"], 0);
     assert!(row["acknowledged_at_ms"].is_null());
+    f.state.schedule_wake_retry_for(&f.row, 60_000)?;
+    f.state.restore_passive("local", &f.row)?;
+    assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    f.state
+        .db
+        .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
+    f.state.restore_passive("local", &f.row)?;
+    assert_eq!(f.rows()?[0]["state"], "RECEIVED");
+    assert!(f.rows()?[0]["held_reason"].is_null());
+    assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
+    for reason in ["stale_generation", "session_switched", "unlistened"] {
+        f.state.db.execute(
+            "UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?",
+            &[json!(reason)],
+        )?;
+        f.state.restore_passive("local", &f.row)?;
+        assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
+    }
     Ok(())
 }
 

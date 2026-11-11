@@ -552,10 +552,10 @@ pub fn detach_channel_expected(
                 .ok_or("INVALID_INPUT: Listener channel must be an object")?
                 .insert("state".into(), json!("UNLISTENED"));
         }
-        let any = remote["channels"]
-            .as_object()
-            .is_some_and(|c| c.values().any(|v| v["state"] == "ACTIVE"));
-        remote["state"] = json!(if any { "ACTIVE" } else { "UNLISTENED" });
+        if channel.ends_with(":human") {
+            remote["human_paused"] = json!(true);
+        }
+        super::lease::reconcile_registration_state(&mut remote, now_ms());
         if client.kv_save(id, &remote, Some(revision)).is_ok() {
             return Ok(());
         }

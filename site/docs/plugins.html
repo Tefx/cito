@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="application-version" content="0.21.1" />
+  <meta name="application-version" content="0.21.2" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Subprocess Plugin Guide — Cito Documentation</title>
   <meta name="description" content="Author agent-harness and human-channel plugins with plugin.json and the stdin/stdout NDJSON subprocess protocol." />
@@ -141,7 +141,7 @@
       <h3>Hub → plugin (stdin NDJSON)</h3>
       <ul>
         <li><code>configure</code>: <code>hub_config</code>, <code>bindings</code> (each with <code>principal_id</code>, <code>user</code>, <code>config</code>), and persisted <code>cursor</code>.</li>
-        <li><code>deliver</code>: <code>delivery_id</code>, <code>principal_id</code>, <code>user</code>, recipient <code>config</code>, and <code>signal</code> (<code>signal_id</code>, <code>from</code> with <code>principal_id</code>, <code>user</code>, <code>host_id</code>, <code>host_name</code>, <code>harness</code>, <code>listener_id</code>, <code>title</code>, and <code>about</code>, <code>to.listener_id</code>, <code>message</code>, <code>in_reply_to</code>, and <code>created_at_ms</code>).</li>
+        <li><code>deliver</code>: <code>delivery_id</code>, <code>principal_id</code>, <code>user</code>, recipient <code>config</code>, a confirmed <code>already_sent_ids</code> prefix to skip on retry, and <code>signal</code> (<code>signal_id</code>, <code>from</code> with <code>principal_id</code>, <code>user</code>, <code>host_id</code>, <code>host_name</code>, <code>harness</code>, <code>listener_id</code>, <code>title</code>, and <code>about</code>, <code>to.listener_id</code>, <code>message</code>, <code>in_reply_to</code>, and <code>created_at_ms</code>).</li>
         <li><code>on_acked</code>: <code>principal_id</code>, <code>signal_ids</code>, <code>acked_at_ms</code>, <code>external_msg_ids</code>, and <code>user_config</code>, for synchronizing external read state.</li>
         <li><code>format_pair</code> / <code>test</code>: correlated RPC requests with <code>req_id</code> and <code>hub_config</code>. Pair formatting includes <code>code</code>; testing includes <code>user</code> and <code>user_config</code>.</li>
         <li><code>pair_ack</code>: <code>code</code>, <code>ok</code>, <code>owner_user</code>, and <code>error</code>. <code>reply_ack</code>: <code>update_id</code>, <code>ok</code>, <code>signal_id</code>, <code>target_display</code>, optional <code>duplicate</code>, and <code>error</code>.</li>
@@ -151,7 +151,7 @@
 {"op":"deliver","delivery_id":"d_1","principal_id":"none#alice","user":"alice","config":{"recipientId":"room-1"},"signal":{"signal_id":"s_1","from":{"principal_id":"none#bob","user":"bob","host_id":"mac-1","host_name":"Bob-Mac","harness":"sample-agent","listener_id":"bob-8a4f2c9011b4e3d2","title":"Review","about":"Release check"},"to":{"listener_id":"c_9f0e1d2c3b4a5968"},"target_generation":1,"sender_endpoint_key":"ep_1","message":"Please review","in_reply_to":null,"created_at_ms":1700000000000}}</code></pre>
       <h3>Plugin → Hub (stdout NDJSON)</h3>
       <ul>
-        <li><code>delivered</code>: report <code>delivery_id</code>, <code>ok</code>, <code>external_msg_id</code>, all <code>external_msg_ids</code>, and <code>error</code> after the external delivery result is known.</li>
+        <li><code>delivered</code>: report <code>delivery_id</code>, <code>ok</code>, <code>external_msg_id</code>, all confirmed <code>external_msg_ids</code> (including on failure), and <code>error</code>. Set <code>retryable: false</code> for permanent rejection and <code>effect_unknown: true</code> when a transmitted request may have succeeded. The Hub quarantines uncertain effects and subprocess crashes; confirmed retryable rejections use bounded exponential backoff. A multipart sender can checkpoint each confirmed prefix with <code>progress: true</code> before its final result; progress frames keep the reservation in flight.</li>
         <li><code>pair_redeem</code>: provide <code>code</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>is_private_chat</code>, <code>display_label</code>, and <code>user_config_patch</code>.</li>
         <li><code>inbound_reply</code>: provide <code>update_id</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>reply_to_external_msg_id</code>, and <code>text</code>. The Hub resolves the reply target and routes a regular signal.</li>
         <li><code>cursor_save</code>: persist the channel's external update <code>cursor</code> after receiving <code>reply_ack</code>.</li>

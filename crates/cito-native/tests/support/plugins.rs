@@ -1040,11 +1040,15 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
             .any(|v| v["op"] == "cursor_save" && v["cursor"] == "16")
     });
     f.send(p,json!({"op":"deliver","delivery_id":"large","config":{"chatId":"9"},"signal":{"from":{"title":"work"},"message":"😀".repeat(9000)}}));
-    wait(|| f.frames(p).iter().any(|v| v["op"] == "delivered"));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "delivered" && v["progress"] != true)
+    });
     let frame = f
         .frames(p)
         .into_iter()
-        .find(|v| v["op"] == "delivered")
+        .find(|v| v["op"] == "delivered" && v["progress"] != true)
         .unwrap();
     assert_eq!(frame["ok"], true);
     assert_eq!(frame["external_msg_ids"].as_array().unwrap().len(), 3);
@@ -1053,6 +1057,53 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         let v: Value = serde_json::from_str(line).unwrap();
         assert!(v["text"].as_str().unwrap().chars().count() <= 4096);
     }
+    let outcome = |delivery_id: &str| {
+        wait(|| {
+            f.frames(p).iter().any(|v| {
+                v["delivery_id"] == delivery_id && v["op"] == "delivered" && v["progress"] != true
+            })
+        });
+        f.frames(p)
+            .into_iter()
+            .find(|v| {
+                v["delivery_id"] == delivery_id && v["op"] == "delivered" && v["progress"] != true
+            })
+            .unwrap()
+    };
+    for status in [400, 401, 403, 404, 408, 429, 500, 503] {
+        let delivery_id = format!("status-{status}");
+        f.send(p,json!({"op":"deliver","delivery_id":delivery_id,"config":{"chatId":format!("status:{status}")},"signal":{"message":"Review"}}));
+        let frame = outcome(&delivery_id);
+        assert_eq!(frame["ok"], false);
+        assert_eq!(frame["retryable"], matches!(status, 408 | 429 | 500..=599));
+        assert_eq!(frame["effect_unknown"], false);
+        assert_eq!(frame["error"], "Rejected by fixture");
+    }
+    f.send(p,json!({"op":"deliver","delivery_id":"uncertain","config":{"chatId":"uncertain"},"signal":{"message":"Review"}}));
+    let frame = outcome("uncertain");
+    assert_eq!(frame["effect_unknown"], true);
+    assert_eq!(frame["retryable"], false);
+    f.send(p,json!({"op":"deliver","delivery_id":"partial","config":{"chatId":"partial"},"signal":{"message":"a".repeat(9000)}}));
+    let partial = outcome("partial");
+    assert_eq!(partial["ok"], false);
+    assert_eq!(partial["retryable"], true);
+    assert_eq!(partial["effect_unknown"], false);
+    assert_eq!(partial["external_msg_ids"].as_array().unwrap().len(), 1);
+    f.send(p,json!({"op":"deliver","delivery_id":"resumed","already_sent_ids":partial["external_msg_ids"],"config":{"chatId":"partial"},"signal":{"message":"a".repeat(9000)}}));
+    let resumed = outcome("resumed");
+    assert_eq!(resumed["ok"], true);
+    assert_eq!(resumed["external_msg_ids"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        resumed["external_msg_ids"][0],
+        partial["external_msg_ids"][0]
+    );
+    let sent = fs::read_to_string(f.home.join("api-sends.jsonl")).unwrap();
+    assert_eq!(
+        sent.lines()
+            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["chat_id"] == "partial")
+            .count(),
+        3
+    );
     f.eof(p);
     wait(|| f.exited(p));
 }

@@ -3,6 +3,7 @@ use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, V
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -112,6 +113,7 @@ impl OidcVerifier {
             refreshed: Condvar::new(),
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(5))
+                .timeout_connect(Duration::from_secs(5))
                 .redirects(0)
                 .build(),
         })
@@ -144,9 +146,9 @@ impl OidcVerifier {
             false,
         )
         .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
-        let discovery: Value = discovery_response
-            .into_json()
-            .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery JSON: {e}"))?;
+        let discovery: Value =
+            serde_json::from_reader(discovery_response.into_reader().take(1_048_576))
+                .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery JSON: {e}"))?;
         if discovery
             .get("issuer")
             .is_some_and(|issuer| issuer.as_str() != Some(self.issuer.as_str()))
@@ -169,8 +171,7 @@ impl OidcVerifier {
         }
         validate_oidc_endpoint(response.get_url(), "OIDC JWKS response URL", true)
             .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
-        let keys: JwkSet = response
-            .into_json()
+        let keys: JwkSet = serde_json::from_reader(response.into_reader().take(1_048_576))
             .map_err(|e| format!("AUTH_UNAVAILABLE: JWKS JSON: {e}"))?;
         Ok(keys)
     }

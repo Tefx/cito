@@ -298,7 +298,7 @@ impl LocalState {
         })
     }
     pub fn restore_passive(&self, hub: &str, listener: &Value) -> Result<(), String> {
-        self.db.execute("UPDATE local_signals SET state='RECEIVED' WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND held_reason IS NULL AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
+        self.db.execute("UPDATE local_signals SET state='RECEIVED',held_reason=NULL WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND (held_reason IS NULL OR (held_reason='driver_unavailable' AND NOT EXISTS(SELECT 1 FROM wake_retries w WHERE w.hub=local_signals.hub AND w.listener_id=local_signals.listener_id AND w.retry_at_ms>?))) AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(now_ms()), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
         Ok(())
     }
     pub fn schedule_wake_retry_for(&self, listener: &Value, delay: u64) -> Result<(), String> {

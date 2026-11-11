@@ -955,7 +955,7 @@ fn r1_add_hub_acknowledgement_settles_submission_without_discarding_newer_drafts
             json!({"op":"error","source_op":"hub_action","error":"OIDC cancelled"}),
             json!({"op":"error","source_op":"setup_save_hub","error":"Invite failed"}),
             json!({"op":"error","source_op":"paste_hub_invite","error":"Invalid invite"}),
-            json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+            json!({"op":"error","error":"INVALID_INPUT: Message is too large to send"}),
             json!({"op":"error","source_op":"","request_id":current["request_id"],"error":"Source-less correlated transport failure"}),
         ] {
             let error = frame["error"].clone();
@@ -1038,6 +1038,9 @@ fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
 }
 fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: Option<&str>) {
     inspect_as(f, p, appearance);
+    if std::env::var_os("CITO_TEST_SNAPSHOT_DIR").is_none() {
+        return;
+    }
     let path = f.dir.join(name);
     f.send(
         p,
@@ -1089,6 +1092,15 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     assert_eq!(s["count"], 0);
     assert_eq!(s["button_title"], "");
     assert_eq!(node(&s, "items", "header_subtitle")["text"], "Idle");
+    assert!(node(&s, "items", "header_hub_strip").is_null());
+    assert!(node(&s, "items", "drawer:local").is_null());
+    assert!(node(&s, "items", "stop_all").is_null());
+    assert_eq!(node(&s, "items", "open_settings")["x"], 12);
+    let quit = node(&s, "items", "quit");
+    assert_eq!(
+        quit["x"].as_f64().unwrap() + quit["width"].as_f64().unwrap(),
+        368.0
+    );
     assert_eq!(
         f.rows("SELECT title, about FROM local_listeners WHERE harness='human'"),
         vec![json!({"title":"Human","about":"Human receiver"})]
@@ -1099,6 +1111,10 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
         .to_string();
     let row_id = format!("session:{id}");
     assert_eq!(node(&s, "items", &row_id)["height"], 64);
+    let pause = node(&s, "items", &format!("stop:{id}"));
+    assert_eq!(pause["text"], "Pause");
+    assert_eq!(pause["tooltip"], "Pause personal notifications");
+    assert!(node(&s, "items", &format!("switch_hub:{id}")).is_null());
     l.control(&format!("stop:{id}"));
     l.until(|s| !node(s, "items", "listen_human").is_null());
     l.control("listen_human");
@@ -1111,6 +1127,28 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
         f.rows("SELECT title FROM local_listeners WHERE harness='human'")[0]["title"],
         "Human"
     );
+    assert_eq!(f.action(json!({"op":"setup_save_hub","name":"archive","url":"https://hub.example.com","auth_mode":"none","enabled":false})).0,200);
+    l.control("open_settings");
+    l.control("settings_tab:hubs");
+    let s = l.until(|s| !node(s, "settings_items", "settings_hub:archive").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "toggle_hub:local")["hidden"],
+        true
+    );
+    let edit = node(&s, "settings_items", "edit_hub:local");
+    assert_eq!(
+        edit["x"].as_f64().unwrap() + edit["width"].as_f64().unwrap(),
+        468.0
+    );
+    l.control("edit_hub:local");
+    assert_eq!(
+        node(&inspect(&f, l.ui), "settings_items", "submit_add_hub")["text"],
+        "Save"
+    );
+    l.control("cancel_add_hub");
+    l.control("settings_tab:channels");
+    inspect(&f, l.ui);
+    l.control("close_settings");
     for appearance in ["light", "dark"] {
         let s = inspect_as(&f, l.ui, Some(appearance));
         assert_eq!(s["low_contrast_labels"], json!([]), "{appearance}");
@@ -1235,7 +1273,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     }
     frame["unread_count"] = json!(3);
     f.send(p, frame.clone());
-    assert_eq!(inspect(&f, p)["button_title"], " 🔔3");
+    assert_eq!(inspect(&f, p)["button_title"], " · 3");
     let mut second = listener();
     second["hub"] = json!("work");
     second["scoped_id"] = json!("work:copy");
@@ -1244,7 +1282,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     f.send(p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
-    assert_eq!(s["button_title"], " 1 🔔3");
+    assert_eq!(s["button_title"], " 1 · 3");
     assert_eq!(
         node(&s, "items", "header_subtitle")["text"],
         "1 session listening"
@@ -1507,7 +1545,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     cfg["channels"][0]["fields"][0]["value"] = json!("");
     cfg["channels"][0]["setup_guide"] = json!([
         "1. Create a gateway credential with your provider.",
-        "2. Save it once for every human on this Hub."
+        "2. Save it once for everyone on this Hub."
     ]);
     cfg["hubs"][0]["name"] = json!("local");
     let mut frame = state();
@@ -1518,7 +1556,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(node(&s, "items", "human_paused_card")["height"], 52);
-    assert_eq!(node(&s, "items", "listen_human")["text"], "Enable");
+    assert_eq!(node(&s, "items", "listen_human")["text"], "Resume");
     render_png(&f, p, "menu", "menu_human_paused.png");
     let rendered = inspect(&f, p);
     for item in nodes(&s["items"]) {
@@ -1590,7 +1628,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         .all(|n| n["id"] != "skip_channel:channel"));
     assert_eq!(
         node(&s, "settings_items", "stratum_hub_title:channel")["text"],
-        "1. HUB GATEWAY · ONCE PER HUB"
+        "1. Shared Bot Gateway"
     );
     assert!(
         node(&s, "settings_items", "stratum_user_title:channel")["text"]
@@ -1622,7 +1660,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "stratum_hub_status:channel")["text"],
-        "● Hub Gateway Active"
+        "● Bot Ready"
     );
     assert!(!node(&s, "settings_items", "clear_channel_service:channel").is_null());
     assert!(
@@ -1913,7 +1951,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .collect();
         assert!(labels.contains(&"HUB NAME".to_owned()));
         assert!(labels.contains(&"HUB URL (http://ip:4291 or https://host)".to_owned()));
-        assert!(labels.contains(&"Access".to_owned()));
+        assert!(labels.contains(&"ACCESS".to_owned()));
     }
     control(&f, p, "open_directory");
     for mode in ["directory", "activity"] {
@@ -2162,7 +2200,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             if configured {
                 "● Connected"
             } else {
-                "Hub Service: ● Ready"
+                "● Bot Ready"
             }
         );
     }
@@ -2232,7 +2270,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             assert_eq!(
                 node(&s, "settings_items", "settings_channel_status:channel")["text"],
                 if action == "clear_channel_service" {
-                    "Hub Service: ● Ready"
+                    "● Bot Ready"
                 } else {
                     "○ Not Configured"
                 }
@@ -2996,7 +3034,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     for frame in [
         json!({"op":"composer_result","ok":true}),
         json!({"op":"composer_result","ok":false,"error":"Untagged result"}),
-        json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"}),
+        json!({"op":"error","error":"INVALID_INPUT: Message is too large to send"}),
         json!({"op":"error","source_op":"send_signal","error":"Untagged send error"}),
         json!({"op":"error","source_op":"send_reply_from_human","error":"Untagged reply error"}),
     ] {
@@ -3176,6 +3214,45 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             );
             f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
             inspect_as(&f, p, Some(appearance));
+        }
+        for (kind, oracle) in [
+            ("bar_anchor", "clipped_views"),
+            ("strip_anchor", "clipped_views"),
+            ("status_emoji", "jargon_leaks"),
+        ] {
+            f.send(p, json!({"op":"test_oracle_calibration","kind":kind}));
+            assert!(
+                !inspect_unchecked(&f, p, Some(appearance))[oracle]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "{kind}"
+            );
+            f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+            inspect_as(&f, p, Some(appearance));
+        }
+        for text in [
+            "Handle",
+            "every human",
+            "each human",
+            "receive wakes",
+            "Wake banners",
+            "cito_listen",
+            "Hub Service:",
+            "UI action exceeds",
+        ] {
+            f.send(
+                p,
+                json!({"op":"test_oracle_calibration","kind":"jargon_leaks","text":text}),
+            );
+            assert!(
+                !inspect_unchecked(&f, p, Some(appearance))["jargon_leaks"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "{text}"
+            );
+            f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
         }
         for human in [false, true] {
             let mut invalid = state();
@@ -4176,7 +4253,7 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
             .filter(|frame| frame["op"] == "error")
             .cloned()
             .collect::<Vec<_>>(),
-        vec![json!({"op":"error","error":"INVALID_INPUT: UI action exceeds 1 MiB"})]
+        vec![json!({"op":"error","error":"INVALID_INPUT: Message is too large to send"})]
     );
     assert_eq!(
         f.db("hub.sqlite")

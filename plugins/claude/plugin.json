@@ -11,7 +11,7 @@
     "./bin/cito-plugin-claude"
   ],
   "channelEnv": "CITO_CLAUDE_CHANNEL",
-  "version": "0.21.1",
+  "version": "0.21.2",
   "postSetupHint": "Connected · Restart open Claude Code sessions, then click + Listen",
   "postDisconnectHint": "Disconnected · Active Claude Code listeners stopped"
 }
