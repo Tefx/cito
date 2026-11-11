@@ -21,7 +21,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -3222,8 +3222,8 @@ fn tailscale_advertised_host() -> Option<String> {
     {
         return None;
     }
-    static CACHE: OnceLock<Mutex<Option<(Instant, Option<String>)>>> = OnceLock::new();
-    let mut cached = CACHE.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    let mut cached = CACHE.lock().ok()?;
     if let Some((_, host)) = cached
         .as_ref()
         .filter(|(time, _)| time.elapsed() < Duration::from_secs(30))
