@@ -8862,3 +8862,111 @@ phases:
       published with Developer ID signed + notarized + stapled Cito-macos-arm64.zip
       (SHA-256 09724dd49db4db4577d7f90e2cf4b74465120bf68c48b05d8b78570f972ee17c),
       synchronized to Tefx/homebrew-tap Casks/cito.rb (commit 7c3b753514295389ec339eaf9a5b2a17c282e2df).'
+- id: v30
+  name: 'V30 Stage 12.1 (v0.21.1): Cito.app Symlink Launcher Resolution, cito-mcp
+    Dispatch & Legacy ~/.cito/plugins Upgrade Cleanup'
+  status: pending
+  gate: 'Cito.app/Contents/MacOS/Cito resolves Homebrew Cask symlinks (cito and cito-mcp)
+    accurately and dispatches 0-arg cito-mcp to mcp-stdio with CITO_ENDPOINT_PID;
+    legacy ~/.cito/plugins/<id> v0.20.x copies and ~/.cito/plugins/human overrides
+    are cleaned up without hardcoded plugin IDs in core; packaging/release.py smoke_cask
+    resolves temp paths on macOS; pathway-auditor, structural-auditor, and uiux-auditor
+    converge to Completeness: CLEAN and Simplicity: ZERO_NEW_ISSUES; cargo test --workspace
+    passes with 0 warnings; v0.21.1 is published on GitHub Releases and Tefx/homebrew-tap.'
+  context: Fix Cito.app/Contents/MacOS/Cito symlink launcher resolution and cito-mcp
+    0-arg mcp-stdio dispatch, clean up legacy v0.20.x ~/.cito/plugins/<id> copies
+    and ~/.cito/plugins/human overrides without hardcoded plugin names in crates/cito-native/src/core/,
+    align docs/DESIGN.md §14 (D20 / v0.21.1) and docs/ROADMAP.md, converge under 2D
+    contract-and-simplicity iterative review, and release v0.21.1 to GitHub Releases
+    and Tefx/homebrew-tap.
+  depends_on:
+  - v29
+  steps:
+  - id: v30.impl
+    name: V30 Cito.app Symlink Launcher Resolution, cito-mcp Dispatch, Legacy ~/.cito/plugins
+      Upgrade Cleanup & v0.21.1 Version Bump
+    status: pending
+    description: 'Update docs/DESIGN.md §14 (D20 / v0.21.1) and docs/ROADMAP.md for
+      v0.21.1. Fix Contents/MacOS/Cito launcher script in crates/cito-native/src/core/setup.rs:688
+      to save INVOKED_AS="$(basename "$0")", resolve symlinks on $0 via a while [
+      -L "$SOURCE" ] loop to compute real APP_CONTENTS (.../Cito.app/Contents) so
+      Homebrew Cask symlinks (/opt/homebrew/bin/cito and /opt/homebrew/bin/cito-mcp)
+      resolve APP_CONTENTS/Helpers/cito-native and APP_CONTENTS/Resources/plugins
+      accurately, and when INVOKED_AS = "cito-mcp" export CITO_ENDPOINT_PID="${CITO_ENDPOINT_PID:-$PPID}"
+      and exec "$APP_CONTENTS/Helpers/cito-native" mcp-stdio when [ "$#" -eq 0 ].
+      In packaging/release.py (smoke_cask), resolve root = Path(directory).resolve()
+      so /var/folders -> /private/var/folders symlink resolution on macOS matches
+      link.resolve(). In crates/cito-native/tests/support/distribution.rs (relocatable_signed_app_and_installed_shims_work_without_node),
+      create symlinks bin/cito and bin/cito-mcp pointing to Cito.app/Contents/MacOS/Cito
+      and verify bin/cito --version (cito v0.21.1) and bin/cito-mcp (initialize MCP
+      stdio handshake with 0 args). Fix legacy v0.20.x ~/.cito/plugins/<id> upgrade
+      cleanup in crates/cito-native/src/core/plugins.rs and crates/cito-native/src/core/hub_plugins.rs
+      (preserving zero hardcoded pi|codex|claude|telegram strings in crates/cito-native/src/core/
+      by checking super::setup::resolve_bundled_plugin_dir(&id).join("plugin.json").is_file()):
+      always load "human" (cito-ui) from bundled builtin_roots (never allowing external
+      directories to override "human", and removing any stale state_dir.join("plugins/human")
+      directory containing ./bin/cito-ui), and when scanning state_dir.join("plugins")
+      (~/.cito/plugins/<id>), if a subdirectory corresponds to a bundled plugin (resolve_bundled_plugin_dir(dir_name).join("plugin.json").is_file())
+      and its plugin.json has command[0] starting with "./bin/cito-" and "version"
+      != Some(CITO_VERSION) (or id == "human"), automatically fs::remove_dir_all(&sub)
+      and fall back to the bundled built-in plugin. Bump version to 0.21.1 across
+      crates/cito-native/Cargo.toml, Cargo.lock, .agents/plugins/marketplace.json,
+      plugins/*/plugin.json, plugins/pi/package.json, site/**/*.html, README.md, docs/DESIGN.md,
+      docs/ROADMAP.md, and deploy/hub/README.md.'
+    verification: python3 packaging/release.py check && python3 -m unittest discover
+      -s packaging -p 'test_*.py' -v && cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - packaging/release.py
+    - crates/cito-native/Cargo.toml
+    - README.md
+    agent: rust-senior
+  - id: v30.hygiene
+    name: 'V30 2D Contract-and-Simplicity Iterative Convergence Audit & Live v0.21.1
+      Release Publication [REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]'
+    status: pending
+    description: '[REQUIRES_SKILL: contract-and-simplicity] [GATE_MODE: ITERATIVE_CONVERGENCE]
+      Run 2D contract-and-simplicity review (pathway-auditor, structural-auditor,
+      uiux-auditor) over the v30 delta until a single round returns Completeness:
+      CLEAN and Simplicity: ZERO_NEW_ISSUES with 0 holds/gaps, then push main and
+      tag v0.21.1 so GitHub Actions CI and Release sign, notarize, publish v0.21.1
+      to GitHub Releases, verify the Homebrew Cask install, and update Tefx/homebrew-tap
+      Casks/cito.rb.'
+    verification: python3 packaging/release.py check && python3 -m unittest discover
+      -s packaging -p 'test_*.py' -v && cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - packaging/release.py
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v30.impl
+    agent: rust-senior
+  - id: v30.gate
+    name: V30 Independent Terminal Acceptance & v0.21.1 Live Release / Homebrew Cask
+      Gate
+    status: pending
+    description: Independent gate-reviewer terminal acceptance (gate.report.v2 PASS)
+      over Phase v30 and live v0.21.1 release + Tefx/homebrew-tap Cask alignment.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - docs/ROADMAP.md
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - packaging/release.py
+    - packaging/homebrew/cito.rb
+    depends_on:
+    - v30.hygiene
+    agent: gate-reviewer
