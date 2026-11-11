@@ -665,13 +665,23 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
     assert_eq!(row["held_reason"], "driver_unavailable");
     assert_eq!(row["queue_written"], 0);
     assert!(row["acknowledged_at_ms"].is_null());
-    f.state.schedule_wake_retry_for(&f.row, 60_000)?;
-    f.state.restore_passive("local", &f.row)?;
+    let retries = f.state.db.query(
+        "SELECT retry_at_ms FROM wake_retries WHERE hub='local' AND listener_id=?",
+        &[f.row["listener_id"].clone()],
+    )?;
+    assert!(
+        retries[0]["retry_at_ms"]
+            .as_u64()
+            .ok_or("Missing retry deadline")?
+            > now_ms()
+    );
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
+    assert_eq!(f.requests()?.len(), 1);
     assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     f.state
         .db
         .execute("UPDATE wake_retries SET retry_at_ms=0", &[])?;
-    f.state.restore_passive("local", &f.row)?;
+    poll_listener(&f.state, &f.client, &f.row, None, &f.dir, |_| {})?;
     assert_eq!(f.rows()?[0]["state"], "RECEIVED");
     assert!(f.rows()?[0]["held_reason"].is_null());
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
@@ -683,6 +693,15 @@ fn unavailable_driver_keeps_signal_passive_unread_without_fabricating_queue_inse
         f.state.restore_passive("local", &f.row)?;
         assert_eq!(f.rows()?[0]["state"], "STORED_PASSIVE");
     }
+    f.state.db.execute(
+        "UPDATE local_signals SET state='RECEIVED',held_reason=NULL",
+        &[],
+    )?;
+    let plugin = f.plugin(DELIVER);
+    poll_listener(&f.state, &f.client, &f.row, Some(&plugin), &f.dir, |_| {})?;
+    assert_eq!(f.requests()?.len(), 2);
+    assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
+    assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());
     Ok(())
 }
 

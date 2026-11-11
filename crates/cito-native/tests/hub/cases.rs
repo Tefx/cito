@@ -947,7 +947,7 @@ fn incomplete_bindings_skip_delivery_and_removed_plugins_restore_inactive() {
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "unready");
     let plugin = e.plugin("fixture").unwrap();
-    let process = e.ensure_process(&plugin, false).unwrap();
+    let process = e.ensure_process(&plugin).unwrap();
     e.replay(&plugin, &process).unwrap();
     assert!(e
         .inner
@@ -1985,7 +1985,7 @@ fn reservations_renew_while_process_is_live_and_quarantine_after_exit() {
     let plugin = e.plugin("fixture").unwrap();
     let process = {
         let _lifecycle = e.inner.lifecycle.lock().unwrap();
-        e.ensure_process(&plugin, true).unwrap()
+        e.ensure_process(&plugin).unwrap()
     };
     let barrier = Arc::new(std::sync::Barrier::new(5));
     let mut handles = Vec::new();
@@ -2017,11 +2017,24 @@ fn reservations_renew_while_process_is_live_and_quarantine_after_exit() {
     assert_eq!(row["reservation_id"], "abandoned");
     assert_eq!(row["status"], "in_flight");
     assert!(n(&row, "delivered_ms") > now_ms() - 1000);
+    // Stop periodic supervision so Send Test is deterministically the first
+    // replacement caller after the crash, rather than racing the supervisor.
+    e.inner.closed.store(true, Ordering::SeqCst);
+    if let Some(worker) = e.inner.worker.lock().unwrap().take() {
+        worker.join().unwrap();
+    }
+    e.inner.closed.store(false, Ordering::SeqCst);
     process.shutdown();
-    let replacement = {
-        let _lifecycle = e.inner.lifecycle.lock().unwrap();
-        e.ensure_process(&plugin, true).unwrap()
-    };
+    assert_eq!(
+        e.rpc(
+            "human_channels_test",
+            &json!({"plugin_id":"fixture"}),
+            Some(&json!({"principal_id":"none#alice","owner_user":"alice"}))
+        )
+        .unwrap()["ok"],
+        true
+    );
+    let replacement = e.inner.processes.lock().unwrap()["fixture"].clone();
     e.replay(&plugin, &replacement).unwrap();
     assert_eq!(
         e.inner
@@ -2172,6 +2185,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .unwrap()[0],
         json!({"status":"effect_unknown","last_error":"Response lost"})
     );
+    send(&e, &node, "after-binding");
     e.inner.plugins.lock().unwrap().push(plugin.clone());
     // Freeze background execution; configuration and ledger reconciliation need no child.
     e.inner.closed.store(true, Ordering::SeqCst);
@@ -2204,6 +2218,40 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             )
             .unwrap()[0],
         json!({"status":"failed","attempts":0,"next_retry_ms":0})
+    );
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT * FROM hub_channel_delivery_msgs", &[])
+            .unwrap()
+            .len(),
+        2
+    );
+    let old_boundary = e
+        .inner
+        .db
+        .query("SELECT last_delivered_seq FROM hub_human_channels", &[])
+        .unwrap()[0]["last_delivered_seq"]
+        .clone();
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='failed_permanent',attempts=6,next_retry_ms=9000,last_error='rejected'",&[]).unwrap();
+    e.inner.db.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms) VALUES('cito-repair','fixture','none#alice','alice',?,?)",&[json!(now_ms()),json!(now_ms()+60_000)]).unwrap();
+    assert_eq!(e.redeem("fixture",&json!({"code":"cito-repair","is_private_chat":true,"external_chat_id":"room","external_user_id":"alice","user_config_patch":{}})).unwrap()["ok"],true);
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT last_delivered_seq FROM hub_human_channels", &[])
+            .unwrap()[0]["last_delivered_seq"],
+        old_boundary
+    );
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT status,attempts,next_retry_ms,last_error FROM hub_channel_deliveries",
+                &[]
+            )
+            .unwrap()[0],
+        json!({"status":"failed","attempts":0,"next_retry_ms":0,"last_error":null})
     );
     assert_eq!(
         e.inner

@@ -706,8 +706,84 @@ impl DaemonService {
         self.ensure_human_nodes()?;
         Ok(())
     }
+    fn reconcile_unlistened(
+        state: &LocalState,
+        client: &HubClient,
+        host_id: &str,
+    ) -> Result<(), String> {
+        // Re-read durable intent under the enrollment lock: an explicit re-enable
+        // supersedes any pending detach before this worker can mutate the Hub.
+        let _registration = client
+            .registration
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        for pending in state.db.query(
+            "SELECT * FROM pending_hub_detaches WHERE hub=?",
+            &[json!(client.name)],
+        )? {
+            let id = string(&pending, "listener_id");
+            let clear = || {
+                state.db.execute(
+                    "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
+                    &[json!(client.name), json!(id)],
+                )
+            };
+            let Some(row) = state
+                .listener(&client.name, id)?
+                .filter(|row| row["status"] == "UNLISTENED")
+            else {
+                clear()?;
+                continue;
+            };
+            if pending["hub_url"]
+                .as_str()
+                .is_some_and(|url| url != string(&client.config, "url"))
+            {
+                continue;
+            }
+            if !super::auth::principal_ids_equal(
+                string(&row, "principal_id"),
+                string(&client.identity, "principal_id"),
+            ) {
+                continue;
+            }
+            let channel = format!("{host_id}:{}", string(&row, "harness"));
+            let Some((remote, _)) = client.kv_get(id)? else {
+                clear()?;
+                continue;
+            };
+            let human = row["harness"] == "human";
+            let captured = if human
+                && row["binding_generation"] == 0
+                && id == listener_id(string(&client.identity, "principal_id"), "human", "default")
+            {
+                // Pause can precede automatic enrollment on this Mac.
+                let mut captured = remote.clone();
+                if let Some(owner) = remote["channels"][&channel]["owner_token"].as_str() {
+                    captured["owner_token"] = json!(owner);
+                }
+                captured
+            } else {
+                row.clone()
+            };
+            if !super::registration::remote_matches_listener(&remote, &captured, &channel) {
+                clear()?;
+                continue;
+            }
+            if remote["channels"][&channel]["state"] == "ACTIVE"
+                || human && remote["human_paused"] != true
+            {
+                detach_channel_expected(client, id, &channel, &captured)?;
+            }
+            clear()?;
+        }
+        Ok(())
+    }
     fn ensure_human_nodes(&mut self) -> Result<(), String> {
         for (slot_name, client) in self.slots.clone() {
+            if client.local.is_some() {
+                let _ = Self::reconcile_unlistened(&self.state, &client, &self.host_id);
+            }
             if client.config["authMode"] == "oidc" && client.bearer.is_none() {
                 continue;
             }
@@ -899,7 +975,7 @@ impl DaemonService {
     }
     fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
         let client = self.slots.get(hub);
-        let _registration = client
+        let registration = client
             .map(|client| {
                 client
                     .registration
@@ -907,39 +983,27 @@ impl DaemonService {
                     .map_err(|_| "STATE_ERROR: Registration lock poisoned")
             })
             .transpose()?;
-        if let Some(row) = self.state.listener(hub, id)? {
-            let active = row["status"] == "ACTIVE";
-            self.state.db.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
-            self.state.db.execute(
-                "UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=?",
-                &[json!(hub), json!(id)],
-            )?;
-            if let Some(client) = client {
-                let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
-                // Local revocation is durable even while the Hub is unavailable.
-                let _ = detach_channel_expected(client, id, &channel, &row);
-            }
-            return Ok(active);
-        }
-        if let Some(client) = client {
-            if id == listener_id(string(&client.identity, "principal_id"), "human", "default") {
-                // Persist intent before a queued background enrollment can obtain the lock.
-                self.state.db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','','self','UNLISTENED')",&[
+        let row = self.state.listener(hub, id)?;
+        let active = row.as_ref().is_some_and(|row| row["status"] == "ACTIVE");
+        self.state.db.transaction(|c| {
+            if row.is_some() {
+                c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
+                c.execute("UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+            } else if let Some(client) = client.filter(|client|id==listener_id(string(&client.identity,"principal_id"),"human","default")) {
+                // Persist intent before queued automatic enrollment can obtain the lock.
+                c.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','','self','UNLISTENED')",&[
                     json!(hub),json!(id),json!(super::identity::public_listener_id(string(&client.identity,"owner_user"),id)),
                     client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name())])?;
-                if let Some((mut captured, _)) = client.kv_get(id)? {
-                    let channel = format!("{}:human", self.host_id);
-                    if let Some(owner) = captured["channels"][&channel]["owner_token"]
-                        .as_str()
-                        .map(str::to_owned)
-                    {
-                        captured["owner_token"] = json!(owner);
-                    }
-                    detach_channel_expected(client, id, &channel, &captured)?;
-                }
-            }
+            } else { return Ok(()); }
+            c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url",&[json!(hub),json!(id),client.map(|client|client.config["url"].clone()).unwrap_or(Value::Null)])?;
+            Ok(())
+        })?;
+        drop(registration);
+        // A failed Hub write leaves durable pending work; poll/reconnect retries it.
+        if let Some(client) = client {
+            let _ = Self::reconcile_unlistened(&self.state, client, &self.host_id);
         }
-        Ok(false)
+        Ok(active)
     }
     fn find_listeners(
         &mut self,
@@ -1661,10 +1725,14 @@ impl DaemonService {
                 && (slot.config["authMode"] != "oidc" || slot.bearer.is_some())
             {
                 let slot = slot.clone();
+                let state = self.state.clone();
+                let host_id = self.host_id.clone();
                 self.receivers.insert(
                     key,
                     thread::spawn(move || {
-                        let _ = slot.directory();
+                        if slot.directory().is_ok() && slot.local.is_none() {
+                            let _ = Self::reconcile_unlistened(&state, &slot, &host_id);
+                        }
                     }),
                 );
             }
@@ -1814,7 +1882,7 @@ impl DaemonService {
                     .cloned()
                     .unwrap_or_default();
                 if inventory["status"] == "error" {
-                    channels.push(json!({"id":"inventory","display_name":"Channel inventory","sf_symbol":"exclamationmark.triangle","tint":"red","enabled":false,"configured":false,"hub_provided":false,"pairing_supported":false,"fields":[],"status":"error","detail":inventory["detail"]}));
+                    channels.push(json!({"id":"inventory","display_name":"Human Channels","sf_symbol":"exclamationmark.triangle","tint":"red","enabled":false,"configured":false,"hub_provided":false,"pairing_supported":false,"fields":[],"status":"error","detail":inventory["detail"]}));
                 }
             }
         }
@@ -4239,6 +4307,124 @@ mod tests {
                 .find(|hub| hub["name"] == "archive")
                 .ok_or("Missing disabled Hub")?;
             assert_eq!(disabled["user"], service.config.effective_user("archive")?);
+            let personal = remaining[0].clone();
+            let personal_signal = service.send(
+                "local",
+                &json!({"to":personal["listener_id"],"message":"Unread personal notification"}),
+                &json!({}),
+            )?;
+            service.listen(
+                "local",
+                &json!({"about":"Receiver"}),
+                &json!({"harness":"fixture","session_id":"default","title":"Receiver"}),
+            )?;
+            let client = service.slot("local")?.clone();
+            client.closed.store(true, Ordering::SeqCst);
+            service.unlisten_id("local", string(&personal, "listener_id"))?;
+            service.unlisten_id("local", string(&target, "listener_id"))?;
+            assert_eq!(
+                LocalState::open(&config.state_dir)?
+                    .db
+                    .query("SELECT * FROM pending_hub_detaches", &[])?
+                    .len(),
+                2
+            );
+            assert_eq!(
+                service
+                    .state
+                    .listener("local", string(&personal, "listener_id"))?
+                    .ok_or("Missing paused listener")?["status"],
+                "UNLISTENED"
+            );
+            service.ensure_human_nodes()?; // Failed reconciliation retains local intent.
+            client.closed.store(false, Ordering::SeqCst);
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing remote listener")?
+                    .0["human_paused"],
+                false
+            );
+            service.ensure_human_nodes()?;
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing paused registration")?
+                    .0["human_paused"],
+                true
+            );
+            assert!(service
+                .state
+                .db
+                .query("SELECT * FROM pending_hub_detaches", &[])?
+                .is_empty());
+            assert_eq!(
+                client
+                    .kv_get(string(&target, "listener_id"))?
+                    .ok_or("Missing agent registration")?
+                    .0["state"],
+                "UNLISTENED"
+            );
+            assert!(service.local.rpc(
+                "stream_get_message",
+                &json!({"stream":"CITO_SIGNALS","seq":personal_signal["seq"]}),
+                None
+            )?["acked_at_ms"]
+                .is_null());
+            let other = LocalState::open(&dir.join("other-mac"))?;
+            super::super::registration::register_listener(
+                &other,
+                &client,
+                "other-mac",
+                &json!({"about":"Receiver"}),
+                &json!({"harness":"human","session_id":"default","title":"Receiver"}),
+            )?;
+            service.ensure_human_nodes()?;
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing personal registration")?
+                    .0["human_paused"],
+                false,
+                "A settled pause must not override another explicit resume"
+            );
+            client.closed.store(true, Ordering::SeqCst);
+            service.unlisten_id("local", string(&personal, "listener_id"))?;
+            client.closed.store(false, Ordering::SeqCst);
+            assert!(service
+                .state
+                .db
+                .query(
+                    "SELECT * FROM local_signals WHERE acknowledged_at_ms IS NOT NULL",
+                    &[]
+                )?
+                .is_empty());
+            super::super::registration::register_listener(
+                &service.state,
+                &client,
+                &service.host_id,
+                &json!({"about":"Receiver"}),
+                &json!({"harness":"human","session_id":"default","title":"Receiver"}),
+            )?;
+            service.ensure_human_nodes()?;
+            assert_eq!(
+                client
+                    .kv_get(string(&personal, "listener_id"))?
+                    .ok_or("Missing resumed registration")?
+                    .0["human_paused"],
+                false
+            );
+            assert!(service
+                .state
+                .db
+                .query("SELECT * FROM pending_hub_detaches", &[])?
+                .is_empty());
+            assert!(service.local.rpc(
+                "stream_get_message",
+                &json!({"stream":"CITO_SIGNALS","seq":personal_signal["seq"]}),
+                None
+            )?["acked_at_ms"]
+                .is_null());
             Ok(())
         })();
         service.shutdown();

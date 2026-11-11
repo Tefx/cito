@@ -1039,7 +1039,14 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
             .iter()
             .any(|v| v["op"] == "cursor_save" && v["cursor"] == "16")
     });
-    f.send(p,json!({"op":"deliver","delivery_id":"large","config":{"chatId":"9"},"signal":{"from":{"title":"work"},"message":"😀".repeat(9000)}}));
+    let message = format!(
+        "start:{}|first-boundary|{}|second-boundary|{}",
+        "😀".repeat(4070),
+        "b".repeat(4090),
+        "🚀".repeat(850)
+    );
+    let expected = format!("🔔 Cito · work\n\n{message}");
+    f.send(p,json!({"op":"deliver","delivery_id":"large","config":{"chatId":"large"},"signal":{"from":{"title":"work"},"message":message}}));
     wait(|| {
         f.frames(p)
             .iter()
@@ -1053,10 +1060,15 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     assert_eq!(frame["ok"], true);
     assert_eq!(frame["external_msg_ids"].as_array().unwrap().len(), 3);
     let sent = fs::read_to_string(f.home.join("api-sends.jsonl")).unwrap();
-    for line in sent.lines() {
-        let v: Value = serde_json::from_str(line).unwrap();
-        assert!(v["text"].as_str().unwrap().chars().count() <= 4096);
-    }
+    let chunks = sent
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|v| v["chat_id"] == "large")
+        .map(|v| v["text"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(chunks.len(), 3);
+    assert!(chunks.iter().all(|text| text.chars().count() <= 4096));
+    assert_eq!(chunks.concat(), expected);
     let outcome = |delivery_id: &str| {
         wait(|| {
             f.frames(p).iter().any(|v| {
@@ -1083,13 +1095,19 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     let frame = outcome("uncertain");
     assert_eq!(frame["effect_unknown"], true);
     assert_eq!(frame["retryable"], false);
-    f.send(p,json!({"op":"deliver","delivery_id":"partial","config":{"chatId":"partial"},"signal":{"message":"a".repeat(9000)}}));
+    let message = format!(
+        "start:{}|first-boundary|{}|second-boundary|end",
+        "a".repeat(4070),
+        "b".repeat(4800)
+    );
+    let expected = format!("🔔 Cito · sender\n\n{message}");
+    f.send(p,json!({"op":"deliver","delivery_id":"partial","config":{"chatId":"partial"},"signal":{"message":message}}));
     let partial = outcome("partial");
     assert_eq!(partial["ok"], false);
     assert_eq!(partial["retryable"], true);
     assert_eq!(partial["effect_unknown"], false);
     assert_eq!(partial["external_msg_ids"].as_array().unwrap().len(), 1);
-    f.send(p,json!({"op":"deliver","delivery_id":"resumed","already_sent_ids":partial["external_msg_ids"],"config":{"chatId":"partial"},"signal":{"message":"a".repeat(9000)}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"resumed","already_sent_ids":partial["external_msg_ids"],"config":{"chatId":"partial"},"signal":{"message":message}}));
     let resumed = outcome("resumed");
     assert_eq!(resumed["ok"], true);
     assert_eq!(resumed["external_msg_ids"].as_array().unwrap().len(), 3);
@@ -1098,11 +1116,17 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         partial["external_msg_ids"][0]
     );
     let sent = fs::read_to_string(f.home.join("api-sends.jsonl")).unwrap();
+    let chunks = sent
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|v| v["chat_id"] == "partial")
+        .map(|v| v["text"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks.concat(), expected);
     assert_eq!(
-        sent.lines()
-            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["chat_id"] == "partial")
-            .count(),
-        3
+        chunks[1..].concat(),
+        expected.chars().skip(4096).collect::<String>()
     );
     f.eof(p);
     wait(|| f.exited(p));

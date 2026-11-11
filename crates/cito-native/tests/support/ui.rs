@@ -3217,6 +3217,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
         }
         for (kind, oracle) in [
             ("bar_anchor", "clipped_views"),
+            ("fractional_truncation", "truncated_labels"),
             ("strip_anchor", "clipped_views"),
             ("status_emoji", "jargon_leaks"),
         ] {
@@ -3239,6 +3240,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             "Wake banners",
             "cito_listen",
             "Hub Service:",
+            "Channel inventory",
             "UI action exceeds",
         ] {
             f.send(
@@ -3254,6 +3256,45 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             );
             f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
         }
+        let mut configured = state();
+        configured["settings"] = settings();
+        f.send(p, configured);
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:channels");
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":"bar_anchor","id":"save_channel:channel"}),
+        );
+        assert!(inspect_unchecked(&f, p, Some(appearance))["clipped_views"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(
+                "stratum_user:channel: bottom row is not edge anchored"
+            )));
+        f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+        control(&f, p, "edit_hub_service:channel");
+        f.send(p,json!({"op":"test_oracle_calibration","kind":"bar_anchor","id":"save_hub_service:channel"}));
+        assert!(inspect_unchecked(&f, p, Some(appearance))["clipped_views"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(
+                "stratum_hub:channel: bottom row is not edge anchored"
+            )));
+        f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+        control(&f, p, "cancel_edit_hub_service:channel");
+        control(&f, p, "close_settings");
+        control(&f, p, "open_activity");
+        f.send(
+            p,
+            json!({"op":"test_oracle_calibration","kind":"bar_anchor","id":"activity_clear"}),
+        );
+        assert!(inspect_unchecked(&f, p, Some(appearance))["clipped_views"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("directory_facet_bar: top row is not edge anchored")));
+        f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+        f.send(p, json!({"op":"test_directory_key","key":"escape"}));
+        inspect_as(&f, p, Some(appearance));
         for human in [false, true] {
             let mut invalid = state();
             invalid["listeners"][0]["hub"] = json!(if human { "personal" } else { "work" });

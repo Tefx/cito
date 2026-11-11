@@ -470,6 +470,7 @@ fn dispatch_listener(
                         false,
                         false,
                     )?;
+                    local.schedule_wake_retry_for(row, 1500)?;
                 }
                 _ => {
                     local.finish_wake_batch(

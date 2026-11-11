@@ -1355,8 +1355,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if op == "test_inspect" || op == "test_inspect_menu" { inspectMenu(); return }
             if op == "test_oracle_calibration", let kind = object["kind"] as? String {
-                if kind == "reset" { rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; return }
-                let roots = cardMenu.items.compactMap { $0.view }
+                if kind == "reset" { rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; updateDirectoryFacetStyles(); return }
+                let roots = cardMenu.items.compactMap { $0.view } + [settingsPanel?.contentView,directoryPanel?.contentView].compactMap { $0 }
                 func control(_ id: String) -> MenuControl? {
                     for root in roots { if let c = findControl(in:root,id:id) { return c } }
                     return nil
@@ -1364,10 +1364,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if let c = control("quit") {
                     if kind == "truncated_labels" { c.label.stringValue = String(repeating:"Wide chrome ",count:20) }
                     if kind == "jargon_leaks" { c.label.stringValue = object["text"] as? String ?? "Human receiver" }
-                    if kind == "bar_anchor" { c.frame.origin.x -= 24 }
+                    if kind == "fractional_truncation", let cell = c.label.cell {
+                        let slack = cell.drawingRect(forBounds:c.label.bounds).width - cell.cellSize.width
+                        c.label.frame.size.width -= max(0,slack) + 0.25
+                    }
                     if kind == "status_emoji", let button = status?.button ?? headlessStatusButton { button.attributedTitle = NSAttributedString(string: "🔔3") }
                     if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
                 }
+                if kind == "bar_anchor", let c = control(object["id"] as? String ?? "quit") { c.frame.origin.x -= 24 }
                 if kind == "address_mismatches", let listener = listeners.first { control("copy:\(listener.scoped_id)")?.label.stringValue = "wrong address" }
                 let row = object["row"] as? Int ?? 0
                 if kind == "activity_jargon", let table = directoryTableView, row >= 0, row < table.numberOfRows,
@@ -2763,7 +2767,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             hubStratum.addSubview(hubTitle)
             let gatewayStatus=textLabel(gatewayActive ? "● Bot Ready" : "○ Gateway Token Required",
                 NSRect(x:0,y:hubStratumH-25,width:gatewayActive ? 76 : 164,height:14),size:9,weight:.medium,color:gatewayActive ? CitoPalette.successText : CitoPalette.secondaryText)
-            gatewayStatus.alignment = gatewayActive ? .left : .right
+            gatewayStatus.alignment = .right
             gatewayStatus.identifier=NSUserInterfaceItemIdentifier("stratum_hub_status:\(ch.id)")
             hubStratum.addSubview(gatewayStatus)
             if gatewayActive && !hubFields.isEmpty {
@@ -3182,7 +3186,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             for hub in resolvedHubs {
                 let local=hub.name == "local"
                 let needsSignIn = hub.auth_mode == "oidc" && hub.enabled && ["auth_required","disconnected"].contains(hub.status)
-                let textWidth:CGFloat=local ? 300 : (needsSignIn ? 150 : 222)
                 let authTitle = ["none":"Trusted Network","token":"Shared Token","oidc":"Team Sign-In"][hub.auth_mode] ?? "Network"
                 let endpoint = hub.url == "local://" ? "On this Mac" : hub.url.replacingOccurrences(of:"^https?://",with:"",options:.regularExpression)
                 let detail = hub.error.map(presentationError) ?? (hub.status == "connected" ? "" : (["auth_required":"Sign-in required","disconnected":"Offline","connecting":"Connecting…"][hub.status] ?? "Unavailable"))
@@ -3195,7 +3198,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 rowTop -= 6
                 row.identifier = NSUserInterfaceItemIdentifier("settings_hub:\(hub.name)")
                 row.addSubview(roundedView(NSRect(x:12,y:rowHeight-28,width:8,height:8),radius:4,color:statusColor(hub.enabled ? hub.status : "disconnected")))
-                let nameLabel = textLabel(hub.name,NSRect(x:28,y:rowHeight-24,width:textWidth,height:16),size:12.5,weight:.semibold)
+                let nameLabel = textLabel(hub.name,NSRect(x:28,y:rowHeight-24,width:0,height:16),size:12.5,weight:.semibold)
                 nameLabel.lineBreakMode = .byTruncatingMiddle; nameLabel.toolTip = hub.name
                 row.addSubview(nameLabel)
                 let subtitleLabel = textLabel(subtitle,NSRect(x:28,y:4,width:subtitleWidth,height:subtitleHeight),size:10.5,color:CitoPalette.secondaryText)
@@ -3518,7 +3521,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         facetBar.addSubview(markReadBtn)
         directoryFacetControls["activity_mark_all_read"] = markReadBtn
-        let clear = MenuControl("Clear",frame:NSRect(x:484,y:5,width:60,height:22),leadingSymbol:"trash",radius:11)
+        let clear = MenuControl("Clear",frame:NSRect(x:0,y:5,width:68,height:22),leadingSymbol:"trash",radius:11)
         clear.label.font = .systemFont(ofSize: 11, weight: .medium)
         clear.identifier = NSUserInterfaceItemIdentifier("activity_clear")
         clear.pressed = { [weak self] in self?.emit(["op":"clear_activity_history"]); self?.queryDirectory() }
@@ -3748,27 +3751,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
 
         let pillFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        var layout: [(id: String, harness: String, title: String, x: CGFloat, width: CGFloat)] = []
-        var curX: CGFloat = 210
-        for h in ordered {
-            let visual = resolveHarnessVisual(h, harnesses: map)
-            let title = ordered.count <= 3 ? visual.name.replacingOccurrences(of:" (Experimental)",with:"") : h
-            let w = max(42, ceil(measureTextWidth(title, font: pillFont)) + 20)
-            layout.append((id: "dir_harness:\(h)", harness: h, title: title, x: curX, width: w))
-            curX += w + 4
-        }
         var harnessPills: [NSView] = []
-        for item in layout {
-            let pill = MenuControl(item.title, frame: NSRect(x: 0, y: 0, width: item.width, height: 22), radius: 11)
-            pill.identifier = NSUserInterfaceItemIdentifier(item.id); pill.label.font = pillFont
+        for harness in ordered {
+            let visual = resolveHarnessVisual(harness, harnesses: map)
+            let title = ordered.count <= 3 ? visual.name.replacingOccurrences(of:" (Experimental)",with:"") : harness
+            let width = max(42, ceil(measureTextWidth(title, font: pillFont)) + 20)
+            let id = "dir_harness:\(harness)"
+            let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
+            pill.identifier = NSUserInterfaceItemIdentifier(id); pill.label.font = pillFont
             pill.pressed = { [weak self] in
                 guard let self = self else { return }
-                self.directoryHarnessFilter = item.harness
+                self.directoryHarnessFilter = harness
                 self.rebuildDirectoryFacetBar()
                 self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
                 self.queryDirectory()
             }
-            harnessPills.append(pill); directoryFacetControls[item.id] = pill
+            harnessPills.append(pill); directoryFacetControls[id] = pill
         }
         let strip = mountPillStrip(in: facetBar, frame: NSRect(x: 210, y: 5, width: 334, height: 22),
                                   id: "directory_harness_scroll", pills: harnessPills) {
@@ -3795,6 +3793,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pill.style = active ? .prominent : .neutral
                 if !isActivity && active && id.hasPrefix("dir_harness:") { pill.scrollToVisible(pill.bounds) }
             }
+        }
+        if isActivity, let bar = directoryFacetBar, let markRead = directoryFacetControls["activity_mark_all_read"], let clear = directoryFacetControls["activity_clear"] {
+            layoutBar(in: bar, insetRight: 16, y: 5, height: 22, trailing: [markRead,clear])
         }
     }
 
@@ -4193,7 +4194,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var lowContrastLabels: [String] = []
         var jargonLeaks: [String] = []
         var addressMismatches: [String] = []
-        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
+        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
         func name(_ view: NSView) -> String {
             view.identifier?.rawValue ?? (view as? NSTextField)?.stringValue ?? String(describing:type(of:view))
         }
@@ -4261,7 +4262,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     // what AppKit can actually draw, not the outer field width.
                     let drawingWidth = label.cell?.drawingRect(forBounds:label.bounds).width ?? label.bounds.width
                     let requiredWidth = label.cell?.cellSize.width ?? label.attributedStringValue.size().width
-                    truncated = requiredWidth > drawingWidth + 0.5
+                    truncated = requiredWidth > drawingWidth
                 } else {
                     let height = ceil((label.stringValue as NSString).boundingRect(with:NSSize(width:label.frame.width,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:font]).height)
                     truncated = height > label.frame.height + 2
@@ -4349,10 +4350,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if ["header_hub_strip", "targetStrip"].contains(id), let scroll = view as? NSScrollView, !children.isEmpty {
                     if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
                 }
-                if ["footer","settings_footer","directory_footer"].contains(id) || ["stratum_hub:","stratum_user:","settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) {
-                    if let top = edgeItems.map({ $0.frame.midY }).max() {
-                        let topItems = edgeItems.filter { abs($0.frame.midY - top) <= 8 }
-                        if (topItems.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 { clippedViews.append(id + ": top row is not edge anchored") }
+                let stratum = ["stratum_hub:","stratum_user:"].contains(where: { id.hasPrefix($0) })
+                if ["footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
+                    var rows: [(String,CGFloat)] = []
+                    if let top = edgeItems.map({ $0.frame.midY }).max() { rows.append(("top",top)) }
+                    if stratum, let bottom = edgeItems.map({ $0.frame.midY }).min(), bottom != rows.first?.1 { rows.append(("bottom",bottom)) }
+                    for (row,y) in rows {
+                        let items = edgeItems.filter { abs($0.frame.midY - y) <= 8 }
+                        if (items.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 { clippedViews.append(id + ": " + row + " row is not edge anchored") }
                     }
                 }
                 for (index, child) in children.enumerated() {

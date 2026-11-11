@@ -836,11 +836,7 @@ impl HubEngine {
             Ok(())
         })
     }
-    fn ensure_process(
-        &self,
-        plugin: &ChannelPlugin,
-        recover_deliveries: bool,
-    ) -> Result<Arc<ChannelProcess>, String> {
+    fn ensure_process(&self, plugin: &ChannelPlugin) -> Result<Arc<ChannelProcess>, String> {
         let mut processes = self
             .inner
             .processes
@@ -867,13 +863,14 @@ impl HubEngine {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err("UNAVAILABLE: Hub is closing".into());
         }
-        // Recovery belongs to the supervisor; a transient test must never mutate the delivery ledger.
-        if recover_deliveries {
-            self.inner.db.execute(
-                "UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Channel process exited during delivery' WHERE plugin_id=? AND status='in_flight'",
-                &[json!(plugin.id)],
-            )?;
+        if let Some(process) = processes.get(&plugin.id).filter(|process| process.alive()) {
+            return Ok(process.clone());
         }
+        // Every replacement owns recovery, including a replacement requested by Send Test.
+        self.inner.db.execute(
+            "UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Channel process exited before confirming delivery' WHERE plugin_id=? AND status='in_flight'",
+            &[json!(plugin.id)],
+        )?;
         let weak = Arc::downgrade(&self.inner);
         let id = plugin.id.clone();
         let callback = Arc::new(move |frame: Value| {
@@ -1058,14 +1055,14 @@ impl HubEngine {
             Ok((cfg,user,changed))
         })?;
         if op == "human_channels_test" {
-            let process = self.ensure_process(&plugin, false)?;
+            let process = self.ensure_process(&plugin)?;
             return process.request(json!({"op":"test","user":caller["owner_user"],"hub_config":cfg,"user_config":user}));
         }
         if changed {
             self.stop_process(id)?;
             self.inner.db.transaction(|c| save_service(c, id, &cfg))?;
         }
-        let process = self.ensure_process(&plugin, true)?;
+        let process = self.ensure_process(&plugin)?;
         self.configure_process(id, &process)?;
         let code = pair_code()?;
         let expires = now_ms() + 600_000;
@@ -1187,7 +1184,7 @@ impl HubEngine {
                 continue;
             }
             if let Err(error) = self
-                .ensure_process(&plugin, true)
+                .ensure_process(&plugin)
                 .and_then(|process| self.replay(&plugin, &process))
             {
                 first_error.get_or_insert(error);
@@ -1276,7 +1273,7 @@ impl HubEngine {
                 &[json!(code), json!(id), json!(now_ms())])?
                 .ok_or("INVALID_INPUT: expired or consumed pairing code")?;
             validate_config(&plugin, &f["user_config_patch"], "user")?;
-            let old = one(c, "SELECT user_config_json FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
+            let old = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
                 &[row["principal_id"].clone(), json!(id)])?;
             let mut config = old.as_ref().map(|b| parse(b, "user_config_json")).unwrap_or(json!({}));
             merge_channel_config(&plugin, "user", &mut config, &f["user_config_patch"], false);
@@ -1284,9 +1281,10 @@ impl HubEngine {
             config["_external_user_id"] = json!(user);
             let (service_cfg, _) = service(c, id)?;
             let active = ready(&plugin, &service_cfg, "hub") && ready(&plugin, &config, "user");
-            let boundary = max_seq(c)?;
+            let boundary = if let Some(old) = old.as_ref().filter(|b| n(b,"enabled")==1) { n(old,"last_delivered_seq") } else { max_seq(c)? };
             c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET enabled=1,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
                 &[row["principal_id"].clone(), json!(id), row["owner_user"].clone(), json!(config.to_string()), f["display_label"].clone(), json!(boundary), json!(now_ms())])?;
+            c.execute("UPDATE hub_channel_deliveries SET status='failed',attempts=0,next_retry_ms=0,last_error=NULL WHERE plugin_id=? AND principal_id=? AND status IN ('failed','failed_permanent')", &[json!(id),row["principal_id"].clone()])?;
             c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE code=?", &[json!(now_ms()), json!(code)])?;
             let binding = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
                 &[row["principal_id"].clone(), json!(id)])?.ok_or("Binding missing")?;
