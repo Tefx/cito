@@ -10203,7 +10203,7 @@ phases:
   name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
     Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
     (U1–U5)'
-  status: in_progress
+  status: done
   gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10297,7 +10297,7 @@ phases:
   - id: v38.review
     name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
       the modified files (do NOT run multi-round review loops), verify cargo test
       --workspace && cargo build --release, and push main to origin (do NOT tag or
@@ -10314,7 +10314,52 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T17:33:54.413374Z'
-    done_at: '2026-11-12T17:30:40.753445+00:00'
+    done_at: '2026-11-12T18:15:25.496425+00:00'
+    evidence: "Artifact:\n- Commits: 80234da3d22bb7f5b3f9a42513f3c962d5a61dca, 9929fe66b5368dde56c1ff3c62f41c60b9e87d9e,\
+      \ beb9b3c87d0098ba1267c139693c208b7423d306, and df16f4a09562bb2aed1f7e9593e25d1c639c81b8\n\
+      - Candidate ref: refs/vectl/candidates/v38.review -> df16f4a09562bb2aed1f7e9593e25d1c639c81b8\n\
+      - Worktree cleanup: removed .vectl/worktrees/v38.review and /tmp/cito-v38* scratch;\
+      \ free space 100Gi.\n\nDelivered (Complete V38 Review + Addendum Questions 2\
+      \ & 3 + 6-Persona Audit Mechanisms 1, 2, 4, 5):\n1. Question 3 (Unify Human\
+      \ & Agent Active Stop Button to \"Pause\"):\n   - Active Agent session cards\
+      \ now use the exact same 52pt `.neutral` `\"Pause\"` pill button (`stop:<scoped_id>`)\
+      \ as `You (@user)` instead of an icon-only `×`.\n2. Question 2 (macOS HIG Segmented\
+      \ Track on All Switchers):\n   - Applied recessed segmented tracks + `.subtleHeader`\
+      \ borderless unselected pills across `header_hub_strip`, `directoryFacetBar`,\
+      \ `channel_hub_selector` (`Settings -> Human Channels`), and `settings_hub_auth:*`\
+      \ (`Settings -> Hubs & Network -> Add / Edit Hub`).\n3. Mechanism 1 (Eliminate\
+      \ Branch Geometry Drift in `src/macos/cito-ui.swift`):\n   - Removed `multiHub`\
+      \ branch geometry drift in `cardMenu` Zone 1; unified `human_paused_card` and\
+      \ all active listener cards to `cardHeight = 58`, `badge = NSRect(x: 12, y:\
+      \ cardHeight - 43, width: 28, height: 28)` (`radius: 7, iconInset: 6`), and\
+      \ `titleX = 48`.\n   - Tightened `copy:` / `copy_remote:` chip width padding\
+      \ (`paddingX: 3`), removed `!addHubFormOpen &&` from `hostExpanded` so opening\
+      \ `Add Hub…` / `Edit` does not collapse `host_hub_card`, and separated `add_hub_error`\
+      \ from `settings_hub_user` when editing `local`.\n4. Mechanism 2 (Fix Error-to-Empty\
+      \ Cache Poisoning in `plugins/codex/native.rs`, `daemon.rs`, and `cito-ui.swift`):\n\
+      \   - Propagated `desktop_running(req)?` in `plugins/codex/native.rs`, preserved\
+      \ existing `\"channels\"` array in `ChannelInventory::fetch_locked` when `slot.rpc(\"\
+      human_channels_list\", ...)` fails transiently, and preserved `activityTotal`\
+      \ / `activityUnreadCount` on `directory` frames when omitted.\n5. Mechanism\
+      \ 4 (State Authority & Scope Consistency in `daemon.rs` and `cito-ui.swift`):\n\
+      \   - Made `auto_listen()` check plugin configuration (`try_inspect_plugin_setup(p)`),\
+      \ filter `local_listeners` by `principal_id`, and pass `scope: Value::Null`\
+      \ so `register_locked` applies the Hub's canonical default scope (`\"workspace\"\
+      ` on `authMode == \"none\"`, `\"self\"` on `token`/`oidc`).\n   - Computed `uniqueSessionCount`\
+      \ and `humanListening` for the selected `effectiveTargetHub`, rendered `\"All\
+      \ sessions listening on \\(targetHub)\"` only when at least one agent session\
+      \ is listening on `targetHub`, and wired `\"act_empty_show_all\"` to `self.queryDirectory()`.\n\
+      6. Mechanism 5 (Remove Bogus `(~)` Suffix & Protocol Jargon Leaks in `cito-ui.swift`\
+      \ and `daemon.rs`):\n   - Removed `\" (~)\"` suffix from `nodeDisplayTitle`\
+      \ and `default_session_title`, preserved root prefix (`\"~/…/\"` vs `\"/…/\"\
+      `) in `compactSessionPath`, replaced `\"signal\"`/`\"signals\"` with `\"message\"\
+      `/`\"messages\"` in `Activity`, and replaced `\"↵ Copy Selected ID\"` with `\"\
+      ↵ Copy Address\"` in `Directory`.\n\nVerification:\n- Run: cargo fmt --all --\
+      \ --check && git diff --check -> PASS\n- Run: cargo build --release -> PASS\
+      \ (0 warnings, staged binaries updated)\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=2 cargo test --workspace -> PASS (274 passed, 4 ignored,\
+      \ 0 failed)\n- Version kept at 0.21.3 (no release tag created).\n\nSpec link:\n\
+      - docs/DESIGN.md §22 (U1–U5 & §22.2)"
     rejection_reason: Apply critical addendum for Question 3 (unify active Agent session
       stop:<id> button to 52pt .neutral 'Pause' pill matching You card) and Question
       2 (apply recessed segmented track + .subtleHeader unselected pills to channel_hub_selector
