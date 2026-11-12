@@ -10203,7 +10203,7 @@ phases:
   name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
     Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
     (U1–U5)'
-  status: in_progress
+  status: done
   gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10297,7 +10297,7 @@ phases:
   - id: v38.review
     name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
       the modified files (do NOT run multi-round review loops), verify cargo test
       --workspace && cargo build --release, and push main to origin (do NOT tag or
@@ -10314,7 +10314,63 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T18:17:30.390255Z'
-    done_at: '2026-11-12T18:15:25.496425+00:00'
+    done_at: '2026-11-12T19:11:05.300411+00:00'
+    evidence: "Artifact:\n- Commits: 80234da3d22bb7f5b3f9a42513f3c962d5a61dca, 9929fe66b5368dde56c1ff3c62f41c60b9e87d9e,\
+      \ beb9b3c87d0098ba1267c139693c208b7423d306, df16f4a09562bb2aed1f7e9593e25d1c639c81b8,\
+      \ and 784cc2be7c94ddc55e374057a3f032bd5889d72a (21 files changed, 550 insertions(+),\
+      \ 98 deletions(-))\n- Candidate ref: refs/vectl/candidates/v38.review -> 784cc2be7c94ddc55e374057a3f032bd5889d72a\n\
+      - Worktree cleanup: removed .vectl/worktrees/v38.review and /tmp/cito-v38* scratch;\
+      \ free space 100Gi.\n\nDelivered (Complete Stage 20 §22 U1–U5 + Stage 21 §23\
+      \ M1–M5 6-Persona Root-Cause Closure):\n1. Appended `## 23. Stage 21: Complete\
+      \ 6-Persona Root-Cause Closure Across Mechanisms M1–M5` (`§23.1` & `§23.2`)\
+      \ to `docs/DESIGN.md`.\n2. M1 (Eliminate Branch-Copy Geometry Drift Across All\
+      \ Cards, Rows & Forms):\n   - Single invariant Zone 1 card grid (`rowHeight\
+      \ = 64/78`, `cardHeight = 58/72`, `badge = (12, cardHeight - 43, 28, 28)`, `titleX\
+      \ = 48`).\n   - Unified `52pt` `.neutral` `\"Pause\"` pill on active Agent session\
+      \ cards and `\"Resume\"` on `human_paused_card`.\n   - Compact `paddingX = 3`\
+      \ on left-aligned `copy:` chips.\n   - Decoupled `host_hub_card` expansion from\
+      \ `addHubFormOpen` and separated `add_hub_error` from `settings_hub_user` on\
+      \ `local` (`formHeight = 144pt`).\n   - Fixed `Activity` expanded `line2MetaLabel`\
+      \ (`height = expanded ? rowHeight - 42 : 18`, `maxY = rowHeight - 34`) and indented\
+      \ `AVAILABLE SESSIONS` candidate rows to `x = 32, width = 260`.\n3. M2 (Distinguish\
+      \ Empty from Transient Error Across All Discovery, RPC & UI Caches):\n   - `sqlite3_busy_timeout(db,\
+      \ 1000)` + `desktop_running(req)?` + `try_rows(req)?` in `plugins/codex/native.rs`.\n\
+      \   - Propagated transient live socket errors in `plugins/pi/native.rs` and\
+      \ `plugins/claude/native.rs` instead of degrading to `needs_reload: true` or\
+      \ dropping sessions.\n   - Preserved existing `\"channels\"` in `ChannelInventory::fetch_locked`\
+      \ on transient RPC failure.\n   - Preserved `activityTotal` / `activityUnreadCount`\
+      \ on `directory` frames, preserved `Activity` selection by `signal_id`, scrolled\
+      \ selected row into view in `openComposer`, refreshed open `Directory`/`Activity`\
+      \ on `state` Hub/listener changes, and correlated `PendingMessageCopy` by `(hub,\
+      \ signalId)` across table reloads.\n4. M3 (Unified macOS HIG Segmented Track\
+      \ & Stable-Width Toggle Builders):\n   - Applied recessed segmented tracks (`labelColor\
+      \ @ 0.06`) with `.prominent` selected and `.subtleHeader` unselected segments\
+      \ across `header_hub_strip`, `settings_header` tabs, `channel_hub_selector`,\
+      \ `host_hub_addr:*`, `settings_hub_auth:*`, `directory_mode_track`, and `directoryFacetBar`.\n\
+      \   - Reserved paired-state widths (`max(width(stateA), width(stateB))`) in\
+      \ `layoutBar` for `scope:*`, `toggle_auto_listen`, `toggle_hub:*`, `toggle_desktop_banner`,\
+      \ and `toggle_host_hub`.\n5. M4 (Single-Authority Auto-Listen, Probe Recovery\
+      \ & Network-Scoped Indicators):\n   - Configured-plugin check, `principal_id`\
+      \ filtering, and `scope: Value::Null` in `auto_listen()`; cleared agent `UNLISTENED`\
+      \ markers on `set_auto_listen(true)` and disabled `auto_listen` on manual agent\
+      \ session pause.\n   - Fenced retained `local_listeners` rows on `principal_id`\
+      \ or Hub URL mismatch across disabled slots, and converged remote `human_paused\
+      \ == true` to local `UNLISTENED` in the receiver heartbeat.\n   - Scoped `uniqueSessionCount`\
+      \ / `humanListening` to `effectiveTargetHub`, showed `\"All sessions listening\"\
+      ` only when agent sessions are listening on `targetHub`, and wired `\"act_empty_show_all\"\
+      ` + `\"mark_all_activity_read\"` to update `activityUnreadCount = 0` and call\
+      \ `queryDirectory()`.\n6. M5 (Eliminate Misleading (~) Suffix & Protocol Jargon):\n\
+      \   - Removed `\" (~)\"` from `nodeDisplayTitle` and `default_session_title`,\
+      \ preserved root prefix (`\"~/…/\"` vs `\"/…/\"`) in `compactSessionPath`, replaced\
+      \ `\"signal\"`/`\"signals\"` with `\"message\"`/`\"messages\"` in `Activity`\
+      \ and `\"↵ Copy Selected ID\"` with `\"↵ Copy Address\"` in `Directory`, mapped\
+      \ all 6 `held_reason` values in `configureActivity`, and stripped trailing `(os\
+      \ error N)` in `presentationError`.\n\nVerification:\n- Run: cargo fmt --all\
+      \ -- --check && git diff --check -> PASS\n- Run: cargo build --release -> PASS\
+      \ (0 warnings, staged binaries updated)\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=2 cargo test --workspace -> PASS (274 passed, 4 ignored,\
+      \ 0 failed)\n- Version kept at 0.21.3 (no release tag created).\n\nSpec link:\n\
+      - docs/DESIGN.md §§22–23 (Stage 20 U1–U5 & Stage 21 M1–M5)"
     rejection_reason: 'Append docs/DESIGN.md §23 (Stage 21: Complete 6-Persona Root-Cause
       Closure Across Mechanisms M1–M5) and close remaining M1–M5 items in v38.review
       before completing and pushing'
