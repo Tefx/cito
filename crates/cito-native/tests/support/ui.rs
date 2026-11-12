@@ -2289,6 +2289,18 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     for mode in ["none", "token", "oidc"] {
         control(&f, p, &format!("settings_hub_auth:{mode}"));
         let s = inspect(&f, p);
+        let track = node(&s, "settings_items", "settings_hub_auth_track");
+        assert_eq!(track["radius"], 7);
+        assert_eq!(track["border_width"], 0);
+        assert!((track["background"][3].as_f64().unwrap() - 0.05).abs() < 0.001);
+        for candidate in ["none", "token", "oidc"] {
+            let pill = node(
+                &s,
+                "settings_items",
+                &format!("settings_hub_auth:{candidate}"),
+            );
+            assert_eq!(pill["border_width"], if candidate == mode { 1 } else { 0 });
+        }
         let labels: Vec<_> = nodes(&node(&s, "settings_items", "add_hub_form")["children"])
             .into_iter()
             .filter_map(|n| n["text"].as_str().map(String::from))
@@ -3595,10 +3607,11 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
         node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
         "Personal networks hide redundant visibility controls"
     );
-    assert_eq!(
-        node(&inspect(&f, p), "items", "stop:work:repo-workabcdefgh")["tooltip"],
-        "Pause listening for this session"
-    );
+    let pause = node(&inspect(&f, p), "items", "stop:work:repo-workabcdefgh");
+    assert_eq!(pause["text"], "Pause");
+    assert_eq!(pause["tooltip"], "Pause listening for this session");
+    assert_eq!(pause["border_width"], 1);
+    assert!(pause["symbol"].is_null());
     next["hubs"][1]["auth_mode"] = json!("token");
     f.send(p, next.clone());
     assert!(node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null());
@@ -4419,6 +4432,18 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 <= title["label_width"].as_f64().unwrap(),
             "Hero title must fit beside the rename pencil in {appearance}: {title}"
         );
+        let pauses: Vec<_> = nodes(&snapshot["items"])
+            .into_iter()
+            .filter(|n| n["id"].as_str().is_some_and(|id| id.starts_with("stop:")))
+            .collect();
+        assert_eq!(pauses.len(), 2);
+        for pause in &pauses {
+            assert_eq!(pause["text"], "Pause");
+            assert!(pause["symbol"].is_null());
+            assert_eq!(pause["border_width"], 1);
+            assert_eq!(pause["width"], pauses[0]["width"]);
+            assert_eq!(pause["height"], 22);
+        }
     }
     capture("menu", "menu_active");
 
@@ -4565,6 +4590,23 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 assert_eq!(icon["width"], 28);
             }
         } else if tab == "channels" {
+            for (appearance, dark) in [("light", false), ("dark", true)] {
+                let snapshot = inspect_as(&f, p, Some(appearance));
+                let track = node(&snapshot, "settings_items", "channel_hub_strip");
+                assert_eq!(track["radius"], 11);
+                assert_eq!(track["draws_background"], true);
+                let red = track["background"][0].as_f64().unwrap();
+                assert!(if dark { red > 0.9 } else { red < 0.1 });
+                assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
+                assert_eq!(
+                    node(&snapshot, "settings_items", "channel_hub_selector:local")["border_width"],
+                    1
+                );
+                assert_eq!(
+                    node(&snapshot, "settings_items", "channel_hub_selector:work")["border_width"],
+                    0
+                );
+            }
             assert_eq!(
                 node(&s, "settings_items", "plugin_icon:telegram")["tint"],
                 json!([])

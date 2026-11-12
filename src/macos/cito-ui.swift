@@ -2372,9 +2372,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
             }
             let personal = listener.harness == "human"
-            let stop = MenuControl(personal ? "Pause" : "Stop listening", frame: NSRect(x: 0, y: cardHeight - 28, width: personal ? 52 : 22, height: 22), symbol: personal ? nil : "xmark")
+            let stop = MenuControl("Pause", frame: NSRect(x: 0, y: cardHeight - 28, width: 52, height: 22))
             stop.toolTip = personal ? "Pause personal notifications" : "Pause listening for this session"
-            stop.style = personal ? .neutral : .subtleHeader
+            stop.style = .neutral
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
@@ -3063,7 +3063,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let width = max(64, measureTextWidth(name, font: .systemFont(ofSize: 11)) + 24)
             let pill = MenuControl(name, frame: NSRect(x: 0, y: 3, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("channel_hub_selector:\(name)")
-            pill.style = effectiveChannelHub == name ? .prominent : .neutral
+            pill.style = effectiveChannelHub == name ? .prominent : .subtleHeader
             pill.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.selectedChannelHub = name
@@ -3073,10 +3073,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             channelPills.append(pill)
         }
         if channelHubs.count > 1 {
-            mountPillStrip(in: channelsView, frame: NSRect(x: 102, y: 270, width: 398, height: 26),
-                           id: "channel_hub_selector", spacing: 6, pills: channelPills) {
+            let strip = mountPillStrip(in: channelsView, frame: NSRect(x: 102, y: 272, width: 398, height: 22),
+                           id: "channel_hub_strip", spacing: 6, pills: channelPills) {
                 $0.identifier?.rawValue == "channel_hub_selector:\(effectiveChannelHub)"
             }
+            strip.wantsLayer = true
+            strip.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
+            strip.drawsBackground = true
+            strip.layer?.cornerRadius = 11
+            strip.layer?.masksToBounds = true
         }
 
         let resolvedChannels = channelSettingsByHub[effectiveChannelHub] ?? []
@@ -3499,21 +3504,26 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 form.addSubview(makeEditableField("settings_hub_url",frame:NSRect(x:14,y:153,width:298,height:24),placeholder:"http://192.168.1.10:4291",value:addHubUrl))
                 form.addSubview(makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:addHubName))
                 fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14))
-                let authOptions: [(String,String,CGFloat)] = [("none","Trusted / Tailscale",132),("token","Shared Token",104),("oidc","Team OIDC",92)]
+                let authOptions = [("none","Trusted Network"),("token","Shared Token"),("oidc","Team Sign-In")]
+                let authTrack = roundedView(NSRect(x:68,y:118,width:398,height:28),radius:7,
+                    color:.labelColor.withAppearanceAlpha(0.05))
+                authTrack.identifier = NSUserInterfaceItemIdentifier("settings_hub_auth_track")
                 var authPills: [NSView] = []
-                for (mode,label,w) in authOptions {
-                    let pill=MenuControl(label,frame:NSRect(x:0,y:121,width:w,height:22),radius:11)
+                for (mode,label) in authOptions {
+                    let pill=MenuControl(label,frame:NSRect(x:0,y:3,width:MenuControl.intrinsicWidth(label),height:22),radius:11)
                     pill.identifier=NSUserInterfaceItemIdentifier("settings_hub_auth:\(mode)")
-                    pill.style = addHubAuth == mode ? .prominent : .neutral
+                    pill.style = addHubAuth == mode ? .prominent : .subtleHeader
                     pill.pressed={ [weak self] in
                         guard let self=self else{return}
                         self.syncAddHubFieldsFromControls()
                         if self.addHubAuth != mode { self.addHubDraftGeneration += 1 }
                         self.addHubAuth=mode; self.rebuildSettingsPanel()
                     }
-                    form.addSubview(pill); authPills.append(pill)
+                    authTrack.addSubview(pill); authPills.append(pill)
                 }
-                layoutBar(in: form, insetLeft: 68, y: 121, height: 22, leading: authPills)
+                layoutBar(in: authTrack, insetLeft: 3, insetRight: 3, y: 3, height: 22, spacing: 4, leading: authPills)
+                authTrack.frame.size.width = authPills.reduce(CGFloat(6)) { $0 + $1.frame.width } + CGFloat(max(0,authPills.count-1)) * 4
+                form.addSubview(authTrack)
                 if addHubAuth == "none" {
                     fieldLabel("Username (Optional)",NSRect(x:14,y:97,width:452,height:14))
                     form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:71,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser))

@@ -1900,10 +1900,13 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - **Basis**: In macOS HIG, mutually exclusive view/network switchers and scope-bar filter pills must be visually distinct from momentary push buttons (`.neutral`). Drawing unselected Hub pills (`[ ● local ]`) and unselected `Directory` filter pills (`My Macs`, `Pi`, `Codex`) with `.neutral` button borders made them look like action buttons.
 - **Contract (`src/macos/cito-ui.swift`)**:
   1. **Recessed Segmented Track for `header_hub_strip` in `cardMenu`**:
-     - When `hubs.count > 1`, style `header_hub_strip` (`height: 22`, right-aligned at `maxX = 368` so `strip_anchor == []`) with a recessed background (`layer?.backgroundColor = NSColor.labelColor.withAppearanceAlpha(0.06).cgColor`, `layer?.cornerRadius = 11`).
+     - When `hubs.count > 1`, style `header_hub_strip` (`height: 22`, right-aligned at `maxX = 368` so `strip_anchor == []`) with a recessed background (`NSColor.labelColor.withAppearanceAlpha(0.06)`, `cornerRadius = 11`). Use native scroll-view background drawing so the track renders and resolves its semantic color in both appearances.
      - Inside `header_hub_strip`, style the selected Hub pill (`hub.name == effectiveTargetHub`) as `.prominent` (when connected and error-free) or `.neutral` (when showing an error/disconnected state), and style **unselected** Hub pills (`hub.name != effectiveTargetHub`) as **`.subtleHeader` (borderless transparent at rest, subtle hover fill)** so the switcher is unmistakably a macOS Segmented Control!
   2. **Scope-Bar Styling for `Directory` / `Activity` Filter Pills (`updateDirectoryFacetStyles`, `cito-ui.swift:3955`)**:
      - For filter pills in `directoryFacetBar` (`dir_scope:*`, `dir_harness:*`, `act_filter:*`), style the active filter pill as `.prominent` and **unselected filter pills as `.subtleHeader` (borderless at rest)**, while keeping right-hand action buttons (`✓ Read All`, `🗑 Clear`) as `.neutral` bordered push buttons.
+  3. **Settings Switchers**:
+     - In Human Channels, place `channel_hub_selector:<name>` pills inside `channel_hub_strip`, using the same appearance-aware recessed fill (`labelColor` at `0.06`) and `11pt` corners. Keep the selected Hub `.prominent` and unselected Hubs `.subtleHeader`.
+     - In the Add / Edit Hub form, group `settings_hub_auth:none|token|oidc` (`Trusted Network`, `Shared Token`, `Team Sign-In`) inside `settings_hub_auth_track`, using a recessed `labelColor` fill at `0.05` and `7pt` corners. Keep the selected mode `.prominent` and unselected modes `.subtleHeader`. A borderless track may use compact padding; bordered tracks require at least `6pt` child padding. Preserve empty `clipped_views` and `overlapping_siblings` results.
 
 #### 3. `U3` — Unified Action Vocabulary (`Pause` / `Resume` / `Listen`) & Deterministic `Auto-Listen` Feedback (`src/macos/cito-ui.swift:2350–2660`, `crates/cito-native/src/core/daemon.rs`, Questions 3, 5, 6, 7)
 - **Basis**:
@@ -1914,7 +1917,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
   1. **Eliminate Hidden Per-Session Exception Memory Under `Auto-Listen` (`Question 6`)**:
      - Make `Auto-Listen` (`auto_listen`) a clean, stateless mode switch on the Hub:
        - **When `Auto-Listen` is toggled ON (`set_auto_listen` with `enabled: true`)**: Clear any prior `UNLISTENED` markers for agent sessions on that Hub and immediately enroll all eligible open sessions (`endpoint_pid != nil && needs_reload != true`).
-       - **When a user manually clicks `Pause` / `×` (`stop:<scoped_id>`) on an agent session while `Auto-Listen` is ON**: Automatically turn `auto_listen = false` on that Hub (switching to manual selection mode) and unlisten that session—so there is **never** a hidden contradiction where `Auto-Listen: On` is lit while an open session sits un-enrolled below!
+       - **When a user manually clicks `Pause` (`stop:<scoped_id>`) on an agent session while `Auto-Listen` is ON**: Automatically turn `auto_listen = false` on that Hub (switching to manual selection mode) and unlisten that session—so there is **never** a hidden contradiction where `Auto-Listen: On` is lit while an open session sits un-enrolled below!
        - **Visible Inline Feedback When `Auto-Listen: On` (`Question 5`)**:
          - When `Auto-Listen: On` is active on `effectiveTargetHub`:
            - If `visibleAvailable` contains sessions that need `/reload` (`needs_reload == true`), display a clear status caption in `AVAILABLE SESSIONS`: `"Auto-Listen is on — run /reload below to finish connecting"`.
@@ -1922,7 +1925,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
            - When `visibleAvailable.isEmpty`, show `"Auto-Listen is on — open sessions connect automatically"` (`available_empty_target`).
   2. **Consistent `Pause` / `Resume` Labeling (`Question 3`)**:
      - On `human_paused_card`, label the button **`"Resume"`** (without a `+` prefix, matching `"Pause"`).
-     - On active agent session cards, set `stop:<scoped_id>` tooltip to `"Pause listening for this session"`.
+     - On every active Human and agent session card, render `stop:<scoped_id>` as the same neutral `"Pause"` pill (`22pt` high, intrinsic text width), without an icon-only `×`. Keep the Human tooltip `"Pause personal notifications"` and agent tooltip `"Pause listening for this session"`. The title and rename control must fit alongside the pill; the canonical `"Release orchestration"` title must remain untruncated in both appearances.
 
 #### 4. `U4` — Intelligent Suppression of `Team / Self` on Personal Networks & Self-Explanatory Hub-Level Visibility (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, Questions 8 & 9)
 - **Basis**: On `local` or a personal Hub (`tefx-mbp-personal` where only `@tefx`'s own devices are connected, or `auth_mode != "oidc"` with no other users), showing `[ 🔒 Self ]` / `[ 👥 Team ]` on every card is meaningless noise (`Question 8`), and even when shown, `"Self"` vs `"Team"` had zero explanation in the UI (`Question 9`).
