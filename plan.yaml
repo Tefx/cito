@@ -9635,3 +9635,22 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+  - id: v34.review
+    name: 'V34 Simple Single-Pass Contract-and-Simplicity Review & Fix and Push to
+      main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: Run a simple SINGLE-PASS contract-and-simplicity review & fix across
+      the modified files and regenerated screenshots (do NOT run multi-round review
+      loops or spawn multiple auditor rounds per user instruction), verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v34.impl
+    agent: rust-senior
