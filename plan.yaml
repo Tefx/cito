@@ -9751,7 +9751,7 @@ phases:
 - id: v35
   name: 'V35 Stage 17: Complete Surface Audit Closure, Button Text Contrast, Intrinsic
     Sizing, Smart Path Compression & Titled-Panel Chinese IME (R1–R7)'
-  status: in_progress
+  status: done
   gate: All R1–R7 requirements in docs/DESIGN.md §19 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; website
     screenshots in site/assets/screenshots/*.png are refreshed; convergent contract-and-simplicity
@@ -9864,7 +9864,7 @@ phases:
   - id: v35.review
     name: 'V35 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: 'Run a convergent contract-and-simplicity review-and-fix loop across
       the modified files and regenerated Light/Dark screenshots until Contract & Wiring:
       CLEAN and Simplicity & Economy: ZERO_NEW_ISSUES converge, verify cargo test
@@ -9881,3 +9881,38 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T07:24:42.165423Z'
+    done_at: '2026-11-12T08:06:07.052367+00:00'
+    evidence: "Artifact:\n- Commits: c5fd874f2e131854cf1600d94628a8bb3d53cf2a and\
+      \ 5770b0aa5b2e17b4e1f48c9474758576d6cf612c (12 files changed, 86 insertions(+),\
+      \ 3 deletions(-))\n- Candidate ref: refs/vectl/candidates/v35.review -> 5770b0aa5b2e17b4e1f48c9474758576d6cf612c\n\
+      - Worktree cleanup: removed .vectl/worktrees/v35.review and /tmp/cito-v35-*\
+      \ scratch; free space 126Gi (delta -1Gi due to incremental target cache in main).\n\
+      \nConvergent 2D Contract-and-Simplicity Review-Fix Loop Summary:\n- Round 1\
+      \ (1..EOF Exhaustive 2D Discovery across pathway-auditor + uiux-auditor):\n\
+      \  - uiux-auditor (1..EOF over docs/DESIGN.md §19, /tmp/cito-v35-uiux-audit.md,\
+      \ src/macos/cito-ui.swift, crates/cito-native/tests/support/ui.rs, and all 7\
+      \ dark-mode Retina screenshots): Contract & Wiring: CLEAN, Simplicity & Economy:\
+      \ ZERO_NEW_ISSUES.\n  - pathway-auditor (1..EOF over docs/DESIGN.md §19, /tmp/cito-v35-uiux-audit.md,\
+      \ README.md, crates/cito-native/src/core/daemon.rs, crates/cito-native/tests/support/daemon.rs,\
+      \ and pathways P1..P7): Simplicity & Economy: ZERO_NEW_ISSUES; reported 3 Contract\
+      \ & Wiring items:\n    1. P2 (`setup_disconnect_all` with `purge_data: true`\
+      \ in `daemon.rs:3039–3046`): also reset local Hub channel service credentials\
+      \ (`human_channels_configure` with `reset_hub: true`) in `hub_plugin_services`.\n\
+      \    2. P6 (`seedDirectoryPeersIfEmpty` in `cito-ui.swift:779, 4254–4263`):\
+      \ decode `host_name` on `Listener` and map it into seeded `RemotePeer.host_name`\
+      \ so seeded local Directory rows preserve `\" · <host>\"` before `\"directory\"\
+      ` arrives.\n    3. P3/P5 (`layoutBar` in `cito-ui.swift:109–116`): preserve\
+      \ caller-supplied feedback-width reservation (`reservedWidth` for `copy:` and\
+      \ `copy_remote:` chips) so 1-character Human addresses (`@a`) never clip `\"\
+      ✓ Copied\"`.\n- Round 2 Fix & Semantic-Impact Delta Re-Review (`c5fd874` + `5770b0a`):\n\
+      \  - rust-senior closed all 3 items and updated existing tests in `daemon.rs`\
+      \ and `ui.rs` in place (zero new test functions added).\n  - pathway-auditor\
+      \ reread `/tmp/cito-v35-round2.diff` and 1..EOF of all 4 modified files (`daemon.rs`,\
+      \ `cito-ui.swift`, `tests/support/daemon.rs`, `tests/support/ui.rs`): converged\
+      \ at **Contract & Wiring: CLEAN** and **Simplicity & Economy: ZERO_NEW_ISSUES**.\n\
+      \nVerification:\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace\
+      \ -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 binary/distribution\
+      \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
+      \ created).\n\nSpec link:\n- docs/DESIGN.md §19 (R1–R7 & §19.2)"
