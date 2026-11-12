@@ -9592,7 +9592,7 @@ phases:
 - id: v34
   name: 'V34 Stage 16: Unified macOS Control Taxonomy, Intrinsic Layout Engine, Chinese
     IME Support, Distinct Directory/Activity Surfaces & Self-Invite Guard (Q1–Q6)'
-  status: in_progress
+  status: done
   gate: All Q1–Q6 requirements in docs/DESIGN.md §18 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; website
     screenshots in site/assets/screenshots/*.png are refreshed; simple single-pass
@@ -9689,7 +9689,7 @@ phases:
   - id: v34.review
     name: 'V34 Simple Single-Pass Contract-and-Simplicity Review & Fix and Push to
       main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a simple SINGLE-PASS contract-and-simplicity review & fix across
       the modified files and regenerated screenshots (do NOT run multi-round review
       loops or spawn multiple auditor rounds per user instruction), verify cargo test
@@ -9707,3 +9707,44 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T04:02:06.174284Z'
+    done_at: '2026-11-12T04:10:02.628291+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 623dd8e300324a19ecd4896049bbf1311a3babaf (10 files changed, 1 insertion(+),
+      2 deletions(-))
+
+      - Candidate ref: refs/vectl/candidates/v34.review -> 623dd8e300324a19ecd4896049bbf1311a3babaf
+
+      - Worktree cleanup: removed .vectl/worktrees/v34.review and /tmp/cito-v34-*
+      scratch; free space 128Gi (unchanged delta).
+
+
+      Single-Pass Contract-and-Simplicity Review & Fixes Applied:
+
+      1. [CONTRACT / DOCS] Synchronized `docs/DESIGN.md:1630` `MenuControl.layoutContents()`
+      text-width formula (`min(bounds.width - 28, ceil(measureTextWidth(...)) + 6)`)
+      with the verified implementation so the `6pt` native `NSTextFieldCell` margin
+      allowance is explicitly documented.
+
+      2. [SIMPLICITY / TRIM] Removed the unreachable `if container === userStratum
+      && !gatewayActive` guard inside `renderChannelFields` (`src/macos/cito-ui.swift:3114`),
+      since `renderChannelFields` is only invoked for `userStratum` when `gatewayActive`
+      is already true.
+
+      3. Verified all Q1–Q6 items, visual cleanliness of all 7 refreshed `site/assets/screenshots/*.png`
+      assets, and hard boundaries (`Cargo.toml` version `0.21.3`, zero CJK characters
+      in repo source/docs/site, zero company/environment-specific names).
+
+
+      Verification:
+
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace
+      -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 doc/bin tests
+      passed, 4 ignored, 0 failed)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §18 (Q1–Q6 & §18.2)'
