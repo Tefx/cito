@@ -285,7 +285,12 @@ func nodeDisplayTitle(_ title: String, harness: String, user: String, cwd: Strin
         return "You (@\(user))"
     }
     if harness != "human" && raw.hasSuffix(" (~)") { return raw }
-    if harness != "human" && (cwd == NSHomeDirectory() || raw.isEmpty || raw.lowercased() == user.lowercased()) {
+    let lower = raw.lowercased()
+    let homeBasename = (NSHomeDirectory() as NSString).lastPathComponent.lowercased()
+    let genericTitle = raw.isEmpty || lower == user.lowercased() || lower == homeBasename
+        || ["agent", "agent session", "session", "cli session", "human", "human node", "human channel"].contains(lower)
+    // A meaningful title remains authoritative even when its session lives at home.
+    if harness != "human" && genericTitle {
         return distinctAbout(about, title: raw, user: user) ?? "\(harnessName ?? harness) (~)"
     }
     return title

@@ -214,17 +214,35 @@ fn default_session_title(
     about: &str,
 ) -> String {
     let raw = string(caller, "title");
-    if caller["harness"] == "human"
-        || !(std::path::Path::new(string(caller, "cwd")) == home
-            || raw.trim().is_empty()
-            || raw.eq_ignore_ascii_case(user))
-    {
+    let title = raw.trim();
+    let home_basename = home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let generic_title = title.is_empty()
+        || title.eq_ignore_ascii_case(user)
+        || title.eq_ignore_ascii_case(home_basename)
+        || [
+            "agent",
+            "agent session",
+            "session",
+            "cli session",
+            "human",
+            "human node",
+            "human channel",
+        ]
+        .iter()
+        .any(|placeholder| title.eq_ignore_ascii_case(placeholder));
+    // Home-directory sessions may already carry a promoted meaningful title.
+    if caller["harness"] == "human" || !generic_title {
         return raw.to_owned();
     }
     let about = about.trim();
     let boilerplate = [
-        raw.to_lowercase(),
+        title.to_lowercase(),
+        user.to_lowercase(),
         format!("@{}", user.to_lowercase()),
+        "agent".into(),
         "session".into(),
         "cli session".into(),
         "agent session".into(),
@@ -5107,6 +5125,43 @@ mod tests {
             default_session_title(&caller, home, "Fixture", "alice", "Release audit"),
             "Release audit"
         );
+        let mut promoted = caller.clone();
+        promoted["title"] = json!("Auth refactor");
+        for cwd in ["/home/alice", "~", "/tmp"] {
+            promoted["cwd"] = json!(cwd);
+            for about in ["Auth refactor", "", "CLI session"] {
+                assert_eq!(
+                    default_session_title(&promoted, home, "Fixture", "alice", about),
+                    "Auth refactor"
+                );
+            }
+        }
+        let other_home = std::path::Path::new("/home/account");
+        for raw in [
+            "",
+            "alice",
+            "account",
+            "Agent",
+            "Agent session",
+            "Session",
+            "CLI session",
+            "Human",
+            "Human node",
+            "Human channel",
+        ] {
+            let generic = json!({"harness":"fixture","cwd":"~","title":raw});
+            for (about, expected) in [
+                ("Auth refactor", "Auth refactor"),
+                ("CLI session", "Fixture (~)"),
+                ("alice", "Fixture (~)"),
+            ] {
+                assert_eq!(
+                    default_session_title(&generic, other_home, "Fixture", "alice", about),
+                    expected,
+                    "raw={raw}, about={about}"
+                );
+            }
+        }
         let dir = std::env::temp_dir().join(format!("cito-addresses-{}", random_uuid_v4()));
         let config = NativeConfig {
             state_dir: dir.join("state"),

@@ -1272,7 +1272,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         );
         assert_eq!(
             node(&s, "directory_items", "dir_title:personal:agent")["text"],
-            "Human"
+            "Fixture (~)"
         );
         assert_eq!(
             node(&s, "directory_items", "dir_meta:personal:agent")["text"],
@@ -1342,7 +1342,18 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         )["text"],
         "Fixture (~)"
     );
-    for raw in ["bob", "Fixture (~)"] {
+    for raw in [
+        "bob",
+        "Fixture (~)",
+        "",
+        "Agent",
+        "Agent session",
+        "Session",
+        "CLI session",
+        "Human",
+        "Human node",
+        "Human channel",
+    ] {
         for about in ["CLI session", "bob", "@bob"] {
             agent["title"] = json!(raw);
             agent["about"] = json!(about);
@@ -1359,17 +1370,39 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             );
         }
     }
-    agent["title"] = json!("bob");
+    agent["title"] = json!("Auth refactor");
+    agent["custom_title"] = json!(false);
+    for cwd in [json!("~"), json!(f.home)] {
+        agent["cwd"] = cwd;
+        for about in ["Auth refactor", "", "CLI session"] {
+            agent["about"] = json!(about);
+            send_fixture(&f, p, json!({"op":"directory","peers":[agent.clone()]}));
+            let s = inspect(&f, p);
+            assert_eq!(
+                node(&s, "directory_items", "dir_title:personal:home")["text"],
+                "Auth refactor"
+            );
+            assert!(
+                !node(&s, "directory_items", "dir_meta:personal:home")["tooltip"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Auth refactor")
+            );
+        }
+    }
     agent["custom_title"] = json!(true);
-    send_fixture(&f, p, json!({"op":"directory","peers":[agent]}));
-    assert_eq!(
-        node(
-            &inspect(&f, p),
-            "directory_items",
-            "dir_title:personal:home"
-        )["text"],
-        "bob"
-    );
+    for title in ["bob", "Human"] {
+        agent["title"] = json!(title);
+        send_fixture(&f, p, json!({"op":"directory","peers":[agent.clone()]}));
+        assert_eq!(
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "dir_title:personal:home"
+            )["text"],
+            title
+        );
+    }
 }
 
 #[test]
