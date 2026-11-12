@@ -9779,7 +9779,7 @@ phases:
   - id: v35.impl
     name: V35 R1–R7 Complete Surface Audit Closure, Button Contrast, Smart Path Compression
       & Titled-Panel Chinese IME
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §19 (R1–R7) while strictly enforcing §19.2
       test economy (update existing unit/UI assertions in place; do NOT add new multi-process
       E2E test functions). Regenerate site/assets/screenshots/*.png.
@@ -9793,6 +9793,74 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T06:54:30.257010Z'
+    done_at: '2026-11-12T07:24:27.378997+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 23779533e6b5cbf6db80ccf63be13c168fceeafa (19 files changed, 268 insertions(+),
+      74 deletions(-))
+
+      - Candidate ref: refs/vectl/candidates/v35.impl -> 23779533e6b5cbf6db80ccf63be13c168fceeafa
+
+      - Worktree cleanup: removed .vectl/worktrees/v35.impl, .v35-captures, and /tmp/cito-v35-*.log;
+      free space 127Gi (unchanged delta).
+
+
+      Delivered (docs/DESIGN.md §19 R1–R7 & §19.2):
+
+      1. R1 (.destructiveHover Resting Primary Text Color): resting foreground uses
+      normalColor (.labelColor) matching .neutral at rest, transitioning to CitoPalette.destructiveFill
+      + white border/foreground on hover.
+
+      2. R2 (Option A Disconnect All… Footer Button & 2-Button Confirmation Modal):
+      renamed open_uninstall_confirm to "Disconnect All…", changed modal title to
+      "Disconnect All Integrations", kept uninstall_purge_data checkbox, and laid
+      out only "Cancel" (.neutral) and "Disconnect All" (confirm_disconnect_all, .destructive).
+      Extended setup_disconnect_all in daemon.rs with purge_data == true to reset
+      config.json (defaultHub = "local", hubs = {}) and clear local_signals + non-human
+      local_listeners.
+
+      3. R3 (Intrinsic Button Widths Without Ellipsis Truncation): layoutBar enforces
+      MenuControl.intrinsicWidth as minimum width for MenuControl subviews; sized
+      open_settings (paddingX: 6) and all Human Channels buttons intrinsically and
+      removed manual 76 / 58 width overrides.
+
+      4. R4 (Clean State C & Share This Mac as a Hub Header Padding): when personalCollapsed
+      && !hubGatewayExpanded, stratum_hub_title:<id> renders "Bot Gateway" and stratum_hub_status:<id>
+      is hidden; expanded host_hub_card places header at y = hostHeight - 30.5 and
+      toggle_host_hub at y = hostHeight - 34 (10pt top margin).
+
+      5. R5 (Smart Path Compression & Left-Aligned copy:<id> Chip): flush-left copy:<scoped_id>
+      chip at x = titleX and compactSessionPath (~/…/<parent>/<leaf> then ~/…/<leaf>,
+      full path in toolTip).
+
+      6. R6 (Directory Initial Peer Seeding, onlineDot Removal & Activity Dynamic
+      Row Height + xmark): removed onlineDot from DirectoryPeerCellView, seeded directoryAllPeers
+      = listeners + myRemote when empty on state/openDirectoryPanel, updated Activity
+      expansion to measureTextWidth(..., 12) > 480 || text.contains("\n") with wrapped
+      height min(108, max(60, 38 + ceil(wrappedRect.height))), and changed delete_activity:<signal_id>
+      symbol to "xmark".
+
+      7. R7 (Titled Full-Size Content KeyPanel & Activation Policy): initialized KeyPanel
+      (settingsPanel and directoryPanel) with styleMask: [.titled, .fullSizeContentView],
+      hidden title, transparent titlebar, hidden traffic-light buttons, and NSApp.setActivationPolicy(.regular/.accessory)
+      when not headless.
+
+      8. Refreshed site/assets/screenshots/*.png and updated existing assertions in
+      crates/cito-native/tests/support/{ui.rs,daemon.rs} in place.
+
+
+      Verification:
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace
+      -- --test-threads=1 -> PASS (170 unit + 100 native integration + 3 binary/distribution
+      tests passed, 4 ignored, 0 failed)
+
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §19 (R1–R7 & §19.2)'
   - id: v35.review
     name: 'V35 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
