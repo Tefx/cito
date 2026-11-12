@@ -9919,7 +9919,7 @@ phases:
 - id: v36
   name: 'V36 Stage 18: Multi-Hub Card & Directory Coalescing, Smart Home-Directory
     Naming, Inline/CLI/MCP Session Renaming & Complete CLI/MCP Surface Parity (S1–S4)'
-  status: in_progress
+  status: done
   gate: All S1–S4 requirements in docs/DESIGN.md §20 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; convergent
     contract-and-simplicity review-fix loop reaches CLEAN + ZERO_NEW_ISSUES; cargo
@@ -10012,7 +10012,7 @@ phases:
   - id: v36.review
     name: 'V36 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: 'Run a convergent contract-and-simplicity review-and-fix loop (with
       pathway-auditor + uiux-auditor) across the modified files until Contract & Wiring:
       CLEAN and Simplicity & Economy: ZERO_NEW_ISSUES converge, verify cargo test
@@ -10030,3 +10030,37 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T10:31:51.247156Z'
+    done_at: '2026-11-12T11:53:47.643941+00:00'
+    evidence: "Artifact:\n- Commits: b4a06e703b8171d3b46cd6ecd6e3cf6553e44fc2, 40a83d34ea961a68457e0b85720a6010fca68ca1,\
+      \ and af7b5c7b1b58efd7dde3cf8285dee2e08b12c38f (14 files changed, 366 insertions(+),\
+      \ 59 deletions(-))\n- Candidate ref: refs/vectl/candidates/v36.review -> af7b5c7b1b58efd7dde3cf8285dee2e08b12c38f\n\
+      - Worktree cleanup: removed .vectl/worktrees/v36.review and /tmp/cito-v36* scratch;\
+      \ free space 122Gi.\n\nConvergent 2D Contract-and-Simplicity Review-Fix Loop\
+      \ Summary:\n- Round 1 (1..EOF 2D Discovery across pathway-auditor + uiux-auditor):\n\
+      \  - Identified 6 findings across P1..P6 and H1..H5:\n    1. `snapshot()[\"\
+      available\"]` custom-title overlay on immediate post-rename snapshot & candidate\
+      \ tooltip normalization (`daemon.rs`, `cito-ui.swift`).\n    2. Coalesced card\
+      \ `switch_hub:<scoped_id>` cycling across disconnected enrolled Hubs (`cito-ui.swift`).\n\
+      \    3. Shared idempotent automatic naming across `daemon.rs` (`default_session_title`\
+      \ / `is_generic_session_label`) and `cito-ui.swift` (`nodeDisplayTitle` / `distinctAbout`\
+      \ / `isGenericSessionLabel`).\n    4. Single-Hub `unlisten` custom-title retention\
+      \ verification across enrolled Hubs (`tests/support/daemon.rs`).\n    5. CLI\
+      \ `cito setup --invite` self-invite loop guard verification across loopback,\
+      \ IPv6 loopback, hostname, and `.local` aliases (`tests/support/daemon.rs`).\n\
+      \    6. Consolidated `cleanHostDisplay`, removed unused `localHost` and `cwd`\
+      \ parameters, tightened `cardMenu` action spacing (`spacing: 2`) and `hubPillWidth`\
+      \ padding so `\"Release orchestration\"` renders untruncated next to `rename:<scoped_id>`,\
+      \ and refreshed `site/assets/screenshots/menu-dark.png`.\n- Rounds 2–4 Fix &\
+      \ Semantic-Impact Delta Re-Reviews (`b4a06e7`, `40a83d3`, `af7b5c7`):\n  - `uiux-auditor`\
+      \ converged at **Contract & Wiring: CLEAN** and **Simplicity & Economy: ZERO_NEW_ISSUES**\
+      \ (confirming `menu-dark.png` renders `\"Release orchestration ✎\"` untruncated).\n\
+      \  - `pathway-auditor` verified the shared `is_generic_session_label` / `isGenericSessionLabel`\
+      \ fixed-point idempotence (covering `user`, `@user`, `home_basename`, `@<home_basename>`,\
+      \ and generic placeholders) and converged at **Contract & Wiring: CLEAN** and\
+      \ **Simplicity & Economy: ZERO_NEW_ISSUES**.\n\nVerification:\n- Run: cargo\
+      \ fmt --all -- --check && git diff --check -> PASS\n- Run: cargo build --release\
+      \ -> PASS (0 warnings, staged binaries updated)\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=2 cargo test --workspace -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Version kept at 0.21.3 (no release tag created).\n\nSpec link:\n- docs/DESIGN.md\
+      \ §20 (S1–S4 & §20.2)"
