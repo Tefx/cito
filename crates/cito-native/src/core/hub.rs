@@ -2126,6 +2126,12 @@ fn handle_http(
                 return Err("INVALID_INPUT: duplicate content-length".into());
             }
         }
+        if path == "/" && method == "GET" {
+            let body = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Cito Hub</title><body><h1>Cito Hub</h1><p>Cito Hub is active on this Mac. Open Cito → Settings → Hubs &amp; Network → Paste Invite Code on another Mac to connect.</p></body></html>";
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
         if path == "/health" && method == "GET" {
             http_json(&mut stream,200,&json!({"ok":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"auth_mode":auth.mode})).map_err(|e|e.to_string())?;
             return Ok(());

@@ -2484,6 +2484,23 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["to"], sender["public_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
+    // A per-message deletion acknowledges and removes just one row.
+    assert_eq!(
+        f.action(json!({"op":"clear_activity_history","hub":"local","signal_id":"missing"}))
+            .0,
+        200
+    );
+    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
+    assert_eq!(
+        f.action(
+            json!({"op":"clear_activity_history","hub":"local","signal_id":activity["signal_id"]})
+        )
+        .0,
+        200
+    );
+    let remaining = f.rows("SELECT * FROM local_signals");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["message"], "Human reply");
     assert_eq!(f.action(json!({"op":"clear_activity_history"})).0, 200);
     assert!(f.rows("SELECT * FROM local_signals").is_empty());
     f.tool("cito_unlisten", json!({}), meta.clone());
@@ -2833,6 +2850,51 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         .find(|h| h["name"] == "json")
         .unwrap()["error"]
         .is_null());
+
+    assert_eq!(
+        f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1"}))
+            .0,
+        200
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let hosted = &snapshot["settings"]["host_hub"];
+    let port = hosted["port"].as_u64().unwrap();
+    let committed = fs::read(&f.config).unwrap();
+    let hostname = f.env["CITO_HOST_NAME"].clone();
+    for host in [
+        "127.0.0.1",
+        "localhost",
+        "[::1]",
+        &hostname,
+        &format!("{}.local", hostname.trim_end_matches(".local")),
+    ] {
+        let invite =
+            json!({"name":"self-invite","url":format!("http://{host}:{port}"),"auth_mode":"none"});
+        let (status, error) =
+            f.action(json!({"op":"paste_hub_invite","invite":invite.to_string()}));
+        assert_eq!(status, 400, "{host}: {error}");
+        assert_eq!(error["error"], "INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.");
+        assert_eq!(fs::read(&f.config).unwrap(), committed);
+    }
+    let root = ureq::get(hosted["endpoint_url"].as_str().unwrap())
+        .call()
+        .unwrap();
+    assert_eq!(
+        root.header("Content-Type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(root
+        .into_string()
+        .unwrap()
+        .contains("Paste Invite Code on another Mac"));
+    // The same host on another port remains a valid remote Hub.
+    let different = if port == 65535 { port - 1 } else { port + 1 };
+    let invite = json!({"name":"different-port","url":format!("http://127.0.0.1:{different}"),"auth_mode":"none"});
+    assert_eq!(
+        f.action(json!({"op":"paste_hub_invite","invite":invite.to_string()}))
+            .0,
+        200
+    );
 }
 #[test]
 fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_errors() {

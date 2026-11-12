@@ -305,10 +305,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     l.until(|s| s["settings_open"] == true);
     l.control("settings_tab:channels");
     let s = l.until(|s| !node(s, "settings_items", "save_hub_service:channel").is_null());
-    assert_eq!(
-        node(&s, "settings_items", "stratum_user:channel")["height"],
-        40
-    );
+    assert!(node(&s, "settings_items", "stratum_user:channel").is_null());
     for id in [
         "channel_field:channel:address",
         "pair_channel:channel",
@@ -1089,10 +1086,11 @@ fn render_png(f: &Fixture, p: usize, surface: &str, name: &str) {
 }
 fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: Option<&str>) {
     inspect_as(f, p, appearance);
-    if std::env::var_os("CITO_TEST_SNAPSHOT_DIR").is_none() {
+    let Some(dir) = std::env::var_os("CITO_TEST_SNAPSHOT_DIR") else {
         return;
-    }
-    let path = f.dir.join(name);
+    };
+    fs::create_dir_all(&dir).unwrap();
+    let path = std::path::Path::new(&dir).join(name);
     f.send(
         p,
         json!({"op":"test_render_png","surface":surface,"path":path,"appearance":appearance}),
@@ -1123,11 +1121,6 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
     }
     assert!(height > 100);
     inspect_as(f, p, appearance);
-    // Opt-in temporary visual-review artifacts; normal test runs leave no residue.
-    if let Some(dir) = std::env::var_os("CITO_TEST_SNAPSHOT_DIR") {
-        fs::create_dir_all(&dir).unwrap();
-        fs::copy(&path, std::path::Path::new(&dir).join(name)).unwrap();
-    }
 }
 
 #[test]
@@ -1536,7 +1529,7 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
         if selected_index == 1 {
             assert_eq!(
                 node(&s, "directory_items", "activity_row:sig_other")["height"],
-                52
+                60
             );
             assert_eq!(
                 node(&s, "directory_items", "activity_row:sig_agent")["height"],
@@ -1660,30 +1653,18 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         "○ Not Set Up"
     );
     let hub = node(&s, "settings_items", "stratum_hub:channel");
-    let user = node(&s, "settings_items", "stratum_user:channel");
-    assert!(
-        hub["y"].as_f64().unwrap() > user["y"].as_f64().unwrap() + user["height"].as_f64().unwrap()
-    );
+    assert!(node(&s, "settings_items", "stratum_user:channel").is_null());
     assert!(nodes(&hub["children"])
         .iter()
         .any(|n| n["id"] == "channel_field:channel:secret"));
     assert!(!nodes(&hub["children"])
         .iter()
         .any(|n| n["id"] == "channel_field:channel:account"));
-    assert_eq!(user["height"], 40);
-    assert!(nodes(&user["children"])
-        .iter()
-        .all(|n| n["id"] != "skip_channel:channel"));
     assert_eq!(
         node(&s, "settings_items", "stratum_hub_title:channel")["text"],
         "1. Shared Bot Gateway"
     );
-    assert!(
-        node(&s, "settings_items", "stratum_user_title:channel")["text"]
-            .as_str()
-            .unwrap()
-            .contains("@alice")
-    );
+    assert!(node(&s, "settings_items", "stratum_user_title:channel").is_null());
     render_png(&f, p, "settings", "settings_channels_unconfigured.png");
     f.send(p, json!({"op":"test_settings_scroll","offset":0}));
     render_png(&f, p, "settings", "settings_channels_unconfigured_node.png");
@@ -1832,7 +1813,12 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert_eq!(node(&s, "settings_items", "edit_hub:local")["x"], 338);
     assert_eq!(node(&s, "settings_items", "remove_hub:work")["x"], 396);
     assert_eq!(node(&s, "settings_items", "edit_hub:work")["x"], 260);
-    assert_eq!(node(&s, "settings_items", "login_hub:work")["x"], 184);
+    let login = node(&s, "settings_items", "login_hub:work");
+    let edit = node(&s, "settings_items", "edit_hub:work");
+    assert_eq!(
+        login["x"].as_f64().unwrap() + login["width"].as_f64().unwrap() + 6.0,
+        edit["x"].as_f64().unwrap()
+    );
     assert!(node(&s, "settings_items", "copy_host_hub_token").is_null());
     render_png(&f, p, "settings", "settings_hubs_token.png");
     control(&f, p, "copy_hub_invite");
@@ -2067,7 +2053,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     );
     assert_eq!(
         node(&s, "settings_items", "settings_hub_user")["placeholder"],
-        "e.g. alice"
+        "Defaults to your Mac username"
     );
     assert_eq!(node(&s, "settings_items", "settings_hub_name"), Value::Null);
     render_png(&f, p, "settings", "settings_hubs_edit_local.png");
@@ -2270,7 +2256,7 @@ fn d12_onboarding_uses_inline_guidance_without_redundant_controls() {
     f.send(p, frame);
     control(&f, p, "open_settings");
     let apps = inspect(&f, p);
-    assert!(nodes(&apps["settings_items"])
+    assert!(!nodes(&apps["settings_items"])
         .iter()
         .any(|n| n["text"] == "Click Set Up below, then + Listen in the Cito menu bar."));
     for tab in ["apps", "channels", "hubs"] {
@@ -2842,10 +2828,75 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
         node(&s, "directory_items", "directory_shortcuts")["text"],
         "↵ Reply    ⎋ Close"
     );
+    let row = node(&s, "directory_items", "activity_row:personal:sig_unread");
+    assert_eq!(row["height"], 60);
+    let children = nodes(&row["children"]);
+    let accent = children
+        .iter()
+        .find(|n| n["id"] == "unread_accent_bar")
+        .unwrap();
+    assert_eq!(accent["hidden"], false);
+    assert_eq!(accent["width"], 3);
+    assert_eq!(accent["x"], 4);
+    assert_eq!(accent["height"], 44);
+    assert_eq!(
+        children
+            .iter()
+            .find(|n| n["id"] == "online_presence_dot")
+            .unwrap()["hidden"],
+        true
+    );
+    assert!(
+        node(&s, "directory_items", "act_title:personal:sig_unread")["text"]
+            .as_str()
+            .unwrap()
+            .ends_with(" · Just now")
+    );
+    assert_eq!(
+        node(&s, "directory_items", "act_msg:personal:sig_unread")["width"],
+        492
+    );
+    let delete = node(&s, "directory_items", "delete_activity:personal:sig_unread");
+    assert_eq!(delete["symbol"], "trash");
+    assert_eq!(delete["width"], 24);
+    assert_eq!(delete["tooltip"], "Delete message");
+    control(&f, p, "delete_activity:personal:sig_unread");
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "clear_activity_history"
+                && v["hub"] == "personal"
+                && v["signal_id"] == "personal:sig_unread"
+        })
+    });
+    let deletions = f
+        .frames(p)
+        .iter()
+        .filter(|v| v["op"] == "clear_activity_history")
+        .count();
+    f.send(p, json!({"op":"test_focus_field","id":"directory_search"}));
+    f.send(p, json!({"op":"test_directory_key","key":"delete"}));
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "clear_activity_history")
+            .count(),
+        deletions,
+        "Delete must keep normal text editing semantics"
+    );
     control(&f, p, "act_filter:all");
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     let s = inspect(&f, p);
     assert_eq!(s["directory_selected_id"], "personal:sig_read");
+    f.send(p, json!({"op":"test_focus_field","id":"directory_table"}));
+    f.send(p, json!({"op":"test_directory_key","key":"delete"}));
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "clear_activity_history"
+                && v["hub"] == "personal"
+                && v["signal_id"] == "personal:sig_read"
+        })
+    });
     assert!(node(&s, "directory_items", "reply_activity:personal:sig_read")["hidden"] == true);
     control(&f, p, "reply_activity:personal:sig_read");
     f.send(p, json!({"op":"test_directory_key","key":"return"}));
@@ -2896,7 +2947,16 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":"/tmp/work","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
     f.send(p, frame.clone());
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "items", "available_scroll")["height"], 144);
+    assert_eq!(node(&s, "items", "available_scroll")["height"], 176);
+    let candidate = node(&s, "items", "candidate:fixture:candidate-0");
+    assert_eq!(candidate["height"], 44);
+    let title = node(&s, "items", "candidate_title:fixture:candidate-0");
+    let path = node(&s, "items", "candidate_cwd:fixture:candidate-0");
+    assert_eq!(title["width"], 268);
+    assert_eq!(path["width"], 268);
+    assert_eq!(title["y"], 23);
+    assert_eq!(path["y"], 6);
+    assert_eq!(path["text"], "/tmp/work");
     assert_eq!(s["available_count"], 5);
     assert_eq!(node(&s, "items", "target_hub:work")["text"], "work");
     control(&f, p, "listen:fixture:candidate-0");
@@ -3878,14 +3938,8 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 node(&s, "settings_items", "copy_hub_invite")["text"],
                 "Copy Invite Code"
             );
-            let guidance = node(&s, "settings_items", "host_hub_guidance");
-            assert_eq!(
-                guidance["text"],
-                "On another Mac, click Paste Invite Code below (or run in Terminal) to connect."
-            );
-            assert_eq!(guidance["x"], 14);
-            assert_eq!(guidance["y"], 110);
-            assert_eq!(guidance["width"], 452);
+            assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
+            assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 136);
             assert_eq!(
                 node(&s, "settings_items", "paste_hub_invite")["text"],
                 "Paste Invite Code"
@@ -3900,7 +3954,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 56);
+    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 46);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 56);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 204);
     assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
@@ -4211,14 +4265,11 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     assert_eq!(s["settings_tab"], "apps");
     for (id, configured) in [("pi", true), ("codex", false), ("cursor", false)] {
         assert!(!node(&s, "settings_items", &format!("settings_app:{id}")).is_null());
-        assert_eq!(
-            node(&s, "settings_items", &format!("settings_app_status:{id}"))["text"],
-            if configured {
-                "● Connected"
-            } else {
-                "○ Not Set Up"
-            }
-        );
+        let status = node(&s, "settings_items", &format!("settings_app_status:{id}"));
+        assert_eq!(status["hidden"], !configured);
+        if configured {
+            assert_eq!(status["text"], "● Connected");
+        }
         assert_eq!(
             node(&s, "settings_items", &format!("setup_app:{id}"))["text"],
             if configured { "Re-check" } else { "Set Up" }
@@ -4365,6 +4416,19 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
             "cito setup --hub remote --url {endpoint} --auth token --token lan-test-token --default"
         )
     );
+    let page = ureq::get(endpoint)
+        .timeout(std::time::Duration::from_secs(2))
+        .call()
+        .unwrap();
+    assert_eq!(page.status(), 200);
+    assert_eq!(
+        page.header("Content-Type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(page
+        .into_string()
+        .unwrap()
+        .contains("Cito Hub is active on this Mac."));
     let anonymous = ureq::get(&format!("{endpoint}/v1/rpc"))
         .timeout(std::time::Duration::from_secs(2))
         .call();

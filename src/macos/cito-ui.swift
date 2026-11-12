@@ -104,6 +104,13 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
                leading: [NSView] = [], flexible: NSView? = nil, trailing: [NSView] = []) {
     let leftItems = leading.filter { !$0.isHidden }
     let rightItems = trailing.filter { !$0.isHidden }
+    for case let control as MenuControl in leftItems + rightItems where !control.label.isHidden
+        && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.centerSymbolView }) {
+        control.frame.size.width = MenuControl.intrinsicWidth(control.label.stringValue,
+            font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
+            leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
+            minWidth:control.frame.width)
+    }
     var left = insetLeft
     var right = container.bounds.width - insetRight
     func place(_ view: NSView, x: CGFloat) {
@@ -211,6 +218,7 @@ enum CitoPalette {
 final class SurfaceView: NSView {
     var fillColor: NSColor { didSet { needsDisplay = true; applyLayerColors() } }
     var strokeColor: NSColor? { didSet { needsDisplay = true; applyLayerColors() } }
+    var strokeWidth: CGFloat = 1 { didSet { applyLayerColors() } }
     var cornerRadiusValue: CGFloat { didSet { layer?.cornerRadius = cornerRadiusValue; needsDisplay = true } }
     override var wantsUpdateLayer: Bool { true }
 
@@ -227,7 +235,7 @@ final class SurfaceView: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = fillColor.cgColor
             layer?.borderColor = strokeColor?.cgColor
-            layer?.borderWidth = strokeColor == nil ? 0 : 1
+            layer?.borderWidth = strokeColor == nil ? 0 : strokeWidth
         }
     }
     override func updateLayer() { applyLayerColors() }
@@ -384,6 +392,21 @@ func makeHarnessBadge(_ frame: NSRect, radius: CGFloat, iconInset: CGFloat, harn
     return badge
 }
 
+func makePillBadge(_ text: String, id: String, height: CGFloat = 20,
+                   font: NSFont = .systemFont(ofSize: 9.5, weight: .semibold),
+                   textColor: NSColor, fill: NSColor, border: NSColor? = nil, paddingX: CGFloat = 8) -> SurfaceView {
+    let label = textLabel(text, .zero, color: textColor)
+    label.font = font; label.alignment = .center
+    let size = label.cell?.cellSize ?? NSSize(width: measureTextWidth(text, font: font), height: 12)
+    let w = max(88, ceil(size.width) + paddingX * 2)
+    let h = ceil(size.height)
+    let pill = roundedView(NSRect(x: 0, y: 0, width: w, height: height), radius: height / 2, color: fill, border: border)
+    pill.identifier = NSUserInterfaceItemIdentifier(id)
+    label.frame = NSRect(x: 0, y: floor((height - h) / 2), width: w, height: h)
+    pill.addSubview(label)
+    return pill
+}
+
 func panelShortcutKey(_ event: NSEvent) -> String? {
     let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
     guard let character = event.charactersIgnoringModifiers?.lowercased(),
@@ -395,7 +418,16 @@ func panelShortcutKey(_ event: NSEvent) -> String? {
 final class KeyPanel: NSPanel {
     var onKey: ((String) -> Void)?
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeMain: Bool { true }
+    @discardableResult
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        if accepted {
+            let editor = (responder as? NSTextField)?.currentEditor() as? NSTextView ?? firstResponder as? NSTextView
+            editor?.inputContext?.activate()
+        }
+        return accepted
+    }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if (firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return super.performKeyEquivalent(with: event) }
         if let key = panelShortcutKey(event), let onKey = onKey { onKey(key); return true }
@@ -418,13 +450,33 @@ final class OverlayScrollView: NSScrollView {
 /** Menu controls own their clicks so copy and scope changes keep native tracking open. */
 final class MenuControl: NSControl {
     let label: NSTextField
-    enum Style { case neutral, prominent, subtleHeader, destructiveHover }
+    enum Style { case neutral, prominent, subtleHeader, destructiveHover, destructive }
+    override var frame: NSRect { didSet { if oldValue.size != frame.size { layoutContents() } } }
+    static func intrinsicWidth(_ title: String, font: NSFont = .systemFont(ofSize: 11, weight: .medium),
+                               leadingSymbol: String? = nil, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat {
+        max(minWidth, ceil(measureTextWidth(title, font: font)) + paddingX * 2 + (leadingSymbol == nil ? 0 : 17))
+    }
+    func layoutContents() {
+        let font = label.font ?? .systemFont(ofSize: 11)
+        let cellH = ceil(label.cell?.cellSize.height ?? (font.ascender - font.descender + font.leading))
+        let labelY = floor((bounds.height - cellH) / 2)
+        centerSymbolView?.frame = NSRect(x: floor((bounds.width - 12) / 2), y: floor((bounds.height - 12) / 2), width: 12, height: 12)
+        if !label.isHidden, let icon = leadingSymbolView, !icon.isHidden {
+            // NSTextField needs its drawable insets beyond cellSize to avoid native ellipsis.
+            let textW = max(0, min(bounds.width - 28, ceil(measureTextWidth(label.stringValue, font: font)) + 6))
+            let startX: CGFloat = label.alignment == .left ? 6 : max(6, floor((bounds.width - 17 - textW) / 2))
+            icon.frame = NSRect(x: startX, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
+            label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - 27) : textW, height: cellH)
+        } else {
+            label.frame = NSRect(x: 4, y: labelY, width: max(0, bounds.width - 8), height: cellH)
+        }
+    }
     var leadingSymbolView: NSImageView?
     var centerSymbolView: NSImageView?
     var accessorySymbolView: NSImageView? { didSet { applyVisualState() } }
     var symbolName: String?
     var pressed: (() -> Void)?
-    var style: Style = .neutral { didSet { applyVisualState() } }
+    var style: Style = .neutral { didSet { layoutContents(); applyVisualState() } }
     var normalColor: NSColor = .labelColor { didSet { applyVisualState() } }
     var feedbackTimer: Timer?
     var restingTitle: String?
@@ -436,12 +488,12 @@ final class MenuControl: NSControl {
     static var tracksPhysicalPointer = true
     override var wantsUpdateLayer: Bool { true }
     init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6) {
-        let hasLeading = leadingSymbol != nil
-        label = textLabel(title, NSRect(x: hasLeading ? 20 : 3, y: (frame.height - 15) / 2, width: frame.width - (hasLeading ? 24 : 6), height: 15))
+        label = textLabel(title, .zero)
         symbolName = leadingSymbol ?? symbol
         super.init(frame: frame)
         wantsLayer = true; layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous
+        label.font = .systemFont(ofSize:11,weight:.medium)
         label.alignment = .center; label.textColor = color; normalColor = color
         addSubview(label)
         if let leadingSymbol = leadingSymbol {
@@ -455,6 +507,7 @@ final class MenuControl: NSControl {
             image.contentTintColor = color; addSubview(image); centerSymbolView = image; label.isHidden = true
         }
         setAccessibilityElement(true); setAccessibilityRole(.button); setAccessibilityLabel(title)
+        layoutContents()
         applyVisualState()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -467,14 +520,12 @@ final class MenuControl: NSControl {
                 addSubview(image)
                 leadingSymbolView = image
             }
-            leadingSymbolView?.frame = NSRect(x: 6, y: (bounds.height - 12) / 2, width: 12, height: 12)
             leadingSymbolView?.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
             leadingSymbolView?.isHidden = false
-            label.frame = NSRect(x: 20, y: (bounds.height - 15) / 2, width: bounds.width - 24, height: 15)
         } else {
             leadingSymbolView?.isHidden = true
-            label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
         }
+        layoutContents()
         applyVisualState()
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -541,7 +592,7 @@ final class MenuControl: NSControl {
         let accessorySymbol: NSColor
         switch style {
         case .neutral:
-            fill = .labelColor.withAppearanceAlpha(isHovered ? 0.18 : 0.09)
+            fill = .labelColor.withAppearanceAlpha(isHovered ? 0.16 : 0.08)
             border = .labelColor.withAppearanceAlpha(isHovered ? 0.28 : 0.14)
             foreground = isHovered ? .labelColor : normalColor
             primarySymbol = foreground
@@ -557,9 +608,14 @@ final class MenuControl: NSControl {
             primarySymbol = isHovered ? .labelColor : CitoPalette.secondaryText
             accessorySymbol = primarySymbol
         case .destructiveHover:
-            fill = isHovered ? CitoPalette.destructiveFill : .clear
-            border = isHovered ? .white.withAlphaComponent(0.26) : nil
+            fill = isHovered ? CitoPalette.destructiveFill : .labelColor.withAppearanceAlpha(0.08)
+            border = isHovered ? .white.withAlphaComponent(0.26) : .labelColor.withAppearanceAlpha(0.14)
             foreground = isHovered ? .white : CitoPalette.secondaryText
+            primarySymbol = foreground; accessorySymbol = foreground
+        case .destructive:
+            fill = isHovered ? CitoPalette.destructiveFill : CitoPalette.dangerText.withAppearanceAlpha(0.14)
+            border = isHovered ? .white.withAlphaComponent(0.28) : CitoPalette.dangerText.withAppearanceAlpha(0.38)
+            foreground = isHovered ? .white : CitoPalette.dangerText
             primarySymbol = foreground; accessorySymbol = foreground
         }
         let isCopied = feedbackTimer?.isValid == true
@@ -588,17 +644,17 @@ final class MenuControl: NSControl {
         if feedbackTimer == nil { restingTitle = label.stringValue }
         feedbackTimer?.invalidate()
         leadingSymbolView?.isHidden = true
-        label.frame = NSRect(x: 3, y: (bounds.height - 15) / 2, width: bounds.width - 6, height: 15)
         label.stringValue = message; label.textColor = CitoPalette.successText
+        layoutContents()
         let restore = Timer(timeInterval: 1.2, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             if self.leadingSymbolView != nil {
                 self.leadingSymbolView?.isHidden = false
-                self.label.frame = NSRect(x: 20, y: (self.bounds.height - 15) / 2, width: self.bounds.width - 24, height: 15)
             }
             self.feedbackTimer = nil
             self.label.stringValue = self.restingTitle ?? self.accessibilityLabel() ?? ""
             self.restingTitle = nil
+            self.layoutContents()
             self.applyVisualState()
         }
         feedbackTimer = restore
@@ -871,8 +927,27 @@ final class DirectoryTableView: NSTableView {
     }
 }
 
+func relativeTime(_ timestamp: String) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let date = formatter.date(from: timestamp) ?? {
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: timestamp)
+    }()
+    guard let date = date else { return "Just now" }
+    let seconds = max(0, Date().timeIntervalSince(date))
+    if seconds < 60 { return "Just now" }
+    if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+    if seconds < 86400 { return "\(Int(seconds / 3600))h ago" }
+    return "\(Int(seconds / 86400))d ago"
+}
+
 final class DirectoryPeerCellView: NSTableCellView {
     let badgeView: SurfaceView
+    let onlineDot = roundedView(.zero, radius: 4, color: CitoPalette.successText, border: CitoPalette.surfaceBackground)
+    let unreadAccentBar = roundedView(.zero, radius: 1.5, color: CitoPalette.infoText)
+    let rowDivider = roundedView(.zero, radius: 0, color: .labelColor.withAppearanceAlpha(0.05))
+    let deleteControl = MenuControl("Delete message", frame: NSRect(x:520,y:30,width:24,height:22), symbol:"trash")
     var inspectionId = ""
     private(set) var activityItem: ActivityItem?
     private var isSelectedRow = false
@@ -899,6 +974,13 @@ final class DirectoryPeerCellView: NSTableCellView {
         identifier = NSUserInterfaceItemIdentifier("DirectoryPeerCell")
         wantsLayer = true
         addSubview(badgeView)
+        onlineDot.strokeWidth = 1.5
+        onlineDot.identifier = NSUserInterfaceItemIdentifier("online_presence_dot")
+        unreadAccentBar.identifier = NSUserInterfaceItemIdentifier("unread_accent_bar")
+        rowDivider.identifier = NSUserInterfaceItemIdentifier("activity_row_divider")
+        addSubview(onlineDot); addSubview(unreadAccentBar); addSubview(rowDivider)
+        deleteControl.style = .subtleHeader
+        addSubview(deleteControl)
         addSubview(line1TitleLabel)
         addSubview(line1RepoLabel)
         addSubview(line2UserLabel)
@@ -927,6 +1009,14 @@ final class DirectoryPeerCellView: NSTableCellView {
     func configure(with peer: RemotePeer, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (String, MenuControl) -> Void, onMessage: (() -> Void)? = nil) {
         activityItem = nil
         badgeView.frame.origin.y = 12
+        onlineDot.frame = NSRect(x:badgeView.frame.maxX-7,y:badgeView.frame.minY-1,width:8,height:8)
+        onlineDot.isHidden = false
+        unreadAccentBar.isHidden = true; deleteControl.isHidden = true; rowDivider.isHidden = true
+        line1TitleLabel.font = .systemFont(ofSize:13,weight:.semibold)
+        line1TitleLabel.textColor = .labelColor
+        line2MetaLabel.font = .systemFont(ofSize:11.5)
+        line2MetaLabel.textColor = CitoPalette.secondaryText
+        msgControl.style = .neutral; copyControl.style = .neutral
         line2MetaLabel.maximumNumberOfLines = 1
         line2MetaLabel.lineBreakMode = .byTruncatingTail
         inspectionId = "dir_peer:\(peer.scoped_id)"
@@ -938,13 +1028,13 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let short = peer.display_address
         let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-        let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
+        let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc"))
         copyControl.feedbackTimer?.invalidate()
         copyControl.feedbackTimer = nil
         copyControl.restingTitle = nil
         copyControl.isHidden = false
         copyControl.setHovered(false)
-        copyControl.frame = NSRect(x: 544 - copyWidth, y: 16, width: copyWidth, height: 22)
+        copyControl.frame = NSRect(x: 544 - MenuControl.intrinsicWidth("Message", leadingSymbol:"bubble.left") - 6 - copyWidth, y: 15, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
         copyControl.label.stringValue = short
@@ -956,10 +1046,10 @@ final class DirectoryPeerCellView: NSTableCellView {
             if let control = copyControl { onCopy(peer.display_address, control) }
         }
 
-        let msgWidth: CGFloat = 86
+        let msgWidth: CGFloat = MenuControl.intrinsicWidth("Message", leadingSymbol:"bubble.left")
         msgControl.isHidden = false
         msgControl.setHovered(false)
-        msgControl.frame = NSRect(x: 544 - copyWidth - msgWidth - 6, y: 16, width: msgWidth, height: 22)
+        msgControl.frame = NSRect(x: 544 - msgWidth, y: 15, width: msgWidth, height: 22)
         msgControl.setLeadingSymbol("bubble.left")
         msgControl.label.font = .systemFont(ofSize: 11, weight: .medium)
         msgControl.label.stringValue = "Message"
@@ -1002,14 +1092,15 @@ final class DirectoryPeerCellView: NSTableCellView {
         line2MetaLabel.frame = NSRect(x: 52 + metaOffset, y: 7, width: max(0, availWidth - metaOffset), height: 16)
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("dir_meta:\(peer.scoped_id)")
         line2MetaLabel.toolTip = line2MetaLabel.stringValue
+        copyControl.layoutContents(); msgControl.layoutContents()
     }
 
-    func configureActivity(with item: ActivityItem, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onReply: @escaping () -> Void) {
+    func configureActivity(with item: ActivityItem, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onDelete: @escaping () -> Void, onReply: @escaping () -> Void) {
         activityItem = item
         inspectionId = "activity_row:\(item.signal_id)"
         isSelectedRow = selected
         let expanded = selected && (item.message.contains("\n") || measureTextWidth(item.message,font:.systemFont(ofSize:11.5)) > 330)
-        let rowHeight: CGFloat = expanded ? 108 : 52
+        let rowHeight: CGFloat = expanded ? 108 : 60
         frame = NSRect(x:0,y:0,width:560,height:rowHeight)
         applySelectionColor()
         let visual = resolveHarnessVisual(item.from_harness ?? item.target_harness, harnesses:harnesses)
@@ -1017,10 +1108,22 @@ final class DirectoryPeerCellView: NSTableCellView {
         configureBadge(badgeView,icon:badgeIcon,id:item.from_harness ?? item.target_harness,symbol:visual.symbol,title:visual.name,tint:visual.tint,inset:6)
         let canReply = item.for_me && !(item.from_display_address ?? item.from_scoped_id ?? "").isEmpty
         let copyFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let copyW = max(66, ceil(measureTextWidth("✓ Copied", font: copyFont)) + 28)
-        let textW = canReply ? (544 - copyW - 6 - 68 - 58) : (544 - copyW - 58)
+        let copyW = max(66, MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"))
+        let copyX = 514 - copyW
+        let replyW = MenuControl.intrinsicWidth("Reply", font:copyFont, leadingSymbol:"arrowshape.turn.up.left")
+        let textW = (canReply ? copyX - 6 - replyW : copyX) - 58
+        onlineDot.isHidden = true
+        unreadAccentBar.isHidden = !item.unread
+        unreadAccentBar.frame = NSRect(x:4,y:8,width:3,height:rowHeight-16)
+        rowDivider.isHidden = false; rowDivider.frame = NSRect(x:0,y:0,width:560,height:1)
+        deleteControl.isHidden = false
+        deleteControl.frame = NSRect(x:520,y:rowHeight-30,width:24,height:22)
+        deleteControl.identifier = NSUserInterfaceItemIdentifier("delete_activity:\(item.signal_id)")
+        deleteControl.toolTip = "Delete message"
+        deleteControl.pressed = onDelete
         msgControl.isHidden = !canReply
-        msgControl.frame = NSRect(x:544-copyW-6-68,y:rowHeight-36,width:68,height:22)
+        msgControl.style = .neutral
+        msgControl.frame = NSRect(x:copyX-6-replyW,y:rowHeight-30,width:replyW,height:22)
         msgControl.setLeadingSymbol("arrowshape.turn.up.left")
         msgControl.label.stringValue = "Reply"
         msgControl.setAccessibilityLabel("Reply")
@@ -1030,7 +1133,8 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.isHidden = false
         copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
         copyControl.restingTitle = nil
-        copyControl.frame = NSRect(x:544-copyW,y:rowHeight-36,width:copyW,height:22)
+        copyControl.style = .neutral
+        copyControl.frame = NSRect(x:copyX,y:rowHeight-30,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
         copyControl.label.stringValue = "Copy"
@@ -1040,15 +1144,20 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.pressed = { [weak copyControl] in if let c = copyControl { onCopy(c) } }
         copyControl.applyVisualState()
         let held = ["stale_generation":" · Held (session reloaded)","driver_unavailable":" · Held (app unavailable)"][item.held_reason ?? ""] ?? ""
-        line1TitleLabel.stringValue = (item.unread ? "● " : "") + "@\(item.from_user) → " + (item.target_harness == "human" ? "You" : item.target_title) + held
-        line1TitleLabel.frame = NSRect(x:52,y:rowHeight-26,width:textW,height:18)
+        line1TitleLabel.stringValue = "@\(item.from_user) → " + (item.target_harness == "human" ? "You" : item.target_title) + held + " · " + relativeTime(item.created_at)
+        line1TitleLabel.font = .systemFont(ofSize:12.5,weight:item.unread ? .semibold : .medium)
+        line1TitleLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
+        line1TitleLabel.frame = NSRect(x:52,y:rowHeight-24,width:max(0,textW),height:18)
         line1TitleLabel.identifier = NSUserInterfaceItemIdentifier("act_title:\(item.signal_id)")
         line1RepoLabel.isHidden = true; line2UserLabel.isHidden = true
         line2MetaLabel.toolTip = item.message
         line2MetaLabel.stringValue = expanded ? item.message : item.message.replacingOccurrences(of:"\\s*\\n+\\s*",with:"  ",options:.regularExpression)
         line2MetaLabel.maximumNumberOfLines = expanded ? 4 : 1
         line2MetaLabel.lineBreakMode = expanded ? .byWordWrapping : .byTruncatingTail
-        line2MetaLabel.frame = NSRect(x:52,y:7,width:expanded ? 492 : textW,height:expanded ? 64 : 16)
+        line2MetaLabel.font = .systemFont(ofSize:12)
+        line2MetaLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
+        line2MetaLabel.frame = NSRect(x:52,y:8,width:492,height:expanded ? 64 : 18)
+        msgControl.layoutContents(); copyControl.layoutContents()
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("act_msg:\(item.signal_id)")
     }
 }
@@ -1403,12 +1512,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let window = event.window ?? NSApp.keyWindow
             if (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return event }
             if let key = panelShortcutKey(event), self.handleTextEditShortcut(key, in: window) { return nil }
+            // Text Services must see navigation and commit keys before our shortcuts.
+            if window?.firstResponder is NSTextView && [126,125,36,76,53,51,117].contains(Int(event.keyCode)) { return event }
             let command = event.modifierFlags.contains(.command)
             if command && event.charactersIgnoringModifiers == "," { self.openSettingsPanel(); return nil }
             if command && event.charactersIgnoringModifiers == "k" { self.openDirectoryPanel(mode:"directory"); return nil }
             let key: String?
             if command && event.charactersIgnoringModifiers == "w" { key = "command-w" }
-            else { key = [53:"escape",126:"up",125:"down",36:"return",76:"return"][Int(event.keyCode)] }
+            else { key = [53:"escape",126:"up",125:"down",36:"return",76:"return",51:"delete",117:"delete"][Int(event.keyCode)] }
             if let key = key {
                 if self.directoryVisible && window === self.directoryPanel { self.handleDirectoryKey(key); return nil }
                 if self.settingsVisible && window === self.settingsPanel { self.handleSettingsKey(key); return nil }
@@ -1586,6 +1697,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if parts.count > 1 { editingPersonalChannel.insert("\(effectiveChannelHub)|\(parts[1])"); rebuildSettingsPanel() }
             }
             if op == "test_focus_field", let id = object["id"] as? String {
+                if id == "directory_table" { directoryPanel?.makeFirstResponder(directoryTableView); return }
                 for window in [settingsPanel, directoryPanel].compactMap({ $0 }) {
                     if let root = window.contentView, let field = findTextField(in: root, id: id), field.isEditable, field.isEnabled {
                         window.makeFirstResponder(field)
@@ -1947,6 +2059,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             row.addSubview(label)
             let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
             dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
+            dismiss.style = .subtleHeader
             dismiss.toolTip = "Dismiss error"
             dismiss.pressed = { [weak self] in self?.menuBannerError = nil; self?.rebuild() }
             row.addSubview(dismiss)
@@ -2076,11 +2189,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let title = textLabel("You (@\(targetUser))", NSRect(x: 46, y: 26, width: 220, height: 16), size: 12.5, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
-            card.addSubview(textLabel("Paused · Click Resume to receive notifications", NSRect(x: 46, y: 8, width: 220, height: 14), size: 9.5, color: CitoPalette.secondaryText))
-            let enable = MenuControl("Resume", frame: NSRect(x: 270, y: 14, width: 74, height: 22), leadingSymbol: "plus", radius: 6)
+            card.addSubview(textLabel("Notifications paused", NSRect(x: 46, y: 8, width: 200, height: 14), size: 9.5, color: CitoPalette.secondaryText))
+            let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume", leadingSymbol:"plus"), y: 14, width: MenuControl.intrinsicWidth("Resume", leadingSymbol:"plus"), height: 22), leadingSymbol: "plus", radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
             enable.pressed = { [weak self] in self?.emit(["op": "listen_session", "hub": targetHub, "harness": "human", "session_id": "default", "about": "Human receiver"]) }
+            title.frame.size.width = max(0,enable.frame.minX-52)
             card.addSubview(enable); row.addSubview(card)
             _ = host(row, id: "human_paused_card")
         }
@@ -2125,7 +2239,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let short = listener.display_address
             let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-            let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
+            let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc"))
             let copy = MenuControl(short, frame: NSRect(x: titleX, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
             copy.label.font = copyFont
             copy.style = .subtleHeader
@@ -2196,7 +2310,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let personal = listener.harness == "human"
             let stop = MenuControl(personal ? "Pause" : "Stop listening", frame: NSRect(x: 0, y: cardHeight - 28, width: personal ? 52 : 22, height: 22), symbol: personal ? nil : "xmark")
             stop.toolTip = personal ? "Pause personal notifications" : "Stop listening"
-            stop.style = personal ? .subtleHeader : .destructiveHover
+            stop.style = personal ? .neutral : .subtleHeader
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
@@ -2261,6 +2375,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             toggleRemote.style = .subtleHeader
             toggleRemote.label.font = .systemFont(ofSize: 10, weight: .semibold)
             toggleRemote.label.alignment = .left
+            toggleRemote.layoutContents()
             toggleRemote.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.myRemoteCollapsed.toggle()
@@ -2280,9 +2395,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
                     let short = peer.display_address
-                    let copyWidth = max(measureTextWidth("✓ Copied", font: copyFont), measureTextWidth(short, font: copyFont)) + 28
+                    let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc"))
                     let copy = MenuControl(short, frame: NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20), leadingSymbol: "doc.on.doc")
                     copy.label.font = copyFont
+                    copy.layoutContents()
                     copy.toolTip = peer.scoped_id
                     copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
                     copy.pressed = { [weak self, weak copy] in
@@ -2411,16 +2527,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     var candidateRows: [(id: String, view: NSView)] = []
                     for c in items {
                         let needsReload = c.needs_reload == true
-                        let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: needsReload ? 46 : 36))
+                        let rowHeight: CGFloat = needsReload ? 58 : 44
+                        let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
                         let rowId = "candidate:\(c.harness):\(c.session_id)"
                         row.identifier = NSUserInterfaceItemIdentifier(rowId)
                         let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                        let titleWidth = min(160,measureTextWidth(c.title,font:.systemFont(ofSize:12))+2)
-                        let info = textLabel(c.title, NSRect(x:24,y:needsReload ? 24 : 9,width:titleWidth,height:18),size:12,color:.labelColor)
+                        let info = textLabel(c.title, NSRect(x:24,y:rowHeight-21,width:268,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
-                        let location = textLabel(" · \(shortCwd)\(branchSuffix)",NSRect(x:24+titleWidth,y:needsReload ? 24 : 9,width:274-titleWidth,height:18),size:12,color:CitoPalette.secondaryText)
+                        let location = textLabel("\(shortCwd)\(branchSuffix)",NSRect(x:24,y:needsReload ? 21 : 6,width:268,height:14),size:10.5,color:CitoPalette.secondaryText)
                         location.lineBreakMode = .byTruncatingMiddle
                         location.identifier = NSUserInterfaceItemIdentifier("candidate_cwd:\(c.harness):\(c.session_id)")
                         row.addSubview(location)
@@ -2428,10 +2544,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         info.identifier=NSUserInterfaceItemIdentifier("candidate_title:\(c.harness):\(c.session_id)")
                         row.addSubview(info)
                         if needsReload {
-                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:24,y:5,width:274,height:15),size:10,color:CitoPalette.warningText)
+                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:24,y:5,width:268,height:14),size:10,color:CitoPalette.warningText)
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
-                            let reload=MenuControl("/reload",frame:NSRect(x:298,y:12,width:70,height:22),leadingSymbol:"doc.on.doc")
+                            let reload=MenuControl("/reload",frame:NSRect(x:298,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
                             reload.label.font = .systemFont(ofSize:10)
                             reload.identifier=NSUserInterfaceItemIdentifier("reload:\(c.harness):\(c.session_id)")
                             reload.pressed={ [weak self, weak reload] in
@@ -2440,10 +2556,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                                 self.emit(["op":"refresh_available"])
                             }
                             row.addSubview(reload)
-                            layoutBar(in: row, insetLeft: 24, y: 22, height: 22, leading: [info], flexible: location, trailing: [reload])
                             candidateRows.append((id:rowId,view:row)); continue
                         }
-                        let listenBtn = MenuControl("Listen", frame: NSRect(x: 304, y: 7, width: 64, height: 22), leadingSymbol: "plus", radius: 6)
+                        let listenBtn = MenuControl("Listen", frame: NSRect(x: 298, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
                         listenBtn.toolTip = "Start listening in \(c.title)"
                         let listenRun = { [weak self, weak listenBtn] in
@@ -2458,14 +2573,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             self.emit(action)
                         }
                         listenBtn.pressed = listenRun; row.addSubview(listenBtn)
-                        layoutBar(in: row, insetLeft: 24, y: 7, height: 22, leading: [info], flexible: location, trailing: [listenBtn])
                         candidateRows.append((id: rowId, view: row))
                     }
                     if candidateRows.count <= 4 {
                         for (id, row) in candidateRows { _ = host(row, id: id) }
                     } else {
                         let totalHeight = candidateRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
-                        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 144))
+                        let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 176))
                         // Overlay scrollers preserve the authored row width even
                         // when macOS is configured to always show scrollbars.
                         scroll.scrollerStyle = .overlay
@@ -2498,7 +2612,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 control.toolTip = tip
                 control.label.font = .systemFont(ofSize: 11, weight: .medium)
                 control.label.alignment = .left
-                control.label.frame = NSRect(x: 22, y: 6, width: 76, height: 16)
+                control.layoutContents()
+                control.label.frame = NSRect(x: 23, y: 6, width: 76, height: 16)
                 let badge = textLabel(trailing, NSRect(x: 100, y: 6, width: 68, height: 16), size: 10, color: CitoPalette.secondaryText)
                 badge.alignment = .right; badge.lineBreakMode = .byTruncatingMiddle; badge.toolTip = trailing
                 badge.identifier = NSUserInterfaceItemIdentifier(mode == "directory" ? "directory_online_badge" : "activity_unread_badge")
@@ -2563,7 +2678,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         ensureEditMainMenu()
         if settingsPanel == nil {
             let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
-                                  styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
             window.appearance = testAppearance
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -2694,9 +2809,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         header.identifier = NSUserInterfaceItemIdentifier("settings_header")
         header.addSubview(textLabel("Cito", NSRect(x: 16, y: 15, width: 38, height: 18), size: 13, weight: .bold))
 
-        let tabsTrack = roundedView(NSRect(x:62,y:10,width:400,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.08))
+        let tabWidths = [("Agent Apps","square.grid.2x2"),("Human Channels","bubble.left.and.bubble.right"),("Hubs & Network","network")].map {
+            MenuControl.intrinsicWidth($0.0, leadingSymbol:$0.1, paddingX:12)
+        }
+        let tabsWidth = tabWidths.reduce(0,+) + 12
+        let tabsTrack = roundedView(NSRect(x:62+floor((400-tabsWidth)/2),y:10,width:tabsWidth,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.08))
         header.addSubview(tabsTrack)
-        let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: 118, height: 24), leadingSymbol: "square.grid.2x2", radius: 7)
+        let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: tabWidths[0], height: 24), leadingSymbol: "square.grid.2x2", radius: 7)
         appsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:apps")
         appsTab.style = settingsActiveTab == "apps" ? .prominent : .subtleHeader
         appsTab.pressed = { [weak self] in
@@ -2708,7 +2827,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         tabsTrack.addSubview(appsTab)
 
-        let channelsTab = MenuControl("Human Channels", frame: NSRect(x: 124, y: 2, width: 148, height: 24), leadingSymbol: "bubble.left.and.bubble.right", radius: 7)
+        let channelsTab = MenuControl("Human Channels", frame: NSRect(x: tabWidths[0]+6, y: 2, width: tabWidths[1], height: 24), leadingSymbol: "bubble.left.and.bubble.right", radius: 7)
         channelsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:channels")
         channelsTab.style = settingsActiveTab == "channels" ? .prominent : .subtleHeader
         channelsTab.pressed = { [weak self] in
@@ -2720,7 +2839,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         tabsTrack.addSubview(channelsTab)
 
-        let hubsTab = MenuControl("Hubs & Network", frame: NSRect(x: 276, y: 2, width: 122, height: 24), leadingSymbol: "network", radius: 7)
+        let hubsTab = MenuControl("Hubs & Network", frame: NSRect(x: tabWidths[0]+tabWidths[1]+10, y: 2, width: tabWidths[2], height: 24), leadingSymbol: "network", radius: 7)
         hubsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:hubs")
         hubsTab.style = settingsActiveTab == "hubs" ? .prominent : .subtleHeader
         hubsTab.pressed = { [weak self] in
@@ -2763,12 +2882,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 configured: false, status: "not_configured", detail: "Click Set Up to connect", paths: [])
         }
         appsView.addSubview(textLabel("AGENT APPS", NSRect(x:20,y:338,width:240,height:14),size:10,weight:.semibold,color:CitoPalette.secondaryText))
-        let needsOnboarding = !resolvedApps.contains(where: { $0.isConfigured })
-        if needsOnboarding {
-            appsView.addSubview(textLabel("Click Set Up below, then + Listen in the Cito menu bar.", NSRect(x:20,y:318,width:480,height:15),size:10,color:CitoPalette.secondaryText))
-        }
         let map = harnessMap
-        var appTop: CGFloat = needsOnboarding ? 308 : 328
+        var appTop: CGFloat = 328
         for app in resolvedApps {
             let diagnostic = !["Click Set Up to connect", "Connected", "Connected and ready", ""].contains(app.detail)
                 && !app.detail.hasPrefix("Connected · ")
@@ -2787,10 +2902,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             card.addSubview(title)
             var leading: [NSView] = [title]
             if app.tier == "experimental" {
-                let tier = roundedView(NSRect(x:0,y:0,width:88,height:20),radius:8,color:CitoPalette.warningSurface,border:CitoPalette.warningBorder)
-                tier.identifier = NSUserInterfaceItemIdentifier("settings_app_tier:\(app.id)")
-                let label = textLabel("Experimental",NSRect(x:6,y:3.5,width:76,height:14),size:9.5,weight:.semibold,color:CitoPalette.warningText)
-                label.alignment = .center; tier.addSubview(label); card.addSubview(tier); leading.append(tier)
+                let tier = makePillBadge("Experimental", id: "settings_app_tier:\(app.id)", textColor: CitoPalette.warningText, fill: CitoPalette.warningSurface, border: CitoPalette.warningBorder)
+                card.addSubview(tier); leading.append(tier)
             }
             if expanded {
                 let detailText = diagnostic ? presentationError(app.detail) : (!app.installed ? "Install this app to connect." : "")
@@ -2802,10 +2915,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let statusText = app.isConfigured ? "● Connected" : (app.status == "error" ? "Inspection failed" : (app.status == "repair_needed" ? "⚠ Repair Needed" : "○ Not Set Up"))
             let status = textLabel(statusText,NSRect(x:0,y:0,width:app.isConfigured ? 76 : 100,height:16),size:11,weight:.medium,color:app.isConfigured ? CitoPalette.successText : CitoPalette.secondaryText)
             status.alignment = .right; status.identifier = NSUserInterfaceItemIdentifier("settings_app_status:\(app.id)")
+            status.isHidden = app.status == "not_configured"
             card.addSubview(status)
-            let btn = MenuControl(app.isConfigured || app.status == "error" ? "Re-check" : (app.status == "repair_needed" ? "Repair" : "Set Up"),frame:NSRect(x:0,y:0,width:app.isConfigured ? 70 : 76,height:24))
+            let appActionWidth = max(76, MenuControl.intrinsicWidth("Disconnect"))
+            let btn = MenuControl(app.isConfigured || app.status == "error" ? "Re-check" : (app.status == "repair_needed" ? "Repair" : "Set Up"),frame:NSRect(x:0,y:0,width:app.isConfigured ? MenuControl.intrinsicWidth("✓ Checked") : appActionWidth,height:24))
             btn.identifier = NSUserInterfaceItemIdentifier("setup_app:\(app.id)")
-            btn.style = app.isConfigured ? .subtleHeader : .prominent
+            btn.style = app.isConfigured ? .neutral : .prominent
             if Date() < (appCheckedUntil[app.id] ?? .distantPast) { btn.copied("✓ Checked") }
             btn.pressed = { [weak self] in
                 let request = UUID().uuidString
@@ -2816,9 +2931,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self?.emit(["op":"setup_apply","harness":app.id,"request_id":request])
             }
             card.addSubview(btn)
-            var trailing: [NSView] = [status,btn]
+            var trailing: [NSView] = status.isHidden ? [btn] : [status,btn]
             if app.isConfigured {
-                let remove = MenuControl("Disconnect",frame:NSRect(x:0,y:0,width:76,height:24))
+                let remove = MenuControl("Disconnect",frame:NSRect(x:0,y:0,width:appActionWidth,height:24))
                 remove.identifier = NSUserInterfaceItemIdentifier("remove_app:\(app.id)"); remove.style = .destructiveHover
                 remove.pressed = { [weak self] in self?.emit(["op":"setup_remove_app","harness":app.id]) }
                 card.addSubview(remove); trailing.append(remove)
@@ -2838,19 +2953,18 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         channelsView.isHidden = settingsActiveTab != "channels"
 
         let bannerEnabled = settings?.desktop_banner_enabled ?? true
-        let bannerCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 304, width: 480, height: 54), radius: 10,
+        let bannerCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 312, width: 480, height: 46), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
         bannerCard.identifier = NSUserInterfaceItemIdentifier("settings_desktop_banner_card")
-        bannerCard.addSubview(textLabel("Mac Desktop Banner", NSRect(x: 14, y: 29, width: 240, height: 17), size: 13, weight: .semibold))
-        bannerCard.addSubview(textLabel("Show floating banners on this Mac when notifications arrive.", NSRect(x: 14, y: 9, width: 366, height: 15), size: 10.5, color: CitoPalette.secondaryText))
-        let toggleBanner = MenuControl(bannerEnabled ? "● Enabled" : "Off", frame: NSRect(x: 386, y: 15, width: 80, height: 24), radius: 12)
+        bannerCard.addSubview(textLabel("Mac Desktop Banner", NSRect(x: 14, y: 14.5, width: 240, height: 17), size: 13, weight: .semibold))
+        let toggleBanner = MenuControl(bannerEnabled ? "● Enabled" : "Disabled", frame: NSRect(x: 386, y: 11, width: 80, height: 24), radius: 12)
         toggleBanner.identifier = NSUserInterfaceItemIdentifier("toggle_desktop_banner")
-        toggleBanner.style = bannerEnabled ? .prominent : .neutral
+        toggleBanner.style = .neutral
         toggleBanner.pressed = { [weak self] in
             self?.emit(["op": "set_desktop_banner", "enabled": !bannerEnabled])
         }
         bannerCard.addSubview(toggleBanner)
-        layoutBar(in: bannerCard, insetRight: CitoMetrics.headerInset, y: 15, height: 24, trailing: [toggleBanner])
+        layoutBar(in: bannerCard, insetRight: CitoMetrics.headerInset, y: 11, height: 24, trailing: [toggleBanner])
         channelsView.addSubview(bannerCard)
 
         let channelHubs = settings?.hubs.map { $0.name } ?? hubs.map { $0.name }
@@ -2892,18 +3006,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let gatewayActive = !hasHubScopeFields || ch.hub_provided || ch.status != "not_configured" || (hasHubScopeFields && ch.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })
             let hubGatewayExpanded = !gatewayActive || editingHubGateway.contains(channelKey)
             let personalCollapsed = gatewayActive && ch.configured && !editingPersonalChannel.contains(channelKey) && instruction.isEmpty
-            let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(30,ceil((guide as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height)+2) : 0
+            let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13,ceil((guide as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height)+2) : 0
             let currentUser=settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? "local"
-            let hubSuffix = channelHubs.count <= 1 || (hubs.count <= 1 && effectiveChannelHub == "local") ? "" : " on '\(effectiveChannelHub)'"
             let gatewayRole = !hubFields.isEmpty ? (guideH > 0 ? "" : "Configured once by the Hub owner. Shared by everyone on this Hub.") :
                 (hasHubScopeFields ? (ch.hub_provided ? "Provided by '\(effectiveChannelHub)' Hub administrator — no gateway setup needed on your Mac." : "Not yet configured by the '\(effectiveChannelHub)' Hub administrator.") : "No shared gateway credentials required for this channel.")
-            let personalRole = gatewayActive ? "Click Pair Account… to link your account, or enter your Chat ID manually." : "Complete Step 1 above to enable personal pairing\(hubSuffix)."
             func roleHeight(_ text: String) -> CGFloat {
                 text.isEmpty ? 0 : max(13,ceil((text as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height))
             }
-            let gatewayRoleH=roleHeight(gatewayRole), personalRoleH=roleHeight(personalRole)
+            let gatewayRoleH=roleHeight(gatewayRole)
             let hubStratumH: CGFloat = hubGatewayExpanded ? 36 + gatewayRoleH + guideH + hubFieldsH + (!hubFields.isEmpty ? 32 : 0) : 36
-            let userStratumH: CGFloat = personalCollapsed ? 36 : (gatewayActive ? 36 + personalRoleH + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34 : 40)
+            let userStratumH: CGFloat = !gatewayActive ? 0 : (personalCollapsed ? 36 : 36 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34)
             let channelResult = channelResults["\(effectiveChannelHub)|\(ch.id)"]
             let showDetail = ch.status == "error" || channelResult != nil
             let headerHeight: CGFloat = showDetail ? 48 : 38
@@ -2991,23 +3103,24 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             userTitle.lineBreakMode = .byTruncatingMiddle; userTitle.toolTip = userTitle.stringValue
             userTitle.identifier=NSUserInterfaceItemIdentifier("stratum_user_title:\(ch.id)")
             if !personalCollapsed { userStratum.addSubview(userTitle) }
-            let personalDescription=textLabel(personalRole,NSRect(x:12,y:userStratumH-26-personalRoleH,width:432,height:personalRoleH),size:10,color:CitoPalette.secondaryText)
-            personalDescription.maximumNumberOfLines=0; personalDescription.lineBreakMode = .byWordWrapping
-            if !personalCollapsed { userStratum.addSubview(personalDescription) }
-            for (container, fields, top) in [(hubStratum,hubGatewayExpanded ? hubFields : [],hubStratumH-34-gatewayRoleH-guideH),(userStratum,gatewayActive && !personalCollapsed ? userFields : [],userStratumH-30-personalRoleH)] {
+            for (container, fields, top) in [(hubStratum,hubGatewayExpanded ? hubFields : [],hubStratumH-34-gatewayRoleH-guideH),(userStratum,gatewayActive && !personalCollapsed ? userFields : [],userStratumH-30)] {
+                let labelW = max(56, min(110, (fields.map { ceil(measureTextWidth($0.label, font: .systemFont(ofSize: 11, weight: .medium))) }.max() ?? 56) + 6))
+                let inputX = 12 + labelW + 10
+                let inputW = container.bounds.width - 12 - inputX
                 var fieldY=top-22
                 for f in fields {
                     let fieldId="channel_field:\(ch.id):\(f.key)"
-                    let labelView=textLabel(f.label,NSRect(x:12,y:fieldY+3,width:140,height:15),size:11,weight:.medium)
+                    let labelView=textLabel(f.label,NSRect(x:12,y:fieldY+3,width:labelW,height:15),size:11,weight:.medium)
                     labelView.toolTip=f.label; container.addSubview(labelView)
                     let initialVal=channelFieldDrafts[draftKey(fieldId)] ?? (f.value ?? "")
-                    let inputField=makeEditableField(fieldId,frame:NSRect(x:158,y:fieldY,width:286,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : (container === userStratum ? "Auto-filled by Pair Account, or enter Chat ID" : f.placeholder),value:initialVal,secret:f.type=="secret")
+                    let inputField=makeEditableField(fieldId,frame:NSRect(x:inputX,y:fieldY,width:inputW,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : (container === userStratum ? "Auto-filled by Pair Account, or enter Chat ID" : f.placeholder),value:initialVal,secret:f.type=="secret")
                     if container === userStratum && !gatewayActive { inputField.isEnabled=false; inputField.alphaValue=0.55 }
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     fieldY-=26
                 }
             }
-            chCard.addSubview(hubStratum); chCard.addSubview(userStratum)
+            chCard.addSubview(hubStratum)
+            if gatewayActive { chCard.addSubview(userStratum) }
             func gate(_ control: MenuControl) { control.isEnabled=gatewayActive; control.alphaValue=gatewayActive ? 1 : 0.55 }
             if !instruction.isEmpty {
                 let instrLabel = textLabel(instruction, NSRect(x: 12, y: 68, width: 432, height: instructionHeight), size: 10.5, weight: .semibold, color: CitoPalette.infoText)
@@ -3051,7 +3164,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     }
                 } else {
                     let edit=MenuControl("Change Token…",frame:NSRect(x:0,y:7,width:96,height:22))
-                    edit.style = .subtleHeader
+                    edit.style = .neutral
                     edit.label.font = .systemFont(ofSize:10.5)
                     edit.identifier=NSUserInterfaceItemIdentifier("edit_hub_service:\(ch.id)")
                     edit.pressed={ [weak self] in self?.editingHubGateway.insert(channelKey); self?.rebuildSettingsPanel() }
@@ -3090,6 +3203,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if ch.configured {
                 let toggle=MenuControl(ch.enabled ? "Pause" : "Resume",frame:NSRect(x:130,y:6,width:64,height:24),radius:6)
                 toggle.identifier=NSUserInterfaceItemIdentifier("toggle_channel:\(ch.id)")
+                toggle.style = ch.enabled ? .neutral : .prominent
                 toggle.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"channel_toggle","hub":self.effectiveChannelHub,"channel_id":chId,"enabled":!ch.enabled]) }
                 userStratum.addSubview(toggle); personalActions.append(toggle)
                 let unpair=MenuControl("Unpair",frame:NSRect(x:196,y:6,width:60,height:24),radius:6)
@@ -3118,11 +3232,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if !personalCollapsed && gatewayActive { userStratum.addSubview(saveBtn) }
             if Date() < (channelSavedUntil["\(channelKey)|user"] ?? .distantPast) { saveBtn.copied("✓ Saved") }
 
-            if !gatewayActive {
-                for child in userStratum.subviews where child !== userTitle && child !== personalDescription { child.removeFromSuperview() }
-                userTitle.frame.origin.y = 24
-                personalDescription.frame = NSRect(x:12,y:8,width:432,height:14)
-            }
             layoutBar(in: hubStratum, y: hubStratumH-29, height: 22, flexible: hubTitle, trailing: [gatewayStatus] + gatewayTop)
             if hubGatewayExpanded { layoutBar(in: hubStratum, y: 8, height: 24, leading: gatewayLeading, trailing: gatewayTrailing) }
             if personalCollapsed {
@@ -3132,7 +3241,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 summary.identifier = NSUserInterfaceItemIdentifier("channel_summary:\(ch.id)"); summary.toolTip = summary.stringValue
                 userStratum.addSubview(summary)
                 let edit = MenuControl("Edit…",frame:NSRect(x:0,y:6,width:44,height:24))
-                edit.identifier = NSUserInterfaceItemIdentifier("edit_user_channel:\(ch.id)"); edit.style = .subtleHeader
+                edit.identifier = NSUserInterfaceItemIdentifier("edit_user_channel:\(ch.id)"); edit.style = .neutral
                 edit.pressed = { [weak self] in self?.editingPersonalChannel.insert(channelKey); self?.rebuildSettingsPanel() }
                 userStratum.addSubview(edit)
                 testBtn.frame.size.width = 76; testBtn.label.frame.size.width = 70; testBtn.label.font = .systemFont(ofSize:10)
@@ -3162,45 +3271,47 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 }
         let hostExpanded = !addHubFormOpen && (hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil)
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
-        let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 168 : 136) : 56
+        let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 136 : 108) + (hostError == nil ? 0 : 28) : 46
         let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 356 - hostHeight, width: 480, height: hostHeight), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
-        hostCard.addSubview(textLabel("Share This Mac as a Hub", NSRect(x: 14, y: hostHeight - 27, width: 350, height: 18), size: 13, weight: .semibold))
-        let showingInviteGuidance = hostExpanded && hostHub.enabled && hostError == nil
-        let hostSubtitle = textLabel(hostError.map(presentationError) ?? (showingInviteGuidance ? "On another Mac, click Paste Invite Code below (or run in Terminal) to connect." : "Let your other Macs or teammates connect to this Mac."),
-            showingInviteGuidance ? NSRect(x: 14, y: hostHeight - 58, width: 452, height: 15) : NSRect(x: 14, y: hostHeight - 46, width: 350, height: 15),
-            size: 11, color: hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
-        if hostError != nil { hostSubtitle.identifier = NSUserInterfaceItemIdentifier("host_hub_error") }
-        else if showingInviteGuidance { hostSubtitle.identifier = NSUserInterfaceItemIdentifier("host_hub_guidance") }
-        hostSubtitle.toolTip = hostError ?? hostSubtitle.stringValue
-        hostCard.addSubview(hostSubtitle)
+        hostCard.addSubview(textLabel("Share This Mac as a Hub", NSRect(x: 14, y: hostExpanded ? hostHeight - 27 : 14.5, width: 350, height: 17), size: 13, weight: .semibold))
+        if hostExpanded, let error = hostError {
+            let subtitle = textLabel(presentationError(error), NSRect(x:14,y:hostHeight-52,width:452,height:18), size:11, color:CitoPalette.dangerText)
+            subtitle.identifier = NSUserInterfaceItemIdentifier("host_hub_error")
+            subtitle.toolTip = error
+            hostCard.addSubview(subtitle)
+        }
 
         let toggleTitle = hostHub.enabled ? "● Sharing" : "Off"
         let toggleHostBtn = MenuControl(toggleTitle, frame: NSRect(x: 0, y: 0, width: 80, height: 24), radius: 12)
         toggleHostBtn.identifier = NSUserInterfaceItemIdentifier("toggle_host_hub")
-        toggleHostBtn.style = hostHub.enabled ? .prominent : .neutral
+        toggleHostBtn.style = .neutral
         let nextHostEnabled = !hostHub.enabled
         toggleHostBtn.pressed = { [weak self] in
             self?.emit(["op": "set_host_hub", "enabled": nextHostEnabled, "port": hostHub.port])
         }
         hostCard.addSubview(toggleHostBtn)
-        layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:hostHeight-40,height:24,trailing:[toggleHostBtn])
+        layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:hostExpanded ? hostHeight-30 : 11,height:24,trailing:[toggleHostBtn])
 
         if hostExpanded {
         let selectedLan = hostHubAddress == "lan" || hostHub.tailscale_url == nil
         let selectedEndpoint = (selectedLan ? hostHub.lan_url : hostHub.tailscale_url) ?? hostHub.endpoint_url
         let selectedInvite = (selectedLan ? hostHub.lan_invite_command : hostHub.tailscale_invite_command) ?? hostHub.invite_command
         if hasAddressChoice {
+            let addressTrack = roundedView(NSRect(x:14,y:76,width:0,height:26),radius:7,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.08))
             var addressPills: [NSView] = []
             for (mode,title) in [("tailscale","Tailscale"),("lan","Local IP")] {
                 let pill = MenuControl(title,frame:NSRect(x:0,y:78,width:80,height:22))
                 pill.identifier = NSUserInterfaceItemIdentifier("host_hub_addr:\(mode)")
-                pill.style = (selectedLan ? mode == "lan" : mode == "tailscale") ? .neutral : .subtleHeader
+                pill.frame.size.width = MenuControl.intrinsicWidth(title)
+                pill.style = (selectedLan ? mode == "lan" : mode == "tailscale") ? .prominent : .subtleHeader
                 pill.pressed = { [weak self] in self?.hostHubAddress=mode; self?.rebuildSettingsPanel() }
-                hostCard.addSubview(pill); addressPills.append(pill)
+                addressTrack.addSubview(pill); addressPills.append(pill)
             }
-            layoutBar(in:hostCard,insetLeft:14,y:78,height:22,leading:addressPills)
+            addressTrack.frame.size.width = addressPills.reduce(4) { $0 + $1.frame.width } + 4
+            layoutBar(in:addressTrack,insetLeft:2,insetRight:2,y:2,height:22,spacing:4,leading:addressPills)
+            hostCard.addSubview(addressTrack)
         }
         let authMode=hostHub.auth_mode ?? (hostHub.token.isEmpty ? "none" : "token")
         let endpointLabel = textLabel(selectedEndpoint, NSRect(x: 14, y: 46, width: 280, height: 16),
@@ -3211,7 +3322,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hostCard.addSubview(endpointLabel)
         var inviteActions: [NSView] = []
 
-        let copyInvite = MenuControl("Copy Invite Code", frame: NSRect(x: 0, y: 48, width: 140, height: 24), leadingSymbol: "doc.on.doc", radius: 6)
+        let copyInvite = MenuControl("Copy Invite Code", frame: NSRect(x: 0, y: 48, width: MenuControl.intrinsicWidth("Copy Invite Code", leadingSymbol:"doc.on.doc"), height: 24), leadingSymbol: "doc.on.doc", radius: 6)
         copyInvite.identifier = NSUserInterfaceItemIdentifier("copy_hub_invite")
         copyInvite.style = .prominent
         let inviteCmd = selectedInvite
@@ -3223,7 +3334,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let portField = makeEditableField("host_hub_port",frame:NSRect(x:0,y:12,width:58,height:24),placeholder:"Port",value:hostHubPortDraft ?? "\(hostHub.port)")
         hostCard.addSubview(portLabel); hostCard.addSubview(portField)
         let auth=MenuControl(authMode=="none" ? "Access: Trusted" : "Access: Token",frame:NSRect(x:286,y:12,width:112,height:24),radius:6)
-        auth.style = .subtleHeader
+        auth.style = .neutral
         auth.identifier=NSUserInterfaceItemIdentifier("toggle_host_hub_auth")
         auth.pressed={ [weak self] in
             guard let self=self else{return}
@@ -3257,7 +3368,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hubsView.addSubview(textLabel("CONNECTED HUBS", NSRect(x: 20, y: 194 + hubOffset, width: 180, height: 14),
             size: 10, weight: .semibold, color: CitoPalette.secondaryText))
 
-        let pasteBtn = MenuControl("Paste Invite Code", frame: NSRect(x: 250, y: 190 + hubOffset, width: 140, height: 22), leadingSymbol: "doc.on.clipboard", radius: 6)
+        let pasteBtn = MenuControl("Paste Invite Code", frame: NSRect(x: 250, y: 190 + hubOffset, width: MenuControl.intrinsicWidth("Paste Invite Code", leadingSymbol:"doc.on.clipboard"), height: 22), leadingSymbol: "doc.on.clipboard", radius: 6)
         pasteBtn.identifier = NSUserInterfaceItemIdentifier("paste_hub_invite")
         if Date() < hubInvitePastedUntil { pasteBtn.copied("✓ Joined") }
         pasteBtn.pressed = { [weak self] in self?.handlePasteHubInvite() }
@@ -3279,7 +3390,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hubsView.addSubview(addBtn)
 
         if addHubFormOpen {
-            let formHeight: CGFloat = editingExistingHub && editingOriginalHub == "local" ? 156 : 204
+            let formHeight: CGFloat = editingExistingHub && editingOriginalHub == "local" ? 124 : 204
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
@@ -3288,10 +3399,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 form.addSubview(textLabel(title,frame,size:10,weight:.semibold,color:CitoPalette.secondaryText))
             }
             if editingExistingHub && editingOriginalHub == "local" {
-                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:126,width:452,height:18),size:12.5,weight:.semibold))
-                form.addSubview(textLabel("Set the username shown when you send or receive messages on this Mac.",NSRect(x:14,y:104,width:452,height:16),size:11,color:CitoPalette.secondaryText))
-                fieldLabel("Username (Optional)",NSRect(x:14,y:80,width:452,height:14))
-                form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:54,width:452,height:24),placeholder:"e.g. alice",value:addHubUser))
+                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94,width:452,height:18),size:12.5,weight:.semibold))
+                fieldLabel("Username (Optional)",NSRect(x:14,y:72,width:452,height:14))
+                form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser))
             } else {
                 fieldLabel("Hub URL",NSRect(x:14,y:179,width:298,height:13))
                 fieldLabel("Hub Name (Optional)",NSRect(x:320,y:179,width:146,height:13))
@@ -3420,7 +3530,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
                 let edit=MenuControl("Edit",frame:NSRect(x:0,y:rowHeight-25,width:52,height:22),radius:6)
                 edit.identifier=NSUserInterfaceItemIdentifier("edit_hub:\(hub.name)")
-                edit.style = .subtleHeader
+                edit.style = .neutral
                 edit.pressed={ [weak self] in
                     guard let self=self else{return}
                     self.addHubName=hub.name; self.addHubUrl=hub.url; self.addHubAuth=hub.auth_mode
@@ -3481,6 +3591,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         loginBtn.identifier = NSUserInterfaceItemIdentifier("settings_launch_at_login")
         loginBtn.style = .subtleHeader
         loginBtn.label.alignment = .left
+        loginBtn.layoutContents()
         loginBtn.pressed = { [weak self] in
             self?.emit(["op": "set_launch_at_login", "enabled": !launchAtLogin])
         }
@@ -3506,15 +3617,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 color: .windowBackgroundColor.withAppearanceAlpha(0.96), border: CitoPalette.dangerText.withAppearanceAlpha(0.35))
             confirmBox.identifier = NSUserInterfaceItemIdentifier("uninstall_confirm_box")
 
-            confirmBox.addSubview(textLabel("Reset or Uninstall Cito",NSRect(x:12,y:98,width:416,height:18),size:12.5,weight:.semibold))
-            let explanation = textLabel("Disconnect keeps Cito running; uninstall removes Cito and quits.", NSRect(x:12,y:79,width:416,height:14),size:10,color:CitoPalette.secondaryText)
-            confirmBox.addSubview(explanation)
-            let purgeCheckbox = MenuControl("Also delete local data and Hub settings on uninstall",
+            confirmBox.addSubview(textLabel("Disconnect or Uninstall Cito",NSRect(x:12,y:98,width:416,height:18),size:12.5,weight:.semibold))
+            let purgeCheckbox = MenuControl("Also delete local data and Hub settings",
                 frame: NSRect(x: 12, y: 54, width: 416, height: 22),
                 leadingSymbol: uninstallPurgeData ? "checkmark.square.fill" : "square", radius: 6)
             purgeCheckbox.identifier = NSUserInterfaceItemIdentifier("uninstall_purge_data")
             purgeCheckbox.style = .subtleHeader
             purgeCheckbox.label.alignment = .left
+            purgeCheckbox.layoutContents()
             purgeCheckbox.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.uninstallPurgeData.toggle()
@@ -3522,7 +3632,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             confirmBox.addSubview(purgeCheckbox)
 
-            let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 32, y: 16, width: 72, height: 24), radius: 6)
+            let cancelUninstallBtn = MenuControl("Cancel", frame: NSRect(x: 32, y: 16, width: MenuControl.intrinsicWidth("Cancel"), height: 24), radius: 6)
             cancelUninstallBtn.identifier = NSUserInterfaceItemIdentifier("cancel_uninstall_all")
             cancelUninstallBtn.pressed = { [weak self] in
                 guard let self = self else { return }
@@ -3532,13 +3642,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             confirmBox.addSubview(cancelUninstallBtn)
 
-            let disconnect=MenuControl("Disconnect All",frame:NSRect(x:112,y:16,width:116,height:24),radius:6)
+            let disconnect=MenuControl("Disconnect All",frame:NSRect(x:112,y:16,width:MenuControl.intrinsicWidth("Disconnect All"),height:24),radius:6)
             disconnect.identifier=NSUserInterfaceItemIdentifier("confirm_disconnect_all")
+            disconnect.toolTip = "Disconnect all Agent Apps and keep Cito running"
             disconnect.pressed={ [weak self] in self?.uninstallConfirmOpen=false; self?.uninstallPurgeData=false; self?.emit(["op":"setup_disconnect_all"]); self?.rebuildSettingsPanel() }
             confirmBox.addSubview(disconnect)
-            let confirmUninstallBtn = MenuControl("Confirm Uninstall", frame: NSRect(x: 236, y: 16, width: 132, height: 24), radius: 6)
+            let confirmUninstallBtn = MenuControl("Confirm Uninstall", frame: NSRect(x: 236, y: 16, width: MenuControl.intrinsicWidth("Confirm Uninstall"), height: 24), radius: 6)
             confirmUninstallBtn.identifier = NSUserInterfaceItemIdentifier("confirm_uninstall_all")
-            confirmUninstallBtn.style = .destructiveHover
+            confirmUninstallBtn.style = .destructive
             confirmUninstallBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 let purge = self.uninstallPurgeData
@@ -3548,7 +3659,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self.rebuildSettingsPanel()
             }
             confirmBox.addSubview(confirmUninstallBtn)
-            layoutBar(in:confirmBox,y:16,height:24,leading:[cancelUninstallBtn],trailing:[disconnect,confirmUninstallBtn])
+            layoutBar(in: confirmBox, insetLeft: 12, insetRight: 12, y: 14, height: 24, leading: [cancelUninstallBtn], trailing: [disconnect,confirmUninstallBtn])
             overlay.addSubview(confirmBox); root.addSubview(overlay)
         }
 
@@ -3592,7 +3703,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         ensureEditMainMenu()
         if directoryPanel != nil { return }
         let window = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
-                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                              styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = testAppearance
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -3750,7 +3861,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         clear.label.font = .systemFont(ofSize: 11, weight: .medium)
         clear.identifier = NSUserInterfaceItemIdentifier("activity_clear")
         clear.isHidden = true
-        clear.style = .subtleHeader
+        clear.style = .neutral
         clear.pressed = { [weak self] in self?.emit(["op":"clear_activity_history"]); self?.queryDirectory() }
         facetBar.addSubview(clear); directoryFacetControls["activity_clear"] = clear
 
@@ -3795,7 +3906,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
         let targetPill = MenuControl("", frame: NSRect(x: 12, y: 10, width: 120, height: 24), radius: 6)
         targetPill.identifier = NSUserInterfaceItemIdentifier("composer_target")
-        targetPill.style = .subtleHeader
+        targetPill.style = .neutral
         targetPill.isEnabled = false
         composer.addSubview(targetPill)
         composerTargetPill = targetPill
@@ -3869,7 +3980,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         directoryModeActPill?.label.stringValue = actTitle
         directoryModeActPill?.setAccessibilityLabel(actTitle)
         if let act = directoryModeActPill, let dir = directoryModeDirPill, let search = directorySearchField, let track = act.superview, let bar = track.superview, let close = bar.subviews.first(where: { $0.identifier?.rawValue == "close_directory" }) {
-            act.frame.size.width = ceil(measureTextWidth(actTitle, font: act.label.font ?? .systemFont(ofSize: 11.5))) + 20
+            dir.frame.size.width = MenuControl.intrinsicWidth("Directory", font:dir.label.font ?? .systemFont(ofSize:11.5))
+            act.frame.size.width = MenuControl.intrinsicWidth(actTitle, font:act.label.font ?? .systemFont(ofSize:11.5))
             act.label.frame.size.width = act.frame.width - 6
             track.frame.size.width = dir.frame.width + act.frame.width + 8
             layoutBar(in:track,insetLeft:2,insetRight:2,y:2,height:24,spacing:4,leading:[dir,act])
@@ -3897,10 +4009,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerReplySignalId = replySignalId
         composerDraftIdempotencyKey = UUID().uuidString
         let displayTarget="To: \(target)"
-        let targetWidth=max(120,min(200,measureTextWidth(displayTarget,font:.systemFont(ofSize:12))+12))
+        let targetWidth = min(220, MenuControl.intrinsicWidth(displayTarget, font:.systemFont(ofSize:11,weight:.medium), minWidth:120))
         composerTargetPill?.frame.size.width=targetWidth
-        composerTargetPill?.label.frame.size.width=targetWidth-6
         composerTargetPill?.label.stringValue = displayTarget
+        composerTargetPill?.layoutContents()
         composerTargetPill?.label.lineBreakMode = .byTruncatingMiddle
         composerTargetPill?.label.toolTip = target
         composerInputField?.frame=NSRect(x:18+targetWidth,y:10,width:394-targetWidth,height:24)
@@ -4017,7 +4129,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 pill.style = (id == "act_filter:\(activityFilter)") ? .prominent : .neutral
             } else if id == "activity_mark_all_read" || id == "activity_clear" {
                 pill.isHidden = !isActivity
-                pill.style = .subtleHeader
+                pill.style = .neutral
             } else {
                 pill.isHidden = isActivity
                 let active = (id == "dir_scope:\(directoryScopeFilter)") || (id == "dir_harness:\(directoryHarnessFilter)")
@@ -4193,6 +4305,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
     }
 
+    func deleteActivity(_ item: ActivityItem) {
+        emit(["op":"clear_activity_history","hub":item.hub,"signal_id":item.signal_id])
+    }
+
     func handleDirectoryKey(_ key: String) {
         if (directoryPanel?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true { return }
         if handleTextEditShortcut(key, in: directoryPanel) { return }
@@ -4232,6 +4348,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 cell.copyControl.copied()
             }
         case "command-comma": openSettingsPanel()
+        case "delete":
+            guard directoryMode == "activity", !(directoryPanel?.firstResponder is NSTextView),
+                  activityFilteredItems.indices.contains(directorySelectedIndex) else { return }
+            deleteActivity(activityFilteredItems[directorySelectedIndex])
         case "command-w": closeDirectoryPanel(emitAction:true)
         case "escape":
             if !(directoryComposerBar?.isHidden ?? true) {
@@ -4292,9 +4412,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         emit(["op":"copy_activity_message","request_id":request,"hub":item.hub,"signal_id":item.signal_id])
     }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard directoryMode == "activity", row == directorySelectedIndex, activityFilteredItems.indices.contains(row) else { return 52 }
+        guard directoryMode == "activity", row == directorySelectedIndex, activityFilteredItems.indices.contains(row) else { return directoryMode == "activity" ? 60 : 52 }
         let text = activityFilteredItems[row].message
-        return text.contains("\n") || measureTextWidth(text,font:.systemFont(ofSize:11.5))>330 ? 108 : 52
+        return text.contains("\n") || measureTextWidth(text,font:.systemFont(ofSize:11.5))>330 ? 108 : 60
     }
     func numberOfRows(in tableView: NSTableView) -> Int {
         return directoryMode == "activity" ? activityFilteredItems.count : directoryFilteredPeers.count
@@ -4307,7 +4427,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if directoryMode == "activity" {
             guard activityFilteredItems.indices.contains(row) else { return nil }
             let item = activityFilteredItems[row]
-            cell.configureActivity(with: item, selected: row == directorySelectedIndex, harnesses: harnessMap, onCopy: { [weak self] control in self?.copyActivity(item,control:control) }) { [weak self] in
+            cell.configureActivity(with: item, selected: row == directorySelectedIndex, harnesses: harnessMap, onCopy: { [weak self] control in self?.copyActivity(item,control:control) }, onDelete: { [weak self] in self?.deleteActivity(item) }) { [weak self] in
                 guard let self = self else { return }
                 self.replyToActivity(item)
             }
@@ -4335,7 +4455,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             for index in indexes {
                 if let cell = table.view(atColumn:0,row:index,makeIfNecessary:false) as? DirectoryPeerCellView {
                     let item = activityFilteredItems[index]
-                    cell.configureActivity(with:item,selected:index==row,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onReply:{ [weak self] in self?.replyToActivity(item) })
+                    cell.configureActivity(with:item,selected:index==row,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
                 }
             }
         }
@@ -4609,6 +4729,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         clippedViews.append("\(name(view)) > \(name(child))")
                     }
                     for other in children.dropFirst(index+1) where f.insetBy(dx:0.5,dy:0.5).intersects(frame(other).insetBy(dx:0.5,dy:0.5)) {
+                        // The online status ring intentionally overlays its badge.
+                        if let cell = view as? DirectoryPeerCellView,
+                           (child === cell.badgeView && other === cell.onlineDot) || (child === cell.onlineDot && other === cell.badgeView) { continue }
                         overlappingSiblings.append("\(name(view)): \(name(child)) / \(name(other))")
                     }
                 }
@@ -4855,7 +4978,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                           NSRect(x: 16, y: 13, width: 356, height: 18),
                           NSRect(x: 288, y: 103, width: 84, height: 20)]
             for (index, size) in [13.0, 11.0, 12.0, 11.0, 10.0].enumerated() {
-                let label = NSTextField(wrappingLabelWithString: "")
+                var label = NSTextField(wrappingLabelWithString: "")
                 label.isSelectable = false
                 label.font = index == 0 || index == 4 ? .boldSystemFont(ofSize: size) : .systemFont(ofSize: size)
                 label.textColor = index == 1 ? CitoPalette.secondaryText : .labelColor
@@ -4864,11 +4987,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 label.maximumNumberOfLines = index == 2 ? 2 : 1
                 label.lineBreakMode = .byTruncatingTail
                 if index == 4 {
-                    label.alignment = .center
-                    let pill = roundedView(frames[index], radius: 7, color: .clear)
-                    pill.identifier = NSUserInterfaceItemIdentifier("banner_semantic_pill")
-                    label.frame = NSRect(x: 0, y: 3, width: frames[index].width, height: 14)
-                    pill.addSubview(label); root.addSubview(pill)
+                    let pill = makePillBadge(semanticLabel, id:"banner_semantic_pill", font:.boldSystemFont(ofSize:10), textColor:.labelColor, fill:.clear)
+                    if let pillLabel = pill.subviews.first as? NSTextField { label = pillLabel }
+                    root.addSubview(pill)
                     semanticPill = pill
                 } else { root.addSubview(label) }
                 labels.append(label)
@@ -4877,9 +4998,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             panel = window
         }
         icon?.image = NSImage(systemSymbolName: value.effective_wake ? "bell.badge.fill" : "tray.and.arrow.down.fill", accessibilityDescription: semanticLabel)
-        let badgeW = max(76,ceil(measureTextWidth(semanticLabel,font:.boldSystemFont(ofSize:10))) + 16)
+        labels[4].stringValue = semanticLabel
+        let badgeSize = labels[4].cell?.cellSize ?? NSSize(width:measureTextWidth(semanticLabel,font:.boldSystemFont(ofSize:10)),height:12)
+        let badgeW = max(88,ceil(badgeSize.width)+16)
+        let badgeH = ceil(badgeSize.height)
         semanticPill?.frame = NSRect(x:372-badgeW,y:103,width:badgeW,height:20)
-        labels[4].frame = NSRect(x:0,y:3,width:badgeW,height:14)
+        labels[4].frame = NSRect(x:0,y:floor((20-badgeH)/2),width:badgeW,height:badgeH)
         labels[0].frame.size.width = 372-badgeW-68
         labels[0].identifier = NSUserInterfaceItemIdentifier(value.target_harness == "human" ? "banner_chrome:0" : "banner_data:0")
         labels[0].stringValue = title

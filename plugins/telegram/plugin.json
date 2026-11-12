@@ -17,7 +17,7 @@
       "label": "Bot Token",
       "type": "secret",
       "required": true,
-      "placeholder": "123456:ABC-DEF...",
+      "placeholder": "123456:ABC-DEF…",
       "configuredPlaceholder": "•••••••• (Saved — enter new token to replace)",
       "helpText": "Shared once for everyone on this Hub"
     },
@@ -38,6 +38,6 @@
   },
   "version": "0.21.3",
   "setupGuide": [
-    "Create a bot via @BotFather on Telegram and paste its token below."
+    "Create a bot via @BotFather (/newbot) on Telegram and paste its token:"
   ]
 }

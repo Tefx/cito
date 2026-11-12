@@ -2591,6 +2591,43 @@ impl DaemonService {
             "paste_hub_invite" => {
                 let mut invite = parse_hub_invite(string(action, "invite"))?;
                 let raw = self.raw_config()?;
+                if let Some(server) = &self.host_server {
+                    let url = url::Url::parse(string(&invite, "url"))
+                        .map_err(|_| "INVALID_INPUT: Invalid Hub URL")?;
+                    let host = raw
+                        .get("host_hub")
+                        .or_else(|| raw.get("hostHub"))
+                        .unwrap_or(&Value::Null);
+                    let bind = string(host, "bind");
+                    let hostname = local_host_name();
+                    let mut local_hosts = vec![
+                        "127.0.0.1".to_owned(),
+                        "localhost".to_owned(),
+                        "::1".to_owned(),
+                        hostname.clone(),
+                        format!("{}.local", hostname.trim_end_matches(".local")),
+                        advertised_hub_host(bind),
+                        lan_advertised_host(bind),
+                    ];
+                    if matches!(bind, "" | "0.0.0.0" | "::") {
+                        local_hosts.extend(tailscale_advertised_host());
+                    }
+                    let invite_host = url
+                        .host_str()
+                        .unwrap_or("")
+                        .trim_matches(['[', ']'])
+                        .trim_end_matches('.');
+                    if url.port_or_known_default() == Some(server.port())
+                        && local_hosts.iter().any(|local| {
+                            local
+                                .trim_matches(['[', ']'])
+                                .trim_end_matches('.')
+                                .eq_ignore_ascii_case(invite_host)
+                        })
+                    {
+                        return Err("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.".into());
+                    }
+                }
                 let base = normalize_slug(string(&invite, "name"));
                 if !string(&invite, "name").is_empty() {
                     let mut name = base.clone();
@@ -2736,7 +2773,8 @@ impl DaemonService {
             "clear_activity_history" => {
                 self.state.db.transaction(|c| {
                     let selected = action["hub"].as_str().unwrap_or("");
-                    let rows = c.query("SELECT * FROM local_signals WHERE (?='' OR hub=?)", &[json!(selected),json!(selected)])?;
+                    let signal_id = action["signal_id"].as_str().unwrap_or("");
+                    let rows = c.query("SELECT * FROM local_signals WHERE (?='' OR hub=?) AND (?='' OR signal_id=?)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id)])?;
                     for row in rows {
                         if row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES(?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms())])?; }
                         c.execute("DELETE FROM local_signals WHERE hub=? AND signal_id=?", &[row["hub"].clone(),row["signal_id"].clone()])?;

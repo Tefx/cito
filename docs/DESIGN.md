@@ -1610,7 +1610,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 
 #### 1. `Q1` — Unified macOS Control Taxonomy & Modal Action Consistency (`src/macos/cito-ui.swift`)
 - **Basis**: Eliminate visual inconsistency where destructive or secondary actions (`Disconnect` in `Agent Apps`, `Confirm Uninstall` in `uninstall_confirm_box`, `Remove` in `Connected Hubs`, `Unpair`, `Clear Token`) lost their button silhouette (`border = nil, fill = .clear`) and appeared as floating plain text next to bordered pill buttons (`Set Up`, `Cancel`, `Disconnect All`).
-- **Four-Class Control Taxonomy (`MenuControl.Style`)**:
+- **Five-Class Control Taxonomy (`MenuControl.Style`)**:
   1. **`.prominent` (Primary Constructive Button)**: Solid accent fill (`CitoPalette.prominentFill`), `1pt` border (`white @ 0.22`), white `.medium` label/icon (`Set Up`, `Save`, `Save Gateway Token`, `Join Hub`, `Copy Invite Code`, `Send ⏎`, `Resume`, active segmented tab).
   2. **`.neutral` (Secondary Pill Button)**: Subtle pill fill (`labelColor @ 0.08`), `1pt` border (`labelColor @ 0.14`), primary `.labelColor` (`Cancel`, `Re-check`, `Send Test`, `Pause`, `Pair Account…`, `Paste Invite Code`, `Add Hub…`, `Apply`, `+ Listen`, `Message`, `Reply`, `Enabled`/`Disabled`).
   3. **`.destructiveHover` (Secondary Destructive Pill Button)**: **Must retain the exact same resting pill silhouette as `.neutral`** (`fill = .labelColor.withAppearanceAlpha(0.08)`, `border = .labelColor.withAppearanceAlpha(0.14)`, `foreground = CitoPalette.secondaryText`), transitioning on hover to solid red (`CitoPalette.destructiveFill`, `border = .white.withAlphaComponent(0.26)`, `foreground = .white`). Used for `Disconnect` (`remove_app:<id>`), `Remove` (`remove_hub:<name>`), `Unpair` (`unpair_channel:<id>`), and `Clear Token` (`clear_channel_service:<id>`), so right-edge action columns in `Agent Apps` and `Connected Hubs` have uniform button geometry at rest.
@@ -1644,7 +1644,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
     - When `!gatewayActive`, keep `stratum_hub` focused with 1-line guide `"Create a bot via @BotFather (/newbot) on Telegram and paste its token:"` (`placeholder: "123456:ABC-DEF…"`).
   - **`This Mac (Local Hub)` Edit Form (`cito-ui.swift:3291`)**: Remove `"Set the username shown when you send or receive messages on this Mac."` (shrinking the local edit form from `156pt` to `124pt`).
 
-#### 3. `Q3` — Native macOS Chinese Input Method (IME / 拼音输入法) Support (`src/macos/cito-ui.swift`)
+#### 3. `Q3` — Native macOS Chinese Input Method (IME / Pinyin) Support (`src/macos/cito-ui.swift`)
 - **Basis**: `KeyPanel` (`settingsPanel` and `directoryPanel`) previously used `styleMask: [.borderless, .nonactivatingPanel]` and intercepted `Up`/`Down`/`Return`/`Escape` in a pre-responder `NSEvent` local monitor before `NSTextInputContext` could process Pinyin composition and candidate selection.
 - **IME & Key-Window Contract (`cito-ui.swift:386–396, 1403–1418, 2560, 3592`)**:
   1. Remove `.nonactivatingPanel` from `settingsPanel` and `directoryPanel` (retaining `.nonactivatingPanel` strictly on `WakeBanner`'s `panel` at line `4805`). Override `canBecomeKey { true }` and `canBecomeMain { true }` on `KeyPanel`, and in `makeFirstResponder(_ responder: NSResponder?)`, activate `(currentEditor() as? NSTextView)?.inputContext?.activate()` so macOS Text Services Manager (`TSM`) binds the Pinyin candidate window to the active text field.
@@ -1665,7 +1665,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
     - In `crates/cito-native/src/core/daemon.rs:2727` (`"clear_activity_history"`), when `action["signal_id"].as_str()` is non-empty, acknowledge and delete only the matching signal (`WHERE hub = ? AND signal_id = ?`) instead of clearing the entire hub history!
 
 #### 5. `Q5` — Clean 2-Line `AVAILABLE SESSIONS` Rows in `cardMenu` (`src/macos/cito-ui.swift:2400–2460`)
-- **Basis**: Eliminate double truncation (`通过 Cito 联系 tefx-d05c1...  · ~/Doc...1-10/ton`) caused by splitting a single `274pt` line into `160pt` title + `114pt` path.
+- **Basis**: Eliminate double truncation (`Contact review-sess...  · ~/Pro.../service`) caused by splitting a single `274pt` line into `160pt` title + `114pt` path.
 - **2-Line Candidate Row Geometry (`height: 44pt`, or `58pt` when `needsReload == true`)**:
   - **Line 1 (`y = rowHeight - 21, height = 16, x = 24, width = 268`)**: `candidate_title:<harness>:<session_id>` displays `c.title` (`12pt .medium`, `.labelColor`, `.byTruncatingTail`) across the full `268pt` left column (`+67%` wider).
   - **Line 2 (`y = needsReload ? 21 : 6, height = 14, x = 24, width = 268`)**: `candidate_cwd:<harness>:<session_id>` displays `"\(shortCwd)\(branchSuffix)"` (`10.5pt .regular`, `CitoPalette.secondaryText`, `.byTruncatingMiddle`) across its own dedicated `268pt` line (`+135%` wider, no leading `" · "` prefix; when `needsReload == true` at `rowHeight = 58`, `Hint` sits at `y = 5, height = 14`, `Path` at `y = 21, height = 14`, and `Title` at `y = 37, height = 16`, preserving `>= 2pt` separation between all 3 lines).

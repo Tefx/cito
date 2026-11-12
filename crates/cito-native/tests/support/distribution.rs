@@ -405,7 +405,7 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
     for (path, width, height) in [
         ("apple-touch-icon.png", 180, 180),
         ("assets/og-card.png", 1200, 630),
-        ("assets/screenshots/menu-dark.png", 760, 668),
+        ("assets/screenshots/menu-dark.png", 760, 684),
         ("assets/screenshots/directory-dark.png", 1120, 880),
         ("assets/screenshots/activity-dark.png", 1120, 880),
         ("assets/screenshots/settings-apps-dark.png", 1040, 920),
