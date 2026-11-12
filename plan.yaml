@@ -9618,3 +9618,20 @@ phases:
     or loop) and do NOT publish a release.'
   depends_on:
   - v33
+  steps:
+  - id: v34.impl
+    name: V34 Q1–Q6 Unified Control Taxonomy, Intrinsic Layout Engine, Chinese IME,
+      Directory/Activity Distinction & Self-Invite Guard
+    status: pending
+    description: Implement docs/DESIGN.md §18 (Q1–Q6) while strictly enforcing §18.2
+      test economy (update existing unit/UI assertions in place; do NOT add new multi-process
+      E2E test functions). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
