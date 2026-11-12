@@ -1278,7 +1278,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         );
         assert_eq!(
             node(&s, "directory_items", "dir_title:personal:agent")["text"],
-            "Fixture (~)"
+            "Fixture"
         );
         assert_eq!(
             node(&s, "directory_items", "dir_meta:personal:agent")["text"],
@@ -1346,7 +1346,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             "directory_items",
             "dir_title:personal:home"
         )["text"],
-        "Fixture (~)"
+        "Fixture"
     );
     // Foundation resolves the account home independently of the fixture's HOME.
     let home_basename = inspect(&f, p)["home_basename"].as_str().unwrap().to_owned();
@@ -1356,7 +1356,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         "@bob",
         home_basename.as_str(),
         at_home_basename.as_str(),
-        "Fixture (~)",
+        "Fixture",
         "",
         "Agent",
         "Agent session",
@@ -1367,15 +1367,15 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         "Human channel",
     ] {
         for (about, expected) in [
-            ("CLI session", "Fixture (~)"),
-            ("bob", "Fixture (~)"),
-            ("@bob", "Fixture (~)"),
-            (home_basename.as_str(), "Fixture (~)"),
-            (at_home_basename.as_str(), "Fixture (~)"),
+            ("CLI session", "Fixture"),
+            ("bob", "Fixture"),
+            ("@bob", "Fixture"),
+            (home_basename.as_str(), "Fixture"),
+            (at_home_basename.as_str(), "Fixture"),
             (
                 "account",
                 if home_basename.eq_ignore_ascii_case("account") {
-                    "Fixture (~)"
+                    "Fixture"
                 } else {
                     "account"
                 },
@@ -1383,13 +1383,13 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             (
                 "@account",
                 if home_basename.eq_ignore_ascii_case("account") {
-                    "Fixture (~)"
+                    "Fixture"
                 } else {
                     "@account"
                 },
             ),
         ] {
-            let expected = if raw == "Fixture (~)" { raw } else { expected };
+            let expected = if raw == "Fixture" { raw } else { expected };
             agent["title"] = json!(raw);
             agent["about"] = json!(about);
             agent["cwd"] = json!(f.home);
@@ -1786,6 +1786,34 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             }
         }
     }
+    let paused_card = node(&s, "items", "human_paused_card")["children"][0].clone();
+    let paused_badge = &paused_card["children"][0];
+    assert_eq!(paused_badge["x"], 12);
+    assert_eq!(paused_badge["y"], 15);
+    assert_eq!(paused_badge["width"], 28);
+    assert_eq!(paused_badge["height"], 28);
+    assert_eq!(paused_badge["radius"], 7);
+    assert_eq!(paused_card["children"][1]["x"], 48);
+    for hub_count in [1, 2] {
+        let mut active = frame.clone();
+        active["hubs"].as_array_mut().unwrap().truncate(hub_count);
+        let mut human = listener();
+        human["harness"] = json!("human");
+        human["session_id"] = json!("default");
+        human["title"] = json!("Human");
+        human["display_address"] = json!("personal:@alice");
+        active["listeners"] = json!([human]);
+        f.send(p, active);
+        let snapshot = inspect(&f, p);
+        let card =
+            node(&snapshot, "items", "session:personal:repo-abcdefghijkl")["children"][0].clone();
+        for coordinate in ["x", "y", "width", "height", "radius"] {
+            assert_eq!(card["children"][0][coordinate], paused_badge[coordinate]);
+        }
+        assert_eq!(card["children"][1]["x"], 48);
+        assert_eq!(card["children"][1]["y"], paused_card["children"][1]["y"]);
+    }
+    f.send(p, frame.clone());
     control(&f, p, "listen_human");
     wait(|| {
         f.frames(p).iter().any(|v| {
@@ -2471,7 +2499,29 @@ fn u3_paused_human_card_requires_no_active_person_and_excludes_offline_targets()
     control(&f, p, "target_hub:work");
     let coalesced = inspect(&f, p);
     assert!(!node(&coalesced, "items", "human_paused_card").is_null());
+    assert_eq!(coalesced["count"], 0);
+    assert_eq!(
+        node(&coalesced, "items", "header_subtitle")["text"],
+        "Notifications paused"
+    );
     assert!(node(&coalesced, "items", "session:personal:repo-abcdefghijkl").is_null());
+    let mut empty = frame.clone();
+    empty["available"] = json!([]);
+    f.send(p, empty.clone());
+    let snapshot = inspect(&f, p);
+    assert!(
+        nodes(&node(&snapshot, "items", "available_empty_target")["children"])
+            .iter()
+            .any(|n| n["text"] == "No open agent sessions")
+    );
+    empty["hubs"][1]["auto_listen"] = json!(true);
+    f.send(p, empty);
+    let snapshot = inspect(&f, p);
+    assert!(
+        nodes(&node(&snapshot, "items", "available_empty_target")["children"])
+            .iter()
+            .any(|n| n["text"] == "Auto-Listen is on — open sessions connect automatically")
+    );
     frame["hubs"][1]["status"] = json!("disconnected");
     f.send(p, frame.clone());
     assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
@@ -3076,8 +3126,34 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     );
     control(&f, p, "act_filter:unread");
     assert!(!node(&inspect(&f, p), "directory_items", "act_empty_show_all").is_null());
+    // An unread-only server projection may omit all read rows while retaining totals.
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"activity":[],"activity_total":1,"activity_unread_count":0,"activity_filter":"unread"}),
+    );
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"activity_filter":"unread"}),
+    );
+    assert!(!node(&inspect(&f, p), "directory_items", "act_empty_show_all").is_null());
     control(&f, p, "act_empty_show_all");
     assert_eq!(inspect(&f, p)["activity_filter"], "all");
+    wait(|| {
+        f.frames(p).iter().rev().any(|v| {
+            v["op"] == "query_directory" && v["mode"] == "activity" && v["filter"] == "all"
+        })
+    });
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"activity":[{"hub":"personal","signal_id":"read","listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Sender","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Done","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":true}],"activity_filter":"all"}),
+    );
+    let summary = inspect(&f, p);
+    assert!(nodes(&summary["directory_items"])
+        .iter()
+        .any(|n| n["text"] == "1 message · 0 unread"));
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "directory_empty_state")["hidden"],
         true
@@ -3236,7 +3312,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut frame = state();
-    frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":if i == 1 { "~/Documents/A-very-long-ancestor/Projects/service" } else if i == 2 { "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else { "/tmp/work" },"branch":"main","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
+    frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":if i == 1 { "~/Documents/A-very-long-ancestor/Projects/service" } else if i == 2 { "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else if i == 3 { "/srv/Documents/A-very-long-ancestor/Projects/service" } else if i == 4 { "/srv/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else { "/tmp/work" },"branch":"main","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
     f.send(p, frame.clone());
     control(&f, p, "target_hub:work");
     let s = inspect(&f, p);
@@ -3259,6 +3335,19 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(
         leaf["tooltip"],
         "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name · main"
+    );
+    assert_eq!(
+        node(&s, "items", "candidate_cwd:fixture:candidate-3")["text"],
+        "/…/Projects/service · main"
+    );
+    assert_eq!(
+        node(&s, "items", "candidate_cwd:fixture:candidate-4")["text"],
+        "/…/project-directory-with-long-name · main"
+    );
+    assert_eq!(s["count"], 0);
+    assert_eq!(
+        node(&s, "items", "header_subtitle")["text"],
+        "Notifications paused"
     );
     assert_eq!(s["available_count"], 5);
     assert_eq!(node(&s, "items", "hub:work")["text"], "work");
@@ -3514,11 +3603,11 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(s["icon_width"], 20);
     assert_eq!(s["button_title"], "");
     let candidate = node(&s, "items", "candidate_title:fixture:candidate");
-    assert_eq!(candidate["text"], "Fixture (~)");
-    assert_eq!(candidate["tooltip"], "Fixture (~) — /tmp");
+    assert_eq!(candidate["text"], "Fixture");
+    assert_eq!(candidate["tooltip"], "Fixture — /tmp");
     assert_eq!(
         node(&s, "items", "listen:fixture:candidate")["tooltip"],
-        "Start listening in Fixture (~)"
+        "Start listening in Fixture"
     );
     control(&f, p, "listen:fixture:candidate");
     wait(|| f.frames(p).iter().any(|v| v["op"] == "listen_session"));
@@ -3527,7 +3616,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
             .into_iter()
             .find(|v| v["op"] == "listen_session")
             .unwrap()["title"],
-        "Fixture (~)"
+        "Fixture"
     );
     initial = state();
     initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","custom_title":true,"cwd":"/tmp"}]);
@@ -3562,7 +3651,13 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
         true
     );
     control(&f, p, "copy:personal:repo-abcdefghijkl");
-    assert_eq!(inspect(&f, p)["clipboard"], "alice/fixture#abcd");
+    let copied = inspect(&f, p);
+    assert_eq!(copied["clipboard"], "alice/fixture#abcd");
+    assert_eq!(
+        node(&copied, "items", "copy:personal:repo-abcdefghijkl")["text"],
+        "✓ Copied"
+    );
+    assert_eq!(copied["truncated_labels"], json!([]));
     for appearance in ["dark", "light"] {
         f.send(p, json!({"op":"test_appearance","appearance":appearance}));
         f.send(p, json!({"op":"test_hover","id":"quit","hovered":true}));
@@ -3971,7 +4066,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     control(&f, p, "composer_cancel");
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "directory_shortcuts")["text"],
-        "↵ Copy Selected ID    ⎋ Close"
+        "↵ Copy Address    ⎋ Close"
     );
     control(&f, p, "dir_mode:activity");
     let activity: Vec<_> = ["reply_a", "reply_b"]
@@ -4642,7 +4737,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 46);
+    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 136);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 8);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 252);
     assert_eq!(node(&s, "settings_items", "hub_visibility_caption")["text"], "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.");
@@ -4654,6 +4749,20 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     control(&f, p, "edit_hub:local");
     assert!(!node(&inspect(&f, p), "settings_items", "settings_hub_user").is_null());
     capture("settings", "settings_edit_local");
+    f.send(p, json!({"op":"error","source_op":"setup_save_hub","error":"INVALID_INPUT: Username is invalid"}));
+    let local_error = inspect(&f, p);
+    let error = node(&local_error, "settings_items", "add_hub_error");
+    let user = node(&local_error, "settings_items", "settings_hub_user");
+    assert_eq!(
+        node(&local_error, "settings_items", "add_hub_form")["height"],
+        152
+    );
+    assert!(
+        error["y"].as_f64().unwrap()
+            >= user["y"].as_f64().unwrap() + user["height"].as_f64().unwrap() + 6.0
+    );
+    assert_eq!(local_error["overlapping_siblings"], json!([]));
+    assert_eq!(local_error["clipped_views"], json!([]));
     control(&f, p, "cancel_add_hub");
     control(&f, p, "edit_hub:work");
     assert_eq!(

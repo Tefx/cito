@@ -572,6 +572,15 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         "PATH".into(),
         format!("{}:{}", git.parent().unwrap().display(), f.env["PATH"]),
     );
+    let failed_process = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":i32::MAX}),
+    );
+    assert_eq!(
+        failed_process["ok"], false,
+        "Process inspection errors must not look empty: {failed_process}"
+    );
+    assert!(failed_process["sessions"].is_null());
     let discover = || f.plugin(CODEX, json!({"op":"discover_sessions"}));
     db.execute("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE", &[])
         .unwrap();

@@ -250,7 +250,7 @@ fn default_session_title(
     {
         about.to_owned()
     } else {
-        format!("{harness_name} (~)")
+        harness_name.to_owned()
     }
 }
 
@@ -443,9 +443,7 @@ impl ChannelInventory {
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
             return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
         }
-        let value = slot
-            .rpc("human_channels_list", &json!({}))
-            .unwrap_or_else(|e| json!({"status":"error","detail":e}));
+        let result = slot.rpc("human_channels_list", &json!({}));
         if slot.closed.load(Ordering::SeqCst) || shutdown_requested() {
             return Err("NATS_UNAVAILABLE: Channel request cancelled".into());
         }
@@ -454,7 +452,16 @@ impl ChannelInventory {
             .completed_gen
             .checked_add(1)
             .ok_or("Channel inventory generation exhausted")?;
-        cached.value = value;
+        cached.value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                let mut value = json!({"status":"error","detail":error});
+                if let Some(channels) = cached.value["channels"].as_array() {
+                    value["channels"] = json!(channels);
+                }
+                value
+            }
+        };
         cached.retry_at = Instant::now() + Duration::from_secs(1);
         Ok(())
     }
@@ -2085,29 +2092,37 @@ impl DaemonService {
             return Ok(());
         };
         for candidate in activity.candidates().filter(|candidate| {
-            candidate["endpoint_pid"].as_u64().is_some() && candidate["needs_reload"] != true
+            candidate["endpoint_pid"].as_u64().is_some()
+                && candidate["needs_reload"] != true
+                && self
+                    .plugins
+                    .find_by_id(string(candidate, "harness"))
+                    .is_some_and(|plugin| {
+                        super::setup::try_inspect_plugin_setup(plugin)
+                            .is_ok_and(|(_, configured, _)| configured)
+                    })
         }) {
-            for (hub, _) in &hubs {
+            for (hub, slot) in &hubs {
                 let rows = self.state.db.query(
-                    "SELECT status FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
+                    "SELECT status, principal_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
                     &[
                         json!(hub),
                         candidate["harness"].clone(),
                         candidate["session_id"].clone(),
                     ],
                 )?;
-                if rows
-                    .iter()
-                    .any(|row| matches!(string(row, "status"), "ACTIVE" | "UNLISTENED"))
-                {
+                if rows.iter().any(|row| {
+                    super::auth::principal_ids_equal(
+                        string(row, "principal_id"),
+                        string(&slot.identity, "principal_id"),
+                    ) && matches!(string(row, "status"), "ACTIVE" | "UNLISTENED")
+                }) {
                     continue;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
-                if let Err(error) = self.listen(
-                    hub,
-                    &json!({"about":candidate["title"],"scope":"self"}),
-                    candidate,
-                ) {
+                if let Err(error) =
+                    self.listen(hub, &json!({"about":candidate["title"]}), candidate)
+                {
                     eprintln!("cito auto-listen {hub}: {error}");
                 }
             }
@@ -4929,6 +4944,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
+        let slot = HubClient::new(
+            "work".into(),
+            json!({"url":"http://127.0.0.1:0"}),
+            "alice",
+            None,
+        );
+        let inventory = ChannelInventory::new(remote_channels_identity(&slot));
+        let channels = json!([{"id":"fixture","status":"ready","fields":[]}]);
+        inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"channels":channels});
+        for generation in 0..2 {
+            inventory.refresh(&slot, generation)?;
+            let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
+            assert_eq!(cached.value["channels"], channels);
+            assert_eq!(cached.value["status"], "error");
+            assert!(cached.value["detail"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()));
+            assert_eq!(cached.completed_gen, generation + 1);
+        }
+        let fresh = ChannelInventory::new(remote_channels_identity(&slot));
+        fresh.refresh(&slot, 0)?;
+        let cached = fresh.cached.lock().map_err(|e| e.to_string())?;
+        assert!(cached.value["channels"].is_null());
+        assert_eq!(cached.value["status"], "error");
+        Ok(())
+    }
+
+    #[test]
     fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state(
     ) -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("cito-daemon-unit-{}", random_uuid_v4()));
@@ -5236,11 +5280,11 @@ mod tests {
         let home = std::path::Path::new("/home/alice");
         assert_eq!(
             default_session_title(&caller, home, "Fixture", "alice", ""),
-            "Fixture (~)"
+            "Fixture"
         );
         assert_eq!(
             default_session_title(&caller, home, "Fixture", "alice", "Session"),
-            "Fixture (~)"
+            "Fixture"
         );
         assert_eq!(
             default_session_title(&caller, home, "Fixture", "alice", "Release audit"),
@@ -5275,11 +5319,11 @@ mod tests {
             let generic = json!({"harness":"fixture","cwd":"~","title":raw});
             for (about, expected) in [
                 ("Auth refactor", "Auth refactor"),
-                ("CLI session", "Fixture (~)"),
-                ("alice", "Fixture (~)"),
-                ("@alice", "Fixture (~)"),
-                ("account", "Fixture (~)"),
-                ("@account", "Fixture (~)"),
+                ("CLI session", "Fixture"),
+                ("alice", "Fixture"),
+                ("@alice", "Fixture"),
+                ("account", "Fixture"),
+                ("@account", "Fixture"),
             ] {
                 let title = default_session_title(&generic, other_home, "Fixture", "alice", about);
                 assert_eq!(title, expected, "raw={raw}, about={about}");

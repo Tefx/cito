@@ -112,7 +112,7 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
         control.frame.size.width = max(reservedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
-            paddingX: id == "open_settings" ? 6 : (id.hasPrefix("scope:") ? 9 : (id == "open_uninstall_confirm" ? 12 : 11))))
+            paddingX: id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") ? 3 : (id == "open_settings" ? 6 : (id.hasPrefix("scope:") ? 9 : (id == "open_uninstall_confirm" ? 12 : 11)))))
         control.layoutContents()
     }
     var left = insetLeft
@@ -262,9 +262,10 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
     guard measureTextWidth(full, font: font) > maxWidth else { return full }
     let segments = shortCwd.split(separator: "/")
     guard segments.count >= 3, let leaf = segments.last else { return full }
-    let parentAndLeaf = "~/…/\(segments.suffix(2).joined(separator: "/"))" + branchSuffix
+    let prefix = shortCwd.hasPrefix("~") ? "~/…/" : "/…/"
+    let parentAndLeaf = prefix + segments.suffix(2).joined(separator: "/") + branchSuffix
     if measureTextWidth(parentAndLeaf, font: font) <= maxWidth { return parentAndLeaf }
-    return "~/…/\(leaf)" + branchSuffix
+    return prefix + leaf + branchSuffix
 }
 
 func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
@@ -291,10 +292,9 @@ func nodeDisplayTitle(_ title: String, harness: String, user: String, about: Str
     if harness == "human" && (raw.isEmpty || raw == "Human" || raw == "@\(user)" || raw == "@\(user) (Me)" || raw.hasPrefix("Human Node")) {
         return "You (@\(user))"
     }
-    if harness != "human" && raw.hasSuffix(" (~)") { return raw }
     // A meaningful title remains authoritative even when its session lives at home.
     if harness != "human" && isGenericSessionLabel(raw, user: user) {
-        return distinctAbout(about, title: raw, user: user) ?? "\(harnessName ?? harness) (~)"
+        return distinctAbout(about, title: raw, user: user) ?? (harnessName ?? harness)
     }
     return title
 }
@@ -504,10 +504,11 @@ final class MenuControl: NSControl {
         if !label.isHidden, let icon = leadingSymbolView, !icon.isHidden {
             // NSTextField needs its drawable insets beyond cellSize to avoid native ellipsis.
             let textW = max(0, min(bounds.width - 23, ceil(measureTextWidth(label.stringValue, font: font)) + 6))
-            let copyChip = style == .subtleHeader && identifier?.rawValue.hasPrefix("copy:") == true
+            let id = identifier?.rawValue ?? ""
+            let copyChip = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:")
             let startX: CGFloat = label.alignment == .left ? (copyChip ? 0 : 6) : max(6, floor((bounds.width - 17 - textW) / 2))
             icon.frame = NSRect(x: startX, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
-            label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - 27) : textW, height: cellH)
+            label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - (copyChip ? 17 : 27)) : textW, height: cellH)
         } else {
             label.frame = NSRect(x: 4, y: labelY, width: max(0, bounds.width - 8), height: cellH)
         }
@@ -1236,10 +1237,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var hubDrawerVisibility: [String: Bool] = [:]
     var statusImage: NSImage?
     var uniqueSessionCount: Int {
-        Dictionary(grouping: listeners.filter { $0.harness != "human" }, by: { $0.harness })
+        Dictionary(grouping: listeners.filter { $0.harness != "human" && (effectiveTargetHub.isEmpty || $0.hub == effectiveTargetHub) }, by: { $0.harness })
             .values.reduce(0) { $0 + Set($1.map { $0.session_id }).count }
     }
-    var humanListening: Bool { listeners.contains { $0.harness == "human" } }
+    var humanListening: Bool { listeners.contains { $0.harness == "human" && (effectiveTargetHub.isEmpty || $0.hub == effectiveTargetHub) } }
     var wakeActionText = ""
     var testAppearance: NSAppearance?
     var hubs: [Hub] = []
@@ -1980,9 +1981,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name) }
             if let error = frame.composer_error, !error.isEmpty { setComposerStatus(error) }
             if hasRenderedState && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
-                let count = uniqueSessionCount
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
-                statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
+                statusImage = makeCitoStatusIcon(warning ? .warning : listeners.contains { $0.harness != "human" } ? .active : .idle)
                 if let button = status?.button ?? headlessStatusButton {
                     formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
                 }
@@ -2022,8 +2022,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
         } else if frame.op == "directory", let peers = frame.peers {
             guard frame.request_id == directoryRequestId && frame.query == directoryQuery && frame.scope == directoryScopeFilter && frame.harness == directoryHarnessFilter else { return }
-            activityTotal = frame.activity_total ?? 0
-            activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? 0
+            activityTotal = frame.activity_total ?? activityTotal
+            activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
             serverActivityFilter = frame.activity_filter
             serverActivityQuery = frame.activity_query ?? ""
             directoryAllPeers = peers
@@ -2081,7 +2081,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         rebuildCount += 1
         let count = uniqueSessionCount
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
-        statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
+        statusImage = makeCitoStatusIcon(warning ? .warning : listeners.contains { $0.harness != "human" } ? .active : .idle)
         if let button = status?.button ?? headlessStatusButton {
             formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
         }
@@ -2270,11 +2270,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
             let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
-            card.addSubview(makeHarnessBadge(NSRect(x: 10, y: 14, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
-            let title = textLabel("You (@\(targetUser))", NSRect(x: 46, y: 32, width: 220, height: 16), size: 12.5, weight: .semibold)
+            card.addSubview(makeHarnessBadge(NSRect(x: 12, y: 15, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
+            let title = textLabel("You (@\(targetUser))", NSRect(x: 48, y: 32, width: 220, height: 16), size: 12.5, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
-            card.addSubview(textLabel("Notifications paused", NSRect(x: 46, y: 10, width: 200, height: 14), size: 9.5, color: CitoPalette.secondaryText))
+            card.addSubview(textLabel("Notifications paused", NSRect(x: 48, y: 10, width: 200, height: 14), size: 9.5, color: CitoPalette.secondaryText))
             let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume"), y: 18, width: MenuControl.intrinsicWidth("Resume"), height: 22), radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
@@ -2303,11 +2303,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             row.addSubview(card)
             activeRows.append((id: "session:\(listener.scoped_id)", view: row))
-            let multiHub = hubs.count > 1
-            let badgeSize: CGFloat = multiHub ? 28 : 34
-            let titleX: CGFloat = multiHub ? 42 : 54
-            let badge = makeHarnessBadge(NSRect(x: 10, y: cardHeight - 44, width: badgeSize, height: badgeSize),
-                radius: 8, iconInset: multiHub ? 7 : 8, harness: listener.harness, harnesses: map)
+            let titleX: CGFloat = 48
+            let badge = makeHarnessBadge(NSRect(x: 12, y: cardHeight - 43, width: 28, height: 28),
+                radius: 7, iconInset: 6, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
             let listenerHub = hubs.first(where: { $0.name == listener.hub })
             let hasOtherUsers = directoryAllPeers.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user }) || listeners.contains(where: { $0.hub == listener.hub && !($0.user ?? "").isEmpty && $0.user != user })
@@ -2325,7 +2323,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let short = listener.display_address
             let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-            let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc"))
+            let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3))
             let copy = MenuControl(short, frame: NSRect(x: titleX, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
             copy.label.font = copyFont
             copy.style = .subtleHeader
@@ -2479,12 +2477,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
                     let short = peer.display_address
-                    let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc"))
+                    let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3))
                     let copy = MenuControl(short, frame: NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20), leadingSymbol: "doc.on.doc")
                     copy.label.font = copyFont
-                    copy.layoutContents()
+                    copy.label.alignment = .left
                     copy.toolTip = peer.scoped_id
                     copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
+                    copy.layoutContents()
                     copy.pressed = { [weak self, weak copy] in
                         self?.copyText(peer.display_address, control: copy)
                     }
@@ -2540,7 +2539,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 : available
             if visibleAvailable.isEmpty {
                 let emptyTarget = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 28))
-                let label = textLabel(autoListen ? "Auto-Listen is on — open sessions connect automatically" : "All sessions listening on \(targetHub)",
+                let label = textLabel(autoListen ? "Auto-Listen is on — open sessions connect automatically" : (listeners.contains { $0.harness != "human" } ? "All sessions listening on \(targetHub)" : "No open agent sessions"),
                     NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: CitoPalette.secondaryText)
                 label.lineBreakMode = .byTruncatingMiddle; label.toolTip = label.stringValue
                 emptyTarget.addSubview(label)
@@ -2714,7 +2713,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             _ = host(dirRow, id: "directory_row")
         }
         let footer = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 36))
-        if uniqueSessionCount > 0 {
+        if self.listeners.contains(where: { $0.harness != "human" }) {
             let stopAll = MenuControl("Stop All", frame: NSRect(x: 12, y: 6, width: 82, height: 24), leadingSymbol: "stop.fill")
             stopAll.identifier = NSUserInterfaceItemIdentifier("stop_all")
             stopAll.style = .subtleHeader
@@ -3365,7 +3364,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             invite_command: "cito setup --hub lan --url http://127.0.0.1:4291 --default", auth_mode: nil, error: nil
         )
         let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 }
-        let hostExpanded = !addHubFormOpen && (hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil)
+        let hostExpanded = hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
         let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 136 : 108) + (hostError == nil ? 0 : 28) : 46
         let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 356 - hostHeight, width: 480, height: hostHeight), radius: 10,
@@ -3486,7 +3485,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hubsView.addSubview(addBtn)
 
         if addHubFormOpen {
-            let formHeight: CGFloat = editingExistingHub && editingOriginalHub == "local" ? 124 : 252
+            let editingLocalHub = editingExistingHub && editingOriginalHub == "local"
+            let localErrorHeight: CGFloat = editingLocalHub && addHubError != nil ? 28 : 0
+            let formHeight: CGFloat = editingLocalHub ? 124 + localErrorHeight : 252
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
@@ -3494,9 +3495,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             func fieldLabel(_ title: String, _ frame: NSRect) {
                 form.addSubview(textLabel(title,frame,size:10,weight:.semibold,color:CitoPalette.secondaryText))
             }
-            if editingExistingHub && editingOriginalHub == "local" {
-                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94,width:452,height:18),size:12.5,weight:.semibold))
-                fieldLabel("Username (Optional)",NSRect(x:14,y:72,width:452,height:14))
+            if editingLocalHub {
+                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94+localErrorHeight,width:452,height:18),size:12.5,weight:.semibold))
+                fieldLabel("Username (Optional)",NSRect(x:14,y:72+localErrorHeight,width:452,height:14))
                 form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser))
             } else {
                 fieldLabel("Hub URL",NSRect(x:14,y:179,width:298,height:13))
@@ -3549,7 +3550,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 form.addSubview(visibility)
             }
             if let error=addHubError {
-                let label=textLabel(presentationError(error),NSRect(x:14,y:38,width:452,height:15),size:10,color:CitoPalette.dangerText)
+                let label=textLabel(presentationError(error),NSRect(x:14,y:editingLocalHub ? 76 : 38,width:452,height:15),size:10,color:CitoPalette.dangerText)
                 label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=label.stringValue
                 label.lineBreakMode = .byTruncatingMiddle; form.addSubview(label)
             }
@@ -4058,7 +4059,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let footerBar = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 28))
         footerBar.identifier = NSUserInterfaceItemIdentifier("directory_footer")
         footerBar.addSubview(roundedView(NSRect(x: 0, y: 27, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-        let shortcuts = textLabel("↵ Copy Selected ID    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: CitoPalette.secondaryText)
+        let shortcuts = textLabel("↵ Copy Address    ⎋ Close", NSRect(x: 16, y: 6, width: 260, height: 16), size: 11, color: CitoPalette.secondaryText)
         shortcuts.identifier = NSUserInterfaceItemIdentifier("directory_shortcuts")
         directoryShortcutsLabel = shortcuts
         footerBar.addSubview(shortcuts)
@@ -4080,7 +4081,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let canReply = activityFilteredItems.indices.contains(directorySelectedIndex) && activityFilteredItems[directorySelectedIndex].for_me && !(activityFilteredItems[directorySelectedIndex].from_display_address ?? activityFilteredItems[directorySelectedIndex].from_scoped_id ?? "").isEmpty
         directoryShortcutsLabel?.stringValue = !(directoryComposerBar?.isHidden ?? true)
             ? "↵ Send    ⎋ Cancel Reply"
-            : (directoryMode == "activity" ? (canReply ? "↵ Reply    ⎋ Close" : "⎋ Close") : "↵ Copy Selected ID    ⎋ Close")
+            : (directoryMode == "activity" ? (canReply ? "↵ Reply    ⎋ Close" : "⎋ Close") : "↵ Copy Address    ⎋ Close")
     }
 
     func updateDirectoryModePills() {
@@ -4280,12 +4281,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 id="dir_empty_open_apps"; label="Open Agent Apps Settings…"
                 action={ [weak self] in self?.closeDirectoryPanel(emitAction:true); self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
             }
-        } else if activityFilter=="unread" && !activityAllItems.isEmpty {
-            title="All caught up"; subtitle="You have no unread signals."
+        } else if activityFilter=="unread" && (!activityAllItems.isEmpty || activityTotal > 0) {
+            title="All caught up"; subtitle="You have no unread messages."
             id="act_empty_show_all"; label="Show All Activity"
-            action={ [weak self] in self?.activityFilter="all"; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter() }
+            action={ [weak self] in self?.activityFilter="all"; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter(); self?.queryDirectory() }
         } else {
-            title="No recent signal activity"; subtitle="Signals sent between your sessions and channels will appear here."
+            title="No recent message activity"; subtitle="Messages sent between your sessions and channels will appear here."
             id="act_empty_open_channels"; label="Configure Human Channels…"
             action={ [weak self] in self?.closeDirectoryPanel(emitAction:true); self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
         }
@@ -4315,7 +4316,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         updateDirectoryShortcuts()
         updateDirectoryEmptyState()
         let count = serverMatches ? max(activityTotal, activityFilteredItems.count) : activityFilteredItems.count
-        directorySummaryLabel?.stringValue = "\(count) signal\(count == 1 ? "" : "s") · \(serverMatches ? activityUnreadCount : activityFilteredItems.filter { $0.unread }.count) unread"
+        directorySummaryLabel?.stringValue = "\(count) message\(count == 1 ? "" : "s") · \(serverMatches ? activityUnreadCount : activityFilteredItems.filter { $0.unread }.count) unread"
         if let table = directoryTableView {
             table.reloadData()
             if !activityFilteredItems.isEmpty {
@@ -4824,7 +4825,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
                 case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && editingHubGateway.isEmpty && (settings?.channels?.first?.fields.count ?? 0) <= 2
-                case "settings_hubs_tab": defaultLayout = (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
+                case "settings_hubs_tab": defaultLayout = !addHubFormOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }

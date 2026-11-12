@@ -347,7 +347,7 @@ pub fn handle(req: &Value) -> Result<Value> {
     }
     match op {
         "discover_sessions" => {
-            let running = desktop_running(req).unwrap_or(false);
+            let running = desktop_running(req)?;
             let sessions = if running {
                 try_rows(req)?
                     .iter()

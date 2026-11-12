@@ -37,6 +37,9 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     assert!(candidate["endpoint_pid"].is_number());
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["hubs"][0]["auto_listen"], false);
+    // A different principal's pause must not suppress this principal's enrollment.
+    let db = f.db("state.sqlite");
+    db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(\'local\',\'c_0123456789abcdef\',\'none#bob\',\'bob\',\'other-host\',\'other-host\',\'pi\',?,\'/tmp\',\'Other session\',\'\',\'self\',\'UNLISTENED\')", &[candidate["session_id"].clone()]).unwrap();
     assert_eq!(
         f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
             .0,
@@ -49,7 +52,12 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v["harness"] == "pi" && v["scope"] == "self"));
+        .any(|v| v["harness"] == "pi" && v["scope"] == "workspace"));
+    db.execute(
+        "DELETE FROM local_listeners WHERE principal_id=\'none#bob\'",
+        &[],
+    )
+    .unwrap();
     let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(saved["hubs"]["local"]["autoListen"], true);
     assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"pi","session_id":candidate["session_id"]})).0, 200);
