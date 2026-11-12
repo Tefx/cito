@@ -9775,3 +9775,19 @@ phases:
     release tag yet).'
   depends_on:
   - v34
+  steps:
+  - id: v35.impl
+    name: V35 R1–R7 Complete Surface Audit Closure, Button Contrast, Smart Path Compression
+      & Titled-Panel Chinese IME
+    status: pending
+    description: Implement docs/DESIGN.md §19 (R1–R7) while strictly enforcing §19.2
+      test economy (update existing unit/UI assertions in place; do NOT add new multi-process
+      E2E test functions). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
