@@ -206,6 +206,25 @@ fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
     }
     peers
 }
+fn is_generic_session_label(label: &str, user: &str, home_basename: &str) -> bool {
+    let label = label.trim();
+    let identity = label.strip_prefix('@').unwrap_or(label);
+    label.is_empty()
+        || identity.eq_ignore_ascii_case(user)
+        || identity.eq_ignore_ascii_case(home_basename)
+        || [
+            "agent",
+            "agent session",
+            "session",
+            "cli session",
+            "human",
+            "human node",
+            "human channel",
+        ]
+        .iter()
+        .any(|placeholder| label.eq_ignore_ascii_case(placeholder))
+}
+
 fn default_session_title(
     caller: &Value,
     home: &std::path::Path,
@@ -219,40 +238,15 @@ fn default_session_title(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    let generic_title = title.is_empty()
-        || title.eq_ignore_ascii_case(user)
-        || title.eq_ignore_ascii_case(home_basename)
-        || [
-            "agent",
-            "agent session",
-            "session",
-            "cli session",
-            "human",
-            "human node",
-            "human channel",
-        ]
-        .iter()
-        .any(|placeholder| title.eq_ignore_ascii_case(placeholder));
     // Home-directory sessions may already carry a promoted meaningful title.
-    if caller["harness"] == "human" || !generic_title {
+    if caller["harness"] == "human" || !is_generic_session_label(title, user, home_basename) {
         return raw.to_owned();
     }
     let about = about.trim();
-    let boilerplate = [
-        title.to_lowercase(),
-        user.to_lowercase(),
-        format!("@{}", user.to_lowercase()),
-        "agent".into(),
-        "session".into(),
-        "cli session".into(),
-        "agent session".into(),
-        "coding session".into(),
-        "human".into(),
-        "human receiver".into(),
-        "human node".into(),
-        "human channel".into(),
-    ];
-    if !about.is_empty() && !boilerplate.contains(&about.to_lowercase()) {
+    if !is_generic_session_label(about, user, home_basename)
+        && !about.eq_ignore_ascii_case(title)
+        && !["coding session", "human receiver"].contains(&about.to_lowercase().as_str())
+    {
         about.to_owned()
     } else {
         format!("{harness_name} (~)")
@@ -5140,7 +5134,9 @@ mod tests {
         for raw in [
             "",
             "alice",
+            "@alice",
             "account",
+            "@account",
             "Agent",
             "Agent session",
             "Session",
@@ -5154,11 +5150,18 @@ mod tests {
                 ("Auth refactor", "Auth refactor"),
                 ("CLI session", "Fixture (~)"),
                 ("alice", "Fixture (~)"),
+                ("@alice", "Fixture (~)"),
+                ("account", "Fixture (~)"),
+                ("@account", "Fixture (~)"),
             ] {
+                let title = default_session_title(&generic, other_home, "Fixture", "alice", about);
+                assert_eq!(title, expected, "raw={raw}, about={about}");
+                let mut second_pass = generic.clone();
+                second_pass["title"] = json!(title);
                 assert_eq!(
-                    default_session_title(&generic, other_home, "Fixture", "alice", about),
+                    default_session_title(&second_pass, other_home, "Fixture", "alice", about),
                     expected,
-                    "raw={raw}, about={about}"
+                    "second pass: raw={raw}, about={about}"
                 );
             }
         }

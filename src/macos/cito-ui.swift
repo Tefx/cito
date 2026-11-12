@@ -278,19 +278,22 @@ func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
 func cleanHostDisplay(_ raw: String) -> String {
     raw.replacingOccurrences(of: "\\.local\\b", with: "", options: [.regularExpression, .caseInsensitive])
 }
-func nodeDisplayTitle(_ title: String, harness: String, user: String, cwd: String = "", about: String? = nil, harnessName: String? = nil, customTitle: Bool = false) -> String {
+func isGenericSessionLabel(_ raw: String, user: String) -> Bool {
+    let label = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let identity = label.hasPrefix("@") ? String(label.dropFirst()) : label
+    let homeBasename = (NSHomeDirectory() as NSString).lastPathComponent.lowercased()
+    return label.isEmpty || identity == user.lowercased() || identity == homeBasename
+        || ["agent", "agent session", "session", "cli session", "human", "human node", "human channel"].contains(label)
+}
+func nodeDisplayTitle(_ title: String, harness: String, user: String, about: String? = nil, harnessName: String? = nil, customTitle: Bool = false) -> String {
     if customTitle { return title }
     let raw = title.trimmingCharacters(in: .whitespacesAndNewlines)
     if harness == "human" && (raw.isEmpty || raw == "Human" || raw == "@\(user)" || raw == "@\(user) (Me)" || raw.hasPrefix("Human Node")) {
         return "You (@\(user))"
     }
     if harness != "human" && raw.hasSuffix(" (~)") { return raw }
-    let lower = raw.lowercased()
-    let homeBasename = (NSHomeDirectory() as NSString).lastPathComponent.lowercased()
-    let genericTitle = raw.isEmpty || lower == user.lowercased() || lower == homeBasename
-        || ["agent", "agent session", "session", "cli session", "human", "human node", "human channel"].contains(lower)
     // A meaningful title remains authoritative even when its session lives at home.
-    if harness != "human" && genericTitle {
+    if harness != "human" && isGenericSessionLabel(raw, user: user) {
         return distinctAbout(about, title: raw, user: user) ?? "\(harnessName ?? harness) (~)"
     }
     return title
@@ -309,7 +312,8 @@ func presentationError(_ raw: String) -> String {
 func distinctAbout(_ raw: String?, title: String, user: String) -> String? {
     let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let lower = value.lowercased()
-    return value.isEmpty || [title.lowercased(), user.lowercased(), "@\(user.lowercased())", "agent", "session", "cli session", "agent session", "coding session", "human", "human receiver", "human node", "human channel"].contains(lower) ? nil : value
+    return isGenericSessionLabel(value, user: user) || lower == title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        || ["coding session", "human receiver"].contains(lower) ? nil : value
 }
 struct HarnessMeta: Decodable, Equatable {
     let id: String
@@ -1098,7 +1102,7 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let availWidth = max(120, 544 - copyWidth - msgWidth - 66)
         let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        let normalizedTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user, cwd: peer.cwd ?? "", about: peer.about, harnessName: visual.name, customTitle: peer.custom_title == true)
+        let normalizedTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user, about: peer.about, harnessName: visual.name, customTitle: peer.custom_title == true)
         let displayTitle = peer.harness == "human" && normalizedTitle == "You (@\(peer.user))" ? "@\(peer.user)" + (peer.is_self_principal == true ? " (You)" : "") : normalizedTitle
         let titleW = min(availWidth, measureTextWidth(displayTitle, font: titleFont) + 4)
         line1TitleLabel.stringValue = displayTitle
@@ -2275,7 +2279,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
                 .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
-            let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user, cwd: listener.cwd, about: listener.about, harnessName: map[listener.harness]?.display_name, customTitle: listener.custom_title == true)
+            let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user, about: listener.about, harnessName: map[listener.harness]?.display_name, customTitle: listener.custom_title == true)
             let hasDistinctAbout = distinctAbout(distinctAbout(listener.about, title: listener.title, user: user), title: displayTitle, user: user) != nil
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
             let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
@@ -2506,7 +2510,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
                     let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                    let displayTitle = nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,cwd:peer.cwd ?? "",about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true)
+                    let displayTitle = nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true)
                     let info = textLabel("\(hostText) · \(displayTitle)\(branchSuffix)",
                         NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
@@ -2632,7 +2636,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                        let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, cwd: c.cwd, harnessName: visual.name, customTitle: c.custom_title == true)
+                        let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, harnessName: visual.name, customTitle: c.custom_title == true)
                         let info = textLabel(candidateTitle, NSRect(x:24,y:rowHeight-21,width:268,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
                         let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix),NSRect(x:24,y:needsReload ? 21 : 6,width:268,height:14),size:10.5,color:CitoPalette.secondaryText)
@@ -4987,6 +4991,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
         let snapshot: [String: Any] = ["items": items, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
+            "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "low_contrast_labels": lowContrastLabels, "jargon_leaks":jargonLeaks, "address_mismatches":addressMismatches, "banner_items":bannerItems, "wake_action_text": wakeActionText,
             "edit_menu": NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "Edit" })?.submenu?.items.map { ["title": $0.title, "key": $0.keyEquivalent, "action": $0.action.map(NSStringFromSelector) ?? "", "shift": $0.keyEquivalentModifierMask.contains(.shift)] as [String: Any] } ?? [],
             "key_panels": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in

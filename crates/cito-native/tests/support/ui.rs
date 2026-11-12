@@ -1342,8 +1342,14 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         )["text"],
         "Fixture (~)"
     );
+    // Foundation resolves the account home independently of the fixture's HOME.
+    let home_basename = inspect(&f, p)["home_basename"].as_str().unwrap().to_owned();
+    let at_home_basename = format!("@{home_basename}");
     for raw in [
         "bob",
+        "@bob",
+        home_basename.as_str(),
+        at_home_basename.as_str(),
         "Fixture (~)",
         "",
         "Agent",
@@ -1354,7 +1360,30 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         "Human node",
         "Human channel",
     ] {
-        for about in ["CLI session", "bob", "@bob"] {
+        for (about, expected) in [
+            ("CLI session", "Fixture (~)"),
+            ("bob", "Fixture (~)"),
+            ("@bob", "Fixture (~)"),
+            (home_basename.as_str(), "Fixture (~)"),
+            (at_home_basename.as_str(), "Fixture (~)"),
+            (
+                "account",
+                if home_basename.eq_ignore_ascii_case("account") {
+                    "Fixture (~)"
+                } else {
+                    "account"
+                },
+            ),
+            (
+                "@account",
+                if home_basename.eq_ignore_ascii_case("account") {
+                    "Fixture (~)"
+                } else {
+                    "@account"
+                },
+            ),
+        ] {
+            let expected = if raw == "Fixture (~)" { raw } else { expected };
             agent["title"] = json!(raw);
             agent["about"] = json!(about);
             agent["cwd"] = json!(f.home);
@@ -1365,9 +1394,15 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
                     "directory_items",
                     "dir_title:personal:home"
                 )["text"],
-                "Fixture (~)",
+                expected,
                 "raw={raw}, about={about}"
             );
+            if about == home_basename || about == at_home_basename {
+                assert_eq!(
+                    node(&inspect(&f, p), "directory_items", "dir_meta:personal:home")["tooltip"],
+                    " · laptop, mac-studio"
+                );
+            }
         }
     }
     agent["title"] = json!("Auth refactor");
