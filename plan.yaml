@@ -9946,3 +9946,24 @@ phases:
     until CLEAN + ZERO_NEW_ISSUES and push to origin/main (NO release tag yet).'
   depends_on:
   - v35
+  steps:
+  - id: v36.impl
+    name: V36 S1–S4 Multi-Hub Coalescing, Smart Home Naming, Session Renaming & Complete
+      CLI/MCP Parity
+    status: pending
+    description: Implement docs/DESIGN.md §20 (S1–S4) while strictly enforcing §20.2
+      test economy (update existing unit/UI/daemon/CLI assertions in place; do NOT
+      add new heavy multi-process E2E test functions).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
