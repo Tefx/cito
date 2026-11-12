@@ -37,12 +37,7 @@ fn desktop_running(req: &Value) -> Result<bool> {
         let identity = process_identity(p)?;
         let command =
             str_at(&identity, "command").ok_or("Desktop process command is unavailable")?;
-        if desktop_command(command) {
-            return Ok(true);
-        }
-        if !matches_process(command) {
-            return Ok(false);
-        }
+        return Ok(desktop_command(command) || matches_process(command));
     }
     let output = Command::new("/bin/ps")
         .args(["-axo", "uid=,command="])
@@ -56,7 +51,11 @@ fn desktop_running(req: &Value) -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
         line.trim_start()
             .split_once(char::is_whitespace)
-            .is_some_and(|(owner, command)| owner == uid && desktop_command(command.trim_start()))
+            .is_some_and(|(owner, command)| {
+                owner == uid
+                    && (desktop_command(command.trim_start())
+                        || matches_process(command.trim_start()))
+            })
     }))
 }
 fn db(req: &Value) -> PathBuf {
@@ -208,8 +207,13 @@ fn rows(req: &Value) -> Vec<Value> {
     let rows = sqlite_rows(
         &db(req),
         &format!(
-            "SELECT * FROM threads{archived} ORDER BY {}",
-            order.join(", ")
+            "SELECT * FROM threads{archived} ORDER BY {}{}",
+            order.join(", "),
+            if req["op"] == "discover_sessions" {
+                " LIMIT 32"
+            } else {
+                ""
+            }
         ),
     )
     .unwrap_or_default();

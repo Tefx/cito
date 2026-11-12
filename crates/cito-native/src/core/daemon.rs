@@ -8,8 +8,9 @@ use super::{
 };
 use crate::plugins::{now_ms, random_uuid_v4, LoadedPlugins, NativeConfig, CITO_VERSION};
 use crate::setup::{
-    apply_plugin_setup, ensure_cli_shims_native, inspect_launch_at_login, inspect_plugin_setup,
-    remove_plugin_setup, resolve_package_root, set_launch_at_login, uninstall_setup_native,
+    apply_plugin_setup, ensure_cli_shims_native, ensure_single_plugin_staged,
+    inspect_launch_at_login, remove_plugin_setup, resolve_package_root, set_launch_at_login,
+    uninstall_setup_native,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Map, Value};
@@ -498,6 +499,7 @@ pub struct DaemonService {
 }
 impl DaemonService {
     pub fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
+        ensure_cli_shims_native(&config.state_dir, plugins)?;
         let state = LocalState::open(&config.state_dir)?;
         // Daemon construction runs only after acquiring the exclusive owner lock.
         state.recover_dispatch_leases()?;
@@ -2018,12 +2020,79 @@ impl DaemonService {
             .map(|activity| activity.tick(&self.state, &live))
             .transpose()?
             .unwrap_or(false);
+        self.auto_listen()?;
         if changed || self.last_ui.elapsed() >= Duration::from_secs(1) {
             self.push_ui();
             self.last_ui = Instant::now();
         }
         Ok(())
     }
+    /// Opt-in enrollment uses discovery liveness, never historical SQLite rows.
+    fn auto_listen(&self) -> Result<(), String> {
+        let hubs: Vec<_> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| {
+                slot.config["autoListen"] == true && slot.connection_status() == "connected"
+            })
+            .collect();
+        if hubs.is_empty() {
+            return Ok(());
+        }
+        let Some(activity) = &self.session_activity else {
+            return Ok(());
+        };
+        for candidate in activity.candidates().filter(|candidate| {
+            candidate["endpoint_pid"].as_u64().is_some() && candidate["needs_reload"] != true
+        }) {
+            for (hub, _) in &hubs {
+                let rows = self.state.db.query(
+                    "SELECT status FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
+                    &[
+                        json!(hub),
+                        candidate["harness"].clone(),
+                        candidate["session_id"].clone(),
+                    ],
+                )?;
+                if rows
+                    .iter()
+                    .any(|row| matches!(string(row, "status"), "ACTIVE" | "UNLISTENED"))
+                {
+                    continue;
+                }
+                // One unavailable endpoint must not prevent enrollment on other Hubs.
+                if let Err(error) = self.listen(
+                    hub,
+                    &json!({"about":candidate["title"],"scope":"self"}),
+                    candidate,
+                ) {
+                    eprintln!("cito auto-listen {hub}: {error}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Give fast providers a bounded first-render opportunity. Workers retain
+    /// ownership after the deadline and are reaped by the regular poll path.
+    fn refresh_available(&mut self) -> Result<(), String> {
+        let live = self.live_receivers()?;
+        if let Some(activity) = self.session_activity.as_mut() {
+            activity.refresh_discovery();
+            activity.tick(&self.state, &live)?;
+            let deadline = Instant::now() + Duration::from_millis(400);
+            while activity.discovery_pending() && Instant::now() < deadline && !shutdown_requested()
+            {
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+                activity.tick(&self.state, &live)?;
+            }
+        }
+        self.auto_listen()
+    }
+
     pub fn settings(&self) -> Value {
         let hub = self
             .active_settings_hub
@@ -2051,7 +2120,7 @@ impl DaemonService {
         let mut hubs = Vec::new();
         let mut channels = Vec::new();
         for (name, slot) in &self.slots {
-            hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"status":wire_status(&slot.connection_status()),"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
+            hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(&slot.connection_status()),"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
             if name == channel_hub {
                 let inventory = if slot.local.is_some() {
                     slot.rpc("human_channels_list", &json!({}))
@@ -2074,13 +2143,23 @@ impl DaemonService {
                 }
             }
         }
+        if channel_hub == "local" && !self.slots.contains_key("local") {
+            let inventory = self
+                .local
+                .rpc("human_channels_list", &json!({}), None)
+                .unwrap_or_else(|e| json!({"status":"error","detail":e}));
+            channels = inventory["channels"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+        }
         let raw = self.raw_config().unwrap_or_else(|_| json!({}));
         if let Ok((_, configured, _)) =
             crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))
         {
             for (name, cfg) in &configured {
                 if !self.slots.contains_key(name) {
-                    hubs.push(json!({"name":name,"url":cfg["url"],"auth_mode":cfg.get("authMode").or_else(||cfg.get("auth_mode")).or_else(||cfg.get("auth")).and_then(Value::as_str).unwrap_or("none").to_ascii_lowercase(),"enabled":cfg["enabled"].as_bool().unwrap_or(true),"status":"disconnected","user":self.config.effective_user(name).ok(),"is_default":name==&self.config.default_hub,"error":null}));
+                    hubs.push(json!({"name":name,"url":cfg["url"],"auth_mode":cfg.get("authMode").or_else(||cfg.get("auth_mode")).or_else(||cfg.get("auth")).and_then(Value::as_str).unwrap_or("none").to_ascii_lowercase(),"enabled":cfg["enabled"].as_bool().unwrap_or(true),"auto_listen":cfg["autoListen"].as_bool().unwrap_or(false),"status":"disconnected","user":self.config.effective_user(name).ok(),"is_default":name==&self.config.default_hub,"error":null}));
                 }
             }
         }
@@ -2338,6 +2417,7 @@ impl DaemonService {
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|hub| hub["enabled"] != false && self.slots.contains_key(string(hub, "name")))
             .cloned()
             .collect();
         Ok(
@@ -2539,18 +2619,23 @@ impl DaemonService {
                     "SELECT * FROM local_listeners WHERE harness=? AND session_id=?",
                     &[action["harness"].clone(), action["session_id"].clone()],
                 )? {
-                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                    if action["hub"].is_null() || row["hub"] == hub {
+                        self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                    }
                 }
                 if action["harness"] == "human" && action["session_id"] == "default" {
                     // Fence automatic enrollment that has not committed a local row yet.
-                    for (hub, slot) in &self.slots {
+                    for (name, slot) in &self.slots {
+                        if !action["hub"].is_null() && name != &hub {
+                            continue;
+                        }
                         let id = super::registration::local_node_id(
                             &self.state,
                             slot,
                             "human",
                             "default",
                         )?;
-                        self.unlisten_id(hub, &id)?;
+                        self.unlisten_id(name, &id)?;
                     }
                 }
             }
@@ -2573,12 +2658,10 @@ impl DaemonService {
                     .plugins
                     .find_by_id(id)
                     .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
-                ensure_cli_shims_native(&self.config.state_dir, &self.plugins)?;
+                ensure_single_plugin_staged(&self.config.state_dir, p)?;
                 apply_plugin_setup(p, true, false)?;
                 self.last_app_action.insert(id.to_owned(), "setup".into());
-                if let Some(activity) = self.session_activity.as_mut() {
-                    activity.refresh_discovery();
-                }
+                self.refresh_available()?;
                 self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
             "setup_remove_app" | "disable_app" => {
@@ -3319,10 +3402,30 @@ impl DaemonService {
                 request_shutdown();
             }
             "quit" | "quit_daemon" => request_shutdown(),
-            "refresh_available" => {
-                if let Some(activity) = self.session_activity.as_mut() {
-                    activity.refresh_discovery();
+            "set_auto_listen" => {
+                if !self.slots.contains_key(&hub) {
+                    return Err("INVALID_INPUT: Enabled hub required".into());
                 }
+                let enabled = action["enabled"]
+                    .as_bool()
+                    .ok_or("INVALID_INPUT: enabled must be a boolean")?;
+                self.mutate_config(|v| {
+                    if v["hubs"].is_null() {
+                        v["hubs"] = json!({"local":{"url":"local://"}});
+                    }
+                    v["hubs"][&hub]["autoListen"] = json!(enabled);
+                    Ok(())
+                })?;
+                // This preference does not change transport identity or leases.
+                if let Some(slot) = self.slots.get_mut(&hub) {
+                    slot.config["autoListen"] = json!(enabled);
+                }
+                if enabled {
+                    self.auto_listen()?;
+                }
+            }
+            "refresh_available" => {
+                self.refresh_available()?;
                 self.poll()?;
             }
             "close_settings" | "close_directory" | "copy_id" => {}
@@ -4631,16 +4734,6 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let listener =
         TcpListener::bind(("127.0.0.1", config.daemon_port)).map_err(|e| e.to_string())?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    // Configured, damaged built-ins remain visible for explicit Repair after a
-    // restart. Fresh installs and healthy integrations still receive staged updates.
-    let mut startup_plugins = plugins.clone();
-    startup_plugins.plugins.retain(|plugin| {
-        !plugin.is_builtin
-            || plugin.kind != "agent-harness"
-            || super::setup::is_staged_plugin_intact(&config.state_dir, plugin)
-            || !inspect_plugin_setup(plugin).1
-    });
-    ensure_cli_shims_native(&config.state_dir, &startup_plugins)?;
     let service = Arc::new(Mutex::new(DaemonService::open(config, plugins)?));
     {
         let mut s = service.lock().map_err(|_| "Service lock poisoned")?;

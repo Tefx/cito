@@ -88,7 +88,7 @@ func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
 
 func formatStatusButton(_ button: NSButton, count: Int, unreadCount: Int, image: NSImage?) {
     button.image = image
-    let title = (count > 0 ? " \(count)" : "") + (unreadCount > 0 ? " · \(unreadCount)" : "")
+    let title = unreadCount > 0 ? " \(unreadCount)" : ""
     button.title = ""
     button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
     if !title.isEmpty {
@@ -108,7 +108,7 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
         && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.centerSymbolView }) {
         let id = control.identifier?.rawValue ?? ""
         // Address chips reserve room for copy feedback; other controls follow their current font.
-        let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") ? control.frame.width : 0
+        let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
         control.frame.size.width = max(reservedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
@@ -786,6 +786,7 @@ final class FlippedView: NSView {
 struct Hub: Decodable, Equatable {
     let name: String, status: String, auth_mode: String
     let user: String?, error: String?
+    let enabled: Bool?, auto_listen: Bool?
 }
 struct Listener: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
@@ -807,7 +808,8 @@ struct Candidate: Decodable, Equatable {
     let reload_hint: String?
 }
 struct RemotePeer: Decodable, Equatable {
-    let hub: String, listener_id: String, public_id: String, scoped_id: String
+    let hub: String?
+    let listener_id: String, public_id: String, scoped_id: String
     let user: String, host_id: String, host_name: String, harness: String
     let display_address: String
     let title: String, about: String, scope: String, last_seen_at: String
@@ -903,6 +905,7 @@ struct HubConfigItem: Decodable, Equatable {
     let url: String
     let auth_mode: String
     let enabled: Bool
+    let auto_listen: Bool?
     let is_default: Bool
     let status: String
     let user: String?
@@ -1230,7 +1233,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var clickSource: DispatchSourceSignal?
     var hoverEventMonitor: Any?
     let cardMenu = NSMenu()
-    var selectedHubs = Set<String>()
+    var hubDrawerVisibility: [String: Bool] = [:]
     var statusImage: NSImage?
     var uniqueSessionCount: Int {
         Dictionary(grouping: listeners.filter { $0.harness != "human" }, by: { $0.harness })
@@ -1254,15 +1257,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         status == "connected" ? CitoPalette.successText : status == "connecting" ? CitoPalette.warningText : status == "auth_required" ? CitoPalette.dangerText : .systemGray
     }
     var effectiveTargetHub: String {
-        if !selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub && $0.status != "disconnected" }) {
+        if !selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub }) {
             return selectedTargetHub
         }
-        if let firstUnmountedConnected = hubs.first(where: { hub in
-            hub.status == "connected" && available.contains(where: { !($0.listening_hubs ?? []).contains(hub.name) })
-        }) {
-            return firstUnmountedConnected.name
-        }
-        return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first(where: { $0.status != "disconnected" })?.name ?? ""
+        if let defaultHub = settings?.hubs.first(where: { $0.is_default && $0.enabled && $0.status == "connected" }),
+           hubs.contains(where: { $0.name == defaultHub.name }) { return defaultHub.name }
+        return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
     }
     var directoryRequestId = ""
     var composerDraftIdempotencyKey = UUID().uuidString
@@ -1396,9 +1396,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var pendingOnboardingMarker: String?
     var settingsKeyMonitor: Any?
     var effectiveChannelHub: String {
-        let inventory = settings?.hubs.map { $0.name } ?? hubs.map { $0.name }
-        if !selectedChannelHub.isEmpty { return inventory.contains(selectedChannelHub) ? selectedChannelHub : "local" }
-        return settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? "local"
+        let inventory = settings?.hubs.filter { $0.enabled != false }.map { $0.name } ?? hubs.filter { $0.enabled != false }.map { $0.name }
+        if !selectedChannelHub.isEmpty { return inventory.contains(selectedChannelHub) ? selectedChannelHub : inventory.first ?? "local" }
+        return settings?.hubs.first(where: { $0.is_default && $0.enabled })?.name ?? inventory.first ?? "local"
     }
     func draftKey(_ fieldId: String) -> String { effectiveChannelHub + "|" + fieldId }
     func clearChannelDrafts(_ channel: ChannelSetupItem, scope: String? = nil, hub: String? = nil) {
@@ -1408,6 +1408,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) {
         settings = value
+        if !selectedChannelHub.isEmpty && !value.hubs.contains(where: { $0.name == selectedChannelHub && $0.enabled }) {
+            selectedChannelHub = value.hubs.first(where: { $0.enabled })?.name ?? ""
+            if !selectedChannelHub.isEmpty { emit(["op": "open_settings", "hub": selectedChannelHub]) }
+        }
         if hostHubPortPending && savedRequest == submittedHostHubRequestId &&
            (value.host_hub.port == submittedHostHubPort || value.host_hub.error != nil) {
             hostHubPortPending = false
@@ -1819,7 +1823,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 return
             }
-            if op == "test_control", let id = object["id"] as? String {
+            if op == "test_control", let requestedId = object["id"] as? String {
+                let id = requestedId.hasPrefix("target_hub:") ? "hub:" + requestedId.dropFirst("target_hub:".count) : requestedId
                 for item in cardMenu.items {
                     if let view = item.view, let control = findControl(in: view, id: id) {
                         _ = control.accessibilityPerformPress()
@@ -2172,7 +2177,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
             let item = host(drawer, id: "drawer:\(hub.name)")
             let autoExpand = hub.status != "connected" || hub.error != nil
-            item.isHidden = selectedHubs.contains(hub.name) ? false : !autoExpand
+            item.isHidden = !(hubDrawerVisibility[hub.name] ?? autoExpand)
             drawerItems[hub.name] = item
         }
         let stripX = max(138, 54 + subWidth)
@@ -2200,6 +2205,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let width: CGFloat = isCompactIcon ? 44 : (compactChips ? chipCap : min(180, measureTextWidth(title, font: btnFont) + 26))
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
+            pill.style = hub.name == effectiveTargetHub ? .prominent : .neutral
             if isCompactIcon {
                 pill.label.isHidden = true
                 pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
@@ -2219,9 +2225,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             pill.pressed = { [weak self, weak menu] in
                 guard let self = self, let drawer = drawerItems[hub.name] else { return }
+                if self.hubs.count > 1 {
+                    self.selectedTargetHub = hub.name
+                    if hub.status != "connected" || hub.error != nil {
+                        self.hubDrawerVisibility[hub.name] = drawer.isHidden
+                    }
+                    self.rebuild()
+                    return
+                }
                 drawer.isHidden = !drawer.isHidden
-                if drawer.isHidden { self.selectedHubs.remove(hub.name) }
-                else { self.selectedHubs.insert(hub.name) }
+                self.hubDrawerVisibility[hub.name] = !drawer.isHidden
                 menu?.update()
                 MenuControl.reconcileActiveHover()
             }
@@ -2231,13 +2244,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             mountPillStrip(in: header, frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22),
                            id: "header_hub_strip", alignment: .trailing, pills: hubPills) { view in
                 let id = view.identifier?.rawValue ?? ""
-                return selectedHubs.contains(String(id.dropFirst(4))) || hubs.contains { id == "hub:\($0.name)" && ($0.error != nil || $0.status != "connected") }
+                return id == "hub:\(effectiveTargetHub)"
             }
         }
         var activeRows: [(id: String, view: NSView)] = []
         let home = NSHomeDirectory()
         let map = harnessMap
         let targetHub = effectiveTargetHub
+        let listeners = self.listeners.filter { targetHub.isEmpty || $0.hub == targetHub }
+        let myRemote = self.myRemote.filter { targetHub.isEmpty || $0.hub == nil || $0.hub == targetHub }
         let hasHumanListener = listeners.contains { $0.harness == "human" }
         let targetUser = hubs.first(where: { $0.name == targetHub })?.user ?? hubs.first?.user ?? "local"
         if !hasHumanListener && hubs.contains(where: { $0.name == targetHub && $0.status != "disconnected" }) {
@@ -2262,20 +2277,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let bh = b.element.harness == "human" ? 0 : 1
             return ah != bh ? ah < bh : a.offset < b.offset
         }.map { $0.element }
-        let groups = Dictionary(grouping: orderedListeners) { "\($0.harness):\($0.session_id)" }
-        var renderedSessions = Set<String>()
-        for entry in orderedListeners {
-            let sessionKey = "\(entry.harness):\(entry.session_id)"
-            guard renderedSessions.insert(sessionKey).inserted, let group = groups[sessionKey] else { continue }
-            let sharedDefault = settings?.hubs.first { $0.is_default && $0.name != "local" && $0.status == "connected" }?.name
-                ?? hubs.first { $0.name != "local" && $0.status == "connected" }?.name
-            let primaryListener = group.first { $0.hub == selectedTargetHub }
-                ?? (!selectedTargetHub.isEmpty ? group.first { $0.hub == effectiveTargetHub } : nil)
-                ?? group.first { $0.hub == sharedDefault }
-                ?? group.first { $0.hub == "local" }
-                ?? group.first { row in hubs.contains { $0.name == row.hub && $0.status == "connected" } }
-                ?? entry
-            let listener = primaryListener
+        for listener in orderedListeners {
+            let sessionKey = "\(listener.harness):\(listener.session_id)"
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
                 .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
@@ -2296,9 +2299,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 radius: 8, iconInset: multiHub ? 7 : 8, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
             let listenerHub = hubs.first(where: { $0.name == listener.hub })
-            let showScopeToggle = group.contains { $0.hub != "local" } || !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
-            let hubPillWidth = min(88, max(40, ceil(measureTextWidth(listener.hub, font: btnFont)) + 16))
-            let scopeWidth: CGFloat = 62
+            let showScopeToggle = !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
+            let scopeWidth = max(MenuControl.intrinsicWidth("Self", leadingSymbol: "lock.fill"), MenuControl.intrinsicWidth("Team", leadingSymbol: "person.2.fill"))
             var sessionActions: [NSView] = []
             let title = textLabel(displayTitle,
                 NSRect(x: titleX, y: cardHeight - 26, width: 40, height: 18), size: 13, weight: .semibold)
@@ -2334,40 +2336,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let path = textLabel(pathText,
                 NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
-            if hubs.count > 1 && listener.harness != "human" {
-                let hubPill = MenuControl(listener.hub, frame: NSRect(x: 0, y: cardHeight - 28, width: hubPillWidth, height: 22), radius: 6)
-                hubPill.identifier = NSUserInterfaceItemIdentifier("switch_hub:\(listener.scoped_id)")
-                hubPill.style = .neutral
-                hubPill.label.font = btnFont
-                hubPill.label.lineBreakMode = .byTruncatingMiddle; hubPill.label.toolTip = listener.hub
-                hubPill.toolTip = listener.hub
-                hubPill.label.alignment = .left
-                hubPill.label.frame = NSRect(x: 13, y: 3.5, width: hubPillWidth - 13, height: 15)
-                let hubStatus = hubs.first(where: { $0.name == listener.hub })?.status ?? "disconnected"
-                hubPill.addSubview(roundedView(NSRect(x: 6, y: 8.5, width: 5, height: 5), radius: 2.5, color: statusColor(hubStatus)))
-                let currentIndex = hubs.firstIndex(where: { $0.name == listener.hub }) ?? 0
-                let ring = (1..<hubs.count).map { hubs[(currentIndex + $0) % hubs.count] }.filter { $0.name != listener.hub && $0.status != "disconnected" }
-                let nextTarget = ring.first(where: { h in
-                    h.status == "connected" && !listeners.contains(where: { $0.hub == h.name && $0.harness == listener.harness && $0.session_id == listener.session_id })
-                }) ?? ring.first
-                if let nextHub = nextTarget?.name {
-                    hubPill.toolTip = "\(listener.hub) · Switch hub to \(nextHub)"
-                    hubPill.pressed = { [weak self] in
-                        guard let self = self else { return }
-                        self.pendingMutation = true
-                        self.emit(["op": "switch_hub", "from_hub": listener.hub, "to_hub": nextHub, "listener_id": listener.listener_id])
-                    }
-                }
-                if group.count > 1, let index = group.firstIndex(where: { $0.hub == listener.hub }) {
-                    let nextHub = group[(index + 1) % group.count].hub
-                    hubPill.toolTip = group.map(\.hub).joined(separator: " · ")
-                    hubPill.pressed = { [weak self] in self?.selectedTargetHub = nextHub; self?.rebuild() }
-                }
-                hubPill.isEnabled = hubPill.pressed != nil
-                card.addSubview(hubPill); sessionActions.append(hubPill)
-            }
             if showScopeToggle {
-                var scope = listener.hub == "local" ? (group.first { $0.hub != "local" }?.scope ?? listener.scope) : listener.scope
+                var scope = listener.scope
                 let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: 0, y: cardHeight - 28, width: scopeWidth, height: 22),
                     leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
                 scopeBtn.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
@@ -2379,12 +2349,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     guard let self = self else { return }
                     self.pendingMutation = true
                     scope = scope == "self" ? "workspace" : "self"
-                    scopeBtn?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
                     scopeBtn?.label.stringValue = scope == "self" ? "Self" : "Team"
+                    scopeBtn?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
                     scopeBtn?.setAccessibilityLabel(scopeBtn?.label.stringValue); scopeColor()
-                    for row in group where row.hub != "local" || group.count == 1 {
-                        self.emit(["op": "set_scope", "hub": row.hub, "listener_id": row.listener_id, "scope": scope])
-                    }
+                    self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
                 }
                 card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
             }
@@ -2393,9 +2361,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             stop.toolTip = personal ? "Pause personal notifications" : "Stop listening"
             stop.style = personal ? .neutral : .subtleHeader
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
-            let unlisten = { self.emit(["op": "unlisten_session", "harness": listener.harness, "session_id": listener.session_id]) }
+            let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
-            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: 2, trailing: sessionActions)
+            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: CitoMetrics.gap, trailing: sessionActions)
             let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
             if !personal && renamingSessionKey == sessionKey {
                 title.isHidden = true
@@ -2422,7 +2390,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             for (id, row) in activeRows { _ = host(row, id: id) }
         } else {
             let totalHeight = activeRows.reduce(CGFloat(0)) { $0 + $1.view.frame.height }
-            let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 260))
+            let scroll = OverlayScrollView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 256))
             scroll.scrollerStyle = .overlay
             scroll.drawsBackground = false; scroll.hasVerticalScroller = true
             scroll.hasHorizontalScroller = false; scroll.autohidesScrollers = true
@@ -2536,37 +2504,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
         }
-        // Zone 3 — Available Sessions with Per-Hub Target Selector & Collapsible Harness Groups
-        if !available.isEmpty {
+        // Zone 3 — Available sessions on the network selected in the header.
+        if !available.isEmpty || !targetHub.isEmpty {
             let targetHub = effectiveTargetHub
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 24))
             availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-            availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: hubs.count > 1 ? 124 : 220, height: 14),
+            availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: 190, height: 14),
                 size: 10, weight: .semibold, color: CitoPalette.secondaryText))
-            if hubs.count > 1 {
-                let targetFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
-                var targetPills: [NSView] = []
-                for hub in hubs where hub.status != "disconnected" {
-                    let w = min(228, max(38, ceil(measureTextWidth(hub.name, font: targetFont)) + 16))
-                    let pill = MenuControl(hub.name, frame: NSRect(x: 0, y: 0, width: w, height: 18), radius: 9)
-                    pill.identifier = NSUserInterfaceItemIdentifier("target_hub:\(hub.name)")
-                    pill.label.font = targetFont
-                    pill.label.lineBreakMode = .byTruncatingMiddle
-                    pill.label.toolTip = hub.name
-                    pill.style = hub.name == targetHub ? .prominent : .neutral
-                    pill.toolTip = "Listen on \(hub.name)"
-                    pill.pressed = { [weak self] in
-                        guard let self = self else { return }
-                        self.selectedTargetHub = hub.name
-                        self.rebuild()
-                    }
-                    targetPills.append(pill)
-                }
-                mountPillStrip(in: availHeader, frame: NSRect(x: 140, y: 2, width: 228, height: 18),
-                               id: "targetStrip", alignment: .trailing, pills: targetPills) {
-                    $0.identifier?.rawValue == "target_hub:\(targetHub)"
-                }
-            }
+            let autoListen = hubs.first(where: { $0.name == targetHub })?.auto_listen ?? false
+            let autoTitle = autoListen ? "Auto-Listen: On" : "Auto-Listen"
+            let autoWidth = MenuControl.intrinsicWidth(autoTitle)
+            let auto = MenuControl(autoTitle, frame: NSRect(x: 368 - autoWidth, y: 2, width: autoWidth, height: 18), radius: 9)
+            auto.identifier = NSUserInterfaceItemIdentifier("toggle_auto_listen")
+            auto.style = autoListen ? .prominent : .neutral
+            auto.isEnabled = !targetHub.isEmpty
+            auto.pressed = { [weak self] in self?.emit(["op": "set_auto_listen", "hub": targetHub, "enabled": !autoListen]) }
+            availHeader.addSubview(auto)
             _ = host(availHeader, id: "available_header")
             let visibleAvailable = hubs.count > 1 && !targetHub.isEmpty
                 ? available.filter { !($0.listening_hubs ?? []).contains(targetHub) }
@@ -3076,7 +3029,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         layoutBar(in: bannerCard, insetRight: CitoMetrics.headerInset, y: 11, height: 24, trailing: [toggleBanner])
         channelsView.addSubview(bannerCard)
 
-        let channelHubs = settings?.hubs.map { $0.name } ?? hubs.map { $0.name }
+        let channelHubs = settings?.hubs.filter { $0.enabled != false }.map { $0.name } ?? hubs.filter { $0.enabled != false }.map { $0.name }
         if channelHubs.count > 1 { channelsView.addSubview(textLabel("Target Hub", NSRect(x: 20, y: 276, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText)) }
         var channelPills: [NSView] = []
         for name in channelHubs {
@@ -3613,7 +3566,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         } else {
             let resolvedHubs: [HubConfigItem] = settings?.hubs ?? hubs.map { h in
                 HubConfigItem(name: h.name, url: h.name == "local" ? "local://" : "http://127.0.0.1:4291",
-                    auth_mode: h.auth_mode, enabled: true, is_default: false, status: h.status, user: h.user, error: h.error, issuer: nil, client_id: nil)
+                    auth_mode: h.auth_mode, enabled: h.enabled != false, auto_listen: h.auto_listen, is_default: false, status: h.status, user: h.user, error: h.error, issuer: nil, client_id: nil)
             }
             var rowTop = 180 + hubOffset
             for hub in resolvedHubs {
@@ -3662,9 +3615,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     row.addSubview(loginBtn)
                 }
 
-                let toggleBtn = MenuControl(hub.enabled ? "Enabled" : "Disabled", frame: NSRect(x: 0, y: rowHeight-25, width: 72, height: 22), radius: 6)
+                let toggleBtn = MenuControl(hub.enabled ? "Disable" : "Enable", frame: NSRect(x: 0, y: rowHeight-25, width: 72, height: 22), radius: 6)
                 toggleBtn.identifier = NSUserInterfaceItemIdentifier("toggle_hub:\(hub.name)")
-                toggleBtn.style = .neutral
+                toggleBtn.style = hub.enabled ? .neutral : .prominent
                 let hubName = hub.name
                 let nextEnabled = !hub.enabled
                 toggleBtn.pressed = { [weak self] in
@@ -4590,7 +4543,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let peer = directoryFilteredPeers[row]
         cell.configure(with: peer, selected: row == directorySelectedIndex, harnesses: harnessMap, onCopy: { [weak self] text, control in self?.copyText(text,control:control) }) { [weak self] in
             guard let self = self else { return }
-            self.openComposer(target: peer.display_address, hub: peer.hub, replySignalId: nil)
+            self.openComposer(target: peer.display_address, hub: peer.hub ?? "", replySignalId: nil)
         }
         return cell
     }
@@ -4812,7 +4765,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let hub = listener?.hub ?? peer?.hub ?? ""
                     let harness = listener?.harness ?? peer?.harness ?? ""
                     let defaultHub = settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? ""
-                    if label.isEmpty || address != label || (harness == "human" && !label.contains("@")) || (hub != defaultHub && !label.hasPrefix("\(hub):")) { addressMismatches.append(id) }
+                    if label.isEmpty || address != label || (harness == "human" && !label.contains("@")) || (!hub.isEmpty && hub != defaultHub && !label.hasPrefix("\(hub):")) { addressMismatches.append(id) }
                 }
             }
             if visible, let scroll = view as? NSScrollView {
@@ -4826,7 +4779,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if defaultLayout && settingsBannerError == nil && (settingsScrollOffsets[name(scroll)] ?? 0) == 0, let doc = scroll.documentView, doc.frame.height > scroll.contentSize.height + 0.75 { clippedViews.append(name(scroll)+": default viewport needs scrolling") }
                 if ((scroll.hasVerticalScroller || scroll.hasHorizontalScroller) && ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle) != .overlay) || (scroll.hasHorizontalScroller && scroll.frame.height < 34) { overlappingSiblings.append(name(scroll)+": scroller geometry") }
                 if let doc = scroll.documentView {
-                    for pill in doc.subviews.compactMap({ $0 as? MenuControl }) where pill.style == .prominent || selectedHubs.contains(String((pill.identifier?.rawValue ?? "").dropFirst(4))) {
+                    for pill in doc.subviews.compactMap({ $0 as? MenuControl }) where pill.style == .prominent {
                         if !scroll.contentView.bounds.contains(pill.frame) { clippedViews.append(name(scroll)+": selected pill") }
                     }
                 }

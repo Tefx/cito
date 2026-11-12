@@ -116,6 +116,17 @@ impl SessionActivity {
         }
     }
 
+    pub fn discovery_pending(&self) -> bool {
+        self.discovery
+            .iter()
+            .any(|provider| provider.worker.is_some())
+    }
+
+    /// All discovered endpoints, without the presentation layer's per-app limit.
+    pub fn candidates(&self) -> impl Iterator<Item = &Value> {
+        self.discovery.iter().flat_map(|provider| &provider.cached)
+    }
+
     /// Read the cache only. Refilter against current live rows so a just-listened
     /// session disappears immediately, even while a provider is still running.
     pub fn available(&self, live_active: &[Value], total_hubs: usize) -> Vec<Value> {

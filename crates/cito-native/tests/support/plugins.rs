@@ -556,6 +556,50 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         f.plugin(CODEX, json!({"op":"probe","session_id":"archived"}))["status"],
         "closed_definitive"
     );
+    // A signed interpreter running a user-space CLI script exercises process
+    // discovery without launching a desktop app or touching host services.
+    let cli = f.dir.join("codex.js");
+    fs::write(
+        &cli,
+        "console.log(JSON.stringify({op:'ready'})); setInterval(()=>{},1000);",
+    )
+    .unwrap();
+    let process = f.spawn("node", &[cli.to_str().unwrap(), "app-server"], &[]);
+    wait(|| f.frames(process).iter().any(|v| v["op"] == "ready"));
+    db.execute(
+        "ALTER TABLE threads ADD COLUMN thread_source TEXT DEFAULT 'user'",
+        &[],
+    )
+    .unwrap();
+    db.transaction(|c| {
+        for i in 0..40 {
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source) VALUES(?, '/repo', 0, ?, 'Internal', 'internal')", &[json!(format!("internal-{i}")),json!(1000+i)])?;
+        }
+        Ok(())
+    }).unwrap();
+    // All top 32 rows are non-user threads; older user rows would leak through
+    // if discovery serialized the entire database before filtering.
+    assert_eq!(
+        f.plugin(CODEX, json!({"op":"discover_sessions"}))["sessions"],
+        json!([])
+    );
+    db.execute(
+        "UPDATE threads SET thread_source='user' WHERE recency_at_ms>=1032",
+        &[],
+    )
+    .unwrap();
+    let discovered = f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    let sessions = discovered["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 8);
+    assert_eq!(sessions[0]["session_id"], "internal-39");
+    // Caller resolution remains unbounded and can still address older threads.
+    assert_eq!(
+        f.plugin(
+            CODEX,
+            json!({"op":"resolve_caller","meta":{"threadId":"active"}})
+        )["caller"]["session_id"],
+        "active"
+    );
 }
 #[test]
 fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {

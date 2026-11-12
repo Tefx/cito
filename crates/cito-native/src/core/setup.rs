@@ -158,6 +158,21 @@ pub fn ensure_cli_shims_native(
     state_dir: &Path,
     plugins: &LoadedPlugins,
 ) -> Result<Vec<PathBuf>, String> {
+    ensure_plugins_staged(state_dir, plugins.plugins.iter().filter(|p| p.is_builtin))
+}
+
+/// Repair one app without changing any other app's staged installation.
+pub fn ensure_single_plugin_staged(
+    state_dir: &Path,
+    plugin: &PluginDescriptor,
+) -> Result<Vec<PathBuf>, String> {
+    ensure_plugins_staged(state_dir, std::iter::once(plugin).filter(|p| p.is_builtin))
+}
+
+fn ensure_plugins_staged<'a>(
+    state_dir: &Path,
+    plugins: impl Iterator<Item = &'a PluginDescriptor>,
+) -> Result<Vec<PathBuf>, String> {
     let bin_dir = state_dir.join("bin");
     fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
@@ -165,7 +180,7 @@ pub fn ensure_cli_shims_native(
     let exe_str = resolve_stable_package_root(&exe.to_string_lossy());
     let plugins_dir = staged_plugins_dir(state_dir);
     let mut written = Vec::new();
-    for plugin in plugins.plugins.iter().filter(|plugin| plugin.is_builtin) {
+    for plugin in plugins {
         let target = plugins_dir.join(&plugin.id);
         let bundled = resolve_bundled_plugin_dir(&plugin.id);
         let source = if plugin.is_builtin
