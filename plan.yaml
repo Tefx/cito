@@ -10155,7 +10155,7 @@ phases:
   - id: v37.review
     name: 'V37 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
       the modified files (do NOT run multi-round review loops per user instruction),
       verify cargo test --workspace && cargo build --release, and push main to origin
@@ -10170,3 +10170,5 @@ phases:
     depends_on:
     - v37.impl
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T15:23:21.474906Z'
