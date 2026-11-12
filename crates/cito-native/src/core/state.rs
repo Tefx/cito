@@ -41,6 +41,7 @@ impl LocalState {
                 replay_gap_detected INTEGER NOT NULL DEFAULT 0, replay_gap_range TEXT, dispatcher_token TEXT,
                 lease_until_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(hub,listener_id));
                 CREATE INDEX IF NOT EXISTS listeners_by_session ON local_listeners(harness,session_id);
+                CREATE TABLE IF NOT EXISTS session_custom_titles(harness TEXT NOT NULL,session_id TEXT NOT NULL,title TEXT NOT NULL,PRIMARY KEY(harness,session_id));
                 CREATE TABLE IF NOT EXISTS local_signals (
                 hub TEXT NOT NULL DEFAULT 'default', signal_id TEXT NOT NULL, listener_id TEXT NOT NULL, seq INTEGER NOT NULL,
                 binding_generation INTEGER NOT NULL, from_user TEXT NOT NULL, from_host_name TEXT NOT NULL, from_harness TEXT,
@@ -70,6 +71,30 @@ impl LocalState {
             Ok(())
         })?;
         Ok(Self { db })
+    }
+    pub fn custom_title(&self, harness: &str, session: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .db
+            .query(
+                "SELECT title FROM session_custom_titles WHERE harness=? AND session_id=?",
+                &[json!(harness), json!(session)],
+            )?
+            .first()
+            .and_then(|row| row["title"].as_str())
+            .map(str::to_owned))
+    }
+    pub fn set_custom_title(
+        &self,
+        harness: &str,
+        session: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        super::registration::validate_title(title)?;
+        self.db.transaction(|c| {
+            c.execute("INSERT INTO session_custom_titles(harness,session_id,title) VALUES(?,?,?) ON CONFLICT(harness,session_id) DO UPDATE SET title=excluded.title", &[json!(harness),json!(session),json!(title)])?;
+            c.execute("UPDATE local_listeners SET title=? WHERE harness=? AND session_id=?", &[json!(title),json!(harness),json!(session)])?;
+            Ok(())
+        })
     }
     pub fn listener(&self, hub: &str, id: &str) -> Result<Option<Value>, String> {
         Ok(self

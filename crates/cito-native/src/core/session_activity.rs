@@ -183,6 +183,16 @@ impl SessionActivity {
             return Ok(false);
         }
         let changed = self.reap_discovery();
+        for provider in &mut self.discovery {
+            for candidate in &mut provider.cached {
+                if let Some(title) =
+                    state.custom_title(&provider.plugin.id, string(candidate, "session_id"))?
+                {
+                    candidate["title"] = json!(title);
+                    candidate["custom_title"] = json!(true);
+                }
+            }
+        }
         self.reap_badges();
         // One short transaction captures both rows and counts. Persisted ACTIVE
         // rows alone never establish liveness and never add unread to a badge.

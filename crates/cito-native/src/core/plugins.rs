@@ -401,7 +401,8 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         .unwrap_or("indigo")
         .to_string();
     let reserved_flags = [
-        "hub", "team", "scope", "tag", "harness", "session", "help", "version", "setup",
+        "hub", "team", "scope", "tag", "title", "all", "json", "harness", "session", "help",
+        "version", "setup",
     ];
     let mut cli_flag = map
         .get("cliFlag")

@@ -275,10 +275,20 @@ func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
     return min(108, max(60, 38 + ceil(wrappedRect.height)))
 }
 
-func nodeDisplayTitle(_ title: String, harness: String, user: String) -> String {
+func cleanHostDisplay(_ raw: String, localHost: String? = nil) -> String {
+    let clean = raw.replacingOccurrences(of: "\\.local\\b", with: "", options: [.regularExpression, .caseInsensitive])
+    if let localHost = localHost, !localHost.isEmpty,
+       clean.caseInsensitiveCompare(cleanHostDisplay(localHost)) == .orderedSame { return "This Mac" }
+    return clean
+}
+func nodeDisplayTitle(_ title: String, harness: String, user: String, cwd: String = "", about: String? = nil, harnessName: String? = nil, customTitle: Bool = false) -> String {
+    if customTitle { return title }
     let raw = title.trimmingCharacters(in: .whitespacesAndNewlines)
     if harness == "human" && (raw.isEmpty || raw == "Human" || raw == "@\(user)" || raw == "@\(user) (Me)" || raw.hasPrefix("Human Node")) {
         return "You (@\(user))"
+    }
+    if harness != "human" && (cwd == NSHomeDirectory() || raw.isEmpty || raw.lowercased() == user.lowercased()) {
+        return distinctAbout(about, title: raw, user: user) ?? "\(harnessName ?? harness) (~)"
     }
     return title
 }
@@ -774,15 +784,18 @@ struct Listener: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
     let harness: String, session_id: String, title: String, cwd: String, scope: String
     let about: String?, repo: String?, branch: String?
+    let custom_title: Bool?
     let display_address: String
     let user: String?, owner_user: String?
     let host_name: String?
+    let host_id: String?
     let channels: [String]?
 }
 struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
     let branch: String?, endpoint_pid: Int?, updated_at_ms: Double?
     let listening_hubs: [String]?
+    let custom_title: Bool?
     let needs_reload: Bool?
     let reload_hint: String?
 }
@@ -791,6 +804,8 @@ struct RemotePeer: Decodable, Equatable {
     let user: String, host_id: String, host_name: String, harness: String
     let display_address: String
     let title: String, about: String, scope: String, last_seen_at: String
+    var session_id: String? = nil
+    var custom_title: Bool? = nil
     let cwd: String?, repo: String?, branch: String?
     let is_self_principal: Bool?
     let channels: [String]?
@@ -1080,7 +1095,7 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let availWidth = max(120, 544 - copyWidth - msgWidth - 66)
         let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        let normalizedTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user)
+        let normalizedTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user, cwd: peer.cwd ?? "", about: peer.about, harnessName: visual.name, customTitle: peer.custom_title == true)
         let displayTitle = peer.harness == "human" && normalizedTitle == "You (@\(peer.user))" ? "@\(peer.user)" + (peer.is_self_principal == true ? " (You)" : "") : normalizedTitle
         let titleW = min(availWidth, measureTextWidth(displayTitle, font: titleFont) + 4)
         line1TitleLabel.stringValue = displayTitle
@@ -1089,7 +1104,11 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-        let repoText = (peer.repo ?? "").isEmpty ? branchSuffix : " · \(peer.repo ?? "")\(branchSuffix)"
+        let cwd = peer.cwd ?? ""
+        let home = NSHomeDirectory()
+        let shortCwd = cwd == home ? "~" : cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd
+        let context = (peer.repo ?? "").isEmpty ? (peer.harness == "human" ? "" : shortCwd) : peer.repo ?? ""
+        let repoText = (context.isEmpty ? "" : " · \(context)") + branchSuffix
         line1RepoLabel.isHidden = false
         line1RepoLabel.stringValue = repoText
         line1RepoLabel.frame = NSRect(x: 52 + titleW, y: 26, width: max(0, availWidth - titleW), height: 18)
@@ -1103,9 +1122,14 @@ final class DirectoryPeerCellView: NSTableCellView {
         line2UserLabel.frame = NSRect(x: 52, y: 7, width: userW, height: 16)
         line2UserLabel.identifier = NSUserInterfaceItemIdentifier("dir_user:\(peer.scoped_id)")
 
-        let cleanHost = peer.host_name.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
-        let hostText = (peer.channels ?? []).isEmpty ? (cleanHost.isEmpty ? peer.host_name : cleanHost) : peer.channels!.joined(separator: ", ")
-        let displayAbout = distinctAbout(peer.about, title: peer.title, user: peer.user)
+        let internalTokens = ["mac", "hub", "human", "desktop notifications"]
+        var hosts: [String] = []
+        for raw in [peer.host_name] + (peer.channels ?? []) {
+            let host = cleanHostDisplay(raw)
+            if !host.isEmpty && !internalTokens.contains(host.lowercased()) && !hosts.contains(host) { hosts.append(host) }
+        }
+        let hostText = hosts.joined(separator: ", ")
+        let displayAbout = distinctAbout(distinctAbout(peer.about, title: peer.title, user: peer.user), title: displayTitle, user: peer.user)
         line2MetaLabel.stringValue = " · \(hostText)" + (displayAbout.map { " · \($0)" } ?? "")
         if peer.harness == "human" { line2MetaLabel.stringValue = "Human · \(hostText)" + (displayAbout.map { " · \($0)" } ?? "") }
         let metaOffset = peer.harness == "human" ? 0 : userW
@@ -1215,6 +1239,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var harnesses: [HarnessMeta] = []
     var harnessMap: [String: HarnessMeta] { Dictionary(uniqueKeysWithValues: harnesses.map { ($0.id, $0) }) }
     var selectedTargetHub: String = ""
+    var renamingSessionKey: String?
+    weak var renameField: NSTextField?
     var myRemoteCollapsed = false
     var collapsedGroups = Set<String>()
     func statusColor(_ status: String) -> NSColor {
@@ -1740,7 +1766,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     composerInputField?.stringValue = value
                     return
                 }
-                if let field = settingsFieldControls[id] ?? (settingsPanel?.contentView.flatMap { findTextField(in: $0, id: id) }) {
+                if let field = settingsFieldControls[id] ?? (settingsPanel?.contentView.flatMap { findTextField(in: $0, id: id) }) ?? cardMenu.items.compactMap({ $0.view }).compactMap({ findTextField(in: $0, id: id) }).first {
                     field.stringValue = value
                     controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
                 }
@@ -1756,6 +1782,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if object["system_only"] as? Bool != true { clipboardString = text }
                 appPasteboard.clearContents()
                 appPasteboard.setString(text, forType: .string)
+                return
+            }
+            if op == "test_menu_key", let key = object["key"] as? String, let field = renameField {
+                let editor = NSTextView(); editor.string = field.stringValue
+                _ = control(field, textView: editor, doCommandBy: key == "escape" ? #selector(NSResponder.cancelOperation(_:)) : #selector(NSResponder.insertNewline(_:)))
                 return
             }
             if ["test_settings_key", "test_directory_key"].contains(op), let key = object["key"] as? String {
@@ -2042,6 +2073,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             formatStatusButton(button, count: count, unreadCount: unreadCount, image: statusImage)
         }
         let menu = cardMenu
+        let renameDraft = renameField?.currentEditor()?.string ?? renameField?.stringValue
         menu.removeAllItems()
         func host(_ view: NSView, id: String) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
@@ -2199,7 +2231,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let home = NSHomeDirectory()
         let map = harnessMap
         let targetHub = effectiveTargetHub
-        let hasHumanListener = listeners.contains { $0.harness == "human" && $0.hub == targetHub }
+        let hasHumanListener = listeners.contains { $0.harness == "human" }
         let targetUser = hubs.first(where: { $0.name == targetHub })?.user ?? hubs.first?.user ?? "local"
         if !hasHumanListener && hubs.contains(where: { $0.name == targetHub && $0.status != "disconnected" }) {
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 56))
@@ -2223,12 +2255,24 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let bh = b.element.harness == "human" ? 0 : 1
             return ah != bh ? ah < bh : a.offset < b.offset
         }.map { $0.element }
-        for listener in orderedListeners {
+        let groups = Dictionary(grouping: orderedListeners) { "\($0.harness):\($0.session_id)" }
+        var renderedSessions = Set<String>()
+        for entry in orderedListeners {
+            let sessionKey = "\(entry.harness):\(entry.session_id)"
+            guard renderedSessions.insert(sessionKey).inserted, let group = groups[sessionKey] else { continue }
+            let sharedDefault = settings?.hubs.first { $0.is_default && $0.name != "local" && $0.status == "connected" }?.name
+                ?? hubs.first { $0.name != "local" && $0.status == "connected" }?.name
+            let primaryListener = (!selectedTargetHub.isEmpty ? group.first { $0.hub == effectiveTargetHub } : nil)
+                ?? group.first { $0.hub == sharedDefault }
+                ?? group.first { $0.hub == "local" }
+                ?? group.first { row in hubs.contains { $0.name == row.hub && $0.status == "connected" } }
+                ?? entry
+            let listener = primaryListener
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
                 .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
-            let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user)
-            let hasDistinctAbout = distinctAbout(listener.about, title: listener.title, user: user) != nil
+            let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user, cwd: listener.cwd, about: listener.about, harnessName: map[listener.harness]?.display_name, customTitle: listener.custom_title == true)
+            let hasDistinctAbout = distinctAbout(distinctAbout(listener.about, title: listener.title, user: user), title: displayTitle, user: user) != nil
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
             let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
@@ -2244,7 +2288,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 radius: 8, iconInset: multiHub ? 7 : 8, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
             let listenerHub = hubs.first(where: { $0.name == listener.hub })
-            let showScopeToggle = !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
+            let showScopeToggle = group.contains { $0.hub != "local" } || !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
             let hubPillWidth = min(88, max(44, ceil(measureTextWidth(listener.hub, font: btnFont)) + 20))
             let scopeWidth: CGFloat = 62
             var sessionActions: [NSView] = []
@@ -2274,14 +2318,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText: String
             if listener.harness == "human" {
-                let chs = listener.channels ?? []
-                pathText = chs.isEmpty ? "Desktop notifications" : chs.joined(separator: " · ")
+                let chs = (listener.channels ?? []).filter { !["mac", "desktop notifications", ""].contains($0.lowercased()) }
+                pathText = chs.joined(separator: " · ")
             } else {
                 pathText = (!branch.isEmpty && branch != "HEAD") ? "\(cwd) · \(branch)" : cwd
             }
             let path = textLabel(pathText,
                 NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
-            path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; card.addSubview(path)
+            path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
             if hubs.count > 1 && listener.harness != "human" {
                 let hubPill = MenuControl(listener.hub, frame: NSRect(x: 0, y: cardHeight - 28, width: hubPillWidth, height: 22), radius: 6)
                 hubPill.identifier = NSUserInterfaceItemIdentifier("switch_hub:\(listener.scoped_id)")
@@ -2306,11 +2350,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         self.emit(["op": "switch_hub", "from_hub": listener.hub, "to_hub": nextHub, "listener_id": listener.listener_id])
                     }
                 }
+                if group.count > 1, let index = group.firstIndex(where: { $0.hub == listener.hub }) {
+                    let nextHub = group[(index + 1) % group.count].hub
+                    hubPill.toolTip = group.map(\.hub).joined(separator: " · ")
+                    hubPill.pressed = { [weak self] in self?.selectedTargetHub = nextHub; self?.rebuild() }
+                }
                 hubPill.isEnabled = hubPill.pressed != nil
                 card.addSubview(hubPill); sessionActions.append(hubPill)
             }
             if showScopeToggle {
-                var scope = listener.scope
+                var scope = listener.hub == "local" ? (group.first { $0.hub != "local" }?.scope ?? listener.scope) : listener.scope
                 let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: 0, y: cardHeight - 28, width: scopeWidth, height: 22),
                     leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
                 scopeBtn.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
@@ -2325,7 +2374,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     scopeBtn?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
                     scopeBtn?.label.stringValue = scope == "self" ? "Self" : "Team"
                     scopeBtn?.setAccessibilityLabel(scopeBtn?.label.stringValue); scopeColor()
-                    self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
+                    for row in group where row.hub != "local" || group.count == 1 {
+                        self.emit(["op": "set_scope", "hub": row.hub, "listener_id": row.listener_id, "scope": scope])
+                    }
                 }
                 card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
             }
@@ -2334,9 +2385,29 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             stop.toolTip = personal ? "Pause personal notifications" : "Stop listening"
             stop.style = personal ? .neutral : .subtleHeader
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
-            let unlisten = { self.emit(["op": "unlisten", "hub": listener.hub, "listener_id": listener.listener_id]) }
+            let unlisten = { self.emit(["op": "unlisten_session", "harness": listener.harness, "session_id": listener.session_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
-            layoutBar(in: card, insetLeft: titleX, insetRight: 10, y: cardHeight - 28, height: 22, flexible: title, trailing: sessionActions)
+            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, trailing: sessionActions)
+            let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
+            if !personal && renamingSessionKey == sessionKey {
+                title.isHidden = true
+                let field = NSTextField(string: renameDraft ?? listener.title)
+                field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
+                field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(listener.scoped_id)")
+                field.delegate = self; field.font = .systemFont(ofSize: 13)
+                card.addSubview(field); renameField = field
+                DispatchQueue.main.async { field.window?.makeFirstResponder(field); field.selectText(nil) }
+            } else if !personal {
+                let titleW = max(24, min(rightEdge - titleX - 24, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
+                title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
+                let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 2, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
+                renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")
+                renameBtn.style = .subtleHeader; renameBtn.toolTip = "Rename session"
+                renameBtn.pressed = { [weak self] in self?.renameField = nil; self?.renamingSessionKey = sessionKey; self?.rebuild() }
+                card.addSubview(renameBtn)
+            } else {
+                title.frame.size.width = max(24, rightEdge - titleX - 6)
+            }
             layoutBar(in: card, insetLeft: titleX, insetRight: 10, y: 7, height: 19, leading: [copy], flexible: path)
         }
         if activeRows.count <= 4 {
@@ -2431,7 +2502,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
                     let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                    let info = textLabel("\(hostText) · \(nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user))\(branchSuffix)",
+                    let info = textLabel("\(hostText) · \(nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,cwd:peer.cwd ?? "",about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true))\(branchSuffix)",
                         NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
                     info.toolTip = peer.scoped_id + (distinctAbout(peer.about, title: peer.title, user: peer.user).map { " — \($0)" } ?? "")
@@ -2556,7 +2627,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         let shortCwd = c.cwd == home ? "~" : c.cwd.hasPrefix(home + "/") ? "~" + c.cwd.dropFirst(home.count) : c.cwd
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                        let info = textLabel(c.title, NSRect(x:24,y:rowHeight-21,width:268,height:16),size:12,weight:.medium,color:.labelColor)
+                        let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, cwd: c.cwd, harnessName: visual.name, customTitle: c.custom_title == true)
+                        let info = textLabel(candidateTitle, NSRect(x:24,y:rowHeight-21,width:268,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
                         let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix),NSRect(x:24,y:needsReload ? 21 : 6,width:268,height:14),size:10.5,color:CitoPalette.secondaryText)
                         location.lineBreakMode = .byTruncatingMiddle
@@ -4256,9 +4328,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let host = (listener.host_name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return RemotePeer(hub: listener.hub, listener_id: listener.listener_id,
                 public_id: listener.public_id, scoped_id: listener.scoped_id,
-                user: user, host_id: "", host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
+                user: user, host_id: listener.host_id ?? "", host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
                 display_address: listener.display_address, title: listener.title, about: listener.about ?? "",
-                scope: listener.scope, last_seen_at: "", cwd: listener.cwd, repo: listener.repo,
+                scope: listener.scope, last_seen_at: "", session_id: listener.session_id, custom_title: listener.custom_title, cwd: listener.cwd, repo: listener.repo,
                 branch: listener.branch, is_self_principal: true, channels: listener.channels)
         } + myRemote
         applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
@@ -4337,7 +4409,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
         let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
         let sameServerQuery = serverDirectoryQuery == directoryQuery && serverDirectoryScope == directoryScopeFilter && serverDirectoryHarness == directoryHarnessFilter
-        directoryFilteredPeers = (fromDaemonFrame || sameServerQuery) ? directoryAllPeers : directoryAllPeers.filter { matchesDirectoryPeer($0) }
+        func shadowKey(_ peer: RemotePeer) -> String {
+            if peer.harness == "human" && peer.is_self_principal == true { return "\(peer.user):human" }
+            return "\(peer.user):\(peer.harness):\(peer.session_id ?? peer.listener_id):\(peer.host_id)"
+        }
+        let sharedKeys = Set(directoryAllPeers.filter { peer in peer.hub != "local" && hubs.contains { $0.name == peer.hub && $0.status == "connected" } }.map(shadowKey))
+        let coalescedPeers = directoryAllPeers.filter { $0.hub != "local" || !sharedKeys.contains(shadowKey($0)) }
+        directoryFilteredPeers = (fromDaemonFrame || sameServerQuery) ? coalescedPeers : coalescedPeers.filter { matchesDirectoryPeer($0) }
         directoryMatchedCount = daemonMatchedCount ?? (sameServerQuery ? serverDirectoryMatchedCount : directoryFilteredPeers.count)
         if directoryFilteredPeers.isEmpty {
             directorySelectedIndex = 0
@@ -4444,6 +4522,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if textView.hasMarkedText() { return false }
+        if control.identifier?.rawValue.hasPrefix("rename_field:") == true {
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                renamingSessionKey = nil; rebuild(); return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)), let key = renamingSessionKey,
+               let listener = listeners.first(where: { "\($0.harness):\($0.session_id)" == key }) {
+                let newTitle = textView.string
+                guard !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, newTitle.unicodeScalars.count <= 128 else { NSSound.beep(); return true }
+                emit(["op":"rename_session", "harness":listener.harness, "session_id":listener.session_id, "title":newTitle])
+                renamingSessionKey = nil; rebuild(); return true
+            }
+            return false
+        }
         if control.window === settingsPanel {
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 handleSettingsKey("escape")

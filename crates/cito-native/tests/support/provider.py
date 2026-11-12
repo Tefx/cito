@@ -17,7 +17,7 @@ for key in ["HOME", "CITO_STATE_DIR", "CITO_CONFIG_PATH"]:
         assert request["env"][key] == os.environ[key]
 with (root / "calls.jsonl").open("a") as output:
     output.write(json.dumps(request) + "\n")
-caller = dict(harness="fixture", session_id=options["session_id"], cwd=str(root), title="Native fixture", endpoint_pid=os.getppid())
+caller = dict(harness="fixture", session_id=options["session_id"], cwd=options.get("cwd", str(root)), title=options.get("title", "Native fixture"), endpoint_pid=os.getppid())
 op = request["op"]
 result = dict(ok=True)
 if op == "resolve_caller":

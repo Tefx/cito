@@ -86,6 +86,12 @@ pub fn parse_cli(
                 }
                 input.insert("scope".into(), json!("workspace"));
             }
+            "--title" | "-t" if cmd == "listen" => {
+                input.insert("title".into(), json!(read_value(args, &mut i, flag)?));
+            }
+            "--all" if cmd == "unlisten" => {
+                input.insert("all".into(), json!(true));
+            }
             "--tag" if cmd == "listen" => {
                 input.insert("tag".into(), json!(read_value(args, &mut i, flag)?));
             }
@@ -173,8 +179,26 @@ pub fn parse_cli(
                 positionals.join(" ")
             }),
         );
+    } else if cmd == "rename" {
+        if positionals.is_empty() {
+            return Err("rename requires a title".into());
+        }
+        let title = positionals.join(" ");
+        super::registration::validate_title(&title)?;
+        input.insert("title".into(), json!(title));
     } else if !positionals.is_empty() {
         return Err(format!("Unexpected argument: {}", positionals[0]));
+    }
+    if let Some(title) = input.get("title").and_then(Value::as_str) {
+        super::registration::validate_title(title)?;
+    }
+    if input.get("all") == Some(&json!(true))
+        && (input.len() != 1 || meta.contains_key("expected_harness"))
+    {
+        return Err("--all cannot be combined with Hub or session selectors".into());
+    }
+    if cmd == "status" && (!input.is_empty() || !meta.is_empty()) {
+        return Err("status accepts only --json".into());
     }
     if cmd == "send" && (!input.contains_key("to") || !input.contains_key("message")) {
         return Err("send requires --to and --message".into());
@@ -193,26 +217,68 @@ pub fn parse_cli(
     );
     Ok((Value::Object(input), Value::Object(meta)))
 }
+pub fn control_request(config: &NativeConfig, action: &Value) -> Result<Value, String> {
+    let response = crate::plugins::http_post_json(
+        config.daemon_port,
+        "/control",
+        &action.to_string(),
+        Duration::from_secs(30),
+    )?;
+    let value: Value = serde_json::from_str(&response.body).map_err(|e| e.to_string())?;
+    if response.status != 200 || value["ok"] == false {
+        return Err(value["error"].as_str().unwrap_or(&response.body).to_owned());
+    }
+    Ok(value)
+}
+
 pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugins: &LoadedPlugins) {
     let result = (|| -> Result<(), String> {
         let (input, meta) = parse_cli(cmd, args, plugins)?;
         ensure_daemon(config)?;
-        let body=json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":format!("cito_{cmd}"),"arguments":input,"_meta":meta}}).to_string();
-        let response = http_post_mcp(config.daemon_port, &body, Duration::from_secs(30))?;
-        let rpc = crate::extract_jsonrpc_from_http_body(&response.body)
-            .ok_or_else(|| format!("HTTP {}", response.status))?;
-        if let Some(error) = rpc.get("error") {
-            return Err(error.to_string());
-        }
-        let text = rpc["result"]["content"][0]["text"]
-            .as_str()
-            .ok_or("Invalid daemon response")?;
-        if rpc["result"]["isError"] == true {
-            return Err(text.into());
-        }
-        let payload: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        if args.iter().any(|a| a == "--json") || !matches!(cmd, "listen" | "unlisten") {
-            println!("{text}");
+        let payload = if cmd == "rename" || cmd == "status" || input["all"] == true {
+            let action = match cmd {
+                "rename" => json!({"op":"cli_rename","title":input["title"],"meta":meta}),
+                "status" => json!({"op":"get_snapshot"}),
+                _ => json!({"op":"unlisten_all"}),
+            };
+            control_request(config, &action)?
+        } else {
+            let body=json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":format!("cito_{cmd}"),"arguments":input,"_meta":meta}}).to_string();
+            let response = http_post_mcp(config.daemon_port, &body, Duration::from_secs(30))?;
+            let rpc = crate::extract_jsonrpc_from_http_body(&response.body)
+                .ok_or_else(|| format!("HTTP {}", response.status))?;
+            if let Some(error) = rpc.get("error") {
+                return Err(error.to_string());
+            }
+            let text = rpc["result"]["content"][0]["text"]
+                .as_str()
+                .ok_or("Invalid daemon response")?;
+            if rpc["result"]["isError"] == true {
+                return Err(text.into());
+            }
+            serde_json::from_str(text).map_err(|e| e.to_string())?
+        };
+        if args.iter().any(|a| a == "--json") || !matches!(cmd, "listen" | "unlisten" | "status") {
+            println!("{payload}");
+        } else if cmd == "status" {
+            for (heading, key) in [
+                ("ACTIVE LISTENERS", "listeners"),
+                ("AVAILABLE SESSIONS", "available"),
+                ("HUBS", "hubs"),
+            ] {
+                println!("{heading}");
+                for row in payload[key].as_array().into_iter().flatten() {
+                    println!(
+                        "  {} {} {}",
+                        row["display_address"]
+                            .as_str()
+                            .or_else(|| row["name"].as_str())
+                            .unwrap_or(""),
+                        row["title"].as_str().unwrap_or(""),
+                        row["status"].as_str().unwrap_or("")
+                    );
+                }
+            }
         } else if cmd == "listen" {
             println!(
                 "Listening as {} ({}): {}",
@@ -247,6 +313,10 @@ mod tests {
             ("find", vec!["--limit", "bad"]),
             ("inbox", vec!["--unknown"]),
             ("listen", vec!["--session", "s"]),
+            ("listen", vec!["--title", " "]),
+            ("rename", vec![]),
+            ("rename", vec![" "]),
+            ("unlisten", vec!["--all", "--hub", "work"]),
         ] {
             assert!(parse_cli(
                 cmd,
@@ -254,6 +324,29 @@ mod tests {
                 &p
             )
             .is_err());
+        }
+        for (cmd, args, key, expected) in [
+            (
+                "listen",
+                vec!["-t", "Backend API", "about"],
+                "title",
+                json!("Backend API"),
+            ),
+            (
+                "rename",
+                vec!["Backend API", "--json"],
+                "title",
+                json!("Backend API"),
+            ),
+            ("unlisten", vec!["--all"], "all", json!(true)),
+        ] {
+            let (input, _) = parse_cli(
+                cmd,
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                &p,
+            )
+            .unwrap();
+            assert_eq!(input[key], expected);
         }
     }
 }

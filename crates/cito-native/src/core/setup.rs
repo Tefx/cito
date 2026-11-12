@@ -981,6 +981,9 @@ pub fn run_setup_cli(args: &[String]) {
         let mut force = false;
         let mut json_output = false;
         let mut uninstall = false;
+        let mut invite: Option<String> = None;
+        let mut print_invite = false;
+        let mut disconnect_all = false;
         let mut purge_data = false;
         let mut set_default = false;
         let mut launch_at_login: Option<bool> = None;
@@ -1030,6 +1033,14 @@ pub fn run_setup_cli(args: &[String]) {
                 json_output = true;
             } else if arg == "--uninstall" {
                 uninstall = true;
+            } else if arg == "--invite" || arg.starts_with("--invite=") {
+                let (v, next_i) = read_val(arg, i, "--invite")?;
+                invite = Some(v);
+                i = next_i;
+            } else if arg == "--print-invite" {
+                print_invite = true;
+            } else if arg == "--disconnect-all" {
+                disconnect_all = true;
             } else if arg == "--purge-data" {
                 purge_data = true;
             } else if arg == "--default" {
@@ -1114,6 +1125,59 @@ pub fn run_setup_cli(args: &[String]) {
             return Err("--hub and --url must be specified together".to_string());
         }
 
+        if invite.is_some() || print_invite || disconnect_all {
+            if usize::from(invite.is_some())
+                + usize::from(print_invite)
+                + usize::from(disconnect_all)
+                != 1
+                || uninstall
+                || build_app
+                || status_only
+                || hub_name.is_some()
+                || share_hub.is_some()
+                || share_port.is_some()
+                || !enable_hubs.is_empty()
+                || !disable_hubs.is_empty()
+                || !remove_hubs.is_empty()
+                || !enable_harnesses.is_empty()
+                || !disable_harnesses.is_empty()
+                || launch_at_login.is_some()
+                || set_default
+                || (purge_data && !disconnect_all)
+            {
+                return Err("Invite and disconnect operations must be used separately from other setup operations".into());
+            }
+            let action = if let Some(invite) = invite {
+                json!({"op":"paste_hub_invite","invite":invite})
+            } else if print_invite {
+                json!({"op":"get_snapshot"})
+            } else {
+                json!({"op":"setup_disconnect_all","purge_data":purge_data})
+            };
+            if dry_run {
+                println!("{}", json!({"ok":true,"dry_run":true,"op":action["op"]}));
+                return Ok(None);
+            }
+            let (config, _) = crate::plugins::load_native_config()?;
+            crate::plugins::ensure_daemon(&config)?;
+            let result = super::cli::control_request(&config, &action)?;
+            if print_invite {
+                if result["settings"]["host_hub"]["enabled"] != true {
+                    return Err("Hub sharing is disabled".into());
+                }
+                let command = result["settings"]["host_hub"]["invite_command"]
+                    .as_str()
+                    .ok_or("Invite unavailable")?;
+                if json_output {
+                    println!("{}", json!({"ok":true,"invite_command":command}));
+                } else {
+                    println!("{command}");
+                }
+            } else {
+                println!("{result}");
+            }
+            return Ok(None);
+        }
         let raw_config = crate::plugins::read_config_text(&config_path)?;
         let (current_default, _, _) = try_normalize_existing_config(raw_config.as_deref())?;
         let plugins = crate::plugins::load_plugins_readonly(&state_dir);

@@ -7,7 +7,7 @@
   "scope": "hub",
   "sfSymbol": "terminal.fill",
   "tint": "amber",
-  "cliFlag": false,
+  "cliFlag": true,
   "command": [
     "./bin/cito-plugin-pi"
   ],

@@ -8,6 +8,50 @@ use super::{
 use crate::plugins::{now_ms, random_uuid_v4};
 use serde_json::{json, Value};
 
+pub fn validate_title(title: &str) -> Result<(), String> {
+    if title.trim().is_empty() || title.chars().count() > 128 {
+        return Err("INVALID_INPUT: title must contain 1..128 characters".into());
+    }
+    Ok(())
+}
+
+/// Reconcile durable naming intent without replacing another host's binding.
+pub fn sync_custom_title(
+    state: &LocalState,
+    client: &HubClient,
+    host_id: &str,
+    row: &Value,
+) -> Result<(), String> {
+    let Some(title) = state.custom_title(string(row, "harness"), string(row, "session_id"))? else {
+        return Ok(());
+    };
+    let _registration = client
+        .registration
+        .lock()
+        .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+    state.db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+    let channel = format!("{host_id}:{}", string(row, "harness"));
+    for _ in 0..3 {
+        let Some((mut remote, revision)) = client.kv_get(string(row, "listener_id"))? else {
+            return Ok(());
+        };
+        if remote["title"] == title && remote["custom_title"] == true {
+            return Ok(());
+        }
+        if !remote_matches_listener(&remote, row, &channel) {
+            return Ok(());
+        }
+        remote["title"] = json!(title);
+        remote["custom_title"] = json!(true);
+        match client.kv_save(string(row, "listener_id"), &remote, Some(revision)) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.starts_with("10071:") => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err("STALE_GENERATION: Title CAS retries exhausted".into())
+}
+
 pub fn local_node(
     state: &LocalState,
     client: &HubClient,
@@ -96,13 +140,22 @@ fn register_locked(
     }
     let harness = string(caller, "harness");
     let session = string(caller, "session_id");
-    let title = match string(caller, "title") {
-        title if harness == "human" && title.trim().is_empty() => "Human",
-        title => title,
-    };
     if harness.is_empty() || session.is_empty() || (harness == "human" && session != "default") {
         return Err("INVALID_INPUT: Invalid Node session identity".into());
     }
+    if let Some(title) = args.get("title") {
+        let title = title
+            .as_str()
+            .ok_or("INVALID_INPUT: title must be a string")?;
+        state.set_custom_title(harness, session, title)?;
+    }
+    let custom_title = state.custom_title(harness, session)?;
+    let title = custom_title
+        .as_deref()
+        .unwrap_or_else(|| match string(caller, "title") {
+            title if harness == "human" && title.trim().is_empty() => "Human",
+            title => title,
+        });
     let local = local_node(state, client, harness, session)?;
     let mut id = local
         .as_ref()
@@ -226,6 +279,7 @@ fn register_locked(
             .unwrap_or_default();
         channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":if harness=="human"{"notify_fanout"}else{"wake_exclusive"},"priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":now_ms()}));
         let mut value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
+        value["custom_title"] = json!(custom_title.is_some());
         value["human_paused"] = if harness == "human" && resume_human {
             json!(false)
         } else {
@@ -302,6 +356,34 @@ mod tests {
                     expected
                 );
             }
+            let caller =
+                json!({"harness":"fixture","session_id":"default","title":"Discovered title"});
+            register_listener(
+                &state,
+                &client,
+                "host",
+                &json!({"about":"Work","title":"alice"}),
+                &caller,
+            )?;
+            let reopened = LocalState::open(&root.join("state"))?;
+            let response = register_listener(
+                &reopened,
+                &client,
+                "host",
+                &json!({"about":"Work"}),
+                &caller,
+            )?;
+            assert_eq!(response["title"], "alice");
+            assert_eq!(
+                reopened.custom_title("fixture", "default")?.as_deref(),
+                Some("alice")
+            );
+            let remote = client
+                .kv_get(string(&response, "canonical_listener_id"))?
+                .ok_or("Missing renamed row")?
+                .0;
+            assert_eq!(remote["title"], "alice");
+            assert_eq!(remote["custom_title"], true);
             Ok(())
         })();
         engine.shutdown();

@@ -1279,6 +1279,71 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             " · laptop"
         );
     }
+    let mut frame = state();
+    frame["hubs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"local","status":"connected","auth_mode":"none","user":"bob"}));
+    f.send(p, frame);
+    let mut agent = peer("home");
+    agent["session_id"] = json!("home-session");
+    agent["title"] = json!("bob");
+    agent["about"] = json!("Release audit");
+    agent["cwd"] = json!("~");
+    agent["repo"] = json!("");
+    agent["branch"] = json!("");
+    agent["host_name"] = json!("laptop.LOCAL");
+    agent["channels"] = json!([
+        "Mac",
+        "Hub",
+        "human",
+        "Desktop notifications",
+        "laptop.local",
+        "mac-studio.local",
+        "mac-studio"
+    ]);
+    let mut shadow = agent.clone();
+    shadow["hub"] = json!("local");
+    shadow["scoped_id"] = json!("local:home");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[shadow,agent.clone()]}),
+    );
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "directory_items", "dir_title:personal:home")["text"],
+        "Release audit"
+    );
+    assert_eq!(
+        node(&s, "directory_items", "dir_meta:personal:home")["text"],
+        " · laptop, mac-studio"
+    );
+    assert_eq!(
+        node(&s, "directory_items", "dir_repo:personal:home")["text"],
+        " · ~"
+    );
+    assert!(node(&s, "directory_items", "dir_title:local:home").is_null());
+    agent["about"] = json!("");
+    send_fixture(&f, p, json!({"op":"directory","peers":[agent.clone()]}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "dir_title:personal:home"
+        )["text"],
+        "Fixture (~)"
+    );
+    agent["custom_title"] = json!(true);
+    send_fixture(&f, p, json!({"op":"directory","peers":[agent]}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "dir_title:personal:home"
+        )["text"],
+        "bob"
+    );
 }
 
 #[test]
@@ -2274,7 +2339,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
 }
 
 #[test]
-fn u3_paused_human_card_is_per_hub_and_excludes_offline_targets() {
+fn u3_paused_human_card_requires_no_active_person_and_excludes_offline_targets() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -2289,7 +2354,9 @@ fn u3_paused_human_card_is_per_hub_and_excludes_offline_targets() {
     f.send(p, frame.clone());
     assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
     control(&f, p, "target_hub:work");
-    assert!(!node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    let coalesced = inspect(&f, p);
+    assert!(node(&coalesced, "items", "human_paused_card").is_null());
+    assert!(!node(&coalesced, "items", "session:personal:repo-abcdefghijkl").is_null());
     frame["hubs"][1]["status"] = json!("disconnected");
     f.send(p, frame.clone());
     assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
@@ -3230,11 +3297,81 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     second["listener_id"] = json!("c_workabcdefgh");
     second["display_address"] = json!("work:alice/fixture#abcd");
     next["listeners"] = json!([listener(), second]);
-    f.send(p, next);
+    f.send(p, next.clone());
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
-    assert!(!node(&s, "items", "session:work:repo-workabcdefgh").is_null());
+    assert!(node(&s, "items", "session:work:repo-workabcdefgh").is_null());
     assert!(!node(&s, "items", "session:personal:repo-abcdefghijkl").is_null());
+    control(&f, p, "switch_hub:personal:repo-abcdefghijkl");
+    let switched = inspect(&f, p);
+    assert!(!node(&switched, "items", "session:work:repo-workabcdefgh").is_null());
+    assert!(node(&switched, "items", "session:personal:repo-abcdefghijkl").is_null());
+    control(&f, p, "copy:work:repo-workabcdefgh");
+    assert_eq!(inspect(&f, p)["clipboard"], "work:alice/fixture#abcd");
+    control(&f, p, "scope:work:repo-workabcdefgh");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "set_scope")
+            .count()
+            == 2
+    });
+    let scopes: Vec<_> = f
+        .frames(p)
+        .into_iter()
+        .filter(|v| v["op"] == "set_scope")
+        .collect();
+    assert!(scopes.iter().any(|v| v["hub"] == "personal"));
+    assert!(scopes.iter().any(|v| v["hub"] == "work"));
+    assert!(scopes.iter().all(|v| v["scope"] == "workspace"));
+    control(&f, p, "rename:work:repo-workabcdefgh");
+    assert!(!node(
+        &inspect(&f, p),
+        "items",
+        "rename_field:work:repo-workabcdefgh"
+    )
+    .is_null());
+    f.send(p, json!({"op":"test_settings_input","id":"rename_field:work:repo-workabcdefgh","value":"Backend API"}));
+    f.send(p, json!({"op":"test_menu_key","key":"escape"}));
+    assert!(node(
+        &inspect(&f, p),
+        "items",
+        "rename_field:work:repo-workabcdefgh"
+    )
+    .is_null());
+    control(&f, p, "rename:work:repo-workabcdefgh");
+    f.send(p, json!({"op":"test_settings_input","id":"rename_field:work:repo-workabcdefgh","value":"Backend API"}));
+    next["unread_count"] = json!(1);
+    f.send(p, next);
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "items",
+            "rename_field:work:repo-workabcdefgh"
+        )["text"],
+        "Backend API"
+    );
+    f.send(p, json!({"op":"test_menu_key","key":"return"}));
+    wait(|| f.frames(p).iter().any(|v| v["op"] == "rename_session"));
+    let renamed = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "rename_session")
+        .unwrap();
+    assert_eq!(renamed["harness"], "fixture");
+    assert_eq!(renamed["session_id"], "s1");
+    assert_eq!(renamed["title"], "Backend API");
+    let after = inspect(&f, p);
+    assert!(node(&after, "items", "rename_field:work:repo-workabcdefgh").is_null());
+    assert_eq!(after["overlapping_siblings"], json!([]));
+    control(&f, p, "stop:work:repo-workabcdefgh");
+    wait(|| f.frames(p).iter().any(|v| v["op"] == "unlisten_session"));
+    let stop = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "unlisten_session")
+        .unwrap();
+    assert_eq!(stop["session_id"], "s1");
 
     let mut human = listener();
     human["hub"] = json!("local");
@@ -3252,6 +3389,9 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     short_addresses["listeners"] = json!([human]);
     f.send(p, short_addresses);
     let before = inspect(&f, p);
+    assert!(!nodes(&before["items"])
+        .iter()
+        .any(|n| n["text"] == "Desktop notifications"));
     let id = "copy:local:human:default";
     assert_eq!(node(&before, "items", id)["text"], "@a");
     for appearance in ["light", "dark"] {

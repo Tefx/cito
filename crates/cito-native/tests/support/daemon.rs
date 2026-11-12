@@ -1124,6 +1124,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         });
     }
     enroll(&f, meta);
+    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"Backend API"})).0,200);
     let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     f.db("state.sqlite").execute(
         "INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','purge-history',?,1,?,'bob','laptop','Sender','Retain until purge','2030-01-01T00:00:00.000Z',4102444800000,'STORED_PASSIVE')",
@@ -1144,7 +1145,12 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         serde_json::from_str::<Value>(rows[0]["config_json"].as_str().unwrap()).unwrap()
     };
     assert_eq!(service_config()["credential"], "saved-gateway");
-    assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--disconnect-all", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.rows("SELECT title FROM session_custom_titles")[0]["title"],
+        "Backend API"
+    );
     assert_eq!(service_config()["credential"], "saved-gateway");
     assert!(!f
         .rows("SELECT * FROM local_signals WHERE signal_id='purge-history'")
@@ -1178,6 +1184,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
             .0,
         200
     );
+    assert!(f.rows("SELECT * FROM session_custom_titles").is_empty());
     let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(config["defaultHub"], "local");
     assert!(config.get("default_hub").is_none());
@@ -2374,12 +2381,23 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     assert_eq!(
         names,
         vec![
+            "cito_status",
             "cito_listen",
             "cito_unlisten",
             "cito_find",
             "cito_send",
             "cito_inbox"
         ]
+    );
+    let listen = list["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "cito_listen")
+        .unwrap();
+    assert_eq!(
+        listen["inputSchema"]["properties"]["title"],
+        json!({"type":"string","minLength":1,"maxLength":128})
     );
     let find = list["tools"]
         .as_array()
@@ -2586,6 +2604,99 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
     let target = enroll(&f, meta.clone());
     assert_eq!(target["hub"], "local");
     assert_eq!(target["scope"], "workspace");
+    let status = f.tool("cito_status", json!({}), meta.clone());
+    assert_eq!(status["registered"], true);
+    assert_eq!(status["title"], "Native fixture");
+    assert_eq!(status["unread_count"], 0);
+    assert_eq!(status["hubs"][0]["is_default"], true);
+    assert_eq!(
+        status
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "about",
+            "display_address",
+            "hubs",
+            "ok",
+            "registered",
+            "scope",
+            "title",
+            "unread_count"
+        ]
+    );
+    for hub in status["hubs"].as_array().unwrap() {
+        assert_eq!(hub.as_object().unwrap().len(), 3);
+    }
+    for forbidden in [
+        "cito_setup",
+        "cito_rename",
+        "cito_unlisten_all",
+        "cito_join_hub",
+        "cito_channel_save",
+        "cito_disconnect_all",
+    ] {
+        assert_eq!(
+            f.tool_result(forbidden, json!({}), meta.clone())["isError"],
+            true
+        );
+    }
+    for title in ["".to_owned(), " ".to_owned(), "x".repeat(129)] {
+        assert_eq!(
+            f.tool_result(
+                "cito_listen",
+                json!({"about":"Native receiver","title":title}),
+                meta.clone()
+            )["isError"],
+            true
+        );
+    }
+    f.tool(
+        "cito_listen",
+        json!({"about":"Native receiver","title":"Backend API"}),
+        meta.clone(),
+    );
+    f.tool(
+        "cito_listen",
+        json!({"about":"Native receiver"}),
+        meta.clone(),
+    );
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta.clone())["title"],
+        "Backend API"
+    );
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &[
+            "rename",
+            "Release audit",
+            "--harness",
+            "fixture",
+            "--session",
+            "session-1",
+            "--json",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta.clone())["title"],
+        "Release audit"
+    );
+    let (ok, out, err) = f.command(NATIVE, &["status", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let snapshot: Value = serde_json::from_str(&out).unwrap();
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["title"] == "Release audit"));
+    assert!(f
+        .command(NATIVE, &["status"], "")
+        .1
+        .contains("AVAILABLE SESSIONS"));
     let find = f.tool("cito_find", json!({"query":"Native receiver"}), human());
     assert!(find["listeners"]
         .as_array()
@@ -2611,12 +2722,71 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         json!([])
     );
     assert_eq!(
-        f.tool("cito_unlisten", json!({}), meta)["status"],
+        f.tool("cito_unlisten", json!({}), meta.clone())["status"],
         "unlistened"
     );
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
         "UNLISTENED"
+    );
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta.clone())["registered"],
+        false
+    );
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &[
+            "listen",
+            "--title",
+            "Billing API",
+            "--harness",
+            "fixture",
+            "--session",
+            "session-1",
+            "Native receiver",
+            "--json",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta)["title"],
+        "Billing API"
+    );
+    let (ok, out, err) = f.command(NATIVE, &["unlisten", "--all", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let stopped: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(stopped["removed"], 1);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    let options_path = f.state.join("plugins/fixture/options.json");
+    let mut options: Value = serde_json::from_slice(&fs::read(&options_path).unwrap()).unwrap();
+    options["session_id"] = json!("session-home");
+    options["cwd"] = json!(f.home);
+    options["title"] = json!("alice");
+    fs::write(options_path, options.to_string()).unwrap();
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &[
+            "listen",
+            "--harness",
+            "fixture",
+            "--session",
+            "session-home",
+            "Auth refactor",
+            "--json",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    let home: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(home["title"], "Auth refactor");
+    assert_eq!(home["about"], "Auth refactor");
+    assert_eq!(
+        f.rows("SELECT title FROM session_custom_titles WHERE session_id='session-home'")[0]
+            ["title"],
+        "Auth refactor"
     );
 }
 #[test]
@@ -2721,7 +2891,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     let (ha, pa) = a.hub();
     let (hb, pb) = b.hub();
     let f = Fixture::new(
-        json!({"hubs":{"personal":{"url":format!("http://127.0.0.1:{pa}"),"user":"alice"},"work":{"url":format!("http://127.0.0.1:{pb}"),"user":"alice"}},"defaultHub":"personal"}),
+        json!({"hubs":{"local":{"url":"local://","user":"alice"},"personal":{"url":format!("http://127.0.0.1:{pa}"),"user":"alice"},"work":{"url":format!("http://127.0.0.1:{pb}"),"user":"alice"}},"defaultHub":"personal"}),
     );
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
@@ -2741,13 +2911,42 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             .unwrap()
             .starts_with(&format!("{hub}:")));
     }
+    f.tool(
+        "cito_listen",
+        json!({"hub":"local","about":"Multi hub","scope":"workspace"}),
+        meta.clone(),
+    );
+    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"alice"})).0, 200);
+    f.tool(
+        "cito_listen",
+        json!({"hub":"personal","about":"Multi hub"}),
+        meta.clone(),
+    );
+    let all = f.tool("cito_find", json!({"harness":"fixture"}), human());
+    assert_eq!(all["listeners"].as_array().unwrap().len(), 2);
+    assert!(all["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["title"] == "alice" && r["custom_title"] == true));
+    let local = f.tool(
+        "cito_find",
+        json!({"hub":"local","harness":"fixture"}),
+        human(),
+    );
+    assert_eq!(local["listeners"].as_array().unwrap().len(), 1);
+    assert_eq!(local["listeners"][0]["title"], "alice");
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
     a.stop(ha);
     b.stop(hb);
     let inbox = f.tool("cito_inbox", json!({}), meta.clone());
     assert_eq!(inbox["signals"].as_array().unwrap().len(), 2);
     assert_eq!(f.rows("SELECT * FROM pending_hub_acks").len(), 2);
-    f.tool("cito_unlisten", json!({}), meta);
+    assert_eq!(
+        f.action(json!({"op":"unlisten_session","harness":"fixture","session_id":"session-1"}))
+            .0,
+        200
+    );
     assert!(f
         .rows("SELECT status FROM local_listeners WHERE harness='fixture'")
         .iter()
@@ -2879,7 +3078,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         ("json",json!({"name":"json","url":format!("http://127.0.0.1:{}",port()),"auth_mode":"none"}).to_string()),
         ("equals",format!("cito setup --hub=equals --url=http://127.0.0.1:{} --default",port())),
     ] {
-        let (status,value)=f.action(json!({"op":"paste_hub_invite","invite":invite})); assert_eq!(status,200,"{value}");
+        let (ok,out,err)=f.command(NATIVE,&["setup","--invite",&invite,"--json"],""); assert!(ok,"{out} {err}");
         let config:Value=serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
         assert!(config["hubs"][name].is_object()); assert_eq!(config["default_hub"],name);
     }
@@ -2917,6 +3116,24 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     );
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     let hosted = &snapshot["settings"]["host_hub"];
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--print-invite", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let printed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(printed["invite_command"], hosted["invite_command"]);
+    let (ok, _, err) = f.command(
+        NATIVE,
+        &[
+            "setup",
+            "--invite",
+            hosted["endpoint_url"].as_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(!ok);
+    assert!(
+        err.contains("This invite code belongs to this Mac's own shared Hub"),
+        "{err}"
+    );
     let port = hosted["port"].as_u64().unwrap();
     let committed = fs::read(&f.config).unwrap();
     let hostname = f.env["CITO_HOST_NAME"].clone();
@@ -3469,6 +3686,36 @@ fn stdio_signal_handlers_exit_cleanly_and_daemon_health_owns_sandbox() {
 #[test]
 fn cli_validation_dry_run_and_selective_harness_configuration() {
     let _lock = serial();
+    let plugins = cito_native::plugins::LoadedPlugins {
+        plugins: ["pi", "codex", "claude"]
+            .into_iter()
+            .map(|id| {
+                cito_native::plugins::parse_manifest_dir(&root().join("plugins").join(id), true)
+                    .unwrap()
+            })
+            .collect(),
+        rejected_ids: Default::default(),
+    };
+    for id in ["pi", "codex", "claude"] {
+        for flag in [format!("--{id}"), format!("--{id}=session-1")] {
+            let (input, meta) = cito_native::core::cli::parse_cli(
+                "rename",
+                &["Backend API".into(), flag.clone()],
+                &plugins,
+            )
+            .unwrap();
+            assert_eq!(input["title"], "Backend API");
+            assert_eq!(meta["expected_harness"], id);
+            assert_eq!(
+                meta["expected_session_id"],
+                if flag.contains('=') {
+                    json!("session-1")
+                } else {
+                    Value::Null
+                }
+            );
+        }
+    }
     let f = Fixture::new(json!({}));
     let legacy = f.state.join("plugins/pi");
     fs::create_dir_all(&legacy).unwrap();
@@ -3484,6 +3731,8 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         vec!["setup", "--hub", "work", "--url", "invalid"],
         vec!["setup", "--enable-hub", "missing"],
         vec!["setup", "--share-port", "invalid"],
+        vec!["setup", "--invite"],
+        vec!["setup", "--invite", "invalid", "--disconnect-all"],
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(!ok, "{args:?}: {out} {err}");
@@ -3509,6 +3758,9 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         vec!["setup", "--dry-run", "--build-app", "--json"],
         vec!["setup", "--status", "--json"],
         vec!["setup", "--status", "--build-app", "--json"],
+        vec!["setup", "--invite", "https://hub.example.com", "--dry-run"],
+        vec!["setup", "--disconnect-all", "--purge-data", "--dry-run"],
+        vec!["setup", "--print-invite", "--dry-run"],
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(ok, "{args:?}: {out} {err}");

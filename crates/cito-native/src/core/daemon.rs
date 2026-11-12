@@ -68,10 +68,14 @@ fn cap_text(s: &str, limit: usize) -> String {
 fn bound_fields(v: &mut Value, key: &str) {
     match v {
         Value::String(s) => {
+            if matches!(key, "title" | "from_title") {
+                *s = s.chars().take(128).collect();
+                return;
+            }
             let cap = match key {
                 "message" => 512,
                 "about" | "from_about" => 256,
-                "title" | "cwd" | "summary" | "from_title" => 128,
+                "cwd" | "summary" => 128,
                 _ => 4096,
             };
             *s = cap_text(s, cap);
@@ -202,6 +206,59 @@ fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
     }
     peers
 }
+fn default_session_title(
+    caller: &Value,
+    home: &std::path::Path,
+    harness_name: &str,
+    user: &str,
+    about: &str,
+) -> String {
+    let raw = string(caller, "title");
+    if caller["harness"] == "human"
+        || !(std::path::Path::new(string(caller, "cwd")) == home
+            || raw.trim().is_empty()
+            || raw.eq_ignore_ascii_case(user))
+    {
+        return raw.to_owned();
+    }
+    let about = about.trim();
+    let boilerplate = [
+        raw.to_lowercase(),
+        format!("@{}", user.to_lowercase()),
+        "session".into(),
+        "cli session".into(),
+        "agent session".into(),
+        "coding session".into(),
+        "human".into(),
+        "human receiver".into(),
+        "human node".into(),
+        "human channel".into(),
+    ];
+    if !about.is_empty() && !boilerplate.contains(&about.to_lowercase()) {
+        about.to_owned()
+    } else {
+        format!("{harness_name} (~)")
+    }
+}
+
+fn directory_identity(row: &Value) -> (String, String, String, String) {
+    let human = row["harness"] == "human" && row["is_self_principal"] == true;
+    (
+        string(row, "user").into(),
+        string(row, "harness").into(),
+        if human {
+            String::new()
+        } else {
+            string(row, "session_id").into()
+        },
+        if human {
+            String::new()
+        } else {
+            string(row, "host_id").into()
+        },
+    )
+}
+
 fn sender_display_address(
     hub: &str,
     default_hub: &str,
@@ -935,7 +992,51 @@ impl DaemonService {
         }
         Ok(None)
     }
+    fn rename_session(&self, harness: &str, session: &str, title: &str) -> Result<Value, String> {
+        if harness.is_empty() || harness == "human" || session.is_empty() {
+            return Err("INVALID_INPUT: An agent session is required".into());
+        }
+        self.state.set_custom_title(harness, session, title)?;
+        let mut warnings = Vec::new();
+        for row in self
+            .state
+            .active()?
+            .into_iter()
+            .filter(|r| r["harness"] == harness && r["session_id"] == session)
+        {
+            if let Some(slot) = self.slots.get(string(&row, "hub")) {
+                if let Err(error) =
+                    super::registration::sync_custom_title(&self.state, slot, &self.host_id, &row)
+                {
+                    warnings.push(json!({"hub":row["hub"],"message":error}));
+                }
+            }
+        }
+        Ok(json!({"ok":true,"title":title,"warnings":warnings}))
+    }
     fn listen(&self, hub: &str, args: &Value, caller: &Value) -> Result<Value, String> {
+        let mut caller = caller.clone();
+        if caller["harness"] != "human"
+            && self
+                .state
+                .custom_title(string(&caller, "harness"), string(&caller, "session_id"))?
+                .is_none()
+            && !args["title"].is_string()
+        {
+            let name = self
+                .plugins
+                .find_by_id(string(&caller, "harness"))
+                .map(|p| p.display_name.as_str())
+                .unwrap_or(string(&caller, "harness"));
+            caller["title"] = json!(default_session_title(
+                &caller,
+                &self.config.home_dir,
+                name,
+                string(&self.slot(hub)?.identity, "owner_user"),
+                string(args, "about")
+            ));
+        }
+        let caller = &caller;
         let previous: Vec<Value> = self
             .state
             .active()?
@@ -1167,6 +1268,14 @@ impl DaemonService {
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
             }
         }
+        if args["hub"] != "local" {
+            let shared: HashSet<_> = rows
+                .iter()
+                .filter(|r| r["hub"] != "local")
+                .map(directory_identity)
+                .collect();
+            rows.retain(|r| r["hub"] != "local" || !shared.contains(&directory_identity(r)));
+        }
         rows.retain(include);
         rows.sort_by_key(|r| format!("{}:{}", string(r, "hub"), string(r, "listener_id")));
         let matched_count = rows.len();
@@ -1207,7 +1316,55 @@ impl DaemonService {
                 let caller = self
                     .caller(meta, true)?
                     .ok_or("BINDING_REQUIRED: Caller required")?;
-                self.listen(&hub, args, &caller)
+                if caller["harness"] == "human" && args.get("title").is_some() {
+                    return Err("INVALID_INPUT: Only agent sessions can be renamed".into());
+                }
+                let mut args = args.clone();
+                let raw = string(&caller, "title");
+                let cwd = std::path::Path::new(string(&caller, "cwd"));
+                let about = string(&args, "about");
+                if meta["cli_cmd"] == "listen"
+                    && !args["title"].is_string()
+                    && self
+                        .state
+                        .custom_title(string(&caller, "harness"), string(&caller, "session_id"))?
+                        .is_none()
+                    && (raw.is_empty()
+                        || cwd == self.config.home_dir
+                        || cwd.file_name().and_then(|v| v.to_str()) == Some(raw))
+                    && about != "CLI session"
+                    && about.chars().count() <= 128
+                {
+                    args["title"] = json!(about);
+                }
+                let result = self.listen(&hub, &args, &caller)?;
+                if let Some(title) = args["title"].as_str() {
+                    self.rename_session(
+                        string(&caller, "harness"),
+                        string(&caller, "session_id"),
+                        title,
+                    )?;
+                }
+                Ok(result)
+            }
+            "cito_status" => {
+                let caller = self
+                    .caller(meta, false)?
+                    .ok_or("BINDING_REQUIRED: Caller required")?;
+                let row = self.state.active()?.into_iter().find(|r| {
+                    r["hub"] == hub
+                        && r["harness"] == caller["harness"]
+                        && r["session_id"] == caller["session_id"]
+                });
+                let unread = if let Some(row) = &row {
+                    self.state.db.query("SELECT COUNT(*) AS n FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL", &[json!(hub), row["listener_id"].clone()])?.first().map(|r|r["n"].clone()).unwrap_or(json!(0))
+                } else {
+                    json!(0)
+                };
+                let hubs: Vec<_> = self.settings()["hubs"].as_array().into_iter().flatten().map(|h|json!({"name":h["name"],"status":h["status"],"is_default":h["name"] == self.config.default_hub})).collect();
+                Ok(
+                    json!({"ok":true,"registered":row.is_some(),"display_address":row.as_ref().map(|r| self.display_address(&hub,r)),"title":row.as_ref().map(|r|r["title"].clone()),"about":row.as_ref().map(|r|r["about"].clone()),"scope":row.as_ref().map(|r|r["scope"].clone()),"unread_count":unread,"hubs":hubs}),
+                )
             }
             "cito_unlisten" => {
                 let caller = self
@@ -1800,6 +1957,14 @@ impl DaemonService {
                 if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
                     if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
+                    let mut changed = false;
+                    if let Ok(Some(title)) = state.custom_title(string(&row,"harness"),string(&row,"session_id")) {
+                        if remote["title"] != title || remote["custom_title"] != true {
+                            remote["title"] = json!(title);
+                            remote["custom_title"] = json!(true);
+                            changed = true;
+                        }
+                    }
                     if let Some(ch) = remote["channels"]
                         .as_object_mut()
                         .and_then(|m| m.get_mut(&channel))
@@ -1808,9 +1973,10 @@ impl DaemonService {
                         let updated = ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
                         if now_ms().saturating_sub(updated) >= 20_000 {
                             ch.insert("updated_at_ms".into(), json!(now_ms()));
-                            let _ = slot.kv_save(string(&row, "listener_id"), &remote, Some(revision));
+                            changed = true;
                         }
                     }
+                    if changed { let _ = slot.kv_save(string(&row,"listener_id"), &remote, Some(revision)); }
                 }
                 if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |signal| {
                     if let Some(ui) = &ui {
@@ -2105,6 +2271,10 @@ impl DaemonService {
             .filter(|row| self.slots.contains_key(string(row, "hub")))
             .collect();
         for row in &mut sessions {
+            row["custom_title"] = json!(self
+                .state
+                .custom_title(string(row, "harness"), string(row, "session_id"))?
+                .is_some());
             row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
             row["display_address"] = json!(self.display_address(string(row, "hub"), row));
         }
@@ -2153,7 +2323,7 @@ impl DaemonService {
         )
     }
     fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.values().filter(|c| c["state"]=="ACTIVE").filter_map(|c| c["display_label"].as_str().or_else(|| c["host_name"].as_str()).or_else(|| c["display_name"].as_str())).filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default()})
+        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"session_id":row["session_id"],"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.values().filter(|c| c["state"]=="ACTIVE").filter_map(|c| c["display_label"].as_str().or_else(|| c["host_name"].as_str()).or_else(|| c["display_name"].as_str())).filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default()})
     }
     fn emit(&self, frame: Value) {
         if let Some(ui) = &self.ui {
@@ -2311,6 +2481,57 @@ impl DaemonService {
         self.reload_slots()?;
         match op {
             "get_snapshot" => return self.snapshot(),
+            "cli_rename" => {
+                let caller = self
+                    .caller(&action["meta"], true)?
+                    .ok_or("BINDING_REQUIRED: Caller required")?;
+                return self.rename_session(
+                    string(&caller, "harness"),
+                    string(&caller, "session_id"),
+                    string(action, "title"),
+                );
+            }
+            "rename_session" => {
+                let row = self
+                    .state
+                    .active()?
+                    .into_iter()
+                    .find(|r| {
+                        (action["harness"].is_null() || action["harness"] == r["harness"])
+                            && (action["session_id"].is_null()
+                                || action["session_id"] == r["session_id"])
+                            && (action["listener_id"].is_null()
+                                || action["listener_id"] == r["listener_id"])
+                            && ((action["harness"].is_string() && action["session_id"].is_string())
+                                || action["listener_id"].is_string())
+                    })
+                    .ok_or("LISTENER_NOT_FOUND: Session is not active")?;
+                return self.rename_session(
+                    string(&row, "harness"),
+                    string(&row, "session_id"),
+                    string(action, "title"),
+                );
+            }
+            "unlisten_session" => {
+                for row in self.state.db.query(
+                    "SELECT * FROM local_listeners WHERE harness=? AND session_id=?",
+                    &[action["harness"].clone(), action["session_id"].clone()],
+                )? {
+                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                }
+                if action["harness"] == "human" && action["session_id"] == "default" {
+                    // Fence automatic enrollment that has not committed a local row yet.
+                    for (hub, slot) in &self.slots {
+                        let id = super::registration::local_node_id(
+                            &self.state,
+                            slot,
+                            "human",
+                            "default",
+                        )?;
+                        self.unlisten_id(hub, &id)?;
+                    }
+                }
+            }
             "set_user" => {
                 let user = string(action, "user");
                 if !crate::plugins::validate_user(user) {
@@ -2819,14 +3040,18 @@ impl DaemonService {
                 self.unlisten_id(&hub, string(action, "listener_id"))?;
             }
             "unlisten_all" => {
+                let mut removed = 0;
                 for row in self
                     .state
                     .active()?
                     .into_iter()
                     .filter(|row| row["harness"] != "human")
                 {
-                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                    if self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))? {
+                        removed += 1;
+                    }
                 }
+                return Ok(json!({"ok":true,"removed":removed}));
             }
             "set_scope" => {
                 let id = string(action, "listener_id");
@@ -3055,6 +3280,7 @@ impl DaemonService {
                     self.state.db.transaction(|db| {
                         db.execute("DELETE FROM local_signals", &[])?;
                         db.execute("DELETE FROM local_listeners WHERE harness != 'human'", &[])?;
+                        db.execute("DELETE FROM session_custom_titles", &[])?;
                         Ok(())
                     })?;
                 }
@@ -3455,7 +3681,8 @@ fn validate_tool_input(name: &str, args: &Value) -> Result<(), String> {
         .as_object()
         .ok_or("INVALID_INPUT: Tool arguments must be an object")?;
     let allowed: &[&str] = match name {
-        "cito_listen" => &["about", "tag", "hub", "scope"],
+        "cito_listen" => &["about", "title", "tag", "hub", "scope"],
+        "cito_status" => &["hub"],
         "cito_unlisten" => &["hub"],
         "cito_find" => &["query", "hub", "user", "host", "harness", "repo", "limit"],
         "cito_send" => &["to", "hub", "message", "in_reply_to", "idempotency_key"],
@@ -3488,6 +3715,9 @@ fn validate_tool_input(name: &str, args: &Value) -> Result<(), String> {
             .is_some_and(|about| !about.trim().is_empty() && about.chars().count() <= 500)
     {
         return Err("INVALID_INPUT: about must contain 1..500 characters".into());
+    }
+    if let Some(title) = args["title"].as_str() {
+        super::registration::validate_title(title)?;
     }
     if let Some(scope) = args["scope"].as_str() {
         if !matches!(scope, "self" | "workspace") {
@@ -3550,7 +3780,8 @@ fn validate_tool_input(name: &str, args: &Value) -> Result<(), String> {
 }
 fn tools_list() -> Value {
     let mut tools = json!({"tools":[
-     {"name":"cito_listen","description":"Enroll this session in the lightweight control plane for signaling and wake notifications.","inputSchema":{"type":"object","properties":{"about":{"type":"string","minLength":1,"maxLength":500},"tag":{"type":"string","maxLength":64},"hub":{"type":"string"},"scope":{"type":"string","enum":["self","workspace"]}},"required":["about"]}},
+     {"name":"cito_status","description":"Inspect this session's current Cito registration, address, connected hubs, and unread inbox count.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
+     {"name":"cito_listen","description":"Enroll this session in the lightweight control plane for signaling and wake notifications.","inputSchema":{"type":"object","properties":{"about":{"type":"string","minLength":1,"maxLength":500},"title":{"type":"string","minLength":1,"maxLength":128},"tag":{"type":"string","maxLength":64},"hub":{"type":"string"},"scope":{"type":"string","enum":["self","workspace"]}},"required":["about"]}},
      {"name":"cito_unlisten","description":"Revoke this session on one or all hubs.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"}}}},
      {"name":"cito_find","description":"Find opted-in active nodes.","inputSchema":{"type":"object","properties":{"hub":{"type":"string"},"query":{"type":"string","maxLength":200},"user":{"type":"string","maxLength":64},"host":{"type":"string","maxLength":128},"harness":{"type":"string","pattern":"^[a-z0-9][a-z0-9_-]{0,31}$"},"repo":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":50}}}},
      {"name":"cito_send","description":"Send a lightweight control plane signal of 1..65,536 Unicode code points. Prefer external channels for long debates or large artifacts.","inputSchema":{"type":"object","properties":{"to":{"type":"string","pattern":"^(?:[a-z0-9][a-z0-9_-]{0,31}:)?(?:c_(?:[a-f0-9]{16}|[a-z2-7]{12})|[a-z0-9]+(?:-[a-z0-9]+)*-(?:[a-f0-9]{16}|[a-z2-7]{12})|@[a-zA-Z0-9._-]{1,64}|[a-zA-Z0-9._-]{1,64}(?:/[a-z0-9][a-z0-9_-]{0,31})?#[a-z0-9]{1,16})$"},"message":{"type":"string","minLength":1,"maxLength":65536},"hub":{"type":"string"},"in_reply_to":{"type":"string","minLength":1,"maxLength":161},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["to","message"]}},
@@ -4852,6 +5083,20 @@ mod tests {
     #[test]
     fn local_enrollment_widens_snapshot_addresses_without_a_directory_query() -> Result<(), String>
     {
+        let caller = json!({"harness":"fixture","cwd":"/home/alice","title":"alice"});
+        let home = std::path::Path::new("/home/alice");
+        assert_eq!(
+            default_session_title(&caller, home, "Fixture", "alice", ""),
+            "Fixture (~)"
+        );
+        assert_eq!(
+            default_session_title(&caller, home, "Fixture", "alice", "Session"),
+            "Fixture (~)"
+        );
+        assert_eq!(
+            default_session_title(&caller, home, "Fixture", "alice", "Release audit"),
+            "Release audit"
+        );
         let dir = std::env::temp_dir().join(format!("cito-addresses-{}", random_uuid_v4()));
         let config = NativeConfig {
             state_dir: dir.join("state"),
@@ -5489,6 +5734,10 @@ mod tests {
         let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         assert_eq!(frame["unread_count"], 200);
         assert_eq!(frame["listeners"].as_array().map(Vec::len), Some(64));
+        let title = "é".repeat(128);
+        let frame: Value = serde_json::from_slice(&bounded_frame(json!({"title":title}))?)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(frame["title"], title);
         Ok(())
     }
 }
