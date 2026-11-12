@@ -566,33 +566,55 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
     .unwrap();
     let process = f.spawn("node", &[cli.to_str().unwrap(), "app-server"], &[]);
     wait(|| f.frames(process).iter().any(|v| v["op"] == "ready"));
+    let discover = || f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    // Older schemas omit the optional source columns.
+    assert_eq!(discover()["sessions"][0]["session_id"], "active");
     db.execute(
-        "ALTER TABLE threads ADD COLUMN thread_source TEXT DEFAULT 'user'",
+        "ALTER TABLE threads ADD COLUMN thread_source TEXT; ALTER TABLE threads ADD COLUMN source TEXT",
         &[],
     )
     .unwrap();
     db.transaction(|c| {
-        for i in 0..40 {
-            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source) VALUES(?, '/repo', 0, ?, 'Internal', 'internal')", &[json!(format!("internal-{i}")),json!(1000+i)])?;
+        for i in 0..35 {
+            let (thread_source, source) = if i % 2 == 0 {
+                (json!("subagent"), Value::Null)
+            } else {
+                (json!("user"), json!("{\"subagent\":true}"))
+            };
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source,source) VALUES(?, '/repo', 0, ?, 'Subagent', ?, ?)", &[json!(format!("subagent-{i}")),json!(1000+i),thread_source,source])?;
+        }
+        for (id, cwd) in [(Value::Null,json!("/repo")),(json!(""),json!("/repo")),(json!("missing-cwd"),Value::Null),(json!("empty-cwd"),json!("")),(json!(" \t"),json!("/repo")),(json!("blank-cwd"),json!(" \n"))] {
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms) VALUES(?, ?, 0, 2000)", &[id,cwd])?;
         }
         Ok(())
     }).unwrap();
-    // All top 32 rows are non-user threads; older user rows would leak through
-    // if discovery serialized the entire database before filtering.
-    assert_eq!(
-        f.plugin(CODEX, json!({"op":"discover_sessions"}))["sessions"],
-        json!([])
-    );
-    db.execute(
-        "UPDATE threads SET thread_source='user' WHERE recency_at_ms>=1032",
-        &[],
-    )
-    .unwrap();
+    // Eligibility must precede LIMIT 32: 35 newer subagents and invalid rows
+    // cannot hide the older user thread, whose source columns are both NULL.
+    let discovered = discover();
+    assert_eq!(discovered["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(discovered["sessions"][0]["session_id"], "active");
+    assert_eq!(discovered["sessions"][0]["title"], "Active work");
+    assert_eq!(discovered["sessions"][0]["branch"], "main");
+    assert_eq!(discovered["sessions"][0]["repo"], "acme/service");
+    db.transaction(|c| {
+        for i in 0..40 {
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source,source) VALUES(?, '/other', 0, ?, 'User', 'user', 'cli')", &[json!(format!("user-{i}")),json!(3000+i)])?;
+        }
+        Ok(())
+    }).unwrap();
     let discovered = f.plugin(CODEX, json!({"op":"discover_sessions"}));
     let sessions = discovered["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 8);
-    assert_eq!(sessions[0]["session_id"], "internal-39");
-    // Caller resolution remains unbounded and can still address older threads.
+    assert_eq!(sessions[0]["session_id"], "user-39");
+    // Implicit caller resolution remains unbounded and can address older threads.
+    assert_eq!(
+        f.plugin(
+            CODEX,
+            json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"})
+        )["caller"]["session_id"],
+        "active"
+    );
+    // Explicit metadata lookup remains available as well.
     assert_eq!(
         f.plugin(
             CODEX,

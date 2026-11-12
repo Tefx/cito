@@ -3262,7 +3262,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(after, before + 1);
     // The next identical state is idle.
     let before = json!(after);
-    f.send(p, frame);
+    f.send(p, frame.clone());
     assert_eq!(inspect(&f, p)["rebuilds"], before);
     assert!(node(
         &inspect(&f, p),
@@ -3277,6 +3277,28 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         "session:personal:repo-abcdefghijkl"
     )
     .is_null());
+    // The sole enabled Hub can differ from the configured default. Listen must
+    // still carry the selected network rather than relying on daemon fallback.
+    frame["hubs"] = json!([hubs()[1].clone()]);
+    frame["listeners"] = json!([]);
+    f.send(p, frame.clone());
+    inspect(&f, p);
+    control(&f, p, "listen:fixture:candidate-1");
+    wait(|| {
+        f.frames(p).iter().any(|v| {
+            v["op"] == "listen_session" && v["hub"] == "work" && v["session_id"] == "candidate-1"
+        })
+    });
+    // No enabled networks leaves discovery visible, but cannot issue a Listen.
+    frame["hubs"] = json!([]);
+    f.send(p, frame);
+    inspect(&f, p);
+    control(&f, p, "listen:fixture:candidate-2");
+    inspect(&f, p);
+    assert!(!f
+        .frames(p)
+        .iter()
+        .any(|v| { v["op"] == "listen_session" && v["session_id"] == "candidate-2" }));
 }
 fn hubs() -> Value {
     json!([{"name":"personal","status":"connected","user":"alice","auth_mode":"oidc","error":null},{"name":"work","status":"connected","user":"alice","auth_mode":"none","error":null}])

@@ -188,11 +188,33 @@ fn rows(req: &Value) -> Vec<Value> {
     if !has("id") || !has("cwd") {
         return vec![];
     }
-    let archived = if has("archived") && req["cli_cmd"] != "unlisten" {
-        " WHERE archived = 0"
-    } else {
-        ""
-    };
+    let projection = [
+        "id",
+        "cwd",
+        "name",
+        "title",
+        "git_branch",
+        "git_origin_url",
+        "recency_at_ms",
+        "updated_at",
+        "archived",
+        "thread_source",
+        "source",
+    ]
+    .into_iter()
+    .filter(|column| has(column))
+    .collect::<Vec<_>>()
+    .join(", ");
+    let mut predicates = vec!["id IS NOT NULL", "id != ''", "cwd IS NOT NULL", "cwd != ''"];
+    if has("archived") && req["cli_cmd"] != "unlisten" {
+        predicates.push("archived = 0");
+    }
+    if has("thread_source") {
+        predicates.push("(thread_source IS NULL OR thread_source = 'user')");
+    }
+    if has("source") {
+        predicates.push("(source IS NULL OR source NOT LIKE '{\"subagent\"%')");
+    }
     let mut order = vec![];
     if has("archived") && req["cli_cmd"] == "unlisten" {
         order.push("archived ASC");
@@ -204,10 +226,11 @@ fn rows(req: &Value) -> Vec<Value> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
-    let rows = sqlite_rows(
+    sqlite_rows(
         &db(req),
         &format!(
-            "SELECT * FROM threads{archived} ORDER BY {}{}",
+            "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
+            predicates.join(" AND "),
             order.join(", "),
             if req["op"] == "discover_sessions" {
                 " LIMIT 32"
@@ -216,19 +239,11 @@ fn rows(req: &Value) -> Vec<Value> {
             }
         ),
     )
-    .unwrap_or_default();
-    rows.into_iter()
-        .filter(|r| {
-            str_at(r, "id").is_some()
-                && str_at(r, "cwd").is_some()
-                && str_at(r, "thread_source")
-                    .map(|s| s == "user")
-                    .unwrap_or(true)
-                && !str_at(r, "source")
-                    .unwrap_or("")
-                    .starts_with("{\"subagent\"")
-        })
-        .collect()
+    .unwrap_or_default()
+    .into_iter()
+    // Preserve caller validation for whitespace-only IDs and working directories.
+    .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
+    .collect()
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];

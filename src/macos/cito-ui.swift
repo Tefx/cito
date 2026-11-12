@@ -86,7 +86,7 @@ func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
     return image
 }
 
-func formatStatusButton(_ button: NSButton, count: Int, unreadCount: Int, image: NSImage?) {
+func formatStatusButton(_ button: NSButton, unreadCount: Int, image: NSImage?) {
     button.image = image
     let title = unreadCount > 0 ? " \(unreadCount)" : ""
     button.title = ""
@@ -107,7 +107,7 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     for case let control as MenuControl in leftItems + rightItems where !control.label.isHidden
         && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.centerSymbolView }) {
         let id = control.identifier?.rawValue ?? ""
-        // Address chips reserve room for copy feedback; other controls follow their current font.
+        // Address chips reserve copy feedback space; scope toggles keep a uniform width.
         let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
         control.frame.size.width = max(reservedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
@@ -1589,7 +1589,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             status?.menu = cardMenu
             statusImage = makeCitoStatusIcon(.idle)
             if let button = status?.button {
-                formatStatusButton(button, count: 0, unreadCount: 0, image: statusImage)
+                formatStatusButton(button, unreadCount: 0, image: statusImage)
             }
             hoverEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
                 MenuControl.reconcileActiveHover()
@@ -1983,7 +1983,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
                 statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
                 if let button = status?.button ?? headlessStatusButton {
-                    formatStatusButton(button, count: count, unreadCount: unreadCount, image: statusImage)
+                    formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
                 }
             } else {
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
@@ -2082,7 +2082,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
         statusImage = makeCitoStatusIcon(warning ? .warning : count > 0 ? .active : .idle)
         if let button = status?.button ?? headlessStatusButton {
-            formatStatusButton(button, count: count, unreadCount: unreadCount, image: statusImage)
+            formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
         }
         let menu = cardMenu
         let renameDraft = renameField?.currentEditor()?.string ?? renameField?.stringValue
@@ -2506,7 +2506,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         // Zone 3 — Available sessions on the network selected in the header.
         if !available.isEmpty || !targetHub.isEmpty {
-            let targetHub = effectiveTargetHub
             let availHeader = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 24))
             availHeader.addSubview(roundedView(NSRect(x: 12, y: 21, width: 356, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
             availHeader.addSubview(textLabel("AVAILABLE SESSIONS", NSRect(x: 12, y: 4, width: 190, height: 14),
@@ -2618,6 +2617,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         let listenBtn = MenuControl("Listen", frame: NSRect(x: 298, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
                         listenBtn.toolTip = "Start listening in \(candidateTitle)"
+                        listenBtn.isEnabled = !targetHub.isEmpty
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
                             self.pendingMutation = true
@@ -2626,7 +2626,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             listenBtn?.setAccessibilityLabel("…")
                             var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.custom_title == true ? c.title : candidateTitle]
                             if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
-                            if self.hubs.count > 1 && !targetHub.isEmpty { action["hub"] = targetHub }
+                            action["hub"] = targetHub
                             self.emit(action)
                         }
                         listenBtn.pressed = listenRun; row.addSubview(listenBtn)
