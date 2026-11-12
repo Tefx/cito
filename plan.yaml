@@ -9950,7 +9950,7 @@ phases:
   - id: v36.impl
     name: V36 S1–S4 Multi-Hub Coalescing, Smart Home Naming, Session Renaming & Complete
       CLI/MCP Parity
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §20 (S1–S4) while strictly enforcing §20.2
       test economy (update existing unit/UI/daemon/CLI assertions in place; do NOT
       add new heavy multi-process E2E test functions).
@@ -9969,6 +9969,46 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T09:33:44.514471Z'
+    done_at: '2026-11-12T10:31:40.233910+00:00'
+    evidence: "Artifact:\n- Commit: e60e401c9b4212a47494fbc22df9c46824eb7181 (23 files\
+      \ changed, 1079 insertions(+), 68 deletions(-))\n- Candidate ref: refs/vectl/candidates/v36.impl\
+      \ -> e60e401c9b4212a47494fbc22df9c46824eb7181\n- Worktree cleanup: removed .vectl/worktrees/v36.impl\
+      \ and /tmp/cito-v36* scratch; free space 124Gi.\n\nDelivered (docs/DESIGN.md\
+      \ §20 S1–S4 & §20.2):\n1. S1 (Multi-Hub Session Coalescing & You Card Cleanup\
+      \ in cardMenu):\n   - Coalesced local listeners by `(harness, session_id)` in\
+      \ cardMenu Zone 1 so at most 1 card renders for `You (@user)` (`human:default`)\
+      \ and 1 card per local coding session, choosing `primaryListener` from `effectiveTargetHub`\
+      \ -> connected default non-local Hub -> `local`.\n   - `Pause` / `stop:<scoped_id>`\
+      \ and `Team / Self` (`scope:<scoped_id>`) fan out across all enrolled Hubs in\
+      \ the group (`unlisten_session`), and `switch_hub:<scoped_id>` cycles `selectedTargetHub`\
+      \ across enrolled Hubs when `group.count > 1`.\n   - Omitted redundant `\"Desktop\
+      \ notifications\"` label on `You (@user)` cards when only internal channels\
+      \ are present.\n2. S2 (Smart Home-Directory Naming, .local Stripping & Shadow\
+      \ Deduplication):\n   - Auto-derived titles never use the `$HOME` username (`cwd\
+      \ == home` or `raw.lowercased() == user.lowercased()` promotes `distinctAbout`\
+      \ or falls back to `\"<Harness Name> (~)\"`), while preserving explicit custom\
+      \ titles verbatim.\n   - Added `cleanHostDisplay` stripping `.local` and filtering\
+      \ internal tokens (`\"Mac\"`, `\"Hub\"`, `\"human\"`, `\"Desktop notifications\"\
+      `) from `peer.channels`, showing `shortCwd` in `line1RepoLabel` when `repo`\
+      \ is empty, and deduplicating `local:` shadow peers in `Directory` when a shared\
+      \ Hub is connected.\n3. S3 (Manual Agent / Session Renaming Across GUI, CLI,\
+      \ and MCP):\n   - Added durable custom-title persistence (`custom_title` / `session_custom_titles`\
+      \ in SQLite `local_listeners` and registration state) that survives discovery\
+      \ refreshes, heartbeats, and daemon restarts.\n   - Added minimalist inline\
+      \ rename (`rename:<scoped_id>` pencil icon and `rename_field:<scoped_id>` editable\
+      \ field) on active agent cards in `cardMenu` with `overlapping_siblings == []`.\n\
+      4. S4 (Complete CLI Interface & Security-Bounded MCP Surface):\n   - Added `cito\
+      \ rename <title>`, `cito listen --title <title>` (plus positional `about` promotion\
+      \ when default title is generic home/folder basename), `cito unlisten --all`,\
+      \ `cito status [--json]`, and `cito setup --invite / --print-invite / --disconnect-all\
+      \ [--purge-data]`.\n   - Added optional `title` (`1..128` chars) to `cito_listen`\
+      \ and read-only secret-free `cito_status` MCP tool.\n5. Updated existing tests\
+      \ in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place and refreshed\
+      \ `site/assets/screenshots/menu-dark.png`.\n\nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=4 cargo test --workspace -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      \nSpec link:\n- docs/DESIGN.md §20 (S1–S4 & §20.2)"
   - id: v36.review
     name: 'V36 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
