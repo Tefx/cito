@@ -10203,7 +10203,7 @@ phases:
   name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
     Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
     (U1–U5)'
-  status: pending
+  status: in_progress
   gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10234,7 +10234,7 @@ phases:
   - id: v38.impl
     name: V38 U1–U5 Unified Human Card Height, Recessed Segmented Controls, Stateless
       Auto-Listen, Personal-Hub Scope Suppression & SQLite Busy-Timeout
-    status: pending
+    status: claimed
     description: Implement docs/DESIGN.md §22 (U1–U5) while strictly enforcing §22.2
       test economy (update existing unit/UI/daemon/plugin assertions in place; do
       NOT add new heavy multi-process E2E test functions).
@@ -10249,6 +10249,8 @@ phases:
     - crates/cito-native/tests/support/daemon.rs
     - crates/cito-native/tests/support/plugins.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T16:35:30.153468Z'
   - id: v38.review
     name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
