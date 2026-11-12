@@ -10203,7 +10203,7 @@ phases:
   name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
     Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
     (U1–U5)'
-  status: in_progress
+  status: done
   gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10297,7 +10297,7 @@ phases:
   - id: v38.review
     name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
       the modified files (do NOT run multi-round review loops), verify cargo test
       --workspace && cargo build --release, and push main to origin (do NOT tag or
@@ -10314,3 +10314,28 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T17:02:59.946018Z'
+    done_at: '2026-11-12T17:30:40.753445+00:00'
+    evidence: "Artifact:\n- Commits: 80234da3d22bb7f5b3f9a42513f3c962d5a61dca and\
+      \ 9929fe66b5368dde56c1ff3c62f41c60b9e87d9e (11 files changed, 63 insertions(+),\
+      \ 12 deletions(-))\n- Candidate ref: refs/vectl/candidates/v38.review -> 9929fe66b5368dde56c1ff3c62f41c60b9e87d9e\n\
+      - Worktree cleanup: removed .vectl/worktrees/v38.review and /tmp/cito-v38* scratch;\
+      \ free space 100Gi.\n\nFast Single-Pass Contract-and-Simplicity Review & Fixes\
+      \ Applied:\n1. [CONTRACT / WIRE] Adaptive Recessed Hub Switcher Track (`src/macos/cito-ui.swift`,\
+      \ `crates/cito-native/tests/support/ui.rs`, `site/assets/screenshots/menu-dark.png`):\n\
+      \   - Rendered the `header_hub_strip` recessed track (`labelColor @ 0.06`, `cornerRadius\
+      \ = 11`) via native appearance-aware `OverlayScrollView` background drawing\
+      \ so Light <-> Dark transitions update immediately and `menu-dark.png` visibly\
+      \ renders the recessed track.\n2. [CONTRACT / WIRE] Principal-Private Default\
+      \ Scope on Remote Hubs & Confirmed Registration Filtering (`crates/cito-native/src/core/{registration,daemon}.rs`,\
+      \ `src/macos/cito-ui.swift`, `docs/DESIGN.md`, `README.md`):\n   - Preserved\
+      \ `auth_mode == \"none\" -> \"workspace\"` and `token`/`oidc` -> `\"self\"`\
+      \ (principal-scoped across `@user`'s Macs) in `registration.rs` and `auto_listen`\
+      \ (`\"scope\": \"self\"`), kept `let showScopeToggle = listenerHub?.auth_mode\
+      \ == \"oidc\" || hasOtherUsers` with no headless special case, and kept `visibleAvailable`\
+      \ filtered strictly by confirmed registration (`!($0.listening_hubs ?? []).contains(targetHub)`).\n\
+      \nVerification:\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2\
+      \ cargo test --workspace -> PASS (170 unit + 100 native integration + 3 binary/distribution\
+      \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
+      \ created).\n\nSpec link:\n- docs/DESIGN.md §22 (U1–U5 & §22.2)"
