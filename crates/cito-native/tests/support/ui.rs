@@ -1769,7 +1769,9 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         json!([{"harness":"fixture","session_id":"s1","title":"Work session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "items", "human_paused_card")["height"], 56);
+    assert_eq!(node(&s, "items", "human_paused_card")["height"], 64);
+    assert_eq!(node(&s, "items", "listen_human")["y"], 18);
+    assert!(node(&s, "items", "listen_human")["symbol"].is_null());
     assert_eq!(node(&s, "items", "listen_human")["text"], "Resume");
     render_png(&f, p, "menu", "menu_human_paused.png");
     let rendered = inspect(&f, p);
@@ -3093,6 +3095,22 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     let s = inspect(&f, p);
     assert_eq!(s["directory_mode"], "activity");
     assert_eq!(
+        node(&s, "directory_items", "act_filter:unread")["border_width"],
+        0
+    );
+    assert_eq!(
+        node(&s, "directory_items", "act_filter:me")["border_width"],
+        1
+    );
+    assert_eq!(
+        node(&s, "directory_items", "activity_mark_all_read")["border_width"],
+        1
+    );
+    assert_eq!(
+        node(&s, "directory_items", "activity_clear")["border_width"],
+        1
+    );
+    assert_eq!(
         node(&s, "directory_items", "directory_shortcuts")["text"],
         "↵ Reply    ⎋ Close"
     );
@@ -3249,6 +3267,8 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
             v["op"] == "listen_session" && v["hub"] == "work" && v["session_id"] == "candidate-0"
         })
     });
+    assert_eq!(node(&s, "items", "header_hub_strip")["radius"], 11);
+    assert_eq!(node(&s, "items", "hub:personal")["border_width"], 0);
     control(&f, p, "target_hub:personal");
     assert!(!node(&inspect(&f, p), "items", "available_empty_target").is_null());
     f.send(
@@ -3277,9 +3297,41 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
         "session:personal:repo-abcdefghijkl"
     )
     .is_null());
+    let original_available = frame["available"].clone();
+    // Auto-Listen explains reload blockers and seeds historical groups once.
+    frame["hubs"][1]["auto_listen"] = json!(true);
+    frame["available"] = json!([
+        {"harness":"fixture","session_id":"reload","title":"Reload","cwd":"/tmp","endpoint_pid":4242,"needs_reload":true}
+    ]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert!(nodes(&s["items"])
+        .iter()
+        .any(|n| n["text"] == "Auto-Listen is on — run /reload below to finish connecting"));
+    frame["available"] = json!([
+        {"harness":"fixture","session_id":"recent","title":"History","cwd":"/tmp"}
+    ]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "items", "toggle_group:fixture")["symbol"],
+        "chevron.right"
+    );
+    assert!(node(&s, "items", "candidate:fixture:recent").is_null());
+    control(&f, p, "toggle_group:fixture");
+    assert!(!node(&inspect(&f, p), "items", "candidate:fixture:recent").is_null());
+    frame["unread_count"] = json!(1);
+    f.send(p, frame.clone());
+    assert!(!node(&inspect(&f, p), "items", "candidate:fixture:recent").is_null());
+    frame["available"] = json!([]);
+    f.send(p, frame.clone());
+    assert!(nodes(&inspect(&f, p)["items"])
+        .iter()
+        .any(|n| n["text"] == "Auto-Listen is on — open sessions connect automatically"));
     // The sole enabled Hub can differ from the configured default. Listen must
     // still carry the selected network rather than relying on daemon fallback.
     frame["hubs"] = json!([hubs()[1].clone()]);
+    frame["available"] = original_available;
     frame["listeners"] = json!([]);
     f.send(p, frame.clone());
     inspect(&f, p);
@@ -3526,7 +3578,33 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(inspect(&f, p)["clipboard"], "alice/fixture#abcd");
     control(&f, p, "hub:work");
     assert!(!node(&inspect(&f, p), "items", "session:work:repo-workabcdefgh").is_null());
+    assert!(
+        node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
+        "Personal networks hide redundant visibility controls"
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "items", "stop:work:repo-workabcdefgh")["tooltip"],
+        "Pause listening for this session"
+    );
+    next["hubs"][1]["auth_mode"] = json!("token");
+    f.send(p, next.clone());
+    assert!(node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null());
+    let mut other = next["listeners"][1].clone();
+    other["user"] = json!("bob");
+    other["listener_id"] = json!("c_other");
+    other["scoped_id"] = json!("work:other");
+    next["listeners"].as_array_mut().unwrap().push(other);
+    f.send(p, next.clone());
+    assert!(
+        !node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
+        "Another user makes visibility meaningful even on token Hubs"
+    );
+    next["listeners"].as_array_mut().unwrap().pop();
+    next["hubs"][1]["auth_mode"] = json!("oidc");
+    f.send(p, next.clone());
     let scope_before = node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh");
+    assert_eq!(scope_before["width"], 68);
+    assert_eq!(scope_before["tooltip"], "Visibility: Only Me (@alice) — only your own sessions and devices on 'work' can message this session. Click to share with Team.");
     control(&f, p, "scope:work:repo-workabcdefgh");
     wait(|| {
         f.frames(p)
@@ -3539,6 +3617,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(scope_after["width"], scope_before["width"]);
     assert_eq!(scope_after["x"], scope_before["x"]);
     let scope_team = scope_after;
+    assert_eq!(scope_team["tooltip"], "Visibility: Team — anyone connected to 'work' can discover and message this session. Click to restrict to Only Me.");
     control(&f, p, "scope:work:repo-workabcdefgh");
     let scope_self = node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh");
     assert_eq!(scope_self["text"], "Self");
@@ -3671,6 +3750,18 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     let s = inspect(&f, p);
     assert_eq!(s["directory_open"], true);
     assert_eq!(s["directory_selected_id"], "personal:one");
+    assert_eq!(
+        node(&s, "directory_items", "dir_scope:mine")["border_width"],
+        0
+    );
+    assert_eq!(
+        node(&s, "directory_items", "dir_harness:fixture")["border_width"],
+        0
+    );
+    assert_eq!(
+        node(&s, "directory_items", "dir_scope:all")["border_width"],
+        1
+    );
     assert_eq!(node(&s, "directory_items", "directory_panel")["width"], 560);
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:two");
@@ -4260,6 +4351,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     cfg["hubs"][1]["client_id"] = json!("cito");
     let mut frame = state();
     frame["hubs"][0]["name"] = json!("local");
+    frame["hubs"][0]["auth_mode"] = json!("none");
     frame["hubs"][1]["auth_mode"] = json!("oidc");
     frame["settings"] = cfg;
     frame["harnesses"] = json!([
@@ -4496,8 +4588,11 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
     let s = inspect(&f, p);
     assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 46);
-    assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 56);
-    assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 204);
+    assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 8);
+    assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 252);
+    assert_eq!(node(&s, "settings_items", "hub_visibility_caption")["text"], "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.");
+    assert_eq!(s["overlapping_siblings"], json!([]));
+    assert_eq!(s["clipped_views"], json!([]));
     assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
     capture("settings", "settings_add_hub");
     control(&f, p, "cancel_add_hub");
@@ -4512,7 +4607,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "add_hub_form")["y"],
-        56
+        8
     );
     capture("settings", "settings_edit_remote");
     control(&f, p, "cancel_add_hub");
@@ -5076,6 +5171,14 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     assert_eq!(configured["hubs"]["remote"]["url"], endpoint);
     assert_eq!(configured["hubs"]["remote"]["authMode"], "token");
     assert_eq!(configured["hubs"]["remote"]["token"], "lan-test-token");
+    wait(|| {
+        let snapshot = client.action(json!({"op":"get_snapshot"})).1;
+        ["local", "remote"].iter().all(|hub| {
+            snapshot["listeners"].as_array().unwrap().iter().any(|row| {
+                row["hub"] == *hub && row["harness"] == "human" && row["scope"] == "workspace"
+            })
+        })
+    });
     let (status, exported) = client.action(json!({"op":"generate_hub_invite","hub":"remote"}));
     assert_eq!(status, 200);
     assert_eq!(exported["invite"]["url"], endpoint);

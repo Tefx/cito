@@ -1086,6 +1086,21 @@ impl DaemonService {
         result["listener_id"] = json!(self.scoped(hub, string(&result, "listener_id")));
         Ok(result)
     }
+    fn pause_listener(&mut self, hub: &str, id: &str) -> Result<bool, String> {
+        if self
+            .state
+            .listener(hub, id)?
+            .is_some_and(|row| row["harness"] != "human")
+            && self
+                .slots
+                .get(hub)
+                .is_some_and(|slot| slot.config["autoListen"] == true)
+        {
+            self.set_auto_listen(hub, false)?;
+        }
+        self.unlisten_id(hub, id)
+    }
+
     fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
         let client = self.slots.get(hub);
         let hub_url = if let Some(client) = client {
@@ -1398,7 +1413,7 @@ impl DaemonService {
                         string(&caller, "harness"),
                         string(&caller, "session_id"),
                     )?;
-                    if self.unlisten_id(&hub, &id)? {
+                    if self.pause_listener(&hub, &id)? {
                         removed += 1;
                     }
                 }
@@ -2027,6 +2042,33 @@ impl DaemonService {
         }
         Ok(())
     }
+    fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
+        let slot = self.slot(hub)?.clone();
+        // Serialize clearing pause intent with deferred detaches and enrollment.
+        let _registration = slot
+            .registration
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        self.mutate_config(|v| {
+            if v["hubs"].is_null() {
+                v["hubs"] = json!({"local":{"url":"local://"}});
+            }
+            v["hubs"][hub]["autoListen"] = json!(enabled);
+            Ok(())
+        })?;
+        if enabled {
+            self.state.db.transaction(|c| {
+                c.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id IN (SELECT listener_id FROM local_listeners WHERE hub=? AND harness!='human' AND status='UNLISTENED')", &[json!(hub),json!(hub)])?;
+                c.execute("UPDATE local_listeners SET status='FENCED_INACTIVE' WHERE hub=? AND harness!='human' AND status='UNLISTENED'", &[json!(hub)])?;
+                Ok(())
+            })?;
+        }
+        if let Some(slot) = self.slots.get_mut(hub) {
+            slot.config["autoListen"] = json!(enabled);
+        }
+        Ok(())
+    }
+
     /// Opt-in enrollment uses discovery liveness, never historical SQLite rows.
     fn auto_listen(&self) -> Result<(), String> {
         let hubs: Vec<_> = self
@@ -2061,11 +2103,9 @@ impl DaemonService {
                     continue;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
-                if let Err(error) = self.listen(
-                    hub,
-                    &json!({"about":candidate["title"],"scope":"self"}),
-                    candidate,
-                ) {
+                if let Err(error) =
+                    self.listen(hub, &json!({"about":candidate["title"]}), candidate)
+                {
                     eprintln!("cito auto-listen {hub}: {error}");
                 }
             }
@@ -2620,7 +2660,8 @@ impl DaemonService {
                     &[action["harness"].clone(), action["session_id"].clone()],
                 )? {
                     if action["hub"].is_null() || row["hub"] == hub {
-                        self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                        let name = string(&row, "hub");
+                        self.pause_listener(name, string(&row, "listener_id"))?;
                     }
                 }
                 if action["harness"] == "human" && action["session_id"] == "default" {
@@ -3142,7 +3183,8 @@ impl DaemonService {
                 );
             }
             "unlisten" => {
-                self.unlisten_id(&hub, string(action, "listener_id"))?;
+                let id = string(action, "listener_id");
+                self.pause_listener(&hub, id)?;
             }
             "unlisten_all" => {
                 let mut removed = 0;
@@ -3152,7 +3194,7 @@ impl DaemonService {
                     .into_iter()
                     .filter(|row| row["harness"] != "human")
                 {
-                    if self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))? {
+                    if self.pause_listener(string(&row, "hub"), string(&row, "listener_id"))? {
                         removed += 1;
                     }
                 }
@@ -3409,17 +3451,7 @@ impl DaemonService {
                 let enabled = action["enabled"]
                     .as_bool()
                     .ok_or("INVALID_INPUT: enabled must be a boolean")?;
-                self.mutate_config(|v| {
-                    if v["hubs"].is_null() {
-                        v["hubs"] = json!({"local":{"url":"local://"}});
-                    }
-                    v["hubs"][&hub]["autoListen"] = json!(enabled);
-                    Ok(())
-                })?;
-                // This preference does not change transport identity or leases.
-                if let Some(slot) = self.slots.get_mut(&hub) {
-                    slot.config["autoListen"] = json!(enabled);
-                }
+                self.set_auto_listen(&hub, enabled)?;
                 if enabled {
                     self.auto_listen()?;
                 }

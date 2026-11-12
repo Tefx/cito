@@ -49,7 +49,7 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v["harness"] == "pi" && v["scope"] == "self"));
+        .any(|v| v["harness"] == "pi" && v["scope"] == "workspace"));
     let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(saved["hubs"]["local"]["autoListen"], true);
     assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"pi","session_id":candidate["session_id"]})).0, 200);
@@ -58,10 +58,41 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         f.rows("SELECT status FROM local_listeners WHERE harness='pi'")[0]["status"],
         "UNLISTENED"
     );
-    assert_eq!(f.action(json!({"op":"listen_session","hub":"local","harness":"pi","session_id":candidate["session_id"],"endpoint_pid":candidate["endpoint_pid"],"cwd":candidate["cwd"]})).0, 200);
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        false
+    );
+    // Re-enabling the mode clears agent pauses, enrolls immediately, and
+    // preserves the independent Human pause on the same Hub.
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='human'")[0]["status"],
+        "UNLISTENED"
+    );
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE harness='pi'")[0]["status"],
         "ACTIVE"
+    );
+    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        false
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
     );
     assert_eq!(
         f.action(json!({"op":"setup_remove_app","harness":"pi"})).0,
@@ -105,7 +136,12 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         200
     );
     assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
+    assert_eq!(snapshot()["hubs"][0]["auto_listen"], false);
     f.stop(daemon);
+    let mut preferences: Value =
+        serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    preferences["hubs"]["local"]["autoListen"] = json!(true);
+    fs::write(&f.config, preferences.to_string()).unwrap();
     config["session_id"] = json!("live");
     let mut sessions: Vec<Value> = (0..8).map(|i| json!({"harness":"fixture","session_id":format!("historical-{i}"),"title":"History","cwd":"/tmp"})).collect();
     sessions.extend([
@@ -3151,6 +3187,38 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("plugin.json"), conflicting.to_string()).unwrap();
     f.daemon(&[]);
+    // Human enrollment covers both networks, independently of defaultHub.
+    wait(|| {
+        let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+        ["local", "remote"].iter().all(|hub| {
+            snapshot["listeners"].as_array().unwrap().iter().any(|row| {
+                row["hub"] == *hub && row["harness"] == "human" && row["scope"] == "workspace"
+            })
+        })
+    });
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"remote","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":false}))
+            .0,
+        200
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert!(!snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["hub"] == "remote" && row["harness"] == "human"));
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["hub"] == "local" && row["harness"] == "human"));
     let rows = || {
         owner
             .db("hub/hub.sqlite")

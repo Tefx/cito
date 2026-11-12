@@ -221,7 +221,7 @@ fn register_locked(
                     .as_str()
                     .or_else(|| client.config["auth_mode"].as_str())
                     .unwrap_or("none")
-                    == "none"
+                    != "oidc"
                 {
                     "workspace"
                 } else {

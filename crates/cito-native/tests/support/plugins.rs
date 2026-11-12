@@ -495,7 +495,7 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
 #[test]
 fn codex_metadata_validation_and_sqlite_thread_projection() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let mut f = Fixture::new(json!({}));
     for meta in [
         json!({"openai/threadId":"thread-a"}),
         json!({"threadId":"thread-a"}),
@@ -566,7 +566,23 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
     .unwrap();
     let process = f.spawn("node", &[cli.to_str().unwrap(), "app-server"], &[]);
     wait(|| f.frames(process).iter().any(|v| v["op"] == "ready"));
+    let git = f.dir.join("tools/git");
+    script(&git, "#!/bin/sh\necho git >> \"$HOME/git-calls\"\nexit 1\n");
+    f.env.insert(
+        "PATH".into(),
+        format!("{}:{}", git.parent().unwrap().display(), f.env["PATH"]),
+    );
     let discover = || f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    db.execute("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE", &[])
+        .unwrap();
+    let started = std::time::Instant::now();
+    let locked = discover();
+    db.execute("ROLLBACK", &[]).unwrap();
+    assert_eq!(
+        locked["ok"], false,
+        "A locked database must not look empty: {locked}"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
     // Older schemas omit the optional source columns.
     assert_eq!(discover()["sessions"][0]["session_id"], "active");
     db.execute(
@@ -596,6 +612,13 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
     assert_eq!(discovered["sessions"][0]["title"], "Active work");
     assert_eq!(discovered["sessions"][0]["branch"], "main");
     assert_eq!(discovered["sessions"][0]["repo"], "acme/service");
+    assert!(
+        !f.home.join("git-calls").exists(),
+        "SQLite metadata must bypass git"
+    );
+    db.execute("UPDATE threads SET thread_source='' WHERE id='active'", &[])
+        .unwrap();
+    assert_eq!(discover()["sessions"][0]["session_id"], "active");
     db.transaction(|c| {
         for i in 0..40 {
             c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source,source) VALUES(?, '/other', 0, ?, 'User', 'user', 'cli')", &[json!(format!("user-{i}")),json!(3000+i)])?;
@@ -621,6 +644,15 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
             json!({"op":"resolve_caller","meta":{"threadId":"active"}})
         )["caller"]["session_id"],
         "active"
+    );
+    drop(db);
+    fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();
+    assert_eq!(discover()["sessions"], json!([]));
+    fs::write(f.home.join(".codex/state_5.sqlite"), "not a database").unwrap();
+    assert_eq!(
+        discover()["ok"],
+        false,
+        "Real IO/format errors must reach the discovery cache owner"
     );
 }
 #[test]

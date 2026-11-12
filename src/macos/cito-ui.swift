@@ -112,7 +112,7 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
         control.frame.size.width = max(reservedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
-            paddingX: id == "open_settings" ? 6 : (id == "open_uninstall_confirm" ? 12 : 11)))
+            paddingX: id == "open_settings" ? 6 : (id.hasPrefix("scope:") ? 9 : (id == "open_uninstall_confirm" ? 12 : 11))))
         control.layoutContents()
     }
     var left = insetLeft
@@ -1253,6 +1253,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     weak var renameField: NSTextField?
     var myRemoteCollapsed = false
     var collapsedGroups = Set<String>()
+    var autoCollapsedRecentGroups = Set<String>()
     func statusColor(_ status: String) -> NSColor {
         status == "connected" ? CitoPalette.successText : status == "connecting" ? CitoPalette.warningText : status == "auth_required" ? CitoPalette.dangerText : .systemGray
     }
@@ -2205,7 +2206,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let width: CGFloat = isCompactIcon ? 44 : (compactChips ? chipCap : min(180, measureTextWidth(title, font: btnFont) + 26))
             let pill = MenuControl(title, frame: NSRect(x: 0, y: 0, width: width, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier("hub:\(hub.name)")
-            pill.style = hub.name == effectiveTargetHub ? .prominent : .neutral
+            pill.style = hub.name == effectiveTargetHub
+                ? (hub.status == "connected" && hub.error == nil ? .prominent : .neutral)
+                : .subtleHeader
             if isCompactIcon {
                 pill.label.isHidden = true
                 pill.addSubview(roundedView(NSRect(x: 7, y: 8, width: 6, height: 6), radius: 3, color: color))
@@ -2241,10 +2244,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             hubPills.append(pill)
         }
         if showHubControls {
-            mountPillStrip(in: header, frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22),
+            let strip = mountPillStrip(in: header, frame: NSRect(x: stripX, y: 9, width: stripWidth, height: 22),
                            id: "header_hub_strip", alignment: .trailing, pills: hubPills) { view in
                 let id = view.identifier?.rawValue ?? ""
                 return id == "hub:\(effectiveTargetHub)"
+            }
+            if hubs.count > 1 {
+                strip.wantsLayer = true
+                strip.layer?.backgroundColor = NSColor.labelColor.withAppearanceAlpha(0.06).cgColor
+                strip.layer?.cornerRadius = 11
             }
         }
         var activeRows: [(id: String, view: NSView)] = []
@@ -2256,15 +2264,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let hasHumanListener = listeners.contains { $0.harness == "human" }
         let targetUser = hubs.first(where: { $0.name == targetHub })?.user ?? hubs.first?.user ?? "local"
         if !hasHumanListener && hubs.contains(where: { $0.name == targetHub && $0.status != "disconnected" }) {
-            let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 56))
-            let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 50), radius: 10,
+            let rowHeight: CGFloat = 64, cardHeight: CGFloat = 58
+            let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
+            let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
-            card.addSubview(makeHarnessBadge(NSRect(x: 10, y: 11, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
-            let title = textLabel("You (@\(targetUser))", NSRect(x: 46, y: 26, width: 220, height: 16), size: 12.5, weight: .semibold)
+            card.addSubview(makeHarnessBadge(NSRect(x: 10, y: 14, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
+            let title = textLabel("You (@\(targetUser))", NSRect(x: 46, y: 32, width: 220, height: 16), size: 12.5, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
-            card.addSubview(textLabel("Notifications paused", NSRect(x: 46, y: 8, width: 200, height: 14), size: 9.5, color: CitoPalette.secondaryText))
-            let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume", leadingSymbol:"plus"), y: 14, width: MenuControl.intrinsicWidth("Resume", leadingSymbol:"plus"), height: 22), leadingSymbol: "plus", radius: 6)
+            card.addSubview(textLabel("Notifications paused", NSRect(x: 46, y: 10, width: 200, height: 14), size: 9.5, color: CitoPalette.secondaryText))
+            let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume"), y: 18, width: MenuControl.intrinsicWidth("Resume"), height: 22), radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
             enable.pressed = { [weak self] in self?.emit(["op": "listen_session", "hub": targetHub, "harness": "human", "session_id": "default", "about": "Human receiver"]) }
@@ -2299,8 +2308,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 radius: 8, iconInset: multiHub ? 7 : 8, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
             let listenerHub = hubs.first(where: { $0.name == listener.hub })
-            let showScopeToggle = !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
-            let scopeWidth = max(MenuControl.intrinsicWidth("Self", leadingSymbol: "lock.fill"), MenuControl.intrinsicWidth("Team", leadingSymbol: "person.2.fill"))
+            let hasOtherUsers = directoryAllPeers.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user }) || listeners.contains(where: { $0.hub == listener.hub && !($0.user ?? "").isEmpty && $0.user != user })
+            let showScopeToggle = listenerHub?.auth_mode == "oidc" || hasOtherUsers
+            let scopeWidth: CGFloat = 68
             var sessionActions: [NSView] = []
             let title = textLabel(displayTitle,
                 NSRect(x: titleX, y: cardHeight - 26, width: 40, height: 18), size: 13, weight: .semibold)
@@ -2343,6 +2353,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 scopeBtn.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
                 let scopeColor = { [weak scopeBtn] in
                     scopeBtn?.style = scope == "workspace" ? .prominent : .neutral
+                    scopeBtn?.toolTip = scope == "self"
+                        ? "Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(listener.hub)' can message this session. Click to share with Team."
+                        : "Visibility: Team — anyone connected to '\(listener.hub)' can discover and message this session. Click to restrict to Only Me."
                 }
                 scopeColor()
                 scopeBtn.pressed = { [weak self, weak scopeBtn] in
@@ -2358,7 +2371,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let personal = listener.harness == "human"
             let stop = MenuControl(personal ? "Pause" : "Stop listening", frame: NSRect(x: 0, y: cardHeight - 28, width: personal ? 52 : 22, height: 22), symbol: personal ? nil : "xmark")
-            stop.toolTip = personal ? "Pause personal notifications" : "Stop listening"
+            stop.toolTip = personal ? "Pause personal notifications" : "Pause listening for this session"
             stop.style = personal ? .neutral : .subtleHeader
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
@@ -2525,11 +2538,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 : available
             if visibleAvailable.isEmpty {
                 let emptyTarget = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 28))
-                let label = textLabel("All sessions listening on \(targetHub)",
+                let label = textLabel(autoListen ? "Auto-Listen is on — open sessions connect automatically" : "All sessions listening on \(targetHub)",
                     NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: CitoPalette.secondaryText)
                 label.lineBreakMode = .byTruncatingMiddle; label.toolTip = label.stringValue
                 emptyTarget.addSubview(label)
                 _ = host(emptyTarget, id: "available_empty_target")
+            }
+            if autoListen && visibleAvailable.contains(where: { $0.needs_reload == true }) {
+                let feedback = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 38))
+                let caption = textLabel("Auto-Listen is on — run /reload below to finish connecting", NSRect(x: 24, y: 4, width: 332, height: 30), size: 11, color: CitoPalette.secondaryText)
+                caption.maximumNumberOfLines = 2
+                caption.cell?.wraps = true
+                feedback.addSubview(caption)
+                _ = host(feedback, id: "auto_listen_reload_status")
             }
             var groupsByHarness: [String: [Candidate]] = [:]
             for c in visibleAvailable { groupsByHarness[c.harness, default: []].append(c) }
@@ -2540,6 +2561,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
             for (harness, items) in groupedCandidates {
+                let recentKey = "\(targetHub):\(harness)"
+                if autoListen && items.allSatisfy({ $0.endpoint_pid == nil && $0.needs_reload != true }) && autoCollapsedRecentGroups.insert(recentKey).inserted {
+                    collapsedGroups.insert(harness)
+                }
                 let isCollapsed = collapsedGroups.contains(harness)
                 let visual = resolveHarnessVisual(harness, harnesses: map)
                 let noun: String
@@ -3454,7 +3479,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         hubsView.addSubview(addBtn)
 
         if addHubFormOpen {
-            let formHeight: CGFloat = editingExistingHub && editingOriginalHub == "local" ? 124 : 204
+            let formHeight: CGFloat = editingExistingHub && editingOriginalHub == "local" ? 124 : 252
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
@@ -3503,6 +3528,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
 
+            if !(editingExistingHub && editingOriginalHub == "local") {
+                for control in form.subviews { control.frame.origin.y += 48 }
+                let visibility = textLabel("Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.", NSRect(x: 14, y: 60, width: 452, height: 48), size: 11, color: CitoPalette.secondaryText)
+                visibility.identifier = NSUserInterfaceItemIdentifier("hub_visibility_caption")
+                visibility.maximumNumberOfLines = 3
+                visibility.cell?.wraps = true
+                form.addSubview(visibility)
+            }
             if let error=addHubError {
                 let label=textLabel(presentationError(error),NSRect(x:14,y:38,width:452,height:15),size:10,color:CitoPalette.dangerText)
                 label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=label.stringValue
@@ -4193,14 +4226,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         for (id, pill) in directoryFacetControls {
             if id.hasPrefix("act_filter:") {
                 pill.isHidden = !isActivity
-                pill.style = (id == "act_filter:\(activityFilter)") ? .prominent : .neutral
+                pill.style = (id == "act_filter:\(activityFilter)") ? .prominent : .subtleHeader
             } else if id == "activity_mark_all_read" || id == "activity_clear" {
                 pill.isHidden = !isActivity
                 pill.style = .neutral
             } else {
                 pill.isHidden = isActivity
                 let active = (id == "dir_scope:\(directoryScopeFilter)") || (id == "dir_harness:\(directoryHarnessFilter)")
-                pill.style = active ? .prominent : .neutral
+                pill.style = active ? .prominent : .subtleHeader
                 if !isActivity && active && id.hasPrefix("dir_harness:") { pill.scrollToVisible(pill.bounds) }
             }
         }

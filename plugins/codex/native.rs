@@ -183,10 +183,17 @@ fn setup(req: &Value) -> Result<Value> {
     Ok(json!({"ok":true,"actions":[action]}))
 }
 fn rows(req: &Value) -> Vec<Value> {
-    let columns = sqlite_rows(&db(req), "PRAGMA table_info(threads)").unwrap_or_default();
+    try_rows(req).unwrap_or_default()
+}
+fn try_rows(req: &Value) -> Result<Vec<Value>> {
+    let path = db(req);
+    if !path.try_exists().map_err(|e| e.to_string())? {
+        return Ok(vec![]);
+    }
+    let columns = sqlite_rows(&path, "PRAGMA table_info(threads)")?;
     let has = |name: &str| columns.iter().any(|c| c["name"] == name);
     if !has("id") || !has("cwd") {
-        return vec![];
+        return Ok(vec![]);
     }
     let projection = [
         "id",
@@ -210,7 +217,7 @@ fn rows(req: &Value) -> Vec<Value> {
         predicates.push("archived = 0");
     }
     if has("thread_source") {
-        predicates.push("(thread_source IS NULL OR thread_source = 'user')");
+        predicates.push("(thread_source IS NULL OR thread_source = '' OR thread_source = 'user')");
     }
     if has("source") {
         predicates.push("(source IS NULL OR source NOT LIKE '{\"subagent\"%')");
@@ -226,8 +233,8 @@ fn rows(req: &Value) -> Vec<Value> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
-    sqlite_rows(
-        &db(req),
+    Ok(sqlite_rows(
+        &path,
         &format!(
             "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
             predicates.join(" AND "),
@@ -238,12 +245,11 @@ fn rows(req: &Value) -> Vec<Value> {
                 ""
             }
         ),
-    )
-    .unwrap_or_default()
+    )?
     .into_iter()
     // Preserve caller validation for whitespace-only IDs and working directories.
     .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
-    .collect()
+    .collect())
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];
@@ -298,20 +304,16 @@ fn row_caller(req: &Value, r: &Value) -> Value {
     let cwd = str_at(r, "cwd")
         .or_else(|| str_at(req, "cwd"))
         .unwrap_or("");
-    let mut c = caller(
-        "codex",
-        str_at(r, "id").unwrap_or(""),
-        cwd,
-        pid(req),
-        str_at(r, "name").or_else(|| str_at(r, "title")),
-    );
-    if r.get("git_branch").is_some() {
-        c["branch"] = r["git_branch"].clone();
+    let title = str_at(r, "name").or_else(|| str_at(r, "title"));
+    if r.get("git_branch").is_some() || r.get("git_origin_url").is_some() {
+        // SQLite metadata is authoritative, including absent values. Do not
+        // launch git once per historical thread during discovery.
+        return json!({"harness":"codex","session_id":r["id"],"cwd":cwd,
+            "endpoint_pid":pid(req),"branch":r["git_branch"],
+            "repo":str_at(r,"git_origin_url").and_then(normalize_repo),
+            "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
     }
-    if r.get("git_origin_url").is_some() {
-        c["repo"] = json!(str_at(r, "git_origin_url").and_then(normalize_repo));
-    }
-    c
+    caller("codex", str_at(r, "id").unwrap_or(""), cwd, pid(req), title)
 }
 fn command_exit(mut command: Command, deadline: Instant) -> Result<Option<bool>> {
     let mut child = command.spawn().map_err(|e| e.to_string())?;
@@ -347,7 +349,7 @@ pub fn handle(req: &Value) -> Result<Value> {
         "discover_sessions" => {
             let running = desktop_running(req).unwrap_or(false);
             let sessions = if running {
-                rows(req)
+                try_rows(req)?
                     .iter()
                     .take(8)
                     .map(|r| {
