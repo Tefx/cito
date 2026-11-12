@@ -516,7 +516,7 @@ final class MenuControl: NSControl {
         else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)]; padding = 11 }
         else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)]; padding = 11 }
         else if id == "toggle_desktop_banner" { states = [("● Enabled",nil),("Disabled",nil)]; padding = 11 }
-        else if id == "toggle_host_hub" { states = [("● Sharing",nil),("Off",nil)]; padding = 11 }
+        else if id == "toggle_host_hub" { states = [("Share",nil),("● Sharing",nil),("● Starting",nil),("● Failed",nil)]; padding = 11 }
         else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)]; padding = 11 }
         else if id.hasPrefix("toggle_channel:") { states = [("Pause",nil),("Resume",nil)]; padding = 11 }
         else { return 0 }
@@ -1306,7 +1306,23 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
     }
     var directoryWarnings: [String] = []
-    var directoryError: String?
+    var directoryQueryError: String?
+    var directoryActionError: String?
+    var directoryActionErrorSourceOp: String?
+    var directoryError: String? { directoryActionError ?? directoryQueryError }
+    func clearDirectoryActionError(sourceOp: String? = nil) {
+        guard sourceOp == nil || sourceOp == directoryActionErrorSourceOp else { return }
+        let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError.map(presentationError) : nil
+        directoryActionError = nil; directoryActionErrorSourceOp = nil
+        if let oldCopyError = oldCopyError {
+            if directorySummaryLabel?.toolTip == oldCopyError { directorySummaryLabel?.toolTip = nil }
+            if directorySummaryLabel?.stringValue == oldCopyError {
+                if directoryMode == "activity" { applyActivityFilter() }
+                else { applyDirectoryFilter(fromDaemonFrame:false,daemonMatchedCount:nil) }
+            }
+        }
+        updateDirectoryWarnings()
+    }
     var directoryWarningLabel: NSTextField?
     func updateDirectoryWarnings() {
         let hasError = directoryError != nil
@@ -1340,9 +1356,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         control?.copied(feedback)
     }
     func showMessageCopyError(_ message: String) {
-        if directoryVisible { directoryError = message; updateDirectoryWarnings() }
+        directoryActionError = message; directoryActionErrorSourceOp = "copy_activity_message"
+        updateDirectoryWarnings()
         pendingMessageCopy = nil
-        setComposerStatus(message)
         if directoryComposerBar?.isHidden != false {
             directorySummaryLabel?.stringValue = presentationError(message)
             directorySummaryLabel?.toolTip = presentationError(message)
@@ -1936,6 +1952,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if let message = frame.message, frame.part == pending.nextPart, frame.error == nil, frame.ok != false {
                 pending.buffer += message; pending.nextPart += 1
                 if frame.complete != false {
+                    clearDirectoryActionError(sourceOp:"copy_activity_message")
                     let index = directoryMode == "activity" ? activityFilteredItems.firstIndex { $0.hub == pending.hub && $0.signal_id == pending.signalId } : nil
                     let cell = index.flatMap { directoryTableView?.view(atColumn:0,row:$0,makeIfNecessary:false) as? DirectoryPeerCellView }
                     let sameItem = cell?.activityItem?.hub == pending.hub && cell?.activityItem?.signal_id == pending.signalId
@@ -1997,8 +2014,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 setComposerStatus(error)
                 pendingComposer = nil
             } else if isAddHubError { addHubError = error }
-            else if ["query_directory", "open_directory"].contains(sourceOp) || directoryVisible && ["delete_activity", "clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"].contains(sourceOp) {
-                if !["query_directory", "open_directory"].contains(sourceOp) || frame.request_id == nil || frame.request_id == directoryRequestId { directoryError = error; updateDirectoryWarnings() }
+            else if ["query_directory", "open_directory"].contains(sourceOp) {
+                if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
+            }
+            else if directoryVisible && ["delete_activity", "clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"].contains(sourceOp) {
+                directoryActionError = error; directoryActionErrorSourceOp = sourceOp; updateDirectoryWarnings()
             }
             else if settingsVisible || pendingHubSave != nil { settingsBannerError = error }
             else { menuBannerError = error }
@@ -2107,7 +2127,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             activityTotal = frame.activity_total ?? activityTotal
             activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
             directoryWarnings = frame.warnings ?? directoryWarnings
-            directoryError = nil
+            directoryQueryError = nil
             updateDirectoryWarnings()
             serverActivityFilter = frame.activity_filter
             serverActivityQuery = frame.activity_query ?? ""
@@ -2140,7 +2160,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         } else { diagnostic("invalid frame") }
     }
     func emit(_ action: [String: Any], userInitiated: Bool = true) {
-        let passive = ["query_directory", "refresh_available"].contains(action["op"] as? String ?? "")
+        let operation = action["op"] as? String ?? ""
+        if userInitiated && ["delete_activity","clear_activity_history","ack_signals","mark_all_activity_read"].contains(operation) { clearDirectoryActionError() }
+        let passive = ["query_directory", "refresh_available"].contains(operation)
         if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild() }
         var outgoing = action
         if let op = action["op"] as? String, ["channel_save", "save_hub_service"].contains(op),
@@ -2381,13 +2403,17 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let targetHubObj = hubs.first { $0.name == targetHub }
         let targetUser = hubs.first(where: { $0.name == targetHub })?.user ?? hubs.first?.user ?? "local"
         if !hasHumanListener && hubs.contains(where: { $0.name == targetHub && $0.status != "disconnected" }) {
-            let about = distinctAbout(targetHubObj?.human_about, title:"Human", user:targetUser)
+            let rawPausedAbout = targetHubObj?.human_about
+            let humanDisplayTitle = "You (@\(targetUser))"
+            let about = distinctAbout(distinctAbout(rawPausedAbout,title:"Human",user:targetUser), title:humanDisplayTitle, user:targetUser)
+            let resumedAbout = (rawPausedAbout ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
+            let resumeAbout = resumedAbout.isEmpty ? "Human" : resumedAbout
             let rowHeight: CGFloat = about == nil ? 64 : 78, cardHeight: CGFloat = about == nil ? 58 : 72
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
             let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
             card.addSubview(makeHarnessBadge(NSRect(x: 12, y: cardHeight - 43, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
-            let title = textLabel("You (@\(targetUser))", NSRect(x: 48, y: cardHeight - 26, width: 220, height: 18), size: 13, weight: .semibold)
+            let title = textLabel(humanDisplayTitle, NSRect(x: 48, y: cardHeight - 26, width: 220, height: 18), size: 13, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
             let status: String
@@ -2407,7 +2433,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume"), y: about == nil ? 18 : cardHeight - 28, width: MenuControl.intrinsicWidth("Resume"), height: 22), radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
-            enable.pressed = { [weak self] in self?.emit(["op": "listen_session", "hub": targetHub, "harness": "human", "session_id": "default", "about": targetHubObj?.human_about ?? "Human receiver"]) }
+            enable.pressed = { [weak self] in self?.emit(["op": "listen_session", "hub": targetHub, "harness": "human", "session_id": "default", "about": resumeAbout]) }
             title.frame.size.width = max(0,enable.frame.minX-52)
             card.addSubview(enable); row.addSubview(card)
             _ = host(row, id: "human_paused_card")
@@ -3501,26 +3527,27 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             endpoint_url: "http://127.0.0.1:4291", token: "",
             invite_command: "cito setup --hub lan --url http://127.0.0.1:4291 --default", auth_mode: nil, error: nil
         )
-        let hostingUnavailable = hostHub.enabled && (!hostHub.running || hostHub.error != nil)
-        let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 } ?? (hostingUnavailable ? (hostHub.running ? "Hub sharing is unavailable" : "Hub server is not running") : nil)
+        let hostingUnavailable = !hostHub.enabled || !hostHub.running || hostHub.error != nil
+        let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 } ?? (hostHub.enabled && hostingUnavailable ? (hostHub.running ? "Hub sharing is unavailable" : "Hub server is not running") : nil)
         let hostExpanded = hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
-        let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 136 : 108) + (hostError == nil ? 0 : 28) : 46
+        let hostNotice = hostError ?? (!hostHub.enabled && hostExpanded ? "Sharing is off — enable Share to accept connections" : nil)
+        let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 136 : 108) + (hostNotice == nil ? 0 : 28) : 46
         let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 356 - hostHeight, width: 480, height: hostHeight), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
         hostCard.addSubview(textLabel("Share This Mac as a Hub", NSRect(x: 14, y: hostExpanded ? hostHeight - 30.5 : 14.5, width: 350, height: 17), size: 13, weight: .semibold))
-        if hostExpanded, let error = hostError {
-            let subtitle = textLabel(presentationError(error), NSRect(x:14,y:hostHeight-52,width:452,height:18), size:11, color:CitoPalette.dangerText)
+        if hostExpanded, let error = hostNotice {
+            let subtitle = textLabel(presentationError(error), NSRect(x:14,y:hostHeight-52,width:452,height:18), size:11, color:hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
             subtitle.identifier = NSUserInterfaceItemIdentifier("host_hub_error")
             subtitle.toolTip = error
             hostCard.addSubview(subtitle)
         }
 
-        let toggleTitle = hostHub.enabled ? "● Sharing" : "Off"
+        let toggleTitle = !hostHub.enabled ? "Share" : hostHub.error != nil ? "● Failed" : hostHub.running ? "● Sharing" : "● Starting"
         let toggleHostBtn = MenuControl(toggleTitle, frame: NSRect(x: 0, y: 0, width: 80, height: 24), radius: 12)
         toggleHostBtn.identifier = NSUserInterfaceItemIdentifier("toggle_host_hub")
-        toggleHostBtn.style = .neutral
+        toggleHostBtn.style = !hostHub.enabled ? .neutral : hostHub.error != nil ? .destructiveHover : hostHub.running ? .prominent : .neutral
         let nextHostEnabled = !hostHub.enabled
         toggleHostBtn.pressed = { [weak self] in
             self?.emit(["op": "set_host_hub", "enabled": nextHostEnabled, "port": hostHub.port])
@@ -3559,8 +3586,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
         let copyInvite = MenuControl("Copy Invite Code", frame: NSRect(x: 0, y: 48, width: MenuControl.intrinsicWidth("Copy Invite Code", leadingSymbol:"doc.on.doc"), height: 24), leadingSymbol: "doc.on.doc", radius: 6)
         copyInvite.identifier = NSUserInterfaceItemIdentifier("copy_hub_invite")
-        copyInvite.style = .prominent
-        if hostingUnavailable { copyInvite.toolTip = "Hub sharing is unavailable. This invite will work after the server recovers." }
+        copyInvite.style = hostingUnavailable ? .neutral : .prominent
+        if !hostHub.enabled { copyInvite.toolTip = "Enable sharing and apply the port before inviting other Macs" }
+        else if hostingUnavailable { copyInvite.toolTip = "Hub sharing is unavailable. This invite will work after the server recovers." }
         let inviteCmd = selectedInvite
         copyInvite.pressed = { [weak self, weak copyInvite] in
             self?.copyText(inviteCmd, control:copyInvite, feedback:"✓ Invite Copied")
@@ -4256,7 +4284,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func switchDirectoryMode(_ mode: String) {
+        clearDirectoryActionError()
         directoryMode = mode
+        updateDirectoryWarnings()
         queryDirectory()
         updateDirectoryModePills()
         updateDirectoryFacetStyles()
@@ -4525,7 +4555,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         ensureDirectoryPanel()
         seedDirectoryPeersIfEmpty()
         directoryVisible = true
+        if directoryMode != mode { clearDirectoryActionError() }
         directoryMode = mode
+        updateDirectoryWarnings()
         queryDirectory(op:"open_directory")
         updateDirectoryModePills()
         updateDirectoryFacetStyles()
@@ -4747,7 +4779,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
-        if item.message_truncated != true { copyText(item.message,control:control); return }
+        if item.message_truncated != true { clearDirectoryActionError(sourceOp:"copy_activity_message"); copyText(item.message,control:control); return }
         let request = UUID().uuidString
         pendingMessageCopy = PendingMessageCopy(requestId:request,hub:item.hub,signalId:item.signal_id)
         emit(["op":"copy_activity_message","request_id":request,"hub":item.hub,"signal_id":item.signal_id])

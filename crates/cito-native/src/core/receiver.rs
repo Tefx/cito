@@ -280,7 +280,7 @@ pub fn probe_listener(
     local.db.transaction(|c| {
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
-            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
             if changed > 0 {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
             }

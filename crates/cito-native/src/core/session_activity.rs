@@ -29,6 +29,8 @@ struct Discovery {
     plugin: PluginDescriptor,
     cached: Vec<Value>,
     stale: bool,
+    refreshed_at: u64,
+    started_at: u64,
     due: Instant,
     worker: Option<Worker<Vec<Value>>>,
 }
@@ -100,6 +102,8 @@ impl SessionActivity {
                     plugin: p.clone(),
                     cached: Vec::new(),
                     stale: false,
+                    refreshed_at: 0,
+                    started_at: 0,
                     due: Instant::now(),
                     worker: None,
                 })
@@ -126,11 +130,17 @@ impl SessionActivity {
 
     /// Freshly confirmed endpoints eligible for automatic enrollment. Retained
     /// inventories remain visible through available(), but cannot establish identity.
-    pub fn candidates(&self) -> impl Iterator<Item = &Value> {
+    pub fn candidates(&self) -> impl Iterator<Item = Value> + '_ {
         self.discovery
             .iter()
             .filter(|provider| !provider.stale && provider.worker.is_none())
-            .flat_map(|provider| &provider.cached)
+            .flat_map(|provider| {
+                provider.cached.iter().map(move |candidate| {
+                    let mut candidate = candidate.clone();
+                    candidate["discovered_at"] = json!(provider.refreshed_at);
+                    candidate
+                })
+            })
     }
 
     /// Read the cache only. Refilter against current live rows so a just-listened
@@ -271,6 +281,7 @@ impl SessionActivity {
             if provider.worker.is_some() || provider.due > Instant::now() {
                 continue;
             }
+            provider.started_at = now_ms();
             let plugin = provider.plugin.clone();
             let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
                 "plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
@@ -328,6 +339,9 @@ impl SessionActivity {
                 };
                 provider.stale = rows.is_none();
                 if let Some(rows) = rows {
+                    // A refresh already in flight at revocation is not newer evidence,
+                    // even if its result is joined after the revocation transaction.
+                    provider.refreshed_at = provider.started_at;
                     changed |= rows != provider.cached;
                     provider.cached = rows;
                 }
@@ -895,9 +909,17 @@ print(json.dumps(response), flush=True)
         let switched =
             vec![json!({"harness":"agent","session_id":"replacement","title":"New work"})];
         let fresh = switched.clone();
+        activity.discovery[0].started_at = 10;
         activity.discovery[0].worker = Some(std::thread::spawn(move || Ok(fresh)));
         pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
-        assert_eq!(activity.candidates().cloned().collect::<Vec<_>>(), switched);
+        let candidates = activity.candidates().collect::<Vec<_>>();
+        assert_eq!(candidates[0]["session_id"], switched[0]["session_id"]);
+        assert_eq!(candidates[0]["discovered_at"], 10);
+        assert_eq!(
+            activity.available(&[], 1),
+            switched,
+            "Private freshness metadata must not leak into presentation"
+        );
         activity.discovery[0].worker = Some(std::thread::spawn(|| Ok(vec![])));
         pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
         assert!(

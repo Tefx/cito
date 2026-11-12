@@ -1132,10 +1132,10 @@ impl DaemonService {
         self.state.db.transaction(|c| {
             if row.is_some() {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
-                c.execute("UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=?", &[json!(hub),json!(id)])?;
+                c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(hub),json!(id)])?;
             } else if let Some(client) = client.filter(|client|id==listener_id(string(&client.identity,"principal_id"),"human","default")) {
                 // Persist intent before queued automatic enrollment can obtain the lock.
-                c.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','','self','UNLISTENED')",&[
+                c.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','Human','self','UNLISTENED')",&[
                     json!(hub),json!(id),json!(super::identity::public_listener_id(string(&client.identity,"owner_user"),id)),
                     client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name())])?;
             } else { return Ok(()); }
@@ -2069,12 +2069,17 @@ impl DaemonService {
         if enabled {
             self.state.db.transaction(|c| {
                 c.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id IN (SELECT listener_id FROM local_listeners WHERE hub=? AND harness!='human' AND status='UNLISTENED')", &[json!(hub),json!(hub)])?;
-                c.execute("UPDATE local_listeners SET status='FENCED_INACTIVE' WHERE hub=? AND harness!='human' AND status='UNLISTENED'", &[json!(hub)])?;
+                c.execute("UPDATE local_listeners SET updated_at=? WHERE hub=? AND harness!='human' AND status='UNLISTENED'", &[json!(now_ms()),json!(hub)])?;
                 Ok(())
             })?;
         }
         if let Some(slot) = self.slots.get_mut(hub) {
             slot.config["autoListen"] = json!(enabled);
+        }
+        if enabled {
+            if let Some(activity) = self.session_activity.as_mut() {
+                activity.refresh_discovery();
+            }
         }
         Ok(())
     }
@@ -2110,7 +2115,7 @@ impl DaemonService {
         }) {
             for (hub, slot) in &hubs {
                 let rows = self.state.db.query(
-                    "SELECT status, principal_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
+                    "SELECT status, principal_id, updated_at FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
                     &[
                         json!(hub),
                         candidate["harness"].clone(),
@@ -2121,13 +2126,16 @@ impl DaemonService {
                     super::auth::principal_ids_equal(
                         string(row, "principal_id"),
                         string(&slot.identity, "principal_id"),
-                    ) && string(row, "status") == "ACTIVE"
+                    ) && (string(row, "status") == "ACTIVE"
+                        || row["status"] == "UNLISTENED"
+                            && candidate["discovered_at"].as_u64().unwrap_or(0)
+                                <= row["updated_at"].as_u64().unwrap_or(0))
                 }) {
                     continue;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
                 if let Err(error) =
-                    self.listen(hub, &json!({"about":candidate["title"]}), candidate)
+                    self.listen(hub, &json!({"about":candidate["title"]}), &candidate)
                 {
                     eprintln!("cito auto-listen {hub}: {error}");
                 }
@@ -2428,6 +2436,7 @@ impl DaemonService {
             // Profile provenance is local persistence metadata, not a UI wire field.
             if let Some(fields) = row.as_object_mut() {
                 fields.remove("hub_url");
+                fields.remove("updated_at");
             }
             row["custom_title"] = json!(self
                 .state
@@ -2480,7 +2489,7 @@ impl DaemonService {
             }
         }
         let harnesses:Vec<Value>=self.plugins.agent_plugins().into_iter().enumerate().map(|(order,p)|json!({"kind":"agent","id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order})).collect();
-        let paused_humans = self.state.db.query("SELECT hub,principal_id,about FROM local_listeners WHERE harness='human' AND status='UNLISTENED'", &[])?;
+        let paused_humans = self.state.db.query("SELECT hub,principal_id,owner_user,title,about FROM local_listeners WHERE harness='human' AND status='UNLISTENED'", &[])?;
         let enabled_hubs: Vec<Value> = settings["hubs"]
             .as_array()
             .into_iter()
@@ -2499,7 +2508,14 @@ impl DaemonService {
                 });
                 hub["human_paused"] = json!(paused.is_some());
                 hub["human_about"] = paused
-                    .map(|row| row["about"].clone())
+                    .and_then(|row| {
+                        super::registration::distinct_human_about(
+                            string(row, "about"),
+                            string(row, "title"),
+                            string(row, "owner_user"),
+                        )
+                    })
+                    .map(|about| json!(about))
                     .unwrap_or(Value::Null);
                 hub
             })
@@ -5028,6 +5044,42 @@ mod tests {
         let mut service = DaemonService::open(&config, &plugins)?;
         service.local.set_plugin_roots(&[])?;
         let result = (|| {
+            // Pause can precede local enrollment, even when the Hub already knows this Node.
+            service
+                .state
+                .db
+                .execute("DELETE FROM local_listeners WHERE harness=\'human\'", &[])?;
+            let human_id = listener_id(
+                string(&service.slot("local")?.identity, "principal_id"),
+                "human",
+                "default",
+            );
+            service.pause_listener("local", &human_id)?;
+            assert_eq!(
+                service
+                    .state
+                    .listener("local", &human_id)?
+                    .ok_or("Missing pause placeholder")?["about"],
+                "Human"
+            );
+            for (about, expected) in [
+                ("", None),
+                (" \n ", None),
+                ("Human", None),
+                ("Human receiver", None),
+                ("You (@alice)", None),
+                (" Release approvals ", Some("Release approvals")),
+            ] {
+                service.state.db.execute(
+                    "UPDATE local_listeners SET about=? WHERE hub=? AND listener_id=?",
+                    &[json!(about), json!("local"), json!(human_id)],
+                )?;
+                let snapshot = service.snapshot()?;
+                assert_eq!(snapshot["hubs"][0]["human_paused"], true);
+                assert_eq!(snapshot["hubs"][0]["human_about"], json!(expected));
+            }
+            service.state.db.execute("UPDATE local_listeners SET title=\'Review desk\',about=\'Review desk\' WHERE harness=\'human\'", &[])?;
+            assert_eq!(service.snapshot()?["hubs"][0]["human_about"], Value::Null);
             for harness in ["human", "fixture"] {
                 super::super::registration::register_listener(
                     &service.state,

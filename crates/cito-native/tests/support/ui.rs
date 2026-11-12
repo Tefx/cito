@@ -1932,6 +1932,68 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         "Notifications paused"
     );
     render_png(&f, p, "menu", "r2_human_paused_about.png");
+    for raw_about in [
+        Value::Null,
+        json!(""),
+        json!(" \n "),
+        json!("Human"),
+        json!("Human receiver"),
+        json!("You (@alice)"),
+        json!(" Release approvals "),
+    ] {
+        let mut paused = frame.clone();
+        paused["hubs"][0]["human_paused"] = json!(true);
+        paused["hubs"][0]["human_about"] = raw_about.clone();
+        f.send(p, paused.clone());
+        let height = if raw_about
+            .as_str()
+            .is_some_and(|about| about.trim() == "Release approvals")
+        {
+            78
+        } else {
+            64
+        };
+        let measured = inspect(&f, p);
+        assert_eq!(
+            node(&measured, "items", "human_paused_card")["height"],
+            height
+        );
+        assert_eq!(
+            node(&measured, "items", "human_paused_card")["children"][0]["height"],
+            height - 6
+        );
+        if raw_about == json!("You (@alice)") {
+            render_png(&f, p, "menu", "r3_human_display_title_about.png");
+        }
+        control(&f, p, "listen_human");
+        inspect(&f, p);
+        let resume = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|action| action["op"] == "listen_session")
+            .unwrap();
+        let trimmed = raw_about.as_str().unwrap_or("").trim();
+        assert_eq!(
+            resume["about"],
+            if trimmed.is_empty() { "Human" } else { trimmed }
+        );
+        let mut human = listener();
+        human["harness"] = json!("human");
+        human["session_id"] = json!("default");
+        human["title"] = json!("Human");
+        human["about"] = resume["about"].clone();
+        human["display_address"] = json!("personal:@alice");
+        let row_id = format!("session:{}", human["scoped_id"].as_str().unwrap());
+        paused["listeners"] = json!([human]);
+        f.send(p, paused);
+        let active = inspect(&f, p);
+        assert_eq!(node(&active, "items", &row_id)["height"], height);
+        assert_eq!(
+            node(&active, "items", &row_id)["children"][0]["height"],
+            height - 6
+        );
+    }
     f.send(p, frame.clone());
     let paused_card = node(&s, "items", "human_paused_card")["children"][0].clone();
     let paused_badge = &paused_card["children"][0];
@@ -2198,6 +2260,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     cfg["hubs"][1]["status"] = json!("auth_required");
     f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "settings_tab:hubs");
+    let sharing_toggle = node(&inspect(&f, p), "settings_items", "toggle_host_hub");
     for (running, error) in [
         (false, None),
         (false, Some("Address already in use")),
@@ -2210,13 +2273,36 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         cfg["host_hub"]["error"] = json!(error);
         f.send(p, json!({"op":"settings","settings":cfg}));
         let status = inspect(&f, p);
+        let toggle = node(&status, "settings_items", "toggle_host_hub");
         assert_eq!(
-            node(&status, "settings_items", "toggle_host_hub")["text"],
-            "● Sharing"
+            toggle["text"],
+            if error.is_some() {
+                "● Failed"
+            } else if running {
+                "● Sharing"
+            } else {
+                "● Starting"
+            }
         );
+        assert_eq!(toggle["width"], sharing_toggle["width"]);
+        assert_eq!(toggle["x"], sharing_toggle["x"]);
+        let prominent = node(&status, "settings_items", "settings_tab:hubs")["background"].clone();
+        let invite = node(&status, "settings_items", "copy_hub_invite");
+        if running && error.is_none() {
+            assert_eq!(toggle["background"], prominent);
+            assert_eq!(invite["background"], prominent);
+        } else {
+            assert_ne!(invite["background"], prominent);
+            if error.is_none() {
+                assert_ne!(toggle["background"], prominent);
+            }
+        }
         let warning = node(&status, "settings_items", "host_hub_error");
         if !running && error.is_none() {
-            render_png(&f, p, "settings", "r2_host_hub_not_running.png");
+            render_png(&f, p, "settings", "r3_host_hub_starting.png");
+        }
+        if error == Some("Address already in use") {
+            render_png(&f, p, "settings", "r3_host_hub_failed.png");
         }
         if !running || error.is_some() {
             assert_eq!(
@@ -2239,6 +2325,43 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             assert!(warning.is_null());
         }
     }
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"4292"}),
+    );
+    cfg["host_hub"]["enabled"] = json!(false);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let off = inspect(&f, p);
+    let toggle = node(&off, "settings_items", "toggle_host_hub");
+    assert_eq!(toggle["text"], "Share");
+    for dimension in ["x", "width"] {
+        assert_eq!(toggle[dimension], sharing_toggle[dimension]);
+    }
+    assert_eq!(
+        node(&off, "settings_items", "host_hub_error")["text"],
+        "Sharing is off — enable Share to accept connections"
+    );
+    let off_invite = node(&off, "settings_items", "copy_hub_invite");
+    assert_eq!(
+        off_invite["tooltip"],
+        "Enable sharing and apply the port before inviting other Macs"
+    );
+    assert_eq!(off_invite["background"], toggle["background"]);
+    render_png(&f, p, "settings", "r3_host_hub_off_with_draft.png");
+    cfg["host_hub"]["error"] = json!("Port already in use");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let off_error = inspect(&f, p);
+    assert_eq!(
+        node(&off_error, "settings_items", "toggle_host_hub")["text"],
+        "Share"
+    );
+    assert_eq!(
+        node(&off_error, "settings_items", "host_hub_error")["text"],
+        "Port already in use"
+    );
+    cfg["host_hub"]["error"] = Value::Null;
+    cfg["host_hub"]["enabled"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
     let s = inspect(&f, p);
     for (hub, trailing) in [("local", "toggle_hub:local"), ("work", "remove_hub:work")] {
         let card = node(&s, "settings_items", &format!("settings_hub:{hub}"));
@@ -3918,6 +4041,34 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
             .unwrap()
             .contains(op));
         assert!(node(&s, "settings_items", "settings_error_banner").is_null());
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|r| r["op"] == "query_directory" || r["op"] == "open_directory")
+            .unwrap();
+        f.send(p,json!({"op":"error","source_op":"query_directory","request_id":request["request_id"],"error":"Directory lookup failed"}));
+        assert!(
+            node(&inspect(&f, p), "directory_items", "directory_warning")["tooltip"]
+                .as_str()
+                .unwrap()
+                .contains(op),
+            "Action error takes precedence over query error"
+        );
+        f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[],"warnings":[]}));
+        assert!(
+            node(&inspect(&f, p), "directory_items", "directory_warning")["tooltip"]
+                .as_str()
+                .unwrap()
+                .contains(op),
+            "Passive Directory success must retain the action error"
+        );
+        control(&f, p, "dir_mode:directory");
+        assert_eq!(
+            node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+            true
+        );
+        control(&f, p, "dir_mode:activity");
     }
 }
 
@@ -5816,6 +5967,29 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         assert_eq!(status["tooltip"], "Message unavailable");
         assert_eq!(status["hidden"], false);
         l.pump();
+        assert_eq!(inspect(&f, l.ui)["clipboard"], "@alice");
+        let query = f
+            .frames(l.ui)
+            .into_iter()
+            .rev()
+            .find(|action| action["op"] == "query_directory" || action["op"] == "open_directory")
+            .unwrap();
+        f.send(l.ui,json!({"op":"directory","request_id":query["request_id"],"query":query["query"],"scope":query["scope"],"harness":query["harness"],"peers":[],"warnings":[]}));
+        let warning = node(&inspect(&f, l.ui), "directory_items", "directory_warning");
+        assert_eq!(warning["hidden"], false);
+        assert_eq!(warning["tooltip"], "Message unavailable");
+        l.control(&control_id);
+        let success = l.until(|s| s["clipboard"] == message.trim());
+        assert_eq!(
+            node(&success, "directory_items", "directory_warning")["hidden"],
+            true,
+            "Only the successful correlated retry settles the copy error"
+        );
+        assert_eq!(
+            node(&success, "directory_items", "directory_summary")["tooltip"],
+            ""
+        );
+        l.control(&format!("copy:{human}"));
         assert_eq!(inspect(&f, l.ui)["clipboard"], "@alice");
     }
     let mut state = f.action(json!({"op":"get_snapshot"})).1;

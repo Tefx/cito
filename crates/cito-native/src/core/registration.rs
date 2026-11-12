@@ -98,6 +98,16 @@ pub fn register_listener(
     register_locked(state, client, host_id, args, caller, true)
 }
 
+pub(super) fn distinct_human_about<'a>(about: &'a str, title: &str, user: &str) -> Option<&'a str> {
+    let about = about.trim();
+    (!about.is_empty()
+        && !about.eq_ignore_ascii_case("Human")
+        && !about.eq_ignore_ascii_case("Human receiver")
+        && !about.eq_ignore_ascii_case(title.trim())
+        && !about.eq_ignore_ascii_case(&format!("You (@{user})")))
+    .then_some(about)
+}
+
 pub fn register_automatic_human(
     state: &LocalState,
     client: &HubClient,
@@ -109,6 +119,7 @@ pub fn register_automatic_human(
         .registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+    let mut args = args.clone();
     if let Some(row) =
         local_node(state, client, "human", "default")?.filter(|row| row["status"] == "UNLISTENED")
     {
@@ -122,30 +133,38 @@ pub fn register_automatic_human(
             )?
             .is_empty();
         let channel = format!("{host_id}:human");
-        let resumed = if pending {
-            false
+        let remote = if pending {
+            None
         } else {
-            client
-                .kv_get(string(&row, "listener_id"))?
-                .is_some_and(|(remote, _)| {
-                    remote["human_paused"] != true
-                        && remote["state"] == "ACTIVE"
-                        && principal_ids_equal(
-                            string(&remote, "principal_id"),
-                            string(&client.identity, "principal_id"),
-                        )
-                        && remote["channels"].as_object().is_some_and(|channels| {
-                            channels
-                                .iter()
-                                .any(|(id, ch)| id != &channel && ch["state"] == "ACTIVE")
-                        })
-                })
+            client.kv_get(string(&row, "listener_id"))?
         };
+        let resumed = remote.as_ref().is_some_and(|(remote, _)| {
+            remote["human_paused"] != true
+                && remote["state"] == "ACTIVE"
+                && principal_ids_equal(
+                    string(&remote, "principal_id"),
+                    string(&client.identity, "principal_id"),
+                )
+                && remote["channels"].as_object().is_some_and(|channels| {
+                    channels
+                        .iter()
+                        .any(|(id, ch)| id != &channel && ch["state"] == "ACTIVE")
+                })
+        });
         if !resumed {
             return Err("BINDING_REQUIRED: Human enrollment was explicitly disabled".into());
         }
+        let user = string(&client.identity, "owner_user");
+        let about = distinct_human_about(string(&row, "about"), string(&row, "title"), user)
+            .or_else(|| {
+                remote.as_ref().and_then(|(remote, _)| {
+                    distinct_human_about(string(remote, "about"), string(remote, "title"), user)
+                })
+            })
+            .unwrap_or("Human receiver");
+        args["about"] = json!(about);
     }
-    register_locked(state, client, host_id, args, caller, false)
+    register_locked(state, client, host_id, &args, caller, false)
 }
 
 fn register_locked(
@@ -664,6 +683,10 @@ mod tests {
                     "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
                     &[json!("work"), json!(id)],
                 )?;
+                first.db.execute(
+                    "UPDATE local_listeners SET about=? WHERE hub=? AND listener_id=?",
+                    &[json!(" Release approvals "), json!("work"), json!(id)],
+                )?;
                 let recovered = register_automatic_human(
                     &first,
                     &client,
@@ -672,7 +695,8 @@ mod tests {
                     &caller,
                 )?;
                 assert_eq!(recovered["scope"], scope);
-                let first_resumed = first
+                assert_eq!(recovered["about"], "Release approvals");
+                let mut first_resumed = first
                     .listener("work", id)?
                     .ok_or("Missing automatically resumed Human")?;
                 assert_eq!(first_resumed["status"], "ACTIVE");
@@ -681,6 +705,35 @@ mod tests {
                     !first.pause_listener_for(&first_row)?,
                     "An old heartbeat cannot undo cross-host resume"
                 );
+                // Generic local metadata must not erase distinct metadata saved remotely.
+                for (local_about, remote_about, expected) in [
+                    (" \n", "Remote approvals", "Remote approvals"),
+                    ("You (@alice)", "Human", "Human receiver"),
+                ] {
+                    assert!(first.pause_listener_for(&first_resumed)?);
+                    first.db.execute(
+                        "UPDATE local_listeners SET about=? WHERE hub=? AND listener_id=?",
+                        &[json!(local_about), json!("work"), json!(id)],
+                    )?;
+                    let (mut remote, revision) = client.kv_get(id)?.ok_or("Missing metadata")?;
+                    remote["about"] = json!(remote_about);
+                    client.kv_save(id, &remote, Some(revision))?;
+                    let recovered = register_automatic_human(
+                        &first,
+                        &client,
+                        "first-host",
+                        &json!({"about":"Human receiver"}),
+                        &caller,
+                    )?;
+                    assert_eq!(recovered["about"], expected);
+                    assert_eq!(
+                        first.listener("work", id)?.ok_or("Missing saved about")?["about"],
+                        expected
+                    );
+                    // Keep the captured lease current for the next pause and sibling test.
+                    first_resumed = first.listener("work", id)?.ok_or("Missing resumed row")?;
+                    assert_eq!(first_resumed["scope"], scope);
+                }
                 let (mut remote, revision) = client.kv_get(id)?.ok_or("Missing active Human")?;
                 remote["channels"]["second-host:human"]["state"] = json!("UNLISTENED");
                 remote["channels"]["hub:fixture"]["state"] = json!("UNLISTENED");

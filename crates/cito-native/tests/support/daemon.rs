@@ -70,8 +70,8 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
         false
     );
-    // Re-enabling the mode clears agent pauses, enrolls immediately, and
-    // preserves the independent Human pause on the same Hub.
+    // Re-enabling requests fresh discovery before restoring agent enrollment,
+    // while preserving the independent Human pause on the same Hub.
     assert_eq!(
         f.action(
             json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
@@ -88,10 +88,9 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         f.rows("SELECT status FROM local_listeners WHERE harness='human'")[0]["status"],
         "UNLISTENED"
     );
-    assert_eq!(
-        f.rows("SELECT status FROM local_listeners WHERE harness='pi'")[0]["status"],
-        "ACTIVE"
-    );
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE harness=\'pi\'")[0]["status"] == "ACTIVE"
+    });
     assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
@@ -208,6 +207,38 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
             .any(|r| r["harness"] == "fixture" && r["session_id"] == "live")
     });
     assert_ne!(f.rows("SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0]["owner_token"], before["owner_token"], "A recovered endpoint needs a new local binding");
+    let recovered = f.rows(
+        "SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+    )[0]
+    .clone();
+    // The PID stays alive while the endpoint switches identities between discovery passes.
+    config["session_id"] = json!("replacement");
+    config["sessions"] = json!([{"harness":"fixture","session_id":"replacement","title":"New session","cwd":"/tmp","endpoint_pid":std::process::id()}]);
+    config["status"] = json!("switched");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        f.rows(
+            "SELECT status FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+        )[0]["status"]
+            == "UNLISTENED"
+    });
+    assert!(f.rows("SELECT updated_at FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0]["updated_at"].as_u64().unwrap()>0);
+    config["status"] = json!("alive");
+    fs::write(&options, config.to_string()).unwrap();
+    // Wait for the next confirmed discovery, not a fixed sleep or explicit cache refresh.
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "fixture" && r["session_id"] == "replacement")
+    });
+    let old = &f.rows("SELECT status,owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0];
+    assert_eq!(
+        old["owner_token"], recovered["owner_token"],
+        "No intermediate re-enrollment from the pre-revocation cache"
+    );
+    assert_eq!(old["status"], "UNLISTENED");
 }
 
 #[test]

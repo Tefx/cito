@@ -70,6 +70,10 @@ impl LocalState {
             if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "hub_url") {
                 c.execute("ALTER TABLE local_listeners ADD COLUMN hub_url TEXT", &[])?;
             }
+            // Additive V4 metadata fences cached enrollment after local revocation.
+            if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "updated_at") {
+                c.execute("ALTER TABLE local_listeners ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0", &[])?;
+            }
             // Opening another handle must never steal a live dispatch lease. Frozen
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
