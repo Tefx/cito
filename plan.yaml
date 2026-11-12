@@ -10096,7 +10096,7 @@ phases:
   - id: v37.impl
     name: V37 N1–N5 Network-Scoped Menu, Trusted Auto-Listen, Fast Codex Discovery
       & UI Polish
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §21 (N1–N5) while strictly enforcing §21.2
       test economy (update existing unit/UI/daemon assertions in place; do NOT add
       new heavy multi-process E2E test functions).
@@ -10112,6 +10112,46 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T14:42:07.991700Z'
+    done_at: '2026-11-12T15:22:52.649190+00:00'
+    evidence: "Artifact:\n- Commit: dab59024c74227522de16a51e488b7931a93bcf8 (19 files\
+      \ changed, 496 insertions(+), 179 deletions(-))\n- Candidate ref: refs/vectl/candidates/v37.impl\
+      \ -> dab59024c74227522de16a51e488b7931a93bcf8\n- Worktree cleanup: removed .vectl/worktrees/v37.impl\
+      \ and /tmp/cito-v37* scratch; free space 110Gi.\n\nDelivered (docs/DESIGN.md\
+      \ §21 N1–N5 & §21.2):\n1. N1 (Network-Scoped Management in cardMenu & Hiding\
+      \ Administratively Disabled Hubs):\n   - Operational `state.hubs` in `daemon.rs`\
+      \ includes only enabled Hubs (`self.slots`), while `settings.hubs` retains disabled\
+      \ Hubs for `Settings -> Hubs & Network`.\n   - `Settings -> Human Channels`\
+      \ filters `channelHubs` to enabled Hubs and falls back when `selectedChannelHub`\
+      \ is disabled; `settings_for_hub` queries `self.local` for `\"local\"` channel\
+      \ inventory even when `\"local\"` slot is disabled.\n   - `header_hub_strip`\
+      \ selects `effectiveTargetHub` for the entire `cardMenu` popover; Zone 1 `listeners`\
+      \ and Zone 2 `myRemote` filter to `effectiveTargetHub`; removed per-card `switch_hub:<scoped_id>`\
+      \ pills and duplicate `targetStrip` on `AVAILABLE SESSIONS` (aliasing `test_control`\
+      \ `target_hub:<name>` to `hub:<name>`).\n2. N2 (Zero-Friction Auto-Listen &\
+      \ Bounded Scrollable Active Session List):\n   - Persisted `auto_listen: bool`\
+      \ per Hub (`hubs.<name>.autoListen` in `config.json`), exposed `toggle_auto_listen`\
+      \ on `AVAILABLE SESSIONS` header emitting `set_auto_listen`, and auto-enrolled\
+      \ open live sessions (`endpoint_pid != nil`, `needs_reload != true`, `status\
+      \ != \"UNLISTENED\"`).\n   - Capped `activeRows` at 4 visible rows (`256pt`\
+      \ `active_scroll` `OverlayScrollView` when `activeRows.count > 4`).\n3. N3 (Fast\
+      \ Bounded Codex SQLite Discovery & Remote/CLI Process Detection):\n   - Added\
+      \ `LIMIT 32` to `discover_sessions` query in `plugins/codex/native.rs`, accepted\
+      \ `desktop_command(cmd) || matches_process(cmd)` in `desktop_running(req)`,\
+      \ and polled discovery up to `400ms` on `setup_apply` / `refresh_available`.\n\
+      4. N4 (Per-App Isolated setup_apply Staging & Daemon Startup Auto-Staging):\n\
+      \   - Added `ensure_single_plugin_staged` in `setup.rs` for isolated per-app\
+      \ `setup_apply` and auto-staged CLI shims/plugins on daemon startup.\n5. N5\
+      \ (Uniform Team/Self Geometry, Action-Verb Hub Buttons & Unread-Only Menu Bar\
+      \ Badge):\n   - Fixed `scopeBtn` width (`68pt`), updated `label.stringValue`\
+      \ before `setLeadingSymbol` with `6pt` spacing, changed Hub toggle buttons to\
+      \ `\"Disable\"` / `\"Enable\"`, and restricted menu bar numeric badge to `unreadCount\
+      \ > 0`.\n6. Updated existing tests in `crates/cito-native/tests/support/{daemon,plugins,ui}.rs`\
+      \ in place and refreshed `site/assets/screenshots/{menu-dark,settings-hubs-dark}.png`.\n\
+      \nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ cargo test --workspace -- --test-threads=2 -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      \nSpec link:\n- docs/DESIGN.md §21 (N1–N5 & §21.2)"
   - id: v37.review
     name: 'V37 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
