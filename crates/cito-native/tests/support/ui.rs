@@ -3269,6 +3269,19 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     });
     assert_eq!(node(&s, "items", "header_hub_strip")["radius"], 11);
     assert_eq!(node(&s, "items", "hub:personal")["border_width"], 0);
+    // A semantic track fill must follow the view's appearance without rebuilding.
+    for (appearance, dark) in [("dark", true), ("light", false), ("dark", true)] {
+        let snapshot = inspect_as(&f, p, Some(appearance));
+        let track = node(&snapshot, "items", "header_hub_strip");
+        assert_eq!(track["draws_background"], true);
+        let background = track["background"].clone();
+        let red = background[0].as_f64().unwrap();
+        assert!(
+            if dark { red > 0.9 } else { red < 0.1 },
+            "{appearance} Hub track: {background}"
+        );
+        assert!((background[3].as_f64().unwrap() - 0.06).abs() < 0.001);
+    }
     control(&f, p, "target_hub:personal");
     assert!(!node(&inspect(&f, p), "items", "available_empty_target").is_null());
     f.send(

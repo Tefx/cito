@@ -2251,8 +2251,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if hubs.count > 1 {
                 strip.wantsLayer = true
-                strip.layer?.backgroundColor = NSColor.labelColor.withAppearanceAlpha(0.06).cgColor
+                strip.backgroundColor = NSColor.labelColor.withAppearanceAlpha(0.06)
+                strip.drawsBackground = true
                 strip.layer?.cornerRadius = 11
+                strip.layer?.masksToBounds = true
             }
         }
         var activeRows: [(id: String, view: NSView)] = []
@@ -4732,7 +4734,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             // Resolve dynamic layer-backed fills in the same appearance as the text.
             if let control = view as? MenuControl { control.applyVisualState() }
             if let fill = view as? SurfaceView { fill.applyLayerColors() }
-            if let fill = view.layer?.backgroundColor.flatMap({ NSColor(cgColor: $0) }) {
+            let fill: NSColor?
+            if let scroll = view as? NSScrollView, scroll.drawsBackground {
+                fill = resolved(scroll.backgroundColor, in: view.effectiveAppearance)
+            } else {
+                fill = view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }
+            }
+            if let fill = fill {
                 surface = blended(resolved(fill, in: view.effectiveAppearance), over: base, opacity: opacity)
             }
             var contrast: CGFloat?
@@ -4877,13 +4885,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
                 "children": childViews.map { project($0, visible: visible, background: surface, opacity: opacity, enabled: enabled) }]
             result["contrast"] = contrast
-            result["background"] = components(view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) })
+            result["background"] = components(fill)
             result["border"] = components(view.layer?.borderColor.flatMap { NSColor(cgColor: $0) })
             result["border_width"] = view.layer?.borderWidth ?? 0
             if let image = view as? NSImageView {
                 view.effectiveAppearance.performAsCurrentDrawingAppearance { result["tint"] = components(image.contentTintColor) }
             }
-            if let scroll = view as? NSScrollView { result["scroller_style"] = ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle).rawValue }
+            if let scroll = view as? NSScrollView {
+                result["scroller_style"] = ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle).rawValue
+                result["draws_background"] = scroll.drawsBackground
+            }
             if let cell = view as? DirectoryPeerCellView { result["reuse_identifier"] = cell.identifier?.rawValue ?? "" }
             if let label = view as? NSTextField {
                 result["text"] = label is NSSecureTextField ? "••••" : label.stringValue
