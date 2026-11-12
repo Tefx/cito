@@ -9919,7 +9919,7 @@ phases:
 - id: v36
   name: 'V36 Stage 18: Multi-Hub Card & Directory Coalescing, Smart Home-Directory
     Naming, Inline/CLI/MCP Session Renaming & Complete CLI/MCP Surface Parity (S1–S4)'
-  status: pending
+  status: in_progress
   gate: All S1–S4 requirements in docs/DESIGN.md §20 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; convergent
     contract-and-simplicity review-fix loop reaches CLEAN + ZERO_NEW_ISSUES; cargo
@@ -9950,7 +9950,7 @@ phases:
   - id: v36.impl
     name: V36 S1–S4 Multi-Hub Coalescing, Smart Home Naming, Session Renaming & Complete
       CLI/MCP Parity
-    status: pending
+    status: claimed
     description: Implement docs/DESIGN.md §20 (S1–S4) while strictly enforcing §20.2
       test economy (update existing unit/UI/daemon/CLI assertions in place; do NOT
       add new heavy multi-process E2E test functions).
@@ -9967,6 +9967,8 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T09:33:44.514471Z'
   - id: v36.review
     name: 'V36 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
