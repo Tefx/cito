@@ -106,10 +106,13 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     let rightItems = trailing.filter { !$0.isHidden }
     for case let control as MenuControl in leftItems + rightItems where !control.label.isHidden
         && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.centerSymbolView }) {
-        control.frame.size.width = MenuControl.intrinsicWidth(control.label.stringValue,
+        let id = control.identifier?.rawValue ?? ""
+        // Address chips reserve room for copy feedback; other controls follow their current font.
+        let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") ? control.frame.width : 0
+        control.frame.size.width = max(reservedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
-            paddingX: control.identifier?.rawValue == "open_settings" ? 6 : (control.identifier?.rawValue == "open_uninstall_confirm" ? 12 : 11))
+            paddingX: id == "open_settings" ? 6 : (id == "open_uninstall_confirm" ? 12 : 11)))
         control.layoutContents()
     }
     var left = insetLeft

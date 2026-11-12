@@ -3235,6 +3235,37 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(s["count"], 1);
     assert!(!node(&s, "items", "session:work:repo-workabcdefgh").is_null());
     assert!(!node(&s, "items", "session:personal:repo-abcdefghijkl").is_null());
+
+    let mut human = listener();
+    human["hub"] = json!("local");
+    human["harness"] = json!("human");
+    human["session_id"] = json!("default");
+    human["listener_id"] = json!("human:default");
+    human["public_id"] = json!("human:default");
+    human["scoped_id"] = json!("local:human:default");
+    human["title"] = json!("Human");
+    human["user"] = json!("a");
+    human["display_address"] = json!("@a");
+    let mut short_addresses = state();
+    short_addresses["hubs"] =
+        json!([{"name":"local","status":"connected","auth_mode":"none","user":"a"}]);
+    short_addresses["listeners"] = json!([human]);
+    f.send(p, short_addresses);
+    let before = inspect(&f, p);
+    let id = "copy:local:human:default";
+    assert_eq!(node(&before, "items", id)["text"], "@a");
+    for appearance in ["light", "dark"] {
+        control(&f, p, id);
+        let copied = inspect_as(&f, p, Some(appearance));
+        assert_eq!(copied["clipboard"], "@a");
+        assert_eq!(node(&copied, "items", id)["text"], "✓ Copied");
+        assert_eq!(
+            node(&copied, "items", id)["width"],
+            node(&before, "items", id)["width"]
+        );
+        assert_eq!(copied["clipped_views"], json!([]));
+        assert_eq!(copied["truncated_labels"], json!([]));
+    }
 }
 #[test]
 fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
