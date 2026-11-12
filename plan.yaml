@@ -10067,7 +10067,7 @@ phases:
 - id: v37
   name: 'V37 Stage 19: Network-Scoped View Management, Trusted-Hub Auto-Listen, Fast
     Codex SQLite Discovery & UI Polish (N1–N5)'
-  status: in_progress
+  status: done
   gate: All N1–N5 requirements in docs/DESIGN.md §21 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10155,7 +10155,7 @@ phases:
   - id: v37.review
     name: 'V37 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
       the modified files (do NOT run multi-round review loops per user instruction),
       verify cargo test --workspace && cargo build --release, and push main to origin
@@ -10172,3 +10172,30 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T15:23:21.474906Z'
+    done_at: '2026-11-12T15:44:20.772530+00:00'
+    evidence: "Artifact:\n- Commit: c54abdaa65335c50cc1d57510dec0579ee813073 (13 files\
+      \ changed, 105 insertions(+), 45 deletions(-))\n- Candidate ref: refs/vectl/candidates/v37.review\
+      \ -> c54abdaa65335c50cc1d57510dec0579ee813073\n- Worktree cleanup: removed .vectl/worktrees/v37.review\
+      \ and /tmp/cito-v37* scratch; free space 109Gi.\n\nFast Single-Pass Contract-and-Simplicity\
+      \ Review & Fixes Applied:\n1. [CONTRACT / WIRE] Codex SQL Metadata Projection\
+      \ & Eligibility Predicate Pushdown (`plugins/codex/native.rs:180–235`, `crates/cito-native/tests/support/plugins.rs:550–615`,\
+      \ `docs/DESIGN.md:1875–1882`):\n   - Replaced `SELECT *` in `rows(req)` with\
+      \ explicit metadata column projection (`id, cwd, name, title, git_branch, git_origin_url,\
+      \ recency_at_ms, updated_at, archived, thread_source, source`) and pushed `id\
+      \ IS NOT NULL AND id != ''`, `cwd IS NOT NULL AND cwd != ''`, `(thread_source\
+      \ IS NULL OR thread_source = 'user')`, and `(source IS NULL OR source NOT LIKE\
+      \ '{\"subagent\"%')` into the SQL `WHERE` clause before `LIMIT 32`, preventing\
+      \ large transcript blob serialization and ensuring 32+ newer subagent rows never\
+      \ shadow user sessions.\n2. [CONTRACT / WIRE] Header Hub Drawer Toggle (`src/macos/cito-ui.swift:2125–2140`,\
+      \ `crates/cito-native/tests/support/ui.rs:3270–3295`):\n   - Preserved drawer\
+      \ toggle when clicking an already-selected disconnected/error Hub pill in `header_hub_strip`\
+      \ while opening the drawer when switching to a different disconnected/error\
+      \ Hub.\n3. [SIMPLICITY / TRIM] Removed unused `count` parameter from `formatStatusButton`\
+      \ (`src/macos/cito-ui.swift:89`) and simplified single-network Zone 1 loop in\
+      \ `rebuild()`. Visually verified `site/assets/screenshots/{menu-dark,settings-hubs-dark}.png`.\n\
+      \nVerification:\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace\
+      \ -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 binary/distribution\
+      \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
+      \ created).\n\nSpec link:\n- docs/DESIGN.md §21 (N1–N5 & §21.2)"
