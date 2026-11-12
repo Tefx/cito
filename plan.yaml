@@ -9791,3 +9791,21 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+  - id: v35.review
+    name: 'V35 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
+      (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: 'Run a convergent contract-and-simplicity review-and-fix loop across
+      the modified files and regenerated Light/Dark screenshots until Contract & Wiring:
+      CLEAN and Simplicity & Economy: ZERO_NEW_ISSUES converge, verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v35.impl
+    agent: rust-senior
