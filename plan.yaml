@@ -10234,7 +10234,7 @@ phases:
   - id: v38.impl
     name: V38 U1–U5 Unified Human Card Height, Recessed Segmented Controls, Stateless
       Auto-Listen, Personal-Hub Scope Suppression & SQLite Busy-Timeout
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §22 (U1–U5) while strictly enforcing §22.2
       test economy (update existing unit/UI/daemon/plugin assertions in place; do
       NOT add new heavy multi-process E2E test functions).
@@ -10251,6 +10251,49 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T16:35:30.153468Z'
+    done_at: '2026-11-12T17:02:19.808470+00:00'
+    evidence: "Artifact:\n- Commit: 5faefdbd0d941b342f8d68a10466a096a658ebbe (20 files\
+      \ changed, 343 insertions(+), 67 deletions(-))\n- Candidate ref: refs/vectl/candidates/v38.impl\
+      \ -> 5faefdbd0d941b342f8d68a10466a096a658ebbe\n- Worktree cleanup: removed .vectl/worktrees/v38.impl\
+      \ and /tmp/cito-v38* scratch; free space 100Gi.\n\nDelivered (docs/DESIGN.md\
+      \ §22 U1–U5 & §22.2):\n1. U1 (Fixed-Height You Card & Automatic Human Enrollment\
+      \ Across All Enabled Hubs):\n   - Unified `human_paused_card` to `rowHeight\
+      \ = 64, cardHeight = 58`, badge at `(10, 14, 28, 28)`, title at `y = 32`, subtitle\
+      \ `\"Notifications paused\"` at `y = 10`, and `\"Resume\"` button at `y = 18`\
+      \ (`0pt` vertical shift).\n   - Auto-enrolled `human` across all enabled non-OIDC\
+      \ Hubs in `reload_slots` / `register_automatic_human` unless explicitly `UNLISTENED`.\n\
+      2. U2 (Recessed Segmented Tracks for Network & Filter Switchers):\n   - Styled\
+      \ `header_hub_strip` (`hubs.count > 1`) with a recessed background (`labelColor\
+      \ @ 0.06`, `cornerRadius = 11`, `maxX = 368`) and `.subtleHeader` unselected\
+      \ Hub pills.\n   - Styled inactive filter pills (`dir_scope:*`, `dir_harness:*`,\
+      \ `act_filter:*`) in `directoryFacetBar` as `.subtleHeader` while keeping `Read\
+      \ All` and `Clear` as `.neutral`.\n3. U3 (Stateless Auto-Listen Mode & Consistent\
+      \ Pause/Resume Vocabulary):\n   - `set_auto_listen(enabled: true)` clears agent\
+      \ `UNLISTENED` markers on that Hub and immediately enrolls eligible open sessions;\
+      \ manually stopping an agent session while `Auto-Listen` is ON disables `auto_listen`\
+      \ on that Hub and unlistens the session.\n   - Added inline `Auto-Listen` captions\
+      \ (`\"Auto-Listen is on — run /reload below to finish connecting\"`, `\"Auto-Listen\
+      \ is on — open sessions connect automatically\"`), seeded `autoCollapsedRecentGroups`\
+      \ once for `recent`-only groups when `auto_listen == true`, labeled `human_paused_card`\
+      \ button `\"Resume\"`, and set `stop:<scoped_id>` tooltip to `\"Pause listening\
+      \ for this session\"`.\n4. U4 (Smart Personal-Hub Scope Suppression & Visibility\
+      \ Guidance):\n   - Suppressed `scope:<scoped_id>` (`Self` / `Team`) unless `listenerHub?.auth_mode\
+      \ == \"oidc\" || hasOtherUsers`, defaulted non-OIDC (`none` / `token`) Hub registrations\
+      \ and `auto_listen` enrollment to `\"workspace\"` scope, added explanatory tooltips\
+      \ on `Self` / `Team`, and added the Hub visibility caption in `add_hub_form`.\n\
+      5. U5 (SQLite busy_timeout(1000) & Error-Preserving Codex Discovery):\n   -\
+      \ Added `sqlite3_busy_timeout(db, 1000)` in `sqlite_rows`, propagated SQLite\
+      \ errors from `try_rows(req)` in `discover_sessions` so `SessionActivity` retains\
+      \ cached Codex sessions on lock contention, avoided spawning `git` subprocesses\
+      \ in `row_caller` when `git_branch` or `git_origin_url` is present in the SQLite\
+      \ row, and included `thread_source = ''` in the SQL `WHERE` predicate.\n6. Updated\
+      \ existing tests in `crates/cito-native/tests/support/{daemon,plugins,ui}.rs`\
+      \ in place and refreshed `site/assets/screenshots/{menu-dark,directory-dark,activity-dark}.png`.\n\
+      \nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=1 cargo test --workspace -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      \nSpec link:\n- docs/DESIGN.md §22 (U1–U5 & §22.2)"
   - id: v38.review
     name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
