@@ -9589,3 +9589,32 @@ phases:
       Spec link:
 
       - docs/DESIGN.md §17 (P1–P4 & §17.2)'
+- id: v34
+  name: 'V34 Stage 16: Unified macOS Control Taxonomy, Intrinsic Layout Engine, Chinese
+    IME Support, Distinct Directory/Activity Surfaces & Self-Invite Guard (Q1–Q6)'
+  status: pending
+  gate: All Q1–Q6 requirements in docs/DESIGN.md §18 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; website
+    screenshots in site/assets/screenshots/*.png are refreshed; simple single-pass
+    contract-and-simplicity review & fix completes; cargo test --workspace && cargo
+    build --release pass with 0 warnings; changes are pushed to origin/main (NO release
+    tag).
+  context: 'Implement docs/DESIGN.md §18 (Q1–Q6 & §18.2): (1) Q1 unified 5-class MenuControl
+    taxonomy (resting pill border/fill on .destructiveHover, new .destructive red
+    pill for modal confirm, Disconnect or Uninstall Cito modal alignment); (2) Q2
+    systemic intrinsic sizing engine (MenuControl.layoutContents centering [icon +
+    5pt + text], makePillBadge optical centering via cellSize.height, dynamic form
+    labelW/inputX eliminating the 90pt Bot Token gap, and anti-verbosity subtitle
+    removal on Mac Desktop Banner, Share This Mac as a Hub, Telegram, and Local Hub
+    edit form); (3) Q3 native macOS Chinese IME support on KeyPanel (remove .nonactivatingPanel
+    on settingsPanel/directoryPanel, activate NSTextInputContext, and defer Up/Down/Return/Escape
+    to NSTextView when editing text); (4) Q4 visual distinction between Directory
+    (online dot on badge) and Activity (60pt rows, 3pt unread left accent bar, relative
+    timestamp, full-width message preview, and per-message delete_activity:<signal_id>
+    via trash icon & Backspace); (5) Q5 2-line 44pt AVAILABLE SESSIONS candidate rows
+    (58pt when needsReload); (6) Q6 self-invite loop guard in paste_hub_invite and
+    browser-friendly HTML response on GET / of HubServer. Per user mandate: run ONLY
+    a simple single-pass contract-and-simplicity review & fix (do NOT over-review
+    or loop) and do NOT publish a release.'
+  depends_on:
+  - v33
