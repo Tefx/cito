@@ -10092,3 +10092,21 @@ phases:
     & fix (no multi-round loops) and push to origin/main (NO release tag).'
   depends_on:
   - v36
+  steps:
+  - id: v37.impl
+    name: V37 N1–N5 Network-Scoped Menu, Trusted Auto-Listen, Fast Codex Discovery
+      & UI Polish
+    status: pending
+    description: Implement docs/DESIGN.md §21 (N1–N5) while strictly enforcing §21.2
+      test economy (update existing unit/UI/daemon assertions in place; do NOT add
+      new heavy multi-process E2E test functions).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
