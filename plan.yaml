@@ -10199,3 +10199,34 @@ phases:
       \ -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 binary/distribution\
       \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
       \ created).\n\nSpec link:\n- docs/DESIGN.md §21 (N1–N5 & §21.2)"
+- id: v38
+  name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
+    Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
+    (U1–U5)'
+  status: pending
+  gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
+    single-pass contract-and-simplicity review & fix completes; cargo test --workspace
+    && cargo build --release pass with 0 warnings; changes are pushed to origin/main
+    (NO release tag).
+  context: 'Implement docs/DESIGN.md §22 (U1–U5 & §22.2): (1) U1 unify human_paused_card
+    to 58pt cardHeight / 64pt rowHeight (0pt jump on network switch or Pause/Resume)
+    with ''Resume'' label, and auto-enroll human across all enabled non-OIDC Hubs
+    in register_automatic_human; (2) U2 macOS HIG recessed track for header_hub_strip
+    with .subtleHeader borderless inactive Hub pills and .subtleHeader borderless
+    inactive filter pills in directoryFacetBar; (3) U3 stateless Auto-Listen mode
+    (enabling Auto-Listen clears UNLISTENED markers and connects eligible open sessions;
+    manually clicking stop:<id> on an agent session while Auto-Listen is On turns
+    auto_listen off and unlistens that session; show clear status feedback when only
+    needs_reload or recent threads remain, and auto-collapse recent-only groups once
+    when auto_listen is On); (4) U4 hide scope:<id> (Team/Self) on local and on none/token
+    Hubs when all known peers/listeners belong to the current user (showing it only
+    on oidc Hubs or when user != targetUser exists), add rich explanatory tooltips
+    on scope:<id>, and add visibility caption in add_hub_form; (5) U5 add sqlite3_busy_timeout(db,
+    1000) in plugin_support.rs, propagate SQLite errors in plugins/codex/native.rs
+    discover_sessions so SessionActivity retains cached sessions on transient lock
+    contention, avoid spawning git subprocesses in row_caller when git_branch/git_origin_url
+    are present, and allow thread_source = '''' in SQL WHERE. Run fast single-pass
+    contract-and-simplicity review & fix and push to origin/main (NO release tag).'
+  depends_on:
+  - v37
