@@ -1041,7 +1041,9 @@ server.serve_forever()
 #[test]
 fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let f = Fixture::new(
+        json!({"default_hub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":false}}}),
+    );
     let meta = f.provider("delivered_unconfirmed");
     let ui = f.recording_ui();
     let daemon = f.daemon(&[
@@ -1110,7 +1112,17 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         });
     }
     enroll(&f, meta);
+    let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    f.db("state.sqlite").execute(
+        "INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','purge-history',?,1,?,'bob','laptop','Sender','Retain until purge','2030-01-01T00:00:00.000Z',4102444800000,'STORED_PASSIVE')",
+        &[row["listener_id"].clone(), row["binding_generation"].clone()],
+    ).unwrap();
     assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    assert!(!f
+        .rows("SELECT * FROM local_signals WHERE signal_id='purge-history'")
+        .is_empty());
+    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert!(config["hubs"].get("work").is_some());
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness!='human' AND status='ACTIVE'")
         .is_empty());
@@ -1133,6 +1145,24 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         host["packages"].is_null() || host["packages"] == json!([]),
         "{host}"
     );
+    assert_eq!(
+        f.action(json!({"op":"setup_disconnect_all","purge_data":true}))
+            .0,
+        200
+    );
+    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert_eq!(config["defaultHub"], "local");
+    assert!(config.get("default_hub").is_none());
+    assert_eq!(config["hubs"], json!({}));
+    assert!(f.rows("SELECT * FROM local_signals").is_empty());
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness!='human'")
+        .is_empty());
+    assert!(!f
+        .rows("SELECT * FROM local_listeners WHERE harness='human'")
+        .is_empty());
+    assert!(!f.exited(daemon));
+    assert!(cito_native::plugins::pid_alive(ui_pid));
 }
 #[test]
 fn lifecycle_sign_in_enables_disabled_hub_before_bounded_discovery_failure() {

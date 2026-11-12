@@ -109,6 +109,14 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     f.send(p, json!({"op":"test_tile_scroll_views"}));
     let s = inspect(&f, p);
     assert_eq!(
+        s["key_panels"],
+        json!([{
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true
+        }, {
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true
+        }])
+    );
+    assert_eq!(
         node(&s, "directory_items", "directory_scroll")["scroller_style"],
         1
     );
@@ -1531,10 +1539,10 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
                 node(&s, "directory_items", "activity_row:sig_other")["height"],
                 60
             );
-            assert_eq!(
-                node(&s, "directory_items", "activity_row:sig_agent")["height"],
-                108
-            );
+            let height = node(&s, "directory_items", "activity_row:sig_agent")["height"]
+                .as_f64()
+                .unwrap();
+            assert!(height > 60.0 && height < 108.0, "{height}");
         }
         if harness == "human" {
             assert_eq!(s["wake_action_text"], "Click to reply in Cito ↩");
@@ -1743,6 +1751,33 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_save","channel_id":"channel","hub":save["hub"],"request_id":save["request_id"],"settings":cfg}));
     let saved = inspect(&f, p);
     assert_eq!(
+        node(&saved, "settings_items", "stratum_hub_title:channel")["text"],
+        "Bot Gateway"
+    );
+    assert_eq!(
+        node(&saved, "settings_items", "stratum_hub_status:channel")["hidden"],
+        true
+    );
+    for id in [
+        "edit_hub_service",
+        "clear_channel_service",
+        "test_channel",
+        "toggle_channel",
+        "edit_user_channel",
+        "unpair_channel",
+    ] {
+        let button = node(&saved, "settings_items", &format!("{id}:channel"));
+        assert!(
+            button["label_width"].as_f64().unwrap()
+                >= button["label_measured_width"].as_f64().unwrap(),
+            "{id}: {button}"
+        );
+    }
+    assert_eq!(
+        node(&saved, "settings_items", "clear_channel_service:channel")["foreground"],
+        node(&saved, "settings_items", "edit_hub_service:channel")["foreground"]
+    );
+    assert_eq!(
         node(&saved, "settings_items", "channel_summary:channel")["text"],
         "✓ Saved"
     );
@@ -1809,10 +1844,34 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "settings_tab:hubs");
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "settings_items", "toggle_hub:local")["x"], 396);
-    assert_eq!(node(&s, "settings_items", "edit_hub:local")["x"], 338);
-    assert_eq!(node(&s, "settings_items", "remove_hub:work")["x"], 396);
-    assert_eq!(node(&s, "settings_items", "edit_hub:work")["x"], 260);
+    for (hub, trailing) in [("local", "toggle_hub:local"), ("work", "remove_hub:work")] {
+        let card = node(&s, "settings_items", &format!("settings_hub:{hub}"));
+        let button = node(&s, "settings_items", trailing);
+        let edit = node(&s, "settings_items", &format!("edit_hub:{hub}"));
+        assert_eq!(
+            button["x"].as_f64().unwrap() + button["width"].as_f64().unwrap(),
+            card["width"].as_f64().unwrap() - 12.0
+        );
+        let toggle = node(&s, "settings_items", &format!("toggle_hub:{hub}"));
+        assert_eq!(
+            edit["x"].as_f64().unwrap() + edit["width"].as_f64().unwrap() + 6.0,
+            toggle["x"].as_f64().unwrap()
+        );
+        if hub == "work" {
+            assert_eq!(
+                toggle["x"].as_f64().unwrap() + toggle["width"].as_f64().unwrap() + 6.0,
+                button["x"].as_f64().unwrap()
+            );
+        }
+    }
+    let host = node(&s, "settings_items", "host_hub_card");
+    let toggle = node(&s, "settings_items", "toggle_host_hub");
+    assert_eq!(
+        host["height"].as_f64().unwrap()
+            - toggle["y"].as_f64().unwrap()
+            - toggle["height"].as_f64().unwrap(),
+        10.0
+    );
     let login = node(&s, "settings_items", "login_hub:work");
     let edit = node(&s, "settings_items", "edit_hub:work");
     assert_eq!(
@@ -2744,12 +2803,27 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     );
     control(&f, p, "cancel_add_hub");
     control(&f, p, "open_uninstall_confirm");
+    let modal = inspect(&f, p);
+    assert!(node(&modal, "settings_items", "confirm_uninstall_all").is_null());
+    assert_eq!(
+        node(&modal, "settings_items", "confirm_disconnect_all")["text"],
+        "Disconnect All"
+    );
     control(&f, p, "confirm_disconnect_all");
     wait(|| {
         f.frames(p)
             .iter()
-            .any(|v| v["op"] == "setup_disconnect_all")
+            .any(|v| v["op"] == "setup_disconnect_all" && v["purge_data"] == false)
     });
+    control(&f, p, "open_uninstall_confirm");
+    control(&f, p, "uninstall_purge_data");
+    control(&f, p, "confirm_disconnect_all");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "setup_disconnect_all" && v["purge_data"] == true)
+    });
+    assert!(!f.frames(p).iter().any(|v| v["op"] == "setup_uninstall_all"));
     assert_eq!(inspect(&f, p)["settings_open"], true);
     control(&f, p, "close_settings");
     control(&f, p, "login:personal");
@@ -2839,13 +2913,7 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     assert_eq!(accent["width"], 3);
     assert_eq!(accent["x"], 4);
     assert_eq!(accent["height"], 44);
-    assert_eq!(
-        children
-            .iter()
-            .find(|n| n["id"] == "online_presence_dot")
-            .unwrap()["hidden"],
-        true
-    );
+    assert!(!children.iter().any(|n| n["id"] == "online_presence_dot"));
     assert!(
         node(&s, "directory_items", "act_title:personal:sig_unread")["text"]
             .as_str()
@@ -2857,7 +2925,7 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
         492
     );
     let delete = node(&s, "directory_items", "delete_activity:personal:sig_unread");
-    assert_eq!(delete["symbol"], "trash");
+    assert_eq!(delete["symbol"], "xmark");
     assert_eq!(delete["width"], 24);
     assert_eq!(delete["tooltip"], "Delete message");
     control(&f, p, "delete_activity:personal:sig_unread");
@@ -2944,7 +3012,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut frame = state();
-    frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":"/tmp/work","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
+    frame["available"]=json!((0..5).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":format!("Candidate {i}"),"cwd":if i == 1 { "~/Documents/A-very-long-ancestor/Projects/service" } else if i == 2 { "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name" } else { "/tmp/work" },"branch":"main","endpoint_pid":4242,"listening_hubs":["personal"]})).collect::<Vec<_>>());
     f.send(p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(node(&s, "items", "available_scroll")["height"], 176);
@@ -2956,7 +3024,17 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(path["width"], 268);
     assert_eq!(title["y"], 23);
     assert_eq!(path["y"], 6);
-    assert_eq!(path["text"], "/tmp/work");
+    assert_eq!(path["text"], "/tmp/work · main");
+    assert_eq!(
+        node(&s, "items", "candidate_cwd:fixture:candidate-1")["text"],
+        "~/…/Projects/service · main"
+    );
+    let leaf = node(&s, "items", "candidate_cwd:fixture:candidate-2");
+    assert_eq!(leaf["text"], "~/…/project-directory-with-long-name · main");
+    assert_eq!(
+        leaf["tooltip"],
+        "~/Documents/Projects/VeryLongParentDirectory/project-directory-with-long-name · main"
+    );
     assert_eq!(s["available_count"], 5);
     assert_eq!(node(&s, "items", "target_hub:work")["text"], "work");
     control(&f, p, "listen:fixture:candidate-0");
@@ -3793,6 +3871,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(node(&s, "items", "plugin_icon:pi")["tint"], json!([]));
     assert_eq!(node(&s, "items", "plugin_icon:pi")["x"], 0);
     assert_eq!(node(&s, "items", "plugin_icon:pi")["width"], 28);
+    let copy = node(&s, "items", "copy:local:alice-76e846d115ce642f");
+    assert!(nodes(&copy["children"])
+        .iter()
+        .any(|n| n["x"] == 0 && n["width"] == 12));
     assert_eq!(
         node(&s, "items", "plugin_symbol:human")["tint"],
         json!([1, 1, 1, 1])
@@ -3823,6 +3905,17 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     expanded["held_reason"] = json!("stale_generation");
     let activity = json!([short, expanded]);
     control(&f, p, "open_directory");
+    let seeded = inspect(&f, p);
+    assert!(!node(
+        &seeded,
+        "directory_items",
+        "dir_peer:local:alice-76e846d115ce642f"
+    )
+    .is_null());
+    assert_eq!(
+        node(&seeded, "directory_items", "directory_empty_state")["hidden"],
+        true
+    );
     send_fixture(
         &f,
         p,
@@ -3854,7 +3947,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(s["directory_selected_id"], "local:short");
     assert_eq!(
         node(&s, "directory_items", "activity_row:local:short")["height"],
-        108
+        60
     );
     assert_eq!(
         node(&s, "directory_items", "plugin_icon:pi")["tint"],
@@ -3889,9 +3982,13 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     let s = inspect(&f, p);
     assert_eq!(s["directory_selected_id"], "local:expanded");
+    let height = node(&s, "directory_items", "activity_row:local:expanded")["height"]
+        .as_f64()
+        .unwrap();
+    assert!(height > 60.0 && height < 108.0, "{height}");
     assert_eq!(
-        node(&s, "directory_items", "activity_row:local:expanded")["height"],
-        108
+        node(&s, "directory_items", "act_msg:local:expanded")["height"],
+        height - 38.0
     );
     capture("directory", "activity_expanded");
     control(&f, p, "reply_activity:local:expanded");

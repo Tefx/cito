@@ -3035,6 +3035,21 @@ impl DaemonService {
                     &self.config.home_dir,
                     &self.plugins,
                 )?;
+                if action["purge_data"] == true {
+                    self.mutate_config(|v| {
+                        v["defaultHub"] = json!("local");
+                        if let Some(object) = v.as_object_mut() {
+                            object.remove("default_hub");
+                        }
+                        v["hubs"] = json!({});
+                        Ok(())
+                    })?;
+                    self.state.db.transaction(|db| {
+                        db.execute("DELETE FROM local_signals", &[])?;
+                        db.execute("DELETE FROM local_listeners WHERE harness != 'human'", &[])?;
+                        Ok(())
+                    })?;
+                }
                 if let Some(activity) = self.session_activity.as_mut() {
                     activity.refresh_discovery();
                 }
