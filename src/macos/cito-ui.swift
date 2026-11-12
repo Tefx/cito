@@ -773,6 +773,7 @@ struct Listener: Decodable, Equatable {
     let about: String?, repo: String?, branch: String?
     let display_address: String
     let user: String?, owner_user: String?
+    let host_name: String?
     let channels: [String]?
 }
 struct Candidate: Decodable, Equatable {
@@ -4249,9 +4250,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         serverDirectoryQuery = nil
         directoryAllPeers = listeners.map { listener in
             let user = listener.user ?? listener.owner_user ?? hubs.first(where: { $0.name == listener.hub })?.user ?? ""
+            let host = (listener.host_name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return RemotePeer(hub: listener.hub, listener_id: listener.listener_id,
                 public_id: listener.public_id, scoped_id: listener.scoped_id,
-                user: user, host_id: "", host_name: "This Mac", harness: listener.harness,
+                user: user, host_id: "", host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
                 display_address: listener.display_address, title: listener.title, about: listener.about ?? "",
                 scope: listener.scope, last_seen_at: "", cwd: listener.cwd, repo: listener.repo,
                 branch: listener.branch, is_self_principal: true, channels: listener.channels)

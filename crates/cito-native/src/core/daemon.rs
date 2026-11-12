@@ -3036,6 +3036,14 @@ impl DaemonService {
                     &self.plugins,
                 )?;
                 if action["purge_data"] == true {
+                    let inventory = self.local.rpc("human_channels_list", &json!({}), None)?;
+                    for channel in inventory["channels"].as_array().into_iter().flatten() {
+                        self.local.rpc(
+                            "human_channels_configure",
+                            &json!({"plugin_id":channel["id"],"reset_hub":true,"reset_user":false}),
+                            None,
+                        )?;
+                    }
                     self.mutate_config(|v| {
                         v["defaultHub"] = json!("local");
                         if let Some(object) = v.as_object_mut() {

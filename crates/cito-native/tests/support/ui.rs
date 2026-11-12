@@ -3851,6 +3851,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     agent["harness"] = json!("pi");
     agent["display_address"] = json!("alice/pi#abcd");
     agent["title"] = json!("Release orchestration");
+    agent["host_name"] = json!("mac-studio.local");
     agent["cwd"] = json!("~/Projects/acme/service");
     let mut human = listener();
     human["hub"] = json!("local");
@@ -3862,6 +3863,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     human["public_id"] = json!("alice-76e846d115ce642f");
     human["scoped_id"] = json!("local:alice-76e846d115ce642f");
     human["display_address"] = json!("@alice");
+    human["host_name"] = json!("mac-studio.local");
     frame["listeners"] = json!([agent, human]);
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);
@@ -3906,6 +3908,14 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let activity = json!([short, expanded]);
     control(&f, p, "open_directory");
     let seeded = inspect(&f, p);
+    assert_eq!(
+        node(
+            &seeded,
+            "directory_items",
+            "dir_meta:local:alice-76e846d115ce642f"
+        )["text"],
+        "Human · mac-studio"
+    );
     assert!(!node(
         &seeded,
         "directory_items",

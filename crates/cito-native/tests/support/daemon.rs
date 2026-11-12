@@ -1045,6 +1045,18 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         json!({"default_hub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":false}}}),
     );
     let meta = f.provider("delivered_unconfirmed");
+    let channel = f.state.join("plugins/channel");
+    fs::create_dir_all(&channel).unwrap();
+    fs::write(
+        channel.join("plugin.json"),
+        json!({
+            "id":"channel","kind":"human-channel","scope":"hub","displayName":"Messenger",
+            "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+            "fields":[{"key":"credential","scope":"hub","type":"secret","required":true}]
+        })
+        .to_string(),
+    )
+    .unwrap();
     let ui = f.recording_ui();
     let daemon = f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -1117,7 +1129,23 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         "INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','purge-history',?,1,?,'bob','laptop','Sender','Retain until purge','2030-01-01T00:00:00.000Z',4102444800000,'STORED_PASSIVE')",
         &[row["listener_id"].clone(), row["binding_generation"].clone()],
     ).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"save_hub_service","hub":"local","channel_id":"channel","values":{"credential":"saved-gateway"}})).0,
+        200
+    );
+    let service_config = || {
+        let rows = f
+            .db("hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        serde_json::from_str::<Value>(rows[0]["config_json"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(service_config()["credential"], "saved-gateway");
     assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    assert_eq!(service_config()["credential"], "saved-gateway");
     assert!(!f
         .rows("SELECT * FROM local_signals WHERE signal_id='purge-history'")
         .is_empty());
@@ -1154,6 +1182,7 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert_eq!(config["defaultHub"], "local");
     assert!(config.get("default_hub").is_none());
     assert_eq!(config["hubs"], json!({}));
+    assert_eq!(service_config(), json!({}));
     assert!(f.rows("SELECT * FROM local_signals").is_empty());
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness!='human'")
