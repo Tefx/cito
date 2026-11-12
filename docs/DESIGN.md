@@ -1884,6 +1884,73 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place; do **NOT** add new heavy multi-process E2E test functions.
 - Run a **fast single-pass `contract-and-simplicity` review & fix** (no multi-round loops), verify `cargo test --workspace && cargo build --release`, and push to `origin/main` without creating a release tag so the user can immediately install and use it on both Macs.
 
+---
+
+## 22. Stage 20: First-Principles Unified Session Model, Recessed Segmented Controls, Hub-Level Visibility Policy & SQLite Busy-Timeout Resilience (`U1`–`U5`)
+
+### 22.1 Binding Contract (`MUST`)
+
+#### 1. `U1` — Fixed-Height `You (@tefx)` Card & Automatic Human Enrollment Across All Enabled Hubs (`src/macos/cito-ui.swift:2225–2270`, `crates/cito-native/src/core/daemon.rs:790, 1450`, Questions 1 & 3)
+- **Basis**: Active `You (@tefx)` rendered with `rowHeight = 64, cardHeight = 58`, whereas paused `You (@tefx)` (`human_paused_card`) rendered with `rowHeight = 56, cardHeight = 50`, causing an `8pt` height jump when switching networks. Furthermore, `register_automatic_human` only auto-enrolled `human` on `default_hub` (or left `local` un-enrolled), making `local` display `"Notifications paused"` even though the user never paused it.
+- **Contract**:
+  1. **Unified `58pt` Card Height**: Set `human_paused_card` (`cito-ui.swift:2232`) to the exact same outer geometry (`rowHeight = 64, cardHeight = 58`, badge at `x = 10, y = 14, width = 28, height = 28`, title at `y = 32`, subtitle `"Notifications paused"` at `y = 10`, and `[ Resume ]` button at `y = 18`) as the active `You (@tefx)` card so switching networks or toggling `Pause` ↔ `Resume` produces **0pt vertical shift**!
+  2. **Automatic Human Enrollment on All Enabled Non-OIDC Hubs (`daemon.rs`)**: In `register_automatic_human` / `reload_slots`, auto-enroll the `human` listener across **every enabled Hub** (unless that Hub's `human` row was explicitly set to `UNLISTENED` by the user or requires unauthenticated OIDC login), so switching between `tefx-mbp-personal` and `local` shows `You (@tefx)` active on both networks by default.
+
+#### 2. `U2` — True macOS HIG Recessed Segmented Tracks for Network & Filter Switchers (`src/macos/cito-ui.swift:2125–2185, 3915–3975`, Question 2)
+- **Basis**: In macOS HIG, mutually exclusive view/network switchers and scope-bar filter pills must be visually distinct from momentary push buttons (`.neutral`). Drawing unselected Hub pills (`[ ● local ]`) and unselected `Directory` filter pills (`My Macs`, `Pi`, `Codex`) with `.neutral` button borders made them look like action buttons.
+- **Contract (`src/macos/cito-ui.swift`)**:
+  1. **Recessed Segmented Track for `header_hub_strip` in `cardMenu`**:
+     - When `hubs.count > 1`, style `header_hub_strip` (`height: 22`, right-aligned at `maxX = 368` so `strip_anchor == []`) with a recessed background (`layer?.backgroundColor = NSColor.labelColor.withAppearanceAlpha(0.06).cgColor`, `layer?.cornerRadius = 11`).
+     - Inside `header_hub_strip`, style the selected Hub pill (`hub.name == effectiveTargetHub`) as `.prominent` (when connected and error-free) or `.neutral` (when showing an error/disconnected state), and style **unselected** Hub pills (`hub.name != effectiveTargetHub`) as **`.subtleHeader` (borderless transparent at rest, subtle hover fill)** so the switcher is unmistakably a macOS Segmented Control!
+  2. **Scope-Bar Styling for `Directory` / `Activity` Filter Pills (`updateDirectoryFacetStyles`, `cito-ui.swift:3955`)**:
+     - For filter pills in `directoryFacetBar` (`dir_scope:*`, `dir_harness:*`, `act_filter:*`), style the active filter pill as `.prominent` and **unselected filter pills as `.subtleHeader` (borderless at rest)**, while keeping right-hand action buttons (`✓ Read All`, `🗑 Clear`) as `.neutral` bordered push buttons.
+
+#### 3. `U3` — Unified Action Vocabulary (`Pause` / `Resume` / `Listen`) & Deterministic `Auto-Listen` Feedback (`src/macos/cito-ui.swift:2350–2660`, `crates/cito-native/src/core/daemon.rs`, Questions 3, 5, 6, 7)
+- **Basis**:
+  - Clicking `Auto-Listen` when open sessions required `/reload` (`needs_reload == true`) or when only historical SQLite threads (`endpoint_pid == nil`) existed produced zero visible feedback (`Question 5`).
+  - Remembering hidden `UNLISTENED` state per session while `Auto-Listen: On` is active created invisible magic that users cannot see or remember after a few clicks (`Question 6`).
+  - `You (@tefx)` used `Pause` / `Resume` while Agent sessions used `×` / `+ Listen` (`Question 3`).
+- **Contract**:
+  1. **Eliminate Hidden Per-Session Exception Memory Under `Auto-Listen` (`Question 6`)**:
+     - Make `Auto-Listen` (`auto_listen`) a clean, stateless mode switch on the Hub:
+       - **When `Auto-Listen` is toggled ON (`set_auto_listen` with `enabled: true`)**: Clear any prior `UNLISTENED` markers for agent sessions on that Hub and immediately enroll all eligible open sessions (`endpoint_pid != nil && needs_reload != true`).
+       - **When a user manually clicks `Pause` / `×` (`stop:<scoped_id>`) on an agent session while `Auto-Listen` is ON**: Automatically turn `auto_listen = false` on that Hub (switching to manual selection mode) and unlisten that session—so there is **never** a hidden contradiction where `Auto-Listen: On` is lit while an open session sits un-enrolled below!
+       - **Visible Inline Feedback When `Auto-Listen: On` (`Question 5`)**:
+         - When `Auto-Listen: On` is active on `effectiveTargetHub`:
+           - If `visibleAvailable` contains sessions that need `/reload` (`needs_reload == true`), display a clear status caption in `AVAILABLE SESSIONS`: `"Auto-Listen is on — run /reload below to finish connecting"`.
+           - When all open sessions are already connected and only historical `recent` threads (`endpoint_pid == nil`) remain: seed `collapsedGroups` once (via `autoCollapsedRecentGroups: Set<String>`) for `recent`-only harnesses when `auto_listen == true` so historical threads collapse to a single **`▸ Codex · 8 recent`** header row by default (while still expanding normally when the user clicks `toggle_group:<harness>`, `Question 7`)!
+           - When `visibleAvailable.isEmpty`, show `"Auto-Listen is on — open sessions connect automatically"` (`available_empty_target`).
+  2. **Consistent `Pause` / `Resume` Labeling (`Question 3`)**:
+     - On `human_paused_card`, label the button **`"Resume"`** (without a `+` prefix, matching `"Pause"`).
+     - On active agent session cards, set `stop:<scoped_id>` tooltip to `"Pause listening for this session"`.
+
+#### 4. `U4` — Intelligent Suppression of `Team / Self` on Personal Networks & Self-Explanatory Hub-Level Visibility (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, Questions 8 & 9)
+- **Basis**: On `local` or a personal Hub (`tefx-mbp-personal` where only `@tefx`'s own devices are connected, or `auth_mode != "oidc"` with no other users), showing `[ 🔒 Self ]` / `[ 👥 Team ]` on every card is meaningless noise (`Question 8`), and even when shown, `"Self"` vs `"Team"` had zero explanation in the UI (`Question 9`).
+- **Contract**:
+  1. **Smart Multi-User Detection (`showScopeToggle`, `Question 8`)**:
+     - In `cito-ui.swift:2345`, set `let hasOtherUsers = directoryAllPeers.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user }) || listeners.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user })` and **`let showScopeToggle = listenerHub?.auth_mode == "oidc" || hasOtherUsers`**.
+     - As a result, on `local` and on personal `none` / `token` Hubs where all connected devices belong to `@tefx`, `[ 🔒 Self ]` / `[ 👥 Team ]` is **completely hidden** on both `You (@tefx)` and agent session cards! Moreover, on `none` / `token` Hubs (`local` and Trusted Network / Personal Token Hubs), default session scope in `daemon.rs` to `"workspace"` so all of the user's Macs and sessions on that personal Hub can discover and message each other freely without needing to toggle `Self` → `Team`!
+     - When `showScopeToggle == true` (on OIDC team Hubs or multi-user Hubs), keep the `68pt` uniform `Self` / `Team` button with self-explanatory tooltips:
+       - `Self`: `"Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(listener.hub)' can message this session. Click to share with Team."`
+       - `Team`: `"Visibility: Team — anyone connected to '\(listener.hub)' can discover and message this session. Click to restrict to Only Me."`
+  2. **Explicit Default Visibility Explanation in `Settings → Hubs & Network` (`Question 9`)**:
+     - In the `Add / Edit Hub` form (`add_hub_form`, for non-`local` Hubs), display a clear caption explaining Hub visibility: `"Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team."`
+
+#### 5. `U5` — SQLite `busy_timeout(1000)` & Error-Preserving Codex Discovery (`crates/cito-native/src/plugin_support.rs`, `plugins/codex/native.rs`, Question 4)
+- **Basis**: `sqlite_rows()` (`plugin_support.rs:688`) opened `~/.codex/state_5.sqlite` without `sqlite3_busy_timeout`. Whenever Codex wrote to `state_5.sqlite` during a poll, `sqlite3_exec` returned `SQLITE_BUSY` (`rc = 5`), `plugins/codex/native.rs` converted the error into `vec![]` via `.unwrap_or_default()`, and `SessionActivity::reap_discovery` overwrote `provider.cached` with `[]`—causing `Codex · 8 recent` to vanish from `cardMenu`! In addition, `row_caller` spawned `git` subprocesses for every row even when `git_branch` and `git_origin_url` were already present in SQLite.
+- **Contract**:
+  1. In `crates/cito-native/src/plugin_support.rs` (`sqlite_rows`), declare `fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;` and call **`sqlite3_busy_timeout(db, 1000)`** immediately after `sqlite3_open_v2` succeeds.
+  2. In `plugins/codex/native.rs`:
+     - Change `try_rows(req: &Value) -> Result<Vec<Value>>` to **propagate** `sqlite_rows` errors (`?`) instead of swallowing them with `.unwrap_or_default()`, and call `try_rows(req)?` inside `"discover_sessions"` so if SQLite is still locked after `1000ms`, `cito-plugin-codex` returns `Err(...)` and `SessionActivity::reap_discovery` **retains the previous cached Codex sessions** instead of wiping them to `[]`!
+     - In `row_caller(req, r)` (`plugins/codex/native.rs:277`), when `r` comes from the `threads` SQLite table (`r.get("git_branch").is_some() || r.get("git_origin_url").is_some()`), construct the session JSON directly from `r["id"]`, `r["cwd"]`, `r["name"]`/`r["title"]`, `r["git_branch"]`, and `r["git_origin_url"]` **without spawning `git` subprocesses** when `git_branch` or `git_origin_url` is already populated in the row!
+     - Also include `thread_source = ''` in the SQL predicate (`(thread_source IS NULL OR thread_source = '' OR thread_source = 'user')`) so threads with an empty-string `thread_source` are never excluded.
+
+### 22.2 Verification, Fast Single-Pass Review & Dual-Mac Installation Policy (`MUST`)
+
+- Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs,plugins.rs}` in place; do **NOT** add new heavy multi-process E2E test functions.
+- Run a **fast single-pass `contract-and-simplicity` review & fix**, verify `cargo test --workspace && cargo build --release`, push to `origin/main` (without creating a release tag), and install on both Macs.
+
+
 
 
 
