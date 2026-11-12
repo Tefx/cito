@@ -109,7 +109,8 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
         let id = control.identifier?.rawValue ?? ""
         // Address chips reserve copy feedback space; scope toggles keep a uniform width.
         let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
-        control.frame.size.width = max(reservedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
+        let pairedWidth = MenuControl.toggleWidth(id, font: control.label.font ?? .systemFont(ofSize:11,weight:.medium))
+        control.frame.size.width = max(reservedWidth, pairedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
             leadingSymbol:control.leadingSymbolView?.isHidden == false ? control.symbolName : nil,
             paddingX: id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") ? 3 : (id == "open_settings" ? 6 : (id.hasPrefix("scope:") ? 9 : (id == "open_uninstall_confirm" ? 12 : 11)))))
@@ -300,10 +301,11 @@ func nodeDisplayTitle(_ title: String, harness: String, user: String, about: Str
 }
 func presentationError(_ raw: String) -> String {
     var message = raw.replacingOccurrences(of: "^([A-Z0-9_]+:\\s*)+", with: "", options: .regularExpression)
+        .replacingOccurrences(of: "\\s*\\(os error [0-9]+\\)$", with: "", options: .regularExpression)
     if message.hasPrefix("CITO_NATS_URL") { return "Enter a valid Hub URL (http://ip:4291 or https://host)." }
     let bindPrefix = "Cannot bind host hub listener: "
     if message.hasPrefix(bindPrefix) {
-        let reason = String(message.dropFirst(bindPrefix.count)).replacingOccurrences(of:" \\(os error [0-9]+\\)$",with:"",options:.regularExpression)
+        let reason = String(message.dropFirst(bindPrefix.count))
         return "Cannot start sharing: " + reason
     }
     for (token, copy) in [("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode"), (" (http://127.0.0.1 is allowed for tests)", "")] { message = message.replacingOccurrences(of: token, with: copy) }
@@ -495,6 +497,17 @@ final class MenuControl: NSControl {
     static func intrinsicWidth(_ title: String, font: NSFont = .systemFont(ofSize: 11, weight: .medium),
                                leadingSymbol: String? = nil, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat {
         max(minWidth, ceil(measureTextWidth(title, font: font)) + paddingX * 2 + (leadingSymbol == nil ? 0 : 17))
+    }
+    static func toggleWidth(_ id: String, font: NSFont = .systemFont(ofSize:11,weight:.medium)) -> CGFloat {
+        let states: [(String,String?)]
+        let padding: CGFloat
+        if id.hasPrefix("scope:") { states = [("Self","lock.fill"),("Team","person.2.fill")]; padding = 9 }
+        else if id == "toggle_auto_listen" { states = [("Auto-Listen",nil),("Auto-Listen: On",nil)]; padding = 11 }
+        else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)]; padding = 11 }
+        else if id == "toggle_desktop_banner" { states = [("● Enabled",nil),("Disabled",nil)]; padding = 11 }
+        else if id == "toggle_host_hub" { states = [("● Sharing",nil),("Off",nil)]; padding = 11 }
+        else { return 0 }
+        return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:padding) }.max() ?? 0
     }
     func layoutContents() {
         let font = label.font ?? .systemFont(ofSize: 11)
@@ -1151,6 +1164,7 @@ final class DirectoryPeerCellView: NSTableCellView {
     }
 
     func configureActivity(with item: ActivityItem, selected: Bool, harnesses: [String: HarnessMeta], onCopy: @escaping (MenuControl) -> Void, onDelete: @escaping () -> Void, onReply: @escaping () -> Void) {
+        let keepCopyFeedback = activityItem?.hub == item.hub && activityItem?.signal_id == item.signal_id && copyControl.feedbackTimer?.isValid == true
         activityItem = item
         inspectionId = "activity_row:\(item.signal_id)"
         isSelectedRow = selected
@@ -1185,19 +1199,24 @@ final class DirectoryPeerCellView: NSTableCellView {
         msgControl.identifier = NSUserInterfaceItemIdentifier("reply_activity:\(item.signal_id)")
         msgControl.pressed = canReply ? onReply : nil
         copyControl.isHidden = false
-        copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
-        copyControl.restingTitle = nil
+        if !keepCopyFeedback {
+            copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
+            copyControl.restingTitle = nil
+            copyControl.label.stringValue = "Copy"
+        }
         copyControl.style = .neutral
         copyControl.frame = NSRect(x:copyX,y:rowHeight-30,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
+        copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
         copyControl.label.font = copyFont
-        copyControl.label.stringValue = "Copy"
         copyControl.setAccessibilityLabel("Copy message")
         copyControl.toolTip = "Copy message"
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_activity_msg:\(item.signal_id)")
         copyControl.pressed = { [weak copyControl] in if let c = copyControl { onCopy(c) } }
         copyControl.applyVisualState()
-        let held = ["stale_generation":" · Held (session reloaded)","driver_unavailable":" · Held (app unavailable)"][item.held_reason ?? ""] ?? ""
+        let held = ["stale_generation":" · Held (session reloaded)","driver_unavailable":" · Held (app unavailable)",
+            "session_switched":" · Held (session changed)","unlistened":" · Held (listening paused)",
+            "unlistened_before_dispatch":" · Held (listening paused)","fenced_before_dispatch":" · Held (connection changed)"][item.held_reason ?? ""] ?? ""
         line1TitleLabel.stringValue = "@\(item.from_user) → " + (item.target_harness == "human" ? "You" : item.target_title) + held + " · " + relativeTime(item.created_at)
         line1TitleLabel.font = .systemFont(ofSize:12.5,weight:item.unread ? .semibold : .medium)
         line1TitleLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
@@ -1210,7 +1229,8 @@ final class DirectoryPeerCellView: NSTableCellView {
         line2MetaLabel.lineBreakMode = expanded ? .byWordWrapping : .byTruncatingTail
         line2MetaLabel.font = .systemFont(ofSize:12)
         line2MetaLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
-        line2MetaLabel.frame = NSRect(x:52,y:8,width:492,height:expanded ? rowHeight - 38 : 18)
+        let messageHeight = expanded ? rowHeight - 42 : 18
+        line2MetaLabel.frame = NSRect(x:52,y:rowHeight - 34 - messageHeight,width:492,height:messageHeight)
         msgControl.layoutContents(); copyControl.layoutContents()
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("act_msg:\(item.signal_id)")
     }
@@ -1270,7 +1290,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var composerDraftIdempotencyKey = UUID().uuidString
     struct PendingMessageCopy {
         let requestId: String
-        weak var control: MenuControl?
+        let hub: String
+        let signalId: String
         var buffer = ""
         var nextPart = 0
     }
@@ -1863,7 +1884,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard var pending = pendingMessageCopy, frame.request_id == pending.requestId else { return }
             if let message = frame.message, frame.part == pending.nextPart, frame.error == nil, frame.ok != false {
                 pending.buffer += message; pending.nextPart += 1
-                if frame.complete != false { copyText(pending.buffer, control:pending.control) }
+                if frame.complete != false {
+                    let index = activityFilteredItems.firstIndex { $0.hub == pending.hub && $0.signal_id == pending.signalId }
+                    let cell = index.flatMap { directoryTableView?.view(atColumn:0,row:$0,makeIfNecessary:false) as? DirectoryPeerCellView }
+                    copyText(pending.buffer, control:cell?.copyControl)
+                }
                 else { pendingMessageCopy = pending }
             }
             else { showMessageCopyError(frame.error ?? "Message retrieval failed.") }
@@ -1972,6 +1997,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             serverActivityQuery = frame.activity_query ?? ""
             unreadCount = nextUnread
             activityAllItems = nextActivity
+            let directoryMembershipChanged = h != hubs || l != listeners
             let nextHarnesses = frame.harnesses ?? harnesses
             let harnessesChanged = nextHarnesses != harnesses
             if harnessesChanged { harnesses = nextHarnesses }
@@ -2000,6 +2026,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         directoryTableView?.reloadData()
                     }
                 }
+                if directoryVisible && directoryMembershipChanged { queryDirectory() }
                 if settingsChanged && settingsPanel != nil {
                     rebuildSettingsPanel()
                 }
@@ -2090,13 +2117,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         menu.removeAllItems()
         func host(_ view: NSView, id: String) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
-            view.appearance = testAppearance
             let item = NSMenuItem()
             if view is NSScrollView {
                 // Menu roots use the same unflipped coordinate space as their host.
                 let root = NSView(frame:NSRect(origin:.zero,size:view.frame.size))
+                root.appearance = testAppearance
                 root.addSubview(view); item.view = root
-            } else { item.view = view }
+            } else { view.appearance = testAppearance; item.view = view }
             menu.addItem(item); return item
         }
         let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
@@ -2271,10 +2298,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
             card.addSubview(makeHarnessBadge(NSRect(x: 12, y: 15, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
-            let title = textLabel("You (@\(targetUser))", NSRect(x: 48, y: 32, width: 220, height: 16), size: 12.5, weight: .semibold)
+            let title = textLabel("You (@\(targetUser))", NSRect(x: 48, y: 32, width: 220, height: 18), size: 13, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
-            card.addSubview(textLabel("Notifications paused", NSRect(x: 48, y: 10, width: 200, height: 14), size: 9.5, color: CitoPalette.secondaryText))
+            card.addSubview(textLabel("Notifications paused", NSRect(x: 48, y: 8, width: 200, height: 16), size: 11, color: CitoPalette.secondaryText))
             let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume"), y: 18, width: MenuControl.intrinsicWidth("Resume"), height: 22), radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
@@ -2526,7 +2553,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 size: 10, weight: .semibold, color: CitoPalette.secondaryText))
             let autoListen = hubs.first(where: { $0.name == targetHub })?.auto_listen ?? false
             let autoTitle = autoListen ? "Auto-Listen: On" : "Auto-Listen"
-            let autoWidth = MenuControl.intrinsicWidth(autoTitle)
+            let autoWidth = MenuControl.toggleWidth("toggle_auto_listen")
             let auto = MenuControl(autoTitle, frame: NSRect(x: 368 - autoWidth, y: 2, width: autoWidth, height: 18), radius: 9)
             auto.identifier = NSUserInterfaceItemIdentifier("toggle_auto_listen")
             auto.style = autoListen ? .prominent : .neutral
@@ -2537,9 +2564,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let visibleAvailable = hubs.count > 1 && !targetHub.isEmpty
                 ? available.filter { !($0.listening_hubs ?? []).contains(targetHub) }
                 : available
-            if visibleAvailable.isEmpty {
+            if visibleAvailable.isEmpty && listeners.contains(where: { $0.harness != "human" }) {
                 let emptyTarget = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 28))
-                let label = textLabel(autoListen ? "Auto-Listen is on — open sessions connect automatically" : (listeners.contains { $0.harness != "human" } ? "All sessions listening on \(targetHub)" : "No open agent sessions"),
+                let label = textLabel(autoListen ? "Auto-Listen is on — open sessions connect automatically" : "All sessions listening on \(targetHub)",
                     NSRect(x: 24, y: 6, width: 332, height: 16), size: 11.5, weight: .regular, color: CitoPalette.secondaryText)
                 label.lineBreakMode = .byTruncatingMiddle; label.toolTip = label.stringValue
                 emptyTarget.addSubview(label)
@@ -2615,9 +2642,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         let branch = (c.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
                         let candidateTitle = nodeDisplayTitle(c.title, harness: c.harness, user: targetUser, harnessName: visual.name, customTitle: c.custom_title == true)
-                        let info = textLabel(candidateTitle, NSRect(x:24,y:rowHeight-21,width:268,height:16),size:12,weight:.medium,color:.labelColor)
+                        let info = textLabel(candidateTitle, NSRect(x:32,y:rowHeight-21,width:260,height:16),size:12,weight:.medium,color:.labelColor)
                         info.lineBreakMode = .byTruncatingTail
-                        let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix),NSRect(x:24,y:needsReload ? 21 : 6,width:268,height:14),size:10.5,color:CitoPalette.secondaryText)
+                        let location = textLabel(compactSessionPath(shortCwd, branchSuffix: branchSuffix, maxWidth:260),NSRect(x:32,y:needsReload ? 21 : 6,width:260,height:14),size:10.5,color:CitoPalette.secondaryText)
                         location.lineBreakMode = .byTruncatingMiddle
                         location.toolTip = "\(shortCwd)\(branchSuffix)"
                         location.identifier = NSUserInterfaceItemIdentifier("candidate_cwd:\(c.harness):\(c.session_id)")
@@ -2626,7 +2653,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         info.identifier=NSUserInterfaceItemIdentifier("candidate_title:\(c.harness):\(c.session_id)")
                         row.addSubview(info)
                         if needsReload {
-                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:24,y:5,width:268,height:14),size:10,color:CitoPalette.warningText)
+                            let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:32,y:5,width:260,height:14),size:10,color:CitoPalette.warningText)
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
                             let reload=MenuControl("/reload",frame:NSRect(x:298,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
@@ -2901,7 +2928,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             MenuControl.intrinsicWidth($0.0, leadingSymbol:$0.1, paddingX:12)
         }
         let tabsWidth = tabWidths.reduce(0,+) + 12
-        let tabsTrack = roundedView(NSRect(x:62+floor((400-tabsWidth)/2),y:10,width:tabsWidth,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.08))
+        let tabsTrack = roundedView(NSRect(x:62+floor((400-tabsWidth)/2),y:10,width:tabsWidth,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
+        tabsTrack.identifier = NSUserInterfaceItemIdentifier("settings_tab_track")
         header.addSubview(tabsTrack)
         let appsTab = MenuControl("Agent Apps", frame: NSRect(x: 2, y: 2, width: tabWidths[0], height: 24), leadingSymbol: "square.grid.2x2", radius: 7)
         appsTab.identifier = NSUserInterfaceItemIdentifier("settings_tab:apps")
@@ -3394,7 +3422,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let selectedEndpoint = (selectedLan ? hostHub.lan_url : hostHub.tailscale_url) ?? hostHub.endpoint_url
         let selectedInvite = (selectedLan ? hostHub.lan_invite_command : hostHub.tailscale_invite_command) ?? hostHub.invite_command
         if hasAddressChoice {
-            let addressTrack = roundedView(NSRect(x:14,y:76,width:0,height:26),radius:7,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.08))
+            let addressTrack = roundedView(NSRect(x:14,y:76,width:0,height:26),radius:7,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
+            addressTrack.identifier = NSUserInterfaceItemIdentifier("host_hub_addr_track")
             var addressPills: [NSView] = []
             for (mode,title) in [("tailscale","Tailscale"),("lan","Local IP")] {
                 let pill = MenuControl(title,frame:NSRect(x:0,y:78,width:80,height:22))
@@ -3486,7 +3515,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
         if addHubFormOpen {
             let editingLocalHub = editingExistingHub && editingOriginalHub == "local"
-            let localErrorHeight: CGFloat = editingLocalHub && addHubError != nil ? 28 : 0
+            let localErrorHeight: CGFloat = editingLocalHub && addHubError != nil ? 20 : 0
             let formHeight: CGFloat = editingLocalHub ? 124 + localErrorHeight : 252
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
@@ -3507,7 +3536,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14))
                 let authOptions = [("none","Trusted Network"),("token","Shared Token"),("oidc","Team Sign-In")]
                 let authTrack = roundedView(NSRect(x:68,y:118,width:398,height:28),radius:7,
-                    color:.labelColor.withAppearanceAlpha(0.05))
+                    color:.labelColor.withAppearanceAlpha(0.06))
                 authTrack.identifier = NSUserInterfaceItemIdentifier("settings_hub_auth_track")
                 var authPills: [NSView] = []
                 for (mode,label) in authOptions {
@@ -3550,7 +3579,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 form.addSubview(visibility)
             }
             if let error=addHubError {
-                let label=textLabel(presentationError(error),NSRect(x:14,y:editingLocalHub ? 76 : 38,width:452,height:15),size:10,color:CitoPalette.dangerText)
+                let label=textLabel(presentationError(error),NSRect(x:14,y:editingLocalHub ? 74 : 38,width:452,height:15),size:10,color:CitoPalette.dangerText)
                 label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=label.stringValue
                 label.lineBreakMode = .byTruncatingMiddle; form.addSubview(label)
             }
@@ -3843,7 +3872,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         // Top Search Bar (560 × 46 pt, y: 394)
         let searchBar = NSView(frame: NSRect(x: 0, y: 394, width: 560, height: 46))
         searchBar.identifier = NSUserInterfaceItemIdentifier("directory_search_bar")
-        let modeTrack = roundedView(NSRect(x:14,y:9,width:174,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.05),border:.labelColor.withAppearanceAlpha(0.08))
+        let modeTrack = roundedView(NSRect(x:14,y:9,width:174,height:28),radius:8,color:.labelColor.withAppearanceAlpha(0.06),border:.labelColor.withAppearanceAlpha(0.08))
         modeTrack.identifier = NSUserInterfaceItemIdentifier("directory_mode_track")
         searchBar.addSubview(modeTrack)
 
@@ -3893,12 +3922,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let facetSeparator = roundedView(NSRect(x: 132, y: 9, width: 1, height: 14), radius: 0, color: .separatorColor)
         facetSeparator.identifier = NSUserInterfaceItemIdentifier("directory_facet_separator")
         facetBar.addSubview(facetSeparator)
+        let scopeTrack = roundedView(NSRect(x:16,y:5,width:110,height:22),radius:11,color:.labelColor.withAppearanceAlpha(0.06))
+        scopeTrack.identifier = NSUserInterfaceItemIdentifier("directory_scope_track")
+        facetBar.addSubview(scopeTrack)
         let scopePills: [(String, String, CGFloat, CGFloat)] = [
             ("dir_scope:all", "All", 16, 38),
             ("dir_scope:mine", "My Macs", 58, 68)
         ]
         for (id, title, x, w) in scopePills {
-            let pill = MenuControl(title, frame: NSRect(x: x, y: 5, width: w, height: 22), radius: 11)
+            let pill = MenuControl(title, frame: NSRect(x: x-16, y: 0, width: w, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier(id)
             pill.label.font = .systemFont(ofSize: 11, weight: .medium)
             let scopeVal = id == "dir_scope:mine" ? "mine" : "all"
@@ -3909,7 +3941,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
                 self.queryDirectory()
             }
-            facetBar.addSubview(pill)
+            scopeTrack.addSubview(pill)
             directoryFacetControls[id] = pill
         }
         let allHarnessesPill = MenuControl("All Apps", frame: NSRect(x: 138, y: 5, width: 68, height: 22), radius: 11)
@@ -3922,16 +3954,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
             self.queryDirectory()
         }
-        facetBar.addSubview(allHarnessesPill)
         directoryFacetControls["dir_harness:all"] = allHarnessesPill
 
+        let activityTrack = roundedView(NSRect(x:16,y:5,width:222,height:22),radius:11,color:.labelColor.withAppearanceAlpha(0.06))
+        activityTrack.identifier = NSUserInterfaceItemIdentifier("activity_filter_track")
+        activityTrack.isHidden = true
+        facetBar.addSubview(activityTrack)
         let actPills: [(String, String, String, CGFloat, CGFloat)] = [
             ("act_filter:me", "me", "For Me", 16, 64),
             ("act_filter:all", "all", "All Activity", 84, 86),
             ("act_filter:unread", "unread", "Unread", 174, 64)
         ]
         for (id, filterVal, title, x, w) in actPills {
-            let pill = MenuControl(title, frame: NSRect(x: x, y: 5, width: w, height: 22), radius: 11)
+            let pill = MenuControl(title, frame: NSRect(x: x-16, y: 0, width: w, height: 22), radius: 11)
             pill.identifier = NSUserInterfaceItemIdentifier(id)
             pill.label.font = .systemFont(ofSize: 11, weight: .medium)
             pill.isHidden = true
@@ -3942,7 +3977,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 self.updateDirectoryFacetStyles()
                 self.applyActivityFilter()
             }
-            facetBar.addSubview(pill)
+            activityTrack.addSubview(pill)
             directoryFacetControls[id] = pill
         }
         let markReadBtn = MenuControl("✓ Read All", frame: NSRect(x: 390, y: 5, width: 88, height: 22), radius: 11)
@@ -3952,6 +3987,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         markReadBtn.pressed = { [weak self] in
             guard let self = self else { return }
             self.unreadCount = 0
+            self.activityUnreadCount = 0
+            self.serverActivityFilter = nil
             self.activityAllItems = self.activityAllItems.map { item in
                 ActivityItem(
                     hub: item.hub, signal_id: item.signal_id, listener_id: item.listener_id,
@@ -3967,6 +4004,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.updateDirectoryModePills()
             self.applyActivityFilter()
             self.emit(["op": "ack_signals", "ack_all": true])
+            self.queryDirectory()
         }
         facetBar.addSubview(markReadBtn)
         directoryFacetControls["activity_mark_all_read"] = markReadBtn
@@ -4134,6 +4172,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         directoryComposerBar?.isHidden = false
         updateDirectoryShortcuts()
         directoryScrollView?.frame = NSRect(x: 0, y: 90, width: 560, height: 272)
+        directoryScrollView?.layoutSubtreeIfNeeded()
+        if let table = directoryTableView, directorySelectedIndex < table.numberOfRows { table.scrollRowToVisible(directorySelectedIndex) }
         if !headless, let window = directoryPanel, let field = composerInputField {
             window.makeFirstResponder(field)
         }
@@ -4207,7 +4247,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
 
         let pillFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        var harnessPills: [NSView] = []
+        var harnessPills: [NSView] = directoryFacetControls["dir_harness:all"].map { [$0] } ?? []
         for harness in ordered {
             let visual = resolveHarnessVisual(harness, harnesses: map)
             let title = ordered.count <= 3 ? visual.name.replacingOccurrences(of:" (Experimental)",with:"") : harness
@@ -4224,10 +4264,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             harnessPills.append(pill); directoryFacetControls[id] = pill
         }
-        let strip = mountPillStrip(in: facetBar, frame: NSRect(x: 210, y: 5, width: 334, height: 22),
+        let strip = mountPillStrip(in: facetBar, frame: NSRect(x: 138, y: 5, width: 406, height: 22),
                                   id: "directory_harness_scroll", pills: harnessPills) {
             $0.identifier?.rawValue == "dir_harness:\(directoryHarnessFilter)"
         }
+        strip.wantsLayer = true
+        strip.backgroundColor = .labelColor.withAppearanceAlpha(0.06)
+        strip.drawsBackground = true
+        strip.layer?.cornerRadius = 11
+        strip.layer?.masksToBounds = true
         directoryDynamicHarnessViews.append(strip)
         updateDirectoryFacetStyles()
     }
@@ -4235,6 +4280,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func updateDirectoryFacetStyles() {
         let isActivity = directoryMode == "activity"
         directoryFacetBar?.subviews.first { $0.identifier?.rawValue == "directory_facet_separator" }?.isHidden = isActivity
+        directoryFacetBar?.subviews.first { $0.identifier?.rawValue == "directory_scope_track" }?.isHidden = isActivity
+        directoryFacetBar?.subviews.first { $0.identifier?.rawValue == "activity_filter_track" }?.isHidden = !isActivity
         for v in directoryDynamicHarnessViews { v.isHidden = isActivity }
         for (id, pill) in directoryFacetControls {
             if id.hasPrefix("act_filter:") {
@@ -4284,7 +4331,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         } else if activityFilter=="unread" && (!activityAllItems.isEmpty || activityTotal > 0) {
             title="All caught up"; subtitle="You have no unread messages."
             id="act_empty_show_all"; label="Show All Activity"
-            action={ [weak self] in self?.activityFilter="all"; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter(); self?.queryDirectory() }
+            action={ [weak self] in self?.activityFilter="all"; self?.activityUnreadCount=0; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter(); self?.queryDirectory() }
         } else {
             title="No recent message activity"; subtitle="Messages sent between your sessions and channels will appear here."
             id="act_empty_open_channels"; label="Configure Human Channels…"
@@ -4299,6 +4346,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         root.addSubview(box)
     }
     func applyActivityFilter() {
+        let selected = activityFilteredItems.indices.contains(directorySelectedIndex) ? activityFilteredItems[directorySelectedIndex] : nil
         let q = directoryQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let serverMatches = serverActivityFilter == activityFilter && serverActivityQuery == directoryQuery
         activityFilteredItems = activityAllItems.filter { item in
@@ -4312,7 +4360,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             return true
         }
-        directorySelectedIndex = activityFilteredItems.isEmpty ? 0 : min(max(0, directorySelectedIndex), activityFilteredItems.count - 1)
+        directorySelectedIndex = selected.flatMap { previous in
+            activityFilteredItems.firstIndex { $0.hub == previous.hub && $0.signal_id == previous.signal_id }
+        } ?? (activityFilteredItems.isEmpty ? 0 : min(max(0, directorySelectedIndex), activityFilteredItems.count - 1))
         updateDirectoryShortcuts()
         updateDirectoryEmptyState()
         let count = serverMatches ? max(activityTotal, activityFilteredItems.count) : activityFilteredItems.count
@@ -4560,7 +4610,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
         if item.message_truncated != true { copyText(item.message,control:control); return }
         let request = UUID().uuidString
-        pendingMessageCopy = PendingMessageCopy(requestId:request,control:control)
+        pendingMessageCopy = PendingMessageCopy(requestId:request,hub:item.hub,signalId:item.signal_id)
         emit(["op":"copy_activity_message","request_id":request,"hub":item.hub,"signal_id":item.signal_id])
     }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
@@ -4746,8 +4796,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if let control = view as? MenuControl { control.applyVisualState() }
             if let fill = view as? SurfaceView { fill.applyLayerColors() }
             let fill: NSColor?
-            if let scroll = view as? NSScrollView, scroll.drawsBackground {
-                fill = resolved(scroll.backgroundColor, in: view.effectiveAppearance)
+            if let scroll = view as? NSScrollView {
+                fill = scroll.drawsBackground ? resolved(scroll.backgroundColor, in: view.effectiveAppearance) : nil
             } else {
                 fill = view.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }
             }
@@ -5024,6 +5074,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             "directory_matched_count": directoryMatchedCount, "directory_query": directoryQuery,
             "directory_scope": directoryScopeFilter, "directory_harness": directoryHarnessFilter,
             "directory_selected_id": selectedId, "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
+            "directory_selection_visible": directoryTableView.map { table in directorySelectedIndex >= 0 && directorySelectedIndex < table.numberOfRows && table.visibleRect.contains(table.rect(ofRow:directorySelectedIndex)) } ?? false,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,

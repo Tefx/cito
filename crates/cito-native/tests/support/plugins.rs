@@ -1,4 +1,5 @@
 use super::support::*;
+use std::os::unix::net::UnixListener;
 
 #[test]
 fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
@@ -67,6 +68,24 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
             json!({"op":"probe","endpoint_pid":row["endpoint_pid"],"session_id":row["session_id"]}),
         );
         assert_eq!(probe["status"], "alive", "{probe}");
+    }
+    // A live endpoint with a temporarily unavailable bridge must retain cached
+    // discovery rather than degrading to process-only or empty session results.
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let live = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", f.pid(first)));
+        drop(UnixListener::bind(&live).unwrap());
+        let failed = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(failed["ok"], false, "{id}: {failed}");
+        assert!(failed["sessions"].is_null());
+        fs::remove_file(live).unwrap();
+        let dead = f.state.join(format!("sockets/{id}-pid-{}.sock", i32::MAX));
+        drop(UnixListener::bind(&dead).unwrap());
+        let found = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(found["ok"], true, "{id}: {found}");
+        fs::remove_file(dead).unwrap();
     }
     // Interactive discovery excludes background invocations, independently of caller resolution.
     let flags: &[&[&str]] = &[

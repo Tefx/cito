@@ -1765,6 +1765,86 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - **2. Eliminate `"Desktop notifications"` Boilerplate on `You (@tefx)` Cards**:
   - On the `You (@tefx)` card (`listener.harness == "human"`): omit the static `"Desktop notifications"` label when `channels` only contains `"Mac"` / `"Desktop notifications"` / empty (`path.isHidden = true`), showing only external connected channels (such as `"Telegram"`) when present. Keep `path` (`cwd · branch`) on agent session cards at `x = titleX + copyWidth + 8` so it retains maximum horizontal width without truncation.
 
+---
+
+## 23. Stage 21: Complete 6-Persona Root-Cause Closure Across Mechanisms `M1`–`M5` (`src/macos/cito-ui.swift`, `crates/cito-native/**`, `plugins/**`)
+
+### 23.1 Binding Contract (`MUST` — All 5 Root Mechanisms & 24 Sibling Closures)
+
+#### 1. `M1` — Eliminate Branch-Copy Geometry Drift Across All Cards, Rows & Forms (`src/macos/cito-ui.swift`)
+- **Basis**: Separate copy-pasted layout branches for `human_paused_card` vs. `orderedListeners`, `multiHub == true` vs. `false`, `hostExpanded` vs. `addHubFormOpen`, `local` vs. remote Hub edit forms, and `expanded` vs. collapsed `Activity` rows caused vertical and horizontal jumps across states.
+- **Required Closures**:
+  1. **Single Invariant Zone 1 Card Grid (`cito-ui.swift:2230–2390`)**:
+     - Delete `let multiHub = hubs.count > 1; let badgeSize: CGFloat = multiHub ? 28 : 34; let titleX: CGFloat = multiHub ? 42 : 54`.
+     - Standardize **all** `cardMenu` Zone 1 cards (`human_paused_card` and `orderedListeners`) on one invariant geometry regardless of Hub count: `rowHeight = 64` (`78` with distinct `about`), `cardHeight = 58` (`72` with distinct `about`), `badge = NSRect(x: 12, y: cardHeight - 43, width: 28, height: 28)` (`radius: 7, iconInset: 6`), `titleX = 48`, title `13pt .semibold` at `y = cardHeight - 26`, and bottom row at `y = 8` (`11pt`).
+  2. **Unified `[ Pause ]` / `[ Resume ]` Lifecycle Control Across Human & Agent Cards (`Question 3`, `cito-ui.swift:2368–2375`)**:
+     - On active Agent session cards in Zone 1, replace the icon-only `×` (`symbol: "xmark"`, `width: 22`) on `stop:<scoped_id>` with the **exact same labeled `"Pause"` pill button** used on `You (@tefx)`: `MenuControl("Pause", frame: NSRect(x: 0, y: cardHeight - 28, width: 52, height: 22))`, `style = .neutral`, `identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")`, `toolTip = "Pause listening for this session"`. On `human_paused_card`, use `"Resume"` (without `+` icon).
+  3. **Eliminate `22pt` Trailing Dead Space on Left-Aligned `copy:` Chips (`cito-ui.swift:109, 2286`)**:
+     - For left-aligned `.subtleHeader` `copy:<id>` chips in `cardMenu`, compute `copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font: copyFont, leadingSymbol: "doc.on.doc", paddingX: 3), MenuControl.intrinsicWidth(short, font: copyFont, leadingSymbol: "doc.on.doc", paddingX: 3))` (and use `paddingX: 3` for `copy:` in `layoutBar`), eliminating the `22pt` blank gap between `tefx/pi#3368` and `~`.
+  4. **Decouple `host_hub_card` Expansion from `addHubFormOpen` & Fix `local` Edit Error Overlap (`cito-ui.swift:3415, 3507`)**:
+     - At `cito-ui.swift:3415`, remove `!addHubFormOpen &&` from `let hostExpanded = ...` so clicking `Add Hub…` or `Edit` in `CONNECTED HUBS` never collapses `Share This Mac as a Hub` (`0pt` jump).
+     - In `add_hub_form`, when `editingExistingHub && editingOriginalHub == "local"` and `addHubError != nil`, increase `formHeight` by `20pt` (`144pt`) so `add_hub_error` (`y = 38..53`) never overlaps `settings_hub_user`.
+  5. **Prevent `Activity` Expanded Message Top-Edge Jump & Button Collision (`cito-ui.swift:1152–1215`)**:
+     - In `DirectoryPeerCellView.configureActivity`, keep `line2MetaLabel` top-edge at `maxY = rowHeight - 34` in both collapsed and expanded states (`height: expanded ? rowHeight - 42 : 18`) so selecting a multi-line message leaves a `>= 4pt` gap below `Reply`/`Copy`/`Delete` (`minY = rowHeight - 30`) and `0pt` vertical jump of line 1.
+  6. **Indent Expanded Candidate Rows Under Parent Group Header (`cito-ui.swift:2507`)**:
+     - In `AVAILABLE SESSIONS`, indent candidate row `info` (`candidate_title`), `location` (`candidate_cwd`), and `hint` (`candidate_hint`) from `x = 24` to `x = 32` (`width = 260`) so expanded child sessions align with the parent group's app badge (`x = 32`).
+
+#### 2. `M2` — Distinguish `Empty` from `Transient Error` Across All Discovery, RPC & UI Caches (`crates/cito-native/**`, `plugins/**`, `src/macos/cito-ui.swift`)
+- **Basis**: Converting transient lock/process/socket/RPC failures into `Ok([])` via `.unwrap_or_default()` / `.unwrap_or(false)` poisoned `SessionActivity.cached` and `ChannelInventory.cached`.
+- **Required Closures**:
+  1. **SQLite Busy Timeout & Codex Error Propagation (`plugin_support.rs:688`, `plugins/codex/native.rs`)**:
+     - Call `sqlite3_busy_timeout(db, 1000)` in `sqlite_rows`.
+     - In `plugins/codex/native.rs`, propagate `let running = desktop_running(req)?;` and `try_rows(req)?` inside `"discover_sessions"` so transient `/bin/ps` or SQLite errors return `Err(...)` and preserve `SessionActivity`'s cached Codex sessions; avoid spawning `git` subprocesses in `row_caller` when `git_branch` or `git_origin_url` columns exist in the SQLite row; and include `thread_source = ''` in the SQL `WHERE` clause.
+  2. **Prevent False `needs_reload: true` Degradation in `plugins/pi/native.rs` & Socket Drop in `plugins/claude/native.rs`**:
+     - In `plugins/pi/native.rs` (`socket_candidates` / `candidates`), if `pi-pid-<p>.sock` exists on disk and `alive(p)` is `true`, do not fall through to `process_candidates` (`needs_reload: true`) when `identify(req, p)` transiently times out—propagate the transient error so `SessionActivity` retains the last known healthy session state.
+     - In `plugins/claude/native.rs` (`discover_sessions`), if a socket `claude-pid-<p>.sock` belongs to a live process (`alive(p) == true`) and `bridge(&r)` times out transiently, return an error from `discover_sessions` rather than silently dropping the live session.
+  3. **Preserve Remote `ChannelInventory` on Transient RPC Failure (`crates/cito-native/src/core/daemon.rs:341–357`)**:
+     - In `ChannelInventory::fetch_locked`, if `slot.rpc("human_channels_list", ...)` returns `Err(e)` and `cached.value["channels"]` is already a non-empty array, preserve the existing `"channels"` array in `cached.value` while recording `"status": "error", "detail": e`, and return `Err(e)` from `fetch_locked` so `ChannelInventory::mutate` surfaces refresh errors accurately.
+  4. **Preserve Activity Counts & Viewport/Selection Stability in `cito-ui.swift` (`lines 1750, 2078, 4255`)**:
+     - In `frame.op == "directory"` (`cito-ui.swift:1750`), use `activityTotal = frame.activity_total ?? activityTotal` and `activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount`.
+     - Preserve `Activity` selected row by `signal_id` across refreshes rather than raw row index, and in `openComposer` scroll the selected row into view after resizing `directoryScrollView`.
+     - When `directoryVisible == true` and a `state` frame changes `hubs` or `listeners`, refresh `directoryFilteredPeers` (or trigger `queryDirectory()`) so `Directory` never displays stale stopped listeners or disabled Hubs.
+
+#### 3. `M3` — Unified macOS HIG Segmented Track & Stable-Width Toggle Builders (`src/macos/cito-ui.swift`)
+- **Basis**: Mutually exclusive tabs/filters used push-button borders (`.neutral`), and binary toggles changed width when their label changed.
+- **Required Closures**:
+  1. **Recessed Segmented Track Styling Across All Switchers (`cito-ui.swift`)**:
+     - Ensure `header_hub_strip` (when `hubs.count > 1`), `settings_header` tabs, `channel_hub_selector` (in `Human Channels`), `host_hub_addr:*` (`Tailscale | Local IP`), `settings_hub_auth:*` (`Trusted Network | Shared Token | Team Sign-In` in `Add Hub`), `directory_mode_track` (`Directory | Activity`), and `directoryFacetBar` filter groups (`dir_scope:*`, `dir_harness:*`, `act_filter:*`) all render inside a recessed track (`fill: labelColor @ 0.06`) with `.prominent` on the selected segment and **`.subtleHeader` (borderless at rest)** on unselected segments.
+  2. **Paired-State Reserved Widths in `layoutBar` (`cito-ui.swift:109`)**:
+     - In `layoutBar`, reserve paired-state widths (`max(width(stateA), width(stateB))`) for stateful toggle controls (`scope:*`, `toggle_auto_listen`, `toggle_hub:*`, `toggle_desktop_banner`, `toggle_host_hub`) so toggling any switch never shifts neighboring controls by even `1px`.
+
+#### 4. `M4` — Single-Authority `Auto-Listen`, Probe Recovery & Network-Scoped Indicators (`crates/cito-native/src/core/{daemon.rs,receiver.rs}`, `src/macos/cito-ui.swift`)
+- **Basis**: `auto_listen` conflicted with `UNLISTENED` rows written by liveness probes, bypassed app-configuration checks, hardcoded `"scope": "self"`, and left `header_subtitle` / `"All sessions listening"` out of sync with the selected network.
+- **Required Closures**:
+  1. **Clean `Auto-Listen` Authority (`daemon.rs:2044–2075, 3383–3401`)**:
+     - Gate `auto_listen` on configured agent plugins (`try_inspect_plugin_setup(p).is_ok_and(|(_, configured, _)| configured)`), filter `local_listeners` by `principal_id`, and pass `scope: Value::Null` (not hardcoded `"self"`) so `register_locked` applies the Hub's canonical default scope (`"workspace"` on `authMode == "none"`, `"self"` otherwise).
+     - When `set_auto_listen` enables `Auto-Listen` (`enabled: true`), clear prior `UNLISTENED` agent rows on that Hub and immediately enroll eligible open sessions. When the user manually clicks `Pause` (`stop:<id>`) on an agent session while `Auto-Listen` is On, turn `auto_listen = false` on that Hub and unlisten that session.
+  2. **Reconcile Remote `human_paused` & Fence Edited Disabled Hub Profiles (`daemon.rs:600, 1968`)**:
+     - When enabling/reloading a Hub slot in `reload_slots`, fence any retained `local_listeners` rows whose stored `principal_id` (or Hub URL recorded in state) differs from the current slot configuration even if the slot was previously disabled.
+     - In the receiver heartbeat (`daemon.rs:1968`), if `row["harness"] == "human"` and `remote["human_paused"] == true`, mark the local `human` row `UNLISTENED` so multi-Mac pause states converge.
+  3. **Network-Scoped `header_subtitle`, Honest Empty Target & `"Show All Activity"` Query (`cito-ui.swift:1234, 2105, 2453, 4230`)**:
+     - Compute `uniqueSessionCount` and `humanListening` in `cardMenu` header for `effectiveTargetHub` so `header_subtitle` always matches the displayed cards.
+     - Only show `"All sessions listening on \(targetHub)"` (`available_empty_target`) when `visibleAvailable.isEmpty` AND at least one agent session is actively listening on `targetHub` (when both `available` and agent `listeners` are empty, hide `available_empty_target` since Zone 1 already displays `"No active listeners"`).
+     - In `"act_empty_show_all"` (`cito-ui.swift:4230`) and `"mark_all_activity_read"` (`cito-ui.swift:3900`), update `activityUnreadCount = 0` atomically and call `self.queryDirectory()` so server-filtered read history is fetched immediately.
+
+#### 5. `M5` — Eliminate Misleading `(~)` Suffix & All Remaining Protocol Jargon (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`)
+- **Basis**: `nodeDisplayTitle` appended `" (~)"` even when `cwd` was `~/dotfiles/agent` (not `~`), `compactSessionPath` turned `/Volumes/...` into `~/…/...`, and `Activity` / `Banner` / `Directory` leaked `"Passive"`, `"signals"`, and `"Selected ID"`.
+- **Required Closures**:
+  1. **Remove Bogus `" (~)"` Suffix (`cito-ui.swift:214`, `daemon.rs`)**:
+     - In `nodeDisplayTitle` and `default_session_title`, when a session's raw title is generic (`isGenericSessionLabel`), return `distinctAbout(about, title: raw, user: user) ?? (harnessName ?? harness)` (`"Pi Coding Agent"`, **never** `"Pi Coding Agent (~)"`) because Line 2 (`path` / `location`) already displays the exact directory (`~` or `~/dotfiles/agent · main`).
+  2. **Preserve Root Prefix in `compactSessionPath` (`cito-ui.swift:259`)**:
+     - Use `let prefix = shortCwd.hasPrefix("~") ? "~/…/" : "/…/"` when abbreviating paths so non-home absolute paths (`/Volumes/...`) never claim to be under `~`.
+  3. **Self-Explanatory User Vocabulary Across `Banner`, `Activity`, `Directory` & `presentationError`**:
+     - In `Activity` empty states and footer summary (`cito-ui.swift:4201, 4205, 4227`), replace `"signal"` / `"signals"` with `"message"` / `"messages"`.
+     - In `Directory` footer (`cito-ui.swift:3834, 4041`), replace `"↵ Copy Selected ID"` with `"↵ Copy Address"`.
+     - In `DirectoryPeerCellView.configureActivity` (`cito-ui.swift:1200`), map all 6 daemon `held_reason` values (`"stale_generation"`, `"driver_unavailable"`, `"session_switched"`, `"unlistened"`, `"unlistened_before_dispatch"`, `"fenced_before_dispatch"`).
+     - In `presentationError` (`cito-ui.swift:281`), strip trailing `\(os error [0-9]+\)` globally across all error strings.
+
+### 23.2 Verification, Fast Single-Pass Review & Dual-Mac Installation Policy (`MUST`)
+
+- Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs,plugins.rs}` in place (including replacing `"Pi Coding Agent (~)"` / `"Fixture (~)"` expectations with `"Pi Coding Agent"` / `"Fixture"` and `"signals"` with `"messages"`).
+- Run `cargo test --workspace && cargo build --release`, push to `origin/main` (no release tag), and install on both Macs.
+
 #### 2. `S2` — Smart Home-Directory Session Naming, `.local` Hostname Stripping & Shadow Deduplication in `Directory` (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/{daemon.rs,registration.rs}`, Question 3)
 - **Basis**: When a coding session is started in `$HOME` (`/Users/tefx`), `basename(cwd)` is `"tefx"` (identical to the username `@tefx`), causing 3 agent rows in `Directory` and `cardMenu` to be titled `"tefx"`. In addition, `DirectoryPeerCellView` did not strip `.local` from `peer.channels`, and `local:` loopback registrations duplicated shared-Hub rows for the same local session.
 - **1. Never Use `$HOME` Username as an Auto-Derived Agent Session Title (`nodeDisplayTitle` & `daemon.rs` / `registration.rs`)**:
@@ -1947,13 +2027,6 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
      - Change `try_rows(req: &Value) -> Result<Vec<Value>>` to **propagate** `sqlite_rows` errors (`?`) instead of swallowing them with `.unwrap_or_default()`, and call `try_rows(req)?` inside `"discover_sessions"` so if SQLite is still locked after `1000ms`, `cito-plugin-codex` returns `Err(...)` and `SessionActivity::reap_discovery` **retains the previous cached Codex sessions** instead of wiping them to `[]`!
      - In `row_caller(req, r)` (`plugins/codex/native.rs:277`), when `r` comes from the `threads` SQLite table (`r.get("git_branch").is_some() || r.get("git_origin_url").is_some()`), construct the session JSON directly from `r["id"]`, `r["cwd"]`, `r["name"]`/`r["title"]`, `r["git_branch"]`, and `r["git_origin_url"]` **without spawning `git` subprocesses** when `git_branch` or `git_origin_url` is already populated in the row!
      - Also include `thread_source = ''` in the SQL predicate (`(thread_source IS NULL OR thread_source = '' OR thread_source = 'user')`) so threads with an empty-string `thread_source` are never excluded.
-
-#### Sibling Mechanism Invariants
-
-- Active and paused cards retain the same badge and title geometry for one or multiple Hubs. Address chips use compact padding while reserving enough width for copy feedback. Opening an Add / Edit Hub form preserves the expanded host card; expanded forms can scroll, and local form errors receive a separate row.
-- Discovery and inventory failures remain visible as errors and preserve the last successful data. Partial Directory frames retain omitted activity counters.
-- Header counts and Human listening state describe the selected Hub; the menu-bar active state and Stop All action still cover all Hubs. Empty states must not claim that sessions are listening when no agent listener exists. Show All Activity fetches read history from the daemon.
-- Generic session titles use the harness name without a home-path suffix. Compacted paths preserve their home-relative or absolute root. Activity uses message terminology, and Directory exposes Copy Address.
 
 ### 22.2 Verification, Fast Single-Pass Review & Dual-Mac Installation Policy (`MUST`)
 

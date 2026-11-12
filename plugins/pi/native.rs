@@ -251,7 +251,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
         }
     }
 }
-fn socket_candidates(req: &Value) -> Vec<(u32, Value)> {
+fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
     let mut out = vec![];
     if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
         for e in entries.flatten() {
@@ -261,7 +261,13 @@ fn socket_candidates(req: &Value) -> Vec<(u32, Value)> {
                 .and_then(|s| s.strip_suffix(".sock"))
                 .and_then(|s| s.parse::<u32>().ok())
             {
-                if let Ok(v) = identify(req, p) {
+                let response = identify(req, p);
+                if req["op"] == "discover_sessions" && alive(p) {
+                    if let Err(error) = &response {
+                        return Err(error.clone());
+                    }
+                }
+                if let Ok(v) = response {
                     if interactive_candidate(req, p)
                         && v["ok"] == true
                         && str_at(&v, "session_id").is_some()
@@ -274,9 +280,9 @@ fn socket_candidates(req: &Value) -> Vec<(u32, Value)> {
         }
     }
     out.sort_by_key(|(pid, _)| *pid);
-    out
+    Ok(out)
 }
-fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
+fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
     let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
     if resolve || pid(req).is_some() {
         let roots = if resolve {
@@ -297,7 +303,7 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
                         && v.get("pi_pid")
                             .is_none_or(|id| id.as_u64() == Some(p as u64))
                     {
-                        return (vec![(p, v)], true);
+                        return Ok((vec![(p, v)], true));
                     }
                 }
                 let Some(parent) = process_parent(p) else {
@@ -309,7 +315,7 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
         // A responding bridge with no open session must not be bypassed.
         let mut live = vec![];
         if !responded {
-            live = socket_candidates(req);
+            live = socket_candidates(req)?;
             process_candidates(req, &mut live);
             // Prefer the nearest caller ancestor, just as socket resolution does.
             // An explicit endpoint must not become ambiguous with its host ancestors.
@@ -319,11 +325,11 @@ fn candidates(req: &Value) -> (Vec<(u32, Value)>, bool) {
                 .into_iter()
                 .collect();
         }
-        return (live, responded);
+        return Ok((live, responded));
     }
-    let mut out = socket_candidates(req);
+    let mut out = socket_candidates(req)?;
     process_candidates(req, &mut out);
-    (out, false)
+    Ok((out, false))
 }
 fn as_caller(p: u32, v: &Value) -> Value {
     caller(
@@ -356,7 +362,7 @@ pub fn handle(input: &Value) -> Result<Value> {
         op,
         "resolve_caller" | "verify" | "probe" | "discover_sessions"
     ) {
-        candidates(req)
+        candidates(req)?
     } else {
         (vec![], false)
     };

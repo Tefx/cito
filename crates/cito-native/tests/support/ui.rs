@@ -2092,6 +2092,45 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             cfg["host_hub"][format!("{address}_invite_command")]
         );
     }
+    let mut reserved = None;
+    for enabled in [false, true] {
+        let mut toggled = cfg.clone();
+        toggled["host_hub"]["enabled"] = json!(enabled);
+        toggled["hubs"][0]["enabled"] = json!(enabled);
+        toggled["desktop_banner_enabled"] = json!(enabled);
+        f.send(p, json!({"op":"settings","settings":toggled}));
+        let snapshot = inspect(&f, p);
+        let frames: Vec<_> = [
+            "toggle_host_hub",
+            "toggle_hub:local",
+            "edit_hub:local",
+            "toggle_desktop_banner",
+        ]
+        .into_iter()
+        .map(|id| {
+            let view = node(&snapshot, "settings_items", id);
+            assert!(!view.is_null(), "{id}");
+            (view["x"].clone(), view["width"].clone())
+        })
+        .collect();
+        if let Some(previous) = &reserved {
+            assert_eq!(&frames, previous);
+        } else {
+            reserved = Some(frames);
+        }
+    }
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let snapshot = inspect(&f, p);
+    for id in ["settings_tab_track", "host_hub_addr_track"] {
+        assert!(
+            (node(&snapshot, "settings_items", id)["background"][3]
+                .as_f64()
+                .unwrap()
+                - 0.06)
+                .abs()
+                < 0.001
+        );
+    }
     for invalid in ["0", "65536", "word", ""] {
         let before = f.frames(p).len();
         f.send(
@@ -2320,7 +2359,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         let track = node(&s, "settings_items", "settings_hub_auth_track");
         assert_eq!(track["radius"], 7);
         assert_eq!(track["border_width"], 0);
-        assert!((track["background"][3].as_f64().unwrap() - 0.05).abs() < 0.001);
+        assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
         for candidate in ["none", "token", "oidc"] {
             let pill = node(
                 &s,
@@ -2358,8 +2397,11 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         let handle = "w".repeat(length);
         let hub = "h".repeat(40);
         let display_name = "W".repeat(length);
-        let clean_error = "Long diagnostic with recovery context. ".repeat(10);
-        let error = format!("INVALID_INPUT: {clean_error}");
+        let clean_error = "Long diagnostic with recovery context. "
+            .repeat(10)
+            .trim_end()
+            .to_owned();
+        let error = format!("INVALID_INPUT: {clean_error} (os error 13)");
         let mut cfg = settings();
         cfg["settings_hub"] = json!(hub);
         cfg["hubs"][0]["name"] = json!(hub);
@@ -2509,18 +2551,14 @@ fn u3_paused_human_card_requires_no_active_person_and_excludes_offline_targets()
     empty["available"] = json!([]);
     f.send(p, empty.clone());
     let snapshot = inspect(&f, p);
-    assert!(
-        nodes(&node(&snapshot, "items", "available_empty_target")["children"])
-            .iter()
-            .any(|n| n["text"] == "No open agent sessions")
-    );
+    assert!(node(&snapshot, "items", "available_empty_target").is_null());
     empty["hubs"][1]["auto_listen"] = json!(true);
     f.send(p, empty);
     let snapshot = inspect(&f, p);
-    assert!(
-        nodes(&node(&snapshot, "items", "available_empty_target")["children"])
-            .iter()
-            .any(|n| n["text"] == "Auto-Listen is on — open sessions connect automatically")
+    assert!(node(&snapshot, "items", "available_empty_target").is_null());
+    assert_eq!(
+        node(&snapshot, "items", "toggle_auto_listen")["text"],
+        "Auto-Listen: On"
     );
     frame["hubs"][1]["status"] = json!("disconnected");
     f.send(p, frame.clone());
@@ -3182,6 +3220,19 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     control(&f, p, "open_activity");
     let s = inspect(&f, p);
     assert_eq!(s["directory_mode"], "activity");
+    assert!(
+        (node(&s, "directory_items", "activity_filter_track")["background"][3]
+            .as_f64()
+            .unwrap()
+            - 0.06)
+            .abs()
+            < 0.001
+    );
+    let collapsed = node(&s, "directory_items", "act_msg:personal:sig_unread");
+    assert_eq!(
+        collapsed["y"].as_f64().unwrap() + collapsed["height"].as_f64().unwrap(),
+        26.0
+    );
     assert_eq!(
         node(&s, "directory_items", "act_filter:unread")["border_width"],
         0
@@ -3256,6 +3307,24 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     let s = inspect(&f, p);
     assert_eq!(s["directory_selected_id"], "personal:sig_read");
+    let mut inserted = activity.clone();
+    let mut newer = activity[0].clone();
+    newer["signal_id"] = json!("newer");
+    inserted.as_array_mut().unwrap().insert(0, newer);
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"activity":inserted,"activity_filter":"all"}),
+    );
+    let refreshed = inspect(&f, p);
+    assert_eq!(refreshed["directory_selected_id"], "personal:sig_read");
+    assert_eq!(refreshed["directory_selected_index"], 2);
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"activity":activity,"activity_filter":"all"}),
+    );
+    assert_eq!(inspect(&f, p)["directory_selected_index"], 1);
     f.send(p, json!({"op":"test_focus_field","id":"directory_table"}));
     f.send(p, json!({"op":"test_directory_key","key":"delete"}));
     wait(|| {
@@ -3299,12 +3368,76 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
         })
     });
     control(&f, p, "composer_cancel");
+    let queries = f
+        .frames(p)
+        .iter()
+        .filter(|v| v["op"] == "query_directory")
+        .count();
     control(&f, p, "activity_mark_all_read");
+    let read = inspect(&f, p);
+    assert_eq!(read["unread_count"], 0);
+    assert!(nodes(&read["directory_items"]).iter().any(|n| n["text"]
+        .as_str()
+        .is_some_and(|s| s.ends_with(" · 0 unread"))));
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "query_directory")
+            .count(),
+        queries + 1
+    );
     wait(|| {
         f.frames(p)
             .iter()
             .any(|v| v["op"] == "ack_signals" && v["ack_all"] == true)
     });
+    control(&f, p, "act_filter:all");
+    for (reason, label) in [
+        ("stale_generation", "session reloaded"),
+        ("driver_unavailable", "app unavailable"),
+        ("session_switched", "session changed"),
+        ("unlistened", "listening paused"),
+        ("unlistened_before_dispatch", "listening paused"),
+        ("fenced_before_dispatch", "connection changed"),
+    ] {
+        let mut item = activity[0].clone();
+        item["held_reason"] = json!(reason);
+        send_fixture(
+            &f,
+            p,
+            json!({"op":"directory","peers":[],"activity":[item],"activity_filter":"all"}),
+        );
+        let snapshot = inspect(&f, p);
+        assert!(node(
+            &snapshot,
+            "directory_items",
+            "act_title:personal:sig_unread"
+        )["text"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("Held ({label})")));
+    }
+    let many: Vec<_> = (0..10)
+        .map(|i| {
+            let mut item = activity[0].clone();
+            item["signal_id"] = json!(format!("row-{i}"));
+            item
+        })
+        .collect();
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":many,"activity_filter":"all"}),
+    );
+    for _ in 0..9 {
+        f.send(p, json!({"op":"test_directory_key","key":"down"}));
+    }
+    assert_eq!(inspect(&f, p)["directory_selection_visible"], true);
+    control(&f, p, "reply_activity:row-9");
+    let reply = inspect(&f, p);
+    assert_eq!(reply["composer_open"], true);
+    assert_eq!(reply["directory_selected_id"], "row-9");
+    assert_eq!(reply["directory_selection_visible"], true);
 }
 #[test]
 fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
@@ -3321,8 +3454,10 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(candidate["height"], 44);
     let title = node(&s, "items", "candidate_title:fixture:candidate-0");
     let path = node(&s, "items", "candidate_cwd:fixture:candidate-0");
-    assert_eq!(title["width"], 268);
-    assert_eq!(path["width"], 268);
+    assert_eq!(title["width"], 260);
+    assert_eq!(title["x"], 32);
+    assert_eq!(path["width"], 260);
+    assert_eq!(path["x"], 32);
     assert_eq!(title["y"], 23);
     assert_eq!(path["y"], 6);
     assert_eq!(path["text"], "/tmp/work · main");
@@ -3412,6 +3547,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     )
     .is_null());
     let original_available = frame["available"].clone();
+    let auto_before = node(&inspect(&f, p), "items", "toggle_auto_listen");
     // Auto-Listen explains reload blockers and seeds historical groups once.
     frame["hubs"][1]["auto_listen"] = json!(true);
     frame["available"] = json!([
@@ -3419,6 +3555,9 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     ]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
+    let auto_after = node(&s, "items", "toggle_auto_listen");
+    assert_eq!(auto_after["width"], auto_before["width"]);
+    assert_eq!(auto_after["x"], auto_before["x"]);
     assert!(nodes(&s["items"])
         .iter()
         .any(|n| n["text"] == "Auto-Listen is on — run /reload below to finish connecting"));
@@ -3439,9 +3578,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert!(!node(&inspect(&f, p), "items", "candidate:fixture:recent").is_null());
     frame["available"] = json!([]);
     f.send(p, frame.clone());
-    assert!(nodes(&inspect(&f, p)["items"])
-        .iter()
-        .any(|n| n["text"] == "Auto-Listen is on — open sessions connect automatically"));
+    assert!(node(&inspect(&f, p), "items", "available_empty_target").is_null());
     // The sole enabled Hub can differ from the configured default. Listen must
     // still carry the selected network rather than relying on daemon fallback.
     frame["hubs"] = json!([hubs()[1].clone()]);
@@ -3884,6 +4021,50 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         1
     );
     assert_eq!(node(&s, "directory_items", "directory_panel")["width"], 560);
+    for id in [
+        "directory_scope_track",
+        "directory_harness_scroll",
+        "directory_mode_track",
+    ] {
+        assert!(
+            (node(&s, "directory_items", id)["background"][3]
+                .as_f64()
+                .unwrap()
+                - 0.06)
+                .abs()
+                < 0.001
+        );
+    }
+    for membership in ["listeners", "hubs"] {
+        let queries = f
+            .frames(p)
+            .iter()
+            .filter(|v| v["op"] == "query_directory")
+            .count();
+        let mut changed = state();
+        if membership == "listeners" {
+            changed["listeners"] = json!([]);
+        } else {
+            changed["hubs"][0]["enabled"] = json!(false);
+        }
+        f.send(p, changed);
+        inspect(&f, p);
+        assert_eq!(
+            f.frames(p)
+                .iter()
+                .filter(|v| v["op"] == "query_directory")
+                .count(),
+            queries + 1,
+            "{membership}"
+        );
+        send_fixture(
+            &f,
+            p,
+            json!({"op":"directory","peers":[peer("one"),peer("two")],"matched_count":2,"online_count":5}),
+        );
+        f.send(p, state());
+        inspect(&f, p);
+    }
     f.send(p, json!({"op":"test_directory_key","key":"down"}));
     assert_eq!(inspect(&f, p)["directory_selected_id"], "personal:two");
     f.send(p, json!({"op":"test_directory_key","key":"return"}));
@@ -4657,8 +4838,24 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert!(height > 60.0 && height < 108.0, "{height}");
     assert_eq!(
         node(&s, "directory_items", "act_msg:local:expanded")["height"],
-        height - 38.0
+        height - 42.0
     );
+    let message = node(&s, "directory_items", "act_msg:local:expanded");
+    assert_eq!(
+        message["y"].as_f64().unwrap() + message["height"].as_f64().unwrap(),
+        height - 34.0
+    );
+    for id in [
+        "reply_activity:local:expanded",
+        "copy_activity_msg:local:expanded",
+        "delete_activity:local:expanded",
+    ] {
+        assert!(
+            node(&s, "directory_items", id)["y"].as_f64().unwrap()
+                - (message["y"].as_f64().unwrap() + message["height"].as_f64().unwrap())
+                >= 4.0
+        );
+    }
     capture("directory", "activity_expanded");
     control(&f, p, "reply_activity:local:expanded");
     f.send(
@@ -4755,7 +4952,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let user = node(&local_error, "settings_items", "settings_hub_user");
     assert_eq!(
         node(&local_error, "settings_items", "add_hub_form")["height"],
-        152
+        144
     );
     assert!(
         error["y"].as_f64().unwrap()

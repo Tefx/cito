@@ -241,6 +241,9 @@ fn register_locked(
         });
         let same_binding = local.as_ref().filter(|row| {
             row["status"] == "ACTIVE"
+                // An explicit resume must invalidate a heartbeat that already saw
+                // the remote pause while this Mac's local row was still active.
+                && (harness != "human" || previous["human_paused"] != true)
                 && remote_matches_listener(&previous, row, &channel)
                 && row["endpoint_pid"] == caller["endpoint_pid"]
         });
@@ -301,6 +304,7 @@ fn register_locked(
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(generation),json!(owner)],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
+            connection.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=?", &[client.config["url"].clone(),json!(hub),json!(id)])?;
             Ok(())
         })?;
         return Ok(
@@ -531,6 +535,20 @@ mod tests {
                 let resumed = client.kv_get(id)?.ok_or("Missing resumed registration")?.0;
                 assert_eq!(resumed["human_paused"], false);
                 assert_eq!(resumed["state"], "ACTIVE");
+                let after_resume = second
+                    .listener("work", id)?
+                    .ok_or("Missing resumed local row")?;
+                assert_ne!(after_resume["owner_token"], second_row["owner_token"]);
+                assert!(
+                    !second.pause_listener_for(&second_row)?,
+                    "A delayed heartbeat must not undo an explicit resume"
+                );
+                assert_eq!(
+                    second
+                        .listener("work", id)?
+                        .ok_or("Missing resumed local row")?["status"],
+                    "ACTIVE"
+                );
                 assert_eq!(
                     resumed["channels"]["hub:fixture"],
                     reg["channels"]["hub:fixture"]

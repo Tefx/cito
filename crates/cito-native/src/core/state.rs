@@ -66,6 +66,10 @@ impl LocalState {
             if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "queue_confirmed") {
                 c.execute("ALTER TABLE local_signals ADD COLUMN queue_confirmed INTEGER NOT NULL DEFAULT 0", &[])?;
             }
+            // Additive V4 extension binds retained listeners to their original Hub URL.
+            if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "hub_url") {
+                c.execute("ALTER TABLE local_listeners ADD COLUMN hub_url TEXT", &[])?;
+            }
             // Opening another handle must never steal a live dispatch lease. Frozen
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
@@ -314,11 +318,27 @@ impl LocalState {
         })
     }
     pub fn fence_listener_for(&self, listener: &Value, reason: &str) -> Result<bool, String> {
+        self.deactivate_listener_for(listener, "FENCED_INACTIVE", reason)
+    }
+    pub fn pause_listener_for(&self, listener: &Value) -> Result<bool, String> {
+        if listener["status"] != "ACTIVE" {
+            return Ok(false);
+        }
+        self.deactivate_listener_for(listener, "UNLISTENED", "unlistened")
+    }
+    fn deactivate_listener_for(
+        &self,
+        listener: &Value,
+        status: &str,
+        reason: &str,
+    ) -> Result<bool, String> {
         self.db.transaction(|c| {
             let hub=string(listener,"hub");
             let current=current_listener(c,hub,string(listener,"listener_id"))?;
-            if current["status"] != "ACTIVE" || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] { return Ok(false); }
-            c.execute("UPDATE local_listeners SET status='FENCED_INACTIVE',dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone(),listener["owner_token"].clone()])?;
+            // A retained pause can be fenced for a changed profile, but a stale
+            // active receiver must never overwrite a more recent pause or resume.
+            if current["status"] != listener["status"] || current["status"] == "FENCED_INACTIVE" || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] { return Ok(false); }
+            c.execute("UPDATE local_listeners SET status=?,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status=?", &[json!(status),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone(),listener["owner_token"].clone(),listener["status"].clone()])?;
             c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?,dispatcher_token=NULL WHERE hub=? AND listener_id=? AND binding_generation<=? AND state IN ('RECEIVED','DISPATCHING')", &[json!(reason),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone()])?;
             Ok(true)
         })

@@ -452,6 +452,7 @@ impl ChannelInventory {
             .completed_gen
             .checked_add(1)
             .ok_or("Channel inventory generation exhausted")?;
+        let refresh_error = result.as_ref().err().cloned();
         cached.value = match result {
             Ok(value) => value,
             Err(error) => {
@@ -463,7 +464,7 @@ impl ChannelInventory {
             }
         };
         cached.retry_at = Instant::now() + Duration::from_secs(1);
-        Ok(())
+        refresh_error.map_or(Ok(()), Err)
     }
 }
 fn remote_channels_identity(slot: &HubClient) -> Value {
@@ -651,9 +652,6 @@ impl DaemonService {
             self.channel_inventories.remove(&name);
             let previous = self.slots.remove(&name);
             let registration = previous.as_ref().map(|old| old.registration.clone());
-            let previous_principal = previous
-                .as_ref()
-                .map(|old| string(&old.identity, "principal_id").to_string());
             if let Some(old) = previous {
                 let changed = old.config["url"] != hub["url"]
                     || (auth != "oidc"
@@ -742,24 +740,24 @@ impl DaemonService {
                     }
                 }
             }
-            if auth == "oidc"
-                && client.bearer.is_some()
-                && previous_principal.as_deref().is_some_and(|previous| {
-                    !super::auth::principal_ids_equal(
-                        previous,
-                        string(&client.identity, "principal_id"),
-                    )
-                })
-            {
-                for row in self.state.active()?.into_iter().filter(|row| {
-                    row["hub"] == name
-                        && !super::auth::principal_ids_equal(
-                            string(row, "principal_id"),
-                            string(&client.identity, "principal_id"),
-                        )
-                }) {
+            // Disabled profiles have no previous slot. Durable binding identity must
+            // still be checked before any receiver can use the replacement client.
+            for row in self.state.db.query(
+                "SELECT * FROM local_listeners WHERE hub=? AND status != \'FENCED_INACTIVE\'",
+                &[json!(name)],
+            )? {
+                let changed = !super::auth::principal_ids_equal(
+                    string(&row, "principal_id"),
+                    string(&client.identity, "principal_id"),
+                ) || row["hub_url"]
+                    .as_str()
+                    .is_some_and(|url| url != string(&hub, "url"));
+                if changed {
                     self.state
                         .fence_listener_for(&row, "fenced_before_dispatch")?;
+                } else if row["hub_url"].is_null() {
+                    // Legacy bindings predate URL persistence; record the first known profile.
+                    self.state.db.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=? AND hub_url IS NULL", &[hub["url"].clone(),row["hub"].clone(),row["listener_id"].clone()])?;
                 }
             }
             if auth != "oidc" || client.bearer.is_some() {
@@ -1141,6 +1139,7 @@ impl DaemonService {
                     client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name())])?;
             } else { return Ok(()); }
             if let Some(url) = &hub_url {
+                c.execute("UPDATE local_listeners SET hub_url=COALESCE(hub_url,?) WHERE hub=? AND listener_id=?", &[json!(url),json!(hub),json!(id)])?;
                 c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url",&[json!(hub),json!(id),json!(url)])?;
             }
             Ok(())
@@ -1991,6 +1990,9 @@ impl DaemonService {
             self.receivers.insert(key,thread::spawn(move||{
                 let channel=format!("{}:{}",host_id,string(&row,"harness"));
                 if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
+                    if row["harness"]=="human" && remote["human_paused"]==true && super::auth::principal_ids_equal(string(&remote,"principal_id"),string(&row,"principal_id")) {
+                        let _=state.pause_listener_for(&row);return;
+                    }
                     if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
                     let mut changed = false;
@@ -2419,6 +2421,10 @@ impl DaemonService {
             .filter(|row| self.slots.contains_key(string(row, "hub")))
             .collect();
         for row in &mut sessions {
+            // Profile provenance is local persistence metadata, not a UI wire field.
+            if let Some(fields) = row.as_object_mut() {
+                fields.remove("hub_url");
+            }
             row["custom_title"] = json!(self
                 .state
                 .custom_title(string(row, "harness"), string(row, "session_id"))?
@@ -4955,7 +4961,7 @@ mod tests {
         let channels = json!([{"id":"fixture","status":"ready","fields":[]}]);
         inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"channels":channels});
         for generation in 0..2 {
-            inventory.refresh(&slot, generation)?;
+            assert!(inventory.refresh(&slot, generation).is_err());
             let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
             assert_eq!(cached.value["channels"], channels);
             assert_eq!(cached.value["status"], "error");
@@ -4965,7 +4971,7 @@ mod tests {
             assert_eq!(cached.completed_gen, generation + 1);
         }
         let fresh = ChannelInventory::new(remote_channels_identity(&slot));
-        fresh.refresh(&slot, 0)?;
+        assert!(fresh.refresh(&slot, 0).is_err());
         let cached = fresh.cached.lock().map_err(|e| e.to_string())?;
         assert!(cached.value["channels"].is_null());
         assert_eq!(cached.value["status"], "error");

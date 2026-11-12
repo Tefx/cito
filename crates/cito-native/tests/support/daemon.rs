@@ -1540,6 +1540,26 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
     sibling.daemon(&[]);
     let attached = enroll(&sibling, sibling_meta);
     assert_eq!(attached["binding_generation"], old["binding_generation"]);
+    wait(|| {
+        [&a, &sibling].iter().all(|fixture| {
+            fixture
+                .rows("SELECT status FROM local_listeners WHERE hub=\'work\' AND harness=\'human\'")
+                .iter()
+                .any(|row| row["status"] == "ACTIVE")
+        })
+    });
+    assert_eq!(
+        a.action(
+            json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    wait(|| {
+        sibling.rows("SELECT status FROM local_listeners WHERE hub=\'work\' AND harness=\'human\'")
+            [0]["status"]
+            == "UNLISTENED"
+    });
     let sibling_row =
         sibling.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     // Hold only the sibling's dispatch lease; its receiver must keep polling unfenced.
@@ -3172,6 +3192,42 @@ fn live_user_reload_and_auth_mode_canonicalization_survive_restart() {
         .as_str()
         .unwrap()
         .starts_with("bob-"));
+    // Disabled slots lose their in-memory predecessor, but retained bindings still
+    // belong to the original principal and URL across edits and restarts.
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    config["hubs"]["local"]["enabled"] = json!(false);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.action(json!({"op":"get_snapshot"}));
+    config["user"] = json!("carol");
+    config["hubs"]["local"]["enabled"] = json!(true);
+    fs::write(&f.config, config.to_string()).unwrap();
+    assert!(enroll(&f, human())["listener_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("carol-"));
+    assert!(f
+        .rows("SELECT status FROM local_listeners WHERE principal_id=\'none#bob\'")
+        .iter()
+        .all(|r| r["status"] == "FENCED_INACTIVE"));
+    config["hubs"]["local"]["enabled"] = json!(false);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.action(json!({"op":"get_snapshot"}));
+    config["hubs"]["local"]["url"] = json!("http://127.0.0.1:0");
+    config["hubs"]["local"]["enabled"] = json!(true);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.action(json!({"op":"get_snapshot"}));
+    let rows =
+        f.rows("SELECT status,hub_url FROM local_listeners WHERE principal_id=\'none#carol\'");
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|r| r["status"] == "FENCED_INACTIVE" && r["hub_url"] == "local://"));
 }
 #[test]
 fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {

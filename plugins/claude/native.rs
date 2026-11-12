@@ -436,7 +436,13 @@ pub fn handle(req: &Value) -> Result<Value> {
                     {
                         let mut r = req.clone();
                         r["endpoint_pid"] = json!(p);
-                        if let Ok(v) = bridge(&r) {
+                        let response = bridge(&r);
+                        if alive(p) {
+                            if let Err(error) = &response {
+                                return Err(error.clone());
+                            }
+                        }
+                        if let Ok(v) = response {
                             if v["ok"] == true {
                                 sessions.push(caller(
                                     "claude",
