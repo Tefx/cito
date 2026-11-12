@@ -5184,6 +5184,8 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
     assert_eq!(configured["hubs"]["remote"]["url"], endpoint);
     assert_eq!(configured["hubs"]["remote"]["authMode"], "token");
     assert_eq!(configured["hubs"]["remote"]["token"], "lan-test-token");
+    // The host already enrolled this principal on its local Hub with workspace
+    // scope. Joining through token auth preserves that existing Node scope.
     wait(|| {
         let snapshot = client.action(json!({"op":"get_snapshot"})).1;
         ["local", "remote"].iter().all(|hub| {

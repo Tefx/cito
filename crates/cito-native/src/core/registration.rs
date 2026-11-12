@@ -221,7 +221,7 @@ fn register_locked(
                     .as_str()
                     .or_else(|| client.config["auth_mode"].as_str())
                     .unwrap_or("none")
-                    != "oidc"
+                    == "none"
                 {
                     "workspace"
                 } else {
@@ -405,6 +405,28 @@ mod tests {
                     json!({"url":"local://","authMode":auth_mode}),
                     "alice",
                     Some(engine.clone()),
+                );
+                let default = register_listener(
+                    &first,
+                    &client,
+                    "first-host",
+                    &json!({"about":"New session"}),
+                    &json!({"harness":"fixture","session_id":"new","title":"Session"}),
+                )?;
+                let expected_scope = if auth_mode == "none" {
+                    "workspace"
+                } else {
+                    "self"
+                };
+                assert_eq!(default["scope"], expected_scope);
+                let id = string(&default, "canonical_listener_id");
+                assert_eq!(
+                    first.listener("work", id)?.ok_or("Missing default row")?["scope"],
+                    expected_scope
+                );
+                assert_eq!(
+                    client.kv_get(id)?.ok_or("Missing default Hub row")?.0["scope"],
+                    expected_scope
                 );
                 let caller = json!({"harness":"human","session_id":"default","title":"Human"});
                 let initial = register_listener(

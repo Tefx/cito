@@ -2103,9 +2103,11 @@ impl DaemonService {
                     continue;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
-                if let Err(error) =
-                    self.listen(hub, &json!({"about":candidate["title"]}), candidate)
-                {
+                if let Err(error) = self.listen(
+                    hub,
+                    &json!({"about":candidate["title"],"scope":"self"}),
+                    candidate,
+                ) {
                     eprintln!("cito auto-listen {hub}: {error}");
                 }
             }

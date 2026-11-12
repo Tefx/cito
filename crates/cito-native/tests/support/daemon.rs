@@ -49,7 +49,7 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v["harness"] == "pi" && v["scope"] == "workspace"));
+        .any(|v| v["harness"] == "pi" && v["scope"] == "self"));
     let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(saved["hubs"]["local"]["autoListen"], true);
     assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"pi","session_id":candidate["session_id"]})).0, 200);
@@ -3188,6 +3188,7 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
     fs::write(directory.join("plugin.json"), conflicting.to_string()).unwrap();
     f.daemon(&[]);
     // Human enrollment covers both networks, independently of defaultHub.
+    // Both Hubs use none auth, so their default Human scope remains workspace.
     wait(|| {
         let snapshot = f.action(json!({"op":"get_snapshot"})).1;
         ["local", "remote"].iter().all(|hub| {
