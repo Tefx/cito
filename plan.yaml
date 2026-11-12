@@ -9622,7 +9622,7 @@ phases:
   - id: v34.impl
     name: V34 Q1–Q6 Unified Control Taxonomy, Intrinsic Layout Engine, Chinese IME,
       Directory/Activity Distinction & Self-Invite Guard
-    status: claimed
+    status: done
     description: Implement docs/DESIGN.md §18 (Q1–Q6) while strictly enforcing §18.2
       test economy (update existing unit/UI assertions in place; do NOT add new multi-process
       E2E test functions). Regenerate site/assets/screenshots/*.png.
@@ -9637,6 +9637,55 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T03:15:43.087500Z'
+    done_at: '2026-11-12T04:01:57.155108+00:00'
+    evidence: "Artifact:\n- Commit: 7e6c701516cf29ff2cc6be4ad15a7b30c3280e80 (25 files\
+      \ changed, 492 insertions(+), 198 deletions(-))\n- Candidate ref: refs/vectl/candidates/v34.impl\
+      \ -> 7e6c701516cf29ff2cc6be4ad15a7b30c3280e80\n- Worktree cleanup: removed .vectl/worktrees/v34.impl\
+      \ and /tmp/cito-v34-* logs; free space 128Gi (unchanged delta).\n\nDelivered\
+      \ (docs/DESIGN.md §18 Q1–Q6 & §18.2):\n1. Q1 Unified 5-Class MenuControl Taxonomy\
+      \ & Modal Consistency:\n   - .destructiveHover retains resting pill border/fill\
+      \ matching .neutral and transitions to solid red on hover (`Disconnect`, `Remove`,\
+      \ `Unpair`, `Clear Token`).\n   - Added .destructive tinted red pill at rest\
+      \ (`Confirm Uninstall`) and aligned `uninstall_confirm_box` (`\"Disconnect or\
+      \ Uninstall Cito\"`, removed redundant subtitle, borderless `.subtleHeader`\
+      \ checkbox, bottom `layoutBar`).\n2. Q2 Systemic Intrinsic-Sizing Engine & Anti-Verbosity\
+      \ Subtitle Trim:\n   - Implemented `MenuControl.layoutContents()` centering\
+      \ `[12pt Icon + 5pt Gap + Text]` and `MenuControl.intrinsicWidth(...)` (using\
+      \ `+ 6` cell-margin allowance in `textW` so native AppKit `NSTextFieldCell`\
+      \ drawing never truncates `Reply`, `Copy`, or tab labels).\n   - Introduced\
+      \ `makePillBadge` with optical vertical centering via `label.cell?.cellSize`\
+      \ (`Experimental`, `Notification` / `Passive`).\n   - Dynamic `labelW` / `inputX`\
+      \ alignment in `Human Channels` field rows (`inputX = 78pt` for `Bot Token`\
+      \ / `Chat ID`).\n   - Trimmed verbose subtitles across `Mac Desktop Banner`\
+      \ (`46pt` single-row card), `Share This Mac as a Hub` (`46pt` collapsed, `108pt`/`136pt`\
+      \ expanded), `Telegram`, and `This Mac (Local Hub)` edit form (`124pt`).\n3.\
+      \ Q3 Native macOS Chinese IME Support:\n   - Removed `.nonactivatingPanel` from\
+      \ `settingsPanel` and `directoryPanel`, overrode `canBecomeKey` / `canBecomeMain`,\
+      \ activated `NSTextInputContext` in `makeFirstResponder`, and deferred `Up`/`Down`/`Return`/`Escape`\
+      \ (plus `Backspace`/`Delete` in `Activity`) to `NSTextView` when a field editor\
+      \ is active.\n4. Q4 Visual & Structural Distinction Between Directory and Activity\
+      \ + Per-Message Delete:\n   - Directory (`52pt` rows): `8x8` green `onlineDot`\
+      \ on badge, `Title · repo · branch` + `@user · host`, `[❐ display_address]`\
+      \ and `[\U0001F4AC Message]`.\n   - Activity (`60pt` / `108pt` expanded rows):\
+      \ `3pt` unread left accent bar, `1pt` bottom divider, relative timestamp (`·\
+      \ Just now` / `· 2m ago`), full-width message preview, `[↩ Reply]`, `[❐ Copy]`,\
+      \ and icon-only `delete_activity:<signal_id>` (`trash` icon + `Backspace`/`Delete`\
+      \ shortcut) backed by signal-scoped `WHERE hub = ? AND signal_id = ?` deletion\
+      \ in `daemon.rs`.\n5. Q5 2-Line AVAILABLE SESSIONS Rows in cardMenu:\n   - `44pt`\
+      \ (`58pt` when `needsReload`) 2-line candidate rows with full `268pt` title\
+      \ and `268pt` middle-truncated path/branch, vertically centered `[+ Listen]`\
+      \ / `[❐ /reload]`, and `176pt` scroll height for `> 4` rows.\n6. Q6 Self-Invite\
+      \ Loop Guard & Browser-Friendly HubServer Root Response:\n   - `paste_hub_invite`\
+      \ rejects self-invites matching this Mac's active `host_hub` port and local\
+      \ host identities (`endpoint_url`, `tailscale_url`, `lan_url`, loopback, `local_host_name()`).\n\
+      \   - `HubServer::handle_http` serves `HTTP/1.1 200 OK` `text/html; charset=utf-8`\
+      \ on `GET /`.\n7. Refreshed all 7 `site/assets/screenshots/*.png` assets and\
+      \ updated existing tests in `ui.rs`, `daemon.rs`, and `distribution.rs` in place.\n\
+      \nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ cargo test --workspace -- --test-threads=2 -> PASS (273 passed, 4 ignored,\
+      \ 0 failed)\n- Run: cargo build --release -> PASS (0 warnings, staged binaries\
+      \ updated)\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\n\
+      Spec link:\n- docs/DESIGN.md §18 (Q1–Q6 & §18.2)"
   - id: v34.review
     name: 'V34 Simple Single-Pass Contract-and-Simplicity Review & Fix and Push to
       main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
