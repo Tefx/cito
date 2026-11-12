@@ -331,7 +331,7 @@ fn register_locked(
                 return Err("NATS_UNAVAILABLE: Hub disconnected during registration".into());
             }
             let changed = connection.execute(
-                "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
+                "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET consecutive_probe_failures=CASE WHEN status!='ACTIVE' OR owner_token!=excluded.owner_token OR COALESCE(endpoint_pid,-1)!=COALESCE(excluded.endpoint_pid,-1) THEN 0 ELSE consecutive_probe_failures END,public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(generation),json!(owner)],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
@@ -419,6 +419,66 @@ mod tests {
                 .0;
             assert_eq!(remote["title"], "alice");
             assert_eq!(remote["custom_title"], true);
+            let id = string(&response, "canonical_listener_id").to_string();
+            reopened.db.execute("UPDATE local_listeners SET consecutive_probe_failures=2 WHERE hub=? AND listener_id=?", &[json!("work"),json!(id)])?;
+            register_listener(
+                &reopened,
+                &client,
+                "host",
+                &json!({"about":"Work"}),
+                &caller,
+            )?;
+            let row = reopened
+                .listener("work", &id)?
+                .ok_or("Missing idempotent binding")?;
+            assert_eq!(
+                row["consecutive_probe_failures"], 2,
+                "Idempotent registration retains the current budget"
+            );
+            let plugin = crate::plugins::PluginDescriptor {
+                id: "fixture".into(),
+                kind: "agent-harness".into(),
+                display_name: "Fixture".into(),
+                tier: "experimental".into(),
+                order: 0,
+                sf_symbol: "terminal".into(),
+                tint: "blue".into(),
+                cli_flag: false,
+                plugin_dir: root.clone(),
+                is_builtin: false,
+                command: vec![
+                    "python3".into(),
+                    "-c".into(),
+                    "print(\'{\"ok\":true,\"status\":\"transient_error\"}\')".into(),
+                ],
+                channel_env: None,
+                fields: vec![],
+                post_setup_hint: None,
+                post_disconnect_hint: None,
+            };
+            super::super::receiver::probe_listener(&reopened, &client, &row, &plugin, &root)?;
+            let revoked = reopened
+                .listener("work", &id)?
+                .ok_or("Missing revoked binding")?;
+            assert_eq!(revoked["consecutive_probe_failures"], 3);
+            assert_eq!(revoked["status"], "UNLISTENED");
+            register_listener(
+                &reopened,
+                &client,
+                "host",
+                &json!({"about":"Work"}),
+                &caller,
+            )?;
+            let fresh = reopened
+                .listener("work", &id)?
+                .ok_or("Missing replacement binding")?;
+            assert_eq!(fresh["consecutive_probe_failures"], 0);
+            super::super::receiver::probe_listener(&reopened, &client, &fresh, &plugin, &root)?;
+            let probed = reopened
+                .listener("work", &id)?
+                .ok_or("Missing probed replacement")?;
+            assert_eq!(probed["consecutive_probe_failures"], 1);
+            assert_eq!(probed["status"], "ACTIVE");
             Ok(())
         })();
         engine.shutdown();

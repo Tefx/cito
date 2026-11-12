@@ -114,35 +114,44 @@ fn allow_process_only(req: &Value) -> bool {
     env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("1")
         && env_value(req, "CITO_PI_REQUIRE_BRIDGE").as_deref() != Some("1")
 }
-fn interactive_candidate(req: &Value, pid: u32) -> bool {
+fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     if req["op"] != "discover_sessions" {
-        return true;
+        return Ok(true);
     }
-    let Ok(output) = std::process::Command::new("/bin/ps")
+    let output = std::process::Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "tty=,command="])
         .output()
-    else {
-        return false;
-    };
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return if alive(pid) {
+            Err("Cannot inspect live Pi process".into())
+        } else {
+            Ok(false)
+        };
+    }
     let text = String::from_utf8_lossy(&output.stdout);
     let mut words = text.split_whitespace();
     let Some(tty) = words.next() else {
-        return false;
+        return if alive(pid) {
+            Err("Missing live Pi process description".into())
+        } else {
+            Ok(false)
+        };
     };
     if matches!(tty, "?" | "??")
         && env_value(req, "CITO_PI_ALLOW_HEADLESS_DISCOVERY").as_deref() != Some("1")
     {
-        return false;
+        return Ok(false);
     }
     let args: Vec<_> = words.collect();
-    !args.iter().any(|a| {
+    Ok(!args.iter().any(|a| {
         matches!(
             *a,
             "--print" | "-p" | "--no-session" | "--version" | "--help"
         ) || matches!(*a, "--mode=rpc" | "--mode=json")
     }) && !args
         .windows(2)
-        .any(|w| w[0] == "--mode" && matches!(w[1], "rpc" | "json"))
+        .any(|w| w[0] == "--mode" && matches!(w[1], "rpc" | "json")))
 }
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
 fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
@@ -171,29 +180,39 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             let p = columns.next()?.parse().ok()?;
             (columns.next()?.parse::<u32>().ok()? == uid
                 && !out.iter().any(|(pid, _)| *pid == p)
-                && matches_process(&columns.collect::<Vec<_>>().join(" "))
-                && interactive_candidate(req, p))
+                && matches_process(&columns.collect::<Vec<_>>().join(" ")))
             .then_some(p)
         })
         .collect();
     // Stable ordering makes the shared-cwd session assignment consistent across requests.
     processes.sort_unstable();
     for p in processes {
-        let Ok(identity) = process_identity(p) else {
+        if !interactive_candidate(req, p)? {
             continue;
+        }
+        let identity = match process_identity(p) {
+            Ok(identity) => identity,
+            Err(_) if !alive(p) => continue,
+            Err(error) => return Err(error),
         };
         if !matches_process(str_at(&identity, "command").unwrap_or("")) {
             continue;
         }
-        let Ok(cwd_output) = std::process::Command::new("/usr/sbin/lsof")
+        let cwd_output = match std::process::Command::new("/usr/sbin/lsof")
             .args(["-a", "-d", "cwd", "-Fn", "-p", &p.to_string()])
             .output()
-        else {
-            continue;
+        {
+            Ok(output) if output.status.success() => output,
+            _ if !alive(p) => continue,
+            Ok(_) => return Err("Cannot inspect live Pi working directory".into()),
+            Err(error) => return Err(error.to_string()),
         };
         let cwd_text = String::from_utf8_lossy(&cwd_output.stdout);
         let Some(cwd) = cwd_text.lines().find_map(|l| l.strip_prefix('n')) else {
-            continue;
+            if !alive(p) {
+                continue;
+            }
+            return Err("Missing live Pi working directory".into());
         };
         let basename = Path::new(cwd)
             .file_name()
@@ -250,8 +269,11 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             v["reload_hint"] = json!("Run /reload in Pi to enable 1-click listen");
         }
         // Fence PID reuse while lsof and session metadata were read.
-        if process_identity(p).is_ok_and(|current| current == identity) {
-            out.push((p, v));
+        match process_identity(p) {
+            Ok(current) if current == identity => out.push((p, v)),
+            Ok(_) => {}
+            Err(_) if !alive(p) => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -279,7 +301,12 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
                     }
                 }
                 if let Ok(v) = response {
-                    if interactive_candidate(req, p)
+                    if v["ok"] == false && alive(p) {
+                        return Err(str_at(&v, "message")
+                            .unwrap_or("Pi bridge identification failed")
+                            .to_string());
+                    }
+                    if interactive_candidate(req, p)?
                         && v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()

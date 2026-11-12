@@ -1319,6 +1319,28 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
         node(&s, "directory_items", &format!("dir_meta:{id}"))["text"],
         "Human · mac-studio"
     );
+    f.tool(
+        "cito_listen",
+        json!({"about":"Release approvals"}),
+        serde_json::from_str(HUMAN).unwrap(),
+    );
+    l.until(|s| node(s, "items", &row_id)["height"] == 78);
+    l.control(&format!("stop:{id}"));
+    let paused = l.until(|s| !node(s, "items", "listen_human").is_null());
+    assert_eq!(node(&paused, "items", "human_paused_card")["height"], 78);
+    assert_eq!(
+        node(&paused, "items", "human_paused_about")["text"],
+        "Release approvals"
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["hubs"][0]["human_paused"], true);
+    assert_eq!(snapshot["hubs"][0]["human_about"], "Release approvals");
+    l.control("listen_human");
+    l.until(|s| node(s, "items", &row_id)["height"] == 78);
+    assert_eq!(
+        f.rows("SELECT about FROM local_listeners WHERE harness='human'")[0]["about"],
+        "Release approvals"
+    );
 }
 
 #[test]
@@ -1874,6 +1896,43 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             }
         }
     }
+    for (status, expected) in [
+        ("auth_required", "Sign in above to receive notifications"),
+        ("connecting", "Connecting to receive notifications"),
+        ("unreachable", "Hub unavailable — reconnect above"),
+        ("error", "Hub unavailable — reconnect above"),
+    ] {
+        let mut unavailable = frame.clone();
+        unavailable["hubs"][0]["status"] = json!(status);
+        unavailable["hubs"][0]["human_paused"] = json!(false);
+        f.send(p, unavailable);
+        control(&f, p, "target_hub:personal");
+        assert_eq!(
+            node(&inspect(&f, p), "items", "human_listening_status")["text"],
+            expected
+        );
+        render_png(&f, p, "menu", &format!("r2_human_{status}.png"));
+    }
+    let mut distinct = frame.clone();
+    distinct["hubs"][0]["human_paused"] = json!(true);
+    distinct["hubs"][0]["human_about"] = json!("Release approvals");
+    f.send(p, distinct);
+    let detail = inspect(&f, p);
+    assert_eq!(node(&detail, "items", "human_paused_card")["height"], 78);
+    assert_eq!(
+        node(&detail, "items", "human_paused_card")["children"][0]["height"],
+        72
+    );
+    assert_eq!(
+        node(&detail, "items", "human_paused_about")["text"],
+        "Release approvals"
+    );
+    assert_eq!(
+        node(&detail, "items", "human_listening_status")["text"],
+        "Notifications paused"
+    );
+    render_png(&f, p, "menu", "r2_human_paused_about.png");
+    f.send(p, frame.clone());
     let paused_card = node(&s, "items", "human_paused_card")["children"][0].clone();
     let paused_badge = &paused_card["children"][0];
     assert_eq!(paused_badge["x"], 12);
@@ -2139,6 +2198,47 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     cfg["hubs"][1]["status"] = json!("auth_required");
     f.send(p, json!({"op":"settings","settings":cfg}));
     control(&f, p, "settings_tab:hubs");
+    for (running, error) in [
+        (false, None),
+        (false, Some("Address already in use")),
+        (false, Some("")),
+        (true, Some("")),
+        (true, Some("Hub listener failed")),
+        (true, None),
+    ] {
+        cfg["host_hub"]["running"] = json!(running);
+        cfg["host_hub"]["error"] = json!(error);
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        let status = inspect(&f, p);
+        assert_eq!(
+            node(&status, "settings_items", "toggle_host_hub")["text"],
+            "● Sharing"
+        );
+        let warning = node(&status, "settings_items", "host_hub_error");
+        if !running && error.is_none() {
+            render_png(&f, p, "settings", "r2_host_hub_not_running.png");
+        }
+        if !running || error.is_some() {
+            assert_eq!(
+                warning["text"],
+                error
+                    .filter(|error| !error.is_empty())
+                    .unwrap_or(if running {
+                        "Hub sharing is unavailable"
+                    } else {
+                        "Hub server is not running"
+                    })
+            );
+            assert!(
+                node(&status, "settings_items", "copy_hub_invite")["tooltip"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unavailable")
+            );
+        } else {
+            assert!(warning.is_null());
+        }
+    }
     let s = inspect(&f, p);
     for (hub, trailing) in [("local", "toggle_hub:local"), ("work", "remove_hub:work")] {
         let card = node(&s, "settings_items", &format!("settings_hub:{hub}"));
@@ -3585,6 +3685,78 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
             "{id} must survive a rebuild"
         );
     }
+    for (field, scroll_id, delta) in [
+        (
+            "listeners",
+            "active_scroll",
+            node(&refreshed, "items", "session:personal:row-0")["height"]
+                .as_f64()
+                .unwrap(),
+        ),
+        ("my_remote_listeners", "my_remote_scroll", 34.0),
+    ] {
+        let mut row = frame[field][0].clone();
+        row["scoped_id"] = json!("personal:inserted");
+        row["public_id"] = json!("inserted");
+        row["session_id"] = json!("inserted");
+        frame[field].as_array_mut().unwrap().insert(0, row);
+        f.send(p, frame.clone());
+        assert_eq!(
+            node(&inspect(&f, p), "items", scroll_id)["content_y"]
+                .as_f64()
+                .unwrap(),
+            20.0 + delta,
+            "{scroll_id} preserves its viewed row after insertion"
+        );
+        frame[field].as_array_mut().unwrap().remove(0);
+        f.send(p, frame.clone());
+        assert_eq!(node(&inspect(&f, p), "items", scroll_id)["content_y"], 20);
+    }
+    // A new expanded group changes identifiers, never the existing group's key.
+    let mut expanded = frame.clone();
+    for i in 0..6 {
+        expanded["available"].as_array_mut().unwrap().push(json!({"harness":"second","session_id":format!("other-{i}"),"title":"Review","cwd":"/tmp","endpoint_pid":4242}));
+    }
+    f.send(p, expanded);
+    assert_eq!(
+        node(&inspect(&f, p), "items", "available_scroll:fixture")["content_y"],
+        20
+    );
+    control(&f, p, "toggle_group:second");
+    assert_eq!(
+        node(&inspect(&f, p), "items", "available_scroll")["content_y"],
+        20
+    );
+    control(&f, p, "toggle_group:second");
+    assert_eq!(
+        node(&inspect(&f, p), "items", "available_scroll:fixture")["content_y"],
+        20
+    );
+    let mut inserted = frame["available"][0].clone();
+    inserted["session_id"] = json!("inserted");
+    frame["available"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, inserted);
+    f.send(p, frame.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "items", "available_scroll")["content_y"],
+        64,
+        "Keep candidate-0 at the same screen position after an insertion"
+    );
+    frame["available"][0]["needs_reload"] = json!(true);
+    f.send(p, frame.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "items", "available_scroll")["content_y"],
+        78,
+        "Keep the anchor after a row above it grows"
+    );
+    frame["available"].as_array_mut().unwrap().remove(0);
+    f.send(p, frame.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "items", "available_scroll")["content_y"],
+        20
+    );
     control(&f, p, "open_directory");
     f.send(p,json!({"op":"error","source_op":"listen_session","error":"BRIDGE_UNAVAILABLE: Retry listening"}));
     f.send(p, json!({"op":"test_directory_query","query":""}));
@@ -3643,6 +3815,28 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     control(&f, p, "dismiss_settings_error");
     assert!(node(&inspect(&f, p), "settings_items", "settings_error_banner").is_null());
     control(&f, p, "close_settings");
+    let peers = (0..12)
+        .map(|i| peer(&format!("view-{i}")))
+        .collect::<Vec<_>>();
+    send_fixture(&f, p, json!({"op":"directory","peers":peers}));
+    f.send(
+        p,
+        json!({"op":"test_scroll","id":"directory_scroll","offset":120}),
+    );
+    let mut more = peers.clone();
+    more.insert(0, peer("inserted"));
+    send_fixture(&f, p, json!({"op":"directory","peers":more}));
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_scroll")["content_y"],
+        172,
+        "Directory insertion preserves the viewed peer"
+    );
+    send_fixture(&f, p, json!({"op":"directory","peers":peers}));
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_scroll")["content_y"],
+        120
+    );
+    send_fixture(&f, p, json!({"op":"directory","peers":[peer("one")]}));
     frame["activity"]=json!((0..12).map(|i|json!({"hub":"personal","signal_id":format!("sig-{i}"),"listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Review","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Review ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})).collect::<Vec<_>>());
     f.send(p, frame.clone());
     control(&f, p, "open_activity");
@@ -3655,13 +3849,32 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         120
     );
     frame["activity"][11]["message"] = json!("New details");
-    f.send(p, frame);
+    f.send(p, frame.clone());
     let refreshed = inspect(&f, p);
     assert_eq!(refreshed["directory_selected_id"], "sig-0");
     assert_eq!(
         node(&refreshed, "directory_items", "directory_scroll")["content_y"],
         120,
         "Passive refresh must not reveal an unchanged selection"
+    );
+    let mut inserted = frame["activity"][0].clone();
+    inserted["signal_id"] = json!("inserted");
+    frame["activity"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, inserted);
+    f.send(p, frame.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_scroll")["content_y"],
+        180,
+        "Insertion above the viewport preserves the viewed Activity row"
+    );
+    frame["activity"].as_array_mut().unwrap().remove(0);
+    f.send(p, frame.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_scroll")["content_y"],
+        120,
+        "Removing the inserted row restores the same anchor"
     );
     control(&f, p, "reply_activity:sig-0");
     assert_eq!(
@@ -3682,6 +3895,30 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
             .any(|n| n["text"] == "Sending…"),
         "Reopening must retain pending-send status"
     );
+    control(&f, p, "open_settings");
+    for op in [
+        "delete_activity",
+        "clear_activity_history",
+        "ack_signals",
+        "mark_all_activity_read",
+        "copy_activity_message",
+    ] {
+        f.send(p,json!({"op":"error","source_op":op,"request_id":"mutation-request","error":format!("Could not complete {op}")}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "directory_items", "directory_warning")["hidden"],
+            false
+        );
+        assert_eq!(
+            node(&s, "directory_items", "directory_warning")["text"],
+            "Cannot update Activity. Please try again."
+        );
+        assert!(node(&s, "directory_items", "directory_warning")["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains(op));
+        assert!(node(&s, "settings_items", "settings_error_banner").is_null());
+    }
 }
 
 #[test]
@@ -4229,6 +4466,54 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
         assert_eq!(copied["clipped_views"], json!([]));
         assert_eq!(copied["truncated_labels"], json!([]));
     }
+    // Isolate the address projection while keeping unrelated identity captions short.
+    let full = format!("work:{}/fixture#abcd", "a".repeat(64));
+    let mut long = listener();
+    long["hub"] = json!("work");
+    long["scoped_id"] = json!("work:long");
+    long["display_address"] = json!(full);
+    long["title"] = json!("Review");
+    let mut remote = peer("long-remote");
+    remote["hub"] = json!("work");
+    remote["scoped_id"] = json!("work:long-remote");
+    remote["display_address"] = json!(full);
+    let mut addresses = state();
+    addresses["listeners"] = json!([long]);
+    addresses["my_remote_listeners"] = json!([remote.clone()]);
+    f.send(p, addresses);
+    control(&f, p, "target_hub:work");
+    if node(&inspect(&f, p), "items", "copy_remote:work:long-remote").is_null() {
+        control(&f, p, "toggle_my_remote");
+    }
+    render_png(&f, p, "menu", "r2_long_address_menu.png");
+    for id in ["copy:work:long", "copy_remote:work:long-remote"] {
+        let chip = node(&inspect(&f, p), "items", id);
+        let shown = chip["text"].as_str().unwrap();
+        assert!(shown.contains('…') && shown.starts_with("work:") && shown.ends_with("#abcd"));
+        assert_eq!(chip["tooltip"], full);
+        assert!(chip["width"].as_f64().unwrap() <= 220.0);
+        control(&f, p, id);
+        assert_eq!(inspect(&f, p)["clipboard"], full);
+    }
+    control(&f, p, "open_directory");
+    send_fixture(&f, p, json!({"op":"directory","peers":[remote]}));
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, p, Some(appearance));
+        let chip = node(&s, "directory_items", "copy_dir:work:long-remote");
+        let shown = chip["text"].as_str().unwrap();
+        assert!(shown.contains('…') && shown.starts_with("work:") && shown.ends_with("#abcd"));
+        assert_eq!(chip["tooltip"], full);
+        assert!(chip["width"].as_f64().unwrap() <= 190.0);
+        render_png_as(
+            &f,
+            p,
+            "directory",
+            &format!("r2_long_address_directory_{appearance}.png"),
+            Some(appearance),
+        );
+    }
+    control(&f, p, "copy_dir:work:long-remote");
+    assert_eq!(inspect(&f, p)["clipboard"], full);
     let mut many = state();
     many["listeners"] = json!((0..6)
         .map(|i| {

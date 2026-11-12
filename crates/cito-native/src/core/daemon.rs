@@ -2480,12 +2480,29 @@ impl DaemonService {
             }
         }
         let harnesses:Vec<Value>=self.plugins.agent_plugins().into_iter().enumerate().map(|(order,p)|json!({"kind":"agent","id":p.id,"display_name":p.display_name,"sf_symbol":p.sf_symbol,"tint":p.tint,"tier":p.tier,"order":order})).collect();
+        let paused_humans = self.state.db.query("SELECT hub,principal_id,about FROM local_listeners WHERE harness='human' AND status='UNLISTENED'", &[])?;
         let enabled_hubs: Vec<Value> = settings["hubs"]
             .as_array()
             .into_iter()
             .flatten()
             .filter(|hub| hub["enabled"] != false && self.slots.contains_key(string(hub, "name")))
-            .cloned()
+            .map(|hub| {
+                let mut hub = hub.clone();
+                let paused = paused_humans.iter().find(|row| {
+                    row["hub"] == hub["name"]
+                        && self.slots.get(string(&hub, "name")).is_some_and(|slot| {
+                            super::auth::principal_ids_equal(
+                                string(row, "principal_id"),
+                                string(&slot.identity, "principal_id"),
+                            )
+                        })
+                });
+                hub["human_paused"] = json!(paused.is_some());
+                hub["human_about"] = paused
+                    .map(|row| row["about"].clone())
+                    .unwrap_or(Value::Null);
+                hub
+            })
             .collect();
         Ok(
             json!({"op":"state","status":if sessions.is_empty(){"idle"}else{"active"},"hubs":enabled_hubs,"hub":self.config.default_hub,"listeners":sessions,"sessions":sessions,"available":available,"my_remote_listeners":remote,"activity":activity,"activity_total":activity_total,"activity_unread_count":activity_unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":unread,"total_online":online,"directory_online_count":online,"harnesses":harnesses,"settings":settings}),

@@ -258,6 +258,16 @@ func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
     field.font = font
     return ceil(field.fittingSize.width)
 }
+/// Compact only the chip presentation; callers retain the full address for copying.
+func compactAddressLabel(_ address: String, maxWidth: CGFloat, font: NSFont, paddingX: CGFloat) -> String {
+    if MenuControl.intrinsicWidth(address,font:font,leadingSymbol:"doc.on.doc",paddingX:paddingX) <= maxWidth { return address }
+    for count in stride(from:max(1,address.count-1),through:1,by:-1) {
+        let text = String(address.prefix((count+1)/2)) + "…" + String(address.suffix(count/2))
+        if MenuControl.intrinsicWidth(text,font:font,leadingSymbol:"doc.on.doc",paddingX:paddingX) <= maxWidth { return text }
+    }
+    return "…"
+}
+
 func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = 264,
                         font: NSFont = .systemFont(ofSize: 10.5)) -> String {
     let full = shortCwd + branchSuffix
@@ -804,6 +814,7 @@ struct Hub: Decodable, Equatable {
     let name: String, status: String, auth_mode: String
     let user: String?, error: String?
     let enabled: Bool?, auto_listen: Bool?
+    let human_paused: Bool?, human_about: String?
 }
 struct Listener: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
@@ -1091,7 +1102,8 @@ final class DirectoryPeerCellView: NSTableCellView {
 
         let short = peer.display_address
         let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-        let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc"))
+        let shownAddress = compactAddressLabel(short,maxWidth:190,font:copyFont,paddingX:11)
+        let copyWidth = min(190,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc")))
         copyControl.feedbackTimer?.invalidate()
         copyControl.feedbackTimer = nil
         copyControl.restingTitle = nil
@@ -1100,10 +1112,10 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.frame = NSRect(x: 544 - MenuControl.intrinsicWidth("Message", leadingSymbol:"bubble.left") - 6 - copyWidth, y: 15, width: copyWidth, height: 22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.label.font = copyFont
-        copyControl.label.stringValue = short
+        copyControl.label.stringValue = shownAddress
         copyControl.applyVisualState()
         copyControl.setAccessibilityLabel(short)
-        copyControl.toolTip = peer.scoped_id
+        copyControl.toolTip = shownAddress == short ? peer.scoped_id : short
         copyControl.identifier = NSUserInterfaceItemIdentifier("copy_dir:\(peer.scoped_id)")
         copyControl.pressed = { [weak copyControl] in
             if let control = copyControl { onCopy(peer.display_address, control) }
@@ -1260,6 +1272,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     let cardMenu = NSMenu()
     var hubDrawerVisibility: [String: Bool] = [:]
     var menuScrollOffsets: [String: NSPoint] = [:]
+    var menuScrollKeys: [String: String] = [:]
+    var menuScrollAnchors: [String: (rowId: String, deltaY: CGFloat)] = [:]
     var statusImage: NSImage?
     var uniqueSessionCount: Int {
         Dictionary(grouping: listeners.filter { $0.harness != "human" && (effectiveTargetHub.isEmpty || $0.hub == effectiveTargetHub) }, by: { $0.harness })
@@ -1298,7 +1312,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let hasError = directoryError != nil
         let hasWarning = hasError || !directoryWarnings.isEmpty
         directoryWarningLabel?.isHidden = !hasWarning
-        directoryWarningLabel?.stringValue = hasError ? "Cannot refresh Directory. Showing the last available results." : "Some Hubs are unavailable. Results may be incomplete."
+        directoryWarningLabel?.stringValue = hasError ? (directoryMode == "activity" ? "Cannot update Activity. Please try again." : "Cannot refresh Directory. Showing the last available results.") : "Some Hubs are unavailable. Results may be incomplete."
         directoryWarningLabel?.toolTip = directoryError.map(presentationError) ?? directoryWarnings.map(presentationError).joined(separator:"\n")
         directoryWarningLabel?.textColor = hasError ? CitoPalette.dangerText : CitoPalette.secondaryText
         let bottom: CGFloat = directoryComposerBar?.isHidden == false ? 90 : 28
@@ -1326,6 +1340,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         control?.copied(feedback)
     }
     func showMessageCopyError(_ message: String) {
+        if directoryVisible { directoryError = message; updateDirectoryWarnings() }
         pendingMessageCopy = nil
         setComposerStatus(message)
         if directoryComposerBar?.isHidden != false {
@@ -1982,8 +1997,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 setComposerStatus(error)
                 pendingComposer = nil
             } else if isAddHubError { addHubError = error }
-            else if ["query_directory", "open_directory"].contains(sourceOp) {
-                if frame.request_id == nil || frame.request_id == directoryRequestId { directoryError = error; updateDirectoryWarnings() }
+            else if ["query_directory", "open_directory"].contains(sourceOp) || directoryVisible && ["delete_activity", "clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"].contains(sourceOp) {
+                if !["query_directory", "open_directory"].contains(sourceOp) || frame.request_id == nil || frame.request_id == directoryRequestId { directoryError = error; updateDirectoryWarnings() }
             }
             else if settingsVisible || pendingHubSave != nil { settingsBannerError = error }
             else { menuBannerError = error }
@@ -2023,7 +2038,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             return
         }
         if frame.op == "state", let h = frame.hubs, let l = frame.listeners,
-           h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected"].contains($0.status) && ["none", "token", "oidc"].contains($0.auth_mode) }),
+           h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected", "unreachable", "error"].contains($0.status) && ["none", "token", "oidc"].contains($0.auth_mode) }),
            l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
             let a = frame.available ?? []
             let r = (frame.my_remote_listeners ?? []).filter { $0.harness != "human" }
@@ -2162,11 +2177,17 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let scroll = (item.view as? NSScrollView) ?? item.view?.subviews.compactMap { $0 as? NSScrollView }.first
             if let scroll = scroll, let id = scroll.identifier?.rawValue,
                ["active_scroll","my_remote_scroll","available_scroll"].contains(where: { id == $0 || id.hasPrefix($0 + ":") }) {
-                menuScrollOffsets[id] = scroll.contentView.bounds.origin
+                let key = menuScrollKeys[id] ?? id
+                let offset = scroll.contentView.bounds.origin
+                menuScrollOffsets[key] = offset; menuScrollOffsets[id] = offset
+                if let top = scroll.documentView?.subviews.sorted(by: { $0.frame.minY < $1.frame.minY }).first(where: { $0.frame.maxY > offset.y }), let rowId = top.identifier?.rawValue {
+                    menuScrollAnchors[key] = (rowId,offset.y-top.frame.minY)
+                    menuScrollAnchors[id] = menuScrollAnchors[key]
+                }
             }
         }
         menu.removeAllItems()
-        func host(_ view: NSView, id: String) -> NSMenuItem {
+        func host(_ view: NSView, id: String, scrollKey: String? = nil) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
             let item = NSMenuItem()
             if view is NSScrollView {
@@ -2176,9 +2197,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 root.addSubview(view); item.view = root
             } else { view.appearance = testAppearance; item.view = view }
             menu.addItem(item)
-            if let scroll = view as? NSScrollView, let offset = menuScrollOffsets[id], let doc = scroll.documentView {
+            let key = scrollKey ?? id
+            if view is NSScrollView { menuScrollKeys[id] = key }
+            if let scroll = view as? NSScrollView, let offset = menuScrollOffsets[key], let doc = scroll.documentView {
                 scroll.layoutSubtreeIfNeeded()
-                scroll.contentView.scroll(to:NSPoint(x:max(0,min(offset.x,doc.frame.width-scroll.contentSize.width)),y:max(0,min(offset.y,doc.frame.height-scroll.contentSize.height))))
+                let anchoredY = menuScrollAnchors[key].flatMap { anchor in doc.subviews.first { $0.identifier?.rawValue == anchor.rowId }.map { $0.frame.minY + anchor.deltaY } } ?? offset.y
+                scroll.contentView.scroll(to:NSPoint(x:max(0,min(offset.x,doc.frame.width-scroll.contentSize.width)),y:max(0,min(anchoredY,doc.frame.height-scroll.contentSize.height))))
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
             return item
@@ -2190,7 +2214,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if count > 0 {
             subtitleText = "\(count) session\(count == 1 ? "" : "s") listening"
         } else {
-            subtitleText = humanListening ? "Idle" : "Notifications paused"
+            let humanHub = hubs.first { $0.name == effectiveTargetHub }
+            if humanListening { subtitleText = "Idle" }
+            else if humanHub?.human_paused != true && humanHub?.status == "auth_required" { subtitleText = "Sign in required" }
+            else if humanHub?.human_paused != true && ["unreachable","error"].contains(humanHub?.status ?? "") { subtitleText = "Hub unavailable" }
+            else if humanHub?.human_paused != true && humanHub?.status == "connecting" { subtitleText = "Connecting…" }
+            else { subtitleText = humanHub?.human_paused == false ? "Not listening" : "Notifications paused" }
         }
         let totalHubPillsWidth = hubs.reduce(CGFloat(0)) { $0 + min(180, measureTextWidth($1.name, font: btnFont) + 26) }
             + CGFloat(max(0, hubs.count - 1)) * 4
@@ -2349,21 +2378,36 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let listeners = self.listeners.filter { targetHub.isEmpty || $0.hub == targetHub }
         let myRemote = self.myRemote.filter { targetHub.isEmpty || $0.hub == nil || $0.hub == targetHub }
         let hasHumanListener = listeners.contains { $0.harness == "human" }
+        let targetHubObj = hubs.first { $0.name == targetHub }
         let targetUser = hubs.first(where: { $0.name == targetHub })?.user ?? hubs.first?.user ?? "local"
         if !hasHumanListener && hubs.contains(where: { $0.name == targetHub && $0.status != "disconnected" }) {
-            let rowHeight: CGFloat = 64, cardHeight: CGFloat = 58
+            let about = distinctAbout(targetHubObj?.human_about, title:"Human", user:targetUser)
+            let rowHeight: CGFloat = about == nil ? 64 : 78, cardHeight: CGFloat = about == nil ? 58 : 72
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
             let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.05), border: .labelColor.withAppearanceAlpha(0.10))
-            card.addSubview(makeHarnessBadge(NSRect(x: 12, y: 15, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
-            let title = textLabel("You (@\(targetUser))", NSRect(x: 48, y: 32, width: 220, height: 18), size: 13, weight: .semibold)
+            card.addSubview(makeHarnessBadge(NSRect(x: 12, y: cardHeight - 43, width: 28, height: 28), radius: 7, iconInset: 6, harness: "human", harnesses: map))
+            let title = textLabel("You (@\(targetUser))", NSRect(x: 48, y: cardHeight - 26, width: 220, height: 18), size: 13, weight: .semibold)
             title.lineBreakMode = .byTruncatingMiddle; title.toolTip = title.stringValue
             card.addSubview(title)
-            card.addSubview(textLabel("Notifications paused", NSRect(x: 48, y: 8, width: 200, height: 16), size: 11, color: CitoPalette.secondaryText))
-            let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume"), y: 18, width: MenuControl.intrinsicWidth("Resume"), height: 22), radius: 6)
+            let status: String
+            if targetHubObj?.human_paused == true { status = "Notifications paused" }
+            else if targetHubObj?.status == "auth_required" { status = "Sign in above to receive notifications" }
+            else if ["unreachable","error"].contains(targetHubObj?.status ?? "") { status = "Hub unavailable — reconnect above" }
+            else if targetHubObj?.status == "connecting" { status = "Connecting to receive notifications" }
+            else { status = targetHubObj?.human_paused == false ? "Notifications not connected" : "Notifications paused" }
+            let statusLabel = textLabel(status, NSRect(x: 48, y: 8, width: 200, height: 16), size: 11, color: CitoPalette.secondaryText)
+            statusLabel.identifier = NSUserInterfaceItemIdentifier("human_listening_status"); statusLabel.toolTip = status
+            card.addSubview(statusLabel)
+            if let about = about {
+                let detail = textLabel(about,NSRect(x:48,y:28,width:296,height:16),size:11.5,color:CitoPalette.secondaryText)
+                detail.lineBreakMode = .byTruncatingMiddle; detail.toolTip = about
+                detail.identifier = NSUserInterfaceItemIdentifier("human_paused_about"); card.addSubview(detail)
+            }
+            let enable = MenuControl("Resume", frame: NSRect(x: card.bounds.width-12-MenuControl.intrinsicWidth("Resume"), y: about == nil ? 18 : cardHeight - 28, width: MenuControl.intrinsicWidth("Resume"), height: 22), radius: 6)
             enable.identifier = NSUserInterfaceItemIdentifier("listen_human")
             enable.style = .prominent
-            enable.pressed = { [weak self] in self?.emit(["op": "listen_session", "hub": targetHub, "harness": "human", "session_id": "default", "about": "Human receiver"]) }
+            enable.pressed = { [weak self] in self?.emit(["op": "listen_session", "hub": targetHub, "harness": "human", "session_id": "default", "about": targetHubObj?.human_about ?? "Human receiver"]) }
             title.frame.size.width = max(0,enable.frame.minX-52)
             card.addSubview(enable); row.addSubview(card)
             _ = host(row, id: "human_paused_card")
@@ -2408,11 +2452,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             let short = listener.display_address
             let copyFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-            let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3))
-            let copy = MenuControl(short, frame: NSRect(x: titleX, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
+            let shownAddress = compactAddressLabel(short,maxWidth:220,font:copyFont,paddingX:3)
+            let copyWidth = min(220,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3)))
+            let copy = MenuControl(shownAddress, frame: NSRect(x: titleX, y: 7, width: copyWidth, height: 19), leadingSymbol: "doc.on.doc")
             copy.label.font = copyFont
             copy.style = .subtleHeader
-            copy.toolTip = listener.scoped_id; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
+            copy.toolTip = shownAddress == short ? listener.scoped_id : short; copy.identifier = NSUserInterfaceItemIdentifier("copy:\(listener.scoped_id)")
+            copy.setAccessibilityLabel(short)
             copy.label.alignment = .left
             copy.layoutContents()
             copy.pressed = { [weak self, weak copy] in
@@ -2562,11 +2608,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     hostIcon.contentTintColor = CitoPalette.secondaryText
                     row.addSubview(hostIcon)
                     let short = peer.display_address
-                    let copyWidth = max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(short, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3))
-                    let copy = MenuControl(short, frame: NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20), leadingSymbol: "doc.on.doc")
+                    let shownAddress = compactAddressLabel(short,maxWidth:220,font:copyFont,paddingX:3)
+                    let copyWidth = min(220,max(MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3), MenuControl.intrinsicWidth(shownAddress, font:copyFont, leadingSymbol:"doc.on.doc", paddingX:3)))
+                    let copy = MenuControl(shownAddress, frame: NSRect(x: 368 - copyWidth, y: 7, width: copyWidth, height: 20), leadingSymbol: "doc.on.doc")
                     copy.label.font = copyFont
                     copy.label.alignment = .left
-                    copy.toolTip = peer.scoped_id
+                    copy.toolTip = shownAddress == short ? peer.scoped_id : short
+                    copy.setAccessibilityLabel(short)
                     copy.identifier = NSUserInterfaceItemIdentifier("copy_remote:\(peer.scoped_id)")
                     copy.layoutContents()
                     copy.pressed = { [weak self, weak copy] in
@@ -2651,6 +2699,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if autoListen && items.allSatisfy({ $0.endpoint_pid == nil && $0.needs_reload != true }) && autoCollapsedRecentGroups.insert(recentKey).inserted {
                     collapsedGroups.insert(harness)
                 }
+            }
+            let expandedGroupCount = groupedCandidates.filter { !collapsedGroups.contains($0.harness) }.count
+            for (harness, items) in groupedCandidates {
                 let isCollapsed = collapsedGroups.contains(harness)
                 let visual = resolveHarnessVisual(harness, harnesses: map)
                 let noun: String
@@ -2761,8 +2812,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             rowY += row.frame.height
                             doc.addSubview(row)
                         }
-                        let scrollId = groupedCandidates.count == 1 ? "available_scroll" : "available_scroll:\(harness)"
-                        scroll.documentView = doc; _ = host(scroll, id: scrollId)
+                        let scrollId = expandedGroupCount == 1 ? "available_scroll" : "available_scroll:\(harness)"
+                        scroll.documentView = doc; _ = host(scroll, id: scrollId, scrollKey:"available_scroll:\(harness)")
                     }
                 }
             }
@@ -3450,7 +3501,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             endpoint_url: "http://127.0.0.1:4291", token: "",
             invite_command: "cito setup --hub lan --url http://127.0.0.1:4291 --default", auth_mode: nil, error: nil
         )
-        let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 }
+        let hostingUnavailable = hostHub.enabled && (!hostHub.running || hostHub.error != nil)
+        let hostError = (hostHubPortError ?? hostHub.error).flatMap { $0.isEmpty ? nil : $0 } ?? (hostingUnavailable ? (hostHub.running ? "Hub sharing is unavailable" : "Hub server is not running") : nil)
         let hostExpanded = hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
         let hostHeight: CGFloat = hostExpanded ? (hasAddressChoice ? 136 : 108) + (hostError == nil ? 0 : 28) : 46
@@ -3508,6 +3560,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         let copyInvite = MenuControl("Copy Invite Code", frame: NSRect(x: 0, y: 48, width: MenuControl.intrinsicWidth("Copy Invite Code", leadingSymbol:"doc.on.doc"), height: 24), leadingSymbol: "doc.on.doc", radius: 6)
         copyInvite.identifier = NSUserInterfaceItemIdentifier("copy_hub_invite")
         copyInvite.style = .prominent
+        if hostingUnavailable { copyInvite.toolTip = "Hub sharing is unavailable. This invite will work after the server recovers." }
         let inviteCmd = selectedInvite
         copyInvite.pressed = { [weak self, weak copyInvite] in
             self?.copyText(inviteCmd, control:copyInvite, feedback:"✓ Invite Copied")
@@ -4409,6 +4462,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func applyActivityFilter(revealSelection: Bool = false) {
         let offset = directoryScrollView?.contentView.bounds.origin
+        let top = directoryTableView.map { $0.rows(in:$0.visibleRect).location } ?? NSNotFound
+        let anchor = activityFilteredItems.indices.contains(top) ? activityFilteredItems[top] : nil
+        let deltaY = (offset?.y ?? 0) - (directoryTableView.flatMap { top == NSNotFound ? nil : $0.rect(ofRow:top).minY } ?? 0)
         let selected = activityFilteredItems.indices.contains(directorySelectedIndex) ? activityFilteredItems[directorySelectedIndex] : nil
         let q = directoryQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let serverMatches = serverActivityFilter == activityFilter && serverActivityQuery == directoryQuery
@@ -4440,7 +4496,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             table.layoutSubtreeIfNeeded()
             if !revealSelection && !selectionChanged, let offset = offset {
-                directoryScrollView?.contentView.scroll(to:offset)
+                let index = anchor.flatMap { previous in activityFilteredItems.firstIndex { $0.hub == previous.hub && $0.signal_id == previous.signal_id } }
+                let y = index.map { table.rect(ofRow:$0).minY + deltaY } ?? offset.y
+                directoryScrollView?.contentView.scroll(to:NSPoint(x:offset.x,y:y))
                 if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
             }
         }
@@ -4535,6 +4593,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
         let offset = directoryScrollView?.contentView.bounds.origin
+        let top = directoryTableView.map { $0.rows(in:$0.visibleRect).location } ?? NSNotFound
+        let anchorId = directoryFilteredPeers.indices.contains(top) ? directoryFilteredPeers[top].scoped_id : nil
+        let deltaY = (offset?.y ?? 0) - (directoryTableView.flatMap { top == NSNotFound ? nil : $0.rect(ofRow:top).minY } ?? 0)
         let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
         let sameServerQuery = serverDirectoryQuery == directoryQuery && serverDirectoryScope == directoryScopeFilter && serverDirectoryHarness == directoryHarnessFilter
         func shadowKey(_ peer: RemotePeer) -> String {
@@ -4564,7 +4625,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             table.layoutSubtreeIfNeeded()
             if !selectionChanged, let offset = offset {
-                directoryScrollView?.contentView.scroll(to:offset)
+                let index = anchorId.flatMap { id in directoryFilteredPeers.firstIndex { $0.scoped_id == id } }
+                let y = index.map { table.rect(ofRow:$0).minY + deltaY } ?? offset.y
+                directoryScrollView?.contentView.scroll(to:NSPoint(x:offset.x,y:y))
                 if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
             }
         }
@@ -4943,7 +5006,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let hub = listener?.hub ?? peer?.hub ?? ""
                     let harness = listener?.harness ?? peer?.harness ?? ""
                     let defaultHub = settings?.hubs.first(where: { $0.is_default })?.name ?? hubs.first?.name ?? ""
-                    if label.isEmpty || address != label || (harness == "human" && !label.contains("@")) || (!hub.isEmpty && hub != defaultHub && !label.hasPrefix("\(hub):")) { addressMismatches.append(id) }
+                    let addressMatches = address.map { expected in
+                        label == expected || (control.toolTip == expected && label == compactAddressLabel(expected,maxWidth:control.frame.width,font:control.label.font ?? .systemFont(ofSize:11),paddingX:prefix == "copy_dir:" ? 11 : 3))
+                    } ?? false
+                    let full = address ?? ""
+                    if label.isEmpty || !addressMatches || (harness == "human" && !full.contains("@")) || (!hub.isEmpty && hub != defaultHub && !full.hasPrefix("\(hub):")) { addressMismatches.append(id) }
                 }
             }
             if visible, let scroll = view as? NSScrollView {

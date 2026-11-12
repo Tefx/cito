@@ -89,6 +89,47 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
             assert_eq!(probe["status"], "transient_error", "{probe}");
             f.env.remove("CITO_PI_REQUIRE_BRIDGE");
         }
+        fs::remove_file(&live).unwrap();
+        let listener = UnixListener::bind(&live).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
+                        let mut line = String::new();
+                        BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut line)
+                            .unwrap();
+                        assert_eq!(
+                            serde_json::from_str::<Value>(&line).unwrap()["op"],
+                            "identify"
+                        );
+                        stream.write_all(b"{\"ok\":false,\"error\":\"DELIVERY_FAILED\",\"message\":\"Cannot persist bridge identity\"}\n").unwrap();
+                        break;
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("Bridge fixture accept failed: {error}"),
+                }
+            }
+        });
+        let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
+        server.join().unwrap();
+        assert_eq!(rejected["ok"], false, "{id}: {rejected}");
+        assert!(rejected["sessions"].is_null());
+        assert!(rejected["message"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot persist bridge identity"));
         fs::remove_file(live).unwrap();
         let dead = f.state.join(format!("sockets/{id}-pid-{}.sock", i32::MAX));
         drop(UnixListener::bind(&dead).unwrap());

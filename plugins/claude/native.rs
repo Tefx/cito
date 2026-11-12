@@ -449,6 +449,11 @@ pub fn handle(req: &Value) -> Result<Value> {
                             }
                         }
                         if let Ok(v) = response {
+                            if v["ok"] == false && alive(p) {
+                                return Err(str_at(&v, "message")
+                                    .unwrap_or("Claude bridge identification failed")
+                                    .to_string());
+                            }
                             if v["ok"] == true {
                                 sessions.push(caller(
                                     "claude",

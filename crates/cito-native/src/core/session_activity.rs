@@ -28,6 +28,7 @@ type Worker<T> = JoinHandle<Result<T, String>>;
 struct Discovery {
     plugin: PluginDescriptor,
     cached: Vec<Value>,
+    stale: bool,
     due: Instant,
     worker: Option<Worker<Vec<Value>>>,
 }
@@ -98,6 +99,7 @@ impl SessionActivity {
                 .map(|p| Discovery {
                     plugin: p.clone(),
                     cached: Vec::new(),
+                    stale: false,
                     due: Instant::now(),
                     worker: None,
                 })
@@ -122,9 +124,13 @@ impl SessionActivity {
             .any(|provider| provider.worker.is_some())
     }
 
-    /// All discovered endpoints, without the presentation layer's per-app limit.
+    /// Freshly confirmed endpoints eligible for automatic enrollment. Retained
+    /// inventories remain visible through available(), but cannot establish identity.
     pub fn candidates(&self) -> impl Iterator<Item = &Value> {
-        self.discovery.iter().flat_map(|provider| &provider.cached)
+        self.discovery
+            .iter()
+            .filter(|provider| !provider.stale && provider.worker.is_none())
+            .flat_map(|provider| &provider.cached)
     }
 
     /// Read the cache only. Refilter against current live rows so a just-listened
@@ -320,6 +326,7 @@ impl SessionActivity {
                         None
                     }
                 };
+                provider.stale = rows.is_none();
                 if let Some(rows) = rows {
                     changed |= rows != provider.cached;
                     provider.cached = rows;
@@ -859,6 +866,7 @@ print(json.dumps(response), flush=True)
         let mut activity = SessionActivity::new(&f.config, &f.plugins);
         let confirmed = vec![json!({"harness":"agent","session_id":"kept","title":"Work"})];
         activity.discovery[0].cached = confirmed.clone();
+        assert_eq!(activity.candidates().count(), 1);
         for panic in [false, true] {
             activity.discovery[0].worker = Some(std::thread::spawn(move || {
                 if panic {
@@ -866,9 +874,30 @@ print(json.dumps(response), flush=True)
                 }
                 Err("PLUGIN_TIMEOUT: fixture deadline".into())
             }));
+            assert_eq!(
+                activity.candidates().count(),
+                0,
+                "Do not enroll an identity while its refresh is unconfirmed"
+            );
             pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
             assert_eq!(activity.discovery[0].cached, confirmed);
+            assert_eq!(
+                activity.available(&[], 1),
+                confirmed,
+                "Retained sessions stay visible"
+            );
+            assert_eq!(
+                activity.candidates().count(),
+                0,
+                "Retained identities cannot auto-enroll after discovery failure"
+            );
         }
+        let switched =
+            vec![json!({"harness":"agent","session_id":"replacement","title":"New work"})];
+        let fresh = switched.clone();
+        activity.discovery[0].worker = Some(std::thread::spawn(move || Ok(fresh)));
+        pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
+        assert_eq!(activity.candidates().cloned().collect::<Vec<_>>(), switched);
         activity.discovery[0].worker = Some(std::thread::spawn(|| Ok(vec![])));
         pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
         assert!(
