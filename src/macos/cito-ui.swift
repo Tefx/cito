@@ -275,11 +275,8 @@ func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
     return min(108, max(60, 38 + ceil(wrappedRect.height)))
 }
 
-func cleanHostDisplay(_ raw: String, localHost: String? = nil) -> String {
-    let clean = raw.replacingOccurrences(of: "\\.local\\b", with: "", options: [.regularExpression, .caseInsensitive])
-    if let localHost = localHost, !localHost.isEmpty,
-       clean.caseInsensitiveCompare(cleanHostDisplay(localHost)) == .orderedSame { return "This Mac" }
-    return clean
+func cleanHostDisplay(_ raw: String) -> String {
+    raw.replacingOccurrences(of: "\\.local\\b", with: "", options: [.regularExpression, .caseInsensitive])
 }
 func nodeDisplayTitle(_ title: String, harness: String, user: String, cwd: String = "", about: String? = nil, harnessName: String? = nil, customTitle: Bool = false) -> String {
     if customTitle { return title }
@@ -287,6 +284,7 @@ func nodeDisplayTitle(_ title: String, harness: String, user: String, cwd: Strin
     if harness == "human" && (raw.isEmpty || raw == "Human" || raw == "@\(user)" || raw == "@\(user) (Me)" || raw.hasPrefix("Human Node")) {
         return "You (@\(user))"
     }
+    if harness != "human" && raw.hasSuffix(" (~)") { return raw }
     if harness != "human" && (cwd == NSHomeDirectory() || raw.isEmpty || raw.lowercased() == user.lowercased()) {
         return distinctAbout(about, title: raw, user: user) ?? "\(harnessName ?? harness) (~)"
     }
@@ -306,7 +304,7 @@ func presentationError(_ raw: String) -> String {
 func distinctAbout(_ raw: String?, title: String, user: String) -> String? {
     let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let lower = value.lowercased()
-    return value.isEmpty || [title.lowercased(), "@\(user.lowercased())", "session", "agent session", "coding session", "human", "human receiver", "human node", "human channel"].contains(lower) ? nil : value
+    return value.isEmpty || [title.lowercased(), user.lowercased(), "@\(user.lowercased())", "agent", "session", "cli session", "agent session", "coding session", "human", "human receiver", "human node", "human channel"].contains(lower) ? nil : value
 }
 struct HarnessMeta: Decodable, Equatable {
     let id: String
@@ -719,7 +717,7 @@ struct Payload: Decodable {
         (effective_wake ? "" : "[Passive] ") + "\(from_user)@\(from_host) · \(from_title)"
     }
     var displaySubtitle: String {
-        let cleanHost = from_host.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
+        let cleanHost = cleanHostDisplay(from_host)
         let title = from_title.trimmingCharacters(in: .whitespacesAndNewlines)
         return "\(from_user)@\(cleanHost.isEmpty ? from_host : cleanHost)" + (title.isEmpty ? "" : " · \(title)")
     }
@@ -2262,7 +2260,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard renderedSessions.insert(sessionKey).inserted, let group = groups[sessionKey] else { continue }
             let sharedDefault = settings?.hubs.first { $0.is_default && $0.name != "local" && $0.status == "connected" }?.name
                 ?? hubs.first { $0.name != "local" && $0.status == "connected" }?.name
-            let primaryListener = (!selectedTargetHub.isEmpty ? group.first { $0.hub == effectiveTargetHub } : nil)
+            let primaryListener = group.first { $0.hub == selectedTargetHub }
+                ?? (!selectedTargetHub.isEmpty ? group.first { $0.hub == effectiveTargetHub } : nil)
                 ?? group.first { $0.hub == sharedDefault }
                 ?? group.first { $0.hub == "local" }
                 ?? group.first { row in hubs.contains { $0.name == row.hub && $0.status == "connected" } }
@@ -2289,7 +2288,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             card.addSubview(badge)
             let listenerHub = hubs.first(where: { $0.name == listener.hub })
             let showScopeToggle = group.contains { $0.hub != "local" } || !(listenerHub?.name == "local" && listenerHub?.auth_mode == "none")
-            let hubPillWidth = min(88, max(44, ceil(measureTextWidth(listener.hub, font: btnFont)) + 20))
+            let hubPillWidth = min(88, max(40, ceil(measureTextWidth(listener.hub, font: btnFont)) + 16))
             let scopeWidth: CGFloat = 62
             var sessionActions: [NSView] = []
             let title = textLabel(displayTitle,
@@ -2387,7 +2386,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "harness": listener.harness, "session_id": listener.session_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
-            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, trailing: sessionActions)
+            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: 2, trailing: sessionActions)
             let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
             if !personal && renamingSessionKey == sessionKey {
                 title.isHidden = true
@@ -2498,14 +2497,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         self?.copyText(peer.display_address, control: copy)
                     }
                     row.addSubview(copy)
-                    let cleanHost = peer.host_name.replacingOccurrences(of: "\\.local$", with: "", options: [.regularExpression, .caseInsensitive])
+                    let cleanHost = cleanHostDisplay(peer.host_name)
                     let hostText = cleanHost.isEmpty ? peer.host_name : cleanHost
                     let branch = (peer.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let branchSuffix = (!branch.isEmpty && branch != "HEAD") ? " · \(branch)" : ""
-                    let info = textLabel("\(hostText) · \(nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,cwd:peer.cwd ?? "",about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true))\(branchSuffix)",
+                    let displayTitle = nodeDisplayTitle(peer.title,harness:peer.harness,user:peer.user,cwd:peer.cwd ?? "",about:peer.about,harnessName:map[peer.harness]?.display_name,customTitle:peer.custom_title == true)
+                    let info = textLabel("\(hostText) · \(displayTitle)\(branchSuffix)",
                         NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
-                    info.toolTip = peer.scoped_id + (distinctAbout(peer.about, title: peer.title, user: peer.user).map { " — \($0)" } ?? "")
+                    info.toolTip = peer.scoped_id + (distinctAbout(distinctAbout(peer.about, title: peer.title, user: peer.user), title: displayTitle, user: peer.user).map { " — \($0)" } ?? "")
                     row.addSubview(info)
                     layoutBar(in: row, insetLeft: 16, y: 7, height: 20, leading: [hostIcon], flexible: info, trailing: [copy])
                     remoteRows.append((id: rowId, view: row))
@@ -2635,7 +2635,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         location.toolTip = "\(shortCwd)\(branchSuffix)"
                         location.identifier = NSUserInterfaceItemIdentifier("candidate_cwd:\(c.harness):\(c.session_id)")
                         row.addSubview(location)
-                        info.toolTip = "\(c.title) — \(c.cwd)"
+                        info.toolTip = "\(candidateTitle) — \(c.cwd)"
                         info.identifier=NSUserInterfaceItemIdentifier("candidate_title:\(c.harness):\(c.session_id)")
                         row.addSubview(info)
                         if needsReload {
@@ -2655,14 +2655,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         }
                         let listenBtn = MenuControl("Listen", frame: NSRect(x: 298, y: floor((rowHeight-22)/2), width: 70, height: 22), leadingSymbol: "plus", radius: 6)
                         listenBtn.identifier = NSUserInterfaceItemIdentifier("listen:\(c.harness):\(c.session_id)")
-                        listenBtn.toolTip = "Start listening in \(c.title)"
+                        listenBtn.toolTip = "Start listening in \(candidateTitle)"
                         let listenRun = { [weak self, weak listenBtn] in
                             guard let self = self else { return }
                             self.pendingMutation = true
                             listenBtn?.setLeadingSymbol(nil)
                             listenBtn?.label.stringValue = "…"
                             listenBtn?.setAccessibilityLabel("…")
-                            var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.title]
+                            var action: [String: Any] = ["op": "listen_session", "harness": c.harness, "session_id": c.session_id, "cwd": c.cwd, "title": c.custom_title == true ? c.title : candidateTitle]
                             if let pid = c.endpoint_pid { action["endpoint_pid"] = pid }
                             if self.hubs.count > 1 && !targetHub.isEmpty { action["hub"] = targetHub }
                             self.emit(action)
@@ -4895,6 +4895,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 result["secure"] = label is NSSecureTextField
                 result["placeholder"] = label.placeholderString ?? ""
                 result["tooltip"] = label.toolTip ?? ""
+                result["label_width"] = label.cell?.drawingRect(forBounds: label.bounds).width ?? label.bounds.width
+                result["label_measured_width"] = label.cell?.cellSize.width ?? label.attributedStringValue.size().width
             }
             if let control = view as? NSControl { result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue }
             if let control = view as? MenuControl {

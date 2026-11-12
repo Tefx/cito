@@ -2895,6 +2895,13 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     );
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["available"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["harness"] == "fixture" && row["session_id"] == "session-1")
+    });
     for hub in ["personal", "work"] {
         let target = f.tool(
             "cito_listen",
@@ -2911,12 +2918,29 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             .unwrap()
             .starts_with(&format!("{hub}:")));
     }
+    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"alice"})).0, 200);
+    // Still available on local: the cached candidate must agree immediately,
+    // without waiting for discovery or an eventual-consistency retry.
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let candidate = snapshot["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["harness"] == "fixture" && row["session_id"] == "session-1")
+        .unwrap();
+    assert_eq!(candidate["title"], "alice");
+    assert_eq!(candidate["custom_title"], true);
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["harness"] == "fixture")
+        .all(|row| row["title"] == candidate["title"] && row["custom_title"] == true));
     f.tool(
         "cito_listen",
         json!({"hub":"local","about":"Multi hub","scope":"workspace"}),
         meta.clone(),
     );
-    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"alice"})).0, 200);
     f.tool(
         "cito_listen",
         json!({"hub":"personal","about":"Multi hub"}),
@@ -2936,6 +2960,49 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     );
     assert_eq!(local["listeners"].as_array().unwrap().len(), 1);
     assert_eq!(local["listeners"][0]["title"], "alice");
+    for hub in ["personal", "work"] {
+        let stopped = if hub == "personal" {
+            f.tool("cito_unlisten", json!({"hub":hub}), meta.clone())
+        } else {
+            let (ok, out, err) = f.command(
+                NATIVE,
+                &[
+                    "unlisten",
+                    "--hub",
+                    hub,
+                    "--harness",
+                    "fixture",
+                    "--session",
+                    "session-1",
+                    "--json",
+                ],
+                "",
+            );
+            assert!(ok, "{out} {err}");
+            serde_json::from_str(&out).unwrap()
+        };
+        assert_eq!(stopped["removed"], 1);
+        let remaining = f.action(json!({"op":"get_snapshot"})).1;
+        assert!(remaining["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["hub"] == "local"
+                && row["harness"] == "fixture"
+                && row["title"] == "alice"
+                && row["custom_title"] == true));
+        assert_eq!(f.rows("SELECT title FROM session_custom_titles WHERE harness='fixture' AND session_id='session-1'")[0]["title"], "alice");
+        // Re-enrollment must retain the shared custom title too.
+        f.tool(
+            "cito_listen",
+            json!({"hub":hub,"about":"Multi hub"}),
+            meta.clone(),
+        );
+        assert_eq!(
+            f.tool("cito_status", json!({"hub":hub}), meta.clone())["title"],
+            "alice"
+        );
+    }
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
     a.stop(ha);
     b.stop(hb);
@@ -3150,6 +3217,17 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
             f.action(json!({"op":"paste_hub_invite","invite":invite.to_string()}));
         assert_eq!(status, 400, "{host}: {error}");
         assert_eq!(error["error"], "INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.");
+        assert_eq!(fs::read(&f.config).unwrap(), committed);
+        let (ok, out, err) = f.command(
+            NATIVE,
+            &["setup", "--invite", &invite.to_string(), "--json"],
+            "",
+        );
+        assert!(!ok, "{host}: {out}");
+        assert!(
+            err.contains("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub"),
+            "{host}: {err}"
+        );
         assert_eq!(fs::read(&f.config).unwrap(), committed);
     }
     let root = ureq::get(hosted["endpoint_url"].as_str().unwrap())

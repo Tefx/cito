@@ -2278,7 +2278,7 @@ impl DaemonService {
             row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
             row["display_address"] = json!(self.display_address(string(row, "hub"), row));
         }
-        let available = self
+        let mut available = self
             .session_activity
             .as_ref()
             .map(|activity| activity.available(&sessions, self.slots.len()))
@@ -2286,6 +2286,16 @@ impl DaemonService {
             .into_iter()
             .filter(|session| !unconfigured_harnesses.contains(string(session, "harness")))
             .collect::<Vec<_>>();
+        // Discovery is cached; a rename must be visible before the next tick.
+        for row in &mut available {
+            if let Some(title) = self
+                .state
+                .custom_title(string(row, "harness"), string(row, "session_id"))?
+            {
+                row["title"] = json!(title);
+                row["custom_title"] = json!(true);
+            }
+        }
         let activity = self.activity_dto(activity);
         let mut remote = Vec::new();
         let mut online = 0;

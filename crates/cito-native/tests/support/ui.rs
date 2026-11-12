@@ -1284,7 +1284,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         .as_array_mut()
         .unwrap()
         .push(json!({"name":"local","status":"connected","auth_mode":"none","user":"bob"}));
-    f.send(p, frame);
+    f.send(p, frame.clone());
     let mut agent = peer("home");
     agent["session_id"] = json!("home-session");
     agent["title"] = json!("bob");
@@ -1302,6 +1302,14 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         "mac-studio.local",
         "mac-studio"
     ]);
+    frame["my_remote_listeners"] = json!([agent.clone()]);
+    f.send(p, frame);
+    let remote = node(&inspect(&f, p), "items", "remote:personal:home");
+    let remote_info = nodes(&remote["children"])
+        .into_iter()
+        .find(|n| n["text"] == "laptop · Release audit")
+        .unwrap();
+    assert_eq!(remote_info["tooltip"], "personal:home");
     let mut shadow = agent.clone();
     shadow["hub"] = json!("local");
     shadow["scoped_id"] = json!("local:home");
@@ -1334,6 +1342,24 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         )["text"],
         "Fixture (~)"
     );
+    for raw in ["bob", "Fixture (~)"] {
+        for about in ["CLI session", "bob", "@bob"] {
+            agent["title"] = json!(raw);
+            agent["about"] = json!(about);
+            agent["cwd"] = json!(f.home);
+            send_fixture(&f, p, json!({"op":"directory","peers":[agent.clone()]}));
+            assert_eq!(
+                node(
+                    &inspect(&f, p),
+                    "directory_items",
+                    "dir_title:personal:home"
+                )["text"],
+                "Fixture (~)",
+                "raw={raw}, about={about}"
+            );
+        }
+    }
+    agent["title"] = json!("bob");
     agent["custom_title"] = json!(true);
     send_fixture(&f, p, json!({"op":"directory","peers":[agent]}));
     assert_eq!(
@@ -3253,13 +3279,43 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     let mut initial = state();
     initial["my_remote_listeners"] = json!([peer("remote")]);
     initial["available"] =
-        json!([{"harness":"fixture","session_id":"candidate","title":"Candidate","cwd":"/tmp"}]);
+        json!([{"harness":"fixture","session_id":"candidate","title":"alice","cwd":"/tmp"}]);
     f.send(p, initial);
     let s = inspect(&f, p);
     assert_eq!(s["count"], 1);
     assert_eq!(s["icon_template"], true);
     assert_eq!(s["icon_width"], 20);
     assert_eq!(s["button_title"], " 1");
+    let candidate = node(&s, "items", "candidate_title:fixture:candidate");
+    assert_eq!(candidate["text"], "Fixture (~)");
+    assert_eq!(candidate["tooltip"], "Fixture (~) — /tmp");
+    assert_eq!(
+        node(&s, "items", "listen:fixture:candidate")["tooltip"],
+        "Start listening in Fixture (~)"
+    );
+    control(&f, p, "listen:fixture:candidate");
+    wait(|| f.frames(p).iter().any(|v| v["op"] == "listen_session"));
+    assert_eq!(
+        f.frames(p)
+            .into_iter()
+            .find(|v| v["op"] == "listen_session")
+            .unwrap()["title"],
+        "Fixture (~)"
+    );
+    initial = state();
+    initial["available"] = json!([{"harness":"fixture","session_id":"candidate","title":"alice","custom_title":true,"cwd":"/tmp"}]);
+    f.send(p, initial);
+    let custom = inspect(&f, p);
+    assert_eq!(
+        node(&custom, "items", "candidate_title:fixture:candidate")["text"],
+        "alice"
+    );
+    control(&f, p, "listen:fixture:candidate");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "listen_session" && v["title"] == "alice")
+    });
     assert!(s["items"]
         .as_array()
         .unwrap()
@@ -3291,6 +3347,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
             .all(|v| v["hovered"] != true));
     }
     let mut next = state();
+    next["hubs"][1]["status"] = json!("disconnected");
     let mut second = listener();
     second["hub"] = json!("work");
     second["scoped_id"] = json!("work:repo-workabcdefgh");
@@ -3308,6 +3365,17 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert!(node(&switched, "items", "session:personal:repo-abcdefghijkl").is_null());
     control(&f, p, "copy:work:repo-workabcdefgh");
     assert_eq!(inspect(&f, p)["clipboard"], "work:alice/fixture#abcd");
+    control(&f, p, "switch_hub:work:repo-workabcdefgh");
+    assert!(!node(
+        &inspect(&f, p),
+        "items",
+        "session:personal:repo-abcdefghijkl"
+    )
+    .is_null());
+    control(&f, p, "copy:personal:repo-abcdefghijkl");
+    assert_eq!(inspect(&f, p)["clipboard"], "alice/fixture#abcd");
+    control(&f, p, "switch_hub:personal:repo-abcdefghijkl");
+    assert!(!node(&inspect(&f, p), "items", "session:work:repo-workabcdefgh").is_null());
     control(&f, p, "scope:work:repo-workabcdefgh");
     wait(|| {
         f.frames(p)
@@ -4052,6 +4120,19 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         node(&s, "items", "plugin_symbol:human")["tint"],
         json!([1, 1, 1, 1])
     );
+    for appearance in ["light", "dark"] {
+        let snapshot = inspect_as(&f, p, Some(appearance));
+        let title = nodes(&snapshot["items"])
+            .into_iter()
+            .find(|n| n["text"] == "Release orchestration")
+            .unwrap()
+            .clone();
+        assert!(
+            title["label_measured_width"].as_f64().unwrap()
+                <= title["label_width"].as_f64().unwrap(),
+            "Hero title must fit beside the rename pencil in {appearance}: {title}"
+        );
+    }
     capture("menu", "menu_active");
 
     let mut remote_agent = peer("review");
