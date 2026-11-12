@@ -9592,7 +9592,7 @@ phases:
 - id: v34
   name: 'V34 Stage 16: Unified macOS Control Taxonomy, Intrinsic Layout Engine, Chinese
     IME Support, Distinct Directory/Activity Surfaces & Self-Invite Guard (Q1–Q6)'
-  status: pending
+  status: in_progress
   gate: All Q1–Q6 requirements in docs/DESIGN.md §18 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; website
     screenshots in site/assets/screenshots/*.png are refreshed; simple single-pass
@@ -9622,7 +9622,7 @@ phases:
   - id: v34.impl
     name: V34 Q1–Q6 Unified Control Taxonomy, Intrinsic Layout Engine, Chinese IME,
       Directory/Activity Distinction & Self-Invite Guard
-    status: pending
+    status: claimed
     description: Implement docs/DESIGN.md §18 (Q1–Q6) while strictly enforcing §18.2
       test economy (update existing unit/UI assertions in place; do NOT add new multi-process
       E2E test functions). Regenerate site/assets/screenshots/*.png.
@@ -9635,6 +9635,8 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T03:15:43.087500Z'
   - id: v34.review
     name: 'V34 Simple Single-Pass Contract-and-Simplicity Review & Fix and Push to
       main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
