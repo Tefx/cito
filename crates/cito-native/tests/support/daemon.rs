@@ -154,7 +154,8 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     let mut sessions: Vec<Value> = (0..8).map(|i| json!({"harness":"fixture","session_id":format!("historical-{i}"),"title":"History","cwd":"/tmp"})).collect();
     sessions.extend([
         json!({"harness":"fixture","session_id":"reload","title":"Reload","cwd":"/tmp","endpoint_pid":std::process::id(),"needs_reload":true}),
-        json!({"harness":"fixture","session_id":"live","title":"Live","cwd":"/tmp","endpoint_pid":std::process::id()})
+        json!({"harness":"fixture","session_id":"live","title":"Live","cwd":"/tmp","endpoint_pid":std::process::id()}),
+        json!({"harness":"fixture","session_id":"departed","title":"Departed","cwd":"/tmp","endpoint_pid":i32::MAX})
     ]);
     config["sessions"] = json!(sessions);
     fs::write(&options, config.to_string()).unwrap();
@@ -171,6 +172,42 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         .rows("SELECT session_id FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'");
     assert_eq!(rows, vec![json!({"session_id":"live"})]);
     assert_eq!(snapshot()["hubs"][0]["auto_listen"], true);
+    let before = f.rows(
+        "SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+    )[0]
+    .clone();
+    config["configured"] = json!(false);
+    config["status"] = json!("closed_definitive");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        f.rows(
+            "SELECT status FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+        )[0]["status"]
+            == "UNLISTENED"
+    });
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"live"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        snapshot()["hubs"][0]["auto_listen"],
+        true,
+        "An inactive-row pause must not disable Auto-Listen"
+    );
+    config["configured"] = json!(true);
+    config["status"] = json!("alive");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "fixture" && r["session_id"] == "live")
+    });
+    assert_ne!(f.rows("SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0]["owner_token"], before["owner_token"], "A recovered endpoint needs a new local binding");
 }
 
 #[test]
@@ -1560,6 +1597,27 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
             [0]["status"]
             == "UNLISTENED"
     });
+    let paused_human = sibling
+        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+        .clone();
+    assert_eq!(
+        a.tool(
+            "cito_listen",
+            json!({"hub":"work","about":"Human receiver"}),
+            human()
+        )["ok"],
+        true
+    );
+    wait(|| {
+        sibling.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+            ["status"]
+            == "ACTIVE"
+    });
+    let resumed_human = sibling
+        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+        .clone();
+    assert_eq!(resumed_human["scope"], paused_human["scope"]);
+    assert_ne!(resumed_human["owner_token"], paused_human["owner_token"]);
     let sibling_row =
         sibling.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     // Hold only the sibling's dispatch lease; its receiver must keep polling unfenced.
@@ -3077,11 +3135,35 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
         json!({"hub":"local","about":"Multi hub","scope":"workspace"}),
         meta.clone(),
     );
+    let binding = f.rows("SELECT endpoint_pid,binding_generation,owner_token FROM local_listeners WHERE hub=\'work\' AND harness=\'fixture\'")[0].clone();
+    f.db("state.sqlite")
+        .execute(
+            "UPDATE local_listeners SET endpoint_pid=? WHERE hub=\'work\' AND harness=\'fixture\'",
+            &[json!(i32::MAX)],
+        )
+        .unwrap();
     f.tool(
         "cito_listen",
         json!({"hub":"personal","about":"Multi hub"}),
         meta.clone(),
     );
+    let retained = f.rows("SELECT endpoint_pid,binding_generation,owner_token FROM local_listeners WHERE hub=\'work\' AND harness=\'fixture\'")[0].clone();
+    assert_eq!(
+        retained["endpoint_pid"],
+        i32::MAX,
+        "Registering on personal must not rewrite work endpoint metadata"
+    );
+    assert_eq!(
+        retained["binding_generation"],
+        binding["binding_generation"]
+    );
+    assert_eq!(retained["owner_token"], binding["owner_token"]);
+    f.db("state.sqlite")
+        .execute(
+            "UPDATE local_listeners SET endpoint_pid=? WHERE hub=\'work\' AND harness=\'fixture\'",
+            &[binding["endpoint_pid"].clone()],
+        )
+        .unwrap();
     let all = f.tool("cito_find", json!({"harness":"fixture"}), human());
     assert_eq!(all["listeners"].as_array().unwrap().len(), 2);
     assert!(all["listeners"]
@@ -3156,6 +3238,21 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
     a.stop(ha);
     b.stop(hb);
+    let (status, directory) = f.action(json!({"op":"query_directory","query":"","scope":"all","harness":"all","request_id":"offline-query"}));
+    assert_eq!(status, 200, "{directory}");
+    let warnings = directory["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.starts_with("personal:"))),
+        "{directory}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.starts_with("work:"))),
+        "{directory}"
+    );
     let inbox = f.tool("cito_inbox", json!({}), meta.clone());
     assert_eq!(inbox["signals"].as_array().unwrap().len(), 2);
     assert_eq!(f.rows("SELECT * FROM pending_hub_acks").len(), 2);

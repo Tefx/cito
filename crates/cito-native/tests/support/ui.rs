@@ -731,11 +731,15 @@ fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer
     );
     f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:secret","value":"newer-draft"}));
     f.send(p,json!({"op":"settings","ok":true,"source_op":"save_hub_service","channel_id":"channel","request_id":second["request_id"],"settings":cfg}));
-    assert_eq!(
-        node(&inspect(&f, p), "settings_items", "stratum_hub:channel")["height"],
-        36
+    let newer = inspect(&f, p);
+    assert!(
+        !node(&newer, "settings_items", "channel_field:channel:secret").is_null(),
+        "A matching acknowledgement must keep a newer draft editable"
     );
-    control(&f, p, "edit_hub_service:channel");
+    assert_ne!(
+        node(&newer, "settings_items", "channel_summary:channel")["text"],
+        "✓ Saved"
+    );
     control(&f, p, "save_hub_service:channel");
     inspect(&f, p);
     let third = f
@@ -787,6 +791,90 @@ fn r1_save_acknowledgements_clear_only_matching_secret_intent_not_tests_or_newer
             .find(|a| a["op"] == "save_hub_service")
             .unwrap()["values"],
         json!({})
+    );
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["paired"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "edit_user_channel:channel");
+    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"submitted"}));
+    control(&f, p, "save_channel:channel");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "channel_save")
+        .unwrap();
+    f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"newer-account"}));
+    cfg["channels"][0]["fields"][1]["value"] = json!("submitted");
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_save","channel_id":"channel","request_id":request["request_id"],"settings":cfg}));
+    let newer = inspect(&f, p);
+    assert_eq!(
+        node(&newer, "settings_items", "channel_field:channel:account")["text"],
+        "newer-account"
+    );
+    assert_eq!(
+        node(&newer, "settings_items", "save_channel:channel")["text"],
+        "Save"
+    );
+    control(&f, p, "save_channel:channel");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "channel_save")
+            .unwrap()["values"]["account"],
+        "newer-account"
+    );
+    cfg["host_hub"]["enabled"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "settings_tab:hubs");
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"4501"}),
+    );
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"4502"}),
+    );
+    cfg["host_hub"]["port"] = json!(4501);
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"set_host_hub","request_id":request["request_id"],"settings":cfg}));
+    let newer = inspect(&f, p);
+    assert_eq!(
+        node(&newer, "settings_items", "host_hub_port")["text"],
+        "4502"
+    );
+    assert_eq!(
+        node(&newer, "settings_items", "apply_host_hub_port")["text"],
+        "Apply",
+        "An old acknowledgement must not mark a newer port draft saved"
+    );
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":" 4502 "}),
+    );
+    control(&f, p, "apply_host_hub_port");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    cfg["host_hub"]["port"] = json!(4502);
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"set_host_hub","request_id":request["request_id"],"settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
+        "✓ Saved"
     );
 }
 
@@ -1977,6 +2065,19 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         "✓ Saved"
     );
     assert!(node(&saved, "settings_items", "save_channel:channel").is_null());
+    let reserved_toggle = node(&saved, "settings_items", "toggle_channel:channel");
+    for enabled in [false, true] {
+        cfg["channels"][0]["enabled"] = json!(enabled);
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        let toggled = node(&inspect(&f, p), "settings_items", "toggle_channel:channel");
+        assert_eq!(toggled["text"], if enabled { "Pause" } else { "Resume" });
+        for dimension in ["x", "width"] {
+            assert_eq!(
+                toggled[dimension], reserved_toggle[dimension],
+                "{dimension}"
+            );
+        }
+    }
     render_png(&f, p, "settings", "settings_channels_paired.png");
     // An active pairing command always expands even an already configured account.
     cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-abc123def4 to @bot");
@@ -2092,16 +2193,21 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             cfg["host_hub"][format!("{address}_invite_command")]
         );
     }
+    // A dirty port keeps the sharing editor open while sharing is off, so
+    // both access labels participate in the same paired-width assertion.
+    f.send(p,json!({"op":"test_settings_input","id":"host_hub_port","value":cfg["host_hub"]["port"].as_u64().unwrap().to_string()}));
     let mut reserved = None;
     for enabled in [false, true] {
         let mut toggled = cfg.clone();
         toggled["host_hub"]["enabled"] = json!(enabled);
         toggled["hubs"][0]["enabled"] = json!(enabled);
         toggled["desktop_banner_enabled"] = json!(enabled);
+        toggled["host_hub"]["auth_mode"] = json!(if enabled { "token" } else { "none" });
         f.send(p, json!({"op":"settings","settings":toggled}));
         let snapshot = inspect(&f, p);
         let frames: Vec<_> = [
             "toggle_host_hub",
+            "toggle_host_hub_auth",
             "toggle_hub:local",
             "edit_hub:local",
             "toggle_desktop_banner",
@@ -2272,8 +2378,8 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "apply_host_hub_port")["text"],
-        "✓ Saved",
-        "Apply must retain the original request identity and submitted port across toggles"
+        "Apply",
+        "An older correlated save must settle without marking the newer draft saved"
     );
     assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], "5302");
     f.send(
@@ -3164,11 +3270,11 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     );
     control(&f, p, "act_filter:unread");
     assert!(!node(&inspect(&f, p), "directory_items", "act_empty_show_all").is_null());
-    // An unread-only server projection may omit all read rows while retaining totals.
+    // An unread-only total counts only unread rows and can be zero despite read history.
     send_fixture(
         &f,
         p,
-        json!({"op":"directory","peers":[peer("one")],"activity":[],"activity_total":1,"activity_unread_count":0,"activity_filter":"unread"}),
+        json!({"op":"directory","peers":[peer("one")],"activity":[],"activity_total":0,"activity_unread_count":0,"activity_filter":"unread"}),
     );
     send_fixture(
         &f,
@@ -3439,6 +3545,145 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     assert_eq!(reply["directory_selected_id"], "row-9");
     assert_eq!(reply["directory_selection_visible"], true);
 }
+#[test]
+fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["listeners"] = json!((0..12)
+        .map(|i| {
+            let mut row = listener();
+            row["listener_id"] = json!(format!("row-{i}"));
+            row["public_id"] = row["listener_id"].clone();
+            row["scoped_id"] = json!(format!("personal:row-{i}"));
+            row["session_id"] = row["listener_id"].clone();
+            row["display_address"] = json!(format!("alice/fixture#{i:04x}"));
+            row
+        })
+        .collect::<Vec<_>>());
+    frame["my_remote_listeners"] = json!((0..12)
+        .map(|i| peer(&format!("remote-{i}")))
+        .collect::<Vec<_>>());
+    frame["available"] = json!((0..6).map(|i|json!({"harness":"fixture","session_id":format!("candidate-{i}"),"title":"Review","cwd":"/tmp","endpoint_pid":4242})).collect::<Vec<_>>());
+    f.send(p, frame.clone());
+    let scrolls = ["active_scroll", "my_remote_scroll", "available_scroll"];
+    for id in scrolls {
+        f.send(p, json!({"op":"test_scroll","id":id,"offset":20}));
+    }
+    let scrolled = inspect(&f, p);
+    for id in scrolls {
+        assert_eq!(node(&scrolled, "items", id)["content_y"], 20, "{id}");
+    }
+    frame["unread_count"] = json!(1);
+    f.send(p, frame.clone());
+    let refreshed = inspect(&f, p);
+    for id in scrolls {
+        assert_eq!(
+            node(&refreshed, "items", id)["content_y"],
+            20,
+            "{id} must survive a rebuild"
+        );
+    }
+    control(&f, p, "open_directory");
+    f.send(p,json!({"op":"error","source_op":"listen_session","error":"BRIDGE_UNAVAILABLE: Retry listening"}));
+    f.send(p, json!({"op":"test_directory_query","query":""}));
+    f.send(p, json!({"op":"test_menu_open"}));
+    assert!(!node(&inspect(&f, p), "items", "menu_error_row").is_null());
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"warnings":["work: Hub temporarily unavailable"]}),
+    );
+    let warned = inspect(&f, p);
+    assert_eq!(
+        node(&warned, "directory_items", "directory_warning")["hidden"],
+        false
+    );
+    assert!(
+        node(&warned, "directory_items", "directory_warning")["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains("work")
+    );
+    assert_eq!(
+        node(&warned, "directory_items", "directory_scroll")["height"],
+        306
+    );
+    f.send(p,json!({"op":"error","source_op":"query_directory","error":"CONNECTION_FAILED: Remote Hub unavailable (os error 61)"}));
+    let failed = inspect(&f, p);
+    assert!(
+        node(&failed, "directory_items", "directory_warning")["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Cannot refresh")
+    );
+    assert!(
+        !node(&failed, "directory_items", "dir_peer:personal:one").is_null(),
+        "A failed query must preserve usable rows"
+    );
+    assert!(!node(&failed, "items", "menu_error_row").is_null());
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one")],"warnings":[]}),
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        true
+    );
+    control(&f, p, "open_settings");
+    f.send(
+        p,
+        json!({"op":"error","source_op":"hub_action","error":"Hub temporarily unavailable"}),
+    );
+    f.send(p, json!({"op":"test_directory_query","query":""}));
+    f.send(p, json!({"op":"test_menu_open"}));
+    assert!(!node(&inspect(&f, p), "settings_items", "settings_error_banner").is_null());
+    control(&f, p, "dismiss_settings_error");
+    assert!(node(&inspect(&f, p), "settings_items", "settings_error_banner").is_null());
+    control(&f, p, "close_settings");
+    frame["activity"]=json!((0..12).map(|i|json!({"hub":"personal","signal_id":format!("sig-{i}"),"listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Review","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Review ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})).collect::<Vec<_>>());
+    f.send(p, frame.clone());
+    control(&f, p, "open_activity");
+    f.send(
+        p,
+        json!({"op":"test_scroll","id":"directory_scroll","offset":120}),
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_scroll")["content_y"],
+        120
+    );
+    frame["activity"][11]["message"] = json!("New details");
+    f.send(p, frame);
+    let refreshed = inspect(&f, p);
+    assert_eq!(refreshed["directory_selected_id"], "sig-0");
+    assert_eq!(
+        node(&refreshed, "directory_items", "directory_scroll")["content_y"],
+        120,
+        "Passive refresh must not reveal an unchanged selection"
+    );
+    control(&f, p, "reply_activity:sig-0");
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_scroll")["content_y"],
+        0,
+        "Opening the composer must reveal the selected row"
+    );
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Review reply"}),
+    );
+    control(&f, p, "composer_send");
+    control(&f, p, "composer_cancel");
+    control(&f, p, "reply_activity:sig-0");
+    assert!(
+        nodes(&inspect(&f, p)["directory_items"])
+            .iter()
+            .any(|n| n["text"] == "Sending…"),
+        "Reopening must retain pending-send status"
+    );
+}
+
 #[test]
 fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     let _lock = serial();
@@ -3782,6 +4027,17 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(node(&s, "items", "header")["height"], 40);
     assert_eq!(node(&s, "items", "footer")["height"], 36);
     assert_eq!(node(&s, "items", "drawer:personal")["hidden"], true);
+    control(&f, p, "hub:personal");
+    assert_eq!(
+        node(&inspect(&f, p), "items", "drawer:personal")["hidden"],
+        true
+    );
+    control(&f, p, "hub:personal");
+    assert_eq!(
+        node(&inspect(&f, p), "items", "drawer:personal")["hidden"],
+        false,
+        "The selected healthy Hub must expose its drawer"
+    );
     control(&f, p, "hub:personal");
     assert_eq!(
         node(&inspect(&f, p), "items", "drawer:personal")["hidden"],
@@ -4422,6 +4678,8 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             "Hub Service:",
             "Channel inventory",
             "UI action exceeds",
+            "Passive",
+            "[Passive]",
         ] {
             f.send(
                 p,
@@ -4617,6 +4875,38 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         &[("CITO_BANNER_DISMISS_MS", "60000")],
     );
     let capture = |surface: &str, state: &str| {
+        let snapshot = inspect(&f, p);
+        let strip = match surface {
+            "menu" => Some(("items", "header_hub_strip", 4.0)),
+            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0)),
+            "settings" => Some(("settings_items", "channel_hub_strip", 6.0)),
+            _ => None,
+        };
+        if let Some((tree, id, spacing)) = strip {
+            let view = node(&snapshot, tree, id);
+            if !view.is_null() && view["hidden"] == false {
+                let pills: Vec<_> = view["children"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|p| p["hidden"] == false)
+                    .collect();
+                let intrinsic = pills
+                    .iter()
+                    .map(|p| p["width"].as_f64().unwrap())
+                    .sum::<f64>()
+                    + spacing * pills.len().saturating_sub(1) as f64;
+                assert!(
+                    view["width"].as_f64().unwrap() <= intrinsic + 0.5,
+                    "{id} must wrap its pills: {view}"
+                );
+            }
+        }
+        if surface == "directory" {
+            for id in ["dir_mode:directory", "dir_mode:activity"] {
+                assert_eq!(node(&snapshot, "directory_items", id)["radius"], 7);
+            }
+        }
         for appearance in ["light", "dark"] {
             render_png_as(
                 &f,
@@ -5020,6 +5310,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             }
         );
         assert_eq!(node(&s, "banner_items", title_id)["hidden"], false);
+        assert_eq!(
+            node(&s, "banner_items", "banner_semantic_pill")["children"][0]["text"],
+            if wake { "Notification" } else { "Queued" }
+        );
         capture("banner", name);
     }
 }
@@ -5186,6 +5480,37 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         "A newer clipboard action supersedes in-flight message chunks"
     );
     assert_eq!(inspect(&f, l.ui)["composer_open"], false);
+    l.control(&control_id);
+    let request = f
+        .frames(l.ui)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "copy_activity_message")
+        .unwrap();
+    l.control("dir_mode:directory");
+    f.send(l.ui,json!({"op":"activity_message","request_id":request["request_id"],"part":0,"message":message.trim(),"complete":true}));
+    let switched = inspect(&f, l.ui);
+    assert_eq!(
+        switched["clipboard"],
+        message.trim(),
+        "A hidden Activity row still completes its copy"
+    );
+    let addresses: Vec<_> = nodes(&switched["directory_items"])
+        .into_iter()
+        .filter(|n| {
+            n["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("copy_dir:"))
+        })
+        .collect();
+    assert!(!addresses.is_empty());
+    assert!(
+        addresses.iter().all(|n| n["text"] != "✓ Copied"),
+        "An Activity completion must not decorate reused Directory cells"
+    );
+    l.control(&format!("copy:{human}"));
+    l.control("dir_mode:activity");
+    l.until(|s| !node(s, "directory_items", &control_id).is_null());
     for invalid_chunk in [false, true] {
         l.control(&control_id);
         let request = f

@@ -145,19 +145,23 @@ fn interactive_candidate(req: &Value, pid: u32) -> bool {
         .any(|w| w[0] == "--mode" && matches!(w[1], "rpc" | "json"))
 }
 // Session files are hints for live, same-user processes, never evidence of bridge readiness.
-fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
-    if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0")
-        || !setup(&json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"],"plugin_dir":req["plugin_dir"]}))
-            .is_ok_and(|v| v["configured"] == true)
-    {
-        return;
+fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
+    if env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("0") {
+        return Ok(());
     }
-    let Ok(output) = std::process::Command::new("/bin/ps")
+    let inspection = setup(
+        &json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"],"plugin_dir":req["plugin_dir"]}),
+    )?;
+    if inspection["configured"] != true {
+        return Ok(());
+    }
+    let output = std::process::Command::new("/bin/ps")
         .args(["-axo", "pid=,uid=,command="])
         .output()
-    else {
-        return;
-    };
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Process inspection failed".into());
+    }
     // SAFETY: geteuid takes no pointers and has no caller obligations.
     let uid = unsafe { libc::geteuid() };
     let mut processes: Vec<u32> = String::from_utf8_lossy(&output.stdout)
@@ -250,11 +254,18 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) {
             out.push((p, v));
         }
     }
+    Ok(())
 }
 fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
     let mut out = vec![];
-    if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
-        for e in entries.flatten() {
+    let entries = match fs::read_dir(state(req).join("sockets")) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    if let Some(entries) = entries {
+        for e in entries {
+            let e = e.map_err(|e| e.to_string())?;
             let n = e.file_name().to_string_lossy().into_owned();
             if let Some(p) = n
                 .strip_prefix("pi-pid-")
@@ -316,7 +327,7 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
         let mut live = vec![];
         if !responded {
             live = socket_candidates(req)?;
-            process_candidates(req, &mut live);
+            process_candidates(req, &mut live)?;
             // Prefer the nearest caller ancestor, just as socket resolution does.
             // An explicit endpoint must not become ambiguous with its host ancestors.
             live = searched
@@ -328,7 +339,7 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
         return Ok((live, responded));
     }
     let mut out = socket_candidates(req)?;
-    process_candidates(req, &mut out);
+    process_candidates(req, &mut out)?;
     Ok((out, false))
 }
 fn as_caller(p: u32, v: &Value) -> Value {
@@ -438,6 +449,14 @@ pub fn handle(input: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"caller":remember_process(c)}))
         }
         "probe" => {
+            if pid(req).is_some_and(|p| {
+                alive(p) && state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+            }) && cs.first().is_none_or(|(_, v)| v["needs_reload"] == true)
+            {
+                return Ok(
+                    json!({"ok":true,"status":"transient_error","reason":"Pi bridge is temporarily unavailable"}),
+                );
+            }
             let Some((_, v)) = cs.first() else {
                 return Ok(
                     json!({"ok":true,"status":"closed_definitive","reason":"Pi bridge is unavailable"}),

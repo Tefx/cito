@@ -109,10 +109,41 @@ pub fn register_automatic_human(
         .registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
-    if local_node(state, client, "human", "default")?
-        .is_some_and(|row| row["status"] == "UNLISTENED")
+    if let Some(row) =
+        local_node(state, client, "human", "default")?.filter(|row| row["status"] == "UNLISTENED")
     {
-        return Err("BINDING_REQUIRED: Human enrollment was explicitly disabled".into());
+        // A pending local pause owns intent until its detach settles. Afterwards,
+        // an active sibling with the global pause cleared represents a remote resume.
+        let pending = !state
+            .db
+            .query(
+                "SELECT 1 FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
+                &[json!(client.name), row["listener_id"].clone()],
+            )?
+            .is_empty();
+        let channel = format!("{host_id}:human");
+        let resumed = if pending {
+            false
+        } else {
+            client
+                .kv_get(string(&row, "listener_id"))?
+                .is_some_and(|(remote, _)| {
+                    remote["human_paused"] != true
+                        && remote["state"] == "ACTIVE"
+                        && principal_ids_equal(
+                            string(&remote, "principal_id"),
+                            string(&client.identity, "principal_id"),
+                        )
+                        && remote["channels"].as_object().is_some_and(|channels| {
+                            channels
+                                .iter()
+                                .any(|(id, ch)| id != &channel && ch["state"] == "ACTIVE")
+                        })
+                })
+        };
+        if !resumed {
+            return Err("BINDING_REQUIRED: Human enrollment was explicitly disabled".into());
+        }
     }
     register_locked(state, client, host_id, args, caller, false)
 }
@@ -552,6 +583,59 @@ mod tests {
                 assert_eq!(
                     resumed["channels"]["hub:fixture"],
                     reg["channels"]["hub:fixture"]
+                );
+                assert!(first.pause_listener_for(&first_row)?);
+                first.db.execute(
+                    "INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?)",
+                    &[json!("work"), json!(id), client.config["url"].clone()],
+                )?;
+                assert!(
+                    register_automatic_human(
+                        &first,
+                        &client,
+                        "first-host",
+                        &json!({"about":"Human"}),
+                        &caller
+                    )
+                    .is_err(),
+                    "An unsettled local pause must win over a remote active sibling"
+                );
+                first.db.execute(
+                    "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
+                    &[json!("work"), json!(id)],
+                )?;
+                let recovered = register_automatic_human(
+                    &first,
+                    &client,
+                    "first-host",
+                    &json!({"about":"Human"}),
+                    &caller,
+                )?;
+                assert_eq!(recovered["scope"], scope);
+                let first_resumed = first
+                    .listener("work", id)?
+                    .ok_or("Missing automatically resumed Human")?;
+                assert_eq!(first_resumed["status"], "ACTIVE");
+                assert_ne!(first_resumed["owner_token"], first_row["owner_token"]);
+                assert!(
+                    !first.pause_listener_for(&first_row)?,
+                    "An old heartbeat cannot undo cross-host resume"
+                );
+                let (mut remote, revision) = client.kv_get(id)?.ok_or("Missing active Human")?;
+                remote["channels"]["second-host:human"]["state"] = json!("UNLISTENED");
+                remote["channels"]["hub:fixture"]["state"] = json!("UNLISTENED");
+                client.kv_save(id, &remote, Some(revision))?;
+                assert!(first.pause_listener_for(&first_resumed)?);
+                assert!(
+                    register_automatic_human(
+                        &first,
+                        &client,
+                        "first-host",
+                        &json!({"about":"Human"}),
+                        &caller
+                    )
+                    .is_err(),
+                    "An inactive remote sibling is not a resume"
                 );
                 Ok(())
             })();

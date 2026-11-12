@@ -182,8 +182,23 @@ fn setup(req: &Value) -> Result<Value> {
     })?;
     Ok(json!({"ok":true,"actions":[action]}))
 }
-fn rows(req: &Value) -> Vec<Value> {
-    try_rows(req).unwrap_or_default()
+fn row_for_id(req: &Value, id: &str) -> Result<Option<Value>> {
+    let path = db(req);
+    if !path.try_exists().map_err(|e| e.to_string())? {
+        return Ok(None);
+    }
+    if sqlite_rows(&path, "PRAGMA table_info(threads)")?.is_empty() {
+        return Ok(None);
+    }
+    Ok(sqlite_rows(
+        &path,
+        &format!(
+            "SELECT * FROM threads WHERE id = '{}'",
+            id.replace('\'', "''")
+        ),
+    )?
+    .into_iter()
+    .next())
 }
 fn try_rows(req: &Value) -> Result<Vec<Value>> {
     let path = db(req);
@@ -382,18 +397,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                     "Conflicting caller metadata: explicit bridge PID cannot claim a Codex thread",
                 ));
             }
-            let all = rows(req);
-            let known_row = explicit.as_deref().and_then(|id| {
-                sqlite_rows(
-                    &db(req),
-                    &format!(
-                        "SELECT * FROM threads WHERE id = '{}'",
-                        id.replace('\'', "''")
-                    ),
-                )
-                .ok()
-                .and_then(|rows| rows.into_iter().next())
-            });
+            let all = try_rows(req)?;
+            let known_row = explicit
+                .as_deref()
+                .map(|id| row_for_id(req, id))
+                .transpose()?
+                .flatten();
             let needs_cached_pid = (explicit.is_some() && known_row.is_none())
                 || (explicit.is_none() && (str_at(req, "cli_cmd").is_none() || all.is_empty()));
             if needs_cached_pid {

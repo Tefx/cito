@@ -135,12 +135,13 @@ func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: 
                     spacing: CGFloat = 4, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
     let visible = pills.filter { !$0.isHidden }
     let totalWidth = visible.reduce(CGFloat(0)) { $0 + $1.frame.width } + CGFloat(max(0, visible.count - 1)) * spacing
-    let scroll = OverlayScrollView(frame: frame)
+    let width = min(frame.width, max(0, totalWidth))
+    let scroll = OverlayScrollView(frame: NSRect(x: alignment == .trailing ? frame.maxX - width : frame.minX, y:frame.minY, width:width, height:frame.height))
     scroll.identifier = NSUserInterfaceItemIdentifier(id)
     scroll.scrollerStyle = .overlay; scroll.drawsBackground = false
     scroll.hasHorizontalScroller = false; scroll.hasVerticalScroller = false
-    let doc = NSView(frame: NSRect(x: 0, y: 0, width: max(frame.width, totalWidth), height: frame.height))
-    var cursorX: CGFloat = alignment == .trailing ? max(0, frame.width - totalWidth) : 0
+    let doc = NSView(frame: NSRect(x: 0, y: 0, width: totalWidth, height: frame.height))
+    var cursorX: CGFloat = 0
     for pill in visible {
         pill.frame.origin = NSPoint(x: cursorX, y: (frame.height - pill.frame.height) / 2)
         doc.addSubview(pill); cursorX += pill.frame.width + spacing
@@ -506,6 +507,8 @@ final class MenuControl: NSControl {
         else if id.hasPrefix("toggle_hub:") { states = [("Enable",nil),("Disable",nil)]; padding = 11 }
         else if id == "toggle_desktop_banner" { states = [("● Enabled",nil),("Disabled",nil)]; padding = 11 }
         else if id == "toggle_host_hub" { states = [("● Sharing",nil),("Off",nil)]; padding = 11 }
+        else if id == "toggle_host_hub_auth" { states = [("Access: Trusted",nil),("Access: Token",nil)]; padding = 11 }
+        else if id.hasPrefix("toggle_channel:") { states = [("Pause",nil),("Resume",nil)]; padding = 11 }
         else { return 0 }
         return states.map { intrinsicWidth($0.0,font:font,leadingSymbol:$0.1,paddingX:padding) }.max() ?? 0
     }
@@ -942,6 +945,7 @@ struct Frame: Decodable {
     let hub: String?
     let ok: Bool?
     let error: String?
+    let warnings: [String]?
     let source_op: String?
     let request_id: String?
     let composer_error: String?
@@ -1255,6 +1259,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var hoverEventMonitor: Any?
     let cardMenu = NSMenu()
     var hubDrawerVisibility: [String: Bool] = [:]
+    var menuScrollOffsets: [String: NSPoint] = [:]
     var statusImage: NSImage?
     var uniqueSessionCount: Int {
         Dictionary(grouping: listeners.filter { $0.harness != "human" && (effectiveTargetHub.isEmpty || $0.hub == effectiveTargetHub) }, by: { $0.harness })
@@ -1285,6 +1290,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if let defaultHub = settings?.hubs.first(where: { $0.is_default && $0.enabled && $0.status == "connected" }),
            hubs.contains(where: { $0.name == defaultHub.name }) { return defaultHub.name }
         return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
+    }
+    var directoryWarnings: [String] = []
+    var directoryError: String?
+    var directoryWarningLabel: NSTextField?
+    func updateDirectoryWarnings() {
+        let hasError = directoryError != nil
+        let hasWarning = hasError || !directoryWarnings.isEmpty
+        directoryWarningLabel?.isHidden = !hasWarning
+        directoryWarningLabel?.stringValue = hasError ? "Cannot refresh Directory. Showing the last available results." : "Some Hubs are unavailable. Results may be incomplete."
+        directoryWarningLabel?.toolTip = directoryError.map(presentationError) ?? directoryWarnings.map(presentationError).joined(separator:"\n")
+        directoryWarningLabel?.textColor = hasError ? CitoPalette.dangerText : CitoPalette.secondaryText
+        let bottom: CGFloat = directoryComposerBar?.isHidden == false ? 90 : 28
+        directoryScrollView?.frame = NSRect(x:0,y:bottom,width:560,height:362-bottom-(hasWarning ? 28 : 0))
     }
     var directoryRequestId = ""
     var composerDraftIdempotencyKey = UUID().uuidString
@@ -1433,15 +1451,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         settings = value
         if !selectedChannelHub.isEmpty && !value.hubs.contains(where: { $0.name == selectedChannelHub && $0.enabled }) {
             selectedChannelHub = value.hubs.first(where: { $0.enabled })?.name ?? ""
-            if !selectedChannelHub.isEmpty { emit(["op": "open_settings", "hub": selectedChannelHub]) }
+            if !selectedChannelHub.isEmpty { emit(["op": "open_settings", "hub": selectedChannelHub], userInitiated:false) }
         }
         if hostHubPortPending && savedRequest == submittedHostHubRequestId &&
            (value.host_hub.port == submittedHostHubPort || value.host_hub.error != nil) {
             hostHubPortPending = false
-            hostHubPortSaved = value.host_hub.port == submittedHostHubPort && value.host_hub.error == nil
+            hostHubPortSaved = value.host_hub.port == submittedHostHubPort && value.host_hub.error == nil && (hostHubPortDraft == nil || Int((hostHubPortDraft ?? "").trimmingCharacters(in:.whitespacesAndNewlines)) == submittedHostHubPort)
             if hostHubPortSaved { hostHubPortSavedUntil = Date().addingTimeInterval(1.2) }
             hostHubPortError = nil
-            if hostHubPortSaved && Int(hostHubPortDraft ?? "") == submittedHostHubPort { hostHubPortDraft = nil }
+            if hostHubPortSaved && Int((hostHubPortDraft ?? "").trimmingCharacters(in:.whitespacesAndNewlines)) == submittedHostHubPort { hostHubPortDraft = nil }
         }
         if confirmHubSave, let pending = pendingHubSave, savedRequest == pending.requestId,
            let saved = value.hubs.first(where: { $0.name == pending.name && $0.url == pending.url }) {
@@ -1463,13 +1481,20 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let key=target + "|" + channel.id
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
-            var acknowledged: (scope: String, values: [String: String])?
+            var acknowledged: (scope: String, values: [String: String], unchanged: Bool)?
             if savedChannel == channel.id, let savedRequest = savedRequest,
                let entry = pendingChannelValues[savedRequest], entry.hub == target && entry.channelId == channel.id {
                 pendingChannelValues.removeValue(forKey: savedRequest)
-                acknowledged = (scope: entry.scope, values: entry.values)
-                channelSavedUntil["\(target)|\(channel.id)|\(entry.scope)"] = Date().addingTimeInterval(1.5)
-                if entry.scope == "user" && channel.configured { editingPersonalChannel.remove(key) }
+                let unchanged = channel.fields.filter { $0.scope == entry.scope }.allSatisfy { field in
+                    let draft = channelFieldDrafts[target + "|channel_field:\(channel.id):\(field.key)"]
+                    if let sent = entry.values[field.key] { return (draft ?? field.value ?? "") == sent }
+                    return draft == nil || draft == (field.value ?? "")
+                }
+                acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
+                if unchanged {
+                    channelSavedUntil["\(target)|\(channel.id)|\(entry.scope)"] = Date().addingTimeInterval(1.5)
+                    if entry.scope == "user" && channel.configured { editingPersonalChannel.remove(key) }
+                } else { channelSavedUntil.removeValue(forKey:"\(target)|\(channel.id)|\(entry.scope)") }
                 DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
                     if self?.settingsVisible == true { self?.rebuildSettingsPanel() }
                 }
@@ -1482,7 +1507,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     channelFieldDrafts.removeValue(forKey: draft)
                 }
             }
-            if acknowledged?.scope == "hub" && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
+            if acknowledged?.scope == "hub" && acknowledged?.unchanged == true && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
                 editingHubGateway.remove(key)
             }
             if let instruction=channel.pairing_instruction, !instruction.isEmpty { channelInstructions[key]=instruction }
@@ -1736,6 +1761,17 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if op == "test_render_png", let surface = object["surface"] as? String, let path = object["path"] as? String {
                 renderPNG(surface: surface, path: path); return
             }
+            if op == "test_scroll", let id = object["id"] as? String, let offset = object["offset"] as? Double {
+                func scroll(_ view: NSView) {
+                    if let target = view as? NSScrollView, target.identifier?.rawValue == id {
+                        target.contentView.scroll(to:NSPoint(x:0,y:CGFloat(offset)))
+                        target.reflectScrolledClipView(target.contentView)
+                    }
+                    for child in view.subviews { scroll(child) }
+                }
+                for root in cardMenu.items.compactMap({ $0.view }) + [directoryPanel?.contentView].compactMap({ $0 }) { scroll(root) }
+                return
+            }
             if op == "test_tile_scroll_views" {
                 func tile(_ view: NSView) {
                     if let scroll = view as? OverlayScrollView { scroll.scrollerStyle = .legacy; scroll.tile() }
@@ -1885,9 +1921,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if let message = frame.message, frame.part == pending.nextPart, frame.error == nil, frame.ok != false {
                 pending.buffer += message; pending.nextPart += 1
                 if frame.complete != false {
-                    let index = activityFilteredItems.firstIndex { $0.hub == pending.hub && $0.signal_id == pending.signalId }
+                    let index = directoryMode == "activity" ? activityFilteredItems.firstIndex { $0.hub == pending.hub && $0.signal_id == pending.signalId } : nil
                     let cell = index.flatMap { directoryTableView?.view(atColumn:0,row:$0,makeIfNecessary:false) as? DirectoryPeerCellView }
-                    copyText(pending.buffer, control:cell?.copyControl)
+                    let sameItem = cell?.activityItem?.hub == pending.hub && cell?.activityItem?.signal_id == pending.signalId
+                    copyText(pending.buffer, control:sameItem ? cell?.copyControl : nil)
                 }
                 else { pendingMessageCopy = pending }
             }
@@ -1945,6 +1982,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 setComposerStatus(error)
                 pendingComposer = nil
             } else if isAddHubError { addHubError = error }
+            else if ["query_directory", "open_directory"].contains(sourceOp) {
+                if frame.request_id == nil || frame.request_id == directoryRequestId { directoryError = error; updateDirectoryWarnings() }
+            }
             else if settingsVisible || pendingHubSave != nil { settingsBannerError = error }
             else { menuBannerError = error }
             diagnostic("error \(error)")
@@ -2051,6 +2091,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             guard frame.request_id == directoryRequestId && frame.query == directoryQuery && frame.scope == directoryScopeFilter && frame.harness == directoryHarnessFilter else { return }
             activityTotal = frame.activity_total ?? activityTotal
             activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
+            directoryWarnings = frame.warnings ?? directoryWarnings
+            directoryError = nil
+            updateDirectoryWarnings()
             serverActivityFilter = frame.activity_filter
             serverActivityQuery = frame.activity_query ?? ""
             directoryAllPeers = peers
@@ -2081,8 +2124,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(dismissMs), execute: work)
         } else { diagnostic("invalid frame") }
     }
-    func emit(_ action: [String: Any]) {
-        if menuBannerError != nil { menuBannerError = nil; rebuild() }
+    func emit(_ action: [String: Any], userInitiated: Bool = true) {
+        let passive = ["query_directory", "refresh_available"].contains(action["op"] as? String ?? "")
+        if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild() }
         var outgoing = action
         if let op = action["op"] as? String, ["channel_save", "save_hub_service"].contains(op),
            let id = action["channel_id"] as? String, let values = action["values"] as? [String: String] {
@@ -2114,6 +2158,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         }
         let menu = cardMenu
         let renameDraft = renameField?.currentEditor()?.string ?? renameField?.stringValue
+        for item in menu.items {
+            let scroll = (item.view as? NSScrollView) ?? item.view?.subviews.compactMap { $0 as? NSScrollView }.first
+            if let scroll = scroll, let id = scroll.identifier?.rawValue,
+               ["active_scroll","my_remote_scroll","available_scroll"].contains(where: { id == $0 || id.hasPrefix($0 + ":") }) {
+                menuScrollOffsets[id] = scroll.contentView.bounds.origin
+            }
+        }
         menu.removeAllItems()
         func host(_ view: NSView, id: String) -> NSMenuItem {
             view.identifier = NSUserInterfaceItemIdentifier(id)
@@ -2124,7 +2175,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 root.appearance = testAppearance
                 root.addSubview(view); item.view = root
             } else { view.appearance = testAppearance; item.view = view }
-            menu.addItem(item); return item
+            menu.addItem(item)
+            if let scroll = view as? NSScrollView, let offset = menuScrollOffsets[id], let doc = scroll.documentView {
+                scroll.layoutSubtreeIfNeeded()
+                scroll.contentView.scroll(to:NSPoint(x:max(0,min(offset.x,doc.frame.width-scroll.contentSize.width)),y:max(0,min(offset.y,doc.frame.height-scroll.contentSize.height))))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            return item
         }
         let btnFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         let header = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 40))
@@ -2256,8 +2313,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             pill.pressed = { [weak self, weak menu] in
                 guard let self = self, let drawer = drawerItems[hub.name] else { return }
                 if self.hubs.count > 1 {
+                    let alreadySelected = self.selectedTargetHub == hub.name
                     self.selectedTargetHub = hub.name
-                    if hub.status != "connected" || hub.error != nil {
+                    if alreadySelected || hub.status != "connected" || hub.error != nil {
                         self.hubDrawerVisibility[hub.name] = drawer.isHidden
                     }
                     self.rebuild()
@@ -2659,6 +2717,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                             let reload=MenuControl("/reload",frame:NSRect(x:298,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
                             reload.label.font = .systemFont(ofSize:10)
                             reload.identifier=NSUserInterfaceItemIdentifier("reload:\(c.harness):\(c.session_id)")
+                            reload.toolTip = "Copy /reload to paste in \(visual.name)"
                             reload.pressed={ [weak self, weak reload] in
                                 guard let self=self else{return}
                                 self.copyText("/reload", control:reload)
@@ -3371,7 +3430,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 let toggle = personalActions.first { $0.identifier?.rawValue == "toggle_channel:\(ch.id)" }
                 let unpair = personalActions.first { $0.identifier?.rawValue == "unpair_channel:\(ch.id)" }
-                layoutBar(in:userStratum,y:6,height:24,flexible:summary,trailing:[testBtn] + [toggle].compactMap { $0 } + [edit] + [unpair].compactMap { $0 })
+                layoutBar(in:userStratum,y:6,height:24,spacing:4,flexible:summary,trailing:[testBtn] + [toggle].compactMap { $0 } + [edit] + [unpair].compactMap { $0 })
             } else if gatewayActive {
                 layoutBar(in: userStratum, y: 8, height: 24, leading: personalActions, trailing: [testBtn,saveBtn])
                 if !pairingActions.isEmpty { layoutBar(in: userStratum, y: 40, height: 22, trailing: pairingActions) }
@@ -3876,7 +3935,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         modeTrack.identifier = NSUserInterfaceItemIdentifier("directory_mode_track")
         searchBar.addSubview(modeTrack)
 
-        let dirPill = MenuControl("Directory", frame: NSRect(x: 16, y: 11, width: 76, height: 24), radius: 12)
+        let dirPill = MenuControl("Directory", frame: NSRect(x: 16, y: 11, width: 76, height: 24), radius: 7)
         dirPill.identifier = NSUserInterfaceItemIdentifier("dir_mode:directory")
         dirPill.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
         dirPill.pressed = { [weak self] in
@@ -3888,7 +3947,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         directoryModeDirPill = dirPill
 
         let actTitle = unreadCount > 0 ? "Activity · \(unreadCount)" : "Activity"
-        let actPill = MenuControl(actTitle, frame: NSRect(x: 96, y: 11, width: 88, height: 24), radius: 12)
+        let actPill = MenuControl(actTitle, frame: NSRect(x: 96, y: 11, width: 88, height: 24), radius: 7)
         actPill.identifier = NSUserInterfaceItemIdentifier("dir_mode:activity")
         actPill.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
         actPill.pressed = { [weak self] in
@@ -3913,7 +3972,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         closeBtn.pressed = { [weak self] in self?.closeDirectoryPanel(emitAction: true) }
         searchBar.addSubview(closeBtn)
         searchBar.addSubview(roundedView(NSRect(x: 0, y: 0, width: 560, height: 1), radius: 0, color: .labelColor.withAppearanceAlpha(0.08)))
-        layoutBar(in: searchBar, insetLeft: 16, y: 9, height: 28, leading: [dirPill,actPill], flexible: searchField, trailing: [closeBtn])
         root.addSubview(searchBar)
 
         // Facet Bar (560 × 32 pt, y: 362)
@@ -4047,6 +4105,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         directoryTableView = table
         directoryScrollView = scroll
         root.addSubview(scroll)
+        let warning = textLabel("",NSRect(x:16,y:338,width:528,height:20),size:11,color:CitoPalette.secondaryText)
+        warning.identifier = NSUserInterfaceItemIdentifier("directory_warning")
+        warning.isHidden = true
+        root.addSubview(warning)
+        directoryWarningLabel = warning
 
         // Bottom Single-Line ComposerBar (560 × 44 pt, y: 28)
         let composer = roundedView(NSRect(x: 0, y: 28, width: 560, height: 62), radius: 0,
@@ -4133,7 +4196,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if let act = directoryModeActPill, let dir = directoryModeDirPill, let search = directorySearchField, let track = act.superview, let bar = track.superview, let close = bar.subviews.first(where: { $0.identifier?.rawValue == "close_directory" }) {
             dir.frame.size.width = MenuControl.intrinsicWidth("Directory", font:dir.label.font ?? .systemFont(ofSize:11.5))
             act.frame.size.width = MenuControl.intrinsicWidth(actTitle, font:act.label.font ?? .systemFont(ofSize:11.5))
-            act.label.frame.size.width = act.frame.width - 6
             track.frame.size.width = dir.frame.width + act.frame.width + 8
             layoutBar(in:track,insetLeft:2,insetRight:2,y:2,height:24,spacing:4,leading:[dir,act])
             layoutBar(in: bar, insetLeft: 14, y: 9, height: 28, leading: [track], flexible: search, trailing: [close])
@@ -4146,7 +4208,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         updateDirectoryModePills()
         updateDirectoryFacetStyles()
         if mode == "activity" {
-            applyActivityFilter()
+            applyActivityFilter(revealSelection:true)
         } else {
             applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
         }
@@ -4154,7 +4216,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func openComposer(target: String, hub: String = "", replySignalId: String? = nil) {
         ensureDirectoryPanel()
-        setComposerStatus("")
+        setComposerStatus(pendingComposer == nil ? "" : "Sending…")
         composerTarget = target
         composerTargetHub = hub
         composerReplySignalId = replySignalId
@@ -4171,7 +4233,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         composerTargetPill?.toolTip = target
         directoryComposerBar?.isHidden = false
         updateDirectoryShortcuts()
-        directoryScrollView?.frame = NSRect(x: 0, y: 90, width: 560, height: 272)
+        updateDirectoryWarnings()
         directoryScrollView?.layoutSubtreeIfNeeded()
         if let table = directoryTableView, directorySelectedIndex < table.numberOfRows { table.scrollRowToVisible(directorySelectedIndex) }
         if !headless, let window = directoryPanel, let field = composerInputField {
@@ -4189,7 +4251,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         directoryComposerBar?.isHidden = true
         setComposerStatus("")
         updateDirectoryShortcuts()
-        directoryScrollView?.frame = NSRect(x: 0, y: 28, width: 560, height: 334)
+        updateDirectoryWarnings()
         directoryPanel?.makeFirstResponder(directorySearchField)
     }
 
@@ -4328,7 +4390,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 id="dir_empty_open_apps"; label="Open Agent Apps Settings…"
                 action={ [weak self] in self?.closeDirectoryPanel(emitAction:true); self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
             }
-        } else if activityFilter=="unread" && (!activityAllItems.isEmpty || activityTotal > 0) {
+        } else if activityFilter=="unread" {
             title="All caught up"; subtitle="You have no unread messages."
             id="act_empty_show_all"; label="Show All Activity"
             action={ [weak self] in self?.activityFilter="all"; self?.activityUnreadCount=0; self?.updateDirectoryFacetStyles(); self?.applyActivityFilter(); self?.queryDirectory() }
@@ -4345,7 +4407,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         button.identifier=NSUserInterfaceItemIdentifier(id); button.pressed=action; box.addSubview(button)
         root.addSubview(box)
     }
-    func applyActivityFilter() {
+    func applyActivityFilter(revealSelection: Bool = false) {
+        let offset = directoryScrollView?.contentView.bounds.origin
         let selected = activityFilteredItems.indices.contains(directorySelectedIndex) ? activityFilteredItems[directorySelectedIndex] : nil
         let q = directoryQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let serverMatches = serverActivityFilter == activityFilter && serverActivityQuery == directoryQuery
@@ -4363,6 +4426,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         directorySelectedIndex = selected.flatMap { previous in
             activityFilteredItems.firstIndex { $0.hub == previous.hub && $0.signal_id == previous.signal_id }
         } ?? (activityFilteredItems.isEmpty ? 0 : min(max(0, directorySelectedIndex), activityFilteredItems.count - 1))
+        let current = activityFilteredItems.indices.contains(directorySelectedIndex) ? activityFilteredItems[directorySelectedIndex] : nil
+        let selectionChanged = selected?.hub != current?.hub || selected?.signal_id != current?.signal_id
         updateDirectoryShortcuts()
         updateDirectoryEmptyState()
         let count = serverMatches ? max(activityTotal, activityFilteredItems.count) : activityFilteredItems.count
@@ -4371,9 +4436,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             table.reloadData()
             if !activityFilteredItems.isEmpty {
                 table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
-                table.scrollRowToVisible(directorySelectedIndex)
+                if revealSelection || selectionChanged { table.scrollRowToVisible(directorySelectedIndex) }
             }
             table.layoutSubtreeIfNeeded()
+            if !revealSelection && !selectionChanged, let offset = offset {
+                directoryScrollView?.contentView.scroll(to:offset)
+                if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
+            }
         }
     }
 
@@ -4403,7 +4472,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         updateDirectoryModePills()
         updateDirectoryFacetStyles()
         if mode == "activity" {
-            applyActivityFilter()
+            applyActivityFilter(revealSelection:true)
         } else {
             applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
         }
@@ -4465,6 +4534,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
+        let offset = directoryScrollView?.contentView.bounds.origin
         let previousSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
         let sameServerQuery = serverDirectoryQuery == directoryQuery && serverDirectoryScope == directoryScopeFilter && serverDirectoryHarness == directoryHarnessFilter
         func shadowKey(_ peer: RemotePeer) -> String {
@@ -4482,15 +4552,21 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         } else {
             directorySelectedIndex = min(max(0, directorySelectedIndex), directoryFilteredPeers.count - 1)
         }
+        let currentSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
+        let selectionChanged = previousSelectedId != currentSelectedId
         updateDirectoryEmptyState()
         directorySummaryLabel?.stringValue = "\(directoryMatchedCount) of \(directoryOnlineCount) online"
         if let table = directoryTableView {
             table.reloadData()
             if !directoryFilteredPeers.isEmpty {
                 table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
-                table.scrollRowToVisible(directorySelectedIndex)
+                if selectionChanged { table.scrollRowToVisible(directorySelectedIndex) }
             }
             table.layoutSubtreeIfNeeded()
+            if !selectionChanged, let offset = offset {
+                directoryScrollView?.contentView.scroll(to:offset)
+                if let scroll = directoryScrollView { scroll.reflectScrolledClipView(scroll.contentView) }
+            }
         }
     }
 
@@ -4754,7 +4830,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var lowContrastLabels: [String] = []
         var jargonLeaks: [String] = []
         var addressMismatches: [String] = []
-        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
+        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\bPassive\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
         func name(_ view: NSView) -> String {
             view.identifier?.rawValue ?? (view as? NSTextField)?.stringValue ?? String(describing:type(of:view))
         }
@@ -4955,6 +5031,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if let scroll = view as? NSScrollView {
                 result["scroller_style"] = ((scroll as? OverlayScrollView)?.nativeScrollerStyle ?? scroll.scrollerStyle).rawValue
                 result["draws_background"] = scroll.drawsBackground
+                result["content_x"] = scroll.contentView.bounds.origin.x
+                result["content_y"] = scroll.contentView.bounds.origin.y
             }
             if let cell = view as? DirectoryPeerCellView { result["reuse_identifier"] = cell.identifier?.rawValue ?? "" }
             if let label = view as? NSTextField {
@@ -4982,10 +5060,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let visible = visible && !view.isHidden && view.alphaValue > 0.01
             guard visible else { return }
             if let control = view as? MenuControl, control.isEnabled, control.pressed != nil {
-                let center = NSPoint(x:control.bounds.midX,y:control.bounds.midY)
+                // Scrolling may clip the nominal center onto a hit-test boundary.
+                // Sample the interior of the portion the user can actually click.
+                let visibleBounds = control.visibleRect
+                let center = NSPoint(x:visibleBounds.midX,y:visibleBounds.midY)
                 let modal = settingsPanel?.contentView?.subviews.first { $0.identifier?.rawValue == "uninstall_modal_overlay" }
                 let inModal = modal.map { control.isDescendant(of:$0) } ?? false
-                if !(surface == "settings" && uninstallConfirmOpen && !inModal), control.visibleRect.contains(center) {
+                if !(surface == "settings" && uninstallConfirmOpen && !inModal), !visibleBounds.isEmpty {
                     let point = control.convert(center,to:root)
                     if root.hitTest(point) !== control {
                         overlappingSiblings.append("\(surface) > \(name(control)): occluded in hitTest")
@@ -5142,7 +5223,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func show(_ value: Payload) {
         let title = (value.target_harness == "human" ? "Cito · Direct Message" : "Cito · \(value.target_title)") + (displayedCount > 1 ? " (\(displayedCount))" : "")
-        let semanticLabel = (value.effective_wake ? "Notification" : "Passive") + (displayedCount > 1 ? " · ×\(displayedCount)" : "")
+        let semanticLabel = (value.effective_wake ? "Notification" : "Queued") + (displayedCount > 1 ? " · ×\(displayedCount)" : "")
         let actionText = value.target_harness == "human" ? "Click to reply in Cito ↩" : "Click to view in Activity ↗"
         wakeActionText = actionText
         visible = true

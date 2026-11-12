@@ -80,6 +80,15 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         let failed = f.plugin(bin, json!({"op":"discover_sessions"}));
         assert_eq!(failed["ok"], false, "{id}: {failed}");
         assert!(failed["sessions"].is_null());
+        if id == "pi" {
+            f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
+            let probe = f.plugin(
+                PI,
+                json!({"op":"probe","endpoint_pid":f.pid(first),"session_id":"live-session"}),
+            );
+            assert_eq!(probe["status"], "transient_error", "{probe}");
+            f.env.remove("CITO_PI_REQUIRE_BRIDGE");
+        }
         fs::remove_file(live).unwrap();
         let dead = f.state.join(format!("sockets/{id}-pid-{}.sock", i32::MAX));
         drop(UnixListener::bind(&dead).unwrap());
@@ -87,6 +96,23 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         assert_eq!(found["ok"], true, "{id}: {found}");
         fs::remove_file(dead).unwrap();
     }
+    fs::remove_dir(f.state.join("sockets")).unwrap();
+    fs::write(f.state.join("sockets"), "not a directory").unwrap();
+    for bin in [PI, CLAUDE] {
+        let failed = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(failed["ok"], false, "{failed}");
+        assert!(failed["sessions"].is_null());
+    }
+    fs::remove_file(f.state.join("sockets")).unwrap();
+    let settings_path = f.home.join(".pi/agent/settings.json");
+    let original_settings = fs::read(&settings_path).unwrap();
+    fs::write(&settings_path, "{").unwrap();
+    assert_eq!(
+        discover(&f)["ok"],
+        false,
+        "Setup inspection errors must not become empty discovery"
+    );
+    fs::write(settings_path, original_settings).unwrap();
     // Interactive discovery excludes background invocations, independently of caller resolution.
     let flags: &[&[&str]] = &[
         &["--mode", "rpc"],
@@ -549,6 +575,15 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         );
     }
     let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE metadata(key TEXT)", &[]).unwrap();
+    let absent_table = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","meta":{"threadId":"schema-pending"},"cwd":"/repo"}),
+    );
+    assert_eq!(
+        absent_table["caller"]["session_id"], "schema-pending",
+        "An absent threads table is not a database IO failure: {absent_table}"
+    );
     db.execute("CREATE TABLE threads(id TEXT, cwd TEXT, archived INTEGER, recency_at_ms INTEGER, title TEXT, git_branch TEXT, git_origin_url TEXT); INSERT INTO threads VALUES('active','/repo',0,200,'Active work','main','git@example.com:acme/service.git'),('archived','/repo',1,300,'Archived','old','https://example.com/acme/service.git')",&[]).unwrap();
     let result = f.plugin(
         CODEX,
@@ -605,6 +640,17 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         .unwrap();
     let started = std::time::Instant::now();
     let locked = discover();
+    for request in [
+        json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"}),
+        json!({"op":"resolve_caller","meta":{"threadId":"active"},"cwd":"/repo"}),
+    ] {
+        let failed = f.plugin(CODEX, request);
+        assert_eq!(
+            failed["ok"], false,
+            "A locked database must not fabricate a caller: {failed}"
+        );
+        assert!(failed["caller"].is_null());
+    }
     db.execute("ROLLBACK", &[]).unwrap();
     assert_eq!(
         locked["ok"], false,
@@ -682,6 +728,17 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         false,
         "Real IO/format errors must reach the discovery cache owner"
     );
+    for request in [
+        json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"}),
+        json!({"op":"resolve_caller","meta":{"threadId":"active"},"cwd":"/repo"}),
+    ] {
+        let failed = f.plugin(CODEX, request);
+        assert_eq!(
+            failed["ok"], false,
+            "Corruption must not fall back to caller metadata: {failed}"
+        );
+        assert!(failed["caller"].is_null());
+    }
 }
 #[test]
 fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {

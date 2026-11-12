@@ -1798,9 +1798,16 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
   2. **Prevent False `needs_reload: true` Degradation in `plugins/pi/native.rs` & Socket Drop in `plugins/claude/native.rs`**:
      - In `plugins/pi/native.rs` (`socket_candidates` / `candidates`), if `pi-pid-<p>.sock` exists on disk and `alive(p)` is `true`, do not fall through to `process_candidates` (`needs_reload: true`) when `identify(req, p)` transiently times out—propagate the transient error so `SessionActivity` retains the last known healthy session state.
      - In `plugins/claude/native.rs` (`discover_sessions`), if a socket `claude-pid-<p>.sock` belongs to a live process (`alive(p) == true`) and `bridge(&r)` times out transiently, return an error from `discover_sessions` rather than silently dropping the live session.
+     - Pi and Claude discovery propagate socket-directory IO failures other than NotFound. Pi also propagates setup/process-inspection failures from fallback discovery; a live Pi PID with an existing but unavailable bridge returns `transient_error` from probe.
+     - Codex caller resolution propagates existing-database lock and IO errors, including explicit thread lookups. A missing database, missing threads table, or absent matching row remains a valid absence.
   3. **Preserve Remote `ChannelInventory` on Transient RPC Failure (`crates/cito-native/src/core/daemon.rs:341–357`)**:
      - In `ChannelInventory::fetch_locked`, if `slot.rpc("human_channels_list", ...)` returns `Err(e)` and `cached.value["channels"]` is already a non-empty array, preserve the existing `"channels"` array in `cached.value` while recording `"status": "error", "detail": e`, and return `Err(e)` from `fetch_locked` so `ChannelInventory::mutate` surfaces refresh errors accurately.
   4. **Preserve Activity Counts & Viewport/Selection Stability in `cito-ui.swift` (`lines 1750, 2078, 4255`)**:
+     - Pending full-message copies resolve a current cell only in Activity mode and only when its Hub and signal identity match. Complete the pasteboard write even if the row is hidden or the user switches to Directory; never apply Activity copy feedback to a reused Directory cell.
+     - Preserve `active_scroll`, `my_remote_scroll`, and `available_scroll` offsets across menu rebuilds. Passive Activity and Directory refreshes preserve the viewport when the selected identity is unchanged; mode, selection, and composer transitions may reveal the selection.
+     - Forward partial-Hub Directory warnings to a visible caption without discarding usable rows. MCP warnings retain their `{hub, message}` shape; the daemon's UI frame projects them to `Hub: message` strings for Swift's `[String]` decoder.
+     - Route Directory request failures to the Directory caption. Passive Directory queries and discovery refreshes must preserve unrelated menu/settings errors.
+     - Save acknowledgements may clear editing state or show Saved only when the current draft still matches the submitted values. Newer channel, gateway, and sharing-port drafts remain editable. Reopening a pending composer retains Sending status.
      - In `frame.op == "directory"` (`cito-ui.swift:1750`), use `activityTotal = frame.activity_total ?? activityTotal` and `activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount`.
      - Preserve `Activity` selected row by `signal_id` across refreshes rather than raw row index, and in `openComposer` scroll the selected row into view after resizing `directoryScrollView`.
      - When `directoryVisible == true` and a `state` frame changes `hubs` or `listeners`, refresh `directoryFilteredPeers` (or trigger `queryDirectory()`) so `Directory` never displays stale stopped listeners or disabled Hubs.
@@ -1810,8 +1817,9 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - **Required Closures**:
   1. **Recessed Segmented Track Styling Across All Switchers (`cito-ui.swift`)**:
      - Ensure `header_hub_strip` (when `hubs.count > 1`), `settings_header` tabs, `channel_hub_selector` (in `Human Channels`), `host_hub_addr:*` (`Tailscale | Local IP`), `settings_hub_auth:*` (`Trusted Network | Shared Token | Team Sign-In` in `Add Hub`), `directory_mode_track` (`Directory | Activity`), and `directoryFacetBar` filter groups (`dir_scope:*`, `dir_harness:*`, `act_filter:*`) all render inside a recessed track (`fill: labelColor @ 0.06`) with `.prominent` on the selected segment and **`.subtleHeader` (borderless at rest)** on unselected segments.
+     - Clamp pill-strip viewports to `min(frame.width, max(0, totalWidth))`; trailing strips keep their right edge anchored while their documents start at x=0. Recessed fills wrap intrinsic pill widths without unused tails. Directory/Activity pills use radius 7 inside the radius-8 mode track, without wrong-parent layout or manual label-width overrides.
   2. **Paired-State Reserved Widths in `layoutBar` (`cito-ui.swift:109`)**:
-     - In `layoutBar`, reserve paired-state widths (`max(width(stateA), width(stateB))`) for stateful toggle controls (`scope:*`, `toggle_auto_listen`, `toggle_hub:*`, `toggle_desktop_banner`, `toggle_host_hub`) so toggling any switch never shifts neighboring controls by even `1px`.
+     - In `layoutBar`, reserve paired-state widths (`max(width(stateA), width(stateB))`) for stateful toggle controls (`scope:*`, `toggle_auto_listen`, `toggle_hub:*`, `toggle_desktop_banner`, `toggle_host_hub`, `toggle_host_hub_auth`, `toggle_channel:*`) so toggling any switch never shifts neighboring controls by even `1px`.
 
 #### 4. `M4` — Single-Authority `Auto-Listen`, Probe Recovery & Network-Scoped Indicators (`crates/cito-native/src/core/{daemon.rs,receiver.rs}`, `src/macos/cito-ui.swift`)
 - **Basis**: `auto_listen` conflicted with `UNLISTENED` rows written by liveness probes, bypassed app-configuration checks, hardcoded `"scope": "self"`, and left `header_subtitle` / `"All sessions listening"` out of sync with the selected network.
@@ -1819,13 +1827,17 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
   1. **Clean `Auto-Listen` Authority (`daemon.rs:2044–2075, 3383–3401`)**:
      - Gate `auto_listen` on configured agent plugins (`try_inspect_plugin_setup(p).is_ok_and(|(_, configured, _)| configured)`), filter `local_listeners` by `principal_id`, and pass `scope: Value::Null` (not hardcoded `"self"`) so `register_locked` applies the Hub's canonical default scope (`"workspace"` on `authMode == "none"`, `"self"` otherwise).
      - When `set_auto_listen` enables `Auto-Listen` (`enabled: true`), clear prior `UNLISTENED` agent rows on that Hub and immediately enroll eligible open sessions. When the user manually clicks `Pause` (`stop:<id>`) on an agent session while `Auto-Listen` is On, turn `auto_listen = false` on that Hub and unlisten that session.
+     - Only an ACTIVE agent's manual pause disables Auto-Listen. Probe-revoked UNLISTENED rows do not suppress re-enrollment while Auto-Listen remains on; enrollment also requires a currently live candidate PID. Registering on one Hub must not rewrite another Hub's endpoint PID or binding metadata.
   2. **Reconcile Remote `human_paused` & Fence Edited Disabled Hub Profiles (`daemon.rs:600, 1968`)**:
      - When enabling/reloading a Hub slot in `reload_slots`, fence any retained `local_listeners` rows whose stored `principal_id` (or Hub URL recorded in state) differs from the current slot configuration even if the slot was previously disabled.
      - In the receiver heartbeat (`daemon.rs:1968`), if `row["harness"] == "human"` and `remote["human_paused"] == true`, mark the local `human` row `UNLISTENED` so multi-Mac pause states converge.
+     - A mirrored Human pause may resume automatically when the matching-principal remote record is ACTIVE, global pause is cleared, an active sibling channel exists, and no local detach remains pending. A pending local pause keeps authority until its detach settles; stale heartbeat ownership cannot undo a later resume.
   3. **Network-Scoped `header_subtitle`, Honest Empty Target & `"Show All Activity"` Query (`cito-ui.swift:1234, 2105, 2453, 4230`)**:
      - Compute `uniqueSessionCount` and `humanListening` in `cardMenu` header for `effectiveTargetHub` so `header_subtitle` always matches the displayed cards.
      - Only show `"All sessions listening on \(targetHub)"` (`available_empty_target`) when `visibleAvailable.isEmpty` AND at least one agent session is actively listening on `targetHub` (when both `available` and agent `listeners` are empty, hide `available_empty_target` since Zone 1 already displays `"No active listeners"`).
      - In `"act_empty_show_all"` (`cito-ui.swift:4230`) and `"mark_all_activity_read"` (`cito-ui.swift:3900`), update `activityUnreadCount = 0` atomically and call `self.queryDirectory()` so server-filtered read history is fetched immediately.
+
+     - An empty Unread projection always offers Show All Activity, even when its unread-only total is zero. Clicking an explicitly selected Hub pill toggles that Hub's drawer, including on healthy connections; choosing another Hub changes the target.
 
 #### 5. `M5` — Eliminate Misleading `(~)` Suffix & All Remaining Protocol Jargon (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`)
 - **Basis**: `nodeDisplayTitle` appended `" (~)"` even when `cwd` was `~/dotfiles/agent` (not `~`), `compactSessionPath` turned `/Volumes/...` into `~/…/...`, and `Activity` / `Banner` / `Directory` leaked `"Passive"`, `"signals"`, and `"Selected ID"`.
@@ -1837,6 +1849,7 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
   3. **Self-Explanatory User Vocabulary Across `Banner`, `Activity`, `Directory` & `presentationError`**:
      - In `Activity` empty states and footer summary (`cito-ui.swift:4201, 4205, 4227`), replace `"signal"` / `"signals"` with `"message"` / `"messages"`.
      - In `Directory` footer (`cito-ui.swift:3834, 4041`), replace `"↵ Copy Selected ID"` with `"↵ Copy Address"`.
+     - Non-wake banner chrome says Queued; the jargon oracle detects bracketed and unbracketed Passive in chrome while preserving user-data exemptions. Reload tooltips explain that `/reload` is copied for pasting into the named Agent App.
      - In `DirectoryPeerCellView.configureActivity` (`cito-ui.swift:1200`), map all 6 daemon `held_reason` values (`"stale_generation"`, `"driver_unavailable"`, `"session_switched"`, `"unlistened"`, `"unlistened_before_dispatch"`, `"fenced_before_dispatch"`).
      - In `presentationError` (`cito-ui.swift:281`), strip trailing `\(os error [0-9]+\)` globally across all error strings.
 

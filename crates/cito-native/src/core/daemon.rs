@@ -862,7 +862,7 @@ impl DaemonService {
                 continue;
             }
             if super::registration::local_node(&self.state, &client, "human", "default")?
-                .is_some_and(|r| matches!(string(&r, "status"), "ACTIVE" | "UNLISTENED"))
+                .is_some_and(|r| r["status"] == "ACTIVE")
             {
                 continue;
             }
@@ -1080,9 +1080,10 @@ impl DaemonService {
             self.unlisten_id(hub, string(&row, "listener_id"))?;
         }
         self.state.db.execute(
-            "UPDATE local_listeners SET endpoint_pid=? WHERE harness=? AND session_id=?",
+            "UPDATE local_listeners SET endpoint_pid=? WHERE hub=? AND harness=? AND session_id=?",
             &[
                 caller["endpoint_pid"].clone(),
+                json!(hub),
                 caller["harness"].clone(),
                 caller["session_id"].clone(),
             ],
@@ -1095,7 +1096,7 @@ impl DaemonService {
         if self
             .state
             .listener(hub, id)?
-            .is_some_and(|row| row["harness"] != "human")
+            .is_some_and(|row| row["harness"] != "human" && row["status"] == "ACTIVE")
             && self
                 .slots
                 .get(hub)
@@ -2094,7 +2095,10 @@ impl DaemonService {
             return Ok(());
         };
         for candidate in activity.candidates().filter(|candidate| {
-            candidate["endpoint_pid"].as_u64().is_some()
+            candidate["endpoint_pid"]
+                .as_u64()
+                .and_then(|p| u32::try_from(p).ok())
+                .is_some_and(crate::support::alive)
                 && candidate["needs_reload"] != true
                 && self
                     .plugins
@@ -2117,7 +2121,7 @@ impl DaemonService {
                     super::auth::principal_ids_equal(
                         string(row, "principal_id"),
                         string(&slot.identity, "principal_id"),
-                    ) && matches!(string(row, "status"), "ACTIVE" | "UNLISTENED")
+                    ) && string(row, "status") == "ACTIVE"
                 }) {
                     continue;
                 }
@@ -3284,7 +3288,15 @@ impl DaemonService {
                     },
                 )?;
                 let activity = self.activity_dto(activity);
-                let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":action["query"].as_str().unwrap_or(""),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"activity":activity,"activity_total":total,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":self.state.activity()?.1});
+                let warnings: Vec<String> = result["warnings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|warning| {
+                        format!("{}: {}", string(warning, "hub"), string(warning, "message"))
+                    })
+                    .collect();
+                let frame = json!({"op":"directory","hub":hub,"request_id":action["request_id"],"query":action["query"].as_str().unwrap_or(""),"scope":action["scope"].as_str().unwrap_or("all"),"harness":action["harness"].as_str().unwrap_or("all"),"matched_count":result["matched_count"],"online_count":result["online_count"],"peers":result["listeners"],"warnings":warnings,"activity":activity,"activity_total":total,"activity_unread_count":unread,"activity_filter":self.activity_filter,"activity_query":self.activity_query,"unread_count":self.state.activity()?.1});
                 self.emit(frame.clone());
                 return Ok(frame);
             }

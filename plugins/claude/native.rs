@@ -426,8 +426,14 @@ pub fn handle(req: &Value) -> Result<Value> {
     match op {
         "discover_sessions" => {
             let mut sessions = vec![];
-            if let Ok(entries) = fs::read_dir(state(req).join("sockets")) {
-                for e in entries.flatten() {
+            let entries = match fs::read_dir(state(req).join("sockets")) {
+                Ok(entries) => Some(entries),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.to_string()),
+            };
+            if let Some(entries) = entries {
+                for e in entries {
+                    let e = e.map_err(|e| e.to_string())?;
                     let n = e.file_name().to_string_lossy().into_owned();
                     if let Some(p) = n
                         .strip_prefix("claude-pid-")
