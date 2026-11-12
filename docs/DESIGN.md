@@ -1602,6 +1602,88 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - **Fast Single-Pass Review Only**: Run a single-pass `contract-and-simplicity` review & fix (do **NOT** run multi-round review loops).
 - **No Formal Release Tagging Yet**: Push verified changes to `origin/main` for immediate local user testing on macOS; do **NOT** push a new release tag or trigger `release.yml` notarization/Homebrew publication until the user completes hands-on testing and explicitly approves release.
 
+---
+
+## 18. Stage 16: Unified macOS Control Taxonomy, Intrinsic Layout Engine, Chinese IME Support, Distinct Directory/Activity Surfaces & Self-Invite Guard (`Q1`–`Q6`)
+
+### 18.1 Binding Contract (`MUST`)
+
+#### 1. `Q1` — Unified macOS Control Taxonomy & Modal Action Consistency (`src/macos/cito-ui.swift`)
+- **Basis**: Eliminate visual inconsistency where destructive or secondary actions (`Disconnect` in `Agent Apps`, `Confirm Uninstall` in `uninstall_confirm_box`, `Remove` in `Connected Hubs`, `Unpair`, `Clear Token`) lost their button silhouette (`border = nil, fill = .clear`) and appeared as floating plain text next to bordered pill buttons (`Set Up`, `Cancel`, `Disconnect All`).
+- **Four-Class Control Taxonomy (`MenuControl.Style`)**:
+  1. **`.prominent` (Primary Constructive Button)**: Solid accent fill (`CitoPalette.prominentFill`), `1pt` border (`white @ 0.22`), white `.medium` label/icon (`Set Up`, `Save`, `Save Gateway Token`, `Join Hub`, `Copy Invite Code`, `Send ⏎`, `Resume`, active segmented tab).
+  2. **`.neutral` (Secondary Pill Button)**: Subtle pill fill (`labelColor @ 0.08`), `1pt` border (`labelColor @ 0.14`), primary `.labelColor` (`Cancel`, `Re-check`, `Send Test`, `Pause`, `Pair Account…`, `Paste Invite Code`, `Add Hub…`, `Apply`, `+ Listen`, `Message`, `Reply`, `Enabled`/`Disabled`).
+  3. **`.destructiveHover` (Secondary Destructive Pill Button)**: **Must retain the exact same resting pill silhouette as `.neutral`** (`fill = .labelColor.withAppearanceAlpha(0.08)`, `border = .labelColor.withAppearanceAlpha(0.14)`, `foreground = CitoPalette.secondaryText`), transitioning on hover to solid red (`CitoPalette.destructiveFill`, `border = .white.withAlphaComponent(0.26)`, `foreground = .white`). Used for `Disconnect` (`remove_app:<id>`), `Remove` (`remove_hub:<name>`), `Unpair` (`unpair_channel:<id>`), and `Clear Token` (`clear_channel_service:<id>`), so right-edge action columns in `Agent Apps` and `Connected Hubs` have uniform button geometry at rest.
+  4. **`.destructive` (Primary Destructive Confirmation Pill Button)**: Tinted red pill at rest (`fill = CitoPalette.dangerText.withAppearanceAlpha(0.14)`, `border = CitoPalette.dangerText.withAppearanceAlpha(0.38)`, `foreground = CitoPalette.dangerText`), transitioning on hover to solid red (`CitoPalette.destructiveFill`, `foreground = .white`). Used for `Confirm Uninstall` (`confirm_uninstall_all`).
+  5. **`.subtleHeader` (Borderless Ghost Chrome / Checkbox / Menu Footer / Inactive Segment)**: `fill = .clear`, `border = nil` at rest (`fill = .labelColor @ 0.10` on hover). Restricted strictly to: (a) icon-only close/dismiss/row actions (`✕` `close_settings`, `close_directory`, `dismiss_*`, `stop:<id>` on menu session cards, icon-only `copy_activity_msg:<id>` / `delete_activity:<id>`), (b) inactive tabs inside a bordered segmented track, (c) checkboxes (`Start Cito at Login`, `uninstall_purge_data`), (d) collapsible section headers, (e) menu bar footer items (`Stop All`, `Settings…`, `Quit Cito ⌘Q`), and (f) inline copyable address chips (`copy:<id>`).
+- **Modal Action Alignment (`uninstall_confirm_box`, `cito-ui.swift:3455–3505`)**:
+  - Title: **`"Disconnect or Uninstall Cito"`** (matching the two buttons `Disconnect All` and `Confirm Uninstall`, removing the orphan word `"Reset"`).
+  - Delete the verbose subtitle (`"Disconnect keeps Cito running; uninstall removes Cito and quits."`).
+  - Checkbox (`uninstall_purge_data`, `.subtleHeader`): `"Also delete local data and Hub settings"`.
+  - Bottom bar via `layoutBar(in: confirmBox, insetLeft: 12, insetRight: 12, y: 14, height: 24, leading: [cancelUninstallBtn], trailing: [disconnect, confirmUninstallBtn])` with `cancelUninstallBtn` (`.neutral`), `disconnect` (`.neutral`), and `confirmUninstallBtn` (`.destructive`).
+
+#### 2. `Q2` — Systemic Intrinsic-Sizing Engine & Anti-Verbosity Subtitle Trim (`src/macos/cito-ui.swift`)
+- **Basis**: Replace hardcoded widths/offsets (`width: 140, x: 158` on form fields, `x = 6` icon + centered `label` gap drift inside `MenuControl`, and `y = 3.5` text offset inside `Experimental`) with intrinsic font/text measurement primitives, and eliminate static subtitles that merely repeat card titles or button labels.
+- **1. Centered `[Icon + 5pt Gap + Text]` Unit in `MenuControl.layoutContents()` (`cito-ui.swift:420–465`)**:
+  - Add `MenuControl.layoutContents()` (called from `init`, `setLeadingSymbol`, `copied`, and `frame` didSet):
+    - Compute `cellH = ceil(label.cell?.cellSize.height ?? (font.ascender - font.descender + font.leading))` and `labelY = floor((bounds.height - cellH) / 2)`.
+    - When `leadingSymbolView` is visible (`!label.isHidden`) and `label.alignment != .left`, measure `textW = max(0, min(bounds.width - 12 - 17, ceil(measureTextWidth(label.stringValue, font: font)) + 2))`, compute `groupW = 12 + 5 + textW` and `startX = max(6, floor((bounds.width - groupW) / 2))`, and place `leadingSymbolView` at `x = startX, y = floor((bounds.height - 12) / 2), width = 12, height = 12` and `label` at `x = startX + 17, y = labelY, width = textW, height = cellH`. (Icon-only controls initialized with `symbol:` keep `centerSymbolView` centered in `bounds` with `label.isHidden = true`).
+    - When `label.alignment == .left` (such as checkboxes and collapsible headers), place `leadingSymbolView` at `x = 6` and `label` at `x = 23`.
+  - Add `MenuControl.intrinsicWidth(_ title: String, font: NSFont, leadingSymbol: String?, paddingX: CGFloat = 11, minWidth: CGFloat = 0) -> CGFloat` and use it to size segmented tabs (`appsTab`, `channelsTab`, `hubsTab`, `dir_mode:*`, `host_hub_addr:*`) and action buttons without hardcoded width guesses.
+- **2. Optical Vertical Centering for Static Badges (`makePillBadge`, `cito-ui.swift:2785, 4865`)**:
+  - Introduce `makePillBadge(_ text: String, id: String, height: CGFloat = 20, font: NSFont = .systemFont(ofSize: 9.5, weight: .semibold), textColor: NSColor, fill: NSColor, border: NSColor?, paddingX: CGFloat = 8) -> SurfaceView`:
+    - Measure `size = label.cell?.cellSize ?? NSSize(width: measureTextWidth(text, font: font), height: 12)`, set `w = max(88, ceil(size.width) + paddingX * 2)` and `h = ceil(size.height)`, and place `label` at `NSRect(x: 0, y: floor((height - h) / 2), width: w, height: h)`.
+    - Use `makePillBadge` for `settings_app_tier:<id>` (`Experimental`) and `banner_semantic_pill` (`Notification` / `Passive`).
+- **3. Intrinsic Form Label-to-Field Column Alignment (`cito-ui.swift:2995–3010`)**:
+  - In `Human Channels` field rows (`Bot Token`, `Chat ID`, etc.), compute `labelW = max(56, min(110, (fields.map { ceil(measureTextWidth($0.label, font: .systemFont(ofSize: 11, weight: .medium))) }.max() ?? 56) + 6))` and `inputX = 12 + labelW + 10` (`inputW = container.bounds.width - 12 - inputX`). For `Bot Token` / `Chat ID`, `inputX` becomes **`78pt`** (eliminating the `90pt` blank gap!).
+- **4. Anti-Verbosity Subtitle Trim Across All Surfaces**:
+  - **`Mac Desktop Banner` (`cito-ui.swift:2830`)**: Remove `"Show floating banners on this Mac when notifications arrive."` and render `settings_desktop_banner_card` as a crisp **single-row `46pt` card** (`"Mac Desktop Banner"` vertically centered on the left at `y = 14.5`, `[ ● Enabled ]` on the right at `y = 11, height = 24`).
+  - **`Share This Mac as a Hub` (`host_hub_card`, `cito-ui.swift:3160`)**: When collapsed (`!hostExpanded`), remove `"Let your other Macs or teammates connect to this Mac."` and render `host_hub_card` as a **single-row `46pt` card** (`"Share This Mac as a Hub"` at `y = 14.5`, `[ Off ]` at `y = 11, height = 24`). When expanded without error, remove `"On another Mac, click Paste Invite Code below..."` so `host_hub_card` is a compact `136pt` (or `108pt` without address switcher) card.
+  - **`Telegram` (`settings_channel:<id>`, `cito-ui.swift:2960–3050`)**:
+    - Remove `"Click Pair Account… to link your account, or enter your Chat ID manually."` (`personalDescription`) when `gatewayActive == true`; the row directly presents `[ 🔗 Pair Account… ]` and `Chat ID` (`placeholder: "Auto-filled by Pair Account, or enter Chat ID"`).
+    - When `!gatewayActive`, keep `stratum_hub` focused with 1-line guide `"Create a bot via @BotFather (/newbot) on Telegram and paste its token:"` (`placeholder: "123456:ABC-DEF…"`).
+  - **`This Mac (Local Hub)` Edit Form (`cito-ui.swift:3291`)**: Remove `"Set the username shown when you send or receive messages on this Mac."` (shrinking the local edit form from `156pt` to `124pt`).
+
+#### 3. `Q3` — Native macOS Chinese Input Method (IME / 拼音输入法) Support (`src/macos/cito-ui.swift`)
+- **Basis**: `KeyPanel` (`settingsPanel` and `directoryPanel`) previously used `styleMask: [.borderless, .nonactivatingPanel]` and intercepted `Up`/`Down`/`Return`/`Escape` in a pre-responder `NSEvent` local monitor before `NSTextInputContext` could process Pinyin composition and candidate selection.
+- **IME & Key-Window Contract (`cito-ui.swift:386–396, 1403–1418, 2560, 3592`)**:
+  1. Remove `.nonactivatingPanel` from `settingsPanel` and `directoryPanel` (retaining `.nonactivatingPanel` strictly on `WakeBanner`'s `panel` at line `4805`). Override `canBecomeKey { true }` and `canBecomeMain { true }` on `KeyPanel`, and in `makeFirstResponder(_ responder: NSResponder?)`, activate `(currentEditor() as? NSTextView)?.inputContext?.activate()` so macOS Text Services Manager (`TSM`) binds the Pinyin candidate window to the active text field.
+  2. In `settingsKeyMonitor` (`cito-ui.swift:1403`), when `window?.firstResponder is NSTextView` (an editable field editor is active), do **NOT** intercept `Up (126)`, `Down (125)`, `Return (36/76)`, or `Escape (53)` in the local event monitor; let `NSWindow.sendEvent` dispatch them through `NSTextView.keyDown` → `NSTextInputContext.handleEvent`. When the IME is not composing, `NSTextView` automatically forwards `moveUp:`, `moveDown:`, `insertNewline:`, and `cancelOperation:` to `control(_:textView:doCommandBy:)` (`lines 4173–4187`), preserving all keyboard navigation and Escape/Return shortcuts without breaking Chinese IME input!
+
+#### 4. `Q4` — Visual & Structural Distinction Between `Directory` and `Activity` + Per-Message Delete (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`)
+- **Basis**: Make `Directory` (Online Node Roster) and `Activity` (Signal Inbox) immediately distinguishable at a glance, and support deleting individual messages in `Activity` without cluttering the row.
+- **`Directory` (Online Node Roster — Presence & Address Centric, `rowHeight = 52pt`)**:
+  - **Online Presence Dot on Badge**: Render an `8 × 8 pt` green online indicator dot (`CitoPalette.successText` with a `1.5pt` surface border ring) as a sibling of `badgeView` inside `DirectoryPeerCellView` at `NSRect(x: badgeView.frame.maxX - 7, y: badgeView.frame.minY - 1, width: 8, height: 8)` (`onlineDot.isHidden = false` in `configure(with:)`, `onlineDot.isHidden = true` in `configureActivity(with:)` so it stays within cell bounds and never trips `clipped_views`).
+  - **Row Layout**: Line 1 shows `Title · repo · branch`; Line 2 shows `@user · host` (or `Human · host`). Right side shows `[ ❐ display_address ]` (`copy_dir:<id>`, `.neutral`) and `[ 💬 Message ]` (`msg_dir:<id>`, `.neutral`). Explicitly hide `unreadAccentBar` and `deleteControl` inside `configure(with:)` so reused `DirectoryPeerCellView` instances never leak `Activity` subviews into `Directory` mode.
+- **`Activity` (Signal Inbox — Message, Time & Unread-Bar Centric, `rowHeight = 60pt` / `108pt` expanded)**:
+  - **Unread Left Accent Bar**: Render a `3pt` vertical accent bar (`x = 4, y = 8, width = 3, height = rowHeight - 16, radius = 1.5`, color `CitoPalette.infoText`, `unreadAccentBar.isHidden = !item.unread`) on unread activity rows, and a `1pt` horizontal row divider (`labelColor @ 0.05`) at `y = 0`.
+  - **Header & Relative Timestamp (Line 1, `y = rowHeight - 24`)**: Display `@\(item.from_user) → \(item.target_harness == "human" ? "You" : item.target_title)\(held)` followed by relative age (e.g. `" · 2m ago"` / `" · Just now"` formatted from `item.created_at`).
+  - **Full-Width Message Preview (Line 2, `y = 8`)**: Render `item.message` in primary `.labelColor` (`12pt .regular`, `CitoPalette.secondaryText` when read) so the message body is the primary visual focus.
+  - **Compact Right-Side Actions + Per-Message Delete (`delete_activity:<signal_id>`)**:
+    - On the right (`y = rowHeight - 30`), render `[ ↩ Reply ]` (`reply_activity:<id>`, `.neutral`, when `canReply == true`), `[ ❐ Copy ]` (`copy_activity_msg:<id>`, `.neutral`), and a compact icon-only delete button **`delete_activity:<signal_id>`** (`symbol: "trash"`, `width: 24, height: 22`, `.subtleHeader`, tooltip `"Delete message"`).
+    - Clicking `delete_activity:<signal_id>` (or pressing `⌫` / `Delete` keyCode `51` / `117` in `Activity` mode when not editing text) emits `["op": "clear_activity_history", "hub": item.hub, "signal_id": item.signal_id]`.
+    - In `crates/cito-native/src/core/daemon.rs:2727` (`"clear_activity_history"`), when `action["signal_id"].as_str()` is non-empty, acknowledge and delete only the matching signal (`WHERE hub = ? AND signal_id = ?`) instead of clearing the entire hub history!
+
+#### 5. `Q5` — Clean 2-Line `AVAILABLE SESSIONS` Rows in `cardMenu` (`src/macos/cito-ui.swift:2400–2460`)
+- **Basis**: Eliminate double truncation (`通过 Cito 联系 tefx-d05c1...  · ~/Doc...1-10/ton`) caused by splitting a single `274pt` line into `160pt` title + `114pt` path.
+- **2-Line Candidate Row Geometry (`height: 44pt`, or `58pt` when `needsReload == true`)**:
+  - **Line 1 (`y = rowHeight - 21, height = 16, x = 24, width = 268`)**: `candidate_title:<harness>:<session_id>` displays `c.title` (`12pt .medium`, `.labelColor`, `.byTruncatingTail`) across the full `268pt` left column (`+67%` wider).
+  - **Line 2 (`y = needsReload ? 21 : 6, height = 14, x = 24, width = 268`)**: `candidate_cwd:<harness>:<session_id>` displays `"\(shortCwd)\(branchSuffix)"` (`10.5pt .regular`, `CitoPalette.secondaryText`, `.byTruncatingMiddle`) across its own dedicated `268pt` line (`+135%` wider, no leading `" · "` prefix; when `needsReload == true` at `rowHeight = 58`, `Hint` sits at `y = 5, height = 14`, `Path` at `y = 21, height = 14`, and `Title` at `y = 37, height = 16`, preserving `>= 2pt` separation between all 3 lines).
+  - **Right Action Button (`x = 298, y = floor((rowHeight - 22) / 2), width = 70, height = 22`)**: `[ + Listen ]` (`listen:<harness>:<session_id>`) or `[ ❐ /reload ]` (`reload:<harness>:<session_id>`), vertically centered in the row. When `candidateRows.count > 4`, set `available_scroll` height to `176pt` (`4 × 44pt`).
+
+#### 6. `Q6` — Self-Invite Loop Guard & Browser-Friendly `HubServer` Root Response (`crates/cito-native/src/core/{daemon.rs,hub.rs}`)
+- **Basis**: Prevent a Mac from connecting to its own shared `host_hub` as a duplicate remote Hub when the user clicks `Copy Invite Code` and then `Paste Invite Code` on the same machine, and prevent browsers from prompting to download an extensionless binary file when visiting `http://<host>:4291/` directly.
+- **Self-Invite Guard in `DaemonService` (`crates/cito-native/src/core/daemon.rs:2591`)**:
+  - In `"paste_hub_invite"`, before saving the Hub, check if `self.host_server.is_some()` and the invite URL's `(host, port)` matches this Mac's own active `host_hub` port and any local host identity (`endpoint_url`, `tailscale_url`, `lan_url`, `127.0.0.1`, `localhost`, `::1`, `local_host_name()`, or `<local_host_name>.local`). If it matches this Mac's own shared Hub, return `Err("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.".into())`.
+- **Browser-Friendly `GET /` on `HubServer` (`crates/cito-native/src/core/hub.rs:2129`)**:
+  - In `HubServer::handle_http`, when `method == "GET"` and `path == "/"`, return `HTTP/1.1 200 OK` with `Content-Type: text/html; charset=utf-8` and a concise HTML status page (`"Cito Hub is active on this Mac. Open Cito → Settings → Hubs & Network → Paste Invite Code on another Mac to connect."`) so opening the Hub URL in a browser never triggers an extensionless file download prompt.
+
+### 18.2 Verification, Fast Single-Pass Review & No-Formal-Release Policy (`MUST`)
+
+- Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place; do **NOT** add new multi-process E2E test functions.
+- Run a single-pass fast `contract-and-simplicity` review & fix (no multi-round loops) and push to `origin/main` without creating a release tag so the user can test immediately on macOS.
+
+
 
 
 
