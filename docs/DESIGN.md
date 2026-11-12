@@ -1820,6 +1820,70 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - Update existing unit/UI/daemon tests in `crates/cito-native/tests/support/{ui.rs,daemon.rs,cli.rs}` in place to cover `S1`–`S4`; do **NOT** add new heavy multi-process E2E test functions.
 - Run a **convergent `contract-and-simplicity` review-and-fix loop** until both `Contract & Wiring: CLEAN` and `Simplicity & Economy: ZERO_NEW_ISSUES` converge, and push to `origin/main` (without creating a formal release tag yet).
 
+---
+
+## 21. Stage 19: Network-Scoped View Management, Trusted-Hub Auto-Listen, Scalable Session Grouping, Fast Codex SQLite Discovery & UI Polish (`N1`–`N6`)
+
+### 21.1 Binding Contract (`MUST`)
+
+#### 1. `N1` — Strictly Network-Scoped Management in `cardMenu` & Hiding Administratively Disabled Hubs (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, Questions 3, 5, 7, 10)
+- **Basis**: Trying to merge multiple independent Hubs (`local` + `tefx-mbp-personal`) onto one flat card forced a truncated `[ ● tefx-...rsonal ]` switcher pill onto every session card while also repeating a second `[ local ] [ tefx-mbp-personal ]` strip above `AVAILABLE SESSIONS`. Meanwhile, administratively disabled Hubs (`enabled == false`) continued to appear in `cardMenu` (`Offline · Disconnected [ Connect ]`) and `Human Channels` (`Target Hub`, producing a blank page when selected).
+- **1. Hide Administratively Disabled Hubs (`enabled == false`) from Operational Views (`Questions 3 & 5`)**:
+  - In `DaemonService::ui_state()` (`crates/cito-native/src/core/daemon.rs:2002`): include only **enabled** Hubs (`self.slots`, where `enabled != false`) in the operational `state.hubs` array (disabled Hubs remain in `settings.hubs` so they can be managed in `Settings → Hubs & Network`).
+  - In `Settings → Human Channels` (`src/macos/cito-ui.swift:3080`): filter `channelHubs` to `settings?.hubs.filter { $0.enabled != false }.map { $0.name } ?? hubs.filter { $0.enabled != false }.map { $0.name }`, and if `selectedChannelHub` points to a disabled Hub, fall back to the first enabled Hub so selecting a disabled Hub never renders a blank page. Also in `daemon.rs:2053` (`settings_for_hub`), if `channel_hub == "local"` and `"local"` is not in `self.slots`, still query `self.local.rpc("human_channels_list", &json!({}), None)` so `"local"`'s channel inventory is never empty.
+- **2. Top Header Hub Strip as the Single Active Network Switcher (`Questions 7 & 10`)**:
+  - In `cardMenu` (`src/macos/cito-ui.swift:1257, 2080–2660`):
+    - **Single Network Scope (`effectiveTargetHub`)**: Update `effectiveTargetHub` so that if `!selectedTargetHub.isEmpty && hubs.contains(where: { $0.name == selectedTargetHub })`, it returns `selectedTargetHub` (even if temporarily disconnected), and falls back to the default/first connected Hub or `hubs.first?.name ?? ""`. When `hubs.count > 1`, clicking `hub:<name>` in `header_hub_strip` always sets `selectedTargetHub = hub.name` and rebuilds `cardMenu` (and if `hub.status != "connected" || hub.error != nil`, also toggles `drawer:<name>`). Highlight the selected Hub pill (`hub.name == effectiveTargetHub`) in `header_hub_strip`.
+    - **Scope All Menu Zones to `effectiveTargetHub`**:
+      - Filter `listeners` in Zone 1 (`You (@tefx)` and active agent sessions) to rows where `listener.hub == effectiveTargetHub` (when `!effectiveTargetHub.isEmpty`) so every card in `cardMenu` belongs unambiguously to the currently selected network!
+      - Filter `myRemote` in Zone 2 (`MY OTHER HOSTS`) to `peer.hub == nil || peer.hub == effectiveTargetHub`.
+      - **Remove Per-Card `switch_hub:<scoped_id>` Pills** from active session cards in Zone 1 (freeing `~95pt` of horizontal space on every session card so titles and buttons never collide or truncate as `tefx-...rsonal`!).
+      - **Remove Duplicate `targetStrip`** on `AVAILABLE SESSIONS` (and allow `test_control` with `"target_hub:<name>"` to alias `"hub:<name>"` so any existing test selecting `target_hub:<name>` switches `selectedTargetHub` via the top header switcher!).
+
+#### 2. `N2` — Zero-Friction `Auto-Listen` on `local` / Trusted Networks & Bounded Scrollable Session List (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, Question 9)
+- **Basis**: On `local` and personal/trusted Hubs (`auth_mode == "none"` or `token`), requiring the user to manually click `+ Listen` for every open coding session is unnecessary friction; and when many agents are active, the active session list must stay compact and scrollable.
+- **1. Automatic Enrollment of Open Live Sessions (`auto_listen`, `daemon.rs`)**:
+  - Persist `auto_listen: bool` per Hub in `config.json` (`hubs.<name>.autoListen`, exposed in `state.hubs[].auto_listen` and `settings.hubs[].auto_listen`, defaulting to `false` when unset in `config.json` so existing unit tests are unaffected).
+  - Add a compact pill control **`toggle_auto_listen`** (`autoListen ? "Auto-Listen: On" : "Auto-Listen"`, style `autoListen ? .prominent : .neutral`, `height: 18, radius: 9`) on the right side of the `AVAILABLE SESSIONS` header row in `cardMenu` that emits `["op": "set_auto_listen", "hub": effectiveTargetHub, "enabled": !autoListen]`.
+  - When `auto_listen == true` for a connected Hub `H`:
+    - During `DaemonService::poll()` (and immediately when `set_auto_listen` enables it), for every discovered candidate session in `session_activity` that has a **live process (`endpoint_pid.is_some()` and `needs_reload != true`)**, is not already `ACTIVE` on `H`, and was not explicitly muted/unlistened by the user (`status != "UNLISTENED"` for `(H, harness, session_id)`), automatically call `self.listen(H, &json!({"about": candidate["title"], "scope": "self"}), &candidate)`!
+    - When the user clicks `×` (`stop:<scoped_id>`) on an active session, `unlisten_id` sets `status = 'UNLISTENED'` in `local_listeners`, preventing `auto_listen` from re-enrolling that session until the user explicitly clicks `+ Listen`.
+- **2. Bounded Scrollable Active Session List**:
+  - Keep standard 2-line active cards at `cardHeight = 58` (`rowHeight = 64`, preserving `>= 6pt` vertical separation between `title` and `copy` and `>= 10pt` badge padding), and cap `activeRows` at `4` visible rows (`256pt` `OverlayScrollView` `active_scroll` when `activeRows.count > 4`) so 5–15 active sessions remain compact and scrollable without dominating the screen.
+
+#### 3. `N3` — Fast `1.5ms` Bounded Codex SQLite Discovery & Remote/CLI Process Detection (`plugins/codex/native.rs`, `crates/cito-native/src/core/daemon.rs`, Question 1)
+- **Basis**: `~/.codex/state_5.sqlite` on a real developer Mac is **209 MB with 5,111 rows**. `plugins/codex/native.rs:193` ran `SELECT * FROM threads WHERE archived = 0 ORDER BY ...` **without a `LIMIT`**, serializing all 5,101 full rows from SQLite and taking `330ms–2000ms` (hitting the `1500ms` `DISCOVERY_TIMEOUT`), causing Codex sessions to intermittently disappear! In addition, `desktop_command` ignored `codex` CLI / `codex app-server` processes.
+- **Contract (`plugins/codex/native.rs:21–40, 175–215`)**:
+  1. In `rows(req)` (`plugins/codex/native.rs:193`), append **`LIMIT 32`** when `req["op"] == "discover_sessions"` (or pass a `limit: Option<usize>` parameter to `rows(req, Some(32))`) so SQLite only reads the top 32 most recent threads in `< 2ms` instead of scanning and serializing 5,101 rows from a 209MB database!
+  2. In `desktop_running(req)` (`plugins/codex/native.rs:28`), accept any running process owned by `uid` that matches **`desktop_command(cmd) || matches_process(cmd)`** (including `codex` CLI and `codex app-server`) so Codex sessions are discovered whether the user is running `ChatGPT.app`, `Codex.app`, or `codex` CLI / `app-server`!
+  3. In `DaemonService::action_inner` (`"setup_apply"` / `"refresh_available"`, `daemon.rs:2579, 3322`), after calling `activity.refresh_discovery()`, immediately run `activity.tick(&self.state, &live)` and briefly poll up to `400ms` for fast discovery workers to finish before calling `self.push_ui()` so newly enabled apps' sessions appear in `cardMenu` on the very first render!
+
+#### 4. `N4` — Per-App Isolated `setup_apply` Staging & Daemon Startup Auto-Staging (`crates/cito-native/src/core/{setup.rs,daemon.rs}`, Question 4)
+- **Basis**: Clicking `Repair` on `Pi Coding Agent` called `ensure_cli_shims_native()`, which re-staged **all** built-in plugins (`pi`, `codex`, `claude`, `telegram`) at once, causing `Codex`'s `Repair` button to unexpectedly flip to `Connected` before the user clicked it.
+- **Contract**:
+  1. Add `ensure_single_plugin_staged(state_dir: &Path, plugin: &PluginDescriptor)` in `setup.rs` (staging only `plugin.id` and the shared `bin/cito` + `bin/cito-mcp` shims), and call it inside `"setup_apply"` (`daemon.rs:2576`) instead of re-staging all other agent plugins.
+  2. At `DaemonService::new` startup (`daemon.rs`), call `ensure_cli_shims_native(&config.state_dir, plugins)` automatically so upgrading or reinstalling `Cito.app` self-heals `~/.cito/runtime/plugins/*` on launch without showing false `⚠ Repair Needed` states.
+
+#### 5. `N5` — Uniform `Team / Self` Toggle Geometry, Action-Verb Hub Buttons & Unread-Only Menu Bar Badge (`src/macos/cito-ui.swift`, Questions 2, 6, 8)
+- **Basis**:
+  - **Question 2**: Clicking `scope:<scoped_id>` (`Team` / `Self`) called `setLeadingSymbol` (which runs `layoutContents()`) *before* updating `label.stringValue`, and used `spacing: 2` (`2pt`) between `Team/Self` and `Pause`.
+  - **Question 6**: In `Settings → Hubs & Network`, `[ Edit ] [ Enabled ] [ Remove ]` mixed a state adjective (`Enabled`) with action verbs (`Edit`, `Remove`).
+  - **Question 8**: `formatStatusButton` displayed `uniqueSessionCount` (`1`) next to the macOS menu bar icon, which looks like `"1 unread notification"` even when `unreadCount == 0`.
+- **Contract (`src/macos/cito-ui.swift`)**:
+  1. **Uniform `Team / Self` Geometry (`Question 2`, `cito-ui.swift:2360–2400`)**:
+     - Size `scopeBtn` to a fixed uniform width `scopeWidth = max(MenuControl.intrinsicWidth("Self", leadingSymbol: "lock.fill"), MenuControl.intrinsicWidth("Team", leadingSymbol: "person.2.fill"))` (`68pt`), and in `layoutBar` preserve `scopeBtn`'s fixed `68pt` width so switching between `Self` and `Team` never shifts adjacent controls by even `1px`!
+     - In `scopeBtn.pressed`, update `scopeBtn?.label.stringValue` **before** calling `scopeBtn?.setLeadingSymbol(...)`, and use standard `spacing: CitoMetrics.gap` (`6pt`) in `layoutBar(in: card, ..., trailing: sessionActions)`.
+  2. **Action-Verb Hub Buttons (`Question 6`, `cito-ui.swift:3490`)**:
+     - On each Hub card in `Settings → Hubs & Network` (`toggle_hub:<name>`), change the button label from `"Enabled"` / `"Disabled"` to the action verb **`"Disable"`** (when `hub.enabled == true`, `.neutral`) and **`"Enable"`** (when `hub.enabled == false`, `.prominent`), matching the action verbs `"Edit"` and `"Remove"`.
+  3. **Unread-Only Menu Bar Number (`Question 8`, `cito-ui.swift:89`)**:
+     - In `formatStatusButton(_ button: NSButton, count: Int, unreadCount: Int, image: NSImage?)`, display a numeric badge next to the menu bar icon **only when `unreadCount > 0`** (`let title = unreadCount > 0 ? " \(unreadCount)" : ""`). When `unreadCount == 0`, show only the Cito icon (`makeCitoStatusIcon` already distinguishes `.active` vs `.idle` vs `.warning`).
+
+### 21.2 Verification, Fast Single-Pass `contract-and-simplicity` Review & No-Release Policy (`MUST`)
+
+- Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place; do **NOT** add new heavy multi-process E2E test functions.
+- Run a **fast single-pass `contract-and-simplicity` review & fix** (no multi-round loops), verify `cargo test --workspace && cargo build --release`, and push to `origin/main` without creating a release tag so the user can immediately install and use it on both Macs.
+
+
 
 
 
