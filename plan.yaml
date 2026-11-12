@@ -9916,3 +9916,33 @@ phases:
       \ -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 binary/distribution\
       \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
       \ created).\n\nSpec link:\n- docs/DESIGN.md §19 (R1–R7 & §19.2)"
+- id: v36
+  name: 'V36 Stage 18: Multi-Hub Card & Directory Coalescing, Smart Home-Directory
+    Naming, Inline/CLI/MCP Session Renaming & Complete CLI/MCP Surface Parity (S1–S4)'
+  status: pending
+  gate: All S1–S4 requirements in docs/DESIGN.md §20 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; convergent
+    contract-and-simplicity review-fix loop reaches CLEAN + ZERO_NEW_ISSUES; cargo
+    test --workspace && cargo build --release pass with 0 warnings; changes are pushed
+    to origin/main (NO release tag).
+  context: 'Implement docs/DESIGN.md §20 (S1–S4 & §20.2): (1) S1 coalesce local listeners
+    by (harness, session_id) in cardMenu Zone 1 (at most 1 You card and 1 card per
+    local coding session, choosing primaryListener from effectiveTargetHub -> default
+    shared Hub -> local, fanning out Pause/stop and Team/Self across enrolled Hubs,
+    and omitting redundant ''Desktop notifications'' text on You cards); (2) S2 never
+    use /Users/tefx username as an auto-derived agent session title (promote distinctAbout
+    or fall back to ''<Harness Name> (~)'' when cwd == home and no custom title is
+    set, while preserving explicit custom titles verbatim), strip .local and internal
+    channel tokens (''Mac'', ''Hub'', ''human'') across all host_name and channels
+    displays in DirectoryPeerCellView, display shortCwd in line1RepoLabel when repo
+    is empty, and deduplicate local: loopback shadow peers in Directory when a shared
+    Hub is connected; (3) S3 support durable session renaming across GUI (inline rename:<scoped_id>
+    pencil icon and rename_field:<scoped_id> in cardMenu), CLI (cito rename <title>
+    and cito listen --title <title>), and MCP (cito_listen optional title), persisting
+    custom titles across discovery refreshes and heartbeats; (4) S4 add complete CLI
+    parity (cito rename, cito listen --title, cito unlisten --all, cito status [--json],
+    and cito setup --invite / --print-invite / --disconnect-all) and read-only secret-free
+    cito_status MCP tool. Run a convergent contract-and-simplicity review-fix loop
+    until CLEAN + ZERO_NEW_ISSUES and push to origin/main (NO release tag yet).'
+  depends_on:
+  - v35
