@@ -1683,6 +1683,70 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place; do **NOT** add new multi-process E2E test functions.
 - Run a single-pass fast `contract-and-simplicity` review & fix (no multi-round loops) and push to `origin/main` without creating a release tag so the user can test immediately on macOS.
 
+---
+
+## 19. Stage 17: Complete Surface Audit Closure, `.destructiveHover` Primary Text Contrast, Intrinsic Button Sizing, Smart Path Compression & Titled-Panel Chinese IME (`R1`–`R7`)
+
+### 19.1 Binding Contract (`MUST`)
+
+#### 1. `R1` — `.destructiveHover` Resting Primary Text Color (`src/macos/cito-ui.swift:613–616`)
+- **Basis**: In macOS HIG, dim gray text (`CitoPalette.secondaryText`) inside a bordered gray button bezel (`fill = labelColor @ 0.08, border = labelColor @ 0.14`) signifies a **Disabled (`isEnabled = false`)** control, making `Disconnect`, `Clear Token`, `Unpair`, `Remove`, and `Disconnect All…` look disabled next to `.neutral` buttons (`Re-check`, `Change Token…`, `Edit…`).
+- **Contract**: In `MenuControl.applyVisualState()`, set `.destructiveHover`'s resting `foreground` to **`normalColor`** (`.labelColor` primary text, identical to `.neutral` at rest), transitioning on hover (`isHovered == true`) to `fill = CitoPalette.destructiveFill`, `border = .white.withAlphaComponent(0.26)`, `foreground = .white`.
+
+#### 2. `R2` — Option A `Disconnect All…` Footer Button & 2-Button Confirmation Modal (`src/macos/cito-ui.swift:3595–3665`, `crates/cito-native/src/core/daemon.rs:3014`)
+- **Basis**: Align the Settings footer button with the confirmation modal and remove the non-functional in-app `Confirm Uninstall` button (per user selection of Option A).
+- **Contract**:
+  1. Rename the Settings footer button (`open_uninstall_confirm`) from `"Remove All Integrations…"` to **`"Disconnect All…"`** (`width: MenuControl.intrinsicWidth("Disconnect All…", paddingX: 12)`).
+  2. In `uninstall_confirm_box`:
+     - Title (`12.5pt .semibold`): **`"Disconnect All Integrations"`**
+     - Checkbox (`uninstall_purge_data`, `.subtleHeader`): **`"Also delete local data and Hub settings"`**
+     - Bottom bar via `layoutBar(in: confirmBox, insetLeft: 12, insetRight: 12, y: 14, height: 24, leading: [cancelUninstallBtn], trailing: [disconnect])` with **two buttons only**:
+       - Left: **`"Cancel"`** (`cancel_uninstall_all`, `.neutral`, `width: MenuControl.intrinsicWidth("Cancel")`)
+       - Right: **`"Disconnect All"`** (`confirm_disconnect_all`, **`.destructive`**, `width: MenuControl.intrinsicWidth("Disconnect All")`, emitting `["op": "setup_disconnect_all", "purge_data": uninstallPurgeData]`).
+     - Remove `confirm_uninstall_all` (`"Confirm Uninstall"`) from the GUI modal (`setup_uninstall_all` remains handled in `daemon.rs` for CLI compatibility).
+  3. In `crates/cito-native/src/core/daemon.rs:3014` (`"setup_disconnect_all"`), when `action["purge_data"] == true`, also reset `config.json` (`defaultHub = "local"`, `hubs = {}`) and clear local state (`DELETE FROM local_signals` and `DELETE FROM local_listeners WHERE harness != 'human'`).
+
+#### 3. `R3` — Eliminate All Remaining Hardcoded Button Widths & Ellipsis Truncation (`src/macos/cito-ui.swift:104–115, 2525, 3160–3250`)
+- **Basis**: Residual hardcoded widths (`width: 96` on `Change Token…`, `width: 44` on `Edit…`, `width: 76` / `58` on `Send Test` / `Pause` / `Unpair`, and `width: 88` on `Settings…`) caused AppKit to render `"Change Token..."` and `"Edit..."` with truncation ellipses in Light Mode.
+- **Contract**:
+  - In `layoutBar` (`cito-ui.swift:107`), remove `minWidth: control.frame.width` or ensure every `MenuControl` in `Human Channels` (`edit_hub_service:<id>`, `clear_channel_service:<id>`, `pair_channel:<id>`, `edit_user_channel:<id>`, `test_channel:<id>`, `toggle_channel:<id>`, `unpair_channel:<id>`) and `cardMenu` (`open_settings` with `paddingX: 6`) uses `MenuControl.intrinsicWidth(title, font: font, leadingSymbol: symbol)` without shrinking below its intrinsic width. Delete the manual width overrides at `cito-ui.swift:3245–3247` (`testBtn.frame.size.width = 76; toggle.frame.size.width = 58; unpair.frame.size.width = 58`).
+
+#### 4. `R4` — Clean State C (`Connected & Paired`) in `Human Channels` & `Share This Mac as a Hub` Header Padding (`src/macos/cito-ui.swift:3015–3100, 3270–3340`)
+- **Basis**: Eliminate the orphan `"1."` prefix and redundant `"● Bot Ready"` badge when Telegram is already connected and paired, and give `Share This Mac as a Hub` balanced top margin when expanded.
+- **Contract**:
+  - In `Human Channels` (`settings_channel:<id>`): when `personalCollapsed == true` and `!hubGatewayExpanded` (both Gateway and Personal Account are active and collapsed), set `stratum_hub_title:<id>` to **`"Bot Gateway"`** (dropping `"1. Shared "`) and hide `stratum_hub_status:<id>` (`"● Bot Ready"`, since the card header right above it already displays `"● Connected (@username)"`).
+  - In `Share This Mac as a Hub` (`host_hub_card`): when `hostExpanded == true`, place `"Share This Mac as a Hub"` at `y = hostHeight - 30.5` and `toggle_host_hub` via `layoutBar(in: hostCard, insetLeft: 14, insetRight: 14, y: hostHeight - 34, height: 24, trailing: [toggleHostBtn])` (`10pt` top margin instead of `6pt`).
+
+#### 5. `R5` — Smart Path Compression in `AVAILABLE SESSIONS` & Left-Aligned `copy:<id>` Address Chip in `cardMenu` (`src/macos/cito-ui.swift:2240–2260, 2525–2545`)
+- **Basis**: Preserve the complete project directory name (`<leaf>`) on Line 2 of `AVAILABLE SESSIONS` instead of middle-truncating inside the project name (`~/Documents/Codex/202...dynamics-com-en-dcd-2`), and align `❐ @tefx` flush left with `You (@tefx)` on active session cards.
+- **Contract**:
+  - On `copy:<scoped_id>` (`cito-ui.swift:2242`), set `copy.label.alignment = .left` and call `copy.layoutContents()` (with `startX = 0` when `label.alignment == .left` and `style == .subtleHeader` on `copy:` chips, or `x = titleX - 6`) so the copy icon and address align flush left with `title` at `x = titleX`.
+  - Add `compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = 264, font: NSFont = .systemFont(ofSize: 10.5)) -> String`:
+    - If `measureTextWidth(shortCwd + branchSuffix, font: font) <= maxWidth`, return `shortCwd + branchSuffix`.
+    - Otherwise, split `shortCwd` into path segments: if there are `>= 3` segments (e.g. `["~", "Documents", "Codex", "2026-11-10-dynamics-com-en-dcd-2"]`), try `"~/…/\(segments.suffix(2).joined(separator: "/"))" + branchSuffix` first, and if still `> maxWidth`, use `"~/…/\(segments.last!)" + branchSuffix` (falling back to `NSTextField` truncation with `toolTip = "\(shortCwd)\(branchSuffix)"` only when `<leaf> + branchSuffix` alone exceeds `maxWidth`).
+
+#### 6. `R6` — `Directory` Initial Peer Seeding, `onlineDot` Removal & `Activity` Dynamic Row Height + `xmark` Delete Icon (`src/macos/cito-ui.swift:950–1160, 1820, 3960, 4410`)
+- **Basis**: Prevent `Directory` from flashing `"No active listeners"` before the async `"directory"` frame arrives, remove the overlapping corner `onlineDot` on `Directory` icons, eliminate the `46pt` dead empty space on 1-line selected `Activity` rows, and avoid duplicating the `🗑` trash icon on every `Activity` row.
+- **Contract**:
+  - Remove `onlineDot` from `DirectoryPeerCellView`.
+  - In `receive` (when `frame.op == "state"`) and `openDirectoryPanel`: if `directoryAllPeers.isEmpty`, seed `directoryAllPeers = listeners + myRemote` and call `applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)`.
+  - In `Activity` (`DirectoryPeerCellView.configureActivity` and `tableView(_:heightOfRow:)`):
+    - Change the multi-line expansion condition from `measureTextWidth(text, font: .systemFont(ofSize: 11.5)) > 330` to **`measureTextWidth(text, font: .systemFont(ofSize: 12)) > 480 || text.contains("\n")`**, and compute the expanded row height dynamically from the wrapped text height (`min(108, max(60, 38 + ceil(wrappedRect.height)))`) so a 1-line selected message stays at `60pt` with zero empty space below it.
+    - Change `deleteControl` (`delete_activity:<signal_id>`) symbol from `"trash"` to **`"xmark"`**.
+
+#### 7. `R7` — Titled Full-Size Content `KeyPanel` for 100% Native Chinese IME Candidate Windows (`src/macos/cito-ui.swift:395–430, 2675, 3700`)
+- **Basis**: Ensure macOS Text Services Manager (`TSM`) always attaches floating Pinyin candidate windows to editable text fields inside `settingsPanel` and `directoryPanel`.
+- **Contract**:
+  - Initialize `KeyPanel` (`settingsPanel` and `directoryPanel`) with `styleMask: [.titled, .fullSizeContentView]`, setting `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`, and hiding `.closeButton`, `.miniaturizeButton`, and `.zoomButton`.
+  - In non-headless mode (`!headless`), set `NSApp.setActivationPolicy(.regular)` when opening `settingsPanel` or `directoryPanel`, and restore `NSApp.setActivationPolicy(.accessory)` when both `settingsVisible == false && directoryVisible == false`.
+
+### 19.2 Verification & Convergent `contract-and-simplicity` Review-Fix Loop Policy (`MUST`)
+
+- Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place; do **NOT** add new multi-process E2E test functions.
+- Regenerate all 7 dark-mode website screenshots (`site/assets/screenshots/*.png`) and verify both Light and Dark mode renders visually.
+- Run a **convergent `contract-and-simplicity` review-and-fix loop** until both `Contract & Wiring: CLEAN` and `Simplicity & Economy: ZERO_NEW_ISSUES` converge, and push to `origin/main` (without creating a formal release tag yet).
+
+
 
 
 
