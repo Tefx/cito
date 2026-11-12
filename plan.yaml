@@ -10064,3 +10064,31 @@ phases:
       \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
       \ Version kept at 0.21.3 (no release tag created).\n\nSpec link:\n- docs/DESIGN.md\
       \ §20 (S1–S4 & §20.2)"
+- id: v37
+  name: 'V37 Stage 19: Network-Scoped View Management, Trusted-Hub Auto-Listen, Fast
+    Codex SQLite Discovery & UI Polish (N1–N5)'
+  status: pending
+  gate: All N1–N5 requirements in docs/DESIGN.md §21 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
+    single-pass contract-and-simplicity review & fix completes; cargo test --workspace
+    && cargo build --release pass with 0 warnings; changes are pushed to origin/main
+    (NO release tag).
+  context: 'Implement docs/DESIGN.md §21 (N1–N5 & §21.2): (1) N1 network-scoped management
+    in cardMenu (top header_hub_strip selects effectiveTargetHub for the entire menu
+    popover; filter Zone 1 listeners and Zone 2 myRemote to effectiveTargetHub; remove
+    per-card switch_hub pills and duplicate AVAILABLE SESSIONS targetStrip, aliasing
+    test_control target_hub:<name> to hub:<name>; hide administratively disabled Hubs
+    enabled == false from operational state.hubs and Human Channels Target Hub selector,
+    and query self.local for local channel inventory even when local slot is disabled);
+    (2) N2 per-Hub auto_listen toggle (toggle_auto_listen pill on AVAILABLE SESSIONS
+    header persisting hubs.<name>.autoListen and auto-enrolling open live sessions
+    with endpoint_pid != nil and status != UNLISTENED); (3) N3 fast Codex SQLite discovery
+    (add LIMIT 32 to threads query in plugins/codex/native.rs, accept matches_process
+    in desktop_running, and poll discovery briefly after setup_apply/refresh_available);
+    (4) N4 single-plugin staging in setup_apply and startup auto-staging in DaemonService::new;
+    (5) N5 uniform 68pt Team/Self toggle width + label-before-symbol order + 6pt spacing,
+    action-verb Enable/Disable buttons on Hub cards, and unread-only numeric badge
+    on the macOS menu bar icon. Run a fast single-pass contract-and-simplicity review
+    & fix (no multi-round loops) and push to origin/main (NO release tag).'
+  depends_on:
+  - v36
