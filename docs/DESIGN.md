@@ -1746,6 +1746,81 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - Regenerate all 7 dark-mode website screenshots (`site/assets/screenshots/*.png`) and verify both Light and Dark mode renders visually.
 - Run a **convergent `contract-and-simplicity` review-and-fix loop** until both `Contract & Wiring: CLEAN` and `Simplicity & Economy: ZERO_NEW_ISSUES` converge, and push to `origin/main` (without creating a formal release tag yet).
 
+---
+
+## 20. Stage 18: Multi-Hub Card & Directory Coalescing, Smart Home-Directory Naming, Inline/CLI/MCP Session Renaming & Complete CLI/MCP Surface Parity (`S1`–`S6`)
+
+### 20.1 Binding Contract (`MUST`)
+
+#### 1. `S1` — Multi-Hub Session Coalescing & Fixed-Stop Secondary Alignment in `cardMenu` (`src/macos/cito-ui.swift:2220–2375`, Questions 1 & 2)
+- **Basis**: When a second Hub (`tefx-mbp-personal`) is connected alongside `local`, `listeners` contains one row per `(hub, listener_id)`, causing `cardMenu` to render **two `You (@tefx)` cards** (`local:@tefx` and `@tefx`) and **two cards for the same local agent session `pi#3368`** (`local:tefx/pi#3368` and `tefx/pi#3368`) even though the header says `"1 session listening"`. Furthermore, placing `path` (`"Desktop notifications"` or `cwd · branch`) at `x = titleX + copyWidth + 8` shifted it horizontally whenever `copyWidth` varied across cards.
+- **1. Coalesce Local Listeners by `(harness, session_id)` in `cardMenu` Zone 1**:
+  - Group `orderedListeners` by `sessionKey = "\(listener.harness):\(listener.session_id)"` so `cardMenu` renders **at most 1 card for `You (@tefx)` (`human:default`)** and **1 card per local coding session (`(harness, session_id)`)**, matching `uniqueSessionCount`.
+  - **Primary Representative Selection (`primaryListener`)**: Within each `(harness, session_id)` group, select the representative row whose `hub == effectiveTargetHub` (or the default connected shared Hub when `hubs.count > 1`, falling back to the first connected Hub or first row). Use `primaryListener.scoped_id` and `primaryListener.display_address` for the card's `session:<scoped_id>` and `copy:<scoped_id>` identifiers so unprefixed default-Hub addresses (`@tefx`, `tefx/pi#3368`) are shown by default and existing single-Hub/target-Hub tests remain 100% compatible.
+  - **Multi-Hub Action & Target-Hub Selection on Coalesced Cards**:
+    - Within each `(harness, session_id)` group, choose `primaryListener` by preferring `hub == effectiveTargetHub` (when `selectedTargetHub` is explicitly chosen), then the connected default non-`local` Hub (`tefx-mbp-personal`), then `"local"`.
+    - Clicking `Pause` (`stop:<scoped_id>` on `human`) or `×` (`stop:<scoped_id>` on an agent session) unlistens all active registrations in that `(harness, session_id)` group across **all enrolled Hubs** (persisting local revocation in `local_listeners` regardless of Hub connectivity so the card disappears in one click and does not resurrect on reconnect).
+    - Clicking `Team / Self` (`scope:<scoped_id>`) updates `scope` across all non-local Hubs in the group.
+    - On agent session cards when `hubs.count > 1`: `switch_hub:<scoped_id>` keeps its existing single-registration switch behavior when the session is only on 1 Hub (`group.count == 1`), and when `group.count > 1` it displays `primaryListener.hub` and cycles `selectedTargetHub` across the session's enrolled Hubs so the user can inspect or copy any Hub's scoped address on demand.
+- **2. Eliminate `"Desktop notifications"` Boilerplate on `You (@tefx)` Cards**:
+  - On the `You (@tefx)` card (`listener.harness == "human"`): omit the static `"Desktop notifications"` label when `channels` only contains `"Mac"` / `"Desktop notifications"` / empty (`path.isHidden = true`), showing only external connected channels (such as `"Telegram"`) when present. Keep `path` (`cwd · branch`) on agent session cards at `x = titleX + copyWidth + 8` so it retains maximum horizontal width without truncation.
+
+#### 2. `S2` — Smart Home-Directory Session Naming, `.local` Hostname Stripping & Shadow Deduplication in `Directory` (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/{daemon.rs,registration.rs}`, Question 3)
+- **Basis**: When a coding session is started in `$HOME` (`/Users/tefx`), `basename(cwd)` is `"tefx"` (identical to the username `@tefx`), causing 3 agent rows in `Directory` and `cardMenu` to be titled `"tefx"`. In addition, `DirectoryPeerCellView` did not strip `.local` from `peer.channels`, and `local:` loopback registrations duplicated shared-Hub rows for the same local session.
+- **1. Never Use `$HOME` Username as an Auto-Derived Agent Session Title (`nodeDisplayTitle` & `daemon.rs` / `registration.rs`)**:
+  - Explicit custom titles (`S3.1`, `1..128` chars) bypass all automatic-title heuristics verbatim across registration, discovery, and GUI rendering.
+  - For auto-derived titles (when no custom title is set for `(harness, session_id)` and `cwd == home` or `raw.isEmpty` or `raw.lowercased() == user.lowercased()`):
+    - If `let distinct = distinctAbout(about, title: raw, user: user)` is non-empty, return **`distinct`**!
+    - Otherwise, return **`"\(harnessName ?? harness) (~)"`** (e.g., **`"Pi Coding Agent (~)"`** or **`"Codex (~)"`**) instead of the bare username `"tefx"`.
+  - Apply the same rule in `crates/cito-native/src/core/daemon.rs` (`default_session_title` / `listen` fallback) so when `cwd == home_dir` and no custom title/about is given, the fallback title is `"<Harness> (~)"` rather than the username.
+- **2. Strip `.local` & Internal Channel Tokens Everywhere (`cleanHostDisplay`)**:
+  - Add helper `cleanHostDisplay(_ raw: String, localHost: String? = nil) -> String` in `cito-ui.swift` that strips `.local` case-insensitively (`replacingOccurrences(of: "\\.local\\b", with: "", options: [.regularExpression, .caseInsensitive])`).
+  - In `DirectoryPeerCellView.configure(with:)` (`cito-ui.swift:1107`), filter out internal tokens (`"Mac"`, `"Hub"`, `"human"`, `"Desktop notifications"`) from `peer.channels`, apply `cleanHostDisplay` to every hostname in `peer.host_name` and `peer.channels`, and deduplicate while preserving order so `"Zhaomengs-MacBook-Air.local, Zhaomengs-MacBook-Pro-16.local"` renders cleanly as **`"Zhaomengs-MacBook-Air, Zhaomengs-MacBook-Pro-16"`**.
+  - When `peer.repo` is empty on an agent row in `Directory`, display `shortCwd` (` · ~` or ` · ~/Projects/cito`) in `line1RepoLabel` so Line 1 always provides workspace context.
+- **3. Deduplicate `local:` Loopback Shadow Peers in `Directory`**:
+  - When building `directoryFilteredPeers` in `cito-ui.swift` (and in `daemon.rs` `directory_peers` when `hub` filter is not explicitly `"local"` and at least one non-`local` Hub is connected): if a peer on `"local"` has the exact same `(user, harness, session_id, host_id)` (or `(user, "human")` for self) as a peer already present on a connected shared Hub, omit the redundant `local:` shadow entry so each real session and person appears **once** with its shared address (`tefx/pi#3368`, `@tefx`).
+
+#### 3. `S3` — Manual Agent / Session Renaming Across GUI, CLI, and MCP (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/{daemon.rs,cli.rs,registration.rs,session_activity.rs}`, Question 4)
+- **Basis**: Allow users and agents to give any session a clear, durable custom name (e.g., `"Cito UI Audit"`, `"Backend API"`) that persists across heartbeats and discovery refreshes without cluttering the GUI.
+- **1. Durable Custom Title Persistence (`custom_title` / `title` Priority)**:
+  - In `crates/cito-native/src/core/registration.rs` (`listen`) and `daemon.rs`:
+    - Accept optional `"title"` (`1..128` chars) in `cito_listen` arguments and `"rename_session"` UI/CLI control action (`{"op": "rename_session", "harness": ..., "session_id": ..., "listener_id"?: ..., "title": ...}`).
+    - When a user or agent explicitly sets `title` via `rename_session`, `cito rename`, or `cito_listen(title: ...)`, persist it in `local_listeners.title` (and `hub_kv` registration `title`) and record it in an in-memory/SQLite custom-title map (`session_custom_titles` keyed by `(harness, session_id)`) so `session_activity.rs` discovery refreshes and automatic heartbeat re-registrations **never overwrite a user/agent-assigned title** with the auto-discovered transcript/folder title!
+- **2. Minimalist Zero-Clutter GUI Inline Rename (`cardMenu` & `Directory`)**:
+  - On each active agent session card in `cardMenu` (`cito-ui.swift:2260`):
+    - Lay out right-hand `sessionActions` first via `layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, trailing: sessionActions)` to establish `rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)`.
+    - When `renamingSessionKey == "\(listener.harness):\(listener.session_id)"`, hide `title` and `renameBtn` and place an editable `NSTextField` **`rename_field:<scoped_id>`** at `NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)` pre-filled with the current title.
+    - Otherwise, size `title` to `titleW = max(24, min(rightEdge - titleX - 24, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))` at `NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)`, and place a compact `18 × 18 pt` `.subtleHeader` icon button **`rename:<scoped_id>`** (`symbol: "pencil"`, tooltip `"Rename session"`) at `NSRect(x: titleX + titleW + 2, y: cardHeight - 26, width: 18, height: 18)` so `title`, `rename:<scoped_id>`, and `sessionActions` never overlap (`overlapping_siblings == []`).
+    - Pressing **`Return`** inside `rename_field:<scoped_id>` emits `["op": "rename_session", "harness": listener.harness, "session_id": listener.session_id, "title": newTitle]`, clears `renamingSessionKey`, and updates the card and Hub registrations immediately. Pressing **`Escape`** cancels inline rename.
+
+#### 4. `S4` — Complete CLI Interface & Security-Bounded MCP Surface (`crates/cito-native/src/{main.rs,core/cli.rs,core/setup.rs,core/daemon.rs}`, Questions 5 & 6)
+- **Basis**: Provide 100% CLI parity with GUI capabilities for terminal/SSH workflows without redundant subcommand aliases, while expanding MCP strictly within the **Session Self-Determination + Read-Only Status** security boundary.
+- **1. Complete CLI Surface (`cito`)**:
+  - **`cito rename <title> [--harness <id> [--session <sid>]] [--pi[=<sid>]] [--codex[=<sid>]] [--claude[=<sid>]] [--json]`**:
+    - Top-level subcommand in `main.rs` / `cli.rs` that renames the current or specified local session across all enrolled Hubs (`rename_session`).
+  - **`cito listen [--title <title>] [--scope <self|workspace>] [--team] [--hub <hub>] [--harness <id> [--session <sid>]] [about...]`**:
+    - Support `--title <title>` (or `-t <title>`) on `cito listen`. When `--title` is omitted and positional `[about...]` is provided on a session whose default title would be the generic folder/home basename, also promote `about` to `title`.
+  - **`cito unlisten [--all] [--hub <hub>] [--harness <id> [--session <sid>]] [--json]`**:
+    - Add `--all` to `cito unlisten` (calling `unlisten_all`, matching GUI `Stop All`).
+  - **`cito status [--json]`**:
+    - Top-level subcommand in `main.rs` / `cli.rs` that queries the local daemon snapshot and prints active listeners, available sessions (`AVAILABLE SESSIONS`), and connected Hubs (`--json` outputs the structured snapshot).
+  - **`cito setup` Parity Flags (`crates/cito-native/src/core/setup.rs`)**:
+    - `--invite <invite-code-or-url>`: parses and joins a Hub invite code/URL from the CLI (matching GUI `Paste Invite Code`, including the self-invite loop guard).
+    - `--print-invite`: prints this Mac's current `host_hub` invite command when Hub sharing is enabled (matching GUI `Copy Invite Code`).
+    - `--disconnect-all [--purge-data]`: disconnects all Agent App integrations while keeping the daemon running (matching GUI `Disconnect All…`).
+- **2. Security-Bounded MCP Surface (`cito-mcp`, `crates/cito-native/src/core/daemon.rs:3455–3610`)**:
+  - **Enhance `cito_listen`**: Add optional `"title": {"type": "string", "minLength": 1, "maxLength": 128}` to `cito_listen` `inputSchema` and `validate_tool_input`, allowing an agent session to set or update its own display title at any time (`cito_listen({ title: "Auth API Refactor", about: "..." })`).
+  - **Add Read-Only `cito_status` MCP Tool**:
+    - `{"name": "cito_status", "description": "Inspect this session's current Cito registration, address, connected hubs, and unread inbox count.", "inputSchema": {"type": "object", "properties": {"hub": {"type": "string"}}, "additionalProperties": false}}`
+    - Returns sanitized, secret-free metadata for the calling session: `{"ok": true, "registered": bool, "display_address": ..., "title": ..., "about": ..., "scope": ..., "unread_count": ..., "hubs": [{"name": ..., "status": ..., "is_default": ...}]}` (**never** returning `token`, `bot_token`, `chat_id`, or other credentials).
+  - **Explicit MCP Security Exclusions**: Administrative mutations (`setup`, `join_hub`, `share_hub`, `unlisten_all`, `channel_save`, `disconnect_all`, and cross-session `rename`) MUST remain strictly CLI/GUI-only.
+
+### 20.2 Verification & Convergent `contract-and-simplicity` Review-Fix Loop Policy (`MUST`)
+
+- Update existing unit/UI/daemon tests in `crates/cito-native/tests/support/{ui.rs,daemon.rs,cli.rs}` in place to cover `S1`–`S4`; do **NOT** add new heavy multi-process E2E test functions.
+- Run a **convergent `contract-and-simplicity` review-and-fix loop** until both `Contract & Wiring: CLEAN` and `Simplicity & Economy: ZERO_NEW_ISSUES` converge, and push to `origin/main` (without creating a formal release tag yet).
+
+
 
 
 
