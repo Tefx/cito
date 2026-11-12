@@ -9748,3 +9748,30 @@ phases:
       Spec link:
 
       - docs/DESIGN.md §18 (Q1–Q6 & §18.2)'
+- id: v35
+  name: 'V35 Stage 17: Complete Surface Audit Closure, Button Text Contrast, Intrinsic
+    Sizing, Smart Path Compression & Titled-Panel Chinese IME (R1–R7)'
+  status: pending
+  gate: All R1–R7 requirements in docs/DESIGN.md §19 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; website
+    screenshots in site/assets/screenshots/*.png are refreshed; convergent contract-and-simplicity
+    review-fix loop reaches CLEAN + ZERO_NEW_ISSUES; cargo test --workspace && cargo
+    build --release pass with 0 warnings; changes are pushed to origin/main (NO release
+    tag).
+  context: 'Implement docs/DESIGN.md §19 (R1–R7 & §19.2): (1) R1 .destructiveHover
+    resting primary text color (.labelColor instead of secondaryText so Disconnect/Remove/Unpair/Clear
+    Token never look disabled); (2) R2 Option A Disconnect All… footer button and
+    2-button confirmation modal (Cancel + Disconnect All with purge_data support);
+    (3) R3 eliminate all remaining hardcoded button widths in Human Channels & Menu
+    so Change Token…, Edit…, Pair Account…, and Settings… never truncate with ellipses;
+    (4) R4 clean State C in Human Channels (Bot Gateway title, hide redundant Bot
+    Ready badge when collapsed) & 10pt top padding on expanded Share This Mac as a
+    Hub; (5) R5 smart path compression (~/…/<leaf>) in AVAILABLE SESSIONS and left-aligned
+    copy:<id> chip in cardMenu; (6) R6 remove onlineDot in Directory, seed directoryAllPeers
+    from listeners + myRemote on state/open, 480pt dynamic wrap height in Activity,
+    and xmark delete icon; (7) R7 titled fullSizeContentView KeyPanel + activationPolicy(.regular)
+    while panels are open for 100% native Chinese IME candidate windows. Then run
+    a convergent contract-and-simplicity review-fix loop until convergence (NO formal
+    release tag yet).'
+  depends_on:
+  - v34
