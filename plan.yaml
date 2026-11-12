@@ -10067,7 +10067,7 @@ phases:
 - id: v37
   name: 'V37 Stage 19: Network-Scoped View Management, Trusted-Hub Auto-Listen, Fast
     Codex SQLite Discovery & UI Polish (N1–N5)'
-  status: pending
+  status: in_progress
   gate: All N1–N5 requirements in docs/DESIGN.md §21 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10096,7 +10096,7 @@ phases:
   - id: v37.impl
     name: V37 N1–N5 Network-Scoped Menu, Trusted Auto-Listen, Fast Codex Discovery
       & UI Polish
-    status: pending
+    status: claimed
     description: Implement docs/DESIGN.md §21 (N1–N5) while strictly enforcing §21.2
       test economy (update existing unit/UI/daemon assertions in place; do NOT add
       new heavy multi-process E2E test functions).
@@ -10110,6 +10110,8 @@ phases:
     - crates/cito-native/tests/support/ui.rs
     - crates/cito-native/tests/support/daemon.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T14:42:07.991700Z'
   - id: v37.review
     name: 'V37 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
