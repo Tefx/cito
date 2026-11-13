@@ -996,22 +996,24 @@ impl HubEngine {
                     let old = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?", &[caller["principal_id"].clone(), json!(id)])?;
                     let mut config = old.as_ref().map(|b| parse(b,"user_config_json")).unwrap_or(json!({}));
                     let mut label = old.as_ref().map(|b| b["display_label"].clone()).unwrap_or(Value::Null);
+                    let mut identity_changed = reset_user;
                     if reset_user { config = json!({}); label = Value::Null; }
                     else if let Some(patch) = p.get("user_config") {
                         let prev = config.clone();
                         merge_channel_config(&plugin, "user", &mut config, patch, clear_secret);
-                        let identity_changed = plugin.manifest["pairing"]["privateIdentityField"].as_str().map(|key|prev[key]!=config[key]).unwrap_or_else(||fields(&plugin).iter().any(|f| s(f,"scope") == "user" && prev[s(f,"key")] != config[s(f,"key")]));
+                        identity_changed = plugin.manifest["pairing"]["privateIdentityField"].as_str().map(|key|prev[key]!=config[key]).unwrap_or_else(||fields(&plugin).iter().any(|f| s(f,"scope") == "user" && prev[s(f,"key")] != config[s(f,"key")]));
                         if identity_changed {
+                            let cleared = plugin.manifest["pairing"]["privateIdentityField"].as_str().is_some_and(|identity| s(&config, identity).is_empty());
                             if let Some(m) = config.as_object_mut() {
                                 for key in ["_external_chat_id", "_external_user_id"] {
-                                    if patch.get(key).is_none() { m.remove(key); }
+                                    if patch.get(key).is_none() || cleared { m.remove(key); }
                                 }
                             }
                             label = Value::Null;
                         }
                     }
                     if let Some(identity) = plugin.manifest["pairing"]["privateIdentityField"].as_str() {
-                        if p["user_config"].get(identity).is_some() {
+                        if identity_changed && !s(&config, identity).is_empty() {
                             let chat = s(&config, identity).parse::<i64>().ok().filter(|n| *n > 0).map(|n| n.to_string());
                             config["_external_chat_id"] = json!(chat);
                             config["_external_user_id"] = json!(chat);
@@ -1021,7 +1023,7 @@ impl HubEngine {
                     replace_destination(c, &plugin, s(caller,"principal_id"), old.as_ref().map(|b|parse(b,"user_config_json")).as_ref(), &config)?;
                     if let Some(value) = p.get("display_label") { label = value.clone(); }
                     let enabled = !reset_user && p["enabled"].as_bool().unwrap_or_else(|| old.as_ref().is_none_or(|b| n(b,"enabled")==1));
-                    let boundary = if enabled && old.as_ref().is_none_or(|b| n(b,"enabled")==0) { max_seq(c)? } else { old.as_ref().map(|b| n(b,"last_delivered_seq")).unwrap_or(0) };
+                    let boundary = if enabled && old.as_ref().is_none_or(|b| n(b,"enabled")==0 && !identity_changed) { max_seq(c)? } else { old.as_ref().map(|b| n(b,"last_delivered_seq")).unwrap_or(0) };
                     c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET owner_user=excluded.owner_user,enabled=excluded.enabled,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
                         &[caller["principal_id"].clone(),json!(id),caller["owner_user"].clone(),json!(if enabled{1}else{0}),json!(config.to_string()),label,json!(boundary),json!(now_ms())])?;
                 }

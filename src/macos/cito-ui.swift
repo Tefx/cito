@@ -320,12 +320,13 @@ func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
 func cleanHostDisplay(_ raw: String) -> String {
     raw.replacingOccurrences(of: "\\.local\\b", with: "", options: [.regularExpression, .caseInsensitive])
 }
-func isGenericSessionLabel(_ raw: String, user: String) -> Bool {
+func isGenericSessionLabel(_ raw: String, user: String, homeBasename: String = (NSHomeDirectory() as NSString).lastPathComponent) -> Bool {
     let label = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let identity = label.hasPrefix("@") ? String(label.dropFirst()) : label
-    let homeBasename = (NSHomeDirectory() as NSString).lastPathComponent.lowercased()
-    return label.isEmpty || identity == user.lowercased() || identity == homeBasename
-        || ["agent", "agent session", "session", "cli session", "human", "human node", "human channel"].contains(label)
+    let homeBasename = homeBasename.lowercased()
+    return label.isEmpty || identity == user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() || identity == homeBasename
+        || label == "you (@\(user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()))"
+        || ["agent", "agent session", "session", "cli session", "human", "human node", "human channel", "human receiver", "you", "coding session", "default"].contains(label)
 }
 func nodeDisplayTitle(_ title: String, harness: String, user: String, about: String? = nil, harnessName: String? = nil, customTitle: Bool = false) -> String {
     if customTitle { return title }
@@ -351,15 +352,11 @@ func presentationError(_ raw: String) -> String {
     for (token, copy) in [("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode"), (" (http://127.0.0.1 is allowed for tests)", "")] { message = message.replacingOccurrences(of: token, with: copy) }
     return message
 }
-func distinctAbout(_ raw: String?, title: String, user: String) -> String? {
+func distinctAbout(_ raw: String?, title: String, user: String, otherTitle: String? = nil) -> String? {
     let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    let lower = value.lowercased()
-    let user = user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let home = (ProcessInfo.processInfo.environment["HOME"] ?? "").split(separator:"/").last.map(String.init)?.lowercased() ?? ""
-    let generic = ["human", "human node", "human channel", "human receiver", "you", "session", "coding session", "default", "agent", "agent session", "cli session"]
-    return value.isEmpty || generic.contains(lower) || lower == title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        || lower == user || lower == "@\(user)" || lower == "you (@\(user))"
-        || lower == home || lower == "@\(home)" ? nil : value
+    // Descriptions use the daemon/UI process HOME; discovered folder titles use the account home.
+    return isGenericSessionLabel(value, user:user, homeBasename:((ProcessInfo.processInfo.environment["HOME"] ?? "") as NSString).lastPathComponent)
+        || [title, otherTitle ?? ""].contains { value.lowercased() == $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ? nil : value
 }
 struct HarnessMeta: Decodable, Equatable {
     let id: String
@@ -560,9 +557,10 @@ final class MenuControl: NSControl {
             icon.frame = NSRect(x: startX, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
             label.frame = NSRect(x: startX + 17, y: labelY, width: label.alignment == .left ? max(0, bounds.width - (copyChip ? 17 : 27)) : textW, height: cellH)
         } else {
-            label.frame = NSRect(x: 4, y: labelY, width: max(0, bounds.width - 8), height: cellH)
+            label.frame = NSRect(x: paddingX, y: labelY, width: max(0, bounds.width - 2 * paddingX), height: cellH)
         }
     }
+    var paddingX: CGFloat = 4
     var leadingDotView: SurfaceView?
     private var dotColor: NSColor = CitoPalette.secondaryText
     private var dotRing = false
@@ -591,7 +589,8 @@ final class MenuControl: NSControl {
     // Headless hooks exercise logical transitions without a visible window or physical pointer.
     static var tracksPhysicalPointer = true
     override var wantsUpdateLayer: Bool { true }
-    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6) {
+    init(_ title: String, frame: NSRect, symbol: String? = nil, leadingSymbol: String? = nil, color: NSColor = .labelColor, radius: CGFloat = 6, paddingX: CGFloat = 4) {
+        self.paddingX = paddingX
         label = textLabel(title, .zero)
         symbolName = leadingSymbol ?? symbol
         super.init(frame: frame)
@@ -1236,7 +1235,7 @@ final class DirectoryPeerCellView: NSTableCellView {
             if !host.isEmpty && !internalTokens.contains(host.lowercased()) && !hosts.contains(host) { hosts.append(host) }
         }
         let hostText = hosts.joined(separator: ", ")
-        let displayAbout = distinctAbout(distinctAbout(peer.about, title: peer.title, user: peer.user), title: displayTitle, user: peer.user)
+        let displayAbout = distinctAbout(peer.about, title:peer.title, user:peer.user, otherTitle:displayTitle)
         let segments = ([peer.harness == "human" ? "Human" : "",hostText,displayAbout ?? ""]).filter { !$0.isEmpty }
         line2MetaLabel.stringValue = (peer.harness != "human" && !segments.isEmpty ? " · " : "") + segments.joined(separator:" · ")
         let metaOffset = peer.harness == "human" ? 0 : userW
@@ -1300,7 +1299,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let held = ["stale_generation":" · Held (session reloaded)","driver_unavailable":" · Held (app unavailable)",
             "session_switched":" · Held (session changed)","unlistened":" · Held (listening paused)",
             "unlistened_before_dispatch":" · Held (listening paused)","fenced_before_dispatch":" · Held (connection changed)"][item.held_reason ?? ""] ?? ""
-        let senderTitle = isGenericSessionLabel(item.from_title,user:item.from_user) ? nil : distinctAbout(item.from_title,title:"",user:item.from_user)
+        let senderTitle = distinctAbout(item.from_title,title:"",user:item.from_user)
         line1TitleLabel.stringValue = "@\(item.from_user)" + (senderTitle.map { " (\($0))" } ?? "") + " → " + (item.target_harness == "human" ? "You" : item.target_title) + held
         line1TitleLabel.font = .systemFont(ofSize:12.5,weight:item.unread ? .semibold : .medium)
         line1TitleLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
@@ -1338,6 +1337,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var iconBadge: SurfaceView?
     var bannerHovered = false
     var semanticPill: SurfaceView?
+    var semanticPillLabel: NSTextField?
     var icon: NSImageView?
     var payload: Payload?
     var displayedCount = 0
@@ -1576,6 +1576,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             channelFieldDrafts.removeValue(forKey: "\(hub ?? effectiveChannelHub)|channel_field:\(channel.id):\(field.key)")
         }
     }
+    func resetPersonalChannelUi(_ key: String) {
+        editingPersonalChannel.remove(key)
+        manualChannelEntry.remove(key)
+        pairCopiedUntil.removeValue(forKey:key)
+    }
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) {
         settings = value
         if value.desktop_banner_enabled == false { hide(clicked:false) }
@@ -1606,9 +1611,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
         }
         let target = value.settings_hub ?? value.channel_hub ?? hub ?? effectiveChannelHub
+        let previousChannels = channelSettingsByHub[target] ?? []
         channelSettingsByHub[target] = value.channels ?? []
         for channel in value.channels ?? [] {
             let key=target + "|" + channel.id
+            if channel.configured && (previousChannels.contains(where: { $0.id == channel.id && !$0.configured }) || (!(channelInstructions[key] ?? "").isEmpty && (channel.pairing_instruction ?? "").isEmpty)) { resetPersonalChannelUi(key) }
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
             var acknowledged: (scope: String, values: [String: String], unchanged: Bool)?
@@ -1623,7 +1630,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
                 if unchanged {
                     channelSavedUntil["\(target)|\(channel.id)|\(entry.scope)"] = Date().addingTimeInterval(1.5)
-                    if entry.scope == "user" && channel.configured { editingPersonalChannel.remove(key) }
+                    if entry.scope == "user" && channel.configured { resetPersonalChannelUi(key) }
                 } else { channelSavedUntil.removeValue(forKey:"\(target)|\(channel.id)|\(entry.scope)") }
                 DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
                     if self?.settingsVisible == true { self?.rebuildSettingsPanel() }
@@ -1871,7 +1878,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 if kind == "banner_jargon", labels.count > 1 {
                     visible = true; timer?.cancel()
-                    labels[1].stringValue = "[Passive] " + labels[1].stringValue
+                    labels[0].stringValue = "[Passive] " + labels[0].stringValue
                 }
                 if kind == "hit_test", let target = control("open_settings"), let parent = target.superview {
                     let blocker = NSView(frame:target.frame)
@@ -2047,7 +2054,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
         }
         if let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any], object["op"] as? String == "hub_invite" {
-            guard object["request_id"] as? String == inviteParseRequest, let cfg=object["config"] as? [String:Any] else{return}
+            guard !inviteParseRequest.isEmpty, object["request_id"] as? String == inviteParseRequest, let cfg=object["config"] as? [String:Any] else{return}
+            inviteParseRequest=""; addHubError=nil
             addHubUrl=cfg["url"] as? String ?? ""; addHubName=cfg["name"] as? String ?? ""
             addHubAuth=cfg["authMode"] as? String ?? cfg["auth_mode"] as? String ?? "none"
             addHubToken=cfg["token"] as? String ?? ""; addHubUser=cfg["user"] as? String ?? ""
@@ -2103,6 +2111,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if frame.op == "error" || actionFailure {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
+            if sourceOp == "paste_hub_invite", frame.request_id != nil {
+                if frame.request_id == inviteParseRequest { inviteParseRequest="" }
+                return
+            }
             // A command may emit both its result and a trailing generic error.
             // Neither can settle a retry or overwrite its feedback.
             if ["send_signal", "send_reply_from_human"].contains(sourceOp),
@@ -2546,7 +2558,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if !hasHumanListener && hubs.contains(where: { $0.name == targetHub && $0.status != "disconnected" }) {
             let rawPausedAbout = targetHubObj?.human_about
             let humanDisplayTitle = "You (@\(targetUser))"
-            let about = distinctAbout(distinctAbout(rawPausedAbout,title:"Human",user:targetUser), title:humanDisplayTitle, user:targetUser)
+            let about = distinctAbout(rawPausedAbout, title:"Human", user:targetUser, otherTitle:humanDisplayTitle)
             let resumedAbout = (rawPausedAbout ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
             let resumeAbout = resumedAbout.isEmpty ? "Human" : resumedAbout
             let rowHeight: CGFloat = about == nil ? 64 : 78, cardHeight: CGFloat = about == nil ? 58 : 72
@@ -2590,7 +2602,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
                 .compactMap { $0 }.first { !$0.isEmpty } ?? targetUser
             let displayTitle = nodeDisplayTitle(listener.title, harness: listener.harness, user: user, about: listener.about, harnessName: map[listener.harness]?.display_name, customTitle: listener.custom_title == true)
-            let hasDistinctAbout = distinctAbout(distinctAbout(listener.about, title: listener.title, user: user), title: displayTitle, user: user) != nil
+            let hasDistinctAbout = distinctAbout(listener.about, title:listener.title, user:user, otherTitle:displayTitle) != nil
             let rowHeight: CGFloat = hasDistinctAbout ? 78 : 64
             let cardHeight: CGFloat = hasDistinctAbout ? 72 : 58
             let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: rowHeight))
@@ -2636,7 +2648,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText: String
             if listener.harness == "human" {
-                let chs = (listener.channels ?? []).filter { !["mac", "this mac", "desktop banner", "desktop notifications", "hub", ""].contains($0.lowercased()) && !$0.hasPrefix("@") }
+                let chs = (listener.channels ?? []).filter { !["mac", "this mac", "desktop banner", "desktop notifications", "hub", ""].contains($0.lowercased()) && !$0.hasPrefix("@") && cleanHostDisplay($0).lowercased() != cleanHostDisplay(listener.host_name ?? "").lowercased() }
                 let banner=settings?.desktop_banner_enabled != false
                 pathText = chs.isEmpty ? (banner ? "Desktop banner" : "Banner off · Inbox only") : (chs.joined(separator:" · ") + (banner ? " · Banner" : " only · Banner off"))
             } else {
@@ -2797,7 +2809,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let info = textLabel("\(hostText) · \(displayTitle)\(branchSuffix)",
                         NSRect(x: 36, y: 8, width: max(40, 368 - copyWidth - 44), height: 18), size: 12, weight: .regular, color: .labelColor)
                     info.lineBreakMode = .byTruncatingMiddle
-                    info.toolTip = peer.scoped_id + (distinctAbout(distinctAbout(peer.about, title: peer.title, user: peer.user), title: displayTitle, user: peer.user).map { " — \($0)" } ?? "")
+                    info.toolTip = peer.scoped_id + (distinctAbout(peer.about, title:peer.title, user:peer.user, otherTitle:displayTitle).map { " — \($0)" } ?? "")
                     row.addSubview(info)
                     layoutBar(in: row, insetLeft: 16, y: 7, height: 20, leading: [hostIcon], flexible: info, trailing: [copy])
                     remoteRows.append((id: rowId, view: row))
@@ -2931,6 +2943,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                         row.addSubview(info)
                         if needsReload {
                             let hint=textLabel(c.reload_hint ?? "Run /reload in \(visual.name) to enable 1-click listen",NSRect(x:46,y:5,width:244,height:14),size:10,color:CitoPalette.warningText)
+                            hint.toolTip=hint.stringValue
                             hint.identifier=NSUserInterfaceItemIdentifier("candidate_hint:\(c.harness):\(c.session_id)")
                             row.addSubview(hint)
                             let reload=MenuControl("/reload",frame:NSRect(x:298,y:floor((rowHeight-22)/2),width:70,height:22),leadingSymbol:"doc.on.doc")
@@ -3101,7 +3114,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         case "command-w": closeSettingsPanel(emitAction:true)
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
-            else if addHubFormOpen { addHubFormOpen = false; pendingHubSave = nil; rebuildSettingsPanel() }
+            else if addHubFormOpen { addHubFormOpen = false; pendingHubSave = nil; inviteParseRequest=""; rebuildSettingsPanel() }
             else if !editingHubGateway.isEmpty {
                 for (hub, channels) in channelSettingsByHub {
                     for ch in channels where editingHubGateway.contains("\(hub)|\(ch.id)") { clearChannelDrafts(ch, scope:"hub", hub:hub) }
@@ -3109,11 +3122,12 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 editingHubGateway.removeAll(); rebuildSettingsPanel()
             }
             else if !editingPersonalChannel.isEmpty {
-                for (hub,channels) in channelSettingsByHub { for ch in channels where editingPersonalChannel.contains("\(hub)|\(ch.id)") { clearChannelDrafts(ch,scope:"user",hub:hub) } }
+                for (hub,channels) in channelSettingsByHub { for ch in channels where editingPersonalChannel.contains("\(hub)|\(ch.id)") { clearChannelDrafts(ch,scope:"user",hub:hub); resetPersonalChannelUi("\(hub)|\(ch.id)") } }
                 editingPersonalChannel.removeAll(); manualChannelEntry.removeAll(); rebuildSettingsPanel()
             }
             else { closeSettingsPanel(emitAction:true) }
         case "return":
+            if uninstallConfirmOpen { return }
             let id = (settingsPanel?.firstResponder as? NSTextView)?.delegate as? NSTextField
             let field=id?.identifier?.rawValue ?? ""
             let actionId: String
@@ -3391,14 +3405,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         cursorY -= 12
         if settings?.hubs.first(where:{$0.name == effectiveChannelHub})?.human_paused == true {
             cursorY -= 44
-            let paused=roundedView(NSRect(x:20,y:cursorY,width:480,height:44),radius:8,color:CitoPalette.warningFill)
+            let paused=roundedView(NSRect(x:20,y:cursorY,width:480,height:44),radius:8,color:CitoPalette.warningSurface)
             paused.identifier=NSUserInterfaceItemIdentifier("human_paused_banner")
             let title=textLabel("Hub paused — Mac and external channels are paused",NSRect(x:12,y:14,width:370,height:16),size:11,color:CitoPalette.warningText)
             paused.addSubview(title)
-            let resume=MenuControl("Resume",frame:NSRect(x:390,y:10,width:78,height:24))
+            let resume=MenuControl("Resume",frame:NSRect(x:0,y:10,width:MenuControl.intrinsicWidth("Resume"),height:24))
             resume.identifier=NSUserInterfaceItemIdentifier("resume_human_channels")
-            resume.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"listen_session","hub":self.effectiveChannelHub,"harness":"human","session_id":"default","title":"Human"]) }
-            paused.addSubview(resume); channelsView.addSubview(paused); cursorY -= 10
+            resume.pressed={ [weak self] in guard let self=self else{return}; self.emit(["op":"listen_session","hub":self.effectiveChannelHub,"harness":"human","session_id":"default","title":"Human","about":self.settings?.hubs.first(where:{$0.name==self.effectiveChannelHub})?.human_about ?? "Human receiver"]) }
+            paused.addSubview(resume)
+            layoutBar(in:paused,y:10,height:24,flexible:title,trailing:[resume])
+            channelsView.addSubview(paused); cursorY -= 10
         }
         let channelHubs = settings?.hubs.filter { $0.enabled != false }.map { $0.name } ?? hubs.filter { $0.enabled != false }.map { $0.name }
         if channelHubs.count > 1 { channelsView.addSubview(textLabel("Target Hub", NSRect(x: 20, y: cursorY-22, width: 78, height: 14), size: 10, weight: .semibold, color: CitoPalette.secondaryText)) }
@@ -3444,7 +3460,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let formFields = disclosure && !manualExpanded ? [] : userFields
             let hasHubScopeFields = ch.fields.contains { $0.scope == "hub" }
             let hubFieldsH = CGFloat(hubFields.count) * 26
-            let userFieldsH = CGFloat(formFields.count) * 26 + (disclosure ? 24 : 0)
+            let userFieldsH = CGFloat(formFields.count) * 26 + (disclosure && instruction.isEmpty ? 24 : 0)
             let gatewayActive = !hasHubScopeFields || ch.hub_provided || ch.status != "not_configured" || (hasHubScopeFields && ch.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })
             let hubGatewayExpanded = !gatewayActive || editingHubGateway.contains(channelKey)
             let personalCollapsed = gatewayActive && ch.configured && !editingPersonalChannel.contains(channelKey) && instruction.isEmpty
@@ -3460,10 +3476,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let userStratumH: CGFloat = !gatewayActive ? 0 : (personalCollapsed ? 36 : 36 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34)
             let channelResult = channelResults["\(effectiveChannelHub)|\(ch.id)"]
             let showDetail = ch.status == "error" || ch.warning == true || channelResult != nil
-            let detailHeight = showDetail ? max(14,ceil((presentationError(channelResult?.detail ?? ch.detail) as NSString).boundingRect(with:NSSize(width:422,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height)) : 0
+            let detailHeight = showDetail ? max(14,ceil((presentationError(channelResult?.detail ?? ch.detail) as NSString).boundingRect(with:NSSize(width:422,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height)) : 0
             let headerHeight: CGFloat = showDetail ? 38 + detailHeight : 38
             let unavailable = ch.status == "error" && ch.fields.isEmpty
-            let cardHeight: CGFloat = unavailable ? 56 : headerHeight + hubStratumH + CitoMetrics.gap + userStratumH + 8
+            let cardHeight: CGFloat = unavailable ? max(56, headerHeight + 8) : headerHeight + hubStratumH + CitoMetrics.gap + userStratumH + 8
             chCursorY -= cardHeight
             let chCard = roundedView(NSRect(x: 20, y: chCursorY, width: 480, height: cardHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
@@ -3522,7 +3538,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 clear.label.font = .systemFont(ofSize:10.5)
                 clear.style = .destructiveHover
                 clear.identifier=NSUserInterfaceItemIdentifier("clear_channel_service:\(ch.id)")
-                clear.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch); self.editingHubGateway.remove(channelKey); self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
+                clear.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch); self.resetPersonalChannelUi(channelKey); self.editingHubGateway.remove(channelKey); self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
                 hubStratum.addSubview(clear)
                 if hubGatewayExpanded { gatewayLeading.append(clear) } else { gatewayTop.append(clear) }
             }
@@ -3561,7 +3577,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             chCard.addSubview(hubStratum)
             if gatewayActive { chCard.addSubview(userStratum) }
-            func gate(_ control: MenuControl) { control.isEnabled=gatewayActive; control.alphaValue=gatewayActive ? 1 : 0.55 }
+            func gate(_ control: MenuControl) { control.isEnabled=gatewayActive }
             if !instruction.isEmpty {
                 let instrLabel = textLabel(instruction, NSRect(x: 12, y: 68, width: 432, height: instructionHeight), size: 10.5, weight: .semibold, color: CitoPalette.infoText)
                 instrLabel.maximumNumberOfLines = 0
@@ -3612,7 +3628,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
             if disclosure && !personalCollapsed && gatewayActive && instruction.isEmpty {
-                let manual=MenuControl(manualExpanded ? "Hide manual entry" : "Enter Chat ID manually…",frame:NSRect(x:12,y:40,width:190,height:22))
+                let manual=MenuControl(manualExpanded ? "Hide manual entry" : "Enter Chat ID manually…",frame:NSRect(x:12,y:40,width:190,height:22),paddingX:0)
+                manual.label.alignment = .left; manual.layoutContents()
                 manual.style = .subtleHeader; manual.identifier=NSUserInterfaceItemIdentifier("manual_channel:\(ch.id)")
                 manual.pressed={ [weak self] in guard let self=self else{return}; if manualExpanded { self.manualChannelEntry.remove(channelKey) } else { self.manualChannelEntry.insert(channelKey) }; self.rebuildSettingsPanel() }
                 userStratum.addSubview(manual)
@@ -3648,7 +3665,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 cancel.identifier=NSUserInterfaceItemIdentifier("cancel_pair_channel:\(ch.id)")
                 cancel.pressed={ [weak self] in
                     guard let self=self else{return}
-                    self.channelInstructions.removeValue(forKey:self.effectiveChannelHub+"|"+chId)
+                    self.channelInstructions.removeValue(forKey:channelKey)
+                    self.resetPersonalChannelUi(channelKey)
                     self.emit(["op":"channel_cancel_pair","hub":self.effectiveChannelHub,"channel_id":chId])
                 }
                 userStratum.addSubview(cancel); pairingActions.append(cancel)
@@ -3662,7 +3680,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let unpair=MenuControl("Unpair",frame:NSRect(x:196,y:6,width:MenuControl.intrinsicWidth("Unpair"),height:24),radius:6)
                 unpair.style = .destructiveHover
                 unpair.identifier=NSUserInterfaceItemIdentifier("unpair_channel:\(ch.id)")
-                unpair.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch, scope:"user"); self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":chId,"reset_user":true]) }
+                unpair.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch, scope:"user"); self.resetPersonalChannelUi(channelKey); self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":chId,"reset_user":true]) }
                 userStratum.addSubview(unpair); personalActions.append(unpair)
             }
             let testBtn = MenuControl("Send Test", frame: NSRect(x: 290, y: 6, width: MenuControl.intrinsicWidth("Send Test"), height: 24), radius: 6)
@@ -3717,7 +3735,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if editingPersonalChannel.contains(channelKey) {
                     let cancel=MenuControl("Cancel",frame:NSRect(x:0,y:8,width:62,height:24))
                     cancel.identifier=NSUserInterfaceItemIdentifier("cancel_edit_user_channel:\(ch.id)")
-                    cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch,scope:"user"); self?.editingPersonalChannel.remove(channelKey); self?.manualChannelEntry.remove(channelKey); self?.rebuildSettingsPanel() }
+                    cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch,scope:"user"); self?.resetPersonalChannelUi(channelKey); self?.rebuildSettingsPanel() }
                     userStratum.addSubview(cancel); trailing.insert(cancel,at:0)
                 }
                 if testBtn.isHidden && saveBtn.isHidden && personalActions.count == 1 {
@@ -3871,7 +3889,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             self.editingOriginalHub=""
             self.addHubName=""; self.addHubUrl=""; self.addHubToken=""; self.addHubUser=""; self.addHubIssuer=""; self.addHubClientId=""; self.addHubAuth="none"
             self.addHubDraftGeneration += 1
-            self.addHubError=nil; self.pendingHubSave=nil
+            self.addHubError=nil; self.pendingHubSave=nil; self.inviteParseRequest=""
             self.addHubFormOpen = wasEditing ? true : !self.addHubFormOpen
             self.rebuildSettingsPanel()
         }
@@ -3952,6 +3970,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             cancelBtn.pressed = { [weak self] in
                 guard let self = self else { return }
                 self.addHubFormOpen = false
+                self.inviteParseRequest=""
                 self.pendingHubSave = nil
                 self.rebuildSettingsPanel()
             }
@@ -4039,7 +4058,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     self.addHubName=hub.name; self.addHubUrl=hub.url; self.addHubAuth=hub.auth_mode
                     self.addHubUser=hub.user ?? ""; self.addHubIssuer=hub.issuer ?? ""; self.addHubClientId=hub.client_id ?? ""; self.addHubToken=""
                     self.addHubDraftGeneration += 1
-                    self.pendingHubSave=nil; self.addHubError=nil
+                    self.pendingHubSave=nil; self.addHubError=nil; self.inviteParseRequest=""
                     self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.addHubFormOpen=true
                     self.rebuildSettingsPanel()
                 }
@@ -5281,7 +5300,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 if id.hasPrefix("act_title:"), let item = (label.superview as? DirectoryPeerCellView)?.activityItem {
                     // Provenance comes from the rendered cell, including its Hub. Remove
                     // only verified user spans; generated targets and held suffixes remain.
-                    let senderTitle = isGenericSessionLabel(item.from_title,user:item.from_user) ? nil : distinctAbout(item.from_title,title:"",user:item.from_user)
+                    let senderTitle = distinctAbout(item.from_title,title:"",user:item.from_user)
                     let senderSpan = "@\(item.from_user)" + (senderTitle.map { " (\($0))" } ?? "") + " → "
                     if generatedText.hasPrefix(senderSpan) {
                         var target = String(generatedText.dropFirst(senderSpan.count))
@@ -5317,7 +5336,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let defaultLayout: Bool
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
-                case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && editingHubGateway.isEmpty && editingPersonalChannel.isEmpty && manualChannelEntry.isEmpty && settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.human_paused != true && (settings?.channels ?? []).allSatisfy { ($0.pairing_instruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelResults["\(effectiveChannelHub)|\($0.id)"] == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
+                case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && editingHubGateway.isEmpty && editingPersonalChannel.isEmpty && manualChannelEntry.isEmpty && settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.human_paused != true && (settings?.channels ?? []).allSatisfy { (channelInstructions["\(effectiveChannelHub)|\($0.id)"] ?? $0.pairing_instruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelResults["\(effectiveChannelHub)|\($0.id)"] == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
                 case "settings_hubs_tab": defaultLayout = !addHubFormOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
@@ -5598,16 +5617,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if headless { diagnostic(clicked ? "banner clicked" : "banner hidden") }
     }
     func refreshBannerColors() {
-        guard labels.count == 5 else { return }
+        guard labels.count == 3 else { return }
         accentBar?.fillColor = CitoPalette.warningText
         semanticPill?.fillColor = payload?.effective_wake == false ? CitoPalette.warningSurface : .labelColor.withAppearanceAlpha(0.08)
         semanticPill?.strokeColor = payload?.effective_wake == false ? CitoPalette.warningBorder : nil
-        labels[4].textColor = payload?.effective_wake == false ? CitoPalette.warningText : CitoPalette.secondaryText
-        labels[3].textColor = bannerHovered ? CitoPalette.infoText : CitoPalette.secondaryText
+        semanticPillLabel?.textColor = payload?.effective_wake == false ? CitoPalette.warningText : CitoPalette.secondaryText
+        labels[2].textColor = bannerHovered ? CitoPalette.infoText : CitoPalette.secondaryText
     }
     func show(_ value: Payload) {
         let human = value.target_harness == "human"
-        let senderTitle = isGenericSessionLabel(value.from_title,user:value.from_user) ? nil : distinctAbout(value.from_title,title:human ? "" : value.target_title,user:value.from_user)
+        let senderTitle = distinctAbout(value.from_title,title:human ? "" : value.target_title,user:value.from_user)
         let metadata = human
             ? "@\(value.from_user)" + (senderTitle.map { " · \($0)" } ?? "") + " → You"
             : "@\(value.from_user) → \(value.target_title)" + (senderTitle.map { " (\($0))" } ?? "")
@@ -5646,16 +5665,15 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             badge.identifier=NSUserInterfaceItemIdentifier("banner_icon_badge")
             let image = NSImageView(frame:badge.bounds)
             badge.addSubview(image); root.addSubview(badge); iconBadge = badge; icon = image
-            let frames = [NSRect.zero,NSRect(x:54,y:82,width:284,height:18),
-                          NSRect(x:54,y:42,width:310,height:38),NSRect(x:54,y:13,width:270,height:18),NSRect.zero]
-            for index in 0..<5 {
+            let frames = [NSRect(x:54,y:82,width:284,height:18),
+                          NSRect(x:54,y:42,width:310,height:38),NSRect(x:54,y:13,width:270,height:18)]
+            for index in 1...3 {
                 let label = NSTextField(wrappingLabelWithString:"")
                 label.isSelectable = false
                 label.font = .systemFont(ofSize:index == 1 ? 12.5 : (index == 2 ? 13 : 11),weight:index == 1 ? .semibold : (index == 2 ? .regular : .medium))
-                label.frame = frames[index]; label.maximumNumberOfLines = index == 2 ? 2 : 1
+                label.frame = frames[index-1]; label.maximumNumberOfLines = index == 2 ? 2 : 1
                 label.lineBreakMode = .byTruncatingTail
                 label.identifier = NSUserInterfaceItemIdentifier(index < 3 ? "banner_data:\(index)" : "banner_chrome:\(index)")
-                label.isHidden = index == 0 || index == 4
                 root.addSubview(label); labels.append(label)
             }
             let close = MenuControl("Close notification",frame:NSRect(x:346,y:82,width:20,height:20),symbol:"xmark")
@@ -5675,21 +5693,21 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let pill = makePillBadge(semanticLabel,id:"banner_semantic_pill",height:20,textColor:value.effective_wake ? CitoPalette.secondaryText : CitoPalette.warningText,fill:value.effective_wake ? .labelColor.withAppearanceAlpha(0.08) : CitoPalette.warningSurface,minWidth:0)
             pill.frame.origin = NSPoint(x:364-pill.frame.width,y:12)
             panel?.contentView?.addSubview(pill); semanticPill = pill
-        } else { semanticPill = nil }
+            semanticPillLabel = pill.subviews.compactMap { $0 as? NSTextField }.first
+        } else { semanticPill = nil; semanticPillLabel = nil }
         accentBar?.isHidden = value.effective_wake
-        labels[0].stringValue = human ? "Direct Message" : value.target_title
-        labels[1].stringValue = metadata
-        labels[2].stringValue = value.displayMessage
+        labels[0].stringValue = metadata
+        labels[1].stringValue = value.displayMessage
         // Measure the actual preview so a one-line message stays pinned to Line 1.
-        let height = min(CGFloat(38),ceil((value.displayMessage as NSString).boundingRect(with:NSSize(width:310,height:38),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:labels[2].font!]).height))
-        labels[2].frame = NSRect(x:54,y:80-height,width:310,height:height)
-        labels[3].stringValue = actionText
-        labels[3].frame.size.width = (semanticPill?.frame.minX ?? 370)-60
+        let height = min(CGFloat(38),ceil((value.displayMessage as NSString).boundingRect(with:NSSize(width:310,height:38),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:labels[1].font!]).height))
+        labels[1].frame = NSRect(x:54,y:80-height,width:310,height:height)
+        labels[2].stringValue = actionText
+        labels[2].frame.size.width = (semanticPill?.frame.minX ?? 370)-60
         refreshBannerColors()
         panel?.contentView?.setAccessibilityLabel("\(metadata). \(semanticLabel). \(value.displayMessage). \(actionText)")
         if headless {
             diagnostic("display " + String(data:try! JSONSerialization.data(withJSONObject:[
-                "pid":getpid(),"title":labels[0].stringValue,"subtitle":value.subtitle,"message":value.message,
+                "pid":getpid(),"title":human ? "Direct Message" : value.target_title,"subtitle":value.subtitle,"message":value.message,
                 "displayed_count":displayedCount,"display_subtitle":metadata,"display_message":value.displayMessage,
                 "semantic_label":semanticLabel,"action_label":actionText],options:[.sortedKeys]),encoding:.utf8)!)
             return

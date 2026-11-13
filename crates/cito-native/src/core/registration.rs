@@ -59,7 +59,7 @@ pub fn local_node(
     session: &str,
 ) -> Result<Option<Value>, String> {
     Ok(state.db.query(
-        "SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? ORDER BY status='ACTIVE' DESC,binding_generation DESC",
+        "SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY status='ACTIVE' DESC,binding_generation DESC",
         &[json!(client.name), json!(harness), json!(session)],
     )?.into_iter().find(|row| principal_ids_equal(string(row,"principal_id"), string(&client.identity,"principal_id"))))
 }
@@ -98,19 +98,16 @@ pub fn register_listener(
     register_locked(state, client, host_id, args, caller, true)
 }
 
-pub(super) fn distinct_human_about<'a>(about: &'a str, title: &str, user: &str) -> Option<&'a str> {
-    let about = about.trim();
-    let lower = about.to_lowercase();
+pub(super) fn is_generic_session_label(label: &str, user: &str, home_basename: &str) -> bool {
+    let label = label.trim().to_lowercase();
+    let identity = label.strip_prefix('@').unwrap_or(&label);
     let user = user.trim().to_lowercase();
-    // Description aliases use the same process HOME basename as the UI.
-    let home = std::env::var("HOME").unwrap_or_default();
-    let home = home
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or("")
-        .to_lowercase();
-    (!about.is_empty()
-        && ![
+    let home = home_basename.trim().to_lowercase();
+    label.is_empty()
+        || identity == user
+        || identity == home
+        || label == format!("you (@{user})")
+        || [
             "human",
             "human node",
             "human channel",
@@ -123,14 +120,25 @@ pub(super) fn distinct_human_about<'a>(about: &'a str, title: &str, user: &str) 
             "agent session",
             "cli session",
         ]
-        .contains(&lower.as_str())
-        && lower != title.trim().to_lowercase()
-        && lower != user
-        && lower != format!("@{user}")
-        && lower != format!("you (@{user})")
-        && lower != home
-        && lower != format!("@{home}"))
-    .then_some(about)
+        .contains(&label.as_str())
+}
+
+pub(super) fn distinct_label<'a>(
+    label: &'a str,
+    title: &str,
+    user: &str,
+    home: &str,
+) -> Option<&'a str> {
+    let label = label.trim();
+    (!is_generic_session_label(label, user, home)
+        && label.to_lowercase() != title.trim().to_lowercase())
+    .then_some(label)
+}
+
+pub(super) fn distinct_human_about<'a>(about: &'a str, title: &str, user: &str) -> Option<&'a str> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home.rsplit('/').find(|part| !part.is_empty()).unwrap_or("");
+    distinct_label(about, title, user, home)
 }
 
 pub fn register_automatic_human(
@@ -482,6 +490,42 @@ mod tests {
     use super::*;
     use crate::core::hub::HubEngine;
     use std::{fs, sync::Arc};
+
+    #[test]
+    fn local_node_selects_current_principal_and_ignores_fenced_history() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("cito-registration-{}", random_uuid_v4()));
+        let result = (|| {
+            let state = LocalState::open(&root)?;
+            let client = HubClient::new("work".into(), json!({"url":"local://"}), "alice", None);
+            for (id, status, generation, principal) in [
+                ("c_1111111111111111", "UNLISTENED", 1, "none#alice"),
+                ("c_2222222222222222", "UNLISTENED", 2, "none#alice"),
+                ("c_3333333333333333", "FENCED_INACTIVE", 99, "none#alice"),
+                ("c_4444444444444444", "ACTIVE", 100, "none#bob"),
+            ] {
+                state.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,binding_generation) VALUES('work',?,?,'alice','host','host','human','default','','Human','Review approvals','self',?,?)",
+                    &[json!(id), json!(principal), json!(status), json!(generation)])?;
+            }
+            let row =
+                local_node(&state, &client, "human", "default")?.ok_or("Missing paused row")?;
+            assert_eq!(row["listener_id"], "c_2222222222222222");
+            assert_eq!(row["status"], "UNLISTENED");
+            state.db.execute("UPDATE local_listeners SET status='FENCED_INACTIVE' WHERE principal_id='none#alice'", &[])?;
+            assert!(local_node(&state, &client, "human", "default")?.is_none());
+            for (label, generic) in [
+                (" @ÉLODIE ", true),
+                ("You (@ÉLODIE)", true),
+                ("Élodie notes", false),
+                (" default ", true),
+            ] {
+                assert_eq!(is_generic_session_label(label, "élodie", "home"), generic);
+            }
+            assert_eq!(distinct_label(" CAFÉ ", "café", "alice", "home"), None);
+            Ok(())
+        })();
+        fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        result
+    }
 
     #[test]
     fn human_title_defaults_reach_response_local_state_and_hub_without_changing_custom_titles(

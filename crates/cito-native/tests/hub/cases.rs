@@ -62,6 +62,97 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
+fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let path = root.join("fixture/plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["pairing"]["privateIdentityField"] = json!("address");
+    std::fs::write(path, manifest.to_string()).unwrap();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let configure = |patch: Value| {
+        let mut patch = patch;
+        patch["plugin_id"] = json!("fixture");
+        e.rpc("human_channels_configure", &patch, Some(&owner))
+            .unwrap()
+    };
+    let binding = || {
+        e.inner
+            .db
+            .query(
+                "SELECT * FROM hub_human_channels WHERE plugin_id='fixture'",
+                &[],
+            )
+            .unwrap()
+            .remove(0)
+    };
+    configure(
+        json!({"hub_config":{"credential":"saved"},"user_config":{"address":"41"},"enabled":false}),
+    );
+    let cursor = binding()["last_delivered_seq"].clone();
+    let node = listener_id("none#alice", "human", "default");
+    send(&e, &node, "pending-destination");
+    configure(json!({"user_config":{"address":"42"},"enabled":true}));
+    assert_eq!(binding()["last_delivered_seq"], cursor);
+    wait_for(|| {
+        !e.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='pending-destination' AND status='delivered'", &[]).unwrap().is_empty()
+    });
+    let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
+    let delivery = frames
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|frame| {
+            frame["op"] == "deliver" && frame["signal"]["signal_id"] == "pending-destination"
+        })
+        .unwrap();
+    assert_eq!(delivery["config"]["address"], "42");
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_human_channels SET display_label='@alice_tg'",
+            &[],
+        )
+        .unwrap();
+    let unchanged = configure(json!({"user_config":{"address":"42"},"enabled":true}));
+    assert_eq!(unchanged["channels"][0]["display_label"], "@alice_tg");
+    e.plugin_frame(
+        "fixture",
+        &json!({"op":"health","error":"HTTP 409: another getUpdates request"}),
+    );
+    let warned = e
+        .rpc("human_channels_list", &json!({}), Some(&owner))
+        .unwrap();
+    assert_eq!(warned["channels"][0]["warning"], true);
+    assert_eq!(warned["channels"][0]["status"], "ready");
+    assert!(s(&warned["channels"][0], "detail").contains("409"));
+    e.plugin_frame("fixture", &json!({"op":"health","error":null}));
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Response lost' WHERE signal_id='pending-destination'", &[]).unwrap();
+    let unknown = e
+        .rpc("human_channels_list", &json!({}), Some(&owner))
+        .unwrap();
+    assert_eq!(unknown["channels"][0]["warning"], true);
+    assert!(s(&unknown["channels"][0], "detail").contains("outcome unknown"));
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='pending-destination'", &[]).unwrap();
+    assert_eq!(
+        e.rpc("human_channels_list", &json!({}), Some(&owner))
+            .unwrap()["channels"][0]["warning"],
+        false
+    );
+    for empty in [json!(""), Value::Null] {
+        configure(json!({"user_config":{"address":"42"}}));
+        let cleared = configure(json!({"user_config":{"address":empty}}));
+        assert!(cleared["channels"][0]["display_label"].is_null());
+        let config = parse(&binding(), "user_config_json");
+        assert!(config.get("_external_chat_id").is_none());
+        assert!(config.get("_external_user_id").is_none());
+    }
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

@@ -1174,6 +1174,37 @@ server.serve_forever()
     wait(|| f.frames(proxy).iter().any(|frame| frame["op"] == "ready"));
     f.daemon(&[]);
     assert_eq!(f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}})).1["channels"][0]["status"], "ready");
+    assert_eq!(
+        f.action(json!({"op":"open_settings","hub":"shared"})).0,
+        200
+    );
+    let hub_db = host.db("hub/hub.sqlite");
+    let current_channel =
+        || f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0].clone();
+    wait(|| current_channel()["status"] == "ready");
+    hub_db
+        .execute(
+            "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id='remote-channel'",
+            &[json!(
+                json!({"poll_error":"HTTP 409: another getUpdates request"}).to_string()
+            )],
+        )
+        .unwrap();
+    wait(|| current_channel()["warning"] == true);
+    assert!(current_channel()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("409"));
+    hub_db.execute("UPDATE hub_plugin_services SET service_state_json='{}' WHERE plugin_id='remote-channel'", &[]).unwrap();
+    wait(|| current_channel()["warning"] == false);
+    hub_db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms,last_error) VALUES('remote-channel','none#alice','unknown-effect',1,'effect_unknown',CAST(strftime('%s','now') AS INTEGER)*1000,'Response lost')", &[]).unwrap();
+    wait(|| current_channel()["warning"] == true);
+    assert!(current_channel()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("outcome unknown"));
+    hub_db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='unknown-effect'", &[]).unwrap();
+    wait(|| current_channel()["warning"] == false);
     let query = "  remote-mac-42  ";
     let (status, response) = f.action(
         json!({"op":"query_directory","mode":"activity","query":query,"request_id":"padded-query"}),
@@ -1488,8 +1519,8 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     );
     assert!(f.rows("SELECT * FROM session_custom_titles").is_empty());
     let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
-    assert_eq!(config["defaultHub"], "local");
-    assert!(config.get("default_hub").is_none());
+    assert_eq!(config["default_hub"], "local");
+    assert!(config.get("defaultHub").is_none());
     assert_eq!(config["hubs"], json!({}));
     assert_eq!(service_config(), json!({}));
     assert!(f.rows("SELECT * FROM local_signals").is_empty());
@@ -2868,6 +2899,96 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
     assert_eq!(app["status"], "error", "{settings}");
     assert!(app["configured"].is_null());
     assert!(!app["detail"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let (_, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}},"default_hub":"local"}),
+    );
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    for hub in ["local", "work"] {
+        f.tool(
+            "cito_listen",
+            json!({"hub":hub,"about":"Review work"}),
+            meta.clone(),
+        );
+    }
+    wait(|| {
+        f.rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
+            .len()
+            == 2
+    });
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+            .len(),
+        2
+    );
+    assert_eq!(f.action(json!({"op":"unlisten_all","hub":"work"})).0, 200);
+    assert_eq!(
+        f.rows("SELECT hub,status FROM local_listeners WHERE harness='fixture' ORDER BY hub"),
+        vec![
+            json!({"hub":"local","status":"ACTIVE"}),
+            json!({"hub":"work","status":"UNLISTENED"})
+        ]
+    );
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
+            .len(),
+        2
+    );
+    let human = f
+        .rows("SELECT * FROM local_listeners WHERE hub='local' AND harness='human'")
+        .remove(0);
+    let db = f.db("hub.sqlite");
+    let row = db
+        .query(
+            "SELECT CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
+            &[human["listener_id"].clone()],
+        )
+        .unwrap()
+        .remove(0);
+    let mut remote: Value = serde_json::from_str(row["value"].as_str().unwrap()).unwrap();
+    assert!(remote["channels"]
+        .as_object()
+        .unwrap()
+        .contains_key(&format!("{}:human", human["host_id"].as_str().unwrap())));
+    remote["channels"]["remote-host:human"] =
+        json!({"state":"ACTIVE","host_name":"other-mac.local"});
+    remote["channels"]["hub:external"] =
+        json!({"state":"ACTIVE","display_name":"Telegram","host_name":"Hub"});
+    db.execute(
+        "UPDATE hub_kv SET value=CAST(? AS BLOB),revision=revision+1 WHERE key=?",
+        &[json!(remote.to_string()), human["listener_id"].clone()],
+    )
+    .unwrap();
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["hub"] == "local" && row["harness"] == "human")
+            .is_some_and(|row| {
+                row["channels"].as_array().is_some_and(|names| {
+                    names.contains(&json!("Telegram"))
+                        && names.contains(&json!("other-mac.local"))
+                        && !names.contains(&human["host_name"])
+                })
+            })
+    });
+    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
+            .len(),
+        2
+    );
 }
 
 #[test]

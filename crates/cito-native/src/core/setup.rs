@@ -1455,30 +1455,16 @@ pub fn run_setup_cli(args: &[String]) {
                 rest.insert("host_hub".to_string(), Value::Object(prev));
             }
 
-            let def_enabled = hubs
-                .get(&def_hub)
-                .and_then(|v| v.get("enabled"))
-                .and_then(|v| v.as_bool())
-                != Some(false);
-            if !hubs.contains_key(&def_hub) || !def_enabled {
-                def_hub = hubs
-                    .iter()
-                    .find(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()) != Some(false))
-                    .map(|(k, _)| k.clone())
-                    .or_else(|| hubs.keys().next().cloned())
-                    .unwrap_or_else(|| "local".to_string());
-            }
-            resolved_default_hub = def_hub.clone();
             let mut next_obj = Map::new();
             next_obj.insert("default_hub".to_string(), json!(def_hub));
             next_obj.insert("hubs".to_string(), Value::Object(hubs));
             for (k, v) in rest {
                 next_obj.insert(k, v);
             }
-            let next_content = format!(
-                "{}\n",
-                serde_json::to_string_pretty(&Value::Object(next_obj)).unwrap()
-            );
+            let mut next = Value::Object(next_obj);
+            super::config::repair_default_hub(&mut next);
+            resolved_default_hub = next["default_hub"].as_str().unwrap_or("local").to_owned();
+            let next_content = format!("{}\n", serde_json::to_string_pretty(&next).unwrap());
             match existing {
                 None => Ok((
                     "created".to_string(),

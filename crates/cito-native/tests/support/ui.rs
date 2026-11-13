@@ -250,6 +250,327 @@ fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh(
     );
 }
 #[test]
+fn v39_human_summary_banner_pause_all_and_unavailable_details_follow_live_state() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    let mut frame = state();
+    let mut human = listener();
+    human["harness"] = json!("human");
+    human["title"] = json!("Human");
+    human["session_id"] = json!("default");
+    human["scoped_id"] = json!("personal:human");
+    human["display_address"] = json!("@alice");
+    human["host_name"] = json!("arbitrary-desktop.local");
+    for (channels, enabled, summary) in [
+        (json!(["arbitrary-desktop.local"]), true, "Desktop banner"),
+        (
+            json!(["arbitrary-desktop.local"]),
+            false,
+            "Banner off · Inbox only",
+        ),
+        (
+            json!(["arbitrary-desktop.local", "Telegram", "other-mac.local"]),
+            true,
+            "Telegram · other-mac.local · Banner",
+        ),
+        (
+            json!(["arbitrary-desktop.local", "Telegram"]),
+            false,
+            "Telegram only · Banner off",
+        ),
+    ] {
+        human["channels"] = channels;
+        cfg["desktop_banner_enabled"] = json!(enabled);
+        frame["listeners"] = json!([listener(), human]);
+        frame["settings"] = cfg.clone();
+        f.send(p, frame.clone());
+        let s = inspect(&f, p);
+        assert!(
+            nodes(&s["items"]).iter().any(|n| n["text"] == summary),
+            "{summary}"
+        );
+        assert_eq!(
+            node(&s, "items", "menu_toggle_desktop_banner")["symbol"],
+            if enabled {
+                "bell.fill"
+            } else {
+                "bell.slash.fill"
+            }
+        );
+        assert_eq!(node(&s, "items", "stop_all")["text"], "Pause All");
+        assert_eq!(node(&s, "items", "stop_all")["symbol"], "pause.fill");
+        control(&f, p, "menu_toggle_desktop_banner");
+        inspect(&f, p);
+        let toggle = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == "set_desktop_banner")
+            .unwrap();
+        assert_eq!(toggle["enabled"], !enabled);
+    }
+    control(&f, p, "stop_all");
+    inspect(&f, p);
+    let stop = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "unlisten_all")
+        .unwrap();
+    assert_eq!(stop["hub"], "personal");
+    cfg["channels"][0]["status"] = json!("error");
+    cfg["channels"][0]["fields"] = json!([]);
+    cfg["channels"][0]["warning"] = json!(true);
+    cfg["channels"][0]["detail"]=json!("Connection unavailable.\nThe remote gateway rejected the request.\nCheck credentials and try again.");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    let s = inspect(&f, p);
+    let detail = node(&s, "settings_items", "settings_channel_detail:channel");
+    let card = node(&s, "settings_items", "settings_channel:channel");
+    assert!(detail["height"].as_f64().unwrap() > 28.0);
+    assert!(card["height"].as_f64().unwrap() >= detail["height"].as_f64().unwrap() + 46.0);
+    assert!(detail["y"].as_f64().unwrap() >= 8.0);
+    for appearance in ["light", "dark"] {
+        inspect_as(&f, p, Some(appearance));
+    }
+}
+
+#[test]
+fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("42");
+    cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    for cancel in ["cancel_edit_user_channel:channel", "escape"] {
+        control(&f, p, "edit_user_channel:channel");
+        f.send(p,json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"discard"}));
+        if cancel == "escape" {
+            f.send(p, json!({"op":"test_settings_key","key":"escape"}));
+        } else {
+            control(&f, p, cancel);
+        }
+        let s = inspect(&f, p);
+        assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
+        control(&f, p, "edit_user_channel:channel");
+        assert_eq!(
+            node(
+                &inspect(&f, p),
+                "settings_items",
+                "channel_field:channel:account"
+            )["text"],
+            "42"
+        );
+        control(&f, p, "cancel_edit_user_channel:channel");
+    }
+    control(&f, p, "edit_user_channel:channel");
+    control(&f, p, "unpair_channel:channel");
+    cfg["channels"][0]["configured"] = json!(false);
+    cfg["channels"][0]["status"] = json!("hub_ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(false);
+    cfg["channels"][0]["fields"][1]["value"] = json!("");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+    let manual = node(&s, "settings_items", "manual_channel:channel");
+    assert_eq!(manual["x"], 12);
+    assert_eq!(manual["children"][0]["x"], 0);
+    for round in 0..2 {
+        control(&f, p, "pair_channel:channel");
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == "channel_pair")
+            .unwrap();
+        f.send(p,json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-example","pairing_command":"/start cito-example"}));
+        assert_eq!(
+            node(
+                &inspect(&f, p),
+                "settings_items",
+                "copy_pair_command:channel"
+            )["text"],
+            "✓ Copied"
+        );
+        if round == 0 {
+            control(&f, p, "cancel_pair_channel:channel");
+            f.send(p, json!({"op":"settings","settings":cfg}));
+            let s = inspect(&f, p);
+            assert!(node(&s, "settings_items", "copy_pair_command:channel").is_null());
+        }
+    }
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("42");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
+    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+    control(&f, p, "edit_user_channel:channel");
+    control(&f, p, "pair_channel:channel");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "channel_pair")
+        .unwrap();
+    f.send(p,json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-again","pairing_command":"/start cito-again"}));
+    assert!(!node(
+        &inspect(&f, p),
+        "settings_items",
+        "copy_pair_command:channel"
+    )
+    .is_null());
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let s = inspect(&f, p);
+    assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
+    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+}
+
+#[test]
+fn v39_invite_parse_receipts_stay_in_the_form_and_modal_return_cannot_submit() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    let latest = |op: &str| {
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == op)
+            .unwrap()
+    };
+    let paste = || {
+        f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"cito setup --hub remote --url https://hub.example.com"}));
+        inspect(&f, p);
+        let request = latest("paste_hub_invite");
+        assert_eq!(request["parse_only"], true);
+        request
+    };
+    let request = paste();
+    f.send(p,json!({"op":"error","source_op":"paste_hub_invite","request_id":request["request_id"],"error":"Invalid invite draft"}));
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "settings_error_banner").is_null());
+    assert!(node(&s, "settings_items", "add_hub_error").is_null());
+    let stale = paste();
+    control(&f, p, "cancel_add_hub");
+    control(&f, p, "open_add_hub");
+    f.send(p,json!({"op":"hub_invite","request_id":stale["request_id"],"config":{"name":"stale","url":"https://stale.example.com"}}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "settings_hub_url")["text"],
+        ""
+    );
+    f.send(p, json!({"op":"test_settings_key","key":"return"}));
+    assert!(!node(&inspect(&f, p), "settings_items", "add_hub_error").is_null());
+    let request = paste();
+    f.send(p,json!({"op":"hub_invite","request_id":request["request_id"],"config":{"name":"remote","url":"https://hub.example.com"}}));
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "add_hub_error").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "settings_hub_url")["text"],
+        "https://hub.example.com"
+    );
+    f.send(p,json!({"op":"hub_invite","request_id":"","config":{"name":"stale","url":"https://stale.example.com"}}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "settings_hub_url")["text"],
+        "https://hub.example.com"
+    );
+    control(&f, p, "open_uninstall_confirm");
+    let before = f
+        .frames(p)
+        .iter()
+        .filter(|v| v["op"] == "setup_save_hub")
+        .count();
+    f.send(p, json!({"op":"test_settings_key","key":"return"}));
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "setup_save_hub")
+            .count(),
+        before
+    );
+    control(&f, p, "cancel_uninstall_all");
+    f.send(p, json!({"op":"test_focus_field","id":"settings_hub_url"}));
+    f.send(p, json!({"op":"test_settings_key","key":"return"}));
+    inspect(&f, p);
+    assert_eq!(latest("setup_save_hub")["url"], "https://hub.example.com");
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|v| v["op"] == "setup_save_hub")
+            .count(),
+        before + 1
+    );
+}
+
+#[test]
+fn v39_reload_hint_retains_full_tooltip_and_activity_reset_requeries() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["harnesses"][0]["display_name"] = json!("Claude Code");
+    frame["available"] = json!([{"harness":"fixture","session_id":"reload","title":"Review","cwd":"/tmp","needs_reload":true}]);
+    frame["activity_has_any"] = json!(true);
+    f.send(p, frame);
+    let hint = node(&inspect(&f, p), "items", "candidate_hint:fixture:reload");
+    assert_eq!(
+        hint["tooltip"],
+        "Run /reload in Claude Code to enable 1-click listen"
+    );
+    assert_eq!(hint["text"], hint["tooltip"]);
+    assert_eq!(hint["width"], 244);
+    assert_eq!(hint["x"], 46);
+    control(&f, p, "open_activity");
+    f.send(p, json!({"op":"test_directory_query","query":"missing"}));
+    assert!(!node(&inspect(&f, p), "directory_items", "act_reset_search").is_null());
+    control(&f, p, "act_reset_search");
+    let s = inspect(&f, p);
+    assert_eq!(node(&s, "directory_items", "directory_search")["text"], "");
+    let query = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "query_directory")
+        .unwrap();
+    assert_eq!(query["query"], "");
+    assert_eq!(query["mode"], "activity");
+    control(&f, p, "act_filter:me");
+    assert!(!node(&inspect(&f, p), "directory_items", "act_empty_show_all").is_null());
+    control(&f, p, "act_empty_show_all");
+    let s = inspect(&f, p);
+    assert_eq!(s["activity_filter"], "all");
+    let query = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "query_directory")
+        .unwrap();
+    assert_eq!(query["filter"], "all");
+}
+
+#[test]
 fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_composer() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1510,8 +1831,13 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["hubs"][0]["human_paused"], true);
     assert_eq!(snapshot["hubs"][0]["human_about"], "Release approvals");
-    l.control("listen_human");
+    l.control("open_settings");
+    l.control("settings_tab:channels");
+    let paused_settings = l.until(|s| !node(s, "settings_items", "human_paused_banner").is_null());
+    assert_eq!(paused_settings["low_contrast_labels"], json!([]));
+    l.control("resume_human_channels");
     l.until(|s| node(s, "items", &row_id)["height"] == 78);
+    l.control("close_settings");
     assert_eq!(
         f.rows("SELECT about FROM local_listeners WHERE harness='human'")[0]["about"],
         "Release approvals"
@@ -3533,6 +3859,13 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
     );
     control(&f, p, "unpair_channel:channel");
     f.send(p, json!({"op":"settings","settings":cfg}));
+    assert!(node(
+        &inspect(&f, p),
+        "settings_items",
+        "channel_field:channel:account"
+    )
+    .is_null());
+    control(&f, p, "edit_user_channel:channel");
     assert_eq!(
         node(
             &inspect(&f, p),
@@ -5789,6 +6122,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     human["scoped_id"] = json!("local:alice-76e846d115ce642f");
     human["display_address"] = json!("@alice");
     human["host_name"] = json!("mac-studio.local");
+    human["channels"] = json!(["mac-studio.local"]);
     frame["listeners"] = json!([agent, human]);
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);

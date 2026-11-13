@@ -1,8 +1,10 @@
 use super::{
     auth::HubAuth,
+    config::repair_default_hub,
     hub::{HubEngine, HubServer},
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
     receiver::{detach_channel_expected, plugin_request, poll_listener},
+    registration::{distinct_label, is_generic_session_label},
     state::LocalState,
     transport::HubClient,
 };
@@ -148,36 +150,6 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     }
 }
 
-fn repair_default_hub(v: &mut Value) {
-    let hubs = v["hubs"].as_object();
-    let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
-    let current = v["default_hub"]
-        .as_str()
-        .or_else(|| v["defaultHub"].as_str())
-        .filter(|name| hubs.and_then(|h| h.get(*name)).is_some_and(enabled));
-    let fallback = current
-        .or_else(|| {
-            let hubs = hubs?;
-            hubs.get_key_value("local")
-                .filter(|(_, cfg)| enabled(cfg))
-                .map(|(name, _)| name.as_str())
-                .or_else(|| {
-                    hubs.iter()
-                        .filter(|(_, cfg)| enabled(cfg))
-                        .map(|(name, _)| name.as_str())
-                        .min()
-                })
-                .or_else(|| hubs.get_key_value("local").map(|(name, _)| name.as_str()))
-                .or_else(|| hubs.keys().map(String::as_str).min())
-        })
-        .unwrap_or("local")
-        .to_string();
-    if let Some(config) = v.as_object_mut() {
-        config.insert("default_hub".into(), json!(fallback));
-        config.remove("defaultHub");
-    }
-}
-
 // Presentation must cover local registrations before the asynchronous directory
 // cache catches up. Cached Hub rows retain their lease and attachment metadata.
 fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
@@ -207,25 +179,6 @@ fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
     }
     peers
 }
-fn is_generic_session_label(label: &str, user: &str, home_basename: &str) -> bool {
-    let label = label.trim();
-    let identity = label.strip_prefix('@').unwrap_or(label);
-    label.is_empty()
-        || identity.eq_ignore_ascii_case(user)
-        || identity.eq_ignore_ascii_case(home_basename)
-        || [
-            "agent",
-            "agent session",
-            "session",
-            "cli session",
-            "human",
-            "human node",
-            "human channel",
-        ]
-        .iter()
-        .any(|placeholder| label.eq_ignore_ascii_case(placeholder))
-}
-
 fn default_session_title(
     caller: &Value,
     home: &std::path::Path,
@@ -244,14 +197,9 @@ fn default_session_title(
         return raw.to_owned();
     }
     let about = about.trim();
-    if !is_generic_session_label(about, user, home_basename)
-        && !about.eq_ignore_ascii_case(title)
-        && !["coding session", "human receiver"].contains(&about.to_lowercase().as_str())
-    {
-        about.to_owned()
-    } else {
-        harness_name.to_owned()
-    }
+    distinct_label(about, title, user, home_basename)
+        .unwrap_or(harness_name)
+        .to_owned()
 }
 
 fn directory_identity(row: &Value) -> (String, String, String, String) {
@@ -1917,16 +1865,7 @@ impl DaemonService {
             let (due, observed_gen) = {
                 let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
                 (
-                    cached.value["status"] == "loading"
-                        || (cached.retry_at <= Instant::now()
-                            && (cached.value["status"] == "error"
-                                || cached.value["channels"].as_array().is_some_and(|channels| {
-                                    channels.iter().any(|ch| {
-                                        matches!(string(ch, "status"), "pairing_pending" | "error")
-                                            || ch["pairing_pending"] == true
-                                            || ch["pairing_code"].is_string()
-                                    })
-                                }))),
+                    cached.value["status"] == "loading" || cached.retry_at <= Instant::now(),
                     cached.completed_gen,
                 )
             };
@@ -2353,23 +2292,11 @@ impl DaemonService {
                     .cloned()
                     .unwrap_or(Value::Null);
             }
-            let human = self
-                .state
-                .db
-                .query(
-                    "SELECT * FROM local_listeners WHERE hub=? AND harness='human'",
-                    &[item["name"].clone()],
-                )
-                .unwrap_or_default()
-                .into_iter()
-                .find(|row| {
-                    self.slots.get(string(item, "name")).is_some_and(|slot| {
-                        super::auth::principal_ids_equal(
-                            string(row, "principal_id"),
-                            string(&slot.identity, "principal_id"),
-                        )
-                    })
-                });
+            let human = self.slots.get(string(item, "name")).and_then(|slot| {
+                super::registration::local_node(&self.state, slot, "human", "default")
+                    .ok()
+                    .flatten()
+            });
             item["human_paused"] = json!(human
                 .as_ref()
                 .is_some_and(|row| row["status"] == "UNLISTENED"));
@@ -2562,7 +2489,11 @@ impl DaemonService {
                     .iter()
                     .find(|peer| peer["listener_id"] == row["listener_id"])
                 {
-                    row["channels"] = self.peer_dto(string(row, "hub"), peer)["channels"].clone();
+                    let mut peer = peer.clone();
+                    if let Some(channels) = peer["channels"].as_object_mut() {
+                        channels.remove(&format!("{}:human", self.host_id));
+                    }
+                    row["channels"] = self.peer_dto(string(row, "hub"), &peer)["channels"].clone();
                 }
             }
             row["custom_title"] = json!(self
@@ -3642,9 +3573,9 @@ impl DaemonService {
                         )?;
                     }
                     self.mutate_config(|v| {
-                        v["defaultHub"] = json!("local");
+                        v["default_hub"] = json!("local");
                         if let Some(object) = v.as_object_mut() {
-                            object.remove("default_hub");
+                            object.remove("defaultHub");
                         }
                         v["hubs"] = json!({});
                         Ok(())

@@ -6,6 +6,36 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+pub fn repair_default_hub(v: &mut Value) {
+    let hubs = v["hubs"].as_object();
+    let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
+    let current = v["default_hub"]
+        .as_str()
+        .or_else(|| v["defaultHub"].as_str())
+        .filter(|name| hubs.and_then(|h| h.get(*name)).is_some_and(enabled));
+    let fallback = current
+        .or_else(|| {
+            let hubs = hubs?;
+            hubs.get_key_value("local")
+                .filter(|(_, cfg)| enabled(cfg))
+                .map(|(name, _)| name.as_str())
+                .or_else(|| {
+                    hubs.iter()
+                        .filter(|(_, cfg)| enabled(cfg))
+                        .map(|(name, _)| name.as_str())
+                        .min()
+                })
+                .or_else(|| hubs.get_key_value("local").map(|(name, _)| name.as_str()))
+                .or_else(|| hubs.keys().map(String::as_str).min())
+        })
+        .unwrap_or("local")
+        .to_string();
+    if let Some(config) = v.as_object_mut() {
+        config.insert("default_hub".into(), json!(fallback));
+        config.remove("defaultHub");
+    }
+}
+
 static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn absolute_path(path: &Path) -> Result<PathBuf, String> {

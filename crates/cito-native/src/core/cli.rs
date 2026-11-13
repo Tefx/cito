@@ -347,6 +347,12 @@ mod tests {
                 json!("Backend API"),
             ),
             ("unlisten", vec!["--all"], "all", json!(true)),
+            (
+                "unlisten",
+                vec!["--all", "--hub", "work"],
+                "hub",
+                json!("work"),
+            ),
         ] {
             let (input, _) = parse_cli(
                 cmd,

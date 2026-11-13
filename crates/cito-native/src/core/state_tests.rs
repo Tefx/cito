@@ -70,17 +70,29 @@ fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() ->
 fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("pending", 1)?;
-    f.state.db.execute("UPDATE local_signals SET from_user='bob',from_harness='sender-app',from_listener_id='c_abcdef123456',from_title='Review'",&[])?;
+    f.state.db.execute("UPDATE local_signals SET from_user='bob',from_harness='sender-app',from_listener_id='bob-abcdef1234567890',from_title='Review'",&[])?;
     for query in [
         "@bob",
         "sender-app",
         "agent",
-        "c_abcdef123456",
+        "bob-abcdef1234567890",
         "bob/sender-app#abcd",
-        "alice/agent#1",
+        "c_1",
     ] {
         assert_eq!(f.state.query_activity("all", query)?.1, 1, "{query}");
     }
+    f.state.db.execute("UPDATE local_signals SET hub='work',from_user='Alice.Smith',from_harness='pi',from_listener_id='alice-smith-abcdef1234567890'", &[])?;
+    for query in [
+        "alice-smith/pi#abcd",
+        "work:alice-smith/pi#abcd",
+        "work:alice-smith/pi#abcdef1234567890",
+    ] {
+        let (rows, total, unread) = f.state.query_activity("all", query)?;
+        assert_eq!((rows.len(), total, unread), (1, 1, 1), "{query}");
+    }
+    f.state
+        .db
+        .execute("UPDATE local_signals SET hub='local'", &[])?;
     let batch = f.state.claim_wake_batch("local", "c_1")?;
     f.state.finish_wake_batch(
         &f.listener()?,
