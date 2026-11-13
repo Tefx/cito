@@ -234,13 +234,13 @@ fn register_locked(
             title if harness == "human" && title.trim().is_empty() => "Human",
             title => title,
         });
-    let local = local_node(state, client, harness, session)?;
-    let mut id = local
+    let initial_local = local_node(state, client, harness, session)?;
+    let mut id = initial_local
         .as_ref()
         .map(|row| string(row, "listener_id").to_string())
         .unwrap_or_else(|| listener_id(string(&client.identity, "principal_id"), harness, session));
     let mut initial_remote = client.kv_get(&id)?;
-    if local.is_none() && initial_remote.is_none() {
+    if initial_local.is_none() && initial_remote.is_none() {
         for legacy in listener_id_candidates(&client.identity, harness, session) {
             if legacy == id {
                 continue;
@@ -255,7 +255,7 @@ fn register_locked(
     let tag = args
         .get("tag")
         .cloned()
-        .or_else(|| local.as_ref().map(|row| row["tag"].clone()))
+        .or_else(|| initial_local.as_ref().map(|row| row["tag"].clone()))
         .unwrap_or(Value::Null);
     let public = public_listener_id(string(&client.identity, "owner_user"), &id);
     let channel = format!("{host_id}:{harness}");
@@ -299,6 +299,7 @@ fn register_locked(
         } else {
             about
         };
+        let local = local_node(state, client, harness, session)?;
         let scope = args["scope"]
             .as_str()
             .or_else(|| local.as_ref().and_then(|row| row["scope"].as_str()))
@@ -388,19 +389,27 @@ fn register_locked(
             Err(error) if error.starts_with("10071:") => continue,
             Err(error) => return Err(error),
         }
-        state.db.transaction(|connection| {
+        let committed = state.db.transaction(|connection| {
             // Close precedes profile fencing under this same database mutex.
             if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("NATS_UNAVAILABLE: Hub disconnected during registration".into());
             }
+            // The remote CAS cannot authorize reuse after a concurrent local revocation.
+            if same_binding.is_some() && connection.query(
+                "SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?",
+                &[json!(hub), json!(id), json!(generation), json!(owner)],
+            )?.is_empty() { return Ok(false); }
             let changed = connection.execute(
                 "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET consecutive_probe_failures=CASE WHEN status!='ACTIVE' OR owner_token!=excluded.owner_token OR COALESCE(endpoint_pid,-1)!=COALESCE(excluded.endpoint_pid,-1) THEN 0 ELSE consecutive_probe_failures END,public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(generation),json!(owner)],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
             connection.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=?", &[client.config["url"].clone(),json!(hub),json!(id)])?;
-            Ok(())
+            Ok(true)
         })?;
+        if !committed {
+            continue;
+        }
         return Ok(
             json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
         );
@@ -542,6 +551,44 @@ mod tests {
                 .ok_or("Missing probed replacement")?;
             assert_eq!(probed["consecutive_probe_failures"], 1);
             assert_eq!(probed["status"], "ACTIVE");
+            // Hold an independent SQLite writer so revocation lands after the remote
+            // CAS but before registration can acquire its local write transaction.
+            let writer = super::super::database::Database::open(&root.join("state/state.sqlite"))?;
+            let replacement = std::thread::scope(|scope| -> Result<Value, String> {
+                let pending=writer.transaction(|connection| {
+                    let pending=scope.spawn(||register_listener(&reopened,&client,"host",&json!({"about":"Concurrent refresh"}),&caller));
+                    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
+                    loop {
+                        if client.kv_get(&id)?.is_some_and(|(remote,_)|remote["about"]=="Concurrent refresh") { break; }
+                        if std::time::Instant::now()>=deadline { return Err("Registration did not publish its remote CAS".into()); }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    assert_eq!(connection.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?", &[json!(now_ms()),json!("work"),json!(id),probed["binding_generation"].clone(),probed["owner_token"].clone()])?,1);
+                    Ok(pending)
+                })?;
+                pending.join().map_err(|_| "Registration worker panicked")?
+            })?;
+            let final_row = reopened
+                .listener("work", &id)?
+                .ok_or("Missing transaction-fenced replacement")?;
+            assert_eq!(final_row["status"], "ACTIVE");
+            assert!(
+                replacement["binding_generation"].as_u64() > probed["binding_generation"].as_u64()
+            );
+            assert_ne!(final_row["owner_token"], probed["owner_token"]);
+            let before_detach = client.kv_get(&id)?;
+            let stale = super::super::receiver::detach_channel_expected(
+                &client,
+                &id,
+                "host:fixture",
+                &probed,
+            );
+            assert!(stale.is_err_and(|error| error.starts_with("STALE_GENERATION:")));
+            assert_eq!(
+                client.kv_get(&id)?,
+                before_detach,
+                "An old revocation cannot detach the retried binding"
+            );
             Ok(())
         })();
         engine.shutdown();

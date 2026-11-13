@@ -515,6 +515,65 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
 
 #[test]
 fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> Result<(), String> {
+    for probe in [true, false] {
+        let f = Fixture::new()?;
+        f.seed("serialized")?;
+        let response = if probe {
+            "print(json.dumps({'ok':True,'status':'closed_definitive'}))"
+        } else {
+            "print(json.dumps({'ok':True,'outcome':'session_switched'}))"
+        };
+        let body = WAIT.replace(
+            "print(json.dumps({'ok':True,'outcome':'delivered'}))",
+            response,
+        );
+        let plugin = f.plugin(&body);
+        let id = string(&f.row, "listener_id");
+        let writer = f.hub_db()?;
+        std::thread::scope(|scope| -> Result<(), String> {
+            let terminal = scope.spawn(|| {
+                if probe {
+                    probe_listener(&f.state, &f.client, &f.row, &plugin, &f.dir)
+                } else {
+                    f.dispatch(&plugin)
+                }
+            });
+            wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
+            // Block the remote detach after local revocation, without holding any
+            // local-state or registration mutex in this controlling thread.
+            let registering=writer.transaction(|_| {
+                std::fs::write(f.dir.join("release"),b"revoke").map_err(|e|e.to_string())?;
+                wait_until(||f.state.listener("local",id).ok().flatten().is_some_and(|row|row["status"]=="UNLISTENED"),Duration::from_secs(3))?;
+                assert!(matches!(f.client.registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"Terminal revocation must hold registration authority through remote detach; probe={probe}");
+                Ok(scope.spawn(||register_listener(&f.state,&f.client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null,"repo":null,"branch":null}))))
+            })?;
+            terminal.join().map_err(|_| "Terminal worker panicked")??;
+            let replacement = registering
+                .join()
+                .map_err(|_| "Registration worker panicked")??;
+            let row = f
+                .state
+                .listener("local", id)?
+                .ok_or("Missing serialized replacement")?;
+            assert_eq!(row["status"], "ACTIVE");
+            assert!(
+                replacement["binding_generation"].as_u64() > f.row["binding_generation"].as_u64()
+            );
+            assert_ne!(row["owner_token"], f.row["owner_token"]);
+            let remote = f
+                .client
+                .kv_get(id)?
+                .ok_or("Missing serialized remote binding")?
+                .0;
+            assert_eq!(remote["channels"]["host:fixture"]["state"], "ACTIVE");
+            assert_eq!(
+                remote["channels"]["host:fixture"]["owner_token"],
+                row["owner_token"]
+            );
+            Ok(())
+        })?;
+        child_gone(&f)?;
+    }
     let f = Fixture::new()?;
     f.seed("s")?;
     let worker = f.worker(f.plugin(&WAIT.replace("'delivered'", "'session_switched'")));

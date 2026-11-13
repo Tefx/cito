@@ -277,17 +277,29 @@ pub fn probe_listener(
         status,
         "switched" | "closed_definitive" | "session_switched"
     ) || failures >= 3;
-    local.db.transaction(|c| {
+    // Never hold the local database mutex while waiting for registration authority.
+    let _registration = if revoke {
+        Some(
+            client
+                .registration
+                .lock()
+                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?,
+        )
+    } else {
+        None
+    };
+    let revoked = local.db.transaction(|c| {
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
             let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
             if changed > 0 {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
             }
+            return Ok(changed > 0);
         }
-        Ok(())
+        Ok(false)
     })?;
-    if revoke {
+    if revoked {
         let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
         let _ = detach_channel_expected(client, string(row, "listener_id"), &channel, row);
     }
@@ -429,7 +441,11 @@ fn dispatch_listener(
                     }
                 }
                 "session_switched" => {
-                    // Finish and revoke locally before the remote detach can race a rebind.
+                    // Serialize terminal revocation and detach with registration.
+                    let _registration = client
+                        .registration
+                        .lock()
+                        .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
                     local.finish_wake_batch(
                         row,
                         first,

@@ -2142,7 +2142,7 @@ impl DaemonService {
             }
             for (hub, slot) in &hubs {
                 let rows = self.state.db.query(
-                    "SELECT status, principal_id, updated_at FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
+                    "SELECT status, principal_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
                     &[
                         json!(hub),
                         candidate["harness"].clone(),
@@ -2158,14 +2158,16 @@ impl DaemonService {
                 }) {
                     continue;
                 }
-                // A probe can revoke after the pass snapshot while setup is inspected.
-                if rows.iter().any(|row| {
-                    row["status"] == "UNLISTENED"
-                        && candidate["discovered_at"].as_u64().unwrap_or(0)
-                            <= row["updated_at"].as_u64().unwrap_or(0)
-                }) {
+                // Recheck all Hubs after setup and each preceding destination registration.
+                let live_revoked_at = self.state.db.query(
+                    "SELECT MAX(updated_at) AS revoked_at FROM local_listeners WHERE status='UNLISTENED' AND harness=? AND session_id=?",
+                    &[json!(key.0), json!(key.1)],
+                )?.first().and_then(|row| row["revoked_at"].as_u64()).unwrap_or(0);
+                if live_revoked_at > 0
+                    && candidate["discovered_at"].as_u64().unwrap_or(0) <= live_revoked_at
+                {
                     stale_harnesses.insert(key.0.clone());
-                    continue;
+                    break;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
                 if let Err(error) =
@@ -5611,6 +5613,111 @@ mod tests {
             let activity = service.activity_dto(vec![json!({"hub":"local","listener_id":"missing","from_listener_id":"alice-abcd123456789012","from_user":"alice","from_harness":"fixture","message":"hello"})]);
             assert_eq!(activity[0]["from_display_address"], "alice/fixture#abcd");
             assert!(activity[0]["target_display_address"].is_null());
+            // Exercise late revocation in both destination iteration orders without
+            // a network server or sleeps: setup inspection performs the local transition.
+            let other = Arc::new(HubEngine::open(&dir.join("other-hub"))?);
+            let fanout_result = (|| -> Result<(), String> {
+                service.slots.insert(
+                    "work".into(),
+                    HubClient::new(
+                        "work".into(),
+                        json!({"url":"local://"}),
+                        "alice",
+                        Some(other.clone()),
+                    ),
+                );
+                let script = dir.join("fixture.py");
+                fs::write(&script,r#"# purpose: drive discovery and late setup-time revocation in a unit sandbox.
+# usage: python3 fixture.py with one NDJSON plugin request.
+# effects: reads candidate/revocation files and updates only the sandbox state database.
+# requires: Python 3, sqlite3, and a pre-created local state.
+import json, pathlib, sqlite3, sys, time
+root = pathlib.Path(__file__).parent
+request = json.loads(sys.stdin.readline())
+result = dict(ok=True)
+if request['op'] == 'discover_sessions':
+    result['sessions'] = [json.loads((root / 'candidate.json').read_text())]
+elif request['op'] == 'setup_inspect':
+    marker = root / 'revoke.json'
+    if marker.exists():
+        revoke = json.loads(marker.read_text())
+        with sqlite3.connect(root / 'state' / 'state.sqlite') as db:
+            db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
+    result.update(installed=True, configured=True, paths=[])
+print(json.dumps(result), flush=True)
+"#).map_err(|e|e.to_string())?;
+                service
+                    .plugins
+                    .plugins
+                    .push(crate::plugins::PluginDescriptor {
+                        id: "fixture".into(),
+                        kind: "agent-harness".into(),
+                        display_name: "Fixture".into(),
+                        tier: "test".into(),
+                        order: 0,
+                        sf_symbol: String::new(),
+                        tint: String::new(),
+                        cli_flag: false,
+                        plugin_dir: dir.clone(),
+                        is_builtin: false,
+                        command: vec![
+                            "/usr/bin/python3".into(),
+                            script.to_string_lossy().into_owned(),
+                        ],
+                        channel_env: None,
+                        fields: vec![],
+                        post_setup_hint: None,
+                        post_disconnect_hint: None,
+                    });
+                service.session_activity = Some(
+                    crate::core::session_activity::SessionActivity::new(&config, &service.plugins),
+                );
+                let order: Vec<_> = service.slots.keys().cloned().collect();
+                for revoked_hub in order {
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(false);
+                    }
+                    let session = format!("fanout-{revoked_hub}");
+                    let candidate = json!({"harness":"fixture","session_id":session,"title":"Review","cwd":"","endpoint_pid":std::process::id()});
+                    fs::write(dir.join("candidate.json"), candidate.to_string())
+                        .map_err(|e| e.to_string())?;
+                    service.listen(&revoked_hub, &json!({"about":"Review"}), &candidate)?;
+                    service.refresh_available()?;
+                    if !service.session_activity.as_ref().is_some_and(|activity| {
+                        activity
+                            .candidates()
+                            .any(|row| row["session_id"] == session)
+                    }) {
+                        return Err("Expected a confirmed cached candidate".into());
+                    }
+                    fs::write(
+                        dir.join("revoke.json"),
+                        json!({"hub":revoked_hub,"session_id":session}).to_string(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(true);
+                    }
+                    service.auto_listen()?;
+                    let rows=service.state.db.query("SELECT hub,status FROM local_listeners WHERE harness='fixture' AND session_id=?",&[json!(session)])?;
+                    if rows.len() != 1
+                        || rows[0]["status"] != "UNLISTENED"
+                        || rows[0]["hub"] != revoked_hub
+                    {
+                        return Err(format!(
+                            "Late revocation must veto the entire candidate fan-out: {rows:?}"
+                        ));
+                    }
+                    fs::remove_file(dir.join("revoke.json")).map_err(|e| e.to_string())?;
+                    service.auto_listen()?;
+                    if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=0 { return Err("Stale presentation cannot regain enrollment authority".into()); }
+                    service.refresh_available()?;
+                    if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=2 { return Err("New discovery must restore enrollment on both Hubs".into()); }
+                }
+                Ok(())
+            })();
+            other.shutdown();
+            fanout_result?;
             Ok(())
         })();
         service.shutdown();
