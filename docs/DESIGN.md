@@ -2049,6 +2049,76 @@ Stage 13 replaces ad-hoc coordinate patching and fragmented backend state/retry 
 - Update existing assertions in `crates/cito-native/tests/support/{ui.rs,daemon.rs,plugins.rs}` in place; do **NOT** add new heavy multi-process E2E test functions.
 - Run a **fast single-pass `contract-and-simplicity` review & fix**, verify `cargo test --workspace && cargo build --release`, push to `origin/main` (without creating a release tag), and install on both Macs.
 
+---
+
+## 24. Stage 22 (V39): Notification Banner Readability, Human-Channel Routing Clarity, Pairing-First Telegram Flow & Cross-Surface Lifecycle Closure (`U1`–`U6`)
+
+This specification consolidates user feedback from dual-Mac live testing, `@uiux-designer` recommendations, and multi-auditor full-repository verification (`2ff4a9c`) into six orthogonal mechanisms (`U1`–`U6`).
+
+### 24.1 Binding Contract (`MUST`)
+
+#### 1. `U1` — `BannerWindow` Readability, Surface Material & Independent Lifecycle (`src/macos/cito-ui.swift`, `crates/cito-native/src/core/daemon.rs`, `crates/cito-native/tests/support/ui.rs`)
+- **Basis**: `NSVisualEffectView(material: .hudWindow)` stays dark charcoal in Light Mode (`.aqua`) while adaptive `.labelColor` and `CitoPalette` resolve dark foreground colors, producing dark text on a dark HUD backdrop that `renderPNG`/`inspectMenu` previously masked by substituting `CitoPalette.surfaceBackground`. Normal live messages also falsely rendered warning amber + redundant `"Notification"` pills with no independent close control or hover pause.
+- **Contract**:
+  1. Replace `.hudWindow` on `BannerWindow` with `NSVisualEffectView(material: .popover)` composited with `CitoPalette.surfaceBackground` and a `1pt` adaptive border (`labelColor @ 0.22`). Blend `CitoPalette.warningSurface` against `CitoPalette.surfaceBackground` instead of `NSColor.textBackgroundColor`.
+  2. Convert `accentBar` and `iconBadge` to `SurfaceView` (and support `wantsUpdateLayer`/`updateLayer` in `ClickView`) so appearance changes update all `CGColor`s consistently. Update `inspectMenu()`/`renderPNG()` assertions so they do not mask live material/appearance mismatches.
+  3. Compact the banner to `380 × 112 pt` (`cornerRadius: 14`) with a unified `x = 54` text keyline and real target/sender badge (`30 × 30` at `(14, 68)`):
+     - Suppress warning amber and the redundant `"Notification"` pill for normal single live deliveries (`effective_wake && displayedCount == 1`); reserve amber for deferred/held states (`Held`/`Queued`) and show a neutral `×N` badge only when `displayedCount > 1` (displaying the latest message preview plus aggregate count).
+     - **Line 1 (`12.5pt .semibold`)**: `@sender → Target · host/session` (omitting redundant `"Cito · "` prefix and duplicate session names);
+     - **Line 2 (`13pt .regular .labelColor`, 2 lines max)**: primary message body;
+     - **Line 3 (`11pt .medium`)**: `CitoPalette.secondaryText` at rest, transitioning to `CitoPalette.infoText` on card hover (`Reply in Cito ↩` / `View in Activity ↗`).
+  4. Provide an independent `20 × 20` close (`×`) button (`ClickView.hitTest` must pass hits through to child buttons) calling `hide(clicked: false)` without opening `Activity`/`Directory` or marking the signal read. Pause the auto-dismiss timer while the pointer hovers over the banner and resume a short timeout on mouse exit.
+  5. When `set_desktop_banner(enabled: false)` executes, hide any currently visible banner immediately and guard queued receiver emissions against the latest `desktop_banner_enabled` state.
+
+#### 2. `U2` — Orthogonal Human Pause vs. Global Desktop Banner Mute & Honest Channel Projection (`crates/cito-native/src/core/daemon.rs`, `hub.rs`, `src/macos/cito-ui.swift`)
+- **Basis**: `human_paused` pauses all Hub-level human delivery (including Telegram and inbound `cito_send` reachability), whereas `desktop_banner_enabled` mutes local macOS banners for both human messages and agent wakes while keeping `You (@user)`, Telegram, and `Activity` active. `DaemonService::snapshot()` previously left `listener.channels` unpopulated and Swift stripped `"Mac"`, making both states opaque.
+- **Contract**:
+  1. Preserve the orthogonal semantics: `You (@user) [ Pause ]` = Hub-wide DND (`human_paused`, pausing Mac & Telegram); `Mac Desktop Banner` = local Mac popup mute (`desktop_banner_enabled`, silencing both human DM and agent wake popups while Telegram & `Activity` continue normally).
+  2. Populate `channels` on the `human` listener row in `DaemonService::snapshot()`, and render the true live delivery summary on the `You (@user)` card in `cardMenu` (e.g., `Banner · Telegram`, `Telegram only · Banner off`, `Desktop banner`, or `Banner off · Inbox only`).
+  3. Expose a compact menu-bar toggle (`bell.fill` / `bell.slash.fill`) in `cardMenu` wired to `set_desktop_banner` with an explicit scope tooltip, add a clear scope subtitle on `Settings → Human Channels → Mac Desktop Banner`, and surface an explicit Hub-paused banner with a 1-click `Resume` button in `Settings → Human Channels` whenever `hub.human_paused == true`.
+
+#### 3. `U3` — Pairing-First Telegram Onboarding, Auto-Copy, Health Reporting & Unambiguous Reply Routing (`plugins/telegram/native.rs`, `plugins/telegram/plugin.json`, `crates/cito-native/src/core/hub.rs`, `daemon.rs`, `src/macos/cito-ui.swift`)
+- **Basis**: `plugins/telegram/native.rs` already fetches `bot_username`, yet `hub.rs` drops it and `cito-ui.swift` neither auto-copies `/start <code>` nor provides a `t.me` deep link, while foregrounding a manual `Chat ID` + `Save` form that clears `_external_chat_id` / `_external_user_id` and breaks all inbound replies. In addition, polling errors only log to `stderr`, remote re-pairing does not surface `pairing_pending`, and multi-principal or unthreaded replies are ambiguous.
+- **Contract**:
+  1. Preserve `bot_username` and emit a plugin-provided `pairing_url` (`https://t.me/<bot_username>?start=<code>`) through `hub.rs` (`human_channel_pair_start` and `channel_list`) into UI `pair_code` / channel payloads.
+  2. Include `request_id` on `pair_code` frames; when `cito-ui.swift` receives a `pair_code` matching the active pending pairing request, automatically copy `pairing_command` (`/start <code>`) to the pasteboard with immediate confirmation (`✓ Copied`) and render a `.prominent` **`Open in Telegram ↗`** button (`NSWorkspace.shared.open`) alongside `Copy Command` and `Cancel`.
+  3. Hide the `Chat ID` input field and `Save` button from the default pairing-capable Telegram view (`Pair Account…` becomes the sole `.prominent` unconfigured CTA), tucking manual `Chat ID` entry behind a collapsed disclosure (`Enter Chat ID manually…`). If a private (positive) `chatId` is saved manually, populate `_external_chat_id` and `_external_user_id` symmetrically (or label negative/group IDs as outbound-only). Disable `Send Test` when no personal destination is configured/entered.
+  4. Report `getUpdates` polling failures (including HTTP 409 webhook/poller conflicts and invalid credentials) and `effect_unknown` delivery stalls as actionable channel health status/details without auto-deleting user webhooks or retrying `effect_unknown` sends.
+  5. Expose pending unconsumed pairing codes on `channel_list` even when a prior binding exists so remote `Re-pair…` auto-refreshes to completion or expiry while keeping the existing binding working until redemption succeeds.
+  6. Enforce 1:1 external identity ownership per `(hub, plugin_id, _external_chat_id, _external_user_id)` on `redeem` (rejecting binding a second Cito principal without unpairing the first). When an unthreaded Telegram message (`reply_to_message` absent) arrives, auto-route only if exactly one distinct sender has a recent delivery; if multiple recent senders exist, ask the user to reply to the specific message instead of guessing.
+
+#### 4. `U4` — `Activity` / `Directory` Scope Conservation, Search & Metadata Integrity (`crates/cito-native/src/core/daemon.rs`, `state.rs`, `hub.rs`, `src/macos/cito-ui.swift`)
+- **Basis**: `Read All` and `Clear` under `For Me` currently acknowledge and delete unread signals addressed to agent sessions (`pi`, `codex`, `claude`); `Activity` rows omit sender session titles, show an `18pt` dead band above the composer, fail `@user` searches, and misreport empty search results; `hub.rs:attach()` omits `display_name`/`display_label`, causing `"Human · "` dangling separators.
+- **Contract**:
+  1. Scope `ack_signals` and `clear_activity_history` to the active `filter` (`"me"` affects only `target_harness == "human"`). Even under `"all"`, clearing log history must not send Hub `acked_at_ms` for pending/undelivered agent signals.
+  2. Display sender session titles on `Activity` Line 1 when distinct from `@from_user` (`@bob (Review session) → You · Just now`), collapse `directory_composer` to `44pt` when `composerError` is empty (expanding to `62pt` only on error), support `@user` and address/harness matching in `query_activity` and `applyActivityFilter`, and show `"No matching messages"` + `Reset Search` when a non-empty Activity query returns 0 rows.
+  3. Populate `display_name` and `display_label` in `hub.rs:attach()`, and join non-empty `DirectoryPeerCellView` subtitle segments cleanly without trailing `" · "`.
+
+#### 5. `U5` — `Menu` / `Settings` Action Scope, Form Symmetry & Config Hygiene (`crates/cito-native/src/core/daemon.rs`, `setup.rs`, `config.rs`, `src/macos/cito-ui.swift`)
+- **Basis**: `close_settings` leaks 1Hz remote polling forever; `Stop All` acts across all Hubs; `header_hub_strip` first-click and `Disconnect` can hide/disable the last Hub; `editingPersonalChannel`, `Share This Mac`, `Clear Token`, `Disconnect All…`, inline rename, and Hub save drafts exhibit asymmetric edit/cancel/config-persistence bugs.
+- **Contract**:
+  1. Clear `self.active_settings_hub = None` on `"close_settings"` in `daemon.rs`, and pass the configured principal for `"local"` when disabled.
+  2. Rename `Stop All` to `Pause All` and scope both its visibility and `unlisten_all` to the active `hub`.
+  3. Compare `effectiveTargetHub == hub.name` on `header_hub_strip` click, prevent disabling the last remaining enabled Hub in `Settings` or `cardMenu`, and avoid permanent `enabled = false` disappearance from a connected Hub's menu drawer.
+  4. Align `AVAILABLE SESSIONS` child text indentation to `x = 44`, reset `renamingSessionKey` in `menuDidClose(_:)`, add `Cancel` + `Escape` handling to `editingPersonalChannel`, submit active `settingsPanel` sections on `Return`, stop `Clear Token` from resetting personal bindings (`reset_user: false`), stop `Disconnect All…` from unchecking `Start Cito at Login` when `purge_data == false`, apply/preserve `host_hub_port` drafts across `Share`/`Access` toggles and disable `Apply` when unchanged, expose raw token copy in `Access: Token` mode and auto-parse invite commands/JSON pasted into `Add Hub`, preserve `editingOriginalHub` when `addHubName` is cleared, explicitly clear `user` when `Username` is emptied on edit, strip `request_id`/`client_id` before saving `hubs` in `config.json`, and canonicalize OIDC keys (`issuer`, `clientId`).
+
+#### 6. `U6` — Cross-Surface Visual Contrast, Control Primitives & Accessibility (`src/macos/cito-ui.swift`)
+- **Contract**:
+  1. Ensure symbol badge fills (`human` green, agent tints) maintain $\ge 3.0:1$ contrast against white SF Symbols in both Light and Dark modes (fixing the `2.14:1` Human badge failure).
+  2. Render `!isEnabled` dimming consistently in `MenuControl.applyVisualState()`, use non-button badge styling for read-only labels (`To: bob/pi#8a4f`), style `Directory` copy chips as `.subtleHeader`, style `[ ● Sharing ]` as `.neutral` with a status dot (leaving `[ Copy Invite Code ]` as the sole `.prominent` CTA in that card), and update `Settings → Telegram` header status to `"○ Account Not Paired"` when only the gateway is configured.
+  3. Standardize all recessed pill tracks to symmetric `2pt` padding (`trackHeight = pillHeight + 4`, `trackRadius = pillRadius + 2`), integrate `header_hub_strip` status dots into `MenuControl.layoutContents()` (white dot on `.prominent`), omit square `1pt` borders around bundled `pluginIconImage` badges, clip `renderPNG` to window `cornerRadius`, align `Activity` row action buttons with Line 1, and strip leading `"● "` bullets while setting explicit `accessibilityLabel`s on icon-only buttons.
+
+### 24.2 Verification & Release Policy (`MUST`)
+- Update existing unit, daemon, hub, plugin, and UI tests (`crates/cito-native/tests/support/{ui,daemon,plugins}.rs`, `crates/cito-native/tests/hub/cases.rs`) and `docs/DESIGN.md` in lockstep, adding discriminating counterfactual checks for `U1`–`U6`.
+- Refresh Light/Dark screenshots (`site/assets/screenshots/*.png`, including verifying live Light/Dark `.popover` rendering of `BannerWindow`).
+- Run `cargo fmt --all -- --check`, `cargo test --workspace`, and `cargo build --release` (0 warnings) after a fast `contract-and-simplicity` review & fix pass, and push `main` to `origin/main` (**do NOT create a release tag**).
+
+### 24.3 Implementation Notes & Hazard Map (`ADVISORY`)
+- Keep `daemon.rs:snapshot()` and `hub.rs:channel_list` lightweight without blocking the UI thread on remote network calls; prefer cached/local state projection for `You (@user)`'s `channels` array.
+- Never auto-delete an existing Telegram webhook on HTTP 409; surface diagnostic guidance so the user decides whether to revoke the external webhook or use a dedicated bot token.
+- Preserve compatibility for existing `ui.rs` test harness fixtures (`id: "channel"`) while gating Telegram's pairing-first hidden `Chat ID` behavior cleanly via manifest/UI rules.
+
+
 
 
 
