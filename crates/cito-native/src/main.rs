@@ -264,7 +264,7 @@ fn main() {
             });
             daemon::run_daemon(&config, &plugins);
         }
-        Some("listen" | "unlisten" | "find" | "send" | "inbox") => {
+        Some("listen" | "unlisten" | "rename" | "status" | "find" | "send" | "inbox") => {
             let (config, plugins) = load_native_config().unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1)

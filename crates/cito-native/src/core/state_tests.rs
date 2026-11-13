@@ -67,6 +67,56 @@ fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() ->
 }
 
 #[test]
+fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.seed("pending", 1)?;
+    f.state.db.execute("UPDATE local_signals SET from_user='bob',from_harness='sender-app',from_listener_id='c_abcdef123456',from_title='Review'",&[])?;
+    for query in [
+        "@bob",
+        "sender-app",
+        "agent",
+        "c_abcdef123456",
+        "bob/sender-app#abcd",
+        "alice/agent#1",
+    ] {
+        assert_eq!(f.state.query_activity("all", query)?.1, 1, "{query}");
+    }
+    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    f.state.finish_wake_batch(
+        &f.listener()?,
+        &batch[0],
+        "DISPATCHING",
+        None,
+        true,
+        true,
+        false,
+        false,
+    )?;
+    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    f.state
+        .db
+        .execute("UPDATE local_signals SET activity_hidden=1", &[])?;
+    assert_eq!(f.state.activity()?.1, 0);
+    assert_eq!(f.state.query_activity("all", "")?.1, 0);
+    let rows = f.rows()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["queue_written"], 1);
+    assert_eq!(rows[0]["queue_confirmed"], 1);
+    assert!(rows[0]["acknowledged_at_ms"].is_null());
+    f.state.finish_wake_batch(
+        &f.listener()?,
+        &batch[0],
+        "DISPATCHED",
+        None,
+        false,
+        false,
+        false,
+        false,
+    )?;
+    assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
+    Ok(())
+}
+#[test]
 fn activity_filters_before_paging_and_counts_full_matching_set() -> Result<(), String> {
     let f = Fixture::new()?;
     for i in 0..100 {
@@ -600,6 +650,31 @@ fn unlisten_racing_final_completion_cannot_business_ack_or_resurrect_dispatch() 
         .query("SELECT * FROM pending_hub_acks", &[])?
         .is_empty());
     assert!(f.listener()?["dispatcher_token"].is_null());
+    f.state.db.execute(
+        "UPDATE local_listeners SET status='ACTIVE',updated_at=1",
+        &[],
+    )?;
+    let active = f.listener()?;
+    assert!(f.state.pause_listener_for(&active)?);
+    let paused = f.listener()?;
+    assert_eq!(paused["status"], "UNLISTENED");
+    assert!(paused["updated_at"].as_u64().is_some_and(|stamp| stamp > 1));
+    assert!(!f
+        .state
+        .fence_listener_for(&active, "fenced_before_dispatch")?);
+    assert_eq!(
+        f.listener()?["updated_at"],
+        paused["updated_at"],
+        "A stale captured status cannot restamp a newer pause"
+    );
+    assert!(f
+        .state
+        .fence_listener_for(&paused, "fenced_before_dispatch")?);
+    assert_eq!(
+        f.listener()?["status"],
+        "FENCED_INACTIVE",
+        "Profile changes must still fence a retained pause"
+    );
     Ok(())
 }
 

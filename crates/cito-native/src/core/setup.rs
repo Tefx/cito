@@ -158,6 +158,21 @@ pub fn ensure_cli_shims_native(
     state_dir: &Path,
     plugins: &LoadedPlugins,
 ) -> Result<Vec<PathBuf>, String> {
+    ensure_plugins_staged(state_dir, plugins.plugins.iter().filter(|p| p.is_builtin))
+}
+
+/// Repair one app without changing any other app's staged installation.
+pub fn ensure_single_plugin_staged(
+    state_dir: &Path,
+    plugin: &PluginDescriptor,
+) -> Result<Vec<PathBuf>, String> {
+    ensure_plugins_staged(state_dir, std::iter::once(plugin).filter(|p| p.is_builtin))
+}
+
+fn ensure_plugins_staged<'a>(
+    state_dir: &Path,
+    plugins: impl Iterator<Item = &'a PluginDescriptor>,
+) -> Result<Vec<PathBuf>, String> {
     let bin_dir = state_dir.join("bin");
     fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
@@ -165,7 +180,7 @@ pub fn ensure_cli_shims_native(
     let exe_str = resolve_stable_package_root(&exe.to_string_lossy());
     let plugins_dir = staged_plugins_dir(state_dir);
     let mut written = Vec::new();
-    for plugin in plugins.plugins.iter().filter(|plugin| plugin.is_builtin) {
+    for plugin in plugins {
         let target = plugins_dir.join(&plugin.id);
         let bundled = resolve_bundled_plugin_dir(&plugin.id);
         let source = if plugin.is_builtin
@@ -981,6 +996,9 @@ pub fn run_setup_cli(args: &[String]) {
         let mut force = false;
         let mut json_output = false;
         let mut uninstall = false;
+        let mut invite: Option<String> = None;
+        let mut print_invite = false;
+        let mut disconnect_all = false;
         let mut purge_data = false;
         let mut set_default = false;
         let mut launch_at_login: Option<bool> = None;
@@ -1030,6 +1048,14 @@ pub fn run_setup_cli(args: &[String]) {
                 json_output = true;
             } else if arg == "--uninstall" {
                 uninstall = true;
+            } else if arg == "--invite" || arg.starts_with("--invite=") {
+                let (v, next_i) = read_val(arg, i, "--invite")?;
+                invite = Some(v);
+                i = next_i;
+            } else if arg == "--print-invite" {
+                print_invite = true;
+            } else if arg == "--disconnect-all" {
+                disconnect_all = true;
             } else if arg == "--purge-data" {
                 purge_data = true;
             } else if arg == "--default" {
@@ -1114,6 +1140,59 @@ pub fn run_setup_cli(args: &[String]) {
             return Err("--hub and --url must be specified together".to_string());
         }
 
+        if invite.is_some() || print_invite || disconnect_all {
+            if usize::from(invite.is_some())
+                + usize::from(print_invite)
+                + usize::from(disconnect_all)
+                != 1
+                || uninstall
+                || build_app
+                || status_only
+                || hub_name.is_some()
+                || share_hub.is_some()
+                || share_port.is_some()
+                || !enable_hubs.is_empty()
+                || !disable_hubs.is_empty()
+                || !remove_hubs.is_empty()
+                || !enable_harnesses.is_empty()
+                || !disable_harnesses.is_empty()
+                || launch_at_login.is_some()
+                || set_default
+                || (purge_data && !disconnect_all)
+            {
+                return Err("Invite and disconnect operations must be used separately from other setup operations".into());
+            }
+            let action = if let Some(invite) = invite {
+                json!({"op":"paste_hub_invite","invite":invite})
+            } else if print_invite {
+                json!({"op":"get_snapshot"})
+            } else {
+                json!({"op":"setup_disconnect_all","purge_data":purge_data})
+            };
+            if dry_run {
+                println!("{}", json!({"ok":true,"dry_run":true,"op":action["op"]}));
+                return Ok(None);
+            }
+            let (config, _) = crate::plugins::load_native_config()?;
+            crate::plugins::ensure_daemon(&config)?;
+            let result = super::cli::control_request(&config, &action)?;
+            if print_invite {
+                if result["settings"]["host_hub"]["enabled"] != true {
+                    return Err("Hub sharing is disabled".into());
+                }
+                let command = result["settings"]["host_hub"]["invite_command"]
+                    .as_str()
+                    .ok_or("Invite unavailable")?;
+                if json_output {
+                    println!("{}", json!({"ok":true,"invite_command":command}));
+                } else {
+                    println!("{command}");
+                }
+            } else {
+                println!("{result}");
+            }
+            return Ok(None);
+        }
         let raw_config = crate::plugins::read_config_text(&config_path)?;
         let (current_default, _, _) = try_normalize_existing_config(raw_config.as_deref())?;
         let plugins = crate::plugins::load_plugins_readonly(&state_dir);
@@ -1298,10 +1377,10 @@ pub fn run_setup_cli(args: &[String]) {
                 entry.insert("token".to_string(), json!(t.trim()));
             }
             if let Some(ref iss) = iss_norm {
-                entry.insert("oidcIssuer".to_string(), json!(iss));
+                entry.insert("issuer".to_string(), json!(iss));
             }
             if let Some(ref cid) = cid_norm {
-                entry.insert("oidcClientId".to_string(), json!(cid));
+                entry.insert("clientId".to_string(), json!(cid));
             }
             entry.insert("enabled".to_string(), json!(true));
             entry.insert("defaultScope".to_string(), json!(def_scope));
@@ -1362,15 +1441,17 @@ pub fn run_setup_cli(args: &[String]) {
                 if !(0..=65535).contains(&p) {
                     return Err("host_hub.port must be an integer in 0..65535".to_string());
                 }
-                let tok = prev
-                    .get("token")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .unwrap_or_else(|| random_hex(32));
                 prev.insert("enabled".into(), json!(en));
                 prev.insert("port".into(), json!(p));
-                prev.insert("token".into(), json!(tok));
+                if share_hub != Some(false) {
+                    let token = prev
+                        .get("token")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .unwrap_or_else(|| random_hex(32));
+                    prev.insert("token".into(), json!(token));
+                }
                 rest.insert("host_hub".to_string(), Value::Object(prev));
             }
 

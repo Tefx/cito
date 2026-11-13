@@ -1,4 +1,5 @@
 use super::support::*;
+use std::os::unix::net::UnixListener;
 
 #[test]
 fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
@@ -68,6 +69,91 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(probe["status"], "alive", "{probe}");
     }
+    // A live endpoint with a temporarily unavailable bridge must retain cached
+    // discovery rather than degrading to process-only or empty session results.
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let live = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", f.pid(first)));
+        drop(UnixListener::bind(&live).unwrap());
+        let failed = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(failed["ok"], false, "{id}: {failed}");
+        assert!(failed["sessions"].is_null());
+        if id == "pi" {
+            f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
+            let probe = f.plugin(
+                PI,
+                json!({"op":"probe","endpoint_pid":f.pid(first),"session_id":"live-session"}),
+            );
+            assert_eq!(probe["status"], "transient_error", "{probe}");
+            f.env.remove("CITO_PI_REQUIRE_BRIDGE");
+        }
+        fs::remove_file(&live).unwrap();
+        let listener = UnixListener::bind(&live).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
+                        let mut line = String::new();
+                        BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut line)
+                            .unwrap();
+                        assert_eq!(
+                            serde_json::from_str::<Value>(&line).unwrap()["op"],
+                            "identify"
+                        );
+                        stream.write_all(b"{\"ok\":false,\"error\":\"DELIVERY_FAILED\",\"message\":\"Cannot persist bridge identity\"}\n").unwrap();
+                        break;
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("Bridge fixture accept failed: {error}"),
+                }
+            }
+        });
+        let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
+        server.join().unwrap();
+        assert_eq!(rejected["ok"], false, "{id}: {rejected}");
+        assert!(rejected["sessions"].is_null());
+        assert!(rejected["message"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot persist bridge identity"));
+        fs::remove_file(live).unwrap();
+        let dead = f.state.join(format!("sockets/{id}-pid-{}.sock", i32::MAX));
+        drop(UnixListener::bind(&dead).unwrap());
+        let found = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(found["ok"], true, "{id}: {found}");
+        fs::remove_file(dead).unwrap();
+    }
+    fs::remove_dir(f.state.join("sockets")).unwrap();
+    fs::write(f.state.join("sockets"), "not a directory").unwrap();
+    for bin in [PI, CLAUDE] {
+        let failed = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(failed["ok"], false, "{failed}");
+        assert!(failed["sessions"].is_null());
+    }
+    fs::remove_file(f.state.join("sockets")).unwrap();
+    let settings_path = f.home.join(".pi/agent/settings.json");
+    let original_settings = fs::read(&settings_path).unwrap();
+    fs::write(&settings_path, "{").unwrap();
+    assert_eq!(
+        discover(&f)["ok"],
+        false,
+        "Setup inspection errors must not become empty discovery"
+    );
+    fs::write(settings_path, original_settings).unwrap();
     // Interactive discovery excludes background invocations, independently of caller resolution.
     let flags: &[&[&str]] = &[
         &["--mode", "rpc"],
@@ -468,15 +554,34 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     assert!(fs::read_to_string(&p).unwrap().contains(prefix));
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_remove"}))["ok"], true);
-    let text = fs::read_to_string(p).unwrap();
+    let text = fs::read_to_string(&p).unwrap();
     assert!(text.contains(prefix));
     assert!(!text.contains("KEEP ="));
     assert!(text.contains("[mcp_servers.other]"));
+    for command in ["cito-mcp", "/opt/cito/bin/cito-mcp"] {
+        for enabled in [true, false] {
+            fs::write(&p,format!("[mcp_servers.cito]\ncommand = {command:?}\nenabled = {enabled}\n[mcp_servers.cito.env]\nKEEP = \"retained\"\n")).unwrap();
+            assert_eq!(
+                f.plugin(CODEX, json!({"op":"setup_inspect"}))["configured"],
+                enabled
+            );
+            assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+            assert_eq!(
+                f.plugin(CODEX, json!({"op":"setup_inspect"}))["configured"],
+                true
+            );
+            assert!(fs::read_to_string(&p)
+                .unwrap()
+                .contains("KEEP = \"retained\""));
+            assert_eq!(f.plugin(CODEX, json!({"op":"setup_remove"}))["ok"], true);
+            assert!(!fs::read_to_string(&p).unwrap().contains("mcp_servers"));
+        }
+    }
 }
 #[test]
 fn codex_metadata_validation_and_sqlite_thread_projection() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let mut f = Fixture::new(json!({}));
     for meta in [
         json!({"openai/threadId":"thread-a"}),
         json!({"threadId":"thread-a"}),
@@ -511,6 +616,15 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         );
     }
     let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE metadata(key TEXT)", &[]).unwrap();
+    let absent_table = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","meta":{"threadId":"schema-pending"},"cwd":"/repo"}),
+    );
+    assert_eq!(
+        absent_table["caller"]["session_id"], "schema-pending",
+        "An absent threads table is not a database IO failure: {absent_table}"
+    );
     db.execute("CREATE TABLE threads(id TEXT, cwd TEXT, archived INTEGER, recency_at_ms INTEGER, title TEXT, git_branch TEXT, git_origin_url TEXT); INSERT INTO threads VALUES('active','/repo',0,200,'Active work','main','git@example.com:acme/service.git'),('archived','/repo',1,300,'Archived','old','https://example.com/acme/service.git')",&[]).unwrap();
     let result = f.plugin(
         CODEX,
@@ -537,6 +651,135 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         f.plugin(CODEX, json!({"op":"probe","session_id":"archived"}))["status"],
         "closed_definitive"
     );
+    // A signed interpreter running a user-space CLI script exercises process
+    // discovery without launching a desktop app or touching host services.
+    let cli = f.dir.join("codex.js");
+    fs::write(
+        &cli,
+        "console.log(JSON.stringify({op:'ready'})); setInterval(()=>{},1000);",
+    )
+    .unwrap();
+    let process = f.spawn("node", &[cli.to_str().unwrap(), "app-server"], &[]);
+    wait(|| f.frames(process).iter().any(|v| v["op"] == "ready"));
+    let git = f.dir.join("tools/git");
+    script(&git, "#!/bin/sh\necho git >> \"$HOME/git-calls\"\nexit 1\n");
+    f.env.insert(
+        "PATH".into(),
+        format!("{}:{}", git.parent().unwrap().display(), f.env["PATH"]),
+    );
+    let failed_process = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":i32::MAX}),
+    );
+    assert_eq!(
+        failed_process["ok"], false,
+        "Process inspection errors must not look empty: {failed_process}"
+    );
+    assert!(failed_process["sessions"].is_null());
+    let discover = || f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    db.execute("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE", &[])
+        .unwrap();
+    let started = std::time::Instant::now();
+    let locked = discover();
+    for request in [
+        json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"}),
+        json!({"op":"resolve_caller","meta":{"threadId":"active"},"cwd":"/repo"}),
+    ] {
+        let failed = f.plugin(CODEX, request);
+        assert_eq!(
+            failed["ok"], false,
+            "A locked database must not fabricate a caller: {failed}"
+        );
+        assert!(failed["caller"].is_null());
+    }
+    db.execute("ROLLBACK", &[]).unwrap();
+    assert_eq!(
+        locked["ok"], false,
+        "A locked database must not look empty: {locked}"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    // Older schemas omit the optional source columns.
+    assert_eq!(discover()["sessions"][0]["session_id"], "active");
+    db.execute(
+        "ALTER TABLE threads ADD COLUMN thread_source TEXT; ALTER TABLE threads ADD COLUMN source TEXT",
+        &[],
+    )
+    .unwrap();
+    db.transaction(|c| {
+        for i in 0..35 {
+            let (thread_source, source) = if i % 2 == 0 {
+                (json!("subagent"), Value::Null)
+            } else {
+                (json!("user"), json!("{\"subagent\":true}"))
+            };
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source,source) VALUES(?, '/repo', 0, ?, 'Subagent', ?, ?)", &[json!(format!("subagent-{i}")),json!(1000+i),thread_source,source])?;
+        }
+        for (id, cwd) in [(Value::Null,json!("/repo")),(json!(""),json!("/repo")),(json!("missing-cwd"),Value::Null),(json!("empty-cwd"),json!("")),(json!(" \t"),json!("/repo")),(json!("blank-cwd"),json!(" \n"))] {
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms) VALUES(?, ?, 0, 2000)", &[id,cwd])?;
+        }
+        Ok(())
+    }).unwrap();
+    // Eligibility must precede LIMIT 32: 35 newer subagents and invalid rows
+    // cannot hide the older user thread, whose source columns are both NULL.
+    let discovered = discover();
+    assert_eq!(discovered["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(discovered["sessions"][0]["session_id"], "active");
+    assert_eq!(discovered["sessions"][0]["title"], "Active work");
+    assert_eq!(discovered["sessions"][0]["branch"], "main");
+    assert_eq!(discovered["sessions"][0]["repo"], "acme/service");
+    assert!(
+        !f.home.join("git-calls").exists(),
+        "SQLite metadata must bypass git"
+    );
+    db.execute("UPDATE threads SET thread_source='' WHERE id='active'", &[])
+        .unwrap();
+    assert_eq!(discover()["sessions"][0]["session_id"], "active");
+    db.transaction(|c| {
+        for i in 0..40 {
+            c.execute("INSERT INTO threads(id,cwd,archived,recency_at_ms,title,thread_source,source) VALUES(?, '/other', 0, ?, 'User', 'user', 'cli')", &[json!(format!("user-{i}")),json!(3000+i)])?;
+        }
+        Ok(())
+    }).unwrap();
+    let discovered = f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    let sessions = discovered["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 8);
+    assert_eq!(sessions[0]["session_id"], "user-39");
+    // Implicit caller resolution remains unbounded and can address older threads.
+    assert_eq!(
+        f.plugin(
+            CODEX,
+            json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"})
+        )["caller"]["session_id"],
+        "active"
+    );
+    // Explicit metadata lookup remains available as well.
+    assert_eq!(
+        f.plugin(
+            CODEX,
+            json!({"op":"resolve_caller","meta":{"threadId":"active"}})
+        )["caller"]["session_id"],
+        "active"
+    );
+    drop(db);
+    fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();
+    assert_eq!(discover()["sessions"], json!([]));
+    fs::write(f.home.join(".codex/state_5.sqlite"), "not a database").unwrap();
+    assert_eq!(
+        discover()["ok"],
+        false,
+        "Real IO/format errors must reach the discovery cache owner"
+    );
+    for request in [
+        json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"}),
+        json!({"op":"resolve_caller","meta":{"threadId":"active"},"cwd":"/repo"}),
+    ] {
+        let failed = f.plugin(CODEX, request);
+        assert_eq!(
+            failed["ok"], false,
+            "Corruption must not fall back to caller metadata: {failed}"
+        );
+        assert!(failed["caller"].is_null());
+    }
 }
 #[test]
 fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
@@ -994,6 +1237,34 @@ fn telegram_token_rotation_discards_pending_updates_and_restarts_offset_zero() {
     wait(|| f.exited(p));
 }
 #[test]
+fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webhooks() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let api = root().join("crates/cito-native/tests/support/telegram-api.py");
+    let server = f.spawn("python3", &[api.to_str().unwrap()], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap();
+    let p = f.spawn(TELEGRAM, &[], &[]);
+    for (token, expected) in [("poll409", "webhook"), ("poll401", "replace the Bot Token")] {
+        f.send(p,json!({"op":"configure","hub_config":{"botToken":token,"apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+        wait(|| {
+            f.frames(p).iter().any(|v| {
+                v["op"] == "health" && v["error"].as_str().is_some_and(|e| e.contains(expected))
+            })
+        });
+    }
+    f.send(p,json!({"op":"configure","hub_config":{"botToken":"healthy","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "health" && v["error"].is_null())
+    });
+    let methods = fs::read_to_string(f.home.join("api-methods.jsonl")).unwrap();
+    assert!(!methods.contains("deleteWebhook"));
+    f.eof(p);
+    wait(|| f.exited(p));
+}
+#[test]
 fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1014,6 +1285,16 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
             .find(|v| v["op"] == "rpc_result")
             .unwrap()["instruction"],
         "Send \"/start cito-abcdefghij\" to @example_bot"
+    );
+    let pairing = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "rpc_result")
+        .unwrap();
+    assert_eq!(pairing["bot_username"], "example_bot");
+    assert_eq!(
+        pairing["pairing_url"],
+        "https://t.me/example_bot?start=cito-abcdefghij"
     );
     f.send(
         p,
@@ -1089,7 +1370,10 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         assert_eq!(frame["ok"], false);
         assert_eq!(frame["retryable"], matches!(status, 408 | 429 | 500..=599));
         assert_eq!(frame["effect_unknown"], false);
-        assert_eq!(frame["error"], "Rejected by fixture");
+        assert_eq!(
+            frame["error"],
+            format!("Telegram sendMessage HTTP {status}: Rejected by fixture")
+        );
     }
     f.send(p,json!({"op":"deliver","delivery_id":"uncertain","config":{"chatId":"uncertain"},"signal":{"message":"Review"}}));
     let frame = outcome("uncertain");

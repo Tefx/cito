@@ -17,18 +17,24 @@ for key in ["HOME", "CITO_STATE_DIR", "CITO_CONFIG_PATH"]:
         assert request["env"][key] == os.environ[key]
 with (root / "calls.jsonl").open("a") as output:
     output.write(json.dumps(request) + "\n")
-caller = dict(harness="fixture", session_id=options["session_id"], cwd=str(root), title="Native fixture", endpoint_pid=os.getppid())
+caller = dict(harness="fixture", session_id=options["session_id"], cwd=options.get("cwd", str(root)), title=options.get("title", "Native fixture"), endpoint_pid=os.getppid())
 op = request["op"]
 result = dict(ok=True)
 if op == "resolve_caller":
     result = dict(ok=True, caller=caller) if request.get("meta", {}).get("expected_harness") == "fixture" else dict(ok=False, error_code="BINDING_REQUIRED", message="Explicit fixture identity required")
 elif op == "discover_sessions":
-    result["sessions"] = options.get("sessions", [dict(caller, updated_at_ms=int(time.time()*1000))])
+    if options.get("discover_error"):
+        result = dict(ok=False, error_code="DISCOVERY_UNAVAILABLE", message="Discovery is temporarily unavailable")
+    else:
+        result["sessions"] = options.get("sessions", [dict(caller, updated_at_ms=int(time.time()*1000))])
 elif op == "probe":
     result.update(status=options["status"], current_session_id=options["session_id"])
 elif op == "wake":
     result["outcome"] = options["outcome"]
 elif op == "setup_inspect":
+    delay_ms = options.get("setup_delay_ms", 0)
+    if delay_ms:
+        time.sleep(delay_ms / 1000)
     result.update(installed=True, configured=options.get('configured', True), paths=[])
 elif op in ["setup_apply", "setup_remove"]:
     result["actions"] = []

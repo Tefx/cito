@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "cito",
-      "description": "Discover, message, and wake sessions across Codex, Claude Code, Pi, and Human channels",
+      "description": "Discover, message, and wake sessions across Pi, Codex, Claude Code, and Human channels",
       "version": "0.21.3",
       "source": "./plugins/codex"
     }

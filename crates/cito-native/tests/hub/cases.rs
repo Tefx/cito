@@ -12,6 +12,183 @@ fn send(e: &HubEngine, id: &str, sig: &str) {
     e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data_b64":encoded(&json!({"signal_id":sig,"from":{"principal_id":"oidc:https://id.example.com|sender","listener_id":"sender","user":"bob"},"message":"hello"})),"opts":{"msgID":sig}}),None).unwrap();
 }
 #[test]
+fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_unknown_effects() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    let plugin = ChannelPlugin {
+        id: "fixture".into(),
+        dir: dir.clone(),
+        manifest: json!({}),
+        command: vec![],
+    };
+    let old = json!({"_external_chat_id":"41","_external_user_id":"41"});
+    let next = json!({"_external_chat_id":"42","_external_user_id":"42"});
+    e.inner.db.transaction(|c| {
+        c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,last_delivered_seq) VALUES('none#alice','fixture','alice',0,?,7)",&[json!(old.to_string())])?;
+        for (sig,status,token) in [("partial","failed","partial-token"),("late","in_flight","late-token"),("unknown","effect_unknown","unknown-token")] {
+            c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,reservation_id,from_listener_id,external_msg_id,delivered_ms) VALUES('fixture','none#alice',?,8,?,?,'sender','1',0)",&[json!(sig),json!(status),json!(token)])?;
+            c.execute("INSERT INTO hub_channel_delivery_msgs VALUES('fixture','none#alice',?,?,'sender')",&[json!(sig),json!(sig)])?;
+        }
+        assert!(replace_destination(c,&plugin,"none#bob",None,&old).is_err(),"paused bindings still own their identities");
+        let mut same=old.clone(); same["preference"]=json!(true);
+        replace_destination(c,&plugin,"none#alice",Some(&old),&same)?;
+        assert_eq!(c.query("SELECT * FROM hub_channel_delivery_msgs",&[])?.len(),3,"non-destination preferences preserve delivery mappings");
+        replace_destination(c,&plugin,"none#alice",Some(&old),&next)?;
+        assert!(c.query("SELECT * FROM hub_channel_delivery_msgs",&[])?.is_empty());
+        assert_eq!(c.query("SELECT last_delivered_seq FROM hub_human_channels",&[])?[0]["last_delivered_seq"],7);
+        Ok(())
+    }).unwrap();
+    e.delivery_result(
+        "fixture",
+        &json!({"delivery_id":"late-token","ok":true,"external_msg_ids":["99"]}),
+    )
+    .unwrap();
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_channel_delivery_msgs", &[])
+        .unwrap()
+        .is_empty());
+    let rows=e.inner.db.query("SELECT signal_id,status,reservation_id,from_listener_id FROM hub_channel_deliveries ORDER BY signal_id",&[]).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| s(r, "status")).collect::<Vec<_>>(),
+        vec!["effect_unknown", "failed", "effect_unknown"]
+    );
+    assert!(rows
+        .iter()
+        .all(|r| r["reservation_id"].is_null() && r["from_listener_id"].is_null()));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    e.inner.plugins.lock().unwrap().push(ChannelPlugin{id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
+    e.inner.closed.store(true, Ordering::SeqCst);
+    let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice"});
+    let bob = json!({"principal_id":"none#bob","owner_user":"bob"});
+    e.human_rpc(
+        "human_channels_configure",
+        &json!({"plugin_id":"fixture","user_config":{"destination":"42"},"enabled":false}),
+        Some(&alice),
+    )
+    .unwrap();
+    let binding = e
+        .inner
+        .db
+        .query("SELECT * FROM hub_human_channels", &[])
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        parse(&binding, "user_config_json")["_external_user_id"],
+        "42"
+    );
+    assert!(e
+        .human_rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"fixture","user_config":{"destination":"42"}}),
+            Some(&bob)
+        )
+        .unwrap_err()
+        .contains("DESTINATION_IN_USE"));
+    e.inner.db.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms) VALUES('cito-owner','fixture','none#bob','bob',?,?)",&[json!(now_ms()),json!(now_ms()+60_000)]).unwrap();
+    assert!(e.redeem("fixture",&json!({"code":"cito-owner","is_private_chat":true,"external_chat_id":"42","external_user_id":"42","user_config_patch":{"destination":"42"}})).unwrap_err().contains("DESTINATION_IN_USE"));
+    let plugin = e.plugin("fixture").unwrap();
+    e.inner
+        .db
+        .transaction(|c| {
+            replace_destination(
+                c,
+                &plugin,
+                "https://id.example.com#alice",
+                None,
+                &json!({"_external_chat_id":"42","_external_user_id":"42"}),
+            )
+        })
+        .unwrap();
+    e.inner.db.execute("UPDATE hub_pairing_codes SET instruction='Pair',pairing_command='/start cito-owner',pairing_url='https://example.com/pair'",&[]).unwrap();
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_pairing_codes SET principal_id=?,owner_user='alice'",
+            &[alice["principal_id"].clone()],
+        )
+        .unwrap();
+    let list = e.channel_list(&alice).unwrap();
+    assert_eq!(list["channels"][0]["configured"], true);
+    assert_eq!(list["channels"][0]["fields"][0]["value"], "42");
+    assert_eq!(list["channels"][0]["pairing_pending"], true);
+    assert_eq!(
+        list["channels"][0]["pairing_url"],
+        "https://example.com/pair"
+    );
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn unthreaded_reply_requires_one_recent_sender_and_threaded_reply_disambiguates_legacy_bindings() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    put(&e, "sender-a", "none#alice", "workspace");
+    put(&e, "sender-b", "none#alice", "workspace");
+    let config = json!({"_external_chat_id":"42","_external_user_id":"42"}).to_string();
+    e.inner.db.transaction(|c|{
+        c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES('none#alice','fixture','alice',?)",&[json!(config)])?;
+        for (signal,sender) in [("a1","sender-a"),("a2","sender-a")] {
+            c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms,from_listener_id) VALUES('fixture','none#alice',?,1,'delivered',?,?)",&[json!(signal),json!(now_ms()),json!(sender)])?;
+            c.execute("INSERT INTO hub_channel_delivery_msgs VALUES('fixture','none#alice',?,?,?)",&[json!(signal),json!(signal),json!(sender)])?;
+        }
+        Ok(())
+    }).unwrap();
+    let mut reply = json!({"update_id":"one-sender","external_chat_id":"42","external_user_id":"42","text":"Continue"});
+    assert_eq!(e.inbound_reply("fixture", &reply).unwrap()["ok"], true);
+    e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms,from_listener_id) VALUES('fixture','none#alice','b1',2,'delivered',?,'sender-b')",&[json!(now_ms())]).unwrap();
+    reply["update_id"] = json!("two-senders");
+    assert!(e
+        .inbound_reply("fixture", &reply)
+        .unwrap_err()
+        .contains("AMBIGUOUS_REPLY"));
+    reply["reply_to_external_msg_id"] = json!("a1");
+    assert_eq!(e.inbound_reply("fixture", &reply).unwrap()["ok"], true);
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_channel_deliveries SET delivered_ms=? WHERE signal_id='b1'",
+            &[json!(now_ms() - 8 * 86_400_000)],
+        )
+        .unwrap();
+    reply
+        .as_object_mut()
+        .unwrap()
+        .remove("reply_to_external_msg_id");
+    reply["update_id"] = json!("one-recent");
+    assert_eq!(e.inbound_reply("fixture", &reply).unwrap()["ok"], true);
+    e.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json,enabled) VALUES('none#bob','fixture','bob',?,0)",&[json!(config)]).unwrap();
+    reply["update_id"] = json!("duplicate-identity");
+    assert!(e
+        .inbound_reply("fixture", &reply)
+        .unwrap_err()
+        .contains("AMBIGUOUS_REPLY"));
+    reply["reply_to_external_msg_id"] = json!("a1");
+    assert_eq!(e.inbound_reply("fixture", &reply).unwrap()["ok"], true);
+    let published = e
+        .inner
+        .db
+        .query(
+            "SELECT json_extract(CAST(data AS TEXT),'$.from.principal_id') AS pid FROM hub_signals",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(published.len(), 4);
+    assert!(published.iter().all(|row| row["pid"] == "none#alice"));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
 fn stopped_channel_process_waits_for_its_reader_callback() {
     let dir = temp();
     let root = fixture(&dir);
@@ -368,7 +545,9 @@ fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<()
             )?;
             let binding = json!({"principal_id":pid,"owner_user":"alice","plugin_id":"fixture"});
             assert_eq!(
-                e.inner.db.transaction(|c| attach(c, &binding, true, false)),
+                e.inner
+                    .db
+                    .transaction(|c| attach(c, &binding, true, false, None)),
                 Err("INVALID_INPUT: Listener must be an object".into()),
             );
             let row = e
@@ -2072,7 +2251,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     let binding = json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"fixture"});
     e.inner.db.transaction(|c| {
         c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES('none#alice','fixture','alice')",&[])?;
-        attach(c,&binding,true,false)
+        attach(c,&binding,true,false,None)
     }).unwrap();
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "retry");
@@ -2085,7 +2264,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
                 "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
                 &[json!(reg.to_string()), json!(node)],
             )?;
-            attach(c, &binding, true, false)?;
+            attach(c, &binding, true, false, None)?;
             assert_eq!(
                 parse(&kv_row(c, &node)?.unwrap(), "value")["state"],
                 "UNLISTENED"
@@ -2253,13 +2432,13 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .unwrap()[0],
         json!({"status":"failed","attempts":0,"next_retry_ms":0,"last_error":null})
     );
-    assert_eq!(
+    assert!(
         e.inner
             .db
             .query("SELECT * FROM hub_channel_delivery_msgs", &[])
             .unwrap()
-            .len(),
-        2
+            .is_empty(),
+        "first identity assignment retires legacy destination mappings"
     );
     e.inner.closed.store(false, Ordering::SeqCst);
     e.inner.plugins.lock().unwrap().clear();

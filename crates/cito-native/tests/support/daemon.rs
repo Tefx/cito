@@ -26,13 +26,88 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     let available = || f.action(json!({"op":"get_snapshot"})).1["available"].clone();
     assert_eq!(available(), json!([]));
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    let candidates = available();
+    let candidate = candidates
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["harness"] == "pi")
+        .expect("fast discovery must be visible on the first snapshot")
+        .clone();
+    assert!(candidate["endpoint_pid"].is_number());
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["hubs"][0]["auto_listen"], false);
+    // A different principal's pause must not suppress this principal's enrollment.
+    let db = f.db("state.sqlite");
+    db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(\'local\',\'c_0123456789abcdef\',\'none#bob\',\'bob\',\'other-host\',\'other-host\',\'pi\',?,\'/tmp\',\'Other session\',\'\',\'self\',\'UNLISTENED\')", &[candidate["session_id"].clone()]).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
     wait(|| {
-        available()
+        f.action(json!({"op":"get_snapshot"})).1["listeners"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v["harness"] == "pi")
+            .any(|v| v["harness"] == "pi" && v["scope"] == "workspace")
     });
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(snapshot["hubs"][0]["auto_listen"], true);
+    assert_eq!(snapshot["settings"]["hubs"][0]["auto_listen"], true);
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["harness"] == "pi" && v["scope"] == "workspace"));
+    db.execute(
+        "DELETE FROM local_listeners WHERE principal_id=\'none#bob\'",
+        &[],
+    )
+    .unwrap();
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert_eq!(saved["hubs"]["local"]["autoListen"], true);
+    assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"pi","session_id":candidate["session_id"]})).0, 200);
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='pi'")[0]["status"],
+        "UNLISTENED"
+    );
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        false
+    );
+    // Re-enabling requests fresh discovery before restoring agent enrollment,
+    // while preserving the independent Human pause on the same Hub.
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='human'")[0]["status"],
+        "UNLISTENED"
+    );
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE harness=\'pi\'")[0]["status"] == "ACTIVE"
+    });
+    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        false
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
     assert_eq!(
         f.action(json!({"op":"setup_remove_app","harness":"pi"})).0,
         200
@@ -46,10 +121,23 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
 #[test]
 fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let host = Fixture::new(json!({}));
+    let (_, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}"),"autoListen":false}},"defaultHub":"local"}),
+    );
     f.provider("delivered");
-    f.daemon(&[]);
+    let daemon = f.daemon(&[]);
     let snapshot = || f.action(json!({"op":"get_snapshot"})).1;
+    let local_auto_listen = || {
+        snapshot()["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hub| hub["name"] == "local")
+            .unwrap()["auto_listen"]
+            .clone()
+    };
     wait(|| {
         snapshot()["available"]
             .as_array()
@@ -69,6 +157,194 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         .unwrap()
         .iter()
         .any(|v| v["harness"] == "fixture"));
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
+    assert_eq!(local_auto_listen(), false);
+    f.stop(daemon);
+    let mut preferences: Value =
+        serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    preferences["hubs"]["local"]["autoListen"] = json!(true);
+    fs::write(&f.config, preferences.to_string()).unwrap();
+    config["session_id"] = json!("live");
+    let mut sessions: Vec<Value> = (0..8).map(|i| json!({"harness":"fixture","session_id":format!("historical-{i}"),"title":"History","cwd":"/tmp"})).collect();
+    sessions.extend([
+        json!({"harness":"fixture","session_id":"reload","title":"Reload","cwd":"/tmp","endpoint_pid":std::process::id(),"needs_reload":true}),
+        json!({"harness":"fixture","session_id":"live","title":"Live","cwd":"/tmp","endpoint_pid":std::process::id()}),
+        json!({"harness":"fixture","session_id":"departed","title":"Departed","cwd":"/tmp","endpoint_pid":i32::MAX})
+    ]);
+    config["sessions"] = json!(sessions);
+    fs::write(&options, config.to_string()).unwrap();
+    // Only background polling drives discovery/enrollment after restart.
+    f.daemon(&[]);
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["harness"] == "fixture" && v["session_id"] == "live")
+    });
+    let rows = f
+        .rows("SELECT session_id FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'");
+    assert_eq!(rows, vec![json!({"session_id":"live"})]);
+    assert_eq!(local_auto_listen(), true);
+    let before = f.rows(
+        "SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+    )[0]
+    .clone();
+    config["configured"] = json!(false);
+    config["status"] = json!("closed_definitive");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        f.rows(
+            "SELECT status FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+        )[0]["status"]
+            == "UNLISTENED"
+    });
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"live"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        local_auto_listen(),
+        true,
+        "An inactive-row pause must not disable Auto-Listen"
+    );
+    config["configured"] = json!(true);
+    config["status"] = json!("alive");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "fixture" && r["session_id"] == "live")
+    });
+    assert_ne!(f.rows("SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0]["owner_token"], before["owner_token"], "A recovered endpoint needs a new local binding");
+    let recovered = f.rows(
+        "SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+    )[0]
+    .clone();
+    // The PID stays alive while the endpoint switches identities between discovery passes.
+    config["session_id"] = json!("replacement");
+    config["sessions"] = json!([{"harness":"fixture","session_id":"replacement","title":"New session","cwd":"/tmp","endpoint_pid":std::process::id()}]);
+    config["status"] = json!("switched");
+    // Let the concurrent probe revoke after the enrollment pass snapshots rows.
+    config["setup_delay_ms"] = json!(200);
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        f.rows(
+            "SELECT status FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
+        )[0]["status"]
+            == "UNLISTENED"
+    });
+    assert!(f.rows("SELECT updated_at FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0]["updated_at"].as_u64().unwrap()>0);
+    config["status"] = json!("alive");
+    config.as_object_mut().unwrap().remove("setup_delay_ms");
+    fs::write(&options, config.to_string()).unwrap();
+    // Wait for the next confirmed discovery, not a fixed sleep or explicit cache refresh.
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "fixture" && r["session_id"] == "replacement")
+    });
+    let old = &f.rows("SELECT status,owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0];
+    assert_eq!(
+        old["owner_token"], recovered["owner_token"],
+        "No intermediate re-enrollment from the pre-revocation cache"
+    );
+    assert_eq!(old["status"], "UNLISTENED");
+    // Exercise wake-dispatch revocation independently of the probe path above.
+    let dispatched=f.rows("SELECT listener_id,owner_token FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0].clone();
+    f.db("state.sqlite").execute("UPDATE local_listeners SET updated_at=1 WHERE harness='fixture' AND session_id='replacement'",&[]).unwrap();
+    config["outcome"] = json!("session_switched");
+    config["sessions"] = json!([{"harness":"fixture","session_id":"dispatch-replacement","title":"After dispatch","cwd":"/tmp","endpoint_pid":std::process::id()}]);
+    fs::write(&options, config.to_string()).unwrap();
+    let (status,result)=f.action(json!({"op":"send_signal","hub":"local","to":dispatched["listener_id"],"message":"Dispatch identity switch","request_id":"dispatch-switch-send"}));
+    assert_eq!(status, 200, "{result}");
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0]["status"]=="UNLISTENED"
+    });
+    assert!(f.rows("SELECT updated_at FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0]["updated_at"].as_u64().unwrap()>1);
+    assert!(
+        !f.rows("SELECT signal_id FROM local_signals WHERE held_reason='session_switched'")
+            .is_empty(),
+        "The wake response, not a probe, revoked this binding"
+    );
+    config["session_id"] = json!("dispatch-replacement");
+    config["outcome"] = json!("delivered");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "fixture" && r["session_id"] == "dispatch-replacement")
+    });
+    let old=&f.rows("SELECT status,owner_token FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0];
+    assert_eq!(old["status"], "UNLISTENED");
+    assert_eq!(
+        old["owner_token"], dispatched["owner_token"],
+        "Dispatch revocation must reject the pre-revocation discovery cache"
+    );
+    // Cache evidence from S cannot enroll on a destination that has no S row.
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
+            .0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    let discoveries = || {
+        fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["op"] == "discover_sessions"
+            })
+            .count()
+    };
+    let confirmed = discoveries();
+    config["status"] = json!("closed_definitive");
+    config["discover_error"] = json!(true);
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE hub='local' AND harness='fixture' AND session_id='dispatch-replacement'")[0]["status"]=="UNLISTENED"
+    });
+    assert_eq!(
+        discoveries(),
+        confirmed,
+        "The cached evidence must predate this revocation"
+    );
+    config["status"] = json!("alive");
+    fs::write(&options, config.to_string()).unwrap();
+    assert!(f
+        .rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")
+        .is_empty());
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"work","enabled":true}))
+            .0,
+        200
+    );
+    assert!(
+        f.rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")
+            .is_empty(),
+        "Hub B must not enroll from Hub A's pre-revocation cache"
+    );
+    config["discover_error"] = json!(false);
+    fs::write(&options, config.to_string()).unwrap();
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='fixture' AND session_id='dispatch-replacement'").iter().any(|row|row["status"]=="ACTIVE")
+    });
+    assert!(discoveries() > confirmed);
 }
 
 #[test]
@@ -93,6 +369,13 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
         .as_str()
         .unwrap()
         .contains("--url http://mac-studio.tailnet.ts.net:4291"));
+    assert!(host["invite_command"]
+        .as_str()
+        .unwrap()
+        .contains("--hub mac-studio "));
+    assert_eq!(host["tailscale_url"], host["endpoint_url"]);
+    assert!(host["lan_url"].as_str().unwrap().starts_with("http://"));
+    assert_eq!(host["tailscale_invite_command"], host["invite_command"]);
     let saved: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
     assert_eq!(saved["host_hub"]["token"], host["token"]);
     assert_eq!(
@@ -104,6 +387,24 @@ fn u8_token_auth_generates_and_persists_token_while_sharing_is_off() {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"]["token"],
         host["token"]
     );
+    // An explicit listener interface must not advertise an unrelated Tailscale address.
+    for bind in ["127.0.0.1", "192.0.2.10", "::1"] {
+        assert_eq!(
+            f.action(json!({"op":"set_host_hub","enabled":false,"bind":bind}))
+                .0,
+            200
+        );
+        let host = f.action(json!({"op":"get_snapshot"})).1["settings"]["host_hub"].clone();
+        let authority = if bind.contains(':') {
+            format!("[{bind}]")
+        } else {
+            bind.into()
+        };
+        assert_eq!(host["endpoint_url"], format!("http://{authority}:4291"));
+        assert_eq!(host["lan_url"], host["endpoint_url"]);
+        assert!(host["tailscale_url"].is_null());
+        assert!(host["tailscale_invite_command"].is_null());
+    }
 }
 
 #[test]
@@ -627,6 +928,9 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
     };
     assert_eq!(app(&f, "pi")["status"], "ready");
     assert_eq!(app(&f, "custom-agent")["status"], "ready");
+    // Repairing one app must not repair another app's deleted staged files.
+    let codex_manifest = f.state.join("runtime/plugins/codex/plugin.json");
+    fs::remove_file(&codex_manifest).unwrap();
     // Repairs must use the distribution even though the loaded descriptor is staged.
     for asset in [
         "cito-bridge.ts",
@@ -644,6 +948,12 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
         );
         assert_eq!(app(&f, "pi")["status"], "ready", "{asset}");
     }
+    assert!(!codex_manifest.exists());
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"codex"})).0,
+        200
+    );
+    assert!(codex_manifest.exists());
     let alias = f.dir.join("staged-plugins");
     std::os::unix::fs::symlink(f.state.join("runtime/plugins"), &alias).unwrap();
     for builtin_root in [
@@ -666,7 +976,7 @@ fn lifecycle_setup_repairs_deleted_builtin_loaded_from_staged_plugins() {
             // A new process must rediscover the descriptor, including through an alias.
             check_plugins(&mut f);
             daemon = f.daemon(&[]);
-            assert_eq!(app(&f, "pi")["status"], "repair_needed");
+            assert_eq!(app(&f, "pi")["status"], "ready");
             let custom_app = app(&f, "custom-agent");
             assert_eq!(custom_app["status"], "ready");
             assert_eq!(
@@ -770,6 +1080,23 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     wait(|| {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "ready"
     });
+    let personal = db
+        .query("SELECT user_config_json FROM hub_human_channels", &[])
+        .unwrap();
+    assert_eq!(f.action(json!({"op":"clear_channel_service","hub":"shared","channel_id":"remote-channel","reset_user":false})).0,200);
+    assert_eq!(
+        db.query("SELECT user_config_json FROM hub_human_channels", &[])
+            .unwrap(),
+        personal,
+        "Clearing service credentials must preserve personal destinations"
+    );
+    assert_eq!(f.action(json!({"op":"save_hub_service","hub":"shared","channel_id":"remote-channel","values":{"credential":"replacement"}})).1["channels"][0]["status"],"ready");
+    assert_eq!(f.action(json!({"op":"clear_channel_service","hub":"shared","channel_id":"remote-channel","reset_user":true})).0,200);
+    assert_eq!(
+        db.query("SELECT user_config_json FROM hub_human_channels", &[])
+            .unwrap()[0]["user_config_json"],
+        "{}"
+    );
     assert_eq!(f.action(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true})).1["channels"][0]["status"],"not_configured");
 }
 #[test]
@@ -1016,8 +1343,22 @@ server.serve_forever()
 #[test]
 fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let f = Fixture::new(
+        json!({"default_hub":"local","hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":false}}}),
+    );
     let meta = f.provider("delivered_unconfirmed");
+    let channel = f.state.join("plugins/channel");
+    fs::create_dir_all(&channel).unwrap();
+    fs::write(
+        channel.join("plugin.json"),
+        json!({
+            "id":"channel","kind":"human-channel","scope":"hub","displayName":"Messenger",
+            "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+            "fields":[{"key":"credential","scope":"hub","type":"secret","required":true}]
+        })
+        .to_string(),
+    )
+    .unwrap();
     let ui = f.recording_ui();
     let daemon = f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -1025,7 +1366,11 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     ]);
     wait(|| f.home.join("ui-pid").exists());
     enroll(&f, meta.clone());
-    assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"pi","request_id":"app-setup"}))
+            .0,
+        200
+    );
     let app = |snapshot: Value| {
         snapshot["settings"]["apps"]
             .as_array()
@@ -1055,17 +1400,70 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         .contains("/reload"));
     enroll(&f, meta.clone());
     assert_eq!(
-        f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
+        f.action(json!({"op":"setup_remove_app","harness":"fixture","request_id":"app-remove"}))
             .0,
         200
     );
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
         .is_empty());
+    for (op, request) in [
+        ("setup_apply", "app-setup"),
+        ("setup_remove_app", "app-remove"),
+    ] {
+        wait(|| {
+            fs::read_to_string(f.home.join("ui-frames"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|frame| {
+                    frame["op"] == "settings"
+                        && frame["ok"] == true
+                        && frame["source_op"] == op
+                        && frame["request_id"] == request
+                        && frame["settings"]["apps"].is_array()
+                })
+        });
+    }
     enroll(&f, meta);
-    assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
+    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"Backend API"})).0,200);
+    let row = f.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
+    f.db("state.sqlite").execute(
+        "INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','purge-history',?,1,?,'bob','laptop','Sender','Retain until purge','2030-01-01T00:00:00.000Z',4102444800000,'STORED_PASSIVE')",
+        &[row["listener_id"].clone(), row["binding_generation"].clone()],
+    ).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"save_hub_service","hub":"local","channel_id":"channel","values":{"credential":"saved-gateway"}})).0,
+        200
+    );
+    let service_config = || {
+        let rows = f
+            .db("hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        serde_json::from_str::<Value>(rows[0]["config_json"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(service_config()["credential"], "saved-gateway");
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--disconnect-all", "--json"], "");
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.rows("SELECT title FROM session_custom_titles")[0]["title"],
+        "Backend API"
+    );
+    assert_eq!(service_config()["credential"], "saved-gateway");
+    assert!(!f
+        .rows("SELECT * FROM local_signals WHERE signal_id='purge-history'")
+        .is_empty());
+    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert!(config["hubs"].get("work").is_some());
     assert!(f
-        .rows("SELECT * FROM local_listeners WHERE status='ACTIVE'")
+        .rows("SELECT * FROM local_listeners WHERE harness!='human' AND status='ACTIVE'")
+        .is_empty());
+    assert!(!f
+        .rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
         .is_empty());
     assert!(!f.exited(daemon));
     let ui_pid = fs::read_to_string(f.home.join("ui-pid"))
@@ -1083,6 +1481,26 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
         host["packages"].is_null() || host["packages"] == json!([]),
         "{host}"
     );
+    assert_eq!(
+        f.action(json!({"op":"setup_disconnect_all","purge_data":true}))
+            .0,
+        200
+    );
+    assert!(f.rows("SELECT * FROM session_custom_titles").is_empty());
+    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert_eq!(config["defaultHub"], "local");
+    assert!(config.get("default_hub").is_none());
+    assert_eq!(config["hubs"], json!({}));
+    assert_eq!(service_config(), json!({}));
+    assert!(f.rows("SELECT * FROM local_signals").is_empty());
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness!='human'")
+        .is_empty());
+    assert!(!f
+        .rows("SELECT * FROM local_listeners WHERE harness='human'")
+        .is_empty());
+    assert!(!f.exited(daemon));
+    assert!(cito_native::plugins::pid_alive(ui_pid));
 }
 #[test]
 fn lifecycle_sign_in_enables_disabled_hub_before_bounded_discovery_failure() {
@@ -1134,7 +1552,12 @@ fn lifecycle_hub_edit_preserves_secrets_disabled_state_default_and_host_error_ro
     assert_eq!(raw["hubs"]["renamed"]["clientSecret"], "retained");
     assert_eq!(raw["hubs"]["renamed"]["enabled"], false);
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
-    let h = snapshot["hubs"]
+    assert!(!snapshot["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h["name"] == "renamed"));
+    let h = snapshot["settings"]["hubs"]
         .as_array()
         .unwrap()
         .iter()
@@ -1308,6 +1731,47 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
     sibling.daemon(&[]);
     let attached = enroll(&sibling, sibling_meta);
     assert_eq!(attached["binding_generation"], old["binding_generation"]);
+    wait(|| {
+        [&a, &sibling].iter().all(|fixture| {
+            fixture
+                .rows("SELECT status FROM local_listeners WHERE hub=\'work\' AND harness=\'human\'")
+                .iter()
+                .any(|row| row["status"] == "ACTIVE")
+        })
+    });
+    assert_eq!(
+        a.action(
+            json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    wait(|| {
+        sibling.rows("SELECT status FROM local_listeners WHERE hub=\'work\' AND harness=\'human\'")
+            [0]["status"]
+            == "UNLISTENED"
+    });
+    let paused_human = sibling
+        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+        .clone();
+    assert_eq!(
+        a.tool(
+            "cito_listen",
+            json!({"hub":"work","about":"Human receiver"}),
+            human()
+        )["ok"],
+        true
+    );
+    wait(|| {
+        sibling.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+            ["status"]
+            == "ACTIVE"
+    });
+    let resumed_human = sibling
+        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+        .clone();
+    assert_eq!(resumed_human["scope"], paused_human["scope"]);
+    assert_ne!(resumed_human["owner_token"], paused_human["owner_token"]);
     let sibling_row =
         sibling.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     // Hold only the sibling's dispatch lease; its receiver must keep polling unfenced.
@@ -2265,12 +2729,23 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
     assert_eq!(
         names,
         vec![
+            "cito_status",
             "cito_listen",
             "cito_unlisten",
             "cito_find",
             "cito_send",
             "cito_inbox"
         ]
+    );
+    let listen = list["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "cito_listen")
+        .unwrap();
+    assert_eq!(
+        listen["inputSchema"]["properties"]["title"],
+        json!({"type":"string","minLength":1,"maxLength":128})
     );
     let find = list["tools"]
         .as_array()
@@ -2396,6 +2871,123 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
 }
 
 #[test]
+fn desktop_banner_toggle_updates_existing_receivers_without_pausing_activity() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"desktopBannerEnabled":false}));
+    let meta = f.provider("delivered");
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    let frames = || {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>()
+    };
+    f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Muted notice"}),
+        meta.clone(),
+    );
+    wait(|| f.rows("SELECT * FROM local_signals").len() == 1);
+    assert!(!frames().iter().any(|v| v["op"] == "banner"));
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":"false"}))
+            .0,
+        400
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":true}))
+            .0,
+        200
+    );
+    f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Visible notice"}),
+        meta,
+    );
+    wait(|| {
+        frames()
+            .iter()
+            .any(|v| v["op"] == "banner" && v["payload"]["message"] == "Visible notice")
+    });
+    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_paused"],
+        false
+    );
+}
+#[test]
+fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let agent = f.tool("cito_listen", json!({"about":"Pending work"}), meta.clone());
+    f.tool(
+        "cito_send",
+        json!({"to":agent["listener_id"],"message":"Pending agent work"}),
+        human(),
+    );
+    f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Human notice"}),
+        meta,
+    );
+    wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
+    let (status, me) = f.action(json!({"op":"query_directory","filter":"me"}));
+    assert_eq!(status, 200);
+    assert_eq!(me["activity_total"], 1);
+    assert_eq!(me["activity_all_total"], 2);
+    assert_eq!(
+        f.action(json!({"op":"ack_signals","filter":"me","ack_all":true}))
+            .0,
+        200
+    );
+    assert!(
+        f.rows("SELECT * FROM local_signals WHERE message='Pending agent work'")[0]
+            ["acknowledged_at_ms"]
+            .is_null()
+    );
+    assert_eq!(
+        f.action(json!({"op":"clear_activity_history","filter":"me"}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.rows("SELECT * FROM local_signals WHERE activity_hidden=0")
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.action(json!({"op":"clear_activity_history","filter":"all"}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"ack_signals","filter":"all","ack_all":true}))
+            .0,
+        200
+    );
+    let pending = f
+        .rows("SELECT * FROM local_signals WHERE message='Pending agent work'")
+        .remove(0);
+    assert_eq!(pending["activity_hidden"], 1);
+    assert!(pending["acknowledged_at_ms"].is_null());
+    let ledger = f
+        .db("hub.sqlite")
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+            &[pending["signal_id"].clone()],
+        )
+        .unwrap();
+    assert!(ledger[0]["acked_at_ms"].is_null());
+    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["unread_count"], 0);
+}
+#[test]
 fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -2434,8 +3026,28 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["to"], sender["public_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
+    // Clearing hides Activity rows without deleting the delivery ledger.
+    assert_eq!(
+        f.action(json!({"op":"clear_activity_history","hub":"local","signal_id":"missing"}))
+            .0,
+        200
+    );
+    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
+    assert_eq!(
+        f.action(
+            json!({"op":"clear_activity_history","hub":"local","signal_id":activity["signal_id"]})
+        )
+        .0,
+        200
+    );
+    let remaining = f.rows("SELECT * FROM local_signals WHERE activity_hidden=0");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["message"], "Human reply");
     assert_eq!(f.action(json!({"op":"clear_activity_history"})).0, 200);
-    assert!(f.rows("SELECT * FROM local_signals").is_empty());
+    assert!(f
+        .rows("SELECT * FROM local_signals WHERE activity_hidden=0")
+        .is_empty());
+    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
     f.tool("cito_unlisten", json!({}), meta.clone());
     assert_eq!(
         f.tool(
@@ -2460,6 +3072,99 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
     let target = enroll(&f, meta.clone());
     assert_eq!(target["hub"], "local");
     assert_eq!(target["scope"], "workspace");
+    let status = f.tool("cito_status", json!({}), meta.clone());
+    assert_eq!(status["registered"], true);
+    assert_eq!(status["title"], "Native fixture");
+    assert_eq!(status["unread_count"], 0);
+    assert_eq!(status["hubs"][0]["is_default"], true);
+    assert_eq!(
+        status
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "about",
+            "display_address",
+            "hubs",
+            "ok",
+            "registered",
+            "scope",
+            "title",
+            "unread_count"
+        ]
+    );
+    for hub in status["hubs"].as_array().unwrap() {
+        assert_eq!(hub.as_object().unwrap().len(), 3);
+    }
+    for forbidden in [
+        "cito_setup",
+        "cito_rename",
+        "cito_unlisten_all",
+        "cito_join_hub",
+        "cito_channel_save",
+        "cito_disconnect_all",
+    ] {
+        assert_eq!(
+            f.tool_result(forbidden, json!({}), meta.clone())["isError"],
+            true
+        );
+    }
+    for title in ["".to_owned(), " ".to_owned(), "x".repeat(129)] {
+        assert_eq!(
+            f.tool_result(
+                "cito_listen",
+                json!({"about":"Native receiver","title":title}),
+                meta.clone()
+            )["isError"],
+            true
+        );
+    }
+    f.tool(
+        "cito_listen",
+        json!({"about":"Native receiver","title":"Backend API"}),
+        meta.clone(),
+    );
+    f.tool(
+        "cito_listen",
+        json!({"about":"Native receiver"}),
+        meta.clone(),
+    );
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta.clone())["title"],
+        "Backend API"
+    );
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &[
+            "rename",
+            "Release audit",
+            "--harness",
+            "fixture",
+            "--session",
+            "session-1",
+            "--json",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta.clone())["title"],
+        "Release audit"
+    );
+    let (ok, out, err) = f.command(NATIVE, &["status", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let snapshot: Value = serde_json::from_str(&out).unwrap();
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["title"] == "Release audit"));
+    assert!(f
+        .command(NATIVE, &["status"], "")
+        .1
+        .contains("AVAILABLE SESSIONS"));
     let find = f.tool("cito_find", json!({"query":"Native receiver"}), human());
     assert!(find["listeners"]
         .as_array()
@@ -2485,12 +3190,71 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         json!([])
     );
     assert_eq!(
-        f.tool("cito_unlisten", json!({}), meta)["status"],
+        f.tool("cito_unlisten", json!({}), meta.clone())["status"],
         "unlistened"
     );
     assert_eq!(
         f.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
         "UNLISTENED"
+    );
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta.clone())["registered"],
+        false
+    );
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &[
+            "listen",
+            "--title",
+            "Billing API",
+            "--harness",
+            "fixture",
+            "--session",
+            "session-1",
+            "Native receiver",
+            "--json",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    assert_eq!(
+        f.tool("cito_status", json!({}), meta)["title"],
+        "Billing API"
+    );
+    let (ok, out, err) = f.command(NATIVE, &["unlisten", "--all", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let stopped: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(stopped["removed"], 1);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    let options_path = f.state.join("plugins/fixture/options.json");
+    let mut options: Value = serde_json::from_slice(&fs::read(&options_path).unwrap()).unwrap();
+    options["session_id"] = json!("session-home");
+    options["cwd"] = json!(f.home);
+    options["title"] = json!("alice");
+    fs::write(options_path, options.to_string()).unwrap();
+    let (ok, out, err) = f.command(
+        NATIVE,
+        &[
+            "listen",
+            "--harness",
+            "fixture",
+            "--session",
+            "session-home",
+            "Auth refactor",
+            "--json",
+        ],
+        "",
+    );
+    assert!(ok, "{out} {err}");
+    let home: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(home["title"], "Auth refactor");
+    assert_eq!(home["about"], "Auth refactor");
+    assert_eq!(
+        f.rows("SELECT title FROM session_custom_titles WHERE session_id='session-home'")[0]
+            ["title"],
+        "Auth refactor"
     );
 }
 #[test]
@@ -2595,10 +3359,17 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     let (ha, pa) = a.hub();
     let (hb, pb) = b.hub();
     let f = Fixture::new(
-        json!({"hubs":{"personal":{"url":format!("http://127.0.0.1:{pa}"),"user":"alice"},"work":{"url":format!("http://127.0.0.1:{pb}"),"user":"alice"}},"defaultHub":"personal"}),
+        json!({"hubs":{"local":{"url":"local://","user":"alice"},"personal":{"url":format!("http://127.0.0.1:{pa}"),"user":"alice"},"work":{"url":format!("http://127.0.0.1:{pb}"),"user":"alice"}},"defaultHub":"personal"}),
     );
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["available"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["harness"] == "fixture" && row["session_id"] == "session-1")
+    });
     for hub in ["personal", "work"] {
         let target = f.tool(
             "cito_listen",
@@ -2615,13 +3386,155 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             .unwrap()
             .starts_with(&format!("{hub}:")));
     }
+    assert_eq!(f.action(json!({"op":"rename_session","harness":"fixture","session_id":"session-1","title":"alice"})).0, 200);
+    // Still available on local: the cached candidate must agree immediately,
+    // without waiting for discovery or an eventual-consistency retry.
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let candidate = snapshot["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["harness"] == "fixture" && row["session_id"] == "session-1")
+        .unwrap();
+    assert_eq!(candidate["title"], "alice");
+    assert_eq!(candidate["custom_title"], true);
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["harness"] == "fixture")
+        .all(|row| row["title"] == candidate["title"] && row["custom_title"] == true));
+    f.tool(
+        "cito_listen",
+        json!({"hub":"local","about":"Multi hub","scope":"workspace"}),
+        meta.clone(),
+    );
+    let binding = f.rows("SELECT endpoint_pid,binding_generation,owner_token FROM local_listeners WHERE hub=\'work\' AND harness=\'fixture\'")[0].clone();
+    f.db("state.sqlite")
+        .execute(
+            "UPDATE local_listeners SET endpoint_pid=? WHERE hub=\'work\' AND harness=\'fixture\'",
+            &[json!(i32::MAX)],
+        )
+        .unwrap();
+    f.tool(
+        "cito_listen",
+        json!({"hub":"personal","about":"Multi hub"}),
+        meta.clone(),
+    );
+    let retained = f.rows("SELECT endpoint_pid,binding_generation,owner_token FROM local_listeners WHERE hub=\'work\' AND harness=\'fixture\'")[0].clone();
+    assert_eq!(
+        retained["endpoint_pid"],
+        i32::MAX,
+        "Registering on personal must not rewrite work endpoint metadata"
+    );
+    assert_eq!(
+        retained["binding_generation"],
+        binding["binding_generation"]
+    );
+    assert_eq!(retained["owner_token"], binding["owner_token"]);
+    f.db("state.sqlite")
+        .execute(
+            "UPDATE local_listeners SET endpoint_pid=? WHERE hub=\'work\' AND harness=\'fixture\'",
+            &[binding["endpoint_pid"].clone()],
+        )
+        .unwrap();
+    let all = f.tool("cito_find", json!({"harness":"fixture"}), human());
+    assert_eq!(all["listeners"].as_array().unwrap().len(), 2);
+    assert!(all["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["title"] == "alice" && r["custom_title"] == true));
+    let local = f.tool(
+        "cito_find",
+        json!({"hub":"local","harness":"fixture"}),
+        human(),
+    );
+    assert_eq!(local["listeners"].as_array().unwrap().len(), 1);
+    assert_eq!(local["listeners"][0]["title"], "alice");
+    for hub in ["personal", "work"] {
+        let stopped = if hub == "personal" {
+            f.tool("cito_unlisten", json!({"hub":hub}), meta.clone())
+        } else {
+            let (ok, out, err) = f.command(
+                NATIVE,
+                &[
+                    "unlisten",
+                    "--hub",
+                    hub,
+                    "--harness",
+                    "fixture",
+                    "--session",
+                    "session-1",
+                    "--json",
+                ],
+                "",
+            );
+            assert!(ok, "{out} {err}");
+            serde_json::from_str(&out).unwrap()
+        };
+        assert_eq!(stopped["removed"], 1);
+        let remaining = f.action(json!({"op":"get_snapshot"})).1;
+        assert!(remaining["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["hub"] == "local"
+                && row["harness"] == "fixture"
+                && row["title"] == "alice"
+                && row["custom_title"] == true));
+        assert_eq!(f.rows("SELECT title FROM session_custom_titles WHERE harness='fixture' AND session_id='session-1'")[0]["title"], "alice");
+        // Re-enrollment must retain the shared custom title too.
+        f.tool(
+            "cito_listen",
+            json!({"hub":hub,"about":"Multi hub"}),
+            meta.clone(),
+        );
+        assert_eq!(
+            f.tool("cito_status", json!({"hub":hub}), meta.clone())["title"],
+            "alice"
+        );
+    }
+    assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
+    let scoped = f.rows("SELECT hub,status FROM local_listeners WHERE harness='fixture'");
+    assert!(scoped
+        .iter()
+        .any(|v| v["hub"] == "local" && v["status"] == "UNLISTENED"));
+    assert!(scoped
+        .iter()
+        .filter(|v| v["hub"] != "local")
+        .all(|v| v["status"] == "ACTIVE"));
+    f.tool(
+        "cito_listen",
+        json!({"hub":"local","about":"Multi hub"}),
+        meta.clone(),
+    );
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
     a.stop(ha);
     b.stop(hb);
+    let (status, directory) = f.action(json!({"op":"query_directory","query":"","scope":"all","harness":"all","request_id":"offline-query"}));
+    assert_eq!(status, 200, "{directory}");
+    let warnings = directory["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.starts_with("personal:"))),
+        "{directory}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.starts_with("work:"))),
+        "{directory}"
+    );
     let inbox = f.tool("cito_inbox", json!({}), meta.clone());
     assert_eq!(inbox["signals"].as_array().unwrap().len(), 2);
     assert_eq!(f.rows("SELECT * FROM pending_hub_acks").len(), 2);
-    f.tool("cito_unlisten", json!({}), meta);
+    assert_eq!(
+        f.action(json!({"op":"unlisten_session","harness":"fixture","session_id":"session-1"}))
+            .0,
+        200
+    );
     assert!(f
         .rows("SELECT status FROM local_listeners WHERE harness='fixture'")
         .iter()
@@ -2650,6 +3563,42 @@ fn live_user_reload_and_auth_mode_canonicalization_survive_restart() {
         .as_str()
         .unwrap()
         .starts_with("bob-"));
+    // Disabled slots lose their in-memory predecessor, but retained bindings still
+    // belong to the original principal and URL across edits and restarts.
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    config["hubs"]["local"]["enabled"] = json!(false);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.action(json!({"op":"get_snapshot"}));
+    config["user"] = json!("carol");
+    config["hubs"]["local"]["enabled"] = json!(true);
+    fs::write(&f.config, config.to_string()).unwrap();
+    assert!(enroll(&f, human())["listener_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("carol-"));
+    assert!(f
+        .rows("SELECT status FROM local_listeners WHERE principal_id=\'none#bob\'")
+        .iter()
+        .all(|r| r["status"] == "FENCED_INACTIVE"));
+    config["hubs"]["local"]["enabled"] = json!(false);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.action(json!({"op":"get_snapshot"}));
+    config["hubs"]["local"]["url"] = json!("http://127.0.0.1:0");
+    config["hubs"]["local"]["enabled"] = json!(true);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.action(json!({"op":"get_snapshot"}));
+    let rows =
+        f.rows("SELECT status,hub_url FROM local_listeners WHERE principal_id=\'none#carol\'");
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|r| r["status"] == "FENCED_INACTIVE" && r["hub_url"] == "local://"));
 }
 #[test]
 fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
@@ -2673,6 +3622,39 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("plugin.json"), conflicting.to_string()).unwrap();
     f.daemon(&[]);
+    // Human enrollment covers both networks, independently of defaultHub.
+    // Both Hubs use none auth, so their default Human scope remains workspace.
+    wait(|| {
+        let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+        ["local", "remote"].iter().all(|hub| {
+            snapshot["listeners"].as_array().unwrap().iter().any(|row| {
+                row["hub"] == *hub && row["harness"] == "human" && row["scope"] == "workspace"
+            })
+        })
+    });
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"remote","harness":"human","session_id":"default"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":false}))
+            .0,
+        200
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert!(!snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["hub"] == "remote" && row["harness"] == "human"));
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["hub"] == "local" && row["harness"] == "human"));
     let rows = || {
         owner
             .db("hub/hub.sqlite")
@@ -2748,12 +3730,12 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     assert_eq!(config["desktopBannerEnabled"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
     for (name,invite) in [
-        ("127-0-0-1",format!("http://127.0.0.1:{}",port())),
+        ("remote",format!("http://127.0.0.1:{}",port())),
         ("joined",format!("cito setup --hub joined --url http://127.0.0.1:{} --auth token --token fixture-token --default",port())),
         ("json",json!({"name":"json","url":format!("http://127.0.0.1:{}",port()),"auth_mode":"none"}).to_string()),
         ("equals",format!("cito setup --hub=equals --url=http://127.0.0.1:{} --default",port())),
     ] {
-        let (status,value)=f.action(json!({"op":"paste_hub_invite","invite":invite})); assert_eq!(status,200,"{value}");
+        let (ok,out,err)=f.command(NATIVE,&["setup","--invite",&invite,"--json"],""); assert!(ok,"{out} {err}");
         let config:Value=serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
         assert!(config["hubs"][name].is_object()); assert_eq!(config["default_hub"],name);
     }
@@ -2783,6 +3765,80 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         .find(|h| h["name"] == "json")
         .unwrap()["error"]
         .is_null());
+
+    assert_eq!(
+        f.action(json!({"op":"set_host_hub","enabled":true,"port":0,"bind":"127.0.0.1"}))
+            .0,
+        200
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let hosted = &snapshot["settings"]["host_hub"];
+    let (ok, out, err) = f.command(NATIVE, &["setup", "--print-invite", "--json"], "");
+    assert!(ok, "{out} {err}");
+    let printed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(printed["invite_command"], hosted["invite_command"]);
+    let (ok, _, err) = f.command(
+        NATIVE,
+        &[
+            "setup",
+            "--invite",
+            hosted["endpoint_url"].as_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(!ok);
+    assert!(
+        err.contains("This invite code belongs to this Mac's own shared Hub"),
+        "{err}"
+    );
+    let port = hosted["port"].as_u64().unwrap();
+    let committed = fs::read(&f.config).unwrap();
+    let hostname = f.env["CITO_HOST_NAME"].clone();
+    for host in [
+        "127.0.0.1",
+        "localhost",
+        "[::1]",
+        &hostname,
+        &format!("{}.local", hostname.trim_end_matches(".local")),
+    ] {
+        let invite =
+            json!({"name":"self-invite","url":format!("http://{host}:{port}"),"auth_mode":"none"});
+        let (status, error) =
+            f.action(json!({"op":"paste_hub_invite","invite":invite.to_string()}));
+        assert_eq!(status, 400, "{host}: {error}");
+        assert_eq!(error["error"], "INVALID_INPUT: This invite code belongs to this Mac's own shared Hub (already active as 'local'). Paste it in Cito on your other Mac to connect.");
+        assert_eq!(fs::read(&f.config).unwrap(), committed);
+        let (ok, out, err) = f.command(
+            NATIVE,
+            &["setup", "--invite", &invite.to_string(), "--json"],
+            "",
+        );
+        assert!(!ok, "{host}: {out}");
+        assert!(
+            err.contains("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub"),
+            "{host}: {err}"
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), committed);
+    }
+    let root = ureq::get(hosted["endpoint_url"].as_str().unwrap())
+        .call()
+        .unwrap();
+    assert_eq!(
+        root.header("Content-Type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(root
+        .into_string()
+        .unwrap()
+        .contains("Paste Invite Code on another Mac"));
+    // The same host on another port remains a valid remote Hub.
+    let different = if port == 65535 { port - 1 } else { port + 1 };
+    let invite = json!({"name":"different-port","url":format!("http://127.0.0.1:{different}"),"auth_mode":"none"});
+    assert_eq!(
+        f.action(json!({"op":"paste_hub_invite","invite":invite.to_string()}))
+            .0,
+        200
+    );
 }
 #[test]
 fn r1_background_hub_recovery_clears_transient_errors_but_preserves_validation_errors() {
@@ -3051,6 +4107,16 @@ fn reloading_disabled_defaults_selects_enabled_hubs_unless_overridden() {
         let (status, snapshot) = f.action(json!({"op":"get_snapshot"}));
         assert_eq!(status, 200, "{snapshot}");
         assert_eq!(snapshot["hub"], expected);
+        assert!(snapshot["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["enabled"] != false && h["name"] != "work"));
+        assert!(snapshot["settings"]["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["name"] == "work" && h["enabled"] == false));
         let found = f.tool("cito_find", json!({"user":"absent"}), human());
         assert_eq!(found["ok"], true, "{found}");
         assert_eq!(found["listeners"], json!([]));
@@ -3081,6 +4147,14 @@ fn disabled_hub_alias_reenable_paths_activate_slots_across_restart() {
             .find(|hub| hub["name"] == "work")
             .unwrap();
         assert_eq!(work["enabled"], false, "{op}: {work}");
+        assert_eq!(snapshot["hubs"], json!([]));
+        assert!(
+            !snapshot["settings"]["channels"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "disabled local still exposes channel inventory"
+        );
         let unavailable =
             f.tool_result("cito_find", json!({"hub":"work","user":"absent"}), human());
         assert_eq!(unavailable["isError"], true, "{unavailable}");
@@ -3257,7 +4331,15 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         assert_eq!(status, 200, "{response}");
         let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
         for (key, value) in fields.as_object().unwrap() {
-            assert_eq!(&config["hubs"]["work"][key], value);
+            let canonical = match key.as_str() {
+                "client_id" | "oidcClientId" => "clientId",
+                "oidcIssuer" => "issuer",
+                key => key,
+            };
+            assert_eq!(&config["hubs"]["work"][canonical], value);
+        }
+        for key in ["client_id", "oidcIssuer", "oidcClientId", "request_id"] {
+            assert!(config["hubs"]["work"].get(key).is_none());
         }
         let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
         assert!(ok, "{fields}: {err}");
@@ -3298,6 +4380,36 @@ fn stdio_signal_handlers_exit_cleanly_and_daemon_health_owns_sandbox() {
 #[test]
 fn cli_validation_dry_run_and_selective_harness_configuration() {
     let _lock = serial();
+    let plugins = cito_native::plugins::LoadedPlugins {
+        plugins: ["pi", "codex", "claude"]
+            .into_iter()
+            .map(|id| {
+                cito_native::plugins::parse_manifest_dir(&root().join("plugins").join(id), true)
+                    .unwrap()
+            })
+            .collect(),
+        rejected_ids: Default::default(),
+    };
+    for id in ["pi", "codex", "claude"] {
+        for flag in [format!("--{id}"), format!("--{id}=session-1")] {
+            let (input, meta) = cito_native::core::cli::parse_cli(
+                "rename",
+                &["Backend API".into(), flag.clone()],
+                &plugins,
+            )
+            .unwrap();
+            assert_eq!(input["title"], "Backend API");
+            assert_eq!(meta["expected_harness"], id);
+            assert_eq!(
+                meta["expected_session_id"],
+                if flag.contains('=') {
+                    json!("session-1")
+                } else {
+                    Value::Null
+                }
+            );
+        }
+    }
     let f = Fixture::new(json!({}));
     let legacy = f.state.join("plugins/pi");
     fs::create_dir_all(&legacy).unwrap();
@@ -3313,6 +4425,8 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         vec!["setup", "--hub", "work", "--url", "invalid"],
         vec!["setup", "--enable-hub", "missing"],
         vec!["setup", "--share-port", "invalid"],
+        vec!["setup", "--invite"],
+        vec!["setup", "--invite", "invalid", "--disconnect-all"],
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(!ok, "{args:?}: {out} {err}");
@@ -3338,6 +4452,9 @@ fn cli_validation_dry_run_and_selective_harness_configuration() {
         vec!["setup", "--dry-run", "--build-app", "--json"],
         vec!["setup", "--status", "--json"],
         vec!["setup", "--status", "--build-app", "--json"],
+        vec!["setup", "--invite", "https://hub.example.com", "--dry-run"],
+        vec!["setup", "--disconnect-all", "--purge-data", "--dry-run"],
+        vec!["setup", "--print-invite", "--dry-run"],
     ] {
         let (ok, out, err) = f.command(NATIVE, &args, "");
         assert!(ok, "{args:?}: {out} {err}");

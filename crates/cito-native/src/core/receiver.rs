@@ -277,19 +277,40 @@ pub fn probe_listener(
         status,
         "switched" | "closed_definitive" | "session_switched"
     ) || failures >= 3;
-    local.db.transaction(|c| {
+    // Never hold the local database mutex while waiting for registration authority.
+    let registration = local.registration_lock(&client.name)?;
+    let _registration = if revoke {
+        Some(
+            registration
+                .lock()
+                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?,
+        )
+    } else {
+        None
+    };
+    let revoked = local.db.transaction(|c| {
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
-            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
             if changed > 0 {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
+                c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[row["hub"].clone(),row["listener_id"].clone(),client.config["url"].clone()])?;
             }
+            return Ok(changed > 0);
         }
-        Ok(())
+        Ok(false)
     })?;
-    if revoke {
+    if revoked {
+        local.invalidate_discovery(string(row, "harness"))?;
         let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
-        let _ = detach_channel_expected(client, string(row, "listener_id"), &channel, row);
+        if detach_channel_expected(client, string(row, "listener_id"), &channel, row).is_ok() {
+            local.clear_pending_detach_if_current(
+                string(row, "hub"),
+                string(row, "listener_id"),
+                row["binding_generation"].as_u64().unwrap_or(0),
+                string(row, "owner_token"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -429,8 +450,11 @@ fn dispatch_listener(
                     }
                 }
                 "session_switched" => {
-                    // Detach failure must still release the local dispatch lease.
-                    let detached = detach_channel_expected(client, id, &channel, row);
+                    // Serialize terminal revocation and detach with registration.
+                    let registration = local.registration_lock(&client.name)?;
+                    let _registration = registration
+                        .lock()
+                        .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
                     local.finish_wake_batch(
                         row,
                         first,
@@ -441,8 +465,23 @@ fn dispatch_listener(
                         false,
                         false,
                     )?;
-                    local.db.execute("UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
-                    detached?;
+                    let changed=local.db.transaction(|c| {
+                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
+                        if changed>0 {
+                            c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
+                        }
+                        Ok(changed)
+                    })?;
+                    if changed > 0 {
+                        local.invalidate_discovery(string(row, "harness"))?;
+                        detach_channel_expected(client, id, &channel, row)?;
+                        local.clear_pending_detach_if_current(
+                            hub,
+                            id,
+                            row["binding_generation"].as_u64().unwrap_or(0),
+                            string(row, "owner_token"),
+                        )?;
+                    }
                 }
                 "driver_unavailable" if written => {
                     // The final response confirms insertion but could not finish

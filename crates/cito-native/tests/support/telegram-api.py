@@ -18,6 +18,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global polls
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         method = self.path.split('/')[-1]
+        with (pathlib.Path(os.environ['HOME']) / 'api-methods.jsonl').open('a') as log:
+            log.write(json.dumps(method) + '\n')
+        token = self.path.split('/')[1]
+        if method == 'getUpdates' and token in ('botpoll409', 'botpoll401'):
+            status = int(token[-3:])
+            data = json.dumps(dict(ok=False, description='Polling rejected by fixture', error_code=status)).encode()
+            self.send_response(status)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         result = True
         if method == 'getMe':
             result = dict(username='example_bot')

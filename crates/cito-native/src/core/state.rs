@@ -5,7 +5,15 @@ use super::{
 };
 use crate::plugins::now_ms;
 use serde_json::{json, Value};
-use std::{os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    collections::HashMap,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+};
 
 #[cfg(test)]
 #[path = "state_tests.rs"]
@@ -14,6 +22,8 @@ mod tests;
 #[derive(Clone)]
 pub struct LocalState {
     pub db: Database,
+    discovery_revisions: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    registration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 impl LocalState {
     pub fn open(dir: &Path) -> Result<Self, String> {
@@ -41,6 +51,7 @@ impl LocalState {
                 replay_gap_detected INTEGER NOT NULL DEFAULT 0, replay_gap_range TEXT, dispatcher_token TEXT,
                 lease_until_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(hub,listener_id));
                 CREATE INDEX IF NOT EXISTS listeners_by_session ON local_listeners(harness,session_id);
+                CREATE TABLE IF NOT EXISTS session_custom_titles(harness TEXT NOT NULL,session_id TEXT NOT NULL,title TEXT NOT NULL,PRIMARY KEY(harness,session_id));
                 CREATE TABLE IF NOT EXISTS local_signals (
                 hub TEXT NOT NULL DEFAULT 'default', signal_id TEXT NOT NULL, listener_id TEXT NOT NULL, seq INTEGER NOT NULL,
                 binding_generation INTEGER NOT NULL, from_user TEXT NOT NULL, from_host_name TEXT NOT NULL, from_harness TEXT,
@@ -65,11 +76,90 @@ impl LocalState {
             if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "queue_confirmed") {
                 c.execute("ALTER TABLE local_signals ADD COLUMN queue_confirmed INTEGER NOT NULL DEFAULT 0", &[])?;
             }
+            // Additive V4 extension binds retained listeners to their original Hub URL.
+            if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "hub_url") {
+                c.execute("ALTER TABLE local_listeners ADD COLUMN hub_url TEXT", &[])?;
+            }
+            // Additive V4 metadata fences cached enrollment after local revocation.
+            if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "updated_at") {
+                c.execute("ALTER TABLE local_listeners ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0", &[])?;
+            }
+            if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "activity_hidden") {
+                c.execute("ALTER TABLE local_signals ADD COLUMN activity_hidden INTEGER NOT NULL DEFAULT 0", &[])?;
+            }
             // Opening another handle must never steal a live dispatch lease. Frozen
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
         })?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            discovery_revisions: Arc::new(Mutex::new(HashMap::new())),
+            registration_locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    /// Hub authority outlives client replacement, reconnect, and disable/enable.
+    pub fn registration_lock(&self, hub: &str) -> Result<Arc<Mutex<()>>, String> {
+        let mut locks = self
+            .registration_locks
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration registry lock poisoned")?;
+        Ok(locks.entry(hub.to_owned()).or_default().clone())
+    }
+    /// Retire only the local incarnation whose remote cleanup just completed.
+    pub fn clear_pending_detach_if_current(
+        &self,
+        hub: &str,
+        id: &str,
+        generation: u64,
+        owner: &str,
+    ) -> Result<(), String> {
+        self.db.execute(
+            "DELETE FROM pending_hub_detaches WHERE hub=?1 AND listener_id=?2 AND EXISTS (SELECT 1 FROM local_listeners WHERE hub=?1 AND listener_id=?2 AND status='UNLISTENED' AND binding_generation=?3 AND COALESCE(owner_token,'')=?4)",
+            &[json!(hub),json!(id),json!(generation),json!(owner)],
+        )?;
+        Ok(())
+    }
+    /// Share provider invalidation with receiver clones, without sharing worker ownership.
+    pub(super) fn discovery_revision(&self, harness: &str) -> Result<Arc<AtomicU64>, String> {
+        let mut revisions = self
+            .discovery_revisions
+            .lock()
+            .map_err(|_| "Discovery revision lock poisoned")?;
+        Ok(revisions.entry(harness.to_owned()).or_default().clone())
+    }
+    pub(super) fn invalidate_discovery(&self, harness: &str) -> Result<(), String> {
+        let revisions = self
+            .discovery_revisions
+            .lock()
+            .map_err(|_| "Discovery revision lock poisoned")?;
+        if let Some(revision) = revisions.get(harness) {
+            revision.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    pub fn custom_title(&self, harness: &str, session: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .db
+            .query(
+                "SELECT title FROM session_custom_titles WHERE harness=? AND session_id=?",
+                &[json!(harness), json!(session)],
+            )?
+            .first()
+            .and_then(|row| row["title"].as_str())
+            .map(str::to_owned))
+    }
+    pub fn set_custom_title(
+        &self,
+        harness: &str,
+        session: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        super::registration::validate_title(title)?;
+        self.db.transaction(|c| {
+            c.execute("INSERT INTO session_custom_titles(harness,session_id,title) VALUES(?,?,?) ON CONFLICT(harness,session_id) DO UPDATE SET title=excluded.title", &[json!(harness),json!(session),json!(title)])?;
+            c.execute("UPDATE local_listeners SET title=? WHERE harness=? AND session_id=?", &[json!(title),json!(harness),json!(session)])?;
+            Ok(())
+        })
     }
     pub fn listener(&self, hub: &str, id: &str) -> Result<Option<Value>, String> {
         Ok(self
@@ -289,14 +379,34 @@ impl LocalState {
         })
     }
     pub fn fence_listener_for(&self, listener: &Value, reason: &str) -> Result<bool, String> {
-        self.db.transaction(|c| {
+        self.deactivate_listener_for(listener, "FENCED_INACTIVE", reason)
+    }
+    pub fn pause_listener_for(&self, listener: &Value) -> Result<bool, String> {
+        if listener["status"] != "ACTIVE" {
+            return Ok(false);
+        }
+        self.deactivate_listener_for(listener, "UNLISTENED", "unlistened")
+    }
+    fn deactivate_listener_for(
+        &self,
+        listener: &Value,
+        status: &str,
+        reason: &str,
+    ) -> Result<bool, String> {
+        let changed = self.db.transaction(|c| {
             let hub=string(listener,"hub");
             let current=current_listener(c,hub,string(listener,"listener_id"))?;
-            if current["status"] != "ACTIVE" || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] { return Ok(false); }
-            c.execute("UPDATE local_listeners SET status='FENCED_INACTIVE',dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone(),listener["owner_token"].clone()])?;
+            // A retained pause can be fenced for a changed profile, but a stale
+            // active receiver must never overwrite a more recent pause or resume.
+            if current["status"] != listener["status"] || current["status"] == "FENCED_INACTIVE" || current["binding_generation"] != listener["binding_generation"] || current["owner_token"] != listener["owner_token"] { return Ok(false); }
+            c.execute("UPDATE local_listeners SET status=?,updated_at=?,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND binding_generation=? AND COALESCE(owner_token,'')=? AND status=?", &[json!(status),json!(now_ms()),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone(),listener["owner_token"].clone(),listener["status"].clone()])?;
             c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?,dispatcher_token=NULL WHERE hub=? AND listener_id=? AND binding_generation<=? AND state IN ('RECEIVED','DISPATCHING')", &[json!(reason),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone()])?;
             Ok(true)
-        })
+        })?;
+        if changed {
+            self.invalidate_discovery(string(listener, "harness"))?;
+        }
+        Ok(changed)
     }
     pub fn restore_passive(&self, hub: &str, listener: &Value) -> Result<(), String> {
         self.db.execute("UPDATE local_signals SET state='RECEIVED',held_reason=NULL WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND (held_reason IS NULL OR (held_reason='driver_unavailable' AND NOT EXISTS(SELECT 1 FROM wake_retries w WHERE w.hub=local_signals.hub AND w.listener_id=local_signals.listener_id AND w.retry_at_ms>?))) AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(now_ms()), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
@@ -327,7 +437,7 @@ impl LocalState {
         filter: &str,
         query: &str,
     ) -> Result<(Vec<Value>, u64, u64), String> {
-        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' '||s.from_user||' '||s.from_host_name||' '||s.from_title||' '||COALESCE(l.title,'')||' '||s.signal_id||' '||s.listener_id||' '||CASE WHEN l.harness='human' THEN 'you' ELSE '' END),lower(?))>0)";
+        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' @'||s.from_user||' '||s.from_host_name||' '||s.from_title||' '||COALESCE(l.title,'')||' '||s.signal_id||' '||s.listener_id||' '||COALESCE(s.from_harness,'')||' '||COALESCE(l.harness,'')||' '||COALESCE(s.from_listener_id,'')||' @'||s.from_user||'/'||COALESCE(s.from_harness,'')||'#'||CASE WHEN s.from_listener_id LIKE 'c_%' THEN substr(s.from_listener_id,3) ELSE COALESCE(s.from_listener_id,'') END||' @'||COALESCE(l.owner_user,'')||'/'||COALESCE(l.harness,'')||'#'||CASE WHEN s.listener_id LIKE 'c_%' THEN substr(s.listener_id,3) ELSE s.listener_id END||' '||CASE WHEN l.harness='human' THEN 'you' ELSE '' END),lower(?))>0)";
         let query = query.trim();
         let params = [json!(filter), json!(filter), json!(query), json!(query)];
         self.db.transaction(|c| {

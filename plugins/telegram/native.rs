@@ -55,9 +55,10 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
             let v: Value =
                 serde_json::from_reader(response.into_reader().take(65_536)).unwrap_or(Value::Null);
             return Err(ApiFailure {
-                message: str_at(&v, "description")
-                    .unwrap_or("Telegram rejected the request")
-                    .into(),
+                message: format!(
+                    "Telegram {method} HTTP {status}: {}",
+                    str_at(&v, "description").unwrap_or("Telegram rejected the request")
+                ),
                 retryable: matches!(status, 408 | 429 | 500..=599),
                 effect_unknown: false,
             });
@@ -95,9 +96,10 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
     if v["ok"] != true {
         let status = v["error_code"].as_u64().unwrap_or(400);
         return Err(ApiFailure {
-            message: str_at(&v, "description")
-                .unwrap_or("Telegram API returned an error")
-                .into(),
+            message: format!(
+                "Telegram {method} API {status}: {}",
+                str_at(&v, "description").unwrap_or("Telegram API returned an error")
+            ),
             retryable: matches!(status, 408 | 429 | 500..=599),
             effect_unknown: false,
         });
@@ -166,7 +168,7 @@ fn rpc(config: &Value, req: &Value) -> Value {
         let username = str_at(&me, "username").ok_or("Bot username is unavailable")?;
         if req["op"] == "format_pair" {
             return Ok(
-                json!({"pairing_command":format!("/start {}",str_at(req,"code").ok_or("Pairing code is required")?),"instruction":format!("Send \"/start {}\" to @{username}",str_at(req,"code").ok_or("Pairing code is required")?),"bot_username":username}),
+                json!({"pairing_command":format!("/start {}",str_at(req,"code").ok_or("Pairing code is required")?),"instruction":format!("Send \"/start {}\" to @{username}",str_at(req,"code").ok_or("Pairing code is required")?),"bot_username":username,"pairing_url":format!("https://t.me/{username}?start={}",str_at(req,"code").ok_or("Pairing code is required")?)}),
             );
         }
         let detail = if let Some(chat) = str_at(&req["user_config"], "chatId") {
@@ -385,7 +387,7 @@ impl Runtime {
 }
 pub fn main() {
     let input = stdin_watchdog();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<(Value, std::result::Result<Value, ApiFailure>)>();
     let mut runtime = Runtime {
         config: json!({}),
         cursor: 0,
@@ -405,9 +407,22 @@ pub fn main() {
             polling = false;
             if config == runtime.config {
                 match result {
-                    Ok(updates) => runtime.updates(updates),
+                    Ok(updates) => {
+                        emit(&json!({"op":"health","error":null}));
+                        runtime.updates(updates);
+                    }
                     Err(e) => {
                         eprintln!("Telegram polling: {e}");
+                        let guidance = if e.message.contains("409") {
+                            "Remove the external webhook yourself or use a dedicated bot token; stop other pollers."
+                        } else if e.message.contains("401") {
+                            "Check or replace the Bot Token in Human Channels Settings."
+                        } else {
+                            "Check the network, Bot Token, and bot permissions."
+                        };
+                        emit(
+                            &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
+                        );
                         next_poll = std::time::Instant::now() + Duration::from_secs(1);
                     }
                 }

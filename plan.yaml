@@ -9232,7 +9232,7 @@ phases:
 - id: v32
   name: 'V32 Stage 14 (v0.21.3): Unified Spatial Grid (CitoMetrics), Real Brand Icons
     (icon.png), and Hubs & Network Tab Redesign (N1–N3)'
-  status: in_progress
+  status: done
   gate: 'All N1–N3 requirements in docs/DESIGN.md §16 pass; all 6 inspectMenu() mechanical
     invariants (including card inner-padding >= 5.5pt) equal [] across all 4 surfaces
     in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
@@ -9320,7 +9320,7 @@ phases:
     name: 'V32 2D Contract-and-Simplicity Iterative Convergence Audit, Light/Dark
       Multimodal Review & Live v0.21.3 Release [REQUIRES_SKILL: contract-and-simplicity]
       [GATE_MODE: ITERATIVE_CONVERGENCE]'
-    status: claimed
+    status: done
     description: 'Execute iterative 2D contract-and-simplicity convergence across
       all modified files, site/assets/screenshots/*.png, and Light/Dark 2x Retina
       PNG snapshots with pathway-auditor, structural-auditor, and uiux-auditor until
@@ -9338,10 +9338,47 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-11T14:49:46.355265Z'
+    done_at: '2026-11-11T17:33:39.930313+00:00'
+    evidence: "Artifact:\n- Commits: 98b83071ba69a9c55230fa80064813fa55a9bf64 (Round\
+      \ 1 ledger closure V32-L1..V32-L7), f6d424224a1732b2cee1036beaad66165ade15a1\
+      \ (N4 1:1 DPI-proportional screenshot stage & ClosedLoop/banner_jargon hardening),\
+      \ and ca882d8a4151ee0d4a188c13df2444bcdf868ca6 (const Mutex Tailscale cache\
+      \ simplification, tagged as v0.21.3)\n- GitHub Release: https://github.com/Tefx/cito/releases/tag/v0.21.3\
+      \ (workflow run 43065443206, CI run 43065433737, Website run 43065433765)\n\
+      - Homebrew Tap: Tefx/homebrew-tap Casks/cito.rb updated to version 0.21.3 (sha256:\
+      \ 386540fc95e15c4b8947930144e1c09a92866401a70a0fc1229cd9784ddcb87f)\n\nVerification:\n\
+      - 2D Contract-and-Simplicity Iterative Convergence:\n  - Round 1 (git:1d4700ffc6f9088181db9ef632cfa612351572ea):\
+      \ pathway-auditor, structural-auditor, and uiux-auditor read 1..EOF of all modified\
+      \ files + 45 PNGs and produced the Frozen Finding Ledger (V32-L1..V32-L7: host_hub_card\
+      \ compaction when add_hub_form is open + settings_hubs_tab viewport oracle,\
+      \ toggle_my_remote & toggle_group 12pt menu rail, pluginIconImage ~ and whitespace\
+      \ path normalization, record_hub_result canonical error clearing, PendingHubSave\
+      \ settlement test, site/index.html preview copy, and canonical Telegram Chat\
+      \ ID / expanded Activity / Direct Message banner screenshots).\n  - Round 2\
+      \ (git:a0f44a2dd01beebfaef1e42a4ab0ebafadfc7429): uiux-auditor and structural-auditor\
+      \ returned Contract & Wiring: CLEAN | Simplicity & Economy: ZERO_NEW_ISSUES;\
+      \ pathway-auditor requested extending ClosedLoop with normalized/auto-derived\
+      \ Hub saves, alongside the user's mid-flight N4 (1:1 DPI-proportional screenshot\
+      \ stage in site/index.html, site/docs/guide.html, site/styles/main.css, site/scripts/hero-preview.js)\
+      \ and banner_jargon timer hardening.\n  - Round 3 (git:ca882d8a4151ee0d4a188c13df2444bcdf868ca6):\
+      \ structural-auditor and uiux-auditor returned Contract & Wiring: CLEAN | Simplicity\
+      \ & Economy: ZERO_NEW_ISSUES; pathway-auditor verified all Round 2/3 repairs\
+      \ (ClosedLoop settlement, banner_jargon timer cancel, const Mutex Tailscale\
+      \ cache, and N4 website runner) with 1 proportionality-exempted test observation\
+      \ (#1 on existing ui.rs:451 ClosedLoop config-save test URLs, exempted under\
+      \ the Proportionality Gate because hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub\
+      \ already tests live fixture-owned Hub ports while ui.rs:451 tests local config\
+      \ persistence and settings frame correlation).\n- Run: `cargo fmt --all -- --check`\
+      \ -> PASS\n- Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`\
+      \ (in CI run 43065433737) -> PASS (0 warnings)\n- Run: `cargo test --workspace\
+      \ --locked -- --test-threads=4` -> PASS (170 library, 100 integration, 3 plugin\
+      \ unit tests; 0 failed)\n- Run: `cargo build --release --locked` -> PASS\n-\
+      \ Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §16 (N1–N4 & §16.2 Anti-Over-Testing\
+      \ Policy) & docs/RELEASING.md"
   - id: v32.gate
     name: V32 Independent Terminal Acceptance, N1–N3 Verification & v0.21.3 Live Release
       Gate
-    status: pending
+    status: done
     description: Independently verify all N1–N3 requirements in docs/DESIGN.md §16,
       all 6 inspectMenu() mechanical invariants in Light and Dark modes, §16.2 test
       economy, and live v0.21.3 GitHub Release / Tefx/homebrew-tap Cask alignment.
@@ -9353,3 +9390,1313 @@ phases:
     depends_on:
     - v32.hygiene
     agent: gate-reviewer
+    claimed_by: gate-reviewer
+    claimed_at: '2026-11-11T17:33:54.640124Z'
+    done_at: '2026-11-11T17:38:46.492314+00:00'
+    evidence: "Artifact:\n- Gate Report: gate.report.v2 (status: PASS, review_kind:\
+      \ PHASE_GATE, review_mode: FULL, target_ref: git:2a79ca06d4f51397d9dad3fcb54402afa25f76e7,\
+      \ evidence_disposition: POSITIVE_GATE_EVIDENCE)\n- Release Commit & Annotated\
+      \ Tag: v0.21.3 -> ca882d8a4151ee0d4a188c13df2444bcdf868ca6\n- GitHub Release:\
+      \ https://github.com/Tefx/cito/releases/tag/v0.21.3 (Cito-macos-arm64.zip sha256:\
+      \ 386540fc95e15c4b8947930144e1c09a92866401a70a0fc1229cd9784ddcb87f)\n- Homebrew\
+      \ Tap: Tefx/homebrew-tap Casks/cito.rb v0.21.3\n\nVerification:\n- Run: `python3\
+      \ ~/.pi/agent/scripts/review_report_validator.py --kind gate --binding /tmp/cito-v32-gate-binding.json\
+      \ /Users/tefx/.pi/larva/subagent-output-artifacts/2026-11-11T17-37-58-983Z-2026-11-11T17-34-50-197Z_01a1cbad-3b54-70f7-9dd6-96291db0f35a.js-75893c6c07ae9200.txt`\
+      \ -> PASS (`valid: true, binding_checked: true, evidence_disposition: \"POSITIVE_GATE_EVIDENCE\"\
+      `)\n- Proven Requirements (5/5 PROVEN):\n  - N1_UNIFIED_SPATIAL_GRID_AND_CARD_PADDING:\
+      \ PROVEN\n  - N2_REAL_BUNDLED_BRAND_ICONS: PROVEN\n  - N3_HUBS_AND_NETWORK_REDESIGN:\
+      \ PROVEN\n  - N4_PURPOSE_DRIVEN_WEBSITE_WALKTHROUGH_AND_STAGE: PROVEN\n  - S16_2_TEST_ECONOMY_AND_V0_21_3_RELEASE:\
+      \ PROVEN\n- Gaps: None.\n\nSpec link:\n- docs/DESIGN.md §16 (N1–N4 & §16.2 Anti-Over-Testing\
+      \ Policy) & docs/RELEASING.md"
+- id: v33
+  name: 'V33 Stage 15 (v0.21.4 Candidate): Crafted macOS Utility De-Boxing, Hit-Test
+    Reachability, Progressive Disclosure & Minimalist Web Architecture (P1–P4)'
+  status: done
+  gate: All P1–P4 requirements in docs/DESIGN.md §17 pass; all inspectMenu() mechanical
+    invariants (including hit-test reachability and card inner-padding) equal [] across
+    all 4 surfaces in Light and Dark appearances; website screenshots in site/assets/screenshots/*.png
+    and architecture-topology.svg are updated; single-pass contract-and-simplicity
+    review & fix completes; cargo test --workspace && cargo build --release pass with
+    0 warnings; changes are pushed to origin/main (NO release tag).
+  context: 'Implement docs/DESIGN.md §17 (P1–P4 & §17.2): (1) P1 AppKit hit-test reachability
+    (MenuControl.hitTest & ClickView.hitTest !isHidden guard, unmounted collapsed
+    subviews, inspectMenu hit-test oracle) and Save/Re-check visual feedback symmetry;
+    (2) P2 Crafted macOS utility de-boxing (.subtleHeader ghost controls, segmented
+    tab tracks, compact 52pt single-row Agent Apps cards, Experimental badge leading
+    alignment, and 3-state Telegram progressive disclosure that collapses personal
+    Chat ID form when paired); (3) P3 canonical Pi -> Codex -> Claude Code ordering
+    in plugins.rs & manifests, Tailscale vs LAN address switcher & online/MagicDNS
+    check, smart Hub Name derivation from IP/domain URLs with live placeholder & sentence-case
+    labels, Directory human row deduplication, centered empty states, and sanitized
+    OIDC errors; (4) P4 website consolidation, equal-height CSS Grid tab stacking,
+    nowrap pills/links, direct Cito-macos-arm64.zip download URLs + target=_blank
+    external links, open reply composer in activity-dark.png, and hand-drawn Excalidraw-style
+    architecture-topology.svg. Per user mandate: run a single-pass fast contract-and-simplicity
+    review & fix (NO multi-round loops) and do NOT create a formal release tag yet.'
+  depends_on:
+  - v32
+  steps:
+  - id: v33.impl
+    name: V33 P1–P4 Crafted macOS Utility De-Boxing, Hit-Test Reachability, Progressive
+      Disclosure & Minimalist Website Implementation
+    status: done
+    description: Implement docs/DESIGN.md §17 (P1–P4) while strictly enforcing §17.2
+      test economy (update existing unit/UI assertions in place; do NOT add new multi-process
+      E2E test functions). Regenerate site/assets/screenshots/*.png and create site/assets/art/architecture-topology.svg.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/daemon.rs
+    - plugins/pi/plugin.json
+    - plugins/codex/plugin.json
+    - plugins/codex/native.rs
+    - plugins/claude/plugin.json
+    - plugins/telegram/plugin.json
+    - site/index.html
+    - site/docs/guide.html
+    - site/docs/plugins.html
+    - site/docs/architecture.html
+    - site/styles/main.css
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/distribution.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T19:23:06.100686Z'
+    done_at: '2026-11-11T20:38:37.588053+00:00'
+    evidence: "Artifact:\n- Commit: 0f1443a5ece334e8b9e5627db012869087287f1e (41 files\
+      \ changed, 932 insertions(+), 533 deletions(-))\n- Candidate ref: refs/vectl/candidates/v33.impl\
+      \ -> 0f1443a5ece334e8b9e5627db012869087287f1e\n- Worktree cleanup: removed .vectl/worktrees/v33.impl\
+      \ and temporary target/v33-* / /tmp/cito-v33-*.log artifacts; free space 129Gi\
+      \ (unchanged delta).\n\nDelivered (docs/DESIGN.md §17 P1–P4 & §17.2):\n1. P1\
+      \ AppKit Hit-Test Reachability & Action Feedback Symmetry:\n   - MenuControl.hitTest\
+      \ and ClickView.hitTest guard !isHidden && !isHiddenOrHasHiddenAncestor && alphaValue\
+      \ > 0.01; non-interactive MenuControl instances (pressed == nil) pass through\
+      \ without hover/click interception.\n   - Collapsed subviews in host_hub_card\
+      \ are only mounted when hostExpanded == true; activity_clear is hidden in Directory\
+      \ mode; single enabled local hub omits Disable button.\n   - inspectMenu() mechanical\
+      \ root.hitTest oracle verifies every visible interactive MenuControl across\
+      \ all 4 surfaces and reports \"hit_test\" in test_oracle_calibration.\n   -\
+      \ Request-correlated channelSavedUntil (\"✓ Saved\") and appCheckedUntil (\"\
+      ✓ Checked\" on Re-check) feedback with daemon settings frame emission; Codex\
+      \ plugin configured() checks enabled != false, accepts cito-mcp or */cito-mcp,\
+      \ and removes empty [mcp_servers] on setup_remove.\n2. P2 Crafted macOS Utility\
+      \ De-Boxing & 3-State Progressive Disclosure:\n   - Softened card surfaces,\
+      \ .subtleHeader ghost controls, segmented tab tracks in Settings and Directory/Activity,\
+      \ compact 52pt single-row Agent Apps cards with leading Experimental pill, and\
+      \ 3-state Telegram progressive disclosure collapsing paired personal Chat ID\
+      \ row into a clean summary bar with [Send Test] [Pause/Resume] [Edit…] [Unpair].\n\
+      3. P3 Canonical Ordering, Tailscale vs LAN Switcher, Smart Hub Naming & Polish:\n\
+      \   - Declarative order: 0/1/2 sorting Pi -> Codex -> Claude Code in plugins.rs\
+      \ and plugin manifests.\n   - Tailscale online/MagicDNS validity check, LAN\
+      \ non-loopback filter, [Tailscale] [Local IP] address switcher in host_hub_card,\
+      \ smart Hub Name derivation (\"lan\", \"tailscale\", \"remote\", domain slug)\
+      \ with live placeholder and sentence-case labels, Directory human row deduplication,\
+      \ centered empty states, uninstall confirmation subtitle, and sanitized OIDC/HTTP\
+      \ error phrasing.\n4. P4 Minimalist Website Consolidation, Equal-Height Grid\
+      \ Tabs, Direct Download Links & Architecture SVG:\n   - Direct Cito-macos-arm64.zip\
+      \ download links, target=\"_blank\" rel=\"noopener noreferrer\" on external\
+      \ GitHub links, nowrap pills/links, 0px height delta CSS Grid tab stacking,\
+      \ Pi -> Codex -> Claude Code ordering, refreshed screenshots (activity-dark.png\
+      \ with open inline reply composer), and hand-drawn Excalidraw-style site/assets/art/architecture-topology.svg.\n\
+      \nVerification:\n- Run: PATH=\"/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\"\
+      \ RUST_TEST_THREADS=1 cargo test --workspace -> PASS (273 passed, 4 ignored,\
+      \ 0 failed across unit, native integration, and doc tests)\n- Run: cargo build\
+      \ --release -> PASS (0 warnings, rebuilt staged native/UI/plugin binaries)\n\
+      - Run: PATH=\"/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\" python3 packaging/release.py\
+      \ check -> PASS (reports 0.21.3)\n- Run: Headless Chrome layout & tab height\
+      \ delta probe across index.html, docs/guide.html, docs/plugins.html, docs/architecture.html\
+      \ at 1200/768/390px -> PASS (0px horizontal overflow, 0 broken images, [0, 0,\
+      \ 0] tab height deltas, 0 SVG text overflow)\n\nSpec link:\n- docs/DESIGN.md\
+      \ §17 (P1–P4 & §17.2)"
+  - id: v33.review
+    name: 'V33 Single-Pass Fast Contract-and-Simplicity Review & Fix and Push to main
+      (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: Run a SINGLE-PASS fast contract-and-simplicity review across the
+      modified files and regenerated screenshots, apply any direct fixes in one pass
+      (do NOT run multi-round review loops per user instruction), verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/plugins.rs
+    - site/index.html
+    - site/docs/architecture.html
+    - site/styles/main.css
+    depends_on:
+    - v33.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-11T20:38:46.001975Z'
+    done_at: '2026-11-11T20:59:56.278063+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 89020018ad41b472a7b9ce457b50d099f2c8a745 (14 files changed, 47 insertions(+),
+      186 deletions(-))
+
+      - Candidate ref: refs/vectl/candidates/v33.review -> 89020018ad41b472a7b9ce457b50d099f2c8a745
+
+      - Worktree cleanup: removed .vectl/worktrees/v33.review and /tmp/cito-v33-review;
+      free space 129Gi (unchanged delta).
+
+
+      Single-Pass Contract-and-Simplicity Review & Fixes Applied:
+
+      1. [CONTRACT / WIRE] Normalized Hub URL comparison across trailing slashes (`normalizedHubURL`
+      in `src/macos/cito-ui.swift:22,3348`): ensures trailing-slash URLs (`http://127.0.0.1:4291/`)
+      submitted in `add_hub_form` match the daemon''s normalized URL on save acknowledgement
+      and close the form cleanly. Verified in `r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states`
+      and `lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions`.
+
+      2. [CONTRACT / WIRE] Wildcard-bind guard for `tailscale_url` (`crates/cito-native/src/core/daemon.rs:1965`):
+      only advertise a Tailscale alternative URL when `host_hub.bind` is wildcard
+      (`""`, `"0.0.0.0"`, `"::"`), preventing unreachable Tailscale invite URLs when
+      explicitly bound to `127.0.0.1`, `::1`, or a specific interface IP. Verified
+      in `u8_token_auth_generates_and_persists_token_while_sharing_is_off`.
+
+      3. [CONTRACT / DOCS] Synchronized `site/docs/guide.html` with V33 UI: updated
+      Agent ordering (`Pi Coding Agent`, `Codex`, `Claude Code`), replaced removed
+      `Skip for Now` wording with optional personal pairing guidance, and documented
+      the collapsed personal summary row (`Edit…`) and `Disconnect All` human-node
+      preservation.
+
+      4. [SIMPLICITY / TRIM] Removed 164 lines of dead `.hero-stage-*` / `.scene-tab`
+      / `.node-pill` CSS from `site/styles/main.css` left behind after landing-page
+      consolidation, and deleted 5 redundant `.isHidden = !hostExpanded` assignments
+      inside the `if hostExpanded` block in `src/macos/cito-ui.swift:3205–3249`.
+
+
+      Verification:
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> PASS
+
+      - Run: cargo fmt --check && git diff --check -> PASS
+
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)
+
+      - Run: PATH="/opt/homebrew/opt/python@3.11/libexec/bin:$PATH" RUST_TEST_THREADS=1
+      cargo test --workspace -> PASS (170 unit + 100 native integration + 3 doc/bin
+      tests passed, 4 ignored, 0 failed)
+
+      - Version kept at 0.21.3 (no release tag created).
+
+
+      Spec link:
+
+      - docs/DESIGN.md §17 (P1–P4 & §17.2)'
+- id: v34
+  name: 'V34 Stage 16: Unified macOS Control Taxonomy, Intrinsic Layout Engine, Chinese
+    IME Support, Distinct Directory/Activity Surfaces & Self-Invite Guard (Q1–Q6)'
+  status: done
+  gate: All Q1–Q6 requirements in docs/DESIGN.md §18 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; website
+    screenshots in site/assets/screenshots/*.png are refreshed; simple single-pass
+    contract-and-simplicity review & fix completes; cargo test --workspace && cargo
+    build --release pass with 0 warnings; changes are pushed to origin/main (NO release
+    tag).
+  context: 'Implement docs/DESIGN.md §18 (Q1–Q6 & §18.2): (1) Q1 unified 5-class MenuControl
+    taxonomy (resting pill border/fill on .destructiveHover, new .destructive red
+    pill for modal confirm, Disconnect or Uninstall Cito modal alignment); (2) Q2
+    systemic intrinsic sizing engine (MenuControl.layoutContents centering [icon +
+    5pt + text], makePillBadge optical centering via cellSize.height, dynamic form
+    labelW/inputX eliminating the 90pt Bot Token gap, and anti-verbosity subtitle
+    removal on Mac Desktop Banner, Share This Mac as a Hub, Telegram, and Local Hub
+    edit form); (3) Q3 native macOS Chinese IME support on KeyPanel (remove .nonactivatingPanel
+    on settingsPanel/directoryPanel, activate NSTextInputContext, and defer Up/Down/Return/Escape
+    to NSTextView when editing text); (4) Q4 visual distinction between Directory
+    (online dot on badge) and Activity (60pt rows, 3pt unread left accent bar, relative
+    timestamp, full-width message preview, and per-message delete_activity:<signal_id>
+    via trash icon & Backspace); (5) Q5 2-line 44pt AVAILABLE SESSIONS candidate rows
+    (58pt when needsReload); (6) Q6 self-invite loop guard in paste_hub_invite and
+    browser-friendly HTML response on GET / of HubServer. Per user mandate: run ONLY
+    a simple single-pass contract-and-simplicity review & fix (do NOT over-review
+    or loop) and do NOT publish a release.'
+  depends_on:
+  - v33
+  steps:
+  - id: v34.impl
+    name: V34 Q1–Q6 Unified Control Taxonomy, Intrinsic Layout Engine, Chinese IME,
+      Directory/Activity Distinction & Self-Invite Guard
+    status: done
+    description: Implement docs/DESIGN.md §18 (Q1–Q6) while strictly enforcing §18.2
+      test economy (update existing unit/UI assertions in place; do NOT add new multi-process
+      E2E test functions). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T03:15:43.087500Z'
+    done_at: '2026-11-12T04:01:57.155108+00:00'
+    evidence: "Artifact:\n- Commit: 7e6c701516cf29ff2cc6be4ad15a7b30c3280e80 (25 files\
+      \ changed, 492 insertions(+), 198 deletions(-))\n- Candidate ref: refs/vectl/candidates/v34.impl\
+      \ -> 7e6c701516cf29ff2cc6be4ad15a7b30c3280e80\n- Worktree cleanup: removed .vectl/worktrees/v34.impl\
+      \ and /tmp/cito-v34-* logs; free space 128Gi (unchanged delta).\n\nDelivered\
+      \ (docs/DESIGN.md §18 Q1–Q6 & §18.2):\n1. Q1 Unified 5-Class MenuControl Taxonomy\
+      \ & Modal Consistency:\n   - .destructiveHover retains resting pill border/fill\
+      \ matching .neutral and transitions to solid red on hover (`Disconnect`, `Remove`,\
+      \ `Unpair`, `Clear Token`).\n   - Added .destructive tinted red pill at rest\
+      \ (`Confirm Uninstall`) and aligned `uninstall_confirm_box` (`\"Disconnect or\
+      \ Uninstall Cito\"`, removed redundant subtitle, borderless `.subtleHeader`\
+      \ checkbox, bottom `layoutBar`).\n2. Q2 Systemic Intrinsic-Sizing Engine & Anti-Verbosity\
+      \ Subtitle Trim:\n   - Implemented `MenuControl.layoutContents()` centering\
+      \ `[12pt Icon + 5pt Gap + Text]` and `MenuControl.intrinsicWidth(...)` (using\
+      \ `+ 6` cell-margin allowance in `textW` so native AppKit `NSTextFieldCell`\
+      \ drawing never truncates `Reply`, `Copy`, or tab labels).\n   - Introduced\
+      \ `makePillBadge` with optical vertical centering via `label.cell?.cellSize`\
+      \ (`Experimental`, `Notification` / `Passive`).\n   - Dynamic `labelW` / `inputX`\
+      \ alignment in `Human Channels` field rows (`inputX = 78pt` for `Bot Token`\
+      \ / `Chat ID`).\n   - Trimmed verbose subtitles across `Mac Desktop Banner`\
+      \ (`46pt` single-row card), `Share This Mac as a Hub` (`46pt` collapsed, `108pt`/`136pt`\
+      \ expanded), `Telegram`, and `This Mac (Local Hub)` edit form (`124pt`).\n3.\
+      \ Q3 Native macOS Chinese IME Support:\n   - Removed `.nonactivatingPanel` from\
+      \ `settingsPanel` and `directoryPanel`, overrode `canBecomeKey` / `canBecomeMain`,\
+      \ activated `NSTextInputContext` in `makeFirstResponder`, and deferred `Up`/`Down`/`Return`/`Escape`\
+      \ (plus `Backspace`/`Delete` in `Activity`) to `NSTextView` when a field editor\
+      \ is active.\n4. Q4 Visual & Structural Distinction Between Directory and Activity\
+      \ + Per-Message Delete:\n   - Directory (`52pt` rows): `8x8` green `onlineDot`\
+      \ on badge, `Title · repo · branch` + `@user · host`, `[❐ display_address]`\
+      \ and `[\U0001F4AC Message]`.\n   - Activity (`60pt` / `108pt` expanded rows):\
+      \ `3pt` unread left accent bar, `1pt` bottom divider, relative timestamp (`·\
+      \ Just now` / `· 2m ago`), full-width message preview, `[↩ Reply]`, `[❐ Copy]`,\
+      \ and icon-only `delete_activity:<signal_id>` (`trash` icon + `Backspace`/`Delete`\
+      \ shortcut) backed by signal-scoped `WHERE hub = ? AND signal_id = ?` deletion\
+      \ in `daemon.rs`.\n5. Q5 2-Line AVAILABLE SESSIONS Rows in cardMenu:\n   - `44pt`\
+      \ (`58pt` when `needsReload`) 2-line candidate rows with full `268pt` title\
+      \ and `268pt` middle-truncated path/branch, vertically centered `[+ Listen]`\
+      \ / `[❐ /reload]`, and `176pt` scroll height for `> 4` rows.\n6. Q6 Self-Invite\
+      \ Loop Guard & Browser-Friendly HubServer Root Response:\n   - `paste_hub_invite`\
+      \ rejects self-invites matching this Mac's active `host_hub` port and local\
+      \ host identities (`endpoint_url`, `tailscale_url`, `lan_url`, loopback, `local_host_name()`).\n\
+      \   - `HubServer::handle_http` serves `HTTP/1.1 200 OK` `text/html; charset=utf-8`\
+      \ on `GET /`.\n7. Refreshed all 7 `site/assets/screenshots/*.png` assets and\
+      \ updated existing tests in `ui.rs`, `daemon.rs`, and `distribution.rs` in place.\n\
+      \nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ cargo test --workspace -- --test-threads=2 -> PASS (273 passed, 4 ignored,\
+      \ 0 failed)\n- Run: cargo build --release -> PASS (0 warnings, staged binaries\
+      \ updated)\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\n\
+      Spec link:\n- docs/DESIGN.md §18 (Q1–Q6 & §18.2)"
+  - id: v34.review
+    name: 'V34 Simple Single-Pass Contract-and-Simplicity Review & Fix and Push to
+      main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: Run a simple SINGLE-PASS contract-and-simplicity review & fix across
+      the modified files and regenerated screenshots (do NOT run multi-round review
+      loops or spawn multiple auditor rounds per user instruction), verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v34.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T04:02:06.174284Z'
+    done_at: '2026-11-12T04:10:02.628291+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 623dd8e300324a19ecd4896049bbf1311a3babaf (10 files changed, 1 insertion(+),
+      2 deletions(-))
+
+      - Candidate ref: refs/vectl/candidates/v34.review -> 623dd8e300324a19ecd4896049bbf1311a3babaf
+
+      - Worktree cleanup: removed .vectl/worktrees/v34.review and /tmp/cito-v34-*
+      scratch; free space 128Gi (unchanged delta).
+
+
+      Single-Pass Contract-and-Simplicity Review & Fixes Applied:
+
+      1. [CONTRACT / DOCS] Synchronized `docs/DESIGN.md:1630` `MenuControl.layoutContents()`
+      text-width formula (`min(bounds.width - 28, ceil(measureTextWidth(...)) + 6)`)
+      with the verified implementation so the `6pt` native `NSTextFieldCell` margin
+      allowance is explicitly documented.
+
+      2. [SIMPLICITY / TRIM] Removed the unreachable `if container === userStratum
+      && !gatewayActive` guard inside `renderChannelFields` (`src/macos/cito-ui.swift:3114`),
+      since `renderChannelFields` is only invoked for `userStratum` when `gatewayActive`
+      is already true.
+
+      3. Verified all Q1–Q6 items, visual cleanliness of all 7 refreshed `site/assets/screenshots/*.png`
+      assets, and hard boundaries (`Cargo.toml` version `0.21.3`, zero CJK characters
+      in repo source/docs/site, zero company/environment-specific names).
+
+
+      Verification:
+
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace
+      -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 doc/bin tests
+      passed, 4 ignored, 0 failed)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §18 (Q1–Q6 & §18.2)'
+- id: v35
+  name: 'V35 Stage 17: Complete Surface Audit Closure, Button Text Contrast, Intrinsic
+    Sizing, Smart Path Compression & Titled-Panel Chinese IME (R1–R7)'
+  status: done
+  gate: All R1–R7 requirements in docs/DESIGN.md §19 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; website
+    screenshots in site/assets/screenshots/*.png are refreshed; convergent contract-and-simplicity
+    review-fix loop reaches CLEAN + ZERO_NEW_ISSUES; cargo test --workspace && cargo
+    build --release pass with 0 warnings; changes are pushed to origin/main (NO release
+    tag).
+  context: 'Implement docs/DESIGN.md §19 (R1–R7 & §19.2): (1) R1 .destructiveHover
+    resting primary text color (.labelColor instead of secondaryText so Disconnect/Remove/Unpair/Clear
+    Token never look disabled); (2) R2 Option A Disconnect All… footer button and
+    2-button confirmation modal (Cancel + Disconnect All with purge_data support);
+    (3) R3 eliminate all remaining hardcoded button widths in Human Channels & Menu
+    so Change Token…, Edit…, Pair Account…, and Settings… never truncate with ellipses;
+    (4) R4 clean State C in Human Channels (Bot Gateway title, hide redundant Bot
+    Ready badge when collapsed) & 10pt top padding on expanded Share This Mac as a
+    Hub; (5) R5 smart path compression (~/…/<leaf>) in AVAILABLE SESSIONS and left-aligned
+    copy:<id> chip in cardMenu; (6) R6 remove onlineDot in Directory, seed directoryAllPeers
+    from listeners + myRemote on state/open, 480pt dynamic wrap height in Activity,
+    and xmark delete icon; (7) R7 titled fullSizeContentView KeyPanel + activationPolicy(.regular)
+    while panels are open for 100% native Chinese IME candidate windows. Then run
+    a convergent contract-and-simplicity review-fix loop until convergence (NO formal
+    release tag yet).'
+  depends_on:
+  - v34
+  steps:
+  - id: v35.impl
+    name: V35 R1–R7 Complete Surface Audit Closure, Button Contrast, Smart Path Compression
+      & Titled-Panel Chinese IME
+    status: done
+    description: Implement docs/DESIGN.md §19 (R1–R7) while strictly enforcing §19.2
+      test economy (update existing unit/UI assertions in place; do NOT add new multi-process
+      E2E test functions). Regenerate site/assets/screenshots/*.png.
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T06:54:30.257010Z'
+    done_at: '2026-11-12T07:24:27.378997+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 23779533e6b5cbf6db80ccf63be13c168fceeafa (19 files changed, 268 insertions(+),
+      74 deletions(-))
+
+      - Candidate ref: refs/vectl/candidates/v35.impl -> 23779533e6b5cbf6db80ccf63be13c168fceeafa
+
+      - Worktree cleanup: removed .vectl/worktrees/v35.impl, .v35-captures, and /tmp/cito-v35-*.log;
+      free space 127Gi (unchanged delta).
+
+
+      Delivered (docs/DESIGN.md §19 R1–R7 & §19.2):
+
+      1. R1 (.destructiveHover Resting Primary Text Color): resting foreground uses
+      normalColor (.labelColor) matching .neutral at rest, transitioning to CitoPalette.destructiveFill
+      + white border/foreground on hover.
+
+      2. R2 (Option A Disconnect All… Footer Button & 2-Button Confirmation Modal):
+      renamed open_uninstall_confirm to "Disconnect All…", changed modal title to
+      "Disconnect All Integrations", kept uninstall_purge_data checkbox, and laid
+      out only "Cancel" (.neutral) and "Disconnect All" (confirm_disconnect_all, .destructive).
+      Extended setup_disconnect_all in daemon.rs with purge_data == true to reset
+      config.json (defaultHub = "local", hubs = {}) and clear local_signals + non-human
+      local_listeners.
+
+      3. R3 (Intrinsic Button Widths Without Ellipsis Truncation): layoutBar enforces
+      MenuControl.intrinsicWidth as minimum width for MenuControl subviews; sized
+      open_settings (paddingX: 6) and all Human Channels buttons intrinsically and
+      removed manual 76 / 58 width overrides.
+
+      4. R4 (Clean State C & Share This Mac as a Hub Header Padding): when personalCollapsed
+      && !hubGatewayExpanded, stratum_hub_title:<id> renders "Bot Gateway" and stratum_hub_status:<id>
+      is hidden; expanded host_hub_card places header at y = hostHeight - 30.5 and
+      toggle_host_hub at y = hostHeight - 34 (10pt top margin).
+
+      5. R5 (Smart Path Compression & Left-Aligned copy:<id> Chip): flush-left copy:<scoped_id>
+      chip at x = titleX and compactSessionPath (~/…/<parent>/<leaf> then ~/…/<leaf>,
+      full path in toolTip).
+
+      6. R6 (Directory Initial Peer Seeding, onlineDot Removal & Activity Dynamic
+      Row Height + xmark): removed onlineDot from DirectoryPeerCellView, seeded directoryAllPeers
+      = listeners + myRemote when empty on state/openDirectoryPanel, updated Activity
+      expansion to measureTextWidth(..., 12) > 480 || text.contains("\n") with wrapped
+      height min(108, max(60, 38 + ceil(wrappedRect.height))), and changed delete_activity:<signal_id>
+      symbol to "xmark".
+
+      7. R7 (Titled Full-Size Content KeyPanel & Activation Policy): initialized KeyPanel
+      (settingsPanel and directoryPanel) with styleMask: [.titled, .fullSizeContentView],
+      hidden title, transparent titlebar, hidden traffic-light buttons, and NSApp.setActivationPolicy(.regular/.accessory)
+      when not headless.
+
+      8. Refreshed site/assets/screenshots/*.png and updated existing assertions in
+      crates/cito-native/tests/support/{ui.rs,daemon.rs} in place.
+
+
+      Verification:
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace
+      -- --test-threads=1 -> PASS (170 unit + 100 native integration + 3 binary/distribution
+      tests passed, 4 ignored, 0 failed)
+
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)
+
+
+      Spec link:
+
+      - docs/DESIGN.md §19 (R1–R7 & §19.2)'
+  - id: v35.review
+    name: 'V35 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
+      (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'Run a convergent contract-and-simplicity review-and-fix loop across
+      the modified files and regenerated Light/Dark screenshots until Contract & Wiring:
+      CLEAN and Simplicity & Economy: ZERO_NEW_ISSUES converge, verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    depends_on:
+    - v35.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T07:24:42.165423Z'
+    done_at: '2026-11-12T08:06:07.052367+00:00'
+    evidence: "Artifact:\n- Commits: c5fd874f2e131854cf1600d94628a8bb3d53cf2a and\
+      \ 5770b0aa5b2e17b4e1f48c9474758576d6cf612c (12 files changed, 86 insertions(+),\
+      \ 3 deletions(-))\n- Candidate ref: refs/vectl/candidates/v35.review -> 5770b0aa5b2e17b4e1f48c9474758576d6cf612c\n\
+      - Worktree cleanup: removed .vectl/worktrees/v35.review and /tmp/cito-v35-*\
+      \ scratch; free space 126Gi (delta -1Gi due to incremental target cache in main).\n\
+      \nConvergent 2D Contract-and-Simplicity Review-Fix Loop Summary:\n- Round 1\
+      \ (1..EOF Exhaustive 2D Discovery across pathway-auditor + uiux-auditor):\n\
+      \  - uiux-auditor (1..EOF over docs/DESIGN.md §19, /tmp/cito-v35-uiux-audit.md,\
+      \ src/macos/cito-ui.swift, crates/cito-native/tests/support/ui.rs, and all 7\
+      \ dark-mode Retina screenshots): Contract & Wiring: CLEAN, Simplicity & Economy:\
+      \ ZERO_NEW_ISSUES.\n  - pathway-auditor (1..EOF over docs/DESIGN.md §19, /tmp/cito-v35-uiux-audit.md,\
+      \ README.md, crates/cito-native/src/core/daemon.rs, crates/cito-native/tests/support/daemon.rs,\
+      \ and pathways P1..P7): Simplicity & Economy: ZERO_NEW_ISSUES; reported 3 Contract\
+      \ & Wiring items:\n    1. P2 (`setup_disconnect_all` with `purge_data: true`\
+      \ in `daemon.rs:3039–3046`): also reset local Hub channel service credentials\
+      \ (`human_channels_configure` with `reset_hub: true`) in `hub_plugin_services`.\n\
+      \    2. P6 (`seedDirectoryPeersIfEmpty` in `cito-ui.swift:779, 4254–4263`):\
+      \ decode `host_name` on `Listener` and map it into seeded `RemotePeer.host_name`\
+      \ so seeded local Directory rows preserve `\" · <host>\"` before `\"directory\"\
+      ` arrives.\n    3. P3/P5 (`layoutBar` in `cito-ui.swift:109–116`): preserve\
+      \ caller-supplied feedback-width reservation (`reservedWidth` for `copy:` and\
+      \ `copy_remote:` chips) so 1-character Human addresses (`@a`) never clip `\"\
+      ✓ Copied\"`.\n- Round 2 Fix & Semantic-Impact Delta Re-Review (`c5fd874` + `5770b0a`):\n\
+      \  - rust-senior closed all 3 items and updated existing tests in `daemon.rs`\
+      \ and `ui.rs` in place (zero new test functions added).\n  - pathway-auditor\
+      \ reread `/tmp/cito-v35-round2.diff` and 1..EOF of all 4 modified files (`daemon.rs`,\
+      \ `cito-ui.swift`, `tests/support/daemon.rs`, `tests/support/ui.rs`): converged\
+      \ at **Contract & Wiring: CLEAN** and **Simplicity & Economy: ZERO_NEW_ISSUES**.\n\
+      \nVerification:\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace\
+      \ -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 binary/distribution\
+      \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
+      \ created).\n\nSpec link:\n- docs/DESIGN.md §19 (R1–R7 & §19.2)"
+- id: v36
+  name: 'V36 Stage 18: Multi-Hub Card & Directory Coalescing, Smart Home-Directory
+    Naming, Inline/CLI/MCP Session Renaming & Complete CLI/MCP Surface Parity (S1–S4)'
+  status: done
+  gate: All S1–S4 requirements in docs/DESIGN.md §20 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; convergent
+    contract-and-simplicity review-fix loop reaches CLEAN + ZERO_NEW_ISSUES; cargo
+    test --workspace && cargo build --release pass with 0 warnings; changes are pushed
+    to origin/main (NO release tag).
+  context: 'Implement docs/DESIGN.md §20 (S1–S4 & §20.2): (1) S1 coalesce local listeners
+    by (harness, session_id) in cardMenu Zone 1 (at most 1 You card and 1 card per
+    local coding session, choosing primaryListener from effectiveTargetHub -> default
+    shared Hub -> local, fanning out Pause/stop and Team/Self across enrolled Hubs,
+    and omitting redundant ''Desktop notifications'' text on You cards); (2) S2 never
+    use /Users/tefx username as an auto-derived agent session title (promote distinctAbout
+    or fall back to ''<Harness Name> (~)'' when cwd == home and no custom title is
+    set, while preserving explicit custom titles verbatim), strip .local and internal
+    channel tokens (''Mac'', ''Hub'', ''human'') across all host_name and channels
+    displays in DirectoryPeerCellView, display shortCwd in line1RepoLabel when repo
+    is empty, and deduplicate local: loopback shadow peers in Directory when a shared
+    Hub is connected; (3) S3 support durable session renaming across GUI (inline rename:<scoped_id>
+    pencil icon and rename_field:<scoped_id> in cardMenu), CLI (cito rename <title>
+    and cito listen --title <title>), and MCP (cito_listen optional title), persisting
+    custom titles across discovery refreshes and heartbeats; (4) S4 add complete CLI
+    parity (cito rename, cito listen --title, cito unlisten --all, cito status [--json],
+    and cito setup --invite / --print-invite / --disconnect-all) and read-only secret-free
+    cito_status MCP tool. Run a convergent contract-and-simplicity review-fix loop
+    until CLEAN + ZERO_NEW_ISSUES and push to origin/main (NO release tag yet).'
+  depends_on:
+  - v35
+  steps:
+  - id: v36.impl
+    name: V36 S1–S4 Multi-Hub Coalescing, Smart Home Naming, Session Renaming & Complete
+      CLI/MCP Parity
+    status: done
+    description: Implement docs/DESIGN.md §20 (S1–S4) while strictly enforcing §20.2
+      test economy (update existing unit/UI/daemon/CLI assertions in place; do NOT
+      add new heavy multi-process E2E test functions).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T09:33:44.514471Z'
+    done_at: '2026-11-12T10:31:40.233910+00:00'
+    evidence: "Artifact:\n- Commit: e60e401c9b4212a47494fbc22df9c46824eb7181 (23 files\
+      \ changed, 1079 insertions(+), 68 deletions(-))\n- Candidate ref: refs/vectl/candidates/v36.impl\
+      \ -> e60e401c9b4212a47494fbc22df9c46824eb7181\n- Worktree cleanup: removed .vectl/worktrees/v36.impl\
+      \ and /tmp/cito-v36* scratch; free space 124Gi.\n\nDelivered (docs/DESIGN.md\
+      \ §20 S1–S4 & §20.2):\n1. S1 (Multi-Hub Session Coalescing & You Card Cleanup\
+      \ in cardMenu):\n   - Coalesced local listeners by `(harness, session_id)` in\
+      \ cardMenu Zone 1 so at most 1 card renders for `You (@user)` (`human:default`)\
+      \ and 1 card per local coding session, choosing `primaryListener` from `effectiveTargetHub`\
+      \ -> connected default non-local Hub -> `local`.\n   - `Pause` / `stop:<scoped_id>`\
+      \ and `Team / Self` (`scope:<scoped_id>`) fan out across all enrolled Hubs in\
+      \ the group (`unlisten_session`), and `switch_hub:<scoped_id>` cycles `selectedTargetHub`\
+      \ across enrolled Hubs when `group.count > 1`.\n   - Omitted redundant `\"Desktop\
+      \ notifications\"` label on `You (@user)` cards when only internal channels\
+      \ are present.\n2. S2 (Smart Home-Directory Naming, .local Stripping & Shadow\
+      \ Deduplication):\n   - Auto-derived titles never use the `$HOME` username (`cwd\
+      \ == home` or `raw.lowercased() == user.lowercased()` promotes `distinctAbout`\
+      \ or falls back to `\"<Harness Name> (~)\"`), while preserving explicit custom\
+      \ titles verbatim.\n   - Added `cleanHostDisplay` stripping `.local` and filtering\
+      \ internal tokens (`\"Mac\"`, `\"Hub\"`, `\"human\"`, `\"Desktop notifications\"\
+      `) from `peer.channels`, showing `shortCwd` in `line1RepoLabel` when `repo`\
+      \ is empty, and deduplicating `local:` shadow peers in `Directory` when a shared\
+      \ Hub is connected.\n3. S3 (Manual Agent / Session Renaming Across GUI, CLI,\
+      \ and MCP):\n   - Added durable custom-title persistence (`custom_title` / `session_custom_titles`\
+      \ in SQLite `local_listeners` and registration state) that survives discovery\
+      \ refreshes, heartbeats, and daemon restarts.\n   - Added minimalist inline\
+      \ rename (`rename:<scoped_id>` pencil icon and `rename_field:<scoped_id>` editable\
+      \ field) on active agent cards in `cardMenu` with `overlapping_siblings == []`.\n\
+      4. S4 (Complete CLI Interface & Security-Bounded MCP Surface):\n   - Added `cito\
+      \ rename <title>`, `cito listen --title <title>` (plus positional `about` promotion\
+      \ when default title is generic home/folder basename), `cito unlisten --all`,\
+      \ `cito status [--json]`, and `cito setup --invite / --print-invite / --disconnect-all\
+      \ [--purge-data]`.\n   - Added optional `title` (`1..128` chars) to `cito_listen`\
+      \ and read-only secret-free `cito_status` MCP tool.\n5. Updated existing tests\
+      \ in `crates/cito-native/tests/support/{ui.rs,daemon.rs}` in place and refreshed\
+      \ `site/assets/screenshots/menu-dark.png`.\n\nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=4 cargo test --workspace -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      \nSpec link:\n- docs/DESIGN.md §20 (S1–S4 & §20.2)"
+  - id: v36.review
+    name: 'V36 Convergent Contract-and-Simplicity Review-Fix Loop and Push to main
+      (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: 'Run a convergent contract-and-simplicity review-and-fix loop (with
+      pathway-auditor + uiux-auditor) across the modified files until Contract & Wiring:
+      CLEAN and Simplicity & Economy: ZERO_NEW_ISSUES converge, verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).'
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/setup.rs
+    depends_on:
+    - v36.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T10:31:51.247156Z'
+    done_at: '2026-11-12T11:53:47.643941+00:00'
+    evidence: "Artifact:\n- Commits: b4a06e703b8171d3b46cd6ecd6e3cf6553e44fc2, 40a83d34ea961a68457e0b85720a6010fca68ca1,\
+      \ and af7b5c7b1b58efd7dde3cf8285dee2e08b12c38f (14 files changed, 366 insertions(+),\
+      \ 59 deletions(-))\n- Candidate ref: refs/vectl/candidates/v36.review -> af7b5c7b1b58efd7dde3cf8285dee2e08b12c38f\n\
+      - Worktree cleanup: removed .vectl/worktrees/v36.review and /tmp/cito-v36* scratch;\
+      \ free space 122Gi.\n\nConvergent 2D Contract-and-Simplicity Review-Fix Loop\
+      \ Summary:\n- Round 1 (1..EOF 2D Discovery across pathway-auditor + uiux-auditor):\n\
+      \  - Identified 6 findings across P1..P6 and H1..H5:\n    1. `snapshot()[\"\
+      available\"]` custom-title overlay on immediate post-rename snapshot & candidate\
+      \ tooltip normalization (`daemon.rs`, `cito-ui.swift`).\n    2. Coalesced card\
+      \ `switch_hub:<scoped_id>` cycling across disconnected enrolled Hubs (`cito-ui.swift`).\n\
+      \    3. Shared idempotent automatic naming across `daemon.rs` (`default_session_title`\
+      \ / `is_generic_session_label`) and `cito-ui.swift` (`nodeDisplayTitle` / `distinctAbout`\
+      \ / `isGenericSessionLabel`).\n    4. Single-Hub `unlisten` custom-title retention\
+      \ verification across enrolled Hubs (`tests/support/daemon.rs`).\n    5. CLI\
+      \ `cito setup --invite` self-invite loop guard verification across loopback,\
+      \ IPv6 loopback, hostname, and `.local` aliases (`tests/support/daemon.rs`).\n\
+      \    6. Consolidated `cleanHostDisplay`, removed unused `localHost` and `cwd`\
+      \ parameters, tightened `cardMenu` action spacing (`spacing: 2`) and `hubPillWidth`\
+      \ padding so `\"Release orchestration\"` renders untruncated next to `rename:<scoped_id>`,\
+      \ and refreshed `site/assets/screenshots/menu-dark.png`.\n- Rounds 2–4 Fix &\
+      \ Semantic-Impact Delta Re-Reviews (`b4a06e7`, `40a83d3`, `af7b5c7`):\n  - `uiux-auditor`\
+      \ converged at **Contract & Wiring: CLEAN** and **Simplicity & Economy: ZERO_NEW_ISSUES**\
+      \ (confirming `menu-dark.png` renders `\"Release orchestration ✎\"` untruncated).\n\
+      \  - `pathway-auditor` verified the shared `is_generic_session_label` / `isGenericSessionLabel`\
+      \ fixed-point idempotence (covering `user`, `@user`, `home_basename`, `@<home_basename>`,\
+      \ and generic placeholders) and converged at **Contract & Wiring: CLEAN** and\
+      \ **Simplicity & Economy: ZERO_NEW_ISSUES**.\n\nVerification:\n- Run: cargo\
+      \ fmt --all -- --check && git diff --check -> PASS\n- Run: cargo build --release\
+      \ -> PASS (0 warnings, staged binaries updated)\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=2 cargo test --workspace -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Version kept at 0.21.3 (no release tag created).\n\nSpec link:\n- docs/DESIGN.md\
+      \ §20 (S1–S4 & §20.2)"
+- id: v37
+  name: 'V37 Stage 19: Network-Scoped View Management, Trusted-Hub Auto-Listen, Fast
+    Codex SQLite Discovery & UI Polish (N1–N5)'
+  status: done
+  gate: All N1–N5 requirements in docs/DESIGN.md §21 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
+    single-pass contract-and-simplicity review & fix completes; cargo test --workspace
+    && cargo build --release pass with 0 warnings; changes are pushed to origin/main
+    (NO release tag).
+  context: 'Implement docs/DESIGN.md §21 (N1–N5 & §21.2): (1) N1 network-scoped management
+    in cardMenu (top header_hub_strip selects effectiveTargetHub for the entire menu
+    popover; filter Zone 1 listeners and Zone 2 myRemote to effectiveTargetHub; remove
+    per-card switch_hub pills and duplicate AVAILABLE SESSIONS targetStrip, aliasing
+    test_control target_hub:<name> to hub:<name>; hide administratively disabled Hubs
+    enabled == false from operational state.hubs and Human Channels Target Hub selector,
+    and query self.local for local channel inventory even when local slot is disabled);
+    (2) N2 per-Hub auto_listen toggle (toggle_auto_listen pill on AVAILABLE SESSIONS
+    header persisting hubs.<name>.autoListen and auto-enrolling open live sessions
+    with endpoint_pid != nil and status != UNLISTENED); (3) N3 fast Codex SQLite discovery
+    (add LIMIT 32 to threads query in plugins/codex/native.rs, accept matches_process
+    in desktop_running, and poll discovery briefly after setup_apply/refresh_available);
+    (4) N4 single-plugin staging in setup_apply and startup auto-staging in DaemonService::new;
+    (5) N5 uniform 68pt Team/Self toggle width + label-before-symbol order + 6pt spacing,
+    action-verb Enable/Disable buttons on Hub cards, and unread-only numeric badge
+    on the macOS menu bar icon. Run a fast single-pass contract-and-simplicity review
+    & fix (no multi-round loops) and push to origin/main (NO release tag).'
+  depends_on:
+  - v36
+  steps:
+  - id: v37.impl
+    name: V37 N1–N5 Network-Scoped Menu, Trusted Auto-Listen, Fast Codex Discovery
+      & UI Polish
+    status: done
+    description: Implement docs/DESIGN.md §21 (N1–N5) while strictly enforcing §21.2
+      test economy (update existing unit/UI/daemon assertions in place; do NOT add
+      new heavy multi-process E2E test functions).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T14:42:07.991700Z'
+    done_at: '2026-11-12T15:22:52.649190+00:00'
+    evidence: "Artifact:\n- Commit: dab59024c74227522de16a51e488b7931a93bcf8 (19 files\
+      \ changed, 496 insertions(+), 179 deletions(-))\n- Candidate ref: refs/vectl/candidates/v37.impl\
+      \ -> dab59024c74227522de16a51e488b7931a93bcf8\n- Worktree cleanup: removed .vectl/worktrees/v37.impl\
+      \ and /tmp/cito-v37* scratch; free space 110Gi.\n\nDelivered (docs/DESIGN.md\
+      \ §21 N1–N5 & §21.2):\n1. N1 (Network-Scoped Management in cardMenu & Hiding\
+      \ Administratively Disabled Hubs):\n   - Operational `state.hubs` in `daemon.rs`\
+      \ includes only enabled Hubs (`self.slots`), while `settings.hubs` retains disabled\
+      \ Hubs for `Settings -> Hubs & Network`.\n   - `Settings -> Human Channels`\
+      \ filters `channelHubs` to enabled Hubs and falls back when `selectedChannelHub`\
+      \ is disabled; `settings_for_hub` queries `self.local` for `\"local\"` channel\
+      \ inventory even when `\"local\"` slot is disabled.\n   - `header_hub_strip`\
+      \ selects `effectiveTargetHub` for the entire `cardMenu` popover; Zone 1 `listeners`\
+      \ and Zone 2 `myRemote` filter to `effectiveTargetHub`; removed per-card `switch_hub:<scoped_id>`\
+      \ pills and duplicate `targetStrip` on `AVAILABLE SESSIONS` (aliasing `test_control`\
+      \ `target_hub:<name>` to `hub:<name>`).\n2. N2 (Zero-Friction Auto-Listen &\
+      \ Bounded Scrollable Active Session List):\n   - Persisted `auto_listen: bool`\
+      \ per Hub (`hubs.<name>.autoListen` in `config.json`), exposed `toggle_auto_listen`\
+      \ on `AVAILABLE SESSIONS` header emitting `set_auto_listen`, and auto-enrolled\
+      \ open live sessions (`endpoint_pid != nil`, `needs_reload != true`, `status\
+      \ != \"UNLISTENED\"`).\n   - Capped `activeRows` at 4 visible rows (`256pt`\
+      \ `active_scroll` `OverlayScrollView` when `activeRows.count > 4`).\n3. N3 (Fast\
+      \ Bounded Codex SQLite Discovery & Remote/CLI Process Detection):\n   - Added\
+      \ `LIMIT 32` to `discover_sessions` query in `plugins/codex/native.rs`, accepted\
+      \ `desktop_command(cmd) || matches_process(cmd)` in `desktop_running(req)`,\
+      \ and polled discovery up to `400ms` on `setup_apply` / `refresh_available`.\n\
+      4. N4 (Per-App Isolated setup_apply Staging & Daemon Startup Auto-Staging):\n\
+      \   - Added `ensure_single_plugin_staged` in `setup.rs` for isolated per-app\
+      \ `setup_apply` and auto-staged CLI shims/plugins on daemon startup.\n5. N5\
+      \ (Uniform Team/Self Geometry, Action-Verb Hub Buttons & Unread-Only Menu Bar\
+      \ Badge):\n   - Fixed `scopeBtn` width (`68pt`), updated `label.stringValue`\
+      \ before `setLeadingSymbol` with `6pt` spacing, changed Hub toggle buttons to\
+      \ `\"Disable\"` / `\"Enable\"`, and restricted menu bar numeric badge to `unreadCount\
+      \ > 0`.\n6. Updated existing tests in `crates/cito-native/tests/support/{daemon,plugins,ui}.rs`\
+      \ in place and refreshed `site/assets/screenshots/{menu-dark,settings-hubs-dark}.png`.\n\
+      \nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ cargo test --workspace -- --test-threads=2 -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      \nSpec link:\n- docs/DESIGN.md §21 (N1–N5 & §21.2)"
+  - id: v37.review
+    name: 'V37 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
+      (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
+      the modified files (do NOT run multi-round review loops per user instruction),
+      verify cargo test --workspace && cargo build --release, and push main to origin
+      (do NOT tag or trigger release.yml).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/setup.rs
+    depends_on:
+    - v37.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T15:23:21.474906Z'
+    done_at: '2026-11-12T15:44:20.772530+00:00'
+    evidence: "Artifact:\n- Commit: c54abdaa65335c50cc1d57510dec0579ee813073 (13 files\
+      \ changed, 105 insertions(+), 45 deletions(-))\n- Candidate ref: refs/vectl/candidates/v37.review\
+      \ -> c54abdaa65335c50cc1d57510dec0579ee813073\n- Worktree cleanup: removed .vectl/worktrees/v37.review\
+      \ and /tmp/cito-v37* scratch; free space 109Gi.\n\nFast Single-Pass Contract-and-Simplicity\
+      \ Review & Fixes Applied:\n1. [CONTRACT / WIRE] Codex SQL Metadata Projection\
+      \ & Eligibility Predicate Pushdown (`plugins/codex/native.rs:180–235`, `crates/cito-native/tests/support/plugins.rs:550–615`,\
+      \ `docs/DESIGN.md:1875–1882`):\n   - Replaced `SELECT *` in `rows(req)` with\
+      \ explicit metadata column projection (`id, cwd, name, title, git_branch, git_origin_url,\
+      \ recency_at_ms, updated_at, archived, thread_source, source`) and pushed `id\
+      \ IS NOT NULL AND id != ''`, `cwd IS NOT NULL AND cwd != ''`, `(thread_source\
+      \ IS NULL OR thread_source = 'user')`, and `(source IS NULL OR source NOT LIKE\
+      \ '{\"subagent\"%')` into the SQL `WHERE` clause before `LIMIT 32`, preventing\
+      \ large transcript blob serialization and ensuring 32+ newer subagent rows never\
+      \ shadow user sessions.\n2. [CONTRACT / WIRE] Header Hub Drawer Toggle (`src/macos/cito-ui.swift:2125–2140`,\
+      \ `crates/cito-native/tests/support/ui.rs:3270–3295`):\n   - Preserved drawer\
+      \ toggle when clicking an already-selected disconnected/error Hub pill in `header_hub_strip`\
+      \ while opening the drawer when switching to a different disconnected/error\
+      \ Hub.\n3. [SIMPLICITY / TRIM] Removed unused `count` parameter from `formatStatusButton`\
+      \ (`src/macos/cito-ui.swift:89`) and simplified single-network Zone 1 loop in\
+      \ `rebuild()`. Visually verified `site/assets/screenshots/{menu-dark,settings-hubs-dark}.png`.\n\
+      \nVerification:\n- Run: cargo fmt --all -- --check && git diff --check -> PASS\n\
+      - Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH cargo test --workspace\
+      \ -- --test-threads=2 -> PASS (170 unit + 100 native integration + 3 binary/distribution\
+      \ tests passed, 4 ignored, 0 failed)\n- Version kept at 0.21.3 (no release tag\
+      \ created).\n\nSpec link:\n- docs/DESIGN.md §21 (N1–N5 & §21.2)"
+- id: v38
+  name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
+    Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
+    (U1–U5)'
+  status: done
+  gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
+    invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
+    single-pass contract-and-simplicity review & fix completes; cargo test --workspace
+    && cargo build --release pass with 0 warnings; changes are pushed to origin/main
+    (NO release tag).
+  context: 'Implement docs/DESIGN.md §22 (U1–U5 & §22.2): (1) U1 unify human_paused_card
+    to 58pt cardHeight / 64pt rowHeight (0pt jump on network switch or Pause/Resume)
+    with ''Resume'' label, and auto-enroll human across all enabled non-OIDC Hubs
+    in register_automatic_human; (2) U2 macOS HIG recessed track for header_hub_strip
+    with .subtleHeader borderless inactive Hub pills and .subtleHeader borderless
+    inactive filter pills in directoryFacetBar; (3) U3 stateless Auto-Listen mode
+    (enabling Auto-Listen clears UNLISTENED markers and connects eligible open sessions;
+    manually clicking stop:<id> on an agent session while Auto-Listen is On turns
+    auto_listen off and unlistens that session; show clear status feedback when only
+    needs_reload or recent threads remain, and auto-collapse recent-only groups once
+    when auto_listen is On); (4) U4 hide scope:<id> (Team/Self) on local and on none/token
+    Hubs when all known peers/listeners belong to the current user (showing it only
+    on oidc Hubs or when user != targetUser exists), add rich explanatory tooltips
+    on scope:<id>, and add visibility caption in add_hub_form; (5) U5 add sqlite3_busy_timeout(db,
+    1000) in plugin_support.rs, propagate SQLite errors in plugins/codex/native.rs
+    discover_sessions so SessionActivity retains cached sessions on transient lock
+    contention, avoid spawning git subprocesses in row_caller when git_branch/git_origin_url
+    are present, and allow thread_source = '''' in SQL WHERE. Run fast single-pass
+    contract-and-simplicity review & fix and push to origin/main (NO release tag).'
+  depends_on:
+  - v37
+  steps:
+  - id: v38.impl
+    name: V38 U1–U5 Unified Human Card Height, Recessed Segmented Controls, Stateless
+      Auto-Listen, Personal-Hub Scope Suppression & SQLite Busy-Timeout
+    status: done
+    description: Implement docs/DESIGN.md §22 (U1–U5) while strictly enforcing §22.2
+      test economy (update existing unit/UI/daemon/plugin assertions in place; do
+      NOT add new heavy multi-process E2E test functions).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T16:35:30.153468Z'
+    done_at: '2026-11-12T17:02:19.808470+00:00'
+    evidence: "Artifact:\n- Commit: 5faefdbd0d941b342f8d68a10466a096a658ebbe (20 files\
+      \ changed, 343 insertions(+), 67 deletions(-))\n- Candidate ref: refs/vectl/candidates/v38.impl\
+      \ -> 5faefdbd0d941b342f8d68a10466a096a658ebbe\n- Worktree cleanup: removed .vectl/worktrees/v38.impl\
+      \ and /tmp/cito-v38* scratch; free space 100Gi.\n\nDelivered (docs/DESIGN.md\
+      \ §22 U1–U5 & §22.2):\n1. U1 (Fixed-Height You Card & Automatic Human Enrollment\
+      \ Across All Enabled Hubs):\n   - Unified `human_paused_card` to `rowHeight\
+      \ = 64, cardHeight = 58`, badge at `(10, 14, 28, 28)`, title at `y = 32`, subtitle\
+      \ `\"Notifications paused\"` at `y = 10`, and `\"Resume\"` button at `y = 18`\
+      \ (`0pt` vertical shift).\n   - Auto-enrolled `human` across all enabled non-OIDC\
+      \ Hubs in `reload_slots` / `register_automatic_human` unless explicitly `UNLISTENED`.\n\
+      2. U2 (Recessed Segmented Tracks for Network & Filter Switchers):\n   - Styled\
+      \ `header_hub_strip` (`hubs.count > 1`) with a recessed background (`labelColor\
+      \ @ 0.06`, `cornerRadius = 11`, `maxX = 368`) and `.subtleHeader` unselected\
+      \ Hub pills.\n   - Styled inactive filter pills (`dir_scope:*`, `dir_harness:*`,\
+      \ `act_filter:*`) in `directoryFacetBar` as `.subtleHeader` while keeping `Read\
+      \ All` and `Clear` as `.neutral`.\n3. U3 (Stateless Auto-Listen Mode & Consistent\
+      \ Pause/Resume Vocabulary):\n   - `set_auto_listen(enabled: true)` clears agent\
+      \ `UNLISTENED` markers on that Hub and immediately enrolls eligible open sessions;\
+      \ manually stopping an agent session while `Auto-Listen` is ON disables `auto_listen`\
+      \ on that Hub and unlistens the session.\n   - Added inline `Auto-Listen` captions\
+      \ (`\"Auto-Listen is on — run /reload below to finish connecting\"`, `\"Auto-Listen\
+      \ is on — open sessions connect automatically\"`), seeded `autoCollapsedRecentGroups`\
+      \ once for `recent`-only groups when `auto_listen == true`, labeled `human_paused_card`\
+      \ button `\"Resume\"`, and set `stop:<scoped_id>` tooltip to `\"Pause listening\
+      \ for this session\"`.\n4. U4 (Smart Personal-Hub Scope Suppression & Visibility\
+      \ Guidance):\n   - Suppressed `scope:<scoped_id>` (`Self` / `Team`) unless `listenerHub?.auth_mode\
+      \ == \"oidc\" || hasOtherUsers`, defaulted non-OIDC (`none` / `token`) Hub registrations\
+      \ and `auto_listen` enrollment to `\"workspace\"` scope, added explanatory tooltips\
+      \ on `Self` / `Team`, and added the Hub visibility caption in `add_hub_form`.\n\
+      5. U5 (SQLite busy_timeout(1000) & Error-Preserving Codex Discovery):\n   -\
+      \ Added `sqlite3_busy_timeout(db, 1000)` in `sqlite_rows`, propagated SQLite\
+      \ errors from `try_rows(req)` in `discover_sessions` so `SessionActivity` retains\
+      \ cached Codex sessions on lock contention, avoided spawning `git` subprocesses\
+      \ in `row_caller` when `git_branch` or `git_origin_url` is present in the SQLite\
+      \ row, and included `thread_source = ''` in the SQL `WHERE` predicate.\n6. Updated\
+      \ existing tests in `crates/cito-native/tests/support/{daemon,plugins,ui}.rs`\
+      \ in place and refreshed `site/assets/screenshots/{menu-dark,directory-dark,activity-dark}.png`.\n\
+      \nVerification:\n- Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=1 cargo test --workspace -> PASS (170 unit + 100 native\
+      \ integration + 3 binary/distribution tests passed, 4 ignored, 0 failed)\n-\
+      \ Run: cargo build --release -> PASS (0 warnings, staged binaries updated)\n\
+      \nSpec link:\n- docs/DESIGN.md §22 (U1–U5 & §22.2)"
+  - id: v38.review
+    name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
+      (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: done
+    description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
+      the modified files (do NOT run multi-round review loops), verify cargo test
+      --workspace && cargo build --release, and push main to origin (do NOT tag or
+      trigger release.yml).
+    verification: cargo test --workspace && cargo build --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon.rs
+    depends_on:
+    - v38.impl
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-12T19:13:02.990149Z'
+    done_at: '2026-11-13T07:20:53.977439+00:00'
+    evidence: 'Completed 11-round convergent contract-and-simplicity review & repair
+      loop for Stage 20 (U1–U5) and Stage 21 (M1–M5) across pathway-auditor, structural-auditor,
+      uiux-auditor, and rust-senior, converging monotonically (13 -> 8 -> 4 -> 3 ->
+      3 -> 2 -> 1 -> 2 -> 1 -> 1 -> 0) to terminal verdicts `Contract & Wiring: CLEAN`
+      and `Simplicity & Economy: ZERO_NEW_ISSUES` across all three auditors at commit
+      `6a664ceb1c5a3337e0faff617245b12f029fd0c3` (commits `61cbaa2`, `5c144e7`, `25a9502`,
+      `a71b292`, `327af17`, `a24ab2d`, `85efeec`, `fc3e550`, `a015924`, `d42f4dc`,
+      `6a664ce`).
+
+
+      Key closures and verifications:
+
+      - M1 (Declarative Horizontal Bar & Pill Strip Layout Engine): `mountPillStrip`
+      (`src/macos/cito-ui.swift:128`) sizes recessed scroll tracks tightly to intrinsic
+      pill content width (`trackWidth = min(frame.width, max(totalWidth, 0))` with
+      symmetric 3pt end padding and overlay scrolling when `totalWidth > frame.width`);
+      `MenuControl.toggleWidth` sizes multi-state toggles across all state labels;
+      regenerated 8 Retina screenshots (`site/assets/screenshots/*.png`, including
+      `wake-card-dark.png`) and verified tight pill tracks visually and via `inspectMenu()`.
+
+      - M2 (Message Copy Fidelity, Banner Outcome Accuracy & Wake Card Polish): `PendingMessageCopy`
+      correlates `copy_message:<signal_id>` by `(requestId, signalId, mode)` and validates
+      returned `signal_id`; desktop banner renders `"Delivered" | "Queued" | "No reply
+      needed"` from wire fields; `jargonPattern` covers `delivery_state`, `signal_id`,
+      `reply_to`, `correlation_id`, `owner_token`, `principal_id`, `binding_generation`,
+      `session_switched`, and `listener_id`.
+
+      - M3 (Plugin Wake Delivery & Setup-Check Error Propagation): Pi, Claude, and
+      Codex plugins propagate structured non-zero exit codes, `ok: false` payloads,
+      and timeouts as `DELIVERY_FAILED`; `check_app_setup` propagates `ok: false`
+      / stderr details into `appSetupErrors[id]`.
+
+      - M4 (Single-Authority Auto-Listen, Probe Recovery, Discovery Freshness & Reconnect-Safe
+      Detach Reconciliation): `LocalState` owns per-Hub `discovery_revisions` and
+      `registration_locks` across clones and client recreations; `DISCOVERY_CUTOFF_SQL`
+      fences both `UNLISTENED` revocations and `ACTIVE` PID rebinds before remote
+      `kv_save` and inside the local SQLite write transaction; `probe_listener`, `dispatch_listener`,
+      and `StaleDiscovery` atomically enqueue `pending_hub_detaches` and clear via
+      `clear_pending_detach_if_current(hub, id, generation, owner)`; `set_auto_listen(true)`
+      preserves pending detaches for omitted sessions; `register_automatic_human`
+      recovers paused and remote non-generic Human `about` metadata; `distinct_human_about`
+      (Rust) and `distinctAbout` (Swift) enforce identical Unicode lowercase generic-label
+      suppression.
+
+      - M5 (Directory & Activity Error Surface, Anchor Scroll & Host Hub Diagnostics):
+      separated `directoryQueryError` and `directoryActionError`, correlated Activity
+      errors by `request_id`, preserved selected-row scroll offset across refreshes,
+      surfaced `hostHubError` in `Settings -> Hubs`, and truncated long address chips
+      cleanly.
+
+      - Commands run: `cargo fmt --all -- --check` (exit 0), `cargo build --release`
+      (exit 0, 0 compiler warnings), `PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH
+      RUST_TEST_THREADS=2 cargo test --workspace` (exit 0: 175 unit tests + 100 integration
+      tests = 275 passed, 4 ignored worker entrypoints, 0 failed).
+
+      - Worktree cleanup: removed `/Users/tefx/Projects/cito/.vectl/worktrees/v38.review`,
+      reclaiming 2 GiB free space (`100 GiB -> 102 GiB`).'
+    rejection_reason: 'Execute multi-round convergent contract-and-simplicity review-and-fix
+      loop (pathway-auditor + structural-auditor + uiux-auditor against /tmp/cito-design-section23.md
+      and /tmp/cito-6persona-full-audit.md) until Contract & Wiring: CLEAN and Simplicity
+      & Economy: ZERO_NEW_ISSUES'
+    rejection_history:
+    - reason: Apply critical addendum for Question 3 (unify active Agent session stop:<id>
+        button to 52pt .neutral 'Pause' pill matching You card) and Question 2 (apply
+        recessed segmented track + .subtleHeader unselected pills to channel_hub_selector
+        and settings_hub_auth:* in Settings)
+      timestamp: '2026-11-12T17:33:30.684791+00:00'
+      reviewer: vectl-orchestrator
+    - reason: 'Append docs/DESIGN.md §23 (Stage 21: Complete 6-Persona Root-Cause
+        Closure Across Mechanisms M1–M5) and close remaining M1–M5 items in v38.review
+        before completing and pushing'
+      timestamp: '2026-11-12T18:17:18.313375+00:00'
+      reviewer: vectl-orchestrator
+    - reason: 'Execute multi-round convergent contract-and-simplicity review-and-fix
+        loop (pathway-auditor + structural-auditor + uiux-auditor against /tmp/cito-design-section23.md
+        and /tmp/cito-6persona-full-audit.md) until Contract & Wiring: CLEAN and Simplicity
+        & Economy: ZERO_NEW_ISSUES'
+      timestamp: '2026-11-12T19:12:40.343773+00:00'
+      reviewer: vectl-orchestrator
+- id: v39
+  name: 'V39 Stage 22: Notification Banner Readability, Human-Channel Routing Clarity,
+    Pairing-First Telegram Flow & Cross-Surface Lifecycle Closure (U1–U6)'
+  status: in_progress
+  gate: All finalized U1–U6 requirements in docs/DESIGN.md §24 (§24.1–§24.3) pass;
+    all inspectMenu() mechanical invariants equal [] across all surfaces in Light
+    and Dark appearances (including live Light/Dark .popover rendering of BannerWindow,
+    banner hitTest/checkHitTests, updated settings_channels_tab defaultLayout, composer_target
+    non-button projection, and 2pt pill-track geometry); contract-and-simplicity review
+    & fix completes cleanly; cargo fmt --all -- --check && cargo test --workspace
+    && cargo build --release pass with 0 warnings; changes are pushed to origin/main
+    (NO release tag).
+  context: 'Implement docs/DESIGN.md §24 (U1–U6, §24.1–§24.3): (1) U1 BannerWindow
+    .popover + clear/translucent legibility root (opaque surfaceBackground offscreen
+    only) + 1pt adaptive border + warningSurface blended against surfaceBackground,
+    SurfaceView accentBar/iconBadge + ClickView wantsUpdateLayer/updateLayer, 380x112
+    x=54 layout with 30x30 badge at (14,68), from_harness == "" normalization, makePillBadge(...,
+    minWidth: 0) xN when displayedCount > 1, ClickView .group role + NSControl-only
+    hitTest + checkHitTests + !bannerHovered coalesced timer + hide() state reset,
+    and UiMailbox AtomicBool gate + queue purge on set_desktop_banner(false); (2)
+    U2 orthogonal human_paused vs desktop_banner_enabled, snapshot() human channels
+    from slot.cached_directory()/local, cardMenu footer bell toggle (Settings… ..
+    Quit Cito ⌘Q), human_paused/human_about projected inside settings_for_hub, and
+    top-down channelsView cursorY layout (58–62pt Mac Desktop Banner + Hub-paused
+    Resume banner + updated settings_channels_tab defaultLayout predicate); (3) U3
+    bot_username + pairing_url (https://t.me/<bot>?start=<code>), request_id-correlated
+    pair_code auto-copy with pairCopiedUntil, Open in Telegram ↗ + hidden duplicate
+    Pair Account…, collapsed manual Chat ID disclosure with server-side _external_*
+    population for positive private IDs, hidden/disabled Send Test when unconfigured,
+    Paired · <display_label> + channel_summary: isDataRow(), [ Pause/Resume ] + [
+    Unpair ] on userStratum header bar during Edit…/Re-pair… (!ch.configured stratum
+    numbering), multi-line chDetail visible on warnings/getUpdates 409/effect_unknown,
+    remote Re-pair… 1Hz polling on pairing_pending || pairing_code, and 1:1 external
+    identity ownership across redeem and human_channels_configure + chat A -> chat
+    B destination isolation/fencing + unthreaded reply disambiguation; (4) U4 filter-scoped
+    ack_signals & clear_activity_history preserving pending local delivery work while
+    hiding cleared rows from snapshot() unread_count (state.activity()?.1) and ack_signals,
+    .destructiveHover Clear, distinct sender titles on Line 1 with protected relativeTime
+    + act_title: provenance stripper, 44 + ceil activityRowHeight at 492pt, 44pt/62pt
+    directory_composer with "Sending…" ~76pt composer_send & dynamic updateDirectoryWarnings(),
+    activity_all_total/activity_has_any + @user search + "No messages addressed to
+    you" + Show All Activity, and hub.rs:attach() display_name/display_label + peer_dto
+    "Hub" skip; (5) U5 close_settings + disabled/removed Hub clearing active_settings_hub,
+    configured "local" principal in settings_for_hub & setup_disconnect_all, Pause
+    All (pause.fill) + explicit "hub"-scoped unlisten_all + cito unlisten --all --hub
+    <name> (cli.rs::flag_errors_precede_effects lockstep), effectiveTargetHub click
+    & last-Hub disable protection across all Hubs, shared x=46–48 AVAILABLE SESSIONS
+    keyline (width <= 244pt), menuDidClose renamingSessionKey reset, editingPersonalChannel
+    Cancel/Escape, Return submit, run_channel_action reset_user, Disconnect All… preserving
+    login item when purge_data == false, settings_header/scroll/settings_footer at
+    0.35 alpha behind 0..460 hit-consuming uninstall_modal_overlay, add_hub_form scrollToVisible,
+    hostHeight +12pt (host_hub_addr_track y=82), host_hub_port draft preservation
+    & [ Copy Token ] + auto-parse invite, editingOriginalHub/NSNull user clear, and
+    OIDC canonicalization (issuer/clientId) & request_id/client_id stripping in setup.rs/config.rs/daemon.rs;
+    (6) U6 CitoPalette.badgeFill(_) at 1.0 alpha (>=3.0:1), !isEnabled dimming, non-button
+    composer_target (SurfaceView + NSTextField), .neutral Directory copy chips & [
+    Sharing ], "Account Not Paired" header status, 2pt symmetric pill tracks (mountPillStrip
+    cursorX=2/base 4, directory_scope_track 114x26, separator x=136, directory_harness_scroll
+    402x26, activity_filter_track 226x26, channel_hub_strip 26, settings_hub_auth_track
+    26, header_hub_strip trailingInset=2), MenuControl.leadingDotView + uniform 6x6
+    SurfaceView dots/rings replacing "● "/"○ ", borderless pluginIconImage, renderPNG
+    cornerRadius clip, Activity Line 1 button alignment, and accessibilityLabels.
+    Refresh site/assets/screenshots/*.png, run contract-and-simplicity review & fix,
+    verify cargo fmt --all -- --check && cargo test --workspace && cargo build --release,
+    and push main to origin/main (NO release tag).'
+  depends_on:
+  - v38
+  steps:
+  - id: v39.impl
+    name: V39 U1–U6 Notification Banner Readability, Orthogonal Human/Banner Routing,
+      Pairing-First Telegram Flow, Activity/Directory Scope & Settings/Visual Closure
+    status: done
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Implement finalized docs/DESIGN.md §24 (U1–U6, §24.1–§24.3) across\
+      \ src/macos/cito-ui.swift, crates/cito-native/src/core/{daemon,hub,state,setup,config,cli,receiver}.rs,\
+      \ and plugins/telegram/{native.rs,plugin.json}:\n  1. U1: BannerWindow .popover\
+      \ material with clear/translucent legibility root (reserving opaque CitoPalette.surfaceBackground\
+      \ strictly for offscreen renderPNG/inspectMenu fallback) + 1pt adaptive border\
+      \ (labelColor @ 0.22) + CitoPalette.warningSurface blended against CitoPalette.surfaceBackground;\
+      \ SurfaceView accentBar/iconBadge + ClickView wantsUpdateLayer/updateLayer +\
+      \ unmasked Light/Dark inspectMenu()/renderPNG() assertions; 380x112pt (cornerRadius:\
+      \ 14) layout at x=54 keyline with 30x30 badge at (14,68) and from_harness ==\
+      \ \"\" normalized to nil before ?? target_harness (sender from_harness on human\
+      \ DMs, target_harness on agent wakes), suppressing accentBar/\"Notification\"\
+      \ pill on normal single live deliveries (effective_wake && displayedCount ==\
+      \ 1), reserving amber for Held/Queued, makePillBadge(..., minWidth: 0) xN badge\
+      \ when displayedCount > 1, deduplicated Line 1 (isGenericSessionLabel/distinctAbout\
+      \ + banner_data:1/test_oracle_calibration lockstep), top-pinned Line 2, and\
+      \ Line 3 secondaryText->infoText hover with hide() state reset; independent\
+      \ 20x20 close (x) button with ClickView .group role + accessibilityPerformPress()\
+      \ + NSControl-only hitTest + banner in inspectMenu() checkHitTests + !bannerHovered\
+      \ coalesced timer gating; boolean-validated set_desktop_banner(false) immediate\
+      \ hide + UiMailbox AtomicBool gate & queue purge + cito-ui.swift late-frame\
+      \ guard.\n  2. U2: Orthogonal human_paused (Hub-wide DND) vs desktop_banner_enabled\
+      \ (local Mac popup mute); human listener channels populated in DaemonService::snapshot()\
+      \ directly from slot.cached_directory()/local (skipping \"Hub\" and @handle)\
+      \ with live delivery summary on You (@user) card; cardMenu footer bell.fill/bell.slash.fill\
+      \ toggle between Settings… and Quit Cito ⌘Q; human_paused/human_about projected\
+      \ inside DaemonService::settings_for_hub (driving snapshot() enabled_hubs);\
+      \ top-down channelsView cursorY layout (58–62pt Mac Desktop Banner with scope\
+      \ subtitle + Hub-paused banner with 1-click Resume + updated inspectMenu() settings_channels_tab\
+      \ defaultLayout predicate).\n  3. U3: Preserve bot_username and emit pairing_url\
+      \ (https://t.me/<bot_username>?start=<code>) on human_channel_pair_start and\
+      \ channel_list; include request_id on pair_code frames, auto-copy /start <code>\
+      \ on matching pending request, persist pairCopiedUntil across settings rebuild,\
+      \ render .prominent Open in Telegram ↗ alongside Copy Command and Cancel while\
+      \ hiding duplicate Pair Account…; tuck manual Chat ID behind collapsed disclosure,\
+      \ populate _external_chat_id/_external_user_id server-side for positive private\
+      \ IDs (or label negative/group IDs outbound-only), hide/disable Send Test when\
+      \ unconfigured; render Paired · <display_label> (channel_summary: in isDataRow()\
+      \ with byTruncatingMiddle + toolTip), order [ Send Test ] [ Pause/Resume ] [\
+      \ Edit… ] [ Unpair ], gate \"1. \"/\"2. \" stratum numbering on !ch.configured,\
+      \ and place [ Pause/Resume ] + [ Unpair ] on userStratum top header bar during\
+      \ Edit…/Re-pair… (bottom bar [ Re-pair… ] + [ Cancel ] [ Send Test ] [ Save\
+      \ ] <= 432pt); surface actionable getUpdates (including HTTP 409 without auto-deleting\
+      \ webhooks) and effect_unknown health diagnostics in multi-line chDetail (maximumNumberOfLines\
+      \ = 0, .byWordWrapping, dynamic headerHeight) visible in warningText/dangerText\
+      \ whenever warning/error is present; expose pending pairing_pending/pairing_code\
+      \ on channel_list and trigger 1Hz remote polling in daemon.rs on pairing_pending\
+      \ == true || pairing_code.is_string(); enforce 1:1 external identity ownership\
+      \ across both redeem and human_channels_configure (including paused enabled\
+      \ == 0 and canonical/legacy OIDC principal equivalence), isolate/fence chat\
+      \ A -> chat B chunk prefixes and reply mappings while preserving last_delivered_seq\
+      \ and effect_unknown safety, and disambiguate unthreaded Telegram replies.\n\
+      \  4. U4: Scope ack_signals (including optimistic Read All) and clear_activity_history\
+      \ to active filter (\"me\" -> target_harness == \"human\" only), preserving\
+      \ pending local agent delivery work/retry checkpoints/in-flight completion while\
+      \ hiding cleared rows from Activity, snapshot() unread_count (state.activity()?.1),\
+      \ and ack_signals, and styling Clear (including updateDirectoryFacetStyles())\
+      \ as .destructiveHover; render distinct sender titles on Activity Line 1 with\
+      \ protected relativeTime + inspectMenu() act_title: provenance stripper skipping\
+      \ optional (\\(<from_title>\\)) and unify activityRowHeight to 44 + ceil(wrappedRect.height)\
+      \ at 492pt (messageHeight = rowHeight - 42); collapse directory_composer to\
+      \ 44pt when composerError is empty (62pt on error, divider at height - 1) with\
+      \ ~76pt \"Sending…\" composer_send and dynamic updateDirectoryWarnings() (28\
+      \ + directoryComposerBar.frame.height); project activity_all_total/activity_has_any,\
+      \ align state.rs:query_activity and applyActivityFilter (@user, harnesses, listener_id,\
+      \ display addresses), and render \"No matching messages\"/Reset Search and \"\
+      No messages addressed to you\"/Show All Activity; populate display_name/display_label\
+      \ in hub.rs:attach(), skip \"Hub\" in daemon.rs:peer_dto when display_name is\
+      \ present, and join DirectoryPeerCellView subtitles without trailing \" · \"\
+      .\n  5. U5: Clear active_settings_hub on close_settings and when active Hub\
+      \ is disabled/removed, and pass configured \"local\" principal in settings_for_hub\
+      \ and setup_disconnect_all(purge_data: true); rename Stop All to Pause All (pause.fill)\
+      \ with explicit \"hub\"-scoped unlisten_all in daemon.rs + cito unlisten --all\
+      \ --hub <name> on CLI (cli.rs::flag_errors_precede_effects lockstep); compare\
+      \ effectiveTargetHub == hub.name on header_hub_strip click and prevent disabling\
+      \ the last enabled Hub across all Hubs (removing local && guard); align AVAILABLE\
+      \ SESSIONS group and child labels to shared x=46–48 keyline (compactSessionPath/candidate_hint\
+      \ width <= 244pt); reset renamingSessionKey in menuDidClose; add Cancel/Escape\
+      \ to editingPersonalChannel and Return submit to settingsPanel; honor action[\"\
+      reset_user\"] == true in daemon.rs:run_channel_action (reset_user: false on\
+      \ Clear Token); preserve login item on Disconnect All… when purge_data == false;\
+      \ keep settings_header/scroll/settings_footer at 0.35 alpha behind 0..460 hit-consuming\
+      \ uninstall_modal_overlay (ui.rs:5901,6008 lockstep); scrollToVisible add_hub_form\
+      \ on open; expand hostHeight by +12pt (148pt/176pt, host_hub_addr_track y=82);\
+      \ preserve/apply host_hub_port drafts across Share/Access toggles with !isEnabled\
+      \ Apply when unchanged; place [ Copy Token ] between [ Apply ] and [ Access:\
+      \ Token ] and auto-parse invite commands/JSON in Add Hub; preserve editingOriginalHub\
+      \ when addHubName is cleared and pass NSNull()/remove \"user\" when Username\
+      \ is emptied; strip request_id/client_id and canonicalize OIDC issuer/clientId\
+      \ (stripping oidcIssuer/oidcClientId) across setup.rs, config.rs:try_normalize_existing_config,\
+      \ and daemon.rs:setup_save_hub (without inferred token when share_hub == Some(false)).\n\
+      \  6. U6: Replace tintColor(_:) + .withAppearanceAlpha(0.88) with CitoPalette.badgeFill(_)\
+      \ at 1.0 alpha (>=3.0:1 contrast against .white SF Symbols in Light/Dark modes);\
+      \ apply consistent !isEnabled dimming in MenuControl.applyVisualState(); render\
+      \ composer_target as non-button SurfaceView + NSTextField (ui.rs:5742 / inspectMenu()\
+      \ lockstep); keep Directory copy_dir chips and [ Sharing ] as .neutral (with\
+      \ status dot on Sharing); show \"Account Not Paired\" Telegram header status\
+      \ when only gateway is configured; standardize mountPillStrip (cursorX=2, base\
+      \ 4) and symmetric 2pt recessed pill tracks (directory_scope_track (16,3,114,26)\
+      \ r=13, separator x=136, directory_harness_scroll (142,3,402,26) updating ui.rs:5456/5486,\
+      \ activity_filter_track (16,3,226,26) r=13, channel_hub_strip h=26 r=13, settings_hub_auth_track\
+      \ h=26 r=13, settings_tab_track r=9, host_hub_addr_track r=8, ui.rs:4298 and\
+      \ inspectMenu() header_hub_strip trailingInset=2); add MenuControl.leadingDotView\
+      \ and uniform 6x6 SurfaceView dots/rings replacing \"● \"/\"○ \" across Settings\
+      \ statuses/toggles (removing dead \"● \" parsing in inspectMenu); omit square\
+      \ 1pt borders on pluginIconImage; clip renderPNG to window cornerRadius; align\
+      \ Activity row buttons with Line 1; set explicit accessibilityLabels on dismiss_menu_error,\
+      \ compact header_hub_strip pills, and dot-bearing controls.\n- Update affected\
+      \ tests in crates/cito-native/tests/support/{ui,daemon,plugins}.rs and crates/cito-native/tests/hub/cases.rs\
+      \ (plus CLI unit tests in cli.rs) with discriminating regression tests for U1–U6,\
+      \ and refresh site/assets/screenshots/*.png.\n\nImplementation Notes (Non-Binding):\n\
+      - Follow docs/DESIGN.md §24.3 advisory notes: keep daemon.rs:snapshot() and\
+      \ hub.rs:channel_list lightweight without blocking UI on remote network calls;\
+      \ never auto-delete an existing Telegram webhook on HTTP 409; preserve compatibility\
+      \ for existing ui.rs test harness fixtures (id: \"channel\").\n\nBoundary:\n\
+      - Owner: rust-senior. Isolated worktree transaction modifying repository source,\
+      \ tests, and screenshots only.\n\nAdmit:\n- Witnessed inputs: finalized docs/DESIGN.md\
+      \ §24 (U1–U6, §24.1–§24.3).\n- Verification: cargo fmt --all -- --check && cargo\
+      \ test --workspace && cargo build --release pass with 0 warnings.\n\nRecovery:\n\
+      - Reconcile in-worktree compiler/test failures before completion; stop and escalate\
+      \ only on a contradictory spec requirement."
+    verification: cargo fmt --all -- --check && cargo test --workspace && cargo build
+      --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - plugins/telegram/native.rs
+    - plugins/telegram/plugin.json
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/hub/cases.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/receiver.rs
+    agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-13T20:05:39.704378Z'
+    done_at: '2026-11-13T21:58:50.750017+00:00'
+    evidence: 'Artifact:
+
+      - Commit: fc27a8ee47ce305d0ac69fa0aeb39ed358960e71 (fast-forward merged into
+      main; retained candidate ref refs/vectl/candidates/v39.impl)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> Passed (exit 0)
+
+      - Run: cargo build --release -> Passed (0 warnings; staged bin/cito-native-darwin-arm64,
+      bin/cito-ui-darwin-arm64, plugins/*/bin/*)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test --workspace -> 285 passed, 4 ignored, 0 failed
+
+      - Screenshots: Refreshed all 8 Retina PNGs (site/assets/screenshots/*.png) after
+      fixing renderPNG 2x CTM/output-bitmap corner-clipping, visually verified all
+      8 destination PNGs and Light captures.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §24 (§24.1–§24.3, U1–U6)'
+  - id: v39.review
+    name: 'V39 Contract-and-Simplicity Review & Fix, Live Light/Dark Banner Verification
+      and Push to main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - Run contract-and-simplicity review & fix across all v39.impl changes (finalized
+      docs/DESIGN.md §24 U1–U6 across src/macos/cito-ui.swift, crates/cito-native/src/core/{daemon,hub,state,setup,config,cli,receiver}.rs,
+      plugins/telegram/{native.rs,plugin.json}, and crates/cito-native/tests/**),
+      closing all contract, wiring, state-transition, destination-fencing, visual,
+      and simplicity findings cleanly.
+
+      - Verify live Light/Dark .popover appearance on BannerWindow, all inspectMenu()
+      mechanical invariants ([] in Light and Dark), and refreshed screenshots in site/assets/screenshots/*.png.
+
+      - Verify cargo fmt --all -- --check && cargo test --workspace && cargo build
+      --release pass with 0 compiler warnings.
+
+      - Push integrated main to origin/main (do NOT create a release tag or trigger
+      release.yml).
+
+
+      Boundary:
+
+      - Owner: rust-senior with [REQUIRES_SKILL: contract-and-simplicity]. Modifies
+      repository and pushes main to origin/main without tagging a release.
+
+
+      Admit:
+
+      - Depends on v39.impl completion.
+
+      - Verification: cargo fmt --all -- --check && cargo test --workspace && cargo
+      build --release (0 warnings), live Light/Dark BannerWindow .popover + inspectMenu()
+      + screenshot verification, and git push origin main.
+
+
+      Recovery:
+
+      - Repair any review or regression finding in place and re-verify before pushing
+      main to origin/main.'
+    verification: cargo fmt --all -- --check && cargo test --workspace && cargo build
+      --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - plugins/telegram/native.rs
+    - plugins/telegram/plugin.json
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/hub/cases.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/receiver.rs
+    depends_on:
+    - v39.impl
+    agent: rust-senior

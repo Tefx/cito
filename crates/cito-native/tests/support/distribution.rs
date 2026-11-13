@@ -388,16 +388,31 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         }
         assert!(html.contains("https://tefx.github.io/cito/assets/og-card.png"));
     }
+    let architecture = fs::read_to_string(site.join("docs/architecture.html")).unwrap();
+    assert!(architecture.contains("src=\"../assets/art/architecture-topology.svg\""));
+    let diagram = fs::read_to_string(site.join("assets/art/architecture-topology.svg")).unwrap();
+    for attribute in [
+        "viewBox=\"0 0 960 420\"",
+        "width=\"960\"",
+        "height=\"420\"",
+        "aria-labelledby=\"title desc\"",
+    ] {
+        assert!(
+            diagram.contains(attribute),
+            "Missing SVG image contract: {attribute}"
+        );
+    }
     for (path, width, height) in [
         ("apple-touch-icon.png", 180, 180),
         ("assets/og-card.png", 1200, 630),
-        ("assets/screenshots/menu-dark.png", 760, 668),
+        ("assets/screenshots/menu-dark.png", 760, 684),
         ("assets/screenshots/directory-dark.png", 1120, 880),
         ("assets/screenshots/activity-dark.png", 1120, 880),
         ("assets/screenshots/settings-apps-dark.png", 1040, 920),
         ("assets/screenshots/settings-channels-dark.png", 1040, 920),
         ("assets/screenshots/settings-hubs-dark.png", 1040, 920),
-        ("assets/screenshots/banner-dark.png", 776, 272),
+        ("assets/screenshots/banner-dark.png", 760, 224),
+        ("assets/screenshots/wake-card-dark.png", 760, 224),
     ] {
         let bytes = fs::read(site.join(path)).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");

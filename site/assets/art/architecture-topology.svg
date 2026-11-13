@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" role="img" aria-labelledby="title desc">
+  <title id="title">Cito: symmetric nodes, shared Hub, attached channels</title>
+  <desc id="desc">Pi, Codex, and Claude Code agent sessions use cito-mcp and wake drivers. A native daemon on port 4290 routes signals through HubEngine with SQLite WAL, leases, split read state, and bounded retry. A Human Node receives on Mac menu bars and Telegram. Remote team Hubs connect over Tailscale, LAN, or OIDC HTTP and SSE on port 4291.</desc>
+  <defs>
+    <pattern id="dots" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="8" cy="8" r="0.6" fill="#303744"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#F3F4F6" stroke-width="1.5"/></marker>
+  </defs>
+  <rect width="960" height="420" rx="16" fill="#0C0E12"/>
+  <rect x="8" y="8" width="944" height="404" rx="12" fill="url(#dots)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5">
+    <path d="M33 60 Q30 54 39 54 L266 55 L268 126 L32 125 Z M35 57 L264 58 L265 123" stroke="#F59E0B"/>
+    <path d="M33 143 L266 141 Q271 177 267 212 L32 213 Z M36 146 L264 144 L264 209" stroke="#38BDF8"/>
+    <path d="M32 230 L267 231 L269 300 L34 302 Z M35 233 L264 234 L265 298" stroke="#FB923C"/>
+    <path d="M342 54 Q480 51 619 56 L620 300 Q480 304 340 300 Z M346 58 L616 59 L616 297 L344 296 Z" stroke="#F59E0B" fill="#171B24"/>
+    <path d="M689 54 L925 56 L928 301 L687 299 Z M692 58 L922 59 L924 296" stroke="#34D399"/>
+    <path d="M705 99 L912 100 L911 151 L704 150 Z M705 169 L912 168 L913 213 L703 215 Z M705 233 L911 232 L913 283 L704 282 Z" stroke="#5F968A"/>
+    <path d="M279 173 Q304 169 330 175 M280 176 Q304 173 328 178" stroke="#F3F4F6" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <path d="M631 173 Q652 168 676 174 M633 177 Q652 173 674 177" stroke="#F3F4F6" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <path d="M341 333 Q480 330 619 334 L620 394 L340 393 Z M344 336 L616 337 L616 390" stroke="#A5B4FC"/>
+    <path d="M480 309 Q477 320 480 326" stroke="#F3F4F6" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  </g>
+  <g fill="#F3F4F6" font-family="ui-rounded, 'SF Pro Rounded', system-ui, sans-serif" font-size="13">
+    <text x="33" y="32" font-size="15" font-weight="600">Agent Session Nodes</text>
+    <text x="47" y="77" fill="#F59E0B" font-weight="600">Pi Coding Agent</text>
+    <text x="47" y="96">alice/pi#8a4f · cito-mcp</text>
+    <text x="47" y="114" font-size="11" fill="#C7CBD4">Live Unix socket wake</text>
+    <text x="47" y="164" fill="#38BDF8" font-weight="600">Codex</text>
+    <text x="47" y="183">alice/codex#4219 · cito-mcp</text>
+    <text x="47" y="201" font-size="11" fill="#C7CBD4">Thread wake · api-server</text>
+    <text x="47" y="253" fill="#FB923C" font-weight="600">Claude Code</text>
+    <text x="47" y="272">alice/claude#3c10 · cito-mcp</text>
+    <text x="47" y="290" font-size="11" fill="#C7CBD4">Turn-boundary hook · web-app</text>
+    <text x="34" y="325" font-size="11" fill="#C7CBD4">Scope: self | workspace</text>
+    <text x="34" y="344" font-size="10" fill="#C7CBD4">cito_send · cito_find · Exclusive Wake</text>
+    <text x="342" y="32" font-size="15" font-weight="600">Cito Hub</text>
+    <text x="358" y="79" font-weight="600" fill="#F59E0B">cito-native daemon :4290</text>
+    <text x="358" y="101">HubEngine · SQLite WAL</text>
+    <text x="358" y="124" font-size="11" fill="#C7CBD4">local:// or HubServer :4291</text>
+    <text x="358" y="153">Node Registry &amp; Leases</text>
+    <text x="358" y="174" font-size="11" fill="#C7CBD4">Node (1) ↔ Channels (1..K)</text>
+    <text x="358" y="200">Durable Signals · Bounded Retry</text>
+    <text x="358" y="222" font-size="11" fill="#C7CBD4">cito_send / cito_inbox / cito_find</text>
+    <text x="358" y="247">Split Read State · Atomic Wake Claim</text>
+    <text x="358" y="269" font-size="11" fill="#C7CBD4">consumer_ack ≠ signal_ack</text>
+    <text x="358" y="287" font-size="11" fill="#C7CBD4">Transport cursor / business read sync</text>
+    <text x="688" y="32" font-size="15" font-weight="600">Human Node</text>
+    <text x="704" y="79" fill="#34D399" font-weight="600">@alice · @self</text>
+    <text x="717" y="121" font-size="12">1 · MacBook Menu Bar &amp; Activity</text>
+    <text x="717" y="140" font-size="11" fill="#C7CBD4">cito-ui · Banner + 1-line reply</text>
+    <text x="717" y="188">2 · Mac Studio Menu Bar</text>
+    <text x="717" y="205" font-size="11" fill="#C7CBD4">Simultaneous presence</text>
+    <text x="717" y="250">3 · Telegram Bot Gateway</text>
+    <text x="717" y="265" font-size="10" fill="#C7CBD4">@BotFather · 7-day reply</text>
+    <text x="717" y="279" font-size="10" fill="#C7CBD4">on_acked → auto read-clear</text>
+    <text x="688" y="325" font-size="11" fill="#C7CBD4">Fan-out to 1..K Channels (@self)</text>
+    <text x="688" y="344" font-size="11" fill="#C7CBD4">1-line reply → wake + signal_ack</text>
+    <text x="355" y="356" fill="#A5B4FC" font-weight="600">Remote / Team Hubs</text>
+    <text x="355" y="378" font-size="11">Tailscale / LAN :4291 · OIDC · HTTP / SSE</text>
+    <text x="34" y="388" font-size="11" fill="#C7CBD4">Every node uses the Hub's signaling channel.</text>
+  </g>
+</svg>

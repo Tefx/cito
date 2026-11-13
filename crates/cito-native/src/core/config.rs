@@ -164,6 +164,20 @@ pub fn try_normalize_existing_config(raw: Option<&str>) -> Result<NormalizedConf
                 .and_then(Value::as_str)
                 .unwrap_or("none"),
         )?;
+        for (canonical, aliases) in [
+            ("issuer", &["oidcIssuer"][..]),
+            ("clientId", &["client_id", "oidcClientId"][..]),
+        ] {
+            if !hm.contains_key(canonical) {
+                if let Some(value) = aliases.iter().find_map(|key| hm.get(*key)).cloned() {
+                    hm.insert(canonical.into(), value);
+                }
+            }
+            for alias in aliases {
+                hm.remove(*alias);
+            }
+        }
+        hm.remove("request_id");
         hm.remove("auth");
         hm.insert("url".to_string(), json!(url));
         hm.insert("natsUrl".to_string(), json!(url));

@@ -37,12 +37,7 @@ fn desktop_running(req: &Value) -> Result<bool> {
         let identity = process_identity(p)?;
         let command =
             str_at(&identity, "command").ok_or("Desktop process command is unavailable")?;
-        if desktop_command(command) {
-            return Ok(true);
-        }
-        if !matches_process(command) {
-            return Ok(false);
-        }
+        return Ok(desktop_command(command) || matches_process(command));
     }
     let output = Command::new("/bin/ps")
         .args(["-axo", "uid=,command="])
@@ -56,7 +51,11 @@ fn desktop_running(req: &Value) -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
         line.trim_start()
             .split_once(char::is_whitespace)
-            .is_some_and(|(owner, command)| owner == uid && desktop_command(command.trim_start()))
+            .is_some_and(|(owner, command)| {
+                owner == uid
+                    && (desktop_command(command.trim_start())
+                        || matches_process(command.trim_start()))
+            })
     }))
 }
 fn db(req: &Value) -> PathBuf {
@@ -90,9 +89,15 @@ fn parse(s: Option<&str>) -> Result<DocumentMut> {
 fn configured(doc: &DocumentMut, cmd: &str) -> bool {
     doc.get("mcp_servers")
         .and_then(|v| v.get("cito"))
-        .and_then(|v| v.get("command"))
-        .and_then(Item::as_str)
-        == Some(cmd)
+        .is_some_and(|cito| {
+            cito.get("enabled").and_then(Item::as_bool) != Some(false)
+                && cito
+                    .get("command")
+                    .and_then(Item::as_str)
+                    .is_some_and(|entry| {
+                        entry == cmd || entry == "cito-mcp" || entry.ends_with("/cito-mcp")
+                    })
+        })
 }
 fn setup(req: &Value) -> Result<Value> {
     let path = config_home(req, "CITO_CODEX_HOME", "~/.codex").join("config.toml");
@@ -146,6 +151,9 @@ fn setup(req: &Value) -> Result<Value> {
         if remove {
             if let Some(t) = d.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
                 t.remove("cito");
+                if t.is_empty() {
+                    d.remove("mcp_servers");
+                }
             }
         } else {
             if !d.contains_key("mcp_servers") {
@@ -154,10 +162,16 @@ fn setup(req: &Value) -> Result<Value> {
             if d["mcp_servers"].as_table_like().is_none() {
                 return Err("mcp_servers must be a table".into());
             }
-            let mut t = Table::new();
+            if d["mcp_servers"].get("cito").is_none() {
+                d["mcp_servers"]["cito"] = Item::Table(Table::new());
+            }
+            let t = &mut d["mcp_servers"]["cito"];
+            if t.as_table_like().is_none() {
+                return Err("mcp_servers.cito must be a table".into());
+            }
             t["command"] = value(command);
             t["args"] = value(toml_edit::Array::new());
-            d["mcp_servers"]["cito"] = Item::Table(t);
+            t["enabled"] = value(true);
         }
         let next = d.to_string();
         Ok(if old.is_none() && next.is_empty() {
@@ -168,17 +182,61 @@ fn setup(req: &Value) -> Result<Value> {
     })?;
     Ok(json!({"ok":true,"actions":[action]}))
 }
-fn rows(req: &Value) -> Vec<Value> {
-    let columns = sqlite_rows(&db(req), "PRAGMA table_info(threads)").unwrap_or_default();
+fn row_for_id(req: &Value, id: &str) -> Result<Option<Value>> {
+    let path = db(req);
+    if !path.try_exists().map_err(|e| e.to_string())? {
+        return Ok(None);
+    }
+    if sqlite_rows(&path, "PRAGMA table_info(threads)")?.is_empty() {
+        return Ok(None);
+    }
+    Ok(sqlite_rows(
+        &path,
+        &format!(
+            "SELECT * FROM threads WHERE id = '{}'",
+            id.replace('\'', "''")
+        ),
+    )?
+    .into_iter()
+    .next())
+}
+fn try_rows(req: &Value) -> Result<Vec<Value>> {
+    let path = db(req);
+    if !path.try_exists().map_err(|e| e.to_string())? {
+        return Ok(vec![]);
+    }
+    let columns = sqlite_rows(&path, "PRAGMA table_info(threads)")?;
     let has = |name: &str| columns.iter().any(|c| c["name"] == name);
     if !has("id") || !has("cwd") {
-        return vec![];
+        return Ok(vec![]);
     }
-    let archived = if has("archived") && req["cli_cmd"] != "unlisten" {
-        " WHERE archived = 0"
-    } else {
-        ""
-    };
+    let projection = [
+        "id",
+        "cwd",
+        "name",
+        "title",
+        "git_branch",
+        "git_origin_url",
+        "recency_at_ms",
+        "updated_at",
+        "archived",
+        "thread_source",
+        "source",
+    ]
+    .into_iter()
+    .filter(|column| has(column))
+    .collect::<Vec<_>>()
+    .join(", ");
+    let mut predicates = vec!["id IS NOT NULL", "id != ''", "cwd IS NOT NULL", "cwd != ''"];
+    if has("archived") && req["cli_cmd"] != "unlisten" {
+        predicates.push("archived = 0");
+    }
+    if has("thread_source") {
+        predicates.push("(thread_source IS NULL OR thread_source = '' OR thread_source = 'user')");
+    }
+    if has("source") {
+        predicates.push("(source IS NULL OR source NOT LIKE '{\"subagent\"%')");
+    }
     let mut order = vec![];
     if has("archived") && req["cli_cmd"] == "unlisten" {
         order.push("archived ASC");
@@ -190,26 +248,23 @@ fn rows(req: &Value) -> Vec<Value> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
-    let rows = sqlite_rows(
-        &db(req),
+    Ok(sqlite_rows(
+        &path,
         &format!(
-            "SELECT * FROM threads{archived} ORDER BY {}",
-            order.join(", ")
+            "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
+            predicates.join(" AND "),
+            order.join(", "),
+            if req["op"] == "discover_sessions" {
+                " LIMIT 32"
+            } else {
+                ""
+            }
         ),
-    )
-    .unwrap_or_default();
-    rows.into_iter()
-        .filter(|r| {
-            str_at(r, "id").is_some()
-                && str_at(r, "cwd").is_some()
-                && str_at(r, "thread_source")
-                    .map(|s| s == "user")
-                    .unwrap_or(true)
-                && !str_at(r, "source")
-                    .unwrap_or("")
-                    .starts_with("{\"subagent\"")
-        })
-        .collect()
+    )?
+    .into_iter()
+    // Preserve caller validation for whitespace-only IDs and working directories.
+    .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
+    .collect())
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];
@@ -264,20 +319,16 @@ fn row_caller(req: &Value, r: &Value) -> Value {
     let cwd = str_at(r, "cwd")
         .or_else(|| str_at(req, "cwd"))
         .unwrap_or("");
-    let mut c = caller(
-        "codex",
-        str_at(r, "id").unwrap_or(""),
-        cwd,
-        pid(req),
-        str_at(r, "name").or_else(|| str_at(r, "title")),
-    );
-    if r.get("git_branch").is_some() {
-        c["branch"] = r["git_branch"].clone();
+    let title = str_at(r, "name").or_else(|| str_at(r, "title"));
+    if r.get("git_branch").is_some() || r.get("git_origin_url").is_some() {
+        // SQLite metadata is authoritative, including absent values. Do not
+        // launch git once per historical thread during discovery.
+        return json!({"harness":"codex","session_id":r["id"],"cwd":cwd,
+            "endpoint_pid":pid(req),"branch":r["git_branch"],
+            "repo":str_at(r,"git_origin_url").and_then(normalize_repo),
+            "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
     }
-    if r.get("git_origin_url").is_some() {
-        c["repo"] = json!(str_at(r, "git_origin_url").and_then(normalize_repo));
-    }
-    c
+    caller("codex", str_at(r, "id").unwrap_or(""), cwd, pid(req), title)
 }
 fn command_exit(mut command: Command, deadline: Instant) -> Result<Option<bool>> {
     let mut child = command.spawn().map_err(|e| e.to_string())?;
@@ -311,9 +362,9 @@ pub fn handle(req: &Value) -> Result<Value> {
     }
     match op {
         "discover_sessions" => {
-            let running = desktop_running(req).unwrap_or(false);
+            let running = desktop_running(req)?;
             let sessions = if running {
-                rows(req)
+                try_rows(req)?
                     .iter()
                     .take(8)
                     .map(|r| {
@@ -346,18 +397,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                     "Conflicting caller metadata: explicit bridge PID cannot claim a Codex thread",
                 ));
             }
-            let all = rows(req);
-            let known_row = explicit.as_deref().and_then(|id| {
-                sqlite_rows(
-                    &db(req),
-                    &format!(
-                        "SELECT * FROM threads WHERE id = '{}'",
-                        id.replace('\'', "''")
-                    ),
-                )
-                .ok()
-                .and_then(|rows| rows.into_iter().next())
-            });
+            let all = try_rows(req)?;
+            let known_row = explicit
+                .as_deref()
+                .map(|id| row_for_id(req, id))
+                .transpose()?
+                .flatten();
             let needs_cached_pid = (explicit.is_some() && known_row.is_none())
                 || (explicit.is_none() && (str_at(req, "cli_cmd").is_none() || all.is_empty()));
             if needs_cached_pid {

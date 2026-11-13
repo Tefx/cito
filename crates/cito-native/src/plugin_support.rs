@@ -662,6 +662,7 @@ extern "C" {
         vfs: *const libc::c_char,
     ) -> libc::c_int;
     fn sqlite3_close(db: *mut libc::c_void) -> libc::c_int;
+    fn sqlite3_busy_timeout(db: *mut libc::c_void, ms: libc::c_int) -> libc::c_int;
     fn sqlite3_exec(
         db: *mut libc::c_void,
         sql: *const libc::c_char,
@@ -717,6 +718,10 @@ pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
                 sqlite3_close(db);
             }
             return Err("Cannot open session database".into());
+        }
+        if sqlite3_busy_timeout(db, 1000) != 0 {
+            sqlite3_close(db);
+            return Err("Cannot configure session database busy timeout".into());
         }
         let mut err = std::ptr::null_mut();
         let rc = sqlite3_exec(

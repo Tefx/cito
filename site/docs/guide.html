@@ -27,7 +27,7 @@
         <a href="./guide.html" aria-current="page">Guide</a>
         <a href="./plugins.html">Plugins</a>
         <a href="./architecture.html">Architecture</a>
-        <a class="nav-cta" href="https://github.com/Tefx/cito">GitHub</a>
+        <a class="nav-cta" href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
     </div>
   </header>
@@ -56,7 +56,7 @@
         <h1>Getting Started with Cito</h1>
       </div>
       <p>
-        Cito connects your coding agent sessions (<strong>Codex</strong>, <strong>Claude Code</strong>, and <strong>Pi Coding Agent</strong>) and your own human presence (macOS Menu Bar and <strong>Telegram</strong>) on a shared signaling network. <code>Cito.app</code> and <code>cito</code> run natively on macOS with zero Node.js runtime dependency, and open the visual <code>Settings…</code> (<code>⌘,</code>) window on first launch so you can choose which Agent Apps to connect.
+        Cito connects your coding agent sessions (<strong>Pi Coding Agent</strong>, <strong>Codex</strong>, and <strong>Claude Code</strong>) and your own human presence (macOS Menu Bar and <strong>Telegram</strong>) on a shared signaling network. <code>Cito.app</code> and <code>cito</code> run natively on macOS with zero Node.js runtime dependency, and open the visual <code>Settings…</code> (<code>⌘,</code>) window on first launch so you can choose which Agent Apps to connect.
       </p>
 
       <h2 id="installation">1. One-Step Installation</h2>
@@ -72,7 +72,7 @@
 
       <h3>Option 2: Download <code>Cito.app</code> for macOS</h3>
       <ol>
-        <li>Download <a class="text-link" href="https://github.com/Tefx/cito/releases/latest"><code>Cito-macos-arm64.zip</code></a> from GitHub Releases.</li>
+        <li>Download <a class="text-link" href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip" target="_blank" rel="noopener noreferrer"><code>Cito-macos-arm64.zip</code></a> from GitHub Releases.</li>
         <li>Drag <strong><code>Cito.app</code></strong> into <code>/Applications</code> and launch it.</li>
         <li>The Cito transceiver icon appears in your macOS menu bar, starts your built-in local hub, and opens <code>Settings…</code> (<code>⌘,</code>) on the <code>Agent Apps</code> tab so you can connect your harnesses with one click.</li>
       </ol>
@@ -90,11 +90,11 @@
         <div class="docs-figure-stage">
           <img
             class="screenshot-img"
-            style="--logical-w: 380; --logical-h: 334;"
+            style="--logical-w: 380; --logical-h: 342;"
             src="../assets/screenshots/menu-dark.png"
             alt="Cito menu bar with personal presence card, listening session, Available Sessions + Listen button, and Directory and Activity buttons"
             width="760"
-            height="668"
+            height="684"
             loading="lazy"
           />
         </div>
@@ -119,12 +119,12 @@
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong>Step 2 — Directory Discovery &amp; Direct Messaging:</strong> Filter online nodes by <code>All</code> / <code>My Macs</code> or coding app, click a readable <code>user/app#id</code> chip to copy its exact send address, or click <code>Message</code> to open the inline composer.
+          <strong>Step 2 — Directory Discovery &amp; Direct Messaging:</strong> Filter online nodes by <code>All</code> / <code>My Macs</code> or coding app, click a readable <code>alice/pi#8a4f</code> chip to copy its exact send address, or click <code>Message</code> to open the inline composer.
         </figcaption>
       </figure>
 
       <h3>Read and reply in Activity</h3>
-      <p>Open <strong>Activity…</strong> directly, regardless of the unread count, to review incoming signals. Human-targeted banners say <strong>Click to reply in Cito ↩</strong> and open the inline reply composer; agent-targeted banners say <strong>Click to view in Activity ↗</strong> and open the matching activity without a composer. Use <strong>Reply</strong> or Return on a signal addressed to your Human Node to send a one-line decision and wake the waiting agent.</p>
+      <p>Open <strong>Activity…</strong> directly, regardless of the unread count, to review incoming signals. Human-targeted banners say <strong>Reply in Cito ↩</strong> and open the inline reply composer; agent-targeted banners say <strong>View in Activity ↗</strong> and open the matching activity without a composer. Use <strong>Reply</strong> or Return on a signal addressed to your Human Node to send a one-line decision and wake the waiting agent.</p>
       <figure class="docs-figure docs-figure--staged">
         <div class="docs-figure-stage">
           <img
@@ -166,11 +166,6 @@
         While <code>Cito.app</code> and the <strong><code>Agent Apps</code></strong> tab in <code>Settings…</code> (<code>⌘,</code>) manage these configuration files automatically (writing the expanded absolute path for your macOS account), you can also inspect what gets registered for each harness:
       </p>
 
-      <h3>Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
-      <pre><code>[mcp_servers.cito]
-command = "/Users/&lt;you&gt;/.cito/bin/cito-mcp"
-args = []</code></pre>
-
       <h3>Pi Coding Agent (<code>~/.pi/agent/settings.json</code>)</h3>
       <pre><code>{
   "packages": ["/Users/&lt;you&gt;/.cito/runtime/plugins/pi"]
@@ -178,6 +173,11 @@ args = []</code></pre>
       <p>
         The installed Pi package registers <code>/Users/&lt;you&gt;/.cito/bin/cito-mcp</code> and the live session wake bridge automatically on package load. Inside any Pi session, use the <code>/cito</code> slash command (<code>/cito on</code>, <code>/cito team</code>, <code>/cito off</code>) or click <strong><code>+ Listen</code></strong> under <code>AVAILABLE SESSIONS</code> in the menu bar dropdown.
       </p>
+
+      <h3>Codex Desktop (<code>~/.codex/config.toml</code>)</h3>
+      <pre><code>[mcp_servers.cito]
+command = "/Users/&lt;you&gt;/.cito/bin/cito-mcp"
+args = []</code></pre>
 
       <h3>Claude Code (<code>~/.claude/settings.json</code>)</h3>
       <p>
@@ -207,7 +207,7 @@ args = []</code></pre>
       <ol>
         <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top.</li>
         <li>Under <strong><code>1. Shared Bot Gateway</code></strong>, paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) and click <strong><code>Save Gateway Token</code></strong>. A managed Hub may already provide this gateway.</li>
-        <li>Under <strong><code>2. Your Personal Account (@&lt;user&gt;)</code></strong>, click <strong><code>Pair Account…</code></strong> and follow the short-lived 10-character Base32 command shown on the card. Use <strong><code>Skip for Now</code></strong> if you do not want phone notifications yet.</li>
+        <li>Under <strong><code>2. Your Personal Account (@&lt;user&gt;)</code></strong>, click <strong><code>Pair Account…</code></strong> and follow the short-lived 10-character Base32 command shown on the card. Pairing is optional; leave your personal account unpaired if you do not want phone notifications yet.</li>
         <li>Send the generated <code>/start cito-&lt;token&gt;</code> message to your bot in a private Telegram chat. Your Telegram <code>Chat ID</code> binds to your user profile automatically.</li>
         <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification (or send a plain message within 7 days of the most recent alert) to route your reply straight back to that agent through the Hub.</li>
       </ol>
@@ -233,24 +233,24 @@ args = []</code></pre>
         <div class="docs-figure-stage docs-figure-stage--compact">
           <img
             class="screenshot-img"
-            style="--logical-w: 388; --logical-h: 136;"
+            style="--logical-w: 380; --logical-h: 112;"
             src="../assets/screenshots/banner-dark.png"
-            alt="Cito Direct Message wake banner with inline-reply navigation"
-            width="776"
-            height="272"
+            alt="Cito direct message banner with sender metadata, a close button, and inline-reply navigation"
+            width="760"
+            height="224"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong>Desktop Wake Banner:</strong> Human-targeted notifications show <code>Click to reply in Cito ↩</code> and open the inline reply composer; agent-targeted notifications show <code>Click to view in Activity ↗</code>.
+          <strong>Desktop Message Banner:</strong> Normal live messages show sender metadata without a status pill. Deferred messages show <code>Held</code> or <code>Queued</code>; coalesced messages show a compact count. Human-targeted messages show <code>Reply in Cito ↩</code> and open the inline reply composer; agent-targeted messages show <code>View in Activity ↗</code>. Hover pauses dismissal, and the close button dismisses without marking the message read.
         </figcaption>
       </figure>
-      <p>Saved Bot Tokens stay redacted. The active Hub Gateway collapses; click <strong>Change Token…</strong> to edit it, leave the field blank to retain the token, or use <strong>Clear Token</strong> to remove the gateway. Personal controls remain disabled until the gateway is ready. <strong>Send Test</strong> uses candidate values without saving them; <strong>Save</strong> commits personal fields. <strong>Pause</strong> retains your Chat ID; <strong>Unpair</strong> removes your personal binding without clearing the gateway. <strong>Copy Command</strong> copies the active pairing command; <strong>Cancel</strong> invalidates it. A new pairing command supersedes earlier commands and expires after ten minutes.</p>
-      <p>Follow the inline <strong>Step 1</strong> guidance in <strong>Agent Apps</strong> to set up your coding app and start listening. In <strong>Activity</strong>, <strong>Clear</strong> acknowledges unread signals and removes local history; each row's <strong>Copy</strong> action retrieves the full message, including text shortened in the preview. <strong>Repair</strong> restores missing staged files. <strong>Disconnect All</strong> stops listeners and removes app integrations while keeping Cito running; <strong>Confirm Uninstall</strong> removes Cito and quits.</p>
+      <p>Saved Bot Tokens stay redacted. The active Hub Gateway collapses; click <strong>Change Token…</strong> to edit it, leave the field blank to retain the token, or use <strong>Clear Token</strong> to remove the gateway. Personal pairing becomes available once the gateway is ready. Paired accounts collapse to a summary; click <strong>Edit…</strong> to reveal the Chat ID and Save controls. <strong>Send Test</strong> uses candidate values without saving them; <strong>Save</strong> commits personal fields. <strong>Pause</strong> retains your Chat ID; <strong>Unpair</strong> removes your personal binding without clearing the gateway. <strong>Copy Command</strong> copies the active pairing command; <strong>Cancel</strong> invalidates it. A new pairing command supersedes earlier commands and expires after ten minutes.</p>
+      <p>Follow the onboarding guidance in <strong>Agent Apps</strong> to set up your coding app and start listening. In <strong>Activity</strong>, <strong>Clear</strong> acknowledges unread signals and removes local history; each row's <strong>Copy</strong> action retrieves the full message, including text shortened in the preview. <strong>Repair</strong> restores missing staged files. <strong>Disconnect All</strong> stops agent listeners and removes app integrations while keeping Cito and your Human Node running; <strong>Confirm Uninstall</strong> removes Cito and quits.</p>
       <h2 id="lan-and-team-hubs">5. LAN, Tailscale &amp; Team Hub Setup</h2>
       <h3>Sharing Across Your Own Macs (LAN / Tailscale)</h3>
       <ol>
-        <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share Hub on Local Network</code></strong>.</li>
+        <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share This Mac as a Hub</code></strong>.</li>
         <li>Click <strong><code>Copy Invite Code</code></strong> to copy a <code>cito setup</code> command containing the host's preferred Tailscale or LAN endpoint and configured access settings.</li>
         <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>Paste Invite Code</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
       </ol>
@@ -261,14 +261,14 @@ args = []</code></pre>
             class="screenshot-img"
             style="--logical-w: 520; --logical-h: 460;"
             src="../assets/screenshots/settings-hubs-dark.png"
-            alt="Settings Hubs and Network tab with Share Hub on Local Network card, Paste Invite Code, Add Hub, and Connected Hubs list"
+            alt="Settings Hubs and Network tab with Share This Mac as a Hub card, Paste Invite Code, Add Hub, and Connected Hubs list"
             width="1040"
             height="920"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share Hub on Local Network</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Paste Invite Code</code> / <code>Add Hub…</code> to connect to another Mac or team server.
+          <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share This Mac as a Hub</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Paste Invite Code</code> / <code>Add Hub…</code> to connect to another Mac or team server.
         </figcaption>
       </figure>
       <p>Change the sharing port with <strong>Apply</strong> and select <strong>Auth: Token</strong> or <strong>Auth: None</strong>. Bind errors appear on the sharing card and preserve the previous listener. Use <strong>Edit</strong> on an existing Hub to update its settings without re-entering saved secrets. Disconnected hubs remain visible with <strong>Connect</strong>. OIDC <strong>Switch Account</strong> always requests an interactive account picker.</p>
@@ -287,7 +287,7 @@ args = []</code></pre>
       <a href="./guide.html">Getting Started</a>
       <a href="./plugins.html">Subprocess Plugins</a>
       <a href="./architecture.html">Architecture</a>
-      <a href="https://github.com/Tefx/cito">GitHub</a>
+      <a href="https://github.com/Tefx/cito" target="_blank" rel="noopener noreferrer">GitHub</a>
     </div>
   </footer>
 

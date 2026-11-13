@@ -40,6 +40,7 @@ pub fn port() -> u16 {
         .unwrap()
         .port()
 }
+#[track_caller]
 pub fn wait(mut predicate: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(12);
     loop {
