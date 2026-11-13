@@ -650,8 +650,8 @@ impl DaemonService {
                 continue;
             }
             self.channel_inventories.remove(&name);
+            let registration = self.state.registration_lock(&name)?;
             let previous = self.slots.remove(&name);
-            let registration = previous.as_ref().map(|old| old.registration.clone());
             if let Some(old) = previous {
                 let changed = old.config["url"] != hub["url"]
                     || (auth != "oidc"
@@ -698,9 +698,7 @@ impl DaemonService {
                     None
                 },
             );
-            if let Some(registration) = registration {
-                client.registration = registration;
-            }
+            client.registration = registration;
             if auth == "oidc" {
                 match super::login::recover(
                     &self.config.state_dir,
@@ -789,8 +787,8 @@ impl DaemonService {
     ) -> Result<(), String> {
         // Re-read durable intent under the enrollment lock: an explicit re-enable
         // supersedes any pending detach before this worker can mutate the Hub.
-        let _registration = client
-            .registration
+        let registration = state.registration_lock(&client.name)?;
+        let _registration = registration
             .lock()
             .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
         for pending in state.db.query(
@@ -798,18 +796,22 @@ impl DaemonService {
             &[json!(client.name)],
         )? {
             let id = string(&pending, "listener_id");
-            let clear = || {
-                state.db.execute(
-                    "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
-                    &[json!(client.name), json!(id)],
-                )
-            };
             let Some(row) = state
                 .listener(&client.name, id)?
                 .filter(|row| row["status"] == "UNLISTENED")
             else {
-                clear()?;
+                state.db.execute("DELETE FROM pending_hub_detaches WHERE hub=?1 AND listener_id=?2 AND NOT EXISTS (SELECT 1 FROM local_listeners WHERE hub=?1 AND listener_id=?2 AND status='UNLISTENED')", &[json!(client.name),json!(id)])?;
                 continue;
+            };
+            // Fence the local intent, including a pre-enrollment Human pause whose
+            // remote detach must adopt the remote generation and owner.
+            let clear = || {
+                state.clear_pending_detach_if_current(
+                    &client.name,
+                    id,
+                    row["binding_generation"].as_u64().unwrap_or(0),
+                    string(&row, "owner_token"),
+                )
             };
             if pending["hub_url"].as_str() != Some(string(&client.config, "url")) {
                 clear()?;
@@ -1112,14 +1114,10 @@ impl DaemonService {
                 crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
             hubs.get(hub).map(|config| string(config, "url").to_owned())
         };
-        let registration = client
-            .map(|client| {
-                client
-                    .registration
-                    .lock()
-                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")
-            })
-            .transpose()?;
+        let registration_lock = self.state.registration_lock(hub)?;
+        let registration = registration_lock
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
         let row = self.state.listener(hub, id)?;
         let active = row.as_ref().is_some_and(|row| row["status"] == "ACTIVE");
         self.state.db.transaction(|c| {
@@ -2049,10 +2047,10 @@ impl DaemonService {
         Ok(())
     }
     fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
-        let slot = self.slot(hub)?.clone();
+        self.slot(hub)?;
         // Serialize enabling fresh discovery with deferred detaches and enrollment.
-        let _registration = slot
-            .registration
+        let registration = self.state.registration_lock(hub)?;
+        let _registration = registration
             .lock()
             .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
         self.mutate_config(|v| {
@@ -3352,8 +3350,8 @@ impl DaemonService {
                     return Err("INVALID_INPUT: Invalid scope".into());
                 }
                 let slot = self.slot(&hub)?;
-                let _registration = slot
-                    .registration
+                let registration = self.state.registration_lock(&hub)?;
+                let _registration = registration
                     .lock()
                     .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
                 for attempt in 0..3 {
@@ -5548,6 +5546,126 @@ mod tests {
         };
         let mut service = DaemonService::open(&config, &plugins)?;
         let result = (|| {
+            // Model a post-RPC completion delayed across a real reconnect and a
+            // replacement owner's failed revocation, without production hooks.
+            {
+                let caller = json!({"harness":"fixture","session_id":"late-cleanup","title":"Cleanup","cwd":""});
+                let enrolled = service.listen("local", &json!({"about":"Cleanup"}), &caller)?;
+                let id = string(&enrolled, "canonical_listener_id");
+                let old = service.slot("local")?.clone();
+                let prior = service
+                    .state
+                    .listener("local", id)?
+                    .ok_or("Missing old binding")?;
+                let (mut remote, revision) = old.kv_get(id)?.ok_or("Missing old remote binding")?;
+                remote["owner_token"] = json!("sibling-owner");
+                remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
+                old.kv_save(id, &remote, Some(revision))?;
+                assert!(service.unlisten_id("local", id)?);
+                let authority = service.state.registration_lock("local")?;
+                assert!(Arc::ptr_eq(&old.registration, &authority));
+                assert!(Arc::ptr_eq(
+                    &service.state.clone().registration_lock("local")?,
+                    &authority
+                ));
+                assert!(!Arc::ptr_eq(
+                    &service.state.registration_lock("other")?,
+                    &authority
+                ));
+                service.action(&json!({"op":"hub_action","hub":"local","action":"reconnect"}))?;
+                let current = service.slot("local")?.clone();
+                assert!(old.closed.load(Ordering::SeqCst));
+                assert!(
+                    !Arc::ptr_eq(&old.closed, &current.closed),
+                    "Reconnect must actually replace the client"
+                );
+                assert!(
+                    Arc::ptr_eq(&current.registration, &authority),
+                    "Reconnect must preserve registration authority"
+                );
+                let guard = authority
+                    .lock()
+                    .map_err(|_| "Test registration lock poisoned")?;
+                assert!(matches!(
+                    current.registration.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                drop(guard);
+                service.listen("local", &json!({"about":"Replacement"}), &caller)?;
+                let replacement = service
+                    .state
+                    .listener("local", id)?
+                    .ok_or("Missing replacement")?;
+                assert_eq!(
+                    replacement["binding_generation"], prior["binding_generation"],
+                    "Live sibling retains the shared generation"
+                );
+                assert_ne!(replacement["owner_token"], prior["owner_token"]);
+                // Fail the real reconciler's remote IO, retaining the newer intent.
+                let backend =
+                    super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
+                backend.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
+                let revoked = service.unlisten_id("local", id);
+                backend.execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
+                assert!(revoked?);
+                let newer = service
+                    .state
+                    .listener("local", id)?
+                    .ok_or("Missing newer revocation")?;
+                assert_eq!(newer["status"], "UNLISTENED");
+                assert_eq!(newer["owner_token"], replacement["owner_token"]);
+                let generation = newer["binding_generation"]
+                    .as_u64()
+                    .ok_or("Missing generation")?;
+                let pending = service.state.db.query(
+                    "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+                    &[json!(id)],
+                )?;
+                assert_eq!(pending.len(), 1);
+                service.state.clear_pending_detach_if_current(
+                    "local",
+                    id,
+                    prior["binding_generation"]
+                        .as_u64()
+                        .ok_or("Missing old generation")?,
+                    string(&prior, "owner_token"),
+                )?;
+                service.state.clear_pending_detach_if_current(
+                    "local",
+                    id,
+                    generation + 1,
+                    string(&newer, "owner_token"),
+                )?;
+                assert_eq!(
+                    service.state.db.query(
+                        "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+                        &[json!(id)]
+                    )?,
+                    pending,
+                    "Old completion or wrong generation cannot erase newer cleanup"
+                );
+                let channel = format!("{}:fixture", service.host_id);
+                assert_eq!(
+                    current.kv_get(id)?.ok_or("Missing orphan")?.0["channels"][&channel]["state"],
+                    "ACTIVE"
+                );
+                DaemonService::reconcile_unlistened(&service.state, &current, &service.host_id)?;
+                assert!(service
+                    .state
+                    .db
+                    .query(
+                        "SELECT 1 FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+                        &[json!(id)]
+                    )?
+                    .is_empty());
+                let after = current.kv_get(id)?.ok_or("Missing cleaned Node")?.0;
+                assert_eq!(after["channels"][&channel]["state"], "UNLISTENED");
+                assert_eq!(
+                    after["channels"]["sibling:fixture"],
+                    remote["channels"]["sibling:fixture"]
+                );
+                assert_eq!(after["owner_token"], "sibling-owner");
+            }
             for session in ["session-26", "session-324"] {
                 service.listen(
                     "local",
@@ -5642,6 +5760,11 @@ mod tests {
                         Some(other.clone()),
                     ),
                 );
+                service
+                    .slots
+                    .get_mut("work")
+                    .ok_or("Missing test Hub")?
+                    .registration = service.state.registration_lock("work")?;
                 let script = dir.join("fixture.py");
                 fs::write(&script,r#"# purpose: drive discovery and late setup-time revocation in a unit sandbox.
 # usage: python3 fixture.py with one NDJSON plugin request.

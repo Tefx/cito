@@ -25,8 +25,8 @@ pub fn sync_custom_title(
     let Some(title) = state.custom_title(string(row, "harness"), string(row, "session_id"))? else {
         return Ok(());
     };
-    let _registration = client
-        .registration
+    let registration = state.registration_lock(&client.name)?;
+    let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
     state.db.execute("UPDATE local_listeners SET title=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(title),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
@@ -91,8 +91,8 @@ pub fn register_listener(
     args: &Value,
     caller: &Value,
 ) -> Result<Value, String> {
-    let _registration = client
-        .registration
+    let registration = state.registration_lock(&client.name)?;
+    let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
     register_locked(state, client, host_id, args, caller, true)
@@ -140,8 +140,8 @@ pub fn register_automatic_human(
     args: &Value,
     caller: &Value,
 ) -> Result<Value, String> {
-    let _registration = client
-        .registration
+    let registration = state.registration_lock(&client.name)?;
+    let _registration = registration
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
     let mut args = args.clone();
@@ -456,10 +456,7 @@ fn register_locked(
                 )
                 .is_ok()
                 {
-                    state.db.execute(
-                        "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
-                        &[json!(hub), json!(id)],
-                    )?;
+                    state.clear_pending_detach_if_current(hub, &id, generation, &owner)?;
                 }
                 return Err("STALE_DISCOVERY: Candidate was revoked during registration".into());
             }

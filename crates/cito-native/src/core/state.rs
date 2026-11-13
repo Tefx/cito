@@ -23,6 +23,7 @@ mod tests;
 pub struct LocalState {
     pub db: Database,
     discovery_revisions: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    registration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 impl LocalState {
     pub fn open(dir: &Path) -> Result<Self, String> {
@@ -90,7 +91,30 @@ impl LocalState {
         Ok(Self {
             db,
             discovery_revisions: Arc::new(Mutex::new(HashMap::new())),
+            registration_locks: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+    /// Hub authority outlives client replacement, reconnect, and disable/enable.
+    pub fn registration_lock(&self, hub: &str) -> Result<Arc<Mutex<()>>, String> {
+        let mut locks = self
+            .registration_locks
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration registry lock poisoned")?;
+        Ok(locks.entry(hub.to_owned()).or_default().clone())
+    }
+    /// Retire only the local incarnation whose remote cleanup just completed.
+    pub fn clear_pending_detach_if_current(
+        &self,
+        hub: &str,
+        id: &str,
+        generation: u64,
+        owner: &str,
+    ) -> Result<(), String> {
+        self.db.execute(
+            "DELETE FROM pending_hub_detaches WHERE hub=?1 AND listener_id=?2 AND EXISTS (SELECT 1 FROM local_listeners WHERE hub=?1 AND listener_id=?2 AND status='UNLISTENED' AND binding_generation=?3 AND COALESCE(owner_token,'')=?4)",
+            &[json!(hub),json!(id),json!(generation),json!(owner)],
+        )?;
+        Ok(())
     }
     /// Share provider invalidation with receiver clones, without sharing worker ownership.
     pub(super) fn discovery_revision(&self, harness: &str) -> Result<Arc<AtomicU64>, String> {

@@ -45,12 +45,13 @@ impl Fixture {
         let state = LocalState::open(&dir)?;
         let engine = Arc::new(HubEngine::open(&dir.join("hub"))?);
         engine.set_plugin_roots(&[])?;
-        let client = HubClient::new(
+        let mut client = HubClient::new(
             "local".into(),
             json!({"url":"local://"}),
             "alice",
             Some(engine.clone()),
         );
+        client.registration = state.registration_lock("local")?;
         let registration = register_listener(
             &state,
             &client,
@@ -530,6 +531,23 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         let plugin = f.plugin(&body);
         let id = string(&f.row, "listener_id");
         let writer = f.hub_db()?;
+        let replacement_client = HubClient::new(
+            "local".into(),
+            json!({"url":"local://"}),
+            "alice",
+            Some(f.engine.clone()),
+        );
+        assert!(!Arc::ptr_eq(
+            &replacement_client.registration,
+            &f.client.registration
+        ));
+        // A standalone client's field is not authority: holding it must not
+        // block registration, which must still wait for the LocalState lock.
+        let unrelated = replacement_client
+            .registration
+            .lock()
+            .map_err(|_| "Test client lock poisoned")?;
+        let (finished, completion) = std::sync::mpsc::channel();
         std::thread::scope(|scope| -> Result<(), String> {
             let terminal = scope.spawn(|| {
                 if probe {
@@ -545,12 +563,22 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
                 std::fs::write(f.dir.join("release"),b"revoke").map_err(|e|e.to_string())?;
                 wait_until(||f.state.listener("local",id).ok().flatten().is_some_and(|row|row["status"]=="UNLISTENED"),Duration::from_secs(3))?;
                 assert!(matches!(f.client.registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)),"Terminal revocation must hold registration authority through remote detach; probe={probe}");
-                Ok(scope.spawn(||register_listener(&f.state,&f.client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null,"repo":null,"branch":null}))))
+                Ok(scope.spawn(|| {
+                    let result=register_listener(&f.state,&replacement_client,"host",&json!({"about":"After terminal revocation"}),&json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null,"repo":null,"branch":null}));
+                    let _=finished.send(());
+                    result
+                }))
             })?;
             terminal.join().map_err(|_| "Terminal worker panicked")??;
+            let completed = completion.recv_timeout(Duration::from_secs(1)).is_ok();
+            drop(unrelated);
             let replacement = registering
                 .join()
                 .map_err(|_| "Registration worker panicked")??;
+            assert!(
+                completed,
+                "Fresh clients must use LocalState authority, not their independent field"
+            );
             let row = f
                 .state
                 .listener("local", id)?

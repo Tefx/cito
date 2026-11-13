@@ -278,10 +278,10 @@ pub fn probe_listener(
         "switched" | "closed_definitive" | "session_switched"
     ) || failures >= 3;
     // Never hold the local database mutex while waiting for registration authority.
+    let registration = local.registration_lock(&client.name)?;
     let _registration = if revoke {
         Some(
-            client
-                .registration
+            registration
                 .lock()
                 .map_err(|_| "STATE_ERROR: Registration lock poisoned")?,
         )
@@ -304,9 +304,11 @@ pub fn probe_listener(
         local.invalidate_discovery(string(row, "harness"))?;
         let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
         if detach_channel_expected(client, string(row, "listener_id"), &channel, row).is_ok() {
-            local.db.execute(
-                "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
-                &[row["hub"].clone(), row["listener_id"].clone()],
+            local.clear_pending_detach_if_current(
+                string(row, "hub"),
+                string(row, "listener_id"),
+                row["binding_generation"].as_u64().unwrap_or(0),
+                string(row, "owner_token"),
             )?;
         }
     }
@@ -449,8 +451,8 @@ fn dispatch_listener(
                 }
                 "session_switched" => {
                     // Serialize terminal revocation and detach with registration.
-                    let _registration = client
-                        .registration
+                    let registration = local.registration_lock(&client.name)?;
+                    let _registration = registration
                         .lock()
                         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
                     local.finish_wake_batch(
@@ -473,9 +475,11 @@ fn dispatch_listener(
                     if changed > 0 {
                         local.invalidate_discovery(string(row, "harness"))?;
                         detach_channel_expected(client, id, &channel, row)?;
-                        local.db.execute(
-                            "DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id=?",
-                            &[json!(hub), json!(id)],
+                        local.clear_pending_detach_if_current(
+                            hub,
+                            id,
+                            row["binding_generation"].as_u64().unwrap_or(0),
+                            string(row, "owner_token"),
                         )?;
                     }
                 }
