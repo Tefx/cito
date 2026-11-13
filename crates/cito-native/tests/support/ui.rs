@@ -5472,12 +5472,22 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let capture = |surface: &str, state: &str| {
         let snapshot = inspect(&f, p);
         let strip = match surface {
-            "menu" => Some(("items", "header_hub_strip", 4.0)),
-            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0)),
-            "settings" => Some(("settings_items", "channel_hub_strip", 6.0)),
+            "menu" => {
+                let subtitle_width = node(&snapshot, "items", "header_subtitle")["width"]
+                    .as_f64()
+                    .unwrap();
+                Some((
+                    "items",
+                    "header_hub_strip",
+                    4.0,
+                    (368.0 - (54.0 + subtitle_width).max(138.0)).max(44.0),
+                ))
+            }
+            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 406.0)),
+            "settings" => Some(("settings_items", "channel_hub_strip", 6.0, 398.0)),
             _ => None,
         };
-        if let Some((tree, id, spacing)) = strip {
+        if let Some((tree, id, spacing, allocated)) = strip {
             let view = node(&snapshot, tree, id);
             if !view.is_null() && view["hidden"] == false {
                 let pills: Vec<_> = view["children"]
@@ -5490,11 +5500,35 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                     .iter()
                     .map(|p| p["width"].as_f64().unwrap())
                     .sum::<f64>()
-                    + spacing * pills.len().saturating_sub(1) as f64;
+                    + spacing * pills.len().saturating_sub(1) as f64
+                    + if pills.is_empty() { 0.0 } else { 6.0 };
+                let width = view["width"].as_f64().unwrap();
                 assert!(
-                    view["width"].as_f64().unwrap() <= intrinsic + 0.5,
-                    "{id} must wrap its pills: {view}"
+                    width <= allocated + 0.5,
+                    "{id} exceeds its allocation: {view}"
                 );
+                assert!(
+                    (width - intrinsic.min(allocated)).abs() < 0.5,
+                    "{id} must hug its pills without an empty tail: {view}"
+                );
+                if let Some(first) = pills.first() {
+                    assert!((first["x"].as_f64().unwrap() - 3.0).abs() < 0.5);
+                    let end = pills
+                        .iter()
+                        .map(|pill| pill["x"].as_f64().unwrap() + pill["width"].as_f64().unwrap())
+                        .fold(0.0, f64::max);
+                    assert!(
+                        (intrinsic - end - 3.0).abs() < 0.5,
+                        "{id} must have exactly 3pt trailing padding: {view}"
+                    );
+                }
+                let x = view["x"].as_f64().unwrap();
+                match surface {
+                    "menu" => assert!((x + width - 368.0).abs() < 0.5),
+                    "directory" => assert_eq!(x, 138.0),
+                    "settings" => assert_eq!(x, 102.0),
+                    _ => unreachable!(),
+                }
             }
         }
         if surface == "directory" {

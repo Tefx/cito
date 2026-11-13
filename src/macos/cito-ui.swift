@@ -134,14 +134,18 @@ enum PillAlignment { case leading, trailing }
 func mountPillStrip(in container: NSView, frame: NSRect, id: String, alignment: PillAlignment = .leading,
                     spacing: CGFloat = 4, pills: [NSView], activePredicate: (NSView) -> Bool) -> OverlayScrollView {
     let visible = pills.filter { !$0.isHidden }
-    let totalWidth = visible.reduce(CGFloat(0)) { $0 + $1.frame.width } + CGFloat(max(0, visible.count - 1)) * spacing
-    let width = min(frame.width, max(0, totalWidth))
-    let scroll = OverlayScrollView(frame: NSRect(x: alignment == .trailing ? frame.maxX - width : frame.minX, y:frame.minY, width:width, height:frame.height))
+    let totalWidth = visible.isEmpty ? 0 : visible.enumerated().reduce(CGFloat(6)) {
+        $0 + $1.element.frame.width + ($1.offset > 0 ? spacing : 0)
+    }
+    let trackWidth = min(frame.width, max(totalWidth, 0))
+    let scrollFrame = NSRect(x: alignment == .trailing ? frame.maxX - trackWidth : frame.minX,
+                             y: frame.minY, width: trackWidth, height: frame.height)
+    let scroll = OverlayScrollView(frame: scrollFrame)
     scroll.identifier = NSUserInterfaceItemIdentifier(id)
     scroll.scrollerStyle = .overlay; scroll.drawsBackground = false
     scroll.hasHorizontalScroller = false; scroll.hasVerticalScroller = false
-    let doc = NSView(frame: NSRect(x: 0, y: 0, width: totalWidth, height: frame.height))
-    var cursorX: CGFloat = 0
+    let doc = NSView(frame: NSRect(x: 0, y: 0, width: max(trackWidth, totalWidth), height: frame.height))
+    var cursorX: CGFloat = 3
     for pill in visible {
         pill.frame.origin = NSPoint(x: cursorX, y: (frame.height - pill.frame.height) / 2)
         doc.addSubview(pill); cursorX += pill.frame.width + spacing
@@ -5115,7 +5119,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let edgeItems = children.filter { $0.frame.height > 5 && ($0 is NSControl || $0 is MenuControl || $0.identifier?.rawValue.hasPrefix("settings_app_tier:") == true) }
                 let id = name(view)
                 if ["header_hub_strip", "targetStrip"].contains(id), let scroll = view as? NSScrollView, !children.isEmpty {
-                    if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
+                    let trailingInset: CGFloat = id == "header_hub_strip" ? 3 : 0
+                    if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - trailingInset - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
                 }
                 let stratum = ["stratum_hub:","stratum_user:"].contains(where: { id.hasPrefix($0) })
                 if ["footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
