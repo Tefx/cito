@@ -517,18 +517,53 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
 fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s")?;
-    let worker = f.worker(f.plugin(WAIT));
+    let worker = f.worker(f.plugin(&WAIT.replace("'delivered'", "'session_switched'")));
     wait_until(|| f.dir.join("entered").exists(), Duration::from_secs(3))?;
-    f.state.db.execute("UPDATE local_listeners SET status='REBINDING',binding_generation=binding_generation+1,owner_token='successor'", &[])?;
+    let id = string(&f.row, "listener_id");
+    detach_channel_expected(&f.client, id, "host:fixture", &f.row)?;
+    assert_eq!(
+        f.state
+            .listener("local", id)?
+            .ok_or("Missing local binding")?["status"],
+        "ACTIVE"
+    );
+    assert_eq!(
+        f.client
+            .kv_get(id)?
+            .ok_or("Missing detached registration")?
+            .0["channels"]["host:fixture"]["state"],
+        "UNLISTENED"
+    );
+    let replacement = register_listener(
+        &f.state,
+        &f.client,
+        "host",
+        &json!({"about":"Replacement"}),
+        &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null,"repo":null,"branch":null}),
+    )?;
+    assert!(replacement["binding_generation"].as_u64() > f.row["binding_generation"].as_u64());
+    let successor = f
+        .state
+        .listener("local", id)?
+        .ok_or("Missing replacement")?;
+    assert_ne!(
+        successor["owner_token"], f.row["owner_token"],
+        "A remotely detached binding cannot reuse the active local owner"
+    );
+    std::fs::write(f.dir.join("release"), b"complete old session switch")
+        .map_err(|e| e.to_string())?;
     wait_until(|| worker.is_finished(), Duration::from_secs(3))?;
     assert!(worker.join().map_err(|_| "Worker panicked")?.is_err());
     child_gone(&f)?;
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_null());
+    let after = f.state.listener("local", id)?.ok_or("Missing listener")?;
+    assert_eq!(after["status"], "ACTIVE");
+    assert_eq!(after["owner_token"], successor["owner_token"]);
+    assert_eq!(after["binding_generation"], successor["binding_generation"]);
     assert_eq!(
-        f.state
-            .listener("local", string(&f.row, "listener_id"))?
-            .ok_or("Missing listener")?["owner_token"],
-        "successor"
+        f.client.kv_get(id)?.ok_or("Missing active replacement")?.0["channels"]["host:fixture"]
+            ["state"],
+        "ACTIVE"
     );
     Ok(())
 }

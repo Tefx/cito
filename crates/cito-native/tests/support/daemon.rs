@@ -45,6 +45,13 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
             .0,
         200
     );
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["harness"] == "pi" && v["scope"] == "workspace")
+    });
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["hubs"][0]["auto_listen"], true);
     assert_eq!(snapshot["settings"]["hubs"][0]["auto_listen"], true);
@@ -114,10 +121,23 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
 #[test]
 fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let host = Fixture::new(json!({}));
+    let (_, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}"),"autoListen":false}},"defaultHub":"local"}),
+    );
     f.provider("delivered");
     let daemon = f.daemon(&[]);
     let snapshot = || f.action(json!({"op":"get_snapshot"})).1;
+    let local_auto_listen = || {
+        snapshot()["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hub| hub["name"] == "local")
+            .unwrap()["auto_listen"]
+            .clone()
+    };
     wait(|| {
         snapshot()["available"]
             .as_array()
@@ -143,7 +163,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         200
     );
     assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
-    assert_eq!(snapshot()["hubs"][0]["auto_listen"], false);
+    assert_eq!(local_auto_listen(), false);
     f.stop(daemon);
     let mut preferences: Value =
         serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
@@ -170,7 +190,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     let rows = f
         .rows("SELECT session_id FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'");
     assert_eq!(rows, vec![json!({"session_id":"live"})]);
-    assert_eq!(snapshot()["hubs"][0]["auto_listen"], true);
+    assert_eq!(local_auto_listen(), true);
     let before = f.rows(
         "SELECT owner_token FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'",
     )[0]
@@ -192,7 +212,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         200
     );
     assert_eq!(
-        snapshot()["hubs"][0]["auto_listen"],
+        local_auto_listen(),
         true,
         "An inactive-row pause must not disable Auto-Listen"
     );
@@ -215,6 +235,8 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     config["session_id"] = json!("replacement");
     config["sessions"] = json!([{"harness":"fixture","session_id":"replacement","title":"New session","cwd":"/tmp","endpoint_pid":std::process::id()}]);
     config["status"] = json!("switched");
+    // Let the concurrent probe revoke after the enrollment pass snapshots rows.
+    config["setup_delay_ms"] = json!(200);
     fs::write(&options, config.to_string()).unwrap();
     wait(|| {
         f.rows(
@@ -224,6 +246,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     });
     assert!(f.rows("SELECT updated_at FROM local_listeners WHERE harness=\'fixture\' AND session_id=\'live\'")[0]["updated_at"].as_u64().unwrap()>0);
     config["status"] = json!("alive");
+    config.as_object_mut().unwrap().remove("setup_delay_ms");
     fs::write(&options, config.to_string()).unwrap();
     // Wait for the next confirmed discovery, not a fixed sleep or explicit cache refresh.
     wait(|| {
@@ -272,6 +295,56 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         old["owner_token"], dispatched["owner_token"],
         "Dispatch revocation must reject the pre-revocation discovery cache"
     );
+    // Cache evidence from S cannot enroll on a destination that has no S row.
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
+            .0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    let discoveries = || {
+        fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["op"] == "discover_sessions"
+            })
+            .count()
+    };
+    let confirmed = discoveries();
+    config["status"] = json!("closed_definitive");
+    config["discover_error"] = json!(true);
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE hub='local' AND harness='fixture' AND session_id='dispatch-replacement'")[0]["status"]=="UNLISTENED"
+    });
+    assert_eq!(
+        discoveries(),
+        confirmed,
+        "The cached evidence must predate this revocation"
+    );
+    config["status"] = json!("alive");
+    fs::write(&options, config.to_string()).unwrap();
+    assert!(f
+        .rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")
+        .is_empty());
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"work","enabled":true}))
+            .0,
+        200
+    );
+    assert!(
+        f.rows("SELECT listener_id FROM local_listeners WHERE hub='work' AND harness='fixture'")
+            .is_empty(),
+        "Hub B must not enroll from Hub A's pre-revocation cache"
+    );
+    config["discover_error"] = json!(false);
+    fs::write(&options, config.to_string()).unwrap();
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='fixture' AND session_id='dispatch-replacement'").iter().any(|row|row["status"]=="ACTIVE")
+    });
+    assert!(discoveries() > confirmed);
 }
 
 #[test]

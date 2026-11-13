@@ -429,8 +429,7 @@ fn dispatch_listener(
                     }
                 }
                 "session_switched" => {
-                    // Detach failure must still release the local dispatch lease.
-                    let detached = detach_channel_expected(client, id, &channel, row);
+                    // Finish and revoke locally before the remote detach can race a rebind.
                     local.finish_wake_batch(
                         row,
                         first,
@@ -441,8 +440,10 @@ fn dispatch_listener(
                         false,
                         false,
                     )?;
-                    local.db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
-                    detached?;
+                    let changed=local.db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
+                    if changed > 0 {
+                        detach_channel_expected(client, id, &channel, row)?;
+                    }
                 }
                 "driver_unavailable" if written => {
                     // The final response confirms insertion but could not finish

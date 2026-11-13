@@ -100,12 +100,36 @@ pub fn register_listener(
 
 pub(super) fn distinct_human_about<'a>(about: &'a str, title: &str, user: &str) -> Option<&'a str> {
     let about = about.trim();
+    let lower = about.to_lowercase();
+    let user = user.trim().to_lowercase();
+    // Description aliases use the same process HOME basename as the UI.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("")
+        .to_lowercase();
     (!about.is_empty()
-        && !["Human", "Human receiver", "Human Node", "You"]
-            .iter()
-            .any(|label| about.eq_ignore_ascii_case(label))
-        && !about.eq_ignore_ascii_case(title.trim())
-        && !about.eq_ignore_ascii_case(&format!("You (@{user})")))
+        && ![
+            "human",
+            "human node",
+            "human channel",
+            "human receiver",
+            "you",
+            "session",
+            "coding session",
+            "default",
+            "agent",
+            "agent session",
+            "cli session",
+        ]
+        .contains(&lower.as_str())
+        && lower != title.trim().to_lowercase()
+        && lower != user
+        && lower != format!("@{user}")
+        && lower != format!("you (@{user})")
+        && lower != home
+        && lower != format!("@{home}"))
     .then_some(about)
 }
 
@@ -311,6 +335,9 @@ fn register_locked(
                 // An explicit resume must invalidate a heartbeat that already saw
                 // the remote pause while this Mac's local row was still active.
                 && (harness != "human" || previous["human_paused"] != true)
+                && previous["state"] == "ACTIVE"
+                && previous["channels"][&channel]["state"] == "ACTIVE"
+                && previous["channels"][&channel]["owner_token"] == row["owner_token"]
                 && remote_matches_listener(&previous, row, &channel)
                 && row["endpoint_pid"] == caller["endpoint_pid"]
         });
@@ -524,6 +551,21 @@ mod tests {
 
     #[test]
     fn automatic_second_host_preserves_remote_scope() -> Result<(), String> {
+        for (about, title, user, expected) in [
+            ("Session", "Human", "alice", None),
+            ("Default", "Human", "alice", None),
+            ("CAFÉ", "café", "alice", None),
+            ("café", "CAFÉ", "alice", None),
+            ("@ÉLODIE", "Human", " élodie ", None),
+            ("you (@ÉLODIE)", "Human", "élodie", None),
+            (" CAFÉ notes ", "café", "alice", Some("CAFÉ notes")),
+        ] {
+            assert_eq!(
+                distinct_human_about(about, title, user),
+                expected,
+                "{about} / {title} / {user}"
+            );
+        }
         for (auth_mode, scope) in [("none", "self"), ("token", "workspace")] {
             let root = std::env::temp_dir().join(format!("cito-registration-{}", random_uuid_v4()));
             let engine = Arc::new(HubEngine::open(&root.join("hub"))?);
@@ -627,6 +669,15 @@ mod tests {
                     "Human",
                     "Human receiver",
                     "Human Node",
+                    "Human channel",
+                    "Session",
+                    "Coding session",
+                    "Default",
+                    "Agent",
+                    "Agent session",
+                    "CLI session",
+                    "alice",
+                    "@alice",
                     " hUmAn NoDe ",
                     "You",
                     "You (@alice)",

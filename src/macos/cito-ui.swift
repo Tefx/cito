@@ -325,8 +325,12 @@ func presentationError(_ raw: String) -> String {
 func distinctAbout(_ raw: String?, title: String, user: String) -> String? {
     let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let lower = value.lowercased()
-    return isGenericSessionLabel(value, user: user) || lower == title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        || ["coding session", "human receiver", "you", "you (@\(user.lowercased()))"].contains(lower) ? nil : value
+    let user = user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let home = (ProcessInfo.processInfo.environment["HOME"] ?? "").split(separator:"/").last.map(String.init)?.lowercased() ?? ""
+    let generic = ["human", "human node", "human channel", "human receiver", "you", "session", "coding session", "default", "agent", "agent session", "cli session"]
+    return value.isEmpty || generic.contains(lower) || lower == title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        || lower == user || lower == "@\(user)" || lower == "you (@\(user))"
+        || lower == home || lower == "@\(home)" ? nil : value
 }
 struct HarnessMeta: Decodable, Equatable {
     let id: String

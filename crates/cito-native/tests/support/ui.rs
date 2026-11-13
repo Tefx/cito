@@ -1461,6 +1461,9 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
     // Foundation resolves the account home independently of the fixture's HOME.
     let home_basename = inspect(&f, p)["home_basename"].as_str().unwrap().to_owned();
     let at_home_basename = format!("@{home_basename}");
+    // Description aliases share the daemon/UI process HOME, not the account database.
+    let description_home = f.home.file_name().unwrap().to_str().unwrap();
+    let at_description_home = format!("@{description_home}");
     for raw in [
         "bob",
         "@bob",
@@ -1480,11 +1483,11 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             ("CLI session", "Fixture"),
             ("bob", "Fixture"),
             ("@bob", "Fixture"),
-            (home_basename.as_str(), "Fixture"),
-            (at_home_basename.as_str(), "Fixture"),
+            (description_home, "Fixture"),
+            (at_description_home.as_str(), "Fixture"),
             (
                 "account",
-                if home_basename.eq_ignore_ascii_case("account") {
+                if description_home.eq_ignore_ascii_case("account") {
                     "Fixture"
                 } else {
                     "account"
@@ -1492,14 +1495,20 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             ),
             (
                 "@account",
-                if home_basename.eq_ignore_ascii_case("account") {
+                if description_home.eq_ignore_ascii_case("account") {
                     "Fixture"
                 } else {
                     "@account"
                 },
             ),
         ] {
-            let expected = if raw == "Fixture" { raw } else { expected };
+            let expected = if raw == "Fixture" {
+                raw
+            } else if about.to_lowercase() == raw.to_lowercase() {
+                "Fixture"
+            } else {
+                expected
+            };
             agent["title"] = json!(raw);
             agent["about"] = json!(about);
             agent["cwd"] = json!(f.home);
@@ -1513,13 +1522,46 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
                 expected,
                 "raw={raw}, about={about}"
             );
-            if about == home_basename || about == at_home_basename {
+            if about == description_home || about == at_description_home {
                 assert_eq!(
                     node(&inspect(&f, p), "directory_items", "dir_meta:personal:home")["tooltip"],
                     " · laptop, mac-studio"
                 );
             }
         }
+    }
+    if home_basename.to_lowercase() != description_home.to_lowercase()
+        && ![
+            "bob",
+            "@bob",
+            "you (@bob)",
+            "fixture",
+            "human",
+            "human node",
+            "human channel",
+            "human receiver",
+            "you",
+            "session",
+            "coding session",
+            "default",
+            "agent",
+            "agent session",
+            "cli session",
+        ]
+        .contains(&home_basename.to_lowercase().as_str())
+    {
+        agent["title"] = json!("bob");
+        agent["about"] = json!(home_basename);
+        send_fixture(&f, p, json!({"op":"directory","peers":[agent.clone()]}));
+        assert_eq!(
+            node(
+                &inspect(&f, p),
+                "directory_items",
+                "dir_title:personal:home"
+            )["text"],
+            home_basename,
+            "A name outside this process's HOME and identity aliases remains distinct"
+        );
     }
     agent["title"] = json!("Auth refactor");
     agent["custom_title"] = json!(false);
@@ -1939,6 +1981,16 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         json!("Human"),
         json!("Human receiver"),
         json!("Human Node"),
+        json!("Human channel"),
+        json!("Session"),
+        json!("Coding session"),
+        json!("Default"),
+        json!("Agent"),
+        json!("Agent session"),
+        json!("CLI session"),
+        json!("alice"),
+        json!("@alice"),
+        json!(f.home.file_name().unwrap().to_str().unwrap()),
         json!(" hUmAn NoDe "),
         json!("You"),
         json!("You (@alice)"),
@@ -2010,6 +2062,28 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
                 "Generic Human aliases remain generic under a custom display title"
             );
         }
+    }
+    for (title, about, height) in [
+        ("café", "CAFÉ", 64),
+        ("CAFÉ", "café", 64),
+        ("café", "CAFÉ notes", 78),
+    ] {
+        let mut human = listener();
+        human["harness"] = json!("human");
+        human["session_id"] = json!("default");
+        human["custom_title"] = json!(true);
+        human["title"] = json!(title);
+        human["about"] = json!(about);
+        human["display_address"] = json!("personal:@alice");
+        let row_id = format!("session:{}", human["scoped_id"].as_str().unwrap());
+        let mut active = frame.clone();
+        active["listeners"] = json!([human]);
+        f.send(p, active);
+        assert_eq!(
+            node(&inspect(&f, p), "items", &row_id)["height"],
+            height,
+            "Unicode title equality must agree with Rust; distinct Unicode details remain visible"
+        );
     }
     f.send(p, frame.clone());
     let paused_card = node(&s, "items", "human_paused_card")["children"][0].clone();

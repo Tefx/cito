@@ -2099,6 +2099,21 @@ impl DaemonService {
         let Some(activity) = &self.session_activity else {
             return Ok(());
         };
+        let mut latest_revoked_at: HashMap<(String, String), u64> = HashMap::new();
+        for row in self.state.db.query(
+            "SELECT harness,session_id,updated_at FROM local_listeners WHERE status='UNLISTENED'",
+            &[],
+        )? {
+            let key = (
+                string(&row, "harness").to_owned(),
+                string(&row, "session_id").to_owned(),
+            );
+            let revoked = row["updated_at"].as_u64().unwrap_or(0);
+            latest_revoked_at
+                .entry(key)
+                .and_modify(|stamp| *stamp = (*stamp).max(revoked))
+                .or_insert(revoked);
+        }
         let mut stale_harnesses = HashSet::new();
         for candidate in activity.candidates().filter(|candidate| {
             candidate["endpoint_pid"]
@@ -2114,6 +2129,17 @@ impl DaemonService {
                             .is_ok_and(|(_, configured, _)| configured)
                     })
         }) {
+            let key = (
+                string(&candidate, "harness").to_owned(),
+                string(&candidate, "session_id").to_owned(),
+            );
+            if latest_revoked_at
+                .get(&key)
+                .is_some_and(|&revoked| candidate["discovered_at"].as_u64().unwrap_or(0) <= revoked)
+            {
+                stale_harnesses.insert(key.0);
+                continue;
+            }
             for (hub, slot) in &hubs {
                 let rows = self.state.db.query(
                     "SELECT status, principal_id, updated_at FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
@@ -2123,24 +2149,22 @@ impl DaemonService {
                         candidate["session_id"].clone(),
                     ],
                 )?;
-                let owned: Vec<_> = rows
-                    .iter()
-                    .filter(|row| {
-                        super::auth::principal_ids_equal(
+                if rows.iter().any(|row| {
+                    row["status"] == "ACTIVE"
+                        && super::auth::principal_ids_equal(
                             string(row, "principal_id"),
                             string(&slot.identity, "principal_id"),
                         )
-                    })
-                    .collect();
-                if owned.iter().any(|row| row["status"] == "ACTIVE") {
+                }) {
                     continue;
                 }
-                if owned.iter().any(|row| {
+                // A probe can revoke after the pass snapshot while setup is inspected.
+                if rows.iter().any(|row| {
                     row["status"] == "UNLISTENED"
                         && candidate["discovered_at"].as_u64().unwrap_or(0)
                             <= row["updated_at"].as_u64().unwrap_or(0)
                 }) {
-                    stale_harnesses.insert(string(&candidate, "harness").to_owned());
+                    stale_harnesses.insert(key.0.clone());
                     continue;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
@@ -3271,7 +3295,14 @@ impl DaemonService {
                 if caller["harness"] == "human" && string(&caller, "title").trim().is_empty() {
                     caller["title"] = json!("Human");
                 }
-                let about = action["about"].as_str().unwrap_or("Session");
+                let about = action["about"]
+                    .as_str()
+                    .filter(|about| caller["harness"] != "human" || !about.trim().is_empty())
+                    .unwrap_or(if caller["harness"] == "human" {
+                        "Human"
+                    } else {
+                        "Session"
+                    });
                 return self.listen(
                     &hub,
                     &json!({"about":about,"scope":action["scope"]}),
@@ -5114,8 +5145,33 @@ mod tests {
                 assert_eq!(snapshot["hubs"][0]["human_paused"], true);
                 assert_eq!(snapshot["hubs"][0]["human_about"], json!(expected));
             }
-            service.state.db.execute("UPDATE local_listeners SET title=\'Review desk\',about=\'Review desk\' WHERE harness=\'human\'", &[])?;
-            assert_eq!(service.snapshot()?["hubs"][0]["human_about"], Value::Null);
+            for (title, about, expected) in [
+                ("Review desk", "Review desk", Value::Null),
+                ("café", "CAFÉ", Value::Null),
+                ("CAFÉ", "café", Value::Null),
+                ("café", "CAFÉ notes", json!("CAFÉ notes")),
+            ] {
+                service.state.db.execute(
+                    "UPDATE local_listeners SET title=?,about=? WHERE harness='human'",
+                    &[json!(title), json!(about)],
+                )?;
+                assert_eq!(service.snapshot()?["hubs"][0]["human_about"], expected);
+            }
+            for about in [None, Some(""), Some(" \n ")] {
+                let mut action = json!({"op":"listen_session","hub":"local","harness":"human","session_id":"default"});
+                if let Some(about) = about {
+                    action["about"] = json!(about);
+                }
+                let resumed = service.action(&action)?;
+                assert_eq!(resumed["about"], "Human");
+                assert_eq!(
+                    service
+                        .state
+                        .listener("local", &human_id)?
+                        .ok_or("Missing default Human")?["about"],
+                    "Human"
+                );
+            }
             for harness in ["human", "fixture"] {
                 super::super::registration::register_listener(
                     &service.state,
