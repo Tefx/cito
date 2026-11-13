@@ -2170,9 +2170,15 @@ impl DaemonService {
                     break;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
-                if let Err(error) =
-                    self.listen(hub, &json!({"about":candidate["title"]}), &candidate)
-                {
+                if let Err(error) = self.listen(
+                    hub,
+                    &json!({"about":candidate["title"],"discovered_at":candidate["discovered_at"]}),
+                    &candidate,
+                ) {
+                    if error.starts_with("STALE_DISCOVERY") {
+                        stale_harnesses.insert(key.0.clone());
+                        break;
+                    }
                     eprintln!("cito auto-listen {hub}: {error}");
                 }
             }
@@ -5713,6 +5719,176 @@ print(json.dumps(result), flush=True)
                     if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=0 { return Err("Stale presentation cannot regain enrollment authority".into()); }
                     service.refresh_available()?;
                     if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=2 { return Err("New discovery must restore enrollment on both Hubs".into()); }
+                }
+                for after_save in [false, true] {
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(false);
+                    }
+                    let session = if after_save {
+                        "inflight-save"
+                    } else {
+                        "inflight-read"
+                    };
+                    let candidate = json!({"harness":"fixture","session_id":session,"title":"Review","cwd":"","endpoint_pid":std::process::id()});
+                    fs::write(dir.join("candidate.json"), candidate.to_string())
+                        .map_err(|e| e.to_string())?;
+                    let initial =
+                        service.listen("local", &json!({"about":"Review"}), &candidate)?;
+                    service.refresh_available()?;
+                    let cached = service
+                        .session_activity
+                        .as_ref()
+                        .and_then(|activity| {
+                            activity
+                                .candidates()
+                                .find(|row| row["session_id"] == session)
+                        })
+                        .ok_or("Missing in-flight candidate")?;
+                    let discovered_at = cached["discovered_at"]
+                        .as_u64()
+                        .filter(|stamp| *stamp > 0)
+                        .ok_or("Missing discovery timestamp")?;
+                    let a = service.slot("local")?.clone();
+                    let b = service.slot("work")?.clone();
+                    assert!(!Arc::ptr_eq(&a.registration, &b.registration));
+                    let state = service.state.clone();
+                    let id = string(&initial, "canonical_listener_id");
+                    let captured = state
+                        .listener("local", id)?
+                        .ok_or("Missing revocation source")?;
+                    let channel = format!("{}:fixture", service.host_id);
+                    if after_save {
+                        // A sibling keeps the shared Node active: cleanup must fence the
+                        // new channel token, not the Node's retained sibling token.
+                        let mut sibling = a.kv_get(id)?.ok_or("Missing source Node")?.0;
+                        sibling["owner_token"] = json!("sibling-owner");
+                        sibling["channels"] = json!({"sibling:fixture":{"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","updated_at_ms":now_ms()}});
+                        b.kv_save(id, &sibling, None)?;
+                    }
+                    let mut probe = service
+                        .plugins
+                        .find_by_id("fixture")
+                        .ok_or("Missing probe fixture")?
+                        .clone();
+                    probe.command = vec![
+                        "/usr/bin/python3".into(),
+                        "-c".into(),
+                        "print('{\"ok\":true,\"status\":\"closed_definitive\"}')".into(),
+                    ];
+                    let writer = super::super::database::Database::open(&if after_save {
+                        config.state_dir.join("state.sqlite")
+                    } else {
+                        dir.join("other-hub/hub.sqlite")
+                    })?;
+                    // Only B is a destination, so stale-error handling cannot borrow
+                    // a later Hub's preflight veto to invalidate cached authority.
+                    for (hub, slot) in &mut service.slots {
+                        slot.config["autoListen"] = json!(hub == "work");
+                    }
+                    let daemon = &mut service;
+                    std::thread::scope(|scope| -> Result<(), String> {
+                        let pending=writer.transaction(|connection| {
+                            let pending=scope.spawn(move ||daemon.auto_listen());
+                            let deadline=Instant::now()+Duration::from_secs(3);
+                            loop {
+                                let entered=if after_save {
+                                    b.kv_get(id)?.is_some_and(|(remote,_)|remote["channels"][&channel]["state"]=="ACTIVE")
+                                } else { matches!(b.registration.try_lock(),Err(std::sync::TryLockError::WouldBlock)) };
+                                if entered { break; }
+                                if Instant::now()>=deadline { return Err("Registration did not reach the controlled RPC interval".into()); }
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            if after_save {
+                                // Commit after the Hub save while registration waits for
+                                // its local write lock; model the inclusive same-ms cutoff.
+                                let changed=connection.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub='local' AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?",&[json!(discovered_at),json!(id),captured["binding_generation"].clone(),captured["owner_token"].clone()])?;
+                                if changed!=1 { return Err("Expected a fenced cross-Hub revocation".into()); }
+                            } else {
+                                super::super::receiver::probe_listener(&state,&a,&captured,&probe,&config.state_dir)?;
+                            }
+                            Ok(pending)
+                        })?;
+                        pending
+                            .join()
+                            .map_err(|_| "Auto-Listen worker panicked")??;
+                        Ok(())
+                    })?;
+                    let revoked = state
+                        .listener("local", id)?
+                        .ok_or("Missing revoked source")?;
+                    assert_eq!(revoked["status"], "UNLISTENED");
+                    assert!(revoked["updated_at"]
+                        .as_u64()
+                        .is_some_and(|stamp| stamp >= discovered_at));
+                    if state
+                        .listener("work", id)?
+                        .is_some_and(|row| row["status"] == "ACTIVE")
+                    {
+                        return Err("Stale discovery left an ACTIVE destination binding".into());
+                    }
+                    if after_save {
+                        let remote = b.kv_get(id)?.ok_or("Missing compensated Node")?.0;
+                        if remote["channels"][&channel]["state"] != "UNLISTENED"
+                            || remote["channels"]["sibling:fixture"]["state"] != "ACTIVE"
+                            || remote["channels"]["sibling:fixture"]["owner_token"]
+                                != "sibling-owner"
+                        {
+                            return Err("Compensation must detach only the stale channel and retain its sibling".into());
+                        }
+                        super::super::receiver::detach_channel_expected(
+                            &a, id, &channel, &captured,
+                        )?;
+                    } else if b.kv_get(id)?.is_some() {
+                        return Err("A pre-save veto must not create a remote Node".into());
+                    }
+                    if service.session_activity.as_ref().is_some_and(|activity| {
+                        activity
+                            .candidates()
+                            .any(|row| row["session_id"] == session)
+                    }) {
+                        return Err(
+                            "STALE_DISCOVERY must invalidate cached enrollment authority".into(),
+                        );
+                    }
+                    if !after_save {
+                        // Explicit Listen omits the private fence even when caller metadata
+                        // came from discovery; a retained revocation must not veto intent.
+                        service.listen("work", &json!({"about":"Manual intent"}), &cached)?;
+                        assert_eq!(
+                            state
+                                .listener("work", id)?
+                                .ok_or("Missing manual binding")?["status"],
+                            "ACTIVE"
+                        );
+                        service.unlisten_id("work", id)?;
+                    }
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(true);
+                    }
+                    service.refresh_available()?;
+                    let fresh = service
+                        .session_activity
+                        .as_ref()
+                        .and_then(|activity| {
+                            activity
+                                .candidates()
+                                .find(|row| row["session_id"] == session)
+                        })
+                        .ok_or("Missing fresh recovery candidate")?;
+                    assert!(fresh["discovered_at"].as_u64() > revoked["updated_at"].as_u64());
+                    for hub in ["local", "work"] {
+                        assert_eq!(
+                            state
+                                .listener(hub, id)?
+                                .ok_or("Missing recovered binding")?["status"],
+                            "ACTIVE"
+                        );
+                    }
+                    assert_eq!(
+                        b.kv_get(id)?.ok_or("Missing recovered Node")?.0["channels"][&channel]
+                            ["state"],
+                        "ACTIVE"
+                    );
                 }
                 Ok(())
             })();

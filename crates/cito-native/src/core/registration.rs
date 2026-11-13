@@ -195,6 +195,12 @@ pub fn register_automatic_human(
     register_locked(state, client, host_id, &args, caller, false)
 }
 
+enum RegistrationCommit {
+    Committed,
+    Retry,
+    StaleDiscovery,
+}
+
 fn register_locked(
     state: &LocalState,
     client: &HubClient,
@@ -204,6 +210,7 @@ fn register_locked(
     resume_human: bool,
 ) -> Result<Value, String> {
     let hub = &client.name;
+    let discovered_at = args["discovered_at"].as_u64().unwrap_or(0);
     let about = string(args, "about");
     if about.trim().is_empty() || about.chars().count() > 500 {
         return Err("INVALID_INPUT: about must contain 1..500 characters".into());
@@ -384,6 +391,12 @@ fn register_locked(
             previous["human_paused"].clone()
         };
         super::lease::reconcile_registration_state(&mut value, now_ms());
+        if discovered_at > 0 && state.db.query(
+            "SELECT COALESCE(MAX(updated_at),0) AS revoked_at FROM local_listeners WHERE status='UNLISTENED' AND harness=? AND session_id=?",
+            &[json!(harness),json!(session)],
+        )?.first().and_then(|row|row["revoked_at"].as_u64()).is_some_and(|revoked|revoked>0 && discovered_at<=revoked) {
+            return Err("STALE_DISCOVERY: Candidate was revoked before registration".into());
+        }
         match client.kv_save(&id, &value, remote.map(|r| r.1)) {
             Ok(_) => {}
             Err(error) if error.starts_with("10071:") => continue,
@@ -394,21 +407,39 @@ fn register_locked(
             if client.closed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("NATS_UNAVAILABLE: Hub disconnected during registration".into());
             }
+            // Admission and cross-Hub revocation share the same SQLite write lock.
+            if discovered_at > 0 && connection.query(
+                "SELECT COALESCE(MAX(updated_at),0) AS revoked_at FROM local_listeners WHERE status='UNLISTENED' AND harness=? AND session_id=?",
+                &[json!(harness),json!(session)],
+            )?.first().and_then(|row|row["revoked_at"].as_u64()).is_some_and(|revoked|revoked>0 && discovered_at<=revoked) {
+                return Ok(RegistrationCommit::StaleDiscovery);
+            }
             // The remote CAS cannot authorize reuse after a concurrent local revocation.
             if same_binding.is_some() && connection.query(
                 "SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?",
                 &[json!(hub), json!(id), json!(generation), json!(owner)],
-            )?.is_empty() { return Ok(false); }
+            )?.is_empty() { return Ok(RegistrationCommit::Retry); }
             let changed = connection.execute(
                 "INSERT INTO local_listeners(hub,listener_id,public_id,tag,principal_id,owner_user,host_id,host_name,harness,session_id,endpoint_pid,cwd,repo,branch,title,about,scope,status,binding_generation,owner_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET consecutive_probe_failures=CASE WHEN status!='ACTIVE' OR owner_token!=excluded.owner_token OR COALESCE(endpoint_pid,-1)!=COALESCE(excluded.endpoint_pid,-1) THEN 0 ELSE consecutive_probe_failures END,public_id=excluded.public_id,tag=excluded.tag,owner_user=excluded.owner_user,host_id=excluded.host_id,host_name=excluded.host_name,endpoint_pid=excluded.endpoint_pid,cwd=excluded.cwd,repo=excluded.repo,branch=excluded.branch,title=excluded.title,about=excluded.about,scope=excluded.scope,status='ACTIVE',binding_generation=excluded.binding_generation,owner_token=excluded.owner_token WHERE local_listeners.status!='ACTIVE' OR local_listeners.binding_generation<=excluded.binding_generation",
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(generation),json!(owner)],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
             connection.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=?", &[client.config["url"].clone(),json!(hub),json!(id)])?;
-            Ok(true)
+            Ok(RegistrationCommit::Committed)
         })?;
-        if !committed {
-            continue;
+        match committed {
+            RegistrationCommit::Retry => continue,
+            RegistrationCommit::StaleDiscovery => {
+                // Drop the database lock before IO; fence cleanup to this channel's token.
+                let _ = super::receiver::detach_channel_expected(
+                    client,
+                    &id,
+                    &channel,
+                    &json!({"binding_generation":generation,"owner_token":owner}),
+                );
+                return Err("STALE_DISCOVERY: Candidate was revoked during registration".into());
+            }
+            RegistrationCommit::Committed => {}
         }
         return Ok(
             json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
