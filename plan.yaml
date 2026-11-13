@@ -10394,3 +10394,201 @@ phases:
         & Economy: ZERO_NEW_ISSUES'
       timestamp: '2026-11-12T19:12:40.343773+00:00'
       reviewer: vectl-orchestrator
+- id: v39
+  name: 'V39 Stage 22: Notification Banner Readability, Human-Channel Routing Clarity,
+    Pairing-First Telegram Flow & Cross-Surface Lifecycle Closure (U1–U6)'
+  status: pending
+  gate: All U1–U6 requirements in docs/DESIGN.md §24 pass; all inspectMenu() mechanical
+    invariants equal [] across all surfaces in Light and Dark appearances (including
+    live Light/Dark .popover rendering of BannerWindow); contract-and-simplicity review
+    & fix completes cleanly; cargo fmt --all -- --check && cargo test --workspace
+    && cargo build --release pass with 0 warnings; changes are pushed to origin/main
+    (NO release tag).
+  context: 'Implement docs/DESIGN.md §24 (U1–U6, §24.1–§24.3): (1) U1 BannerWindow
+    .popover material + CitoPalette.surfaceBackground + 1pt adaptive border, SurfaceView
+    accentBar/iconBadge + ClickView layer updates, 380x112pt compact banner layout
+    suppressing warning amber/Notification pill on normal single live deliveries,
+    independent 20x20 close (x) button + hover timer pause, and immediate hide/guard
+    on set_desktop_banner(enabled: false); (2) U2 orthogonal You (@user) Pause (human_paused)
+    vs Mac Desktop Banner mute (desktop_banner_enabled), populated human listener.channels
+    in DaemonService::snapshot(), live delivery summary + bell.fill/bell.slash.fill
+    toggle on You (@user) card, scope subtitle on Mac Desktop Banner, and Hub-paused
+    banner with 1-click Resume in Settings -> Human Channels; (3) U3 preserve bot_username
+    and emit pairing_url + request_id on pair_code/channel_list, auto-copy /start
+    <code> with Open in Telegram CTA, tuck manual Chat ID behind collapsed disclosure
+    while populating _external_chat_id/_external_user_id symmetrically, surface getUpdates/409/effect_unknown
+    health details without auto-deleting webhooks, expose pending pairing codes during
+    Re-pair, enforce 1:1 external identity ownership on redeem, and disambiguate unthreaded
+    Telegram replies; (4) U4 scope ack_signals and clear_activity_history to active
+    filter without acking pending agent signals on log clear, show distinct sender
+    session titles on Activity Line 1, collapse directory_composer to 44pt when composerError
+    is empty, support @user/address/harness search with Reset Search empty state,
+    and populate display_name/display_label in hub.rs:attach() without trailing ''
+    · ''; (5) U5 clear active_settings_hub on close_settings, rename/scope Pause All
+    (unlisten_all) to active hub, fix header_hub_strip effectiveTargetHub click and
+    prevent disabling last enabled Hub, align AVAILABLE SESSIONS child indentation
+    to x=44, reset renamingSessionKey on menuDidClose, add Cancel/Escape to editingPersonalChannel
+    and Return submit to settingsPanel, fix Clear Token (reset_user: false), Disconnect
+    All (preserve login item when purge_data == false), host_hub_port draft persistence,
+    raw token copy & Add Hub invite auto-parse, editingOriginalHub/empty Username
+    handling, strip request_id/client_id from saved hubs, and canonicalize OIDC issuer/clientId;
+    (6) U6 enforce >=3.0:1 symbol badge contrast in Light/Dark modes, consistent !isEnabled
+    dimming, non-button To: badge, .subtleHeader Directory copy chips, .neutral [
+    ● Sharing ] pill, ''○ Account Not Paired'' gateway-only Telegram status, symmetric
+    2pt recessed pill tracks, integrated header_hub_strip status dots, borderless
+    pluginIconImage badges, cornerRadius-clipped renderPNG, Line 1 Activity action
+    alignment, and explicit accessibilityLabels without leading ''● '' bullets. Refresh
+    site/assets/screenshots/*.png, run contract-and-simplicity review & fix, verify
+    cargo fmt --all -- --check && cargo test --workspace && cargo build --release,
+    and push main to origin/main (NO release tag).'
+  depends_on:
+  - v38
+  steps:
+  - id: v39.impl
+    name: V39 U1–U6 Notification Banner Readability, Orthogonal Human/Banner Routing,
+      Pairing-First Telegram Flow, Activity/Directory Scope & Settings/Visual Closure
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Implement docs/DESIGN.md §24 (U1–U6, §24.1–§24.3) across src/macos/cito-ui.swift,\
+      \ crates/cito-native/src/core/{daemon,hub,state,setup,config}.rs, and plugins/telegram/{native.rs,plugin.json}:\n\
+      \  1. U1: BannerWindow .popover material + CitoPalette.surfaceBackground + 1pt\
+      \ adaptive border, SurfaceView accentBar/iconBadge + ClickView updateLayer,\
+      \ 380x112pt compact layout (x=54 keyline, 30x30 badge at (14,68), amber reserved\
+      \ for Held/Queued, xN badge only when displayedCount > 1), independent 20x20\
+      \ close (x) button via ClickView.hitTest pass-through + hover auto-dismiss pause,\
+      \ immediate hide and receiver guard on set_desktop_banner(enabled: false), and\
+      \ unmasked Light/Dark inspectMenu()/renderPNG() verification.\n  2. U2: Orthogonal\
+      \ human_paused (Hub-wide DND) vs desktop_banner_enabled (local Mac popup mute),\
+      \ populated human listener.channels in DaemonService::snapshot(), live delivery\
+      \ summary + bell.fill/bell.slash.fill toggle on You (@user) card, scope subtitle\
+      \ on Mac Desktop Banner in Settings, and Hub-paused banner with 1-click Resume\
+      \ in Settings -> Human Channels.\n  3. U3: Preserve bot_username and emit pairing_url\
+      \ (https://t.me/<bot_username>?start=<code>) + request_id on pair_code/channel_list;\
+      \ auto-copy /start <code> and show prominent Open in Telegram button; hide manual\
+      \ Chat ID/Save behind collapsed disclosure while populating _external_chat_id/_external_user_id\
+      \ symmetrically for private chat IDs and disabling Send Test when unconfigured;\
+      \ surface getUpdates (including HTTP 409) and effect_unknown health diagnostics\
+      \ without auto-deleting webhooks; expose pending pairing codes during Re-pair;\
+      \ enforce 1:1 external identity ownership on redeem; disambiguate unthreaded\
+      \ Telegram replies across multiple recent senders.\n  4. U4: Scope ack_signals\
+      \ and clear_activity_history to active filter (\"me\" -> target_harness == \"\
+      human\" only; never send Hub acked_at_ms for pending agent signals when clearing\
+      \ log history); render distinct sender session titles on Activity Line 1; collapse\
+      \ directory_composer to 44pt when composerError is empty (62pt on error); support\
+      \ @user and address/harness search with \"No matching messages\" + Reset Search\
+      \ empty state; populate display_name/display_label in hub.rs:attach() and omit\
+      \ trailing \" · \" in DirectoryPeerCellView.\n  5. U5: Clear active_settings_hub\
+      \ on close_settings and pass configured local principal when disabled; rename/scope\
+      \ Pause All (unlisten_all) to active hub; compare effectiveTargetHub == hub.name\
+      \ on header_hub_strip click and prevent disabling the last enabled Hub; align\
+      \ AVAILABLE SESSIONS child indentation to x=44; reset renamingSessionKey in\
+      \ menuDidClose; add Cancel + Escape to editingPersonalChannel and Return submit\
+      \ to settingsPanel; keep personal bindings on Clear Token (reset_user: false)\
+      \ and login item on Disconnect All (purge_data == false); preserve/apply host_hub_port\
+      \ drafts and disable Apply when unchanged; expose raw token copy in Access:\
+      \ Token mode and auto-parse invite commands/JSON in Add Hub; preserve editingOriginalHub\
+      \ when addHubName is cleared and clear user when Username is emptied; strip\
+      \ request_id/client_id from persisted hubs in config.json and canonicalize OIDC\
+      \ issuer/clientId.\n  6. U6: Ensure >=3.0:1 contrast on symbol badge fills in\
+      \ Light/Dark modes; consistent !isEnabled dimming in MenuControl.applyVisualState();\
+      \ non-button To: target badge; .subtleHeader Directory copy chips; .neutral\
+      \ [ ● Sharing ] button with status dot; \"○ Account Not Paired\" status when\
+      \ only Telegram gateway is configured; symmetric 2pt recessed pill tracks; integrated\
+      \ header_hub_strip status dots in MenuControl.layoutContents(); borderless pluginIconImage\
+      \ badges; cornerRadius-clipped renderPNG; Line 1 Activity action button alignment;\
+      \ explicit accessibilityLabels without leading \"● \" bullets.\n- Update affected\
+      \ tests in crates/cito-native/tests/support/{ui,daemon,plugins}.rs and crates/cito-native/tests/hub/cases.rs\
+      \ with discriminating regression tests for U1–U6, and refresh site/assets/screenshots/*.png.\n\
+      \nImplementation Notes (Non-Binding):\n- Follow docs/DESIGN.md §24.3 advisory\
+      \ notes: keep daemon.rs:snapshot() and hub.rs:channel_list lightweight without\
+      \ blocking UI on remote network calls; never auto-delete an existing Telegram\
+      \ webhook on HTTP 409; preserve compatibility for existing ui.rs test harness\
+      \ fixtures (id: \"channel\").\n\nBoundary:\n- Owner: rust-senior. Isolated worktree\
+      \ transaction modifying repository source, tests, and screenshots only.\n\n\
+      Admit:\n- Witnessed inputs: docs/DESIGN.md §24 (U1–U6, §24.1–§24.3).\n- Verification:\
+      \ cargo fmt --all -- --check && cargo test --workspace && cargo build --release\
+      \ pass with 0 warnings.\n\nRecovery:\n- Reconcile in-worktree compiler/test\
+      \ failures before completion; stop and escalate only on a contradictory spec\
+      \ requirement.\n"
+    verification: cargo fmt --all -- --check && cargo test --workspace && cargo build
+      --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - plugins/telegram/native.rs
+    - plugins/telegram/plugin.json
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/hub/cases.rs
+    agent: rust-senior
+  - id: v39.review
+    name: 'V39 Contract-and-Simplicity Review & Fix, Live Light/Dark Banner Verification
+      and Push to main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: 'step_type: implementation
+
+      repo_change_policy: modifies_repo
+
+
+      Deliver:
+
+      - Run contract-and-simplicity review & fix across all v39.impl changes (docs/DESIGN.md
+      §24 U1–U6), closing all contract, wiring, state-transition, visual, and simplicity
+      findings cleanly.
+
+      - Verify live Light/Dark .popover appearance on BannerWindow and refreshed screenshots
+      in site/assets/screenshots/*.png.
+
+      - Verify cargo fmt --all -- --check && cargo test --workspace && cargo build
+      --release pass with 0 compiler warnings.
+
+      - Push integrated main to origin/main (do NOT create a release tag or trigger
+      release.yml).
+
+
+      Boundary:
+
+      - Owner: rust-senior with [REQUIRES_SKILL: contract-and-simplicity]. Modifies
+      repository and pushes main to origin/main without tagging a release.
+
+
+      Admit:
+
+      - Depends on v39.impl completion.
+
+      - Verification: cargo fmt --all -- --check && cargo test --workspace && cargo
+      build --release (0 warnings), live Light/Dark BannerWindow .popover + screenshot
+      verification, and git push origin main.
+
+
+      Recovery:
+
+      - Repair any review or regression finding in place and re-verify before pushing
+      main to origin/main.
+
+      '
+    verification: cargo fmt --all -- --check && cargo test --workspace && cargo build
+      --release
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/config.rs
+    - plugins/telegram/native.rs
+    - plugins/telegram/plugin.json
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/hub/cases.rs
+    depends_on:
+    - v39.impl
+    agent: rust-senior
