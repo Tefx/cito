@@ -10397,7 +10397,7 @@ phases:
 - id: v39
   name: 'V39 Stage 22: Notification Banner Readability, Human-Channel Routing Clarity,
     Pairing-First Telegram Flow & Cross-Surface Lifecycle Closure (U1–U6)'
-  status: in_progress
+  status: done
   gate: All finalized U1–U6 requirements in docs/DESIGN.md §24 (§24.1–§24.3) pass;
     all inspectMenu() mechanical invariants equal [] across all surfaces in Light
     and Dark appearances (including live Light/Dark .popover rendering of BannerWindow,
@@ -10636,7 +10636,7 @@ phases:
   - id: v39.review
     name: 'V39 Contract-and-Simplicity Review & Fix, Live Light/Dark Banner Verification
       and Push to main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: 'step_type: implementation
 
       repo_change_policy: modifies_repo
@@ -10702,3 +10702,38 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-13T21:58:55.191514Z'
+    done_at: '2026-11-13T23:57:54.714319+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 85e384433447820b7d40639948f4421a339207c3 (rebased review tip 2d3dbb9385032e7819d9c67a498f49b8d53f359e
+      + staged verified release binaries on main; retained candidate ref refs/vectl/candidates/v39.review)
+
+
+      Verification:
+
+      - Convergent 3-round `contract-and-simplicity` review & repair loop (`pathway-auditor`,
+      `structural-auditor`, `uiux-auditor`, `rust-senior`) converged monotonically
+      (`13 -> 5 -> 0`) to terminal verdicts `Contract & Wiring: CLEAN` and `Simplicity
+      & Economy: ZERO_NEW_ISSUES` across all three auditors at `d02fe5a2fa967c24072054f642bd556114c11a12`
+      (rebased onto `main` at `2d3dbb9385032e7819d9c67a498f49b8d53f359e`).
+
+      - Run: cargo fmt --all -- --check -> Passed (exit 0)
+
+      - Run: cargo build --release -> Passed (0 warnings)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test --workspace -> 294 passed (178 lib + 113 integration + 3 bin), 4
+      ignored, 0 failed
+
+      - UI & Screenshots: Verified Light/Dark `.popover` material + clear live fill
+      + `inspectMenu()` invariants `[]` on `BannerWindow` and all panels, fixed `renderPNG`
+      2x CTM/output-bitmap corner-clipping, and visually verified all 8 refreshed
+      Retina screenshots (`site/assets/screenshots/*.png`).
+
+      - Worktree cleanup: Removed `/Users/tefx/Projects/cito/.vectl/worktrees/v39.review`
+      and `/tmp/cito-v39*`.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §24 (§24.1–§24.3, U1–U6)'
