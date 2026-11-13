@@ -124,7 +124,7 @@
       </figure>
 
       <h3>Read and reply in Activity</h3>
-      <p>Open <strong>Activity…</strong> directly, regardless of the unread count, to review incoming signals. Human-targeted banners say <strong>Click to reply in Cito ↩</strong> and open the inline reply composer; agent-targeted banners say <strong>Click to view in Activity ↗</strong> and open the matching activity without a composer. Use <strong>Reply</strong> or Return on a signal addressed to your Human Node to send a one-line decision and wake the waiting agent.</p>
+      <p>Open <strong>Activity…</strong> directly, regardless of the unread count, to review incoming signals. Human-targeted banners say <strong>Reply in Cito ↩</strong> and open the inline reply composer; agent-targeted banners say <strong>View in Activity ↗</strong> and open the matching activity without a composer. Use <strong>Reply</strong> or Return on a signal addressed to your Human Node to send a one-line decision and wake the waiting agent.</p>
       <figure class="docs-figure docs-figure--staged">
         <div class="docs-figure-stage">
           <img
@@ -233,16 +233,16 @@ args = []</code></pre>
         <div class="docs-figure-stage docs-figure-stage--compact">
           <img
             class="screenshot-img"
-            style="--logical-w: 388; --logical-h: 136;"
+            style="--logical-w: 380; --logical-h: 112;"
             src="../assets/screenshots/banner-dark.png"
-            alt="Cito Direct Message banner with Queued status and inline-reply navigation"
-            width="776"
-            height="272"
+            alt="Cito direct message banner with sender metadata, a close button, and inline-reply navigation"
+            width="760"
+            height="224"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong>Desktop Message Banner:</strong> The status pill shows <code>Notification</code> when a message requests attention or <code>Queued</code> otherwise. Human-targeted messages show <code>Click to reply in Cito ↩</code> and open the inline reply composer; agent-targeted messages show <code>Click to view in Activity ↗</code>.
+          <strong>Desktop Message Banner:</strong> Normal live messages show sender metadata without a status pill. Deferred messages show <code>Held</code> or <code>Queued</code>; coalesced messages show a compact count. Human-targeted messages show <code>Reply in Cito ↩</code> and open the inline reply composer; agent-targeted messages show <code>View in Activity ↗</code>. Hover pauses dismissal, and the close button dismisses without marking the message read.
         </figcaption>
       </figure>
       <p>Saved Bot Tokens stay redacted. The active Hub Gateway collapses; click <strong>Change Token…</strong> to edit it, leave the field blank to retain the token, or use <strong>Clear Token</strong> to remove the gateway. Personal pairing becomes available once the gateway is ready. Paired accounts collapse to a summary; click <strong>Edit…</strong> to reveal the Chat ID and Save controls. <strong>Send Test</strong> uses candidate values without saving them; <strong>Save</strong> commits personal fields. <strong>Pause</strong> retains your Chat ID; <strong>Unpair</strong> removes your personal binding without clearing the gateway. <strong>Copy Command</strong> copies the active pairing command; <strong>Cancel</strong> invalidates it. A new pairing command supersedes earlier commands and expires after ten minutes.</p>

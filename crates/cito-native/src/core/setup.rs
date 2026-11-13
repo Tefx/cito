@@ -1377,10 +1377,10 @@ pub fn run_setup_cli(args: &[String]) {
                 entry.insert("token".to_string(), json!(t.trim()));
             }
             if let Some(ref iss) = iss_norm {
-                entry.insert("oidcIssuer".to_string(), json!(iss));
+                entry.insert("issuer".to_string(), json!(iss));
             }
             if let Some(ref cid) = cid_norm {
-                entry.insert("oidcClientId".to_string(), json!(cid));
+                entry.insert("clientId".to_string(), json!(cid));
             }
             entry.insert("enabled".to_string(), json!(true));
             entry.insert("defaultScope".to_string(), json!(def_scope));
@@ -1441,15 +1441,17 @@ pub fn run_setup_cli(args: &[String]) {
                 if !(0..=65535).contains(&p) {
                     return Err("host_hub.port must be an integer in 0..65535".to_string());
                 }
-                let tok = prev
-                    .get("token")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .unwrap_or_else(|| random_hex(32));
                 prev.insert("enabled".into(), json!(en));
                 prev.insert("port".into(), json!(p));
-                prev.insert("token".into(), json!(tok));
+                if share_hub != Some(false) {
+                    let token = prev
+                        .get("token")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .unwrap_or_else(|| random_hex(32));
+                    prev.insert("token".into(), json!(token));
+                }
                 rest.insert("host_hub".to_string(), Value::Object(prev));
             }
 

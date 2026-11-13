@@ -411,8 +411,8 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         ("assets/screenshots/settings-apps-dark.png", 1040, 920),
         ("assets/screenshots/settings-channels-dark.png", 1040, 920),
         ("assets/screenshots/settings-hubs-dark.png", 1040, 920),
-        ("assets/screenshots/banner-dark.png", 776, 272),
-        ("assets/screenshots/wake-card-dark.png", 776, 272),
+        ("assets/screenshots/banner-dark.png", 760, 224),
+        ("assets/screenshots/wake-card-dark.png", 760, 224),
     ] {
         let bytes = fs::read(site.join(path)).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");

@@ -193,9 +193,12 @@ pub fn parse_cli(
         super::registration::validate_title(title)?;
     }
     if input.get("all") == Some(&json!(true))
-        && (input.len() != 1 || meta.contains_key("expected_harness"))
+        && (input
+            .keys()
+            .any(|key| !matches!(key.as_str(), "all" | "hub"))
+            || !meta.is_empty())
     {
-        return Err("--all cannot be combined with Hub or session selectors".into());
+        return Err("--all cannot be combined with session selectors".into());
     }
     if cmd == "status" && (!input.is_empty() || !meta.is_empty()) {
         return Err("status accepts only --json".into());
@@ -239,7 +242,13 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
             let action = match cmd {
                 "rename" => json!({"op":"cli_rename","title":input["title"],"meta":meta}),
                 "status" => json!({"op":"get_snapshot"}),
-                _ => json!({"op":"unlisten_all"}),
+                _ => {
+                    let mut action = json!({"op":"unlisten_all"});
+                    if let Some(hub) = input.get("hub") {
+                        action["hub"] = hub.clone();
+                    }
+                    action
+                }
             };
             control_request(config, &action)?
         } else {
@@ -316,7 +325,6 @@ mod tests {
             ("listen", vec!["--title", " "]),
             ("rename", vec![]),
             ("rename", vec![" "]),
-            ("unlisten", vec!["--all", "--hub", "work"]),
         ] {
             assert!(parse_cli(
                 cmd,

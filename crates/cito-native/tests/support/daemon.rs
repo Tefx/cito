@@ -1080,6 +1080,23 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     wait(|| {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "ready"
     });
+    let personal = db
+        .query("SELECT user_config_json FROM hub_human_channels", &[])
+        .unwrap();
+    assert_eq!(f.action(json!({"op":"clear_channel_service","hub":"shared","channel_id":"remote-channel","reset_user":false})).0,200);
+    assert_eq!(
+        db.query("SELECT user_config_json FROM hub_human_channels", &[])
+            .unwrap(),
+        personal,
+        "Clearing service credentials must preserve personal destinations"
+    );
+    assert_eq!(f.action(json!({"op":"save_hub_service","hub":"shared","channel_id":"remote-channel","values":{"credential":"replacement"}})).1["channels"][0]["status"],"ready");
+    assert_eq!(f.action(json!({"op":"clear_channel_service","hub":"shared","channel_id":"remote-channel","reset_user":true})).0,200);
+    assert_eq!(
+        db.query("SELECT user_config_json FROM hub_human_channels", &[])
+            .unwrap()[0]["user_config_json"],
+        "{}"
+    );
     assert_eq!(f.action(json!({"op":"disconnect_human_channel","hub":"shared","channel_id":"remote-channel","reset_hub":true})).1["channels"][0]["status"],"not_configured");
 }
 #[test]
@@ -2854,6 +2871,123 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
 }
 
 #[test]
+fn desktop_banner_toggle_updates_existing_receivers_without_pausing_activity() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"desktopBannerEnabled":false}));
+    let meta = f.provider("delivered");
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    let frames = || {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>()
+    };
+    f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Muted notice"}),
+        meta.clone(),
+    );
+    wait(|| f.rows("SELECT * FROM local_signals").len() == 1);
+    assert!(!frames().iter().any(|v| v["op"] == "banner"));
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":"false"}))
+            .0,
+        400
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_desktop_banner","enabled":true}))
+            .0,
+        200
+    );
+    f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Visible notice"}),
+        meta,
+    );
+    wait(|| {
+        frames()
+            .iter()
+            .any(|v| v["op"] == "banner" && v["payload"]["message"] == "Visible notice")
+    });
+    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_paused"],
+        false
+    );
+}
+#[test]
+fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    let agent = f.tool("cito_listen", json!({"about":"Pending work"}), meta.clone());
+    f.tool(
+        "cito_send",
+        json!({"to":agent["listener_id"],"message":"Pending agent work"}),
+        human(),
+    );
+    f.tool(
+        "cito_send",
+        json!({"to":"@self","message":"Human notice"}),
+        meta,
+    );
+    wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
+    let (status, me) = f.action(json!({"op":"query_directory","filter":"me"}));
+    assert_eq!(status, 200);
+    assert_eq!(me["activity_total"], 1);
+    assert_eq!(me["activity_all_total"], 2);
+    assert_eq!(
+        f.action(json!({"op":"ack_signals","filter":"me","ack_all":true}))
+            .0,
+        200
+    );
+    assert!(
+        f.rows("SELECT * FROM local_signals WHERE message='Pending agent work'")[0]
+            ["acknowledged_at_ms"]
+            .is_null()
+    );
+    assert_eq!(
+        f.action(json!({"op":"clear_activity_history","filter":"me"}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.rows("SELECT * FROM local_signals WHERE activity_hidden=0")
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.action(json!({"op":"clear_activity_history","filter":"all"}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"ack_signals","filter":"all","ack_all":true}))
+            .0,
+        200
+    );
+    let pending = f
+        .rows("SELECT * FROM local_signals WHERE message='Pending agent work'")
+        .remove(0);
+    assert_eq!(pending["activity_hidden"], 1);
+    assert!(pending["acknowledged_at_ms"].is_null());
+    let ledger = f
+        .db("hub.sqlite")
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+            &[pending["signal_id"].clone()],
+        )
+        .unwrap();
+    assert!(ledger[0]["acked_at_ms"].is_null());
+    assert_eq!(f.action(json!({"op":"get_snapshot"})).1["unread_count"], 0);
+}
+#[test]
 fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -2892,7 +3026,7 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["to"], sender["public_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
-    // A per-message deletion acknowledges and removes just one row.
+    // Clearing hides Activity rows without deleting the delivery ledger.
     assert_eq!(
         f.action(json!({"op":"clear_activity_history","hub":"local","signal_id":"missing"}))
             .0,
@@ -2906,11 +3040,14 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
         .0,
         200
     );
-    let remaining = f.rows("SELECT * FROM local_signals");
+    let remaining = f.rows("SELECT * FROM local_signals WHERE activity_hidden=0");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0]["message"], "Human reply");
     assert_eq!(f.action(json!({"op":"clear_activity_history"})).0, 200);
-    assert!(f.rows("SELECT * FROM local_signals").is_empty());
+    assert!(f
+        .rows("SELECT * FROM local_signals WHERE activity_hidden=0")
+        .is_empty());
+    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
     f.tool("cito_unlisten", json!({}), meta.clone());
     assert_eq!(
         f.tool(
@@ -4194,7 +4331,15 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
         assert_eq!(status, 200, "{response}");
         let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
         for (key, value) in fields.as_object().unwrap() {
-            assert_eq!(&config["hubs"]["work"][key], value);
+            let canonical = match key.as_str() {
+                "client_id" | "oidcClientId" => "clientId",
+                "oidcIssuer" => "issuer",
+                key => key,
+            };
+            assert_eq!(&config["hubs"]["work"][canonical], value);
+        }
+        for key in ["client_id", "oidcIssuer", "oidcClientId", "request_id"] {
+            assert!(config["hubs"]["work"].get(key).is_none());
         }
         let (ok, out, err) = f.command(NATIVE, &["setup", "--status", "--json"], "");
         assert!(ok, "{fields}: {err}");

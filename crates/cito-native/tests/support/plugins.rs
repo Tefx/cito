@@ -1237,6 +1237,34 @@ fn telegram_token_rotation_discards_pending_updates_and_restarts_offset_zero() {
     wait(|| f.exited(p));
 }
 #[test]
+fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webhooks() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let api = root().join("crates/cito-native/tests/support/telegram-api.py");
+    let server = f.spawn("python3", &[api.to_str().unwrap()], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap();
+    let p = f.spawn(TELEGRAM, &[], &[]);
+    for (token, expected) in [("poll409", "webhook"), ("poll401", "replace the Bot Token")] {
+        f.send(p,json!({"op":"configure","hub_config":{"botToken":token,"apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+        wait(|| {
+            f.frames(p).iter().any(|v| {
+                v["op"] == "health" && v["error"].as_str().is_some_and(|e| e.contains(expected))
+            })
+        });
+    }
+    f.send(p,json!({"op":"configure","hub_config":{"botToken":"healthy","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|v| v["op"] == "health" && v["error"].is_null())
+    });
+    let methods = fs::read_to_string(f.home.join("api-methods.jsonl")).unwrap();
+    assert!(!methods.contains("deleteWebhook"));
+    f.eof(p);
+    wait(|| f.exited(p));
+}
+#[test]
 fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -1257,6 +1285,16 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
             .find(|v| v["op"] == "rpc_result")
             .unwrap()["instruction"],
         "Send \"/start cito-abcdefghij\" to @example_bot"
+    );
+    let pairing = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "rpc_result")
+        .unwrap();
+    assert_eq!(pairing["bot_username"], "example_bot");
+    assert_eq!(
+        pairing["pairing_url"],
+        "https://t.me/example_bot?start=cito-abcdefghij"
     );
     f.send(
         p,
@@ -1332,7 +1370,10 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         assert_eq!(frame["ok"], false);
         assert_eq!(frame["retryable"], matches!(status, 408 | 429 | 500..=599));
         assert_eq!(frame["effect_unknown"], false);
-        assert_eq!(frame["error"], "Rejected by fixture");
+        assert_eq!(
+            frame["error"],
+            format!("Telegram sendMessage HTTP {status}: Rejected by fixture")
+        );
     }
     f.send(p,json!({"op":"deliver","delivery_id":"uncertain","config":{"chatId":"uncertain"},"signal":{"message":"Review"}}));
     let frame = outcome("uncertain");

@@ -84,6 +84,9 @@ impl LocalState {
             if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "updated_at") {
                 c.execute("ALTER TABLE local_listeners ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0", &[])?;
             }
+            if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "activity_hidden") {
+                c.execute("ALTER TABLE local_signals ADD COLUMN activity_hidden INTEGER NOT NULL DEFAULT 0", &[])?;
+            }
             // Opening another handle must never steal a live dispatch lease. Frozen
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
@@ -434,7 +437,7 @@ impl LocalState {
         filter: &str,
         query: &str,
     ) -> Result<(Vec<Value>, u64, u64), String> {
-        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' '||s.from_user||' '||s.from_host_name||' '||s.from_title||' '||COALESCE(l.title,'')||' '||s.signal_id||' '||s.listener_id||' '||CASE WHEN l.harness='human' THEN 'you' ELSE '' END),lower(?))>0)";
+        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' @'||s.from_user||' '||s.from_host_name||' '||s.from_title||' '||COALESCE(l.title,'')||' '||s.signal_id||' '||s.listener_id||' '||COALESCE(s.from_harness,'')||' '||COALESCE(l.harness,'')||' '||COALESCE(s.from_listener_id,'')||' @'||s.from_user||'/'||COALESCE(s.from_harness,'')||'#'||CASE WHEN s.from_listener_id LIKE 'c_%' THEN substr(s.from_listener_id,3) ELSE COALESCE(s.from_listener_id,'') END||' @'||COALESCE(l.owner_user,'')||'/'||COALESCE(l.harness,'')||'#'||CASE WHEN s.listener_id LIKE 'c_%' THEN substr(s.listener_id,3) ELSE s.listener_id END||' '||CASE WHEN l.harness='human' THEN 'you' ELSE '' END),lower(?))>0)";
         let query = query.trim();
         let params = [json!(filter), json!(filter), json!(query), json!(query)];
         self.db.transaction(|c| {

@@ -33,6 +33,9 @@
   ],
   "pairing": {
     "supported": true,
+    "manualDisclosure": true,
+    "openUrlLabel": "Open in Telegram ↗",
+    "privateIdentityField": "chatId",
     "actionLabel": "Pair Account…",
     "helpText": "Generate a one-time /start code to link your Telegram chat (expires in 10 minutes)."
   },

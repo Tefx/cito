@@ -81,6 +81,175 @@ impl<'a> ClosedLoop<'a> {
 }
 
 #[test]
+fn v39_banner_material_hover_close_badges_and_late_mute_are_independent() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = f.spawn(
+        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
+        &[],
+        &[("CITO_BANNER_DISMISS_MS", "200")],
+    );
+    let mut frame = state();
+    frame["settings"] = settings();
+    frame["harnesses"] = json!([{"id":"sender","display_name":"Sender","sf_symbol":"terminal","tint":"purple","kind":"agent","tier":"stable","order":0},{"id":"target","display_name":"Target","sf_symbol":"star.fill","tint":"blue","kind":"agent","tier":"stable","order":1}]);
+    f.send(p, frame.clone());
+    let mut notification = banner();
+    notification["payload"]["target_harness"] = json!("human");
+    notification["payload"]["from_harness"] = json!("sender");
+    f.send(p, notification.clone());
+    f.send(
+        p,
+        json!({"op":"test_hover","id":"banner_root","hovered":true}),
+    );
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, p, Some(appearance));
+        let root = node(&s, "banner_items", "banner_root");
+        assert_eq!(
+            (root["width"].clone(), root["height"].clone()),
+            (json!(380), json!(112))
+        );
+        assert_eq!(root["radius"], 14);
+        assert_eq!(root["live_material_valid"], true);
+        assert_eq!(root["accessibility_role"], "AXGroup");
+        assert!(node(&s, "banner_items", "banner_semantic_pill").is_null());
+        let badge = node(&s, "banner_items", "banner_icon_badge");
+        assert_eq!(
+            (
+                badge["x"].clone(),
+                badge["y"].clone(),
+                badge["width"].clone()
+            ),
+            (json!(14), json!(68), json!(30))
+        );
+        assert!(!node(&s, "banner_items", "plugin_symbol:sender").is_null());
+    }
+    f.send(
+        p,
+        json!({"op":"test_oracle_calibration","kind":"banner_material"}),
+    );
+    assert_eq!(
+        node(
+            &inspect_unchecked(&f, p, None),
+            "banner_items",
+            "banner_root"
+        )["live_material_valid"],
+        false
+    );
+    f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
+    // Coalescing must not re-arm a timer while the pointer remains on the card.
+    f.send(p, notification.clone());
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let s = inspect(&f, p);
+    assert_eq!(s["banner_visible"], true);
+    assert_eq!(s["banner_hovered"], true);
+    assert_eq!(
+        node(&s, "banner_items", "banner_semantic_pill")["children"][0]["text"],
+        "×2"
+    );
+    control(&f, p, "banner_close");
+    let s = inspect(&f, p);
+    assert_eq!(s["banner_visible"], false);
+    assert_eq!(s["banner_hovered"], false);
+    assert_eq!(s["directory_open"], false);
+    assert!(!f
+        .frames(p)
+        .iter()
+        .any(|v| v["op"] == "wake_clicked" || v["op"] == "ack_signals"));
+    notification["payload"]["target_harness"] = json!("target");
+    f.send(p, notification.clone());
+    let s = inspect(&f, p);
+    assert!(!node(&s, "banner_items", "plugin_symbol:target").is_null());
+    f.send(
+        p,
+        json!({"op":"test_hover","id":"banner_root","hovered":false}),
+    );
+    wait(|| inspect(&f, p)["banner_visible"] == false);
+    frame["settings"]["desktop_banner_enabled"] = json!(false);
+    f.send(p, frame);
+    f.send(p, notification);
+    assert_eq!(inspect(&f, p)["banner_visible"], false);
+}
+#[test]
+fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
+    cfg["channels"][0]["pairing_open_url_label"] = json!("Open Pairing Link ↗");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    let s = inspect(&f, p);
+    assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+    assert!(node(&s, "settings_items", "save_channel:channel").is_null());
+    assert_eq!(
+        node(&s, "settings_items", "test_channel:channel")["hidden"],
+        true
+    );
+    control(&f, p, "manual_channel:channel");
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "settings_items", "test_channel:channel")["enabled"],
+        false
+    );
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"42"}),
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "test_channel:channel")["enabled"],
+        true
+    );
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"channel_field:channel:account","value":""}),
+    );
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "test_channel:channel")["enabled"],
+        false
+    );
+    control(&f, p, "manual_channel:channel");
+    control(&f, p, "pair_channel:channel");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "channel_pair")
+        .unwrap();
+    let mut pair = json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":"unrelated","code":"cito-example","instruction":"Send /start cito-example","pairing_command":"/start cito-example","pairing_url":"https://example.com/pair"});
+    f.send(p, pair.clone());
+    assert_ne!(inspect(&f, p)["clipboard"], "/start cito-example");
+    pair["request_id"] = request["request_id"].clone();
+    f.send(p, pair);
+    let s = inspect(&f, p);
+    assert_eq!(s["clipboard"], "/start cito-example");
+    assert_eq!(
+        node(&s, "settings_items", "copy_pair_command:channel")["text"],
+        "✓ Copied"
+    );
+    assert_eq!(
+        node(&s, "settings_items", "open_pair_url:channel")["text"],
+        "Open Pairing Link ↗"
+    );
+    assert!(node(&s, "settings_items", "pair_channel:channel").is_null());
+    cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-example");
+    cfg["channels"][0]["pairing_command"] = json!("/start cito-example");
+    cfg["channels"][0]["pairing_url"] = json!("https://example.com/pair");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "copy_pair_command:channel"
+        )["text"],
+        "✓ Copied"
+    );
+}
+#[test]
 fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_composer() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -501,7 +670,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     // The same form remains open through validation and daemon errors, and closes
     // only on a real settings/state acknowledgement of the saved Hub.
     l.control("toggle_host_hub");
-    l.until(|s| node(s, "settings_items", "toggle_host_hub")["text"] == "● Sharing");
+    l.until(|s| node(s, "settings_items", "toggle_host_hub")["text"] == "Sharing");
     l.input("host_hub_port", &port().to_string());
     l.control("apply_host_hub_port");
     l.until(|s| node(s, "settings_items", "apply_host_hub_port")["text"] == "✓ Saved");
@@ -1207,13 +1376,16 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
         } else if surface == "directory" {
             1120
         } else if surface == "banner" {
-            776
+            760
         } else {
             760
         }
     );
     if surface == "settings" {
         assert_eq!(height, 920);
+    }
+    if surface == "banner" {
+        assert_eq!(height, 224);
     }
     assert!(height > 100);
     inspect_as(f, p, appearance);
@@ -1253,7 +1425,10 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     assert_eq!(node(&s, "items", &row_id)["height"], 64);
     let pause = node(&s, "items", &format!("stop:{id}"));
     assert_eq!(pause["text"], "Pause");
-    assert_eq!(pause["tooltip"], "Pause personal notifications");
+    assert_eq!(
+        pause["tooltip"],
+        "Pause all human channels on this Hub, including this Mac and external channels"
+    );
     assert!(node(&s, "items", &format!("switch_hub:{id}")).is_null());
     l.control(&format!("stop:{id}"));
     l.until(|s| !node(s, "items", "listen_human").is_null());
@@ -1862,7 +2037,7 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
             assert!(height > 60.0 && height < 108.0, "{height}");
         }
         if harness == "human" {
-            assert_eq!(s["wake_action_text"], "Click to reply in Cito ↩");
+            assert_eq!(s["wake_action_text"], "Reply in Cito ↩");
             assert_eq!(s["composer_open"], true);
             assert_eq!(s["composer_target"], "personal:sender-abcdefgh2345");
             assert_eq!(s["composer_reply_signal_id"], signal);
@@ -1871,7 +2046,7 @@ fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() 
                 "↵ Send    ⎋ Cancel Reply"
             );
         } else {
-            assert_eq!(s["wake_action_text"], "Click to view in Activity ↗");
+            assert_eq!(s["wake_action_text"], "View in Activity ↗");
             assert_eq!(s["composer_open"], false);
             assert_eq!(s["composer_target"], "");
             assert_eq!(
@@ -2153,7 +2328,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert!(node(&s, "settings_items", "onboarding_banner").is_null());
     assert_eq!(
         node(&s, "settings_items", "settings_channel_status:channel")["text"],
-        "○ Not Set Up"
+        "Not Set Up"
     );
     let hub = node(&s, "settings_items", "stratum_hub:channel");
     assert!(node(&s, "settings_items", "stratum_user:channel").is_null());
@@ -2192,7 +2367,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "stratum_hub_status:channel")["text"],
-        "● Bot Ready"
+        "Bot Ready"
     );
     assert!(!node(&s, "settings_items", "clear_channel_service:channel").is_null());
     assert!(
@@ -2225,7 +2400,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert!(node(&paired, "settings_items", "channel_field:channel:account").is_null());
     assert_eq!(
         node(&paired, "settings_items", "channel_summary:channel")["text"],
-        "● Paired (@alice · account-42)"
+        "Paired · account-42"
     );
     control(&f, p, "edit_user_channel:channel");
     assert!(!node(
@@ -2368,11 +2543,11 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         assert_eq!(
             toggle["text"],
             if error.is_some() {
-                "● Failed"
+                "Failed"
             } else if running {
-                "● Sharing"
+                "Sharing"
             } else {
-                "● Starting"
+                "Starting"
             }
         );
         assert_eq!(toggle["width"], sharing_toggle["width"]);
@@ -2380,7 +2555,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         let prominent = node(&status, "settings_items", "settings_tab:hubs")["background"].clone();
         let invite = node(&status, "settings_items", "copy_hub_invite");
         if running && error.is_none() {
-            assert_eq!(toggle["background"], prominent);
+            assert_ne!(toggle["background"], prominent);
             assert_eq!(invite["background"], prominent);
         } else {
             assert_ne!(invite["background"], prominent);
@@ -2488,7 +2663,18 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         login["x"].as_f64().unwrap() + login["width"].as_f64().unwrap() + 6.0,
         edit["x"].as_f64().unwrap()
     );
-    assert!(node(&s, "settings_items", "copy_host_hub_token").is_null());
+    let token = node(&s, "settings_items", "copy_host_hub_token");
+    assert!(!token.is_null());
+    let apply = node(&s, "settings_items", "apply_host_hub_port");
+    let access = node(&s, "settings_items", "toggle_host_hub_auth");
+    assert!(
+        apply["x"].as_f64().unwrap() + apply["width"].as_f64().unwrap()
+            < token["x"].as_f64().unwrap()
+    );
+    assert!(
+        token["x"].as_f64().unwrap() + token["width"].as_f64().unwrap()
+            < access["x"].as_f64().unwrap()
+    );
     render_png(&f, p, "settings", "settings_hubs_token.png");
     control(&f, p, "copy_hub_invite");
     assert_eq!(
@@ -2579,32 +2765,35 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     frame["settings"] = cfg.clone();
     f.send(p, frame.clone());
     for op in ["state", "settings"] {
-        // Editing a new intent ends prior acknowledgement feedback, even when
-        // duplicate daemon refreshes arrive during the feedback timer.
+        let current = cfg["host_hub"]["port"].as_i64().unwrap();
         f.send(
             p,
-            json!({"op":"test_settings_input","id":"host_hub_port","value":"4291"}),
+            json!({"op":"test_settings_input","id":"host_hub_port","value":current.to_string()}),
         );
         f.send(p, json!({"op":"settings","settings":cfg}));
+        let unchanged = inspect(&f, p);
         assert_eq!(
-            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-            "Apply"
-        );
-        f.send(
-            p,
-            json!({"op":"test_settings_input","id":"host_hub_port","value":"4291"}),
+            node(&unchanged, "settings_items", "apply_host_hub_port")["enabled"],
+            false
         );
         let before = f.frames(p).len();
         control(&f, p, "apply_host_hub_port");
+        inspect(&f, p);
         assert_eq!(
-            node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-            "Apply",
-            "Do not report success before the daemon acknowledges the save"
+            f.frames(p).len(),
+            before,
+            "Unchanged Apply must not emit a mutation"
         );
+        let draft = current + 1;
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":draft.to_string()}),
+        );
+        control(&f, p, "apply_host_hub_port");
         wait(|| {
             f.frames(p)[before..]
                 .iter()
-                .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291)
+                .any(|v| v["op"] == "set_host_hub" && v["port"] == draft)
         });
         let submitted = f.frames(p)[before..]
             .iter()
@@ -2625,15 +2814,16 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             "Apply",
             "An uncorrelated {op} snapshot cannot acknowledge the save"
         );
+        cfg["host_hub"]["port"] = json!(draft);
         f.send(
             p,
             json!({"op":"settings","request_id":submitted["request_id"],"settings":cfg}),
         );
         assert_eq!(
             node(&inspect(&f, p), "settings_items", "apply_host_hub_port")["text"],
-            "✓ Saved",
-            "An unchanged correlated acknowledgement must settle the save"
+            "✓ Saved"
         );
+        frame["settings"] = cfg.clone();
     }
     f.send(
         p,
@@ -2664,7 +2854,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert_eq!(toggles.len(), 2);
     for action in toggles {
         assert_eq!(action["op"], "set_host_hub");
-        assert_eq!(action["port"], cfg["host_hub"]["port"]);
+        assert_eq!(action["port"], 5302);
         assert!(
             action["request_id"].is_null(),
             "Toggles cannot own the port save"
@@ -2698,7 +2888,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     assert_eq!(node(&s, "settings_items", "host_hub_port")["text"], "5302");
     f.send(
         p,
-        json!({"op":"test_settings_input","id":"host_hub_port","value":"5301"}),
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"5303"}),
     );
     control(&f, p, "apply_host_hub_port");
     inspect(&f, p);
@@ -2741,6 +2931,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         "Apply"
     );
     cfg["host_hub"]["error"] = Value::Null;
+    cfg["host_hub"]["port"] = json!(5303);
     f.send(
         p,
         json!({"op":"settings","request_id":retry["request_id"],"settings":cfg}),
@@ -2777,7 +2968,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         control(&f, p, &format!("settings_hub_auth:{mode}"));
         let s = inspect(&f, p);
         let track = node(&s, "settings_items", "settings_hub_auth_track");
-        assert_eq!(track["radius"], 7);
+        assert_eq!(track["radius"], 13);
         assert_eq!(track["border_width"], 0);
         assert!((track["background"][3].as_f64().unwrap() - 0.06).abs() < 0.001);
         for candidate in ["none", "token", "oidc"] {
@@ -2828,6 +3019,8 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         cfg["hubs"][0]["user"] = json!(handle);
         cfg["channels"][0]["display_name"] = json!(display_name);
         cfg["channels"][0]["display_label"] = json!(handle);
+        cfg["channels"][0]["fields"][1]["value"] = json!(handle);
+        cfg["channels"][0]["fields"][1]["configured"] = json!(true);
         cfg["channels"][0]["configured"] = json!(true);
         cfg["channels"][0]["status"] = json!("ready");
         for app in cfg["apps"].as_array_mut().unwrap() {
@@ -2888,19 +3081,16 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         control(&f, p, "settings_tab:channels");
         let s = stress_inspect();
         tooltip(&s, "settings_items", &display_name);
-        tooltip(&s, "settings_items", &format!("● Connected ({handle})"));
+        assert_eq!(
+            node(&s, "settings_items", "channel_summary:channel")["text"],
+            format!("Paired · {handle}")
+        );
         let summary = node(&s, "settings_items", "channel_summary:channel");
-        assert!(summary["tooltip"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("@{handle}")));
+        assert!(summary["tooltip"].as_str().unwrap().contains(&handle));
         control(&f, p, "edit_user_channel:channel");
         let expanded = stress_inspect();
         let title = node(&expanded, "settings_items", "stratum_user_title:channel");
-        assert_eq!(
-            title["text"],
-            format!("2. Your Personal Account (@{handle})")
-        );
+        assert_eq!(title["text"], format!("Your Personal Account (@{handle})"));
         assert_eq!(title["tooltip"], title["text"]);
         f.send(p, json!({"op":"error","error":error}));
         let s = stress_inspect();
@@ -3102,9 +3292,9 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
         assert_eq!(
             node(&s, "settings_items", "settings_channel_status:channel")["text"],
             if configured {
-                "● Connected"
+                "Connected"
             } else {
-                "● Bot Gateway Ready"
+                "Account Not Paired"
             }
         );
     }
@@ -3144,7 +3334,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             );
             assert_eq!(
                 node(&s, "settings_items", "settings_channel_status:channel")["text"],
-                if ok { "○ Not Set Up" } else { "⚠ Error" }
+                if ok { "Not Set Up" } else { "⚠ Error" }
             );
             if action == "clear_channel_service" {
                 // Clear Token becomes available once the hub service is configured.
@@ -3169,9 +3359,9 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             assert_eq!(
                 node(&s, "settings_items", "settings_channel_status:channel")["text"],
                 if action == "clear_channel_service" {
-                    "● Bot Gateway Ready"
+                    "Account Not Paired"
                 } else {
-                    "○ Not Set Up"
+                    "Not Set Up"
                 }
             );
         }
@@ -3427,7 +3617,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     wait(|| {
         f.frames(p)
             .iter()
-            .any(|v| v["op"] == "set_host_hub" && v["port"] == 4291 && v["auth_mode"] == "token")
+            .any(|v| v["op"] == "set_host_hub" && v["port"] == 5300 && v["auth_mode"] == "token")
     });
     control(&f, p, "edit_hub:work");
     let s = inspect(&f, p);
@@ -3685,11 +3875,9 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     assert_eq!(accent["x"], 4);
     assert_eq!(accent["height"], 44);
     assert!(!children.iter().any(|n| n["id"] == "online_presence_dot"));
-    assert!(
-        node(&s, "directory_items", "act_title:personal:sig_unread")["text"]
-            .as_str()
-            .unwrap()
-            .ends_with(" · Just now")
+    assert_eq!(
+        node(&s, "directory_items", "act_time:personal:sig_unread")["text"],
+        "Just now"
     );
     assert_eq!(
         node(&s, "directory_items", "act_msg:personal:sig_unread")["width"],
@@ -4246,10 +4434,10 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(candidate["height"], 44);
     let title = node(&s, "items", "candidate_title:fixture:candidate-0");
     let path = node(&s, "items", "candidate_cwd:fixture:candidate-0");
-    assert_eq!(title["width"], 260);
-    assert_eq!(title["x"], 32);
-    assert_eq!(path["width"], 260);
-    assert_eq!(path["x"], 32);
+    assert_eq!(title["width"], 244);
+    assert_eq!(title["x"], 46);
+    assert_eq!(path["width"], 244);
+    assert_eq!(path["x"], 46);
     assert_eq!(title["y"], 23);
     assert_eq!(path["y"], 6);
     assert_eq!(path["text"], "/tmp/work · main");
@@ -4459,6 +4647,12 @@ fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
     for key in ["low_contrast_labels", "jargon_leaks", "address_mismatches"] {
         assert_eq!(snapshot[key], json!([]), "{key}");
     }
+    if snapshot["banner_visible"] == true {
+        assert_eq!(
+            node(&snapshot, "banner_items", "banner_root")["live_material_valid"],
+            true
+        );
+    }
     snapshot
 }
 fn nodes(tree: &Value) -> Vec<Value> {
@@ -4574,11 +4768,6 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(node(&s, "items", "header")["height"], 40);
     assert_eq!(node(&s, "items", "footer")["height"], 36);
     assert_eq!(node(&s, "items", "drawer:personal")["hidden"], true);
-    control(&f, p, "hub:personal");
-    assert_eq!(
-        node(&inspect(&f, p), "items", "drawer:personal")["hidden"],
-        true
-    );
     control(&f, p, "hub:personal");
     assert_eq!(
         node(&inspect(&f, p), "items", "drawer:personal")["hidden"],
@@ -4980,7 +5169,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
     assert_eq!(
-        node(&s, "directory_items", "composer_error")["text"],
+        node(&s, "directory_items", "composer_send")["text"],
         "Sending…"
     );
     control(&f, p, "composer_send");
@@ -5068,7 +5257,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     let s = inspect(&f, p);
     assert_eq!(s["composer_open"], true);
     assert_eq!(
-        node(&s, "directory_items", "composer_error")["text"],
+        node(&s, "directory_items", "composer_send")["text"],
         "Sending…"
     );
     control(&f, p, "composer_send");
@@ -5151,8 +5340,8 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
         "Same reply text"
     );
     assert_eq!(
-        node(&s, "directory_items", "composer_error")["text"],
-        "Sent. Your newer draft is preserved."
+        node(&s, "directory_items", "composer_send")["text"],
+        "✓ Sent"
     );
     control(&f, p, "composer_send");
     inspect(&f, p);
@@ -5383,7 +5572,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             .as_array()
             .unwrap()
             .contains(&json!("banner_data:1")));
-        // A human banner's fixed title is chrome and must be measured for truncation.
+        // Human metadata shares the same visible, user-data-aware first line.
         let mut chrome = banner();
         chrome["payload"]["target_harness"] = json!("human");
         f.send(p, chrome);
@@ -5391,9 +5580,9 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             node(
                 &inspect_unchecked(&f, p, Some(appearance)),
                 "banner_items",
-                "banner_chrome:0"
+                "banner_data:1"
             )["text"],
-            "Cito · Direct Message"
+            "@alice · sender → You"
         );
         let mut user_titles = state();
         user_titles["listeners"][0]["title"] = json!("Human Node");
@@ -5483,7 +5672,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                     (368.0 - (54.0 + subtitle_width).max(138.0)).max(44.0),
                 ))
             }
-            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 406.0)),
+            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 402.0)),
             "settings" => Some(("settings_items", "channel_hub_strip", 6.0, 398.0)),
             _ => None,
         };
@@ -5501,7 +5690,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                     .map(|p| p["width"].as_f64().unwrap())
                     .sum::<f64>()
                     + spacing * pills.len().saturating_sub(1) as f64
-                    + if pills.is_empty() { 0.0 } else { 6.0 };
+                    + if pills.is_empty() { 0.0 } else { 4.0 };
                 let width = view["width"].as_f64().unwrap();
                 assert!(
                     width <= allocated + 0.5,
@@ -5512,20 +5701,20 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                     "{id} must hug its pills without an empty tail: {view}"
                 );
                 if let Some(first) = pills.first() {
-                    assert!((first["x"].as_f64().unwrap() - 3.0).abs() < 0.5);
+                    assert!((first["x"].as_f64().unwrap() - 2.0).abs() < 0.5);
                     let end = pills
                         .iter()
                         .map(|pill| pill["x"].as_f64().unwrap() + pill["width"].as_f64().unwrap())
                         .fold(0.0, f64::max);
                     assert!(
-                        (intrinsic - end - 3.0).abs() < 0.5,
-                        "{id} must have exactly 3pt trailing padding: {view}"
+                        (intrinsic - end - 2.0).abs() < 0.5,
+                        "{id} must have exactly 2pt trailing padding: {view}"
                     );
                 }
                 let x = view["x"].as_f64().unwrap();
                 match surface {
                     "menu" => assert!((x + width - 368.0).abs() < 0.5),
-                    "directory" => assert_eq!(x, 138.0),
+                    "directory" => assert_eq!(x, 142.0),
                     "settings" => assert_eq!(x, 102.0),
                     _ => unreachable!(),
                 }
@@ -5553,6 +5742,8 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     cfg["apps"][0]["display_name"] = json!("Pi Coding Agent");
     cfg["channels"][0]["id"] = json!("telegram");
     cfg["channels"][0]["display_name"] = json!("Telegram");
+    cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
+    cfg["channels"][0]["pairing_open_url_label"] = json!("Open in Telegram ↗");
     cfg["channels"][0]["fields"][1]["label"] = json!("Chat ID");
     cfg["channels"][0]["fields"][1]["placeholder"] = json!("Paired via /start or enter Chat ID");
     cfg["host_hub"]["enabled"] = json!(true);
@@ -5804,7 +5995,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             for (appearance, dark) in [("light", false), ("dark", true)] {
                 let snapshot = inspect_as(&f, p, Some(appearance));
                 let track = node(&snapshot, "settings_items", "channel_hub_strip");
-                assert_eq!(track["radius"], 11);
+                assert_eq!(track["radius"], 13);
                 assert_eq!(track["draws_background"], true);
                 let red = track["background"][0].as_f64().unwrap();
                 assert!(if dark { red > 0.9 } else { red < 0.1 });
@@ -5838,7 +6029,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 "Copy Invite Code"
             );
             assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
-            assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 136);
+            assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 148);
             assert_eq!(
                 node(&s, "settings_items", "paste_hub_invite")["text"],
                 "Paste Invite Code"
@@ -5853,7 +6044,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 136);
+    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 148);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 8);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 252);
     assert_eq!(node(&s, "settings_items", "hub_visibility_caption")["text"], "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.");
@@ -5899,7 +6090,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     assert_eq!(
         node(&s, "settings_items", "settings_footer")["hidden"],
-        true
+        false
     );
     capture("settings", "settings_uninstall_modal");
     control(&f, p, "cancel_uninstall_all");
@@ -5925,23 +6116,27 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
         notification["payload"]["from_display_address"] = json!("bob/pi#abcd");
         f.send(p, notification);
         let s = inspect(&f, p);
-        let title_id = if kind == "human" {
-            "banner_chrome:0"
-        } else {
-            "banner_data:0"
-        };
+        let title_id = "banner_data:1";
         assert_eq!(
             node(&s, "banner_items", title_id)["text"],
             if kind == "human" {
-                "Cito · Direct Message"
+                "@bob · Review → You"
             } else {
-                "Cito · Review"
+                "@bob → Review"
             }
         );
         assert_eq!(node(&s, "banner_items", title_id)["hidden"], false);
+        if wake {
+            assert!(node(&s, "banner_items", "banner_semantic_pill").is_null());
+        } else {
+            assert_eq!(
+                node(&s, "banner_items", "banner_semantic_pill")["children"][0]["text"],
+                "Queued"
+            );
+        }
         assert_eq!(
-            node(&s, "banner_items", "banner_semantic_pill")["children"][0]["text"],
-            if wake { "Notification" } else { "Queued" }
+            node(&s, "banner_items", "banner_root")["live_material_valid"],
+            true
         );
         capture("banner", name);
     }
@@ -6008,7 +6203,7 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
     );
     assert_eq!(
         node(&modal, "settings_items", "settings_footer")["hidden"],
-        true
+        false
     );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["settings_open"], true);
@@ -6248,7 +6443,12 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             true
         );
     }
-    assert!(f.rows("SELECT signal_id FROM local_signals").is_empty());
+    assert!(f
+        .rows("SELECT signal_id FROM local_signals WHERE activity_hidden=0")
+        .is_empty());
+    assert!(!f
+        .rows("SELECT signal_id FROM local_signals WHERE activity_hidden=1")
+        .is_empty());
 }
 
 #[test]
@@ -6268,7 +6468,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
         let status = node(&s, "settings_items", &format!("settings_app_status:{id}"));
         assert_eq!(status["hidden"], !configured);
         if configured {
-            assert_eq!(status["text"], "● Connected");
+            assert_eq!(status["text"], "Connected");
         }
         assert_eq!(
             node(&s, "settings_items", &format!("setup_app:{id}"))["text"],
@@ -6366,7 +6566,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     );
     assert_eq!(
         node(&s, "settings_items", "settings_channels_tab")["hidden"],
-        true
+        false
     );
     assert!(!f.frames(p).iter().any(|v| v["op"] == "setup_uninstall_all"));
     control(&f, p, "settings_tab:hubs");
