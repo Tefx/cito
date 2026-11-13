@@ -10465,7 +10465,7 @@ phases:
   - id: v39.impl
     name: V39 U1–U6 Notification Banner Readability, Orthogonal Human/Banner Routing,
       Pairing-First Telegram Flow, Activity/Directory Scope & Settings/Visual Closure
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement finalized docs/DESIGN.md §24 (U1–U6, §24.1–§24.3) across\
       \ src/macos/cito-ui.swift, crates/cito-native/src/core/{daemon,hub,state,setup,config,cli,receiver}.rs,\
@@ -10608,6 +10608,31 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-13T20:05:39.704378Z'
+    done_at: '2026-11-13T21:58:50.750017+00:00'
+    evidence: 'Artifact:
+
+      - Commit: fc27a8ee47ce305d0ac69fa0aeb39ed358960e71 (fast-forward merged into
+      main; retained candidate ref refs/vectl/candidates/v39.impl)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check -> Passed (exit 0)
+
+      - Run: cargo build --release -> Passed (0 warnings; staged bin/cito-native-darwin-arm64,
+      bin/cito-ui-darwin-arm64, plugins/*/bin/*)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test --workspace -> 285 passed, 4 ignored, 0 failed
+
+      - Screenshots: Refreshed all 8 Retina PNGs (site/assets/screenshots/*.png) after
+      fixing renderPNG 2x CTM/output-bitmap corner-clipping, visually verified all
+      8 destination PNGs and Light captures.
+
+
+      Spec link:
+
+      - docs/DESIGN.md §24 (§24.1–§24.3, U1–U6)'
   - id: v39.review
     name: 'V39 Contract-and-Simplicity Review & Fix, Live Light/Dark Banner Verification
       and Push to main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
