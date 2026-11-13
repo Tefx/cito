@@ -574,6 +574,144 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
         })?;
         child_gone(&f)?;
     }
+    for probe in [true, false] {
+        for cleanup in ["success", "retry", "newer", "enqueue_failure"] {
+            let f = Fixture::new()?;
+            f.seed("durable-revocation")?;
+            let id = string(&f.row, "listener_id");
+            let (mut remote, revision) = f.client.kv_get(id)?.ok_or("Missing initial binding")?;
+            remote["owner_token"] = json!("sibling-owner");
+            remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
+            f.client.kv_save(id, &remote, Some(revision))?;
+            let fail = matches!(cleanup, "retry" | "newer");
+            if cleanup == "enqueue_failure" {
+                f.state.db.execute("CREATE TRIGGER reject_detach BEFORE INSERT ON pending_hub_detaches BEGIN SELECT RAISE(ABORT,'fixture queue failure'); END",&[])?;
+            }
+            let fault = if fail {
+                "import sqlite3\nwith sqlite3.connect(os.path.join(root,'hub','hub.sqlite')) as db: db.execute('ALTER TABLE hub_kv RENAME TO unavailable_hub_kv')\n"
+            } else {
+                ""
+            };
+            let response = if probe {
+                "print(json.dumps({'ok':True,'status':'closed_definitive'}))"
+            } else {
+                "print(json.dumps({'ok':True,'outcome':'session_switched'}))"
+            };
+            let plugin=f.plugin(&format!("with open(os.path.join(root,'entered'),'w') as f: f.write(str(os.getpid()))\n{fault}{response}"));
+            let result = if probe {
+                probe_listener(&f.state, &f.client, &f.row, &plugin, &f.dir)
+            } else {
+                f.dispatch(&plugin)
+            };
+            // Restore the sandbox backend before inspecting even a failing result.
+            if fail {
+                f.hub_db()?
+                    .execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
+            }
+            child_gone(&f)?;
+            let row = f
+                .state
+                .listener("local", id)?
+                .ok_or("Missing revoked row")?;
+            let pending = f.state.db.query(
+                "SELECT * FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+                &[json!(id)],
+            )?;
+            if cleanup == "enqueue_failure" {
+                assert!(result.is_err_and(|error| error.contains("fixture queue failure")));
+                assert_eq!(
+                    row["status"], "ACTIVE",
+                    "Revocation must roll back when retry intent cannot commit"
+                );
+                assert_eq!(row["owner_token"], f.row["owner_token"]);
+                assert!(pending.is_empty());
+                assert_eq!(
+                    f.client.kv_get(id)?.ok_or("Missing unchanged binding")?.0["channels"]
+                        ["host:fixture"]["state"],
+                    "ACTIVE"
+                );
+                continue;
+            }
+            assert_eq!(
+                result.is_ok(),
+                probe || !fail,
+                "Keep probe/dispatch cleanup error semantics"
+            );
+            assert_eq!(row["status"], "UNLISTENED");
+            assert_eq!(row["binding_generation"], f.row["binding_generation"]);
+            assert_eq!(row["owner_token"], f.row["owner_token"]);
+            if fail {
+                assert_eq!(
+                    pending.len(),
+                    1,
+                    "Failed detach must retain retry intent; probe={probe}"
+                );
+                assert_eq!(pending[0]["hub_url"], "local://");
+                assert_eq!(
+                    f.client.kv_get(id)?.ok_or("Missing orphan")?.0["channels"]["host:fixture"]
+                        ["state"],
+                    "ACTIVE"
+                );
+                if cleanup == "newer" {
+                    // A genuine replacement can exist remotely while this state handle
+                    // still retains the old UNLISTENED owner and retry intent.
+                    let replacement = LocalState::open(&f.dir.join("replacement"))?;
+                    register_listener(
+                        &replacement,
+                        &f.client,
+                        "host",
+                        &json!({"about":"New owner"}),
+                        &json!({"harness":"fixture","session_id":"session","title":"Target","cwd":f.dir,"endpoint_pid":null}),
+                    )?;
+                    let before = f.client.kv_get(id)?;
+                    assert_ne!(
+                        before.as_ref().ok_or("Missing replacement")?.0["channels"]["host:fixture"]
+                            ["owner_token"],
+                        f.row["owner_token"]
+                    );
+                    super::super::daemon::DaemonService::reconcile_unlistened(
+                        &f.state, &f.client, "host",
+                    )?;
+                    assert_eq!(
+                        f.client.kv_get(id)?,
+                        before,
+                        "Old retry intent cannot detach a newer owner"
+                    );
+                } else {
+                    super::super::daemon::DaemonService::reconcile_unlistened(
+                        &f.state, &f.client, "host",
+                    )?;
+                }
+            } else {
+                assert!(
+                    pending.is_empty(),
+                    "Successful immediate detach must clear retry intent"
+                );
+            }
+            assert!(f
+                .state
+                .db
+                .query(
+                    "SELECT 1 FROM pending_hub_detaches WHERE hub='local' AND listener_id=?",
+                    &[json!(id)]
+                )?
+                .is_empty());
+            let after = f.client.kv_get(id)?.ok_or("Missing final binding")?.0;
+            assert_eq!(
+                after["channels"]["host:fixture"]["state"],
+                if cleanup == "newer" {
+                    "ACTIVE"
+                } else {
+                    "UNLISTENED"
+                }
+            );
+            assert_eq!(
+                after["channels"]["sibling:fixture"],
+                remote["channels"]["sibling:fixture"]
+            );
+            assert_eq!(after["owner_token"], remote["owner_token"]);
+        }
+    }
     let f = Fixture::new()?;
     f.seed("s")?;
     let worker = f.worker(f.plugin(&WAIT.replace("'delivered'", "'session_switched'")));

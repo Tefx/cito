@@ -782,7 +782,7 @@ impl DaemonService {
         self.ensure_human_nodes()?;
         Ok(())
     }
-    fn reconcile_unlistened(
+    pub(super) fn reconcile_unlistened(
         state: &LocalState,
         client: &HubClient,
         host_id: &str,
@@ -2050,7 +2050,7 @@ impl DaemonService {
     }
     fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
         let slot = self.slot(hub)?.clone();
-        // Serialize clearing pause intent with deferred detaches and enrollment.
+        // Serialize enabling fresh discovery with deferred detaches and enrollment.
         let _registration = slot
             .registration
             .lock()
@@ -2064,7 +2064,6 @@ impl DaemonService {
         })?;
         if enabled {
             self.state.db.transaction(|c| {
-                c.execute("DELETE FROM pending_hub_detaches WHERE hub=? AND listener_id IN (SELECT listener_id FROM local_listeners WHERE hub=? AND harness!='human' AND status='UNLISTENED')", &[json!(hub),json!(hub)])?;
                 c.execute("UPDATE local_listeners SET updated_at=? WHERE hub=? AND harness!='human' AND status='UNLISTENED'", &[json!(now_ms()),json!(hub)])?;
                 Ok(())
             })?;
@@ -5653,7 +5652,8 @@ root = pathlib.Path(__file__).parent
 request = json.loads(sys.stdin.readline())
 result = dict(ok=True)
 if request['op'] == 'discover_sessions':
-    result['sessions'] = [json.loads((root / 'candidate.json').read_text())]
+    candidates = json.loads((root / 'candidate.json').read_text())
+    result['sessions'] = candidates if isinstance(candidates, list) else [candidates]
 elif request['op'] == 'setup_inspect':
     marker = root / 'revoke.json'
     if marker.exists():
@@ -5858,11 +5858,46 @@ print(json.dumps(result), flush=True)
                             .map_err(|_| "Auto-Listen worker panicked")??;
                         Ok(())
                     });
-                    if backend_unavailable {
+                    let toggled = if backend_unavailable {
+                        let toggled = (|| -> Result<(), String> {
+                            if b.kv_get(id).is_ok() {
+                                return Err(
+                                    "Expected the Hub to remain unavailable during enable".into()
+                                );
+                            }
+                            service.mutate_config(|raw| {
+                                if raw["hubs"].is_null() {
+                                    raw["hubs"] = json!({"local":{"url":"local://"}});
+                                }
+                                raw["hubs"]["work"] = b.config.clone();
+                                Ok(())
+                            })?;
+                            fs::write(dir.join("candidate.json"), "[]")
+                                .map_err(|e| e.to_string())?;
+                            service.set_auto_listen("work", false)?;
+                            service.set_auto_listen("work", true)?;
+                            service.refresh_available()?;
+                            if state.db.query("SELECT 1 FROM pending_hub_detaches WHERE hub='work' AND listener_id=?",&[json!(id)])?.len()!=1 {
+                                return Err("Enabling Auto-Listen lost cleanup for an undiscovered session".into());
+                            }
+                            if service.session_activity.as_ref().is_some_and(|activity| {
+                                activity
+                                    .candidates()
+                                    .any(|row| row["session_id"] == session)
+                            }) {
+                                return Err("Empty discovery retained the revoked session".into());
+                            }
+                            Ok(())
+                        })();
+                        // Restore the backend even if the enable/discovery assertions fail.
                         remote_db
                             .execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
-                    }
+                        toggled
+                    } else {
+                        Ok(())
+                    };
                     outcome?;
+                    toggled?;
                     let revoked = state
                         .listener("local", id)?
                         .ok_or("Missing revoked source")?;
@@ -5938,6 +5973,10 @@ print(json.dumps(result), flush=True)
                     }
                     for slot in service.slots.values_mut() {
                         slot.config["autoListen"] = json!(false);
+                    }
+                    if fail_detach {
+                        fs::write(dir.join("candidate.json"), candidate.to_string())
+                            .map_err(|e| e.to_string())?;
                     }
                     if rebind {
                         let mut next = candidate.clone();
