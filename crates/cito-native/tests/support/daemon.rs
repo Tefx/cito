@@ -239,6 +239,39 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         "No intermediate re-enrollment from the pre-revocation cache"
     );
     assert_eq!(old["status"], "UNLISTENED");
+    // Exercise wake-dispatch revocation independently of the probe path above.
+    let dispatched=f.rows("SELECT listener_id,owner_token FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0].clone();
+    f.db("state.sqlite").execute("UPDATE local_listeners SET updated_at=1 WHERE harness='fixture' AND session_id='replacement'",&[]).unwrap();
+    config["outcome"] = json!("session_switched");
+    config["sessions"] = json!([{"harness":"fixture","session_id":"dispatch-replacement","title":"After dispatch","cwd":"/tmp","endpoint_pid":std::process::id()}]);
+    fs::write(&options, config.to_string()).unwrap();
+    let (status,result)=f.action(json!({"op":"send_signal","hub":"local","to":dispatched["listener_id"],"message":"Dispatch identity switch","request_id":"dispatch-switch-send"}));
+    assert_eq!(status, 200, "{result}");
+    wait(|| {
+        f.rows("SELECT status FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0]["status"]=="UNLISTENED"
+    });
+    assert!(f.rows("SELECT updated_at FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0]["updated_at"].as_u64().unwrap()>1);
+    assert!(
+        !f.rows("SELECT signal_id FROM local_signals WHERE held_reason='session_switched'")
+            .is_empty(),
+        "The wake response, not a probe, revoked this binding"
+    );
+    config["session_id"] = json!("dispatch-replacement");
+    config["outcome"] = json!("delivered");
+    fs::write(&options, config.to_string()).unwrap();
+    wait(|| {
+        snapshot()["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "fixture" && r["session_id"] == "dispatch-replacement")
+    });
+    let old=&f.rows("SELECT status,owner_token FROM local_listeners WHERE harness='fixture' AND session_id='replacement'")[0];
+    assert_eq!(old["status"], "UNLISTENED");
+    assert_eq!(
+        old["owner_token"], dispatched["owner_token"],
+        "Dispatch revocation must reject the pre-revocation discovery cache"
+    );
 }
 
 #[test]

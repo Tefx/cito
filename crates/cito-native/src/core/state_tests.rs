@@ -600,6 +600,31 @@ fn unlisten_racing_final_completion_cannot_business_ack_or_resurrect_dispatch() 
         .query("SELECT * FROM pending_hub_acks", &[])?
         .is_empty());
     assert!(f.listener()?["dispatcher_token"].is_null());
+    f.state.db.execute(
+        "UPDATE local_listeners SET status='ACTIVE',updated_at=1",
+        &[],
+    )?;
+    let active = f.listener()?;
+    assert!(f.state.pause_listener_for(&active)?);
+    let paused = f.listener()?;
+    assert_eq!(paused["status"], "UNLISTENED");
+    assert!(paused["updated_at"].as_u64().is_some_and(|stamp| stamp > 1));
+    assert!(!f
+        .state
+        .fence_listener_for(&active, "fenced_before_dispatch")?);
+    assert_eq!(
+        f.listener()?["updated_at"],
+        paused["updated_at"],
+        "A stale captured status cannot restamp a newer pause"
+    );
+    assert!(f
+        .state
+        .fence_listener_for(&paused, "fenced_before_dispatch")?);
+    assert_eq!(
+        f.listener()?["status"],
+        "FENCED_INACTIVE",
+        "Profile changes must still fence a retained pause"
+    );
     Ok(())
 }
 

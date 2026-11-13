@@ -122,6 +122,14 @@ impl SessionActivity {
         }
     }
 
+    /// Revoke cached enrollment authority while preserving presentation and workers.
+    pub fn mark_stale(&mut self, harness: &str) {
+        for provider in self.discovery.iter_mut().filter(|p| p.plugin.id == harness) {
+            provider.stale = true;
+            provider.due = Instant::now();
+        }
+    }
+
     pub fn discovery_pending(&self) -> bool {
         self.discovery
             .iter()

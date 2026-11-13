@@ -1938,7 +1938,11 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         json!(" \n "),
         json!("Human"),
         json!("Human receiver"),
+        json!("Human Node"),
+        json!(" hUmAn NoDe "),
+        json!("You"),
         json!("You (@alice)"),
+        json!(" yOu (@ALICE) "),
         json!(" Release approvals "),
     ] {
         let mut paused = frame.clone();
@@ -1986,13 +1990,26 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         human["display_address"] = json!("personal:@alice");
         let row_id = format!("session:{}", human["scoped_id"].as_str().unwrap());
         paused["listeners"] = json!([human]);
-        f.send(p, paused);
+        f.send(p, paused.clone());
         let active = inspect(&f, p);
         assert_eq!(node(&active, "items", &row_id)["height"], height);
         assert_eq!(
             node(&active, "items", &row_id)["children"][0]["height"],
             height - 6
         );
+        if raw_about
+            .as_str()
+            .is_some_and(|about| about.trim().to_ascii_lowercase().starts_with("you"))
+        {
+            paused["listeners"][0]["title"] = json!("Review desk");
+            paused["listeners"][0]["custom_title"] = json!(true);
+            f.send(p, paused);
+            assert_eq!(
+                node(&inspect(&f, p), "items", &row_id)["height"],
+                64,
+                "Generic Human aliases remain generic under a custom display title"
+            );
+        }
     }
     f.send(p, frame.clone());
     let paused_card = node(&s, "items", "human_paused_card")["children"][0].clone();
@@ -4026,7 +4043,11 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         "mark_all_activity_read",
         "copy_activity_message",
     ] {
-        f.send(p,json!({"op":"error","source_op":op,"request_id":"mutation-request","error":format!("Could not complete {op}")}));
+        // Legacy untagged failures retain their routing; tagged overlap is exercised below.
+        f.send(
+            p,
+            json!({"op":"error","source_op":op,"error":format!("Could not complete {op}")}),
+        );
         let s = inspect(&f, p);
         assert_eq!(
             node(&s, "directory_items", "directory_warning")["hidden"],
@@ -4070,6 +4091,70 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         );
         control(&f, p, "dir_mode:activity");
     }
+    // Retry B owns feedback before either response arrives.
+    let latest_delete = || {
+        inspect(&f, p);
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "clear_activity_history")
+            .unwrap()
+    };
+    control(&f, p, "delete_activity:sig-0");
+    let a = latest_delete();
+    control(&f, p, "delete_activity:sig-0");
+    let b = latest_delete();
+    assert!(!a["request_id"].as_str().unwrap().is_empty());
+    assert_ne!(a["request_id"], b["request_id"]);
+    for op in ["error", "state"] {
+        f.send(p,json!({"op":op,"ok":false,"source_op":"clear_activity_history","request_id":a["request_id"],"error":"Late failure from A"}));
+        assert_eq!(
+            node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+            true,
+            "Superseded {op} failure must not own B's feedback"
+        );
+    }
+    f.send(p,json!({"op":"state","ok":false,"source_op":"clear_activity_history","request_id":b["request_id"],"error":"Current failure from B"}));
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        false,
+        "Matching ok:false mutation results must be visible"
+    );
+    let mut success = frame.clone();
+    success["ok"] = json!(true);
+    success["source_op"] = json!("clear_activity_history");
+    success["request_id"] = a["request_id"].clone();
+    f.send(p, success.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        false,
+        "A's success cannot settle B's error"
+    );
+    success["request_id"] = b["request_id"].clone();
+    f.send(p, success);
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        true,
+        "B's matching state success settles its feedback"
+    );
+    f.send(p,json!({"op":"error","source_op":"clear_activity_history","request_id":a["request_id"],"error":"A after B completed"}));
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        true
+    );
+    control(&f, p, "delete_activity:sig-0");
+    let c = latest_delete();
+    f.send(p,json!({"op":"error","source_op":"clear_activity_history","request_id":c["request_id"],"error":"Current failure from C"}));
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        false
+    );
+    f.send(p,json!({"op":"directory","ok":true,"source_op":"clear_activity_history","request_id":c["request_id"],"peers":[]}));
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "directory_warning")["hidden"],
+        true,
+        "A matching Directory receipt also settles the action independently of query correlation"
+    );
 }
 
 #[test]
@@ -6030,6 +6115,32 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             );
         }
     }
+    // Real production actions must emit non-coalesced success receipts, not just passive snapshots.
+    l.pump();
+    for op in [
+        "ack_signals",
+        "mark_activity_read",
+        "mark_all_activity_read",
+        "clear_activity_history",
+    ] {
+        let request = format!("round4-{op}");
+        let (status, result) = f.action(json!({"op":op,"request_id":request,"ack_all":true}));
+        assert_eq!(status, 200, "{result}");
+        wait(|| {
+            l.pump();
+            l.frames.iter().any(|frame| {
+                frame["op"] == "state"
+                    && frame["ok"] == true
+                    && frame["request_id"] == request
+                    && frame["source_op"] == op
+            })
+        });
+        assert_eq!(
+            node(&inspect(&f, l.ui), "directory_items", "directory_warning")["hidden"],
+            true
+        );
+    }
+    assert!(f.rows("SELECT signal_id FROM local_signals").is_empty());
 }
 
 #[test]

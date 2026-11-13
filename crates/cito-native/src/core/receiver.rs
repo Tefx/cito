@@ -441,7 +441,7 @@ fn dispatch_listener(
                         false,
                         false,
                     )?;
-                    local.db.execute("UPDATE local_listeners SET status='UNLISTENED' WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
+                    local.db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
                     detached?;
                 }
                 "driver_unavailable" if written => {

@@ -101,8 +101,9 @@ pub fn register_listener(
 pub(super) fn distinct_human_about<'a>(about: &'a str, title: &str, user: &str) -> Option<&'a str> {
     let about = about.trim();
     (!about.is_empty()
-        && !about.eq_ignore_ascii_case("Human")
-        && !about.eq_ignore_ascii_case("Human receiver")
+        && !["Human", "Human receiver", "Human Node", "You"]
+            .iter()
+            .any(|label| about.eq_ignore_ascii_case(label))
         && !about.eq_ignore_ascii_case(title.trim())
         && !about.eq_ignore_ascii_case(&format!("You (@{user})")))
     .then_some(about)
@@ -120,6 +121,10 @@ pub fn register_automatic_human(
         .lock()
         .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
     let mut args = args.clone();
+    let user = string(&client.identity, "owner_user");
+    if distinct_human_about(string(&args, "about"), string(caller, "title"), user).is_none() {
+        args["about"] = json!("Human receiver");
+    }
     if let Some(row) =
         local_node(state, client, "human", "default")?.filter(|row| row["status"] == "UNLISTENED")
     {
@@ -154,15 +159,14 @@ pub fn register_automatic_human(
         if !resumed {
             return Err("BINDING_REQUIRED: Human enrollment was explicitly disabled".into());
         }
-        let user = string(&client.identity, "owner_user");
-        let about = distinct_human_about(string(&row, "about"), string(&row, "title"), user)
-            .or_else(|| {
-                remote.as_ref().and_then(|(remote, _)| {
-                    distinct_human_about(string(remote, "about"), string(remote, "title"), user)
-                })
-            })
-            .unwrap_or("Human receiver");
-        args["about"] = json!(about);
+        if distinct_human_about(string(&args, "about"), string(caller, "title"), user).is_none() {
+            // Resolve remote fallback inside the CAS loop so a retry uses current metadata.
+            args["about"] =
+                json!(
+                    distinct_human_about(string(&row, "about"), string(&row, "title"), user)
+                        .unwrap_or("Human receiver")
+                );
+        }
     }
     register_locked(state, client, host_id, &args, caller, false)
 }
@@ -258,6 +262,19 @@ fn register_locked(
         {
             return Err("STALE_GENERATION: Listener collision".into());
         }
+        let about = if harness == "human"
+            && !resume_human
+            && distinct_human_about(about, title, string(&client.identity, "owner_user")).is_none()
+        {
+            distinct_human_about(
+                string(&previous, "about"),
+                string(&previous, "title"),
+                string(&client.identity, "owner_user"),
+            )
+            .unwrap_or("Human receiver")
+        } else {
+            about
+        };
         let scope = args["scope"]
             .as_str()
             .or_else(|| local.as_ref().and_then(|row| row["scope"].as_str()))
@@ -547,7 +564,7 @@ mod tests {
                     &first,
                     &client,
                     "first-host",
-                    &json!({"about":"Human","scope":scope}),
+                    &json!({"about":"Release approvals","scope":scope}),
                     &caller,
                 )?;
                 let id = string(&initial, "canonical_listener_id");
@@ -564,11 +581,18 @@ mod tests {
                     &second,
                     &client,
                     "second-host",
-                    &json!({"about":"Human"}),
+                    &json!({"about":"Human receiver"}),
                     &caller,
                 )?;
                 assert_eq!(attached["canonical_listener_id"], id);
                 assert_eq!(attached["scope"], scope);
+                assert_eq!(attached["about"], "Release approvals");
+                assert_eq!(
+                    second
+                        .listener("work", id)?
+                        .ok_or("Missing fresh host row")?["about"],
+                    "Release approvals"
+                );
                 assert_eq!(
                     attached["binding_generation"],
                     initial["binding_generation"]
@@ -581,6 +605,7 @@ mod tests {
                 );
                 let remote = client.kv_get(id)?.ok_or("Missing remote registration")?.0;
                 assert_eq!(remote["scope"], scope);
+                assert_eq!(remote["about"], "Release approvals");
                 assert_eq!(remote["channels"]["first-host:human"]["state"], "ACTIVE");
                 assert_eq!(remote["channels"]["second-host:human"]["state"], "ACTIVE");
                 let second_row = second
@@ -598,21 +623,37 @@ mod tests {
                     &second_row,
                     "second-host:human"
                 ));
-                register_automatic_human(
-                    &second,
-                    &client,
-                    "second-host",
-                    &json!({"about":"Human"}),
-                    &caller,
-                )?;
-                let refreshed = second
-                    .listener("work", id)?
-                    .ok_or("Missing refreshed row")?;
-                assert_eq!(
-                    refreshed["binding_generation"],
-                    second_row["binding_generation"]
-                );
-                assert_eq!(refreshed["owner_token"], second_row["owner_token"]);
+                for about in [
+                    "Human",
+                    "Human receiver",
+                    "Human Node",
+                    " hUmAn NoDe ",
+                    "You",
+                    "You (@alice)",
+                    " \n",
+                ] {
+                    register_automatic_human(
+                        &second,
+                        &client,
+                        "second-host",
+                        &json!({"about":about}),
+                        &caller,
+                    )?;
+                    let refreshed = second
+                        .listener("work", id)?
+                        .ok_or("Missing refreshed row")?;
+                    assert_eq!(
+                        refreshed["binding_generation"],
+                        second_row["binding_generation"]
+                    );
+                    assert_eq!(refreshed["owner_token"], second_row["owner_token"]);
+                    assert_eq!(refreshed["about"], "Release approvals", "{about}");
+                    assert_eq!(
+                        client.kv_get(id)?.ok_or("Missing remote about")?.0["about"],
+                        "Release approvals",
+                        "{about}"
+                    );
+                }
                 let (mut reg, rev) = client.kv_get(id)?.ok_or("Missing registration")?;
                 reg["channels"]["hub:fixture"] =
                     json!({"host_id":"hub","state":"ACTIVE","updated_at_ms":0});
@@ -708,6 +749,11 @@ mod tests {
                 // Generic local metadata must not erase distinct metadata saved remotely.
                 for (local_about, remote_about, expected) in [
                     (" \n", "Remote approvals", "Remote approvals"),
+                    ("Human Node", "Release approvals", "Release approvals"),
+                    (" hUmAn NoDe ", "Release approvals", "Release approvals"),
+                    ("You", "Release approvals", "Release approvals"),
+                    ("Human receiver", "You", "Human receiver"),
+                    ("Human", "Human Node", "Human receiver"),
                     ("You (@alice)", "Human", "Human receiver"),
                 ] {
                     assert!(first.pause_listener_for(&first_resumed)?);

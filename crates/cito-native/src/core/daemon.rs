@@ -2085,7 +2085,7 @@ impl DaemonService {
     }
 
     /// Opt-in enrollment uses discovery liveness, never historical SQLite rows.
-    fn auto_listen(&self) -> Result<(), String> {
+    fn auto_listen(&mut self) -> Result<(), String> {
         let hubs: Vec<_> = self
             .slots
             .iter()
@@ -2099,6 +2099,7 @@ impl DaemonService {
         let Some(activity) = &self.session_activity else {
             return Ok(());
         };
+        let mut stale_harnesses = HashSet::new();
         for candidate in activity.candidates().filter(|candidate| {
             candidate["endpoint_pid"]
                 .as_u64()
@@ -2122,15 +2123,24 @@ impl DaemonService {
                         candidate["session_id"].clone(),
                     ],
                 )?;
-                if rows.iter().any(|row| {
-                    super::auth::principal_ids_equal(
-                        string(row, "principal_id"),
-                        string(&slot.identity, "principal_id"),
-                    ) && (string(row, "status") == "ACTIVE"
-                        || row["status"] == "UNLISTENED"
-                            && candidate["discovered_at"].as_u64().unwrap_or(0)
-                                <= row["updated_at"].as_u64().unwrap_or(0))
+                let owned: Vec<_> = rows
+                    .iter()
+                    .filter(|row| {
+                        super::auth::principal_ids_equal(
+                            string(row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        )
+                    })
+                    .collect();
+                if owned.iter().any(|row| row["status"] == "ACTIVE") {
+                    continue;
+                }
+                if owned.iter().any(|row| {
+                    row["status"] == "UNLISTENED"
+                        && candidate["discovered_at"].as_u64().unwrap_or(0)
+                            <= row["updated_at"].as_u64().unwrap_or(0)
                 }) {
+                    stale_harnesses.insert(string(&candidate, "harness").to_owned());
                     continue;
                 }
                 // One unavailable endpoint must not prevent enrollment on other Hubs.
@@ -2139,6 +2149,11 @@ impl DaemonService {
                 {
                     eprintln!("cito auto-listen {hub}: {error}");
                 }
+            }
+        }
+        if let Some(activity) = self.session_activity.as_mut() {
+            for harness in stale_harnesses {
+                activity.mark_stale(&harness);
             }
         }
         Ok(())
@@ -2543,8 +2558,16 @@ impl DaemonService {
             .unwrap_or(true)
     }
     fn push_ui(&self) {
+        self.push_ui_result(None);
+    }
+    fn push_ui_result(&self, action: Option<&Value>) {
         if self.ui.is_some() {
-            if let Ok(frame) = self.snapshot() {
+            if let Ok(mut frame) = self.snapshot() {
+                if let Some(action) = action {
+                    frame["ok"] = json!(true);
+                    frame["request_id"] = action["request_id"].clone();
+                    frame["source_op"] = action["op"].clone();
+                }
                 self.emit(frame);
             }
         }
@@ -2598,7 +2621,20 @@ impl DaemonService {
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
             self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
         }
-        self.push_ui();
+        if result.is_ok()
+            && matches!(
+                string(action, "op"),
+                "delete_activity"
+                    | "clear_activity_history"
+                    | "ack_signals"
+                    | "mark_activity_read"
+                    | "mark_all_activity_read"
+            )
+        {
+            self.push_ui_result(Some(action));
+        } else {
+            self.push_ui();
+        }
         result
     }
     fn record_hub_result(
@@ -6031,6 +6067,8 @@ mod tests {
             json!({"op":"settings","hub":"local","request_id":"personal-save"}),
             json!({"op":"settings","hub":"local","confirm_hub_save":true}),
             json!({"op":"settings","hub":"local","ok":true,"source_op":"setup_save_hub"}),
+            json!({"op":"state","ok":true,"source_op":"clear_activity_history","request_id":"delete-a"}),
+            json!({"op":"state","ok":true,"source_op":"ack_signals","request_id":"read-b"}),
             json!({"op":"composer_result","ok":true}),
             json!({"op":"pair_code","code":"123456"}),
         ];

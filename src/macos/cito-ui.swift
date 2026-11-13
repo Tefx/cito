@@ -326,7 +326,7 @@ func distinctAbout(_ raw: String?, title: String, user: String) -> String? {
     let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     let lower = value.lowercased()
     return isGenericSessionLabel(value, user: user) || lower == title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        || ["coding session", "human receiver"].contains(lower) ? nil : value
+        || ["coding session", "human receiver", "you", "you (@\(user.lowercased()))"].contains(lower) ? nil : value
 }
 struct HarnessMeta: Decodable, Equatable {
     let id: String
@@ -1309,9 +1309,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var directoryQueryError: String?
     var directoryActionError: String?
     var directoryActionErrorSourceOp: String?
+    var latestDirectoryActionRequestId: String?
+    let directoryActionOps = ["delete_activity", "clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"]
     var directoryError: String? { directoryActionError ?? directoryQueryError }
-    func clearDirectoryActionError(sourceOp: String? = nil) {
-        guard sourceOp == nil || sourceOp == directoryActionErrorSourceOp else { return }
+    func clearDirectoryActionError() {
         let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError.map(presentationError) : nil
         directoryActionError = nil; directoryActionErrorSourceOp = nil
         if let oldCopyError = oldCopyError {
@@ -1349,6 +1350,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var serverActivityFilter: String?
     var serverActivityQuery = ""
     func copyText(_ text: String, control: MenuControl? = nil, feedback: String = "✓ Copied") {
+        if let pending = pendingMessageCopy, latestDirectoryActionRequestId == pending.requestId { latestDirectoryActionRequestId = nil }
         pendingMessageCopy = nil
         clipboardString = text
         appPasteboard.clearContents()
@@ -1356,9 +1358,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         control?.copied(feedback)
     }
     func showMessageCopyError(_ message: String) {
+        let ownsFeedback = latestDirectoryActionRequestId != nil && pendingMessageCopy?.requestId == latestDirectoryActionRequestId
+        pendingMessageCopy = nil
+        guard ownsFeedback else { return }
         directoryActionError = message; directoryActionErrorSourceOp = "copy_activity_message"
         updateDirectoryWarnings()
-        pendingMessageCopy = nil
         if directoryComposerBar?.isHidden != false {
             directorySummaryLabel?.stringValue = presentationError(message)
             directorySummaryLabel?.toolTip = presentationError(message)
@@ -1947,12 +1951,23 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if frame.ok == false || frame.op == "error", let requestId = frame.request_id {
             pendingChannelValues.removeValue(forKey: requestId)
         }
+        let actionFailure = (frame.op == "error" || frame.ok == false) && directoryActionOps.contains(frame.source_op ?? "")
+        if actionFailure, let requestId = frame.request_id, !requestId.isEmpty,
+           requestId != latestDirectoryActionRequestId {
+            if requestId == pendingMessageCopy?.requestId { pendingMessageCopy = nil }
+            return
+        }
+        if ["state", "directory"].contains(frame.op), frame.ok != false, frame.error == nil,
+           let latest = latestDirectoryActionRequestId, frame.request_id == latest {
+            clearDirectoryActionError()
+            latestDirectoryActionRequestId = nil
+        }
         if frame.op == "activity_message" {
             guard var pending = pendingMessageCopy, frame.request_id == pending.requestId else { return }
             if let message = frame.message, frame.part == pending.nextPart, frame.error == nil, frame.ok != false {
                 pending.buffer += message; pending.nextPart += 1
                 if frame.complete != false {
-                    clearDirectoryActionError(sourceOp:"copy_activity_message")
+                    if frame.request_id == latestDirectoryActionRequestId { clearDirectoryActionError() }
                     let index = directoryMode == "activity" ? activityFilteredItems.firstIndex { $0.hub == pending.hub && $0.signal_id == pending.signalId } : nil
                     let cell = index.flatMap { directoryTableView?.view(atColumn:0,row:$0,makeIfNecessary:false) as? DirectoryPeerCellView }
                     let sameItem = cell?.activityItem?.hub == pending.hub && cell?.activityItem?.signal_id == pending.signalId
@@ -1977,7 +1992,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             pendingComposer = nil
             return
         }
-        if frame.op == "error" {
+        if frame.op == "error" || actionFailure {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
             // A command may emit both its result and a trailing generic error.
@@ -2017,7 +2032,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             else if ["query_directory", "open_directory"].contains(sourceOp) {
                 if frame.request_id == nil || frame.request_id == directoryRequestId { directoryQueryError = error; updateDirectoryWarnings() }
             }
-            else if directoryVisible && ["delete_activity", "clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"].contains(sourceOp) {
+            else if directoryVisible && directoryActionOps.contains(sourceOp) {
                 directoryActionError = error; directoryActionErrorSourceOp = sourceOp; updateDirectoryWarnings()
             }
             else if settingsVisible || pendingHubSave != nil { settingsBannerError = error }
@@ -2161,10 +2176,16 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
     func emit(_ action: [String: Any], userInitiated: Bool = true) {
         let operation = action["op"] as? String ?? ""
-        if userInitiated && ["delete_activity","clear_activity_history","ack_signals","mark_all_activity_read"].contains(operation) { clearDirectoryActionError() }
         let passive = ["query_directory", "refresh_available"].contains(operation)
         if userInitiated && !passive && menuBannerError != nil { menuBannerError = nil; rebuild() }
         var outgoing = action
+        if directoryActionOps.contains(operation) {
+            // Full-message copy already owns this ID through its multipart buffer.
+            let request = (action["request_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
+            outgoing["request_id"] = request
+            latestDirectoryActionRequestId = request
+            clearDirectoryActionError()
+        }
         if let op = action["op"] as? String, ["channel_save", "save_hub_service"].contains(op),
            let id = action["channel_id"] as? String, let values = action["values"] as? [String: String] {
             let requestId = UUID().uuidString
@@ -4284,6 +4305,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func switchDirectoryMode(_ mode: String) {
+        latestDirectoryActionRequestId = nil
         clearDirectoryActionError()
         directoryMode = mode
         updateDirectoryWarnings()
@@ -4555,7 +4577,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         ensureDirectoryPanel()
         seedDirectoryPeersIfEmpty()
         directoryVisible = true
-        if directoryMode != mode { clearDirectoryActionError() }
+        if directoryMode != mode { latestDirectoryActionRequestId = nil; clearDirectoryActionError() }
         directoryMode = mode
         updateDirectoryWarnings()
         queryDirectory(op:"open_directory")
@@ -4779,7 +4801,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
-        if item.message_truncated != true { clearDirectoryActionError(sourceOp:"copy_activity_message"); copyText(item.message,control:control); return }
+        if item.message_truncated != true { latestDirectoryActionRequestId = nil; clearDirectoryActionError(); copyText(item.message,control:control); return }
         let request = UUID().uuidString
         pendingMessageCopy = PendingMessageCopy(requestId:request,hub:item.hub,signalId:item.signal_id)
         emit(["op":"copy_activity_message","request_id":request,"hub":item.hub,"signal_id":item.signal_id])

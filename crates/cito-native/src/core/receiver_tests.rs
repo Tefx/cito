@@ -483,7 +483,18 @@ fn session_switch_detaches_only_local_channel_and_preserves_sibling_generation(
     remote["owner_token"] = json!("legacy-sibling-owner");
     f.client
         .kv_save(string(&f.row, "listener_id"), &remote, Some(revision))?;
+    f.state
+        .db
+        .execute("UPDATE local_listeners SET updated_at=1", &[])?;
+    let dispatched_at = now_ms();
     f.dispatch(&f.plugin("print(json.dumps({'ok':True,'outcome':'session_switched'}))"))?;
+    let revoked = f
+        .state
+        .listener("local", string(&f.row, "listener_id"))?
+        .ok_or("Missing revoked listener")?;
+    assert!(revoked["updated_at"]
+        .as_u64()
+        .is_some_and(|stamp| stamp > 1 && stamp >= dispatched_at));
     let (after, _) = f
         .client
         .kv_get(string(&f.row, "listener_id"))?
