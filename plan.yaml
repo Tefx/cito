@@ -10203,7 +10203,7 @@ phases:
   name: 'V38 Stage 20: First-Principles Unified Session Model, Recessed Segmented
     Controls, Smart Personal-Hub Scope Suppression & SQLite Busy-Timeout Resilience
     (U1–U5)'
-  status: in_progress
+  status: done
   gate: All U1–U5 requirements in docs/DESIGN.md §22 pass; all inspectMenu() mechanical
     invariants equal [] across all 4 surfaces in Light and Dark appearances; fast
     single-pass contract-and-simplicity review & fix completes; cargo test --workspace
@@ -10297,7 +10297,7 @@ phases:
   - id: v38.review
     name: 'V38 Fast Single-Pass Contract-and-Simplicity Review & Fix and Push to main
       (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: Run a fast SINGLE-PASS contract-and-simplicity review & fix across
       the modified files (do NOT run multi-round review loops), verify cargo test
       --workspace && cargo build --release, and push main to origin (do NOT tag or
@@ -10314,7 +10314,64 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-12T19:13:02.990149Z'
-    done_at: '2026-11-12T19:11:05.300411+00:00'
+    done_at: '2026-11-13T07:20:53.977439+00:00'
+    evidence: 'Completed 11-round convergent contract-and-simplicity review & repair
+      loop for Stage 20 (U1–U5) and Stage 21 (M1–M5) across pathway-auditor, structural-auditor,
+      uiux-auditor, and rust-senior, converging monotonically (13 -> 8 -> 4 -> 3 ->
+      3 -> 2 -> 1 -> 2 -> 1 -> 1 -> 0) to terminal verdicts `Contract & Wiring: CLEAN`
+      and `Simplicity & Economy: ZERO_NEW_ISSUES` across all three auditors at commit
+      `6a664ceb1c5a3337e0faff617245b12f029fd0c3` (commits `61cbaa2`, `5c144e7`, `25a9502`,
+      `a71b292`, `327af17`, `a24ab2d`, `85efeec`, `fc3e550`, `a015924`, `d42f4dc`,
+      `6a664ce`).
+
+
+      Key closures and verifications:
+
+      - M1 (Declarative Horizontal Bar & Pill Strip Layout Engine): `mountPillStrip`
+      (`src/macos/cito-ui.swift:128`) sizes recessed scroll tracks tightly to intrinsic
+      pill content width (`trackWidth = min(frame.width, max(totalWidth, 0))` with
+      symmetric 3pt end padding and overlay scrolling when `totalWidth > frame.width`);
+      `MenuControl.toggleWidth` sizes multi-state toggles across all state labels;
+      regenerated 8 Retina screenshots (`site/assets/screenshots/*.png`, including
+      `wake-card-dark.png`) and verified tight pill tracks visually and via `inspectMenu()`.
+
+      - M2 (Message Copy Fidelity, Banner Outcome Accuracy & Wake Card Polish): `PendingMessageCopy`
+      correlates `copy_message:<signal_id>` by `(requestId, signalId, mode)` and validates
+      returned `signal_id`; desktop banner renders `"Delivered" | "Queued" | "No reply
+      needed"` from wire fields; `jargonPattern` covers `delivery_state`, `signal_id`,
+      `reply_to`, `correlation_id`, `owner_token`, `principal_id`, `binding_generation`,
+      `session_switched`, and `listener_id`.
+
+      - M3 (Plugin Wake Delivery & Setup-Check Error Propagation): Pi, Claude, and
+      Codex plugins propagate structured non-zero exit codes, `ok: false` payloads,
+      and timeouts as `DELIVERY_FAILED`; `check_app_setup` propagates `ok: false`
+      / stderr details into `appSetupErrors[id]`.
+
+      - M4 (Single-Authority Auto-Listen, Probe Recovery, Discovery Freshness & Reconnect-Safe
+      Detach Reconciliation): `LocalState` owns per-Hub `discovery_revisions` and
+      `registration_locks` across clones and client recreations; `DISCOVERY_CUTOFF_SQL`
+      fences both `UNLISTENED` revocations and `ACTIVE` PID rebinds before remote
+      `kv_save` and inside the local SQLite write transaction; `probe_listener`, `dispatch_listener`,
+      and `StaleDiscovery` atomically enqueue `pending_hub_detaches` and clear via
+      `clear_pending_detach_if_current(hub, id, generation, owner)`; `set_auto_listen(true)`
+      preserves pending detaches for omitted sessions; `register_automatic_human`
+      recovers paused and remote non-generic Human `about` metadata; `distinct_human_about`
+      (Rust) and `distinctAbout` (Swift) enforce identical Unicode lowercase generic-label
+      suppression.
+
+      - M5 (Directory & Activity Error Surface, Anchor Scroll & Host Hub Diagnostics):
+      separated `directoryQueryError` and `directoryActionError`, correlated Activity
+      errors by `request_id`, preserved selected-row scroll offset across refreshes,
+      surfaced `hostHubError` in `Settings -> Hubs`, and truncated long address chips
+      cleanly.
+
+      - Commands run: `cargo fmt --all -- --check` (exit 0), `cargo build --release`
+      (exit 0, 0 compiler warnings), `PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH
+      RUST_TEST_THREADS=2 cargo test --workspace` (exit 0: 175 unit tests + 100 integration
+      tests = 275 passed, 4 ignored worker entrypoints, 0 failed).
+
+      - Worktree cleanup: removed `/Users/tefx/Projects/cito/.vectl/worktrees/v38.review`,
+      reclaiming 2 GiB free space (`100 GiB -> 102 GiB`).'
     rejection_reason: 'Execute multi-round convergent contract-and-simplicity review-and-fix
       loop (pathway-auditor + structural-auditor + uiux-auditor against /tmp/cito-design-section23.md
       and /tmp/cito-6persona-full-audit.md) until Contract & Wiring: CLEAN and Simplicity
