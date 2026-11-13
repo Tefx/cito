@@ -1,7 +1,8 @@
 use crate::plugins::{
     expand_home_dir, is_staged_plugins_root, now_ms, random_hex, resolve_builtin_plugins_dir,
-    selected_plugin_dir, staged_plugins_dir, validate_harness_id, validate_https_issuer,
-    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor, CITO_VERSION,
+    selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
+    validate_https_issuer, validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
+    CITO_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -1444,12 +1445,14 @@ pub fn run_setup_cli(args: &[String]) {
                 prev.insert("enabled".into(), json!(en));
                 prev.insert("port".into(), json!(p));
                 if share_hub != Some(false) {
-                    let token = prev
+                    let token = match prev
                         .get("token")
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .unwrap_or_else(|| random_hex(32));
+                    {
+                        Some(token) => token.to_owned(),
+                        None => try_random_hex(32)?,
+                    };
                     prev.insert("token".into(), json!(token));
                 }
                 rest.insert("host_hub".to_string(), Value::Object(prev));

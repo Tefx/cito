@@ -1326,6 +1326,36 @@ final class DirectoryPeerCellView: NSTableCellView {
     }
 }
 
+struct ChannelUiState {
+    var editingGateway = false
+    var editingPersonal = false
+    var manualEntry = false
+    var drafts: [String: String] = [:]
+    var pendingPairRequest: String?
+    var pairingInstruction = ""
+    var pairingCommand: String?
+    var pairingURL: String?
+    var pairCopiedUntil = Date.distantPast
+    var savedUntil: [String: Date] = [:]
+    var testResult: (ok: Bool, detail: String)?
+
+    mutating func resetPersonal() {
+        editingPersonal = false
+        manualEntry = false
+        pendingPairRequest = nil
+        pairingInstruction = ""
+        pairingCommand = nil
+        pairingURL = nil
+        pairCopiedUntil = .distantPast
+        savedUntil.removeValue(forKey: "user")
+    }
+    mutating func resetGateway() {
+        editingGateway = false
+        savedUntil.removeValue(forKey: "hub")
+    }
+    mutating func resetAll() { self = ChannelUiState() }
+}
+
 final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     let headless = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" || ProcessInfo.processInfo.environment["CITO_BANNER_HEADLESS"] == "1"
     let dismissMs = max(1, Int(ProcessInfo.processInfo.environment["CITO_BANNER_DISMISS_MS"] ?? "6000") ?? 6000)
@@ -1547,21 +1577,13 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var addHubIssuer = ""
     var addHubClientId = ""
     var settingsFieldControls: [String: NSTextField] = [:]
-    var channelFieldDrafts: [String: String] = [:]
-    var editingHubGateway = Set<String>()
-    var editingPersonalChannel = Set<String>()
-    var manualChannelEntry = Set<String>()
-    var pendingPairRequests: [String:String] = [:]
-    var pairCopiedUntil: [String:Date] = [:]
-    var channelSavedUntil: [String: Date] = [:]
+    var channelUiStates: [String: ChannelUiState] = [:]
     var appCheckedUntil: [String: Date] = [:]
     var pendingAppChecks: [String: String] = [:]
     var hostHubAddress = "tailscale"
     var pendingChannelValues: [String: (hub: String, channelId: String, scope: String, values: [String: String])] = [:]
     var selectedChannelHub = ""
     var channelSettingsByHub: [String: [ChannelSetupItem]] = [:]
-    var channelInstructions: [String: String] = [:]
-    var channelResults: [String: (ok: Bool, detail: String)] = [:]
     var settingsScrollOffsets: [String: CGFloat] = [:]
     var pendingOnboardingMarker: String?
     var settingsKeyMonitor: Any?
@@ -1570,16 +1592,11 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if !selectedChannelHub.isEmpty { return inventory.contains(selectedChannelHub) ? selectedChannelHub : inventory.first ?? "local" }
         return settings?.hubs.first(where: { $0.is_default && $0.enabled })?.name ?? inventory.first ?? "local"
     }
-    func draftKey(_ fieldId: String) -> String { effectiveChannelHub + "|" + fieldId }
     func clearChannelDrafts(_ channel: ChannelSetupItem, scope: String? = nil, hub: String? = nil) {
+        let key = "\(hub ?? effectiveChannelHub)|\(channel.id)"
         for field in channel.fields where scope == nil || field.scope == scope {
-            channelFieldDrafts.removeValue(forKey: "\(hub ?? effectiveChannelHub)|channel_field:\(channel.id):\(field.key)")
+            channelUiStates[key, default: ChannelUiState()].drafts.removeValue(forKey: field.key)
         }
-    }
-    func resetPersonalChannelUi(_ key: String) {
-        editingPersonalChannel.remove(key)
-        manualChannelEntry.remove(key)
-        pairCopiedUntil.removeValue(forKey:key)
     }
     func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) {
         settings = value
@@ -1615,7 +1632,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         channelSettingsByHub[target] = value.channels ?? []
         for channel in value.channels ?? [] {
             let key=target + "|" + channel.id
-            if channel.configured && (previousChannels.contains(where: { $0.id == channel.id && !$0.configured }) || (!(channelInstructions[key] ?? "").isEmpty && (channel.pairing_instruction ?? "").isEmpty)) { resetPersonalChannelUi(key) }
+            var ui = channelUiStates[key] ?? ChannelUiState()
+            if channel.configured && (previousChannels.contains(where: { $0.id == channel.id && !$0.configured }) || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) { ui.resetPersonal() }
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
             var acknowledged: (scope: String, values: [String: String], unchanged: Bool)?
@@ -1623,32 +1641,33 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                let entry = pendingChannelValues[savedRequest], entry.hub == target && entry.channelId == channel.id {
                 pendingChannelValues.removeValue(forKey: savedRequest)
                 let unchanged = channel.fields.filter { $0.scope == entry.scope }.allSatisfy { field in
-                    let draft = channelFieldDrafts[target + "|channel_field:\(channel.id):\(field.key)"]
+                    let draft = ui.drafts[field.key]
                     if let sent = entry.values[field.key] { return (draft ?? field.value ?? "") == sent }
                     return draft == nil || draft == (field.value ?? "")
                 }
                 acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
                 if unchanged {
-                    channelSavedUntil["\(target)|\(channel.id)|\(entry.scope)"] = Date().addingTimeInterval(1.5)
-                    if entry.scope == "user" && channel.configured { resetPersonalChannelUi(key) }
-                } else { channelSavedUntil.removeValue(forKey:"\(target)|\(channel.id)|\(entry.scope)") }
+                    if entry.scope == "user" && channel.configured { ui.resetPersonal() }
+                    ui.savedUntil[entry.scope] = Date().addingTimeInterval(1.5)
+                } else { ui.savedUntil.removeValue(forKey: entry.scope) }
                 DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
                     if self?.settingsVisible == true { self?.rebuildSettingsPanel() }
                 }
             }
             for field in channel.fields {
-                let draft = target + "|channel_field:\(channel.id):\(field.key)"
-                if let sent = acknowledged?.values[field.key], channelFieldDrafts[draft] == sent {
-                    channelFieldDrafts.removeValue(forKey: draft)
-                } else if field.type != "secret" && channelFieldDrafts[draft] == (field.value ?? "") {
-                    channelFieldDrafts.removeValue(forKey: draft)
+                if let sent = acknowledged?.values[field.key], ui.drafts[field.key] == sent {
+                    ui.drafts.removeValue(forKey: field.key)
+                } else if field.type != "secret" && ui.drafts[field.key] == (field.value ?? "") {
+                    ui.drafts.removeValue(forKey: field.key)
                 }
             }
             if acknowledged?.scope == "hub" && acknowledged?.unchanged == true && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
-                editingHubGateway.remove(key)
+                ui.editingGateway = false
             }
-            if let instruction=channel.pairing_instruction, !instruction.isEmpty { channelInstructions[key]=instruction }
-            else { channelInstructions.removeValue(forKey:key) }
+            ui.pairingInstruction = channel.pairing_instruction ?? ""
+            ui.pairingCommand = channel.pairing_command ?? channel.pairing_code
+            ui.pairingURL = channel.pairing_url
+            channelUiStates[key] = ui
         }
     }
     var uninstallConfirmOpen = false
@@ -1949,7 +1968,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if ["test_focus_field", "test_settings_input"].contains(op), let id = object["id"] as? String, id.hasPrefix("channel_field:") {
                 let parts = id.split(separator: ":")
-                if parts.count > 1 { editingPersonalChannel.insert("\(effectiveChannelHub)|\(parts[1])"); rebuildSettingsPanel() }
+                if parts.count > 1 { channelUiStates["\(effectiveChannelHub)|\(parts[1])", default: ChannelUiState()].editingPersonal = true; rebuildSettingsPanel() }
             }
             if op == "test_focus_field", let id = object["id"] as? String {
                 if id == "directory_table" { directoryPanel?.makeFirstResponder(directoryTableView); return }
@@ -2065,6 +2084,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
         if frame.ok == false || frame.op == "error", let requestId = frame.request_id {
             pendingChannelValues.removeValue(forKey: requestId)
+            for key in Array(channelUiStates.keys) where channelUiStates[key]?.pendingPairRequest == requestId {
+                channelUiStates[key]?.pendingPairRequest = nil
+            }
         }
         let actionFailure = (frame.op == "error" || frame.ok == false) && directoryActionOps.contains(frame.source_op ?? "")
         if actionFailure, let requestId = frame.request_id, !requestId.isEmpty,
@@ -2183,20 +2205,18 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if frame.op == "pair_code", let id = frame.channel_id {
             let hub = frame.hub ?? effectiveChannelHub
             let key="\(hub)|\(id)"
-            if let request=frame.request_id, pendingPairRequests[key] == request {
-                pendingPairRequests.removeValue(forKey:key)
-                if let command=frame.pairing_command { copyText(command); pairCopiedUntil[key]=Date().addingTimeInterval(1.2) }
-            }
-            channelInstructions[key] = frame.instruction ?? frame.code ?? ""
-            if let index = channelSettingsByHub[hub]?.firstIndex(where: { $0.id == id }) {
-                channelSettingsByHub[hub]?[index].pairing_command = frame.pairing_command ?? frame.instruction
-                channelSettingsByHub[hub]?[index].pairing_url = frame.pairing_url
-            }
+            guard let request = frame.request_id, var ui = channelUiStates[key], ui.pendingPairRequest == request else { return }
+            ui.pendingPairRequest = nil
+            ui.pairingInstruction = frame.instruction ?? frame.code ?? ""
+            ui.pairingCommand = frame.pairing_command ?? frame.instruction
+            ui.pairingURL = frame.pairing_url
+            if let command = frame.pairing_command { copyText(command); ui.pairCopiedUntil = Date().addingTimeInterval(1.2) }
+            channelUiStates[key] = ui
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
         if frame.op == "channel_test_result", let id = frame.channel_id {
-            channelResults["\(frame.hub ?? effectiveChannelHub)|\(id)"] = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
+            channelUiStates["\(frame.hub ?? effectiveChannelHub)|\(id)", default: ChannelUiState()].testResult = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
@@ -2315,7 +2335,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if operation == "channel_pair", let id=action["channel_id"] as? String {
             let request=UUID().uuidString
             outgoing["request_id"]=request
-            pendingPairRequests["\(action["hub"] as? String ?? effectiveChannelHub)|\(id)"]=request
+            channelUiStates["\(action["hub"] as? String ?? effectiveChannelHub)|\(id)", default: ChannelUiState()].pendingPairRequest = request
         }
         if let op = action["op"] as? String, ["channel_save", "save_hub_service"].contains(op),
            let id = action["channel_id"] as? String, let values = action["values"] as? [String: String] {
@@ -2328,10 +2348,27 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             pendingChannelValues[requestId] = (hub: hub, channelId: id, scope: scope, values: values)
         }
         if let op = action["op"] as? String,
-           ["channel_save", "save_hub_service", "channel_pair", "channel_toggle", "channel_unpair", "channel_cancel_pair", "disconnect_human_channel"].contains(op),
+           ["channel_save", "save_hub_service", "channel_pair", "channel_toggle", "channel_unpair", "channel_cancel_pair", "disconnect_human_channel", "clear_channel_service"].contains(op),
            let id = action["channel_id"] as? String {
             let key = "\(action["hub"] as? String ?? effectiveChannelHub)|\(id)"
-            if channelResults.removeValue(forKey: key) != nil, settingsPanel != nil { rebuildSettingsPanel() }
+            var needsRebuild = channelUiStates[key]?.testResult != nil
+            switch op {
+            case "channel_unpair", "channel_cancel_pair":
+                channelUiStates[key, default: ChannelUiState()].resetPersonal()
+                needsRebuild = true
+            case "clear_channel_service":
+                channelUiStates[key, default: ChannelUiState()].resetAll()
+                needsRebuild = true
+            case "disconnect_human_channel":
+                if action["reset_hub"] as? Bool == true { channelUiStates[key, default: ChannelUiState()].resetAll() }
+                else { channelUiStates[key, default: ChannelUiState()].resetPersonal() }
+                needsRebuild = true
+            default: break
+            }
+            channelUiStates[key, default: ChannelUiState()].testResult = nil
+            // Preserve native field editors and undo history when a submission
+            // changes no presentation; cancellation must redraw immediately.
+            if needsRebuild && settingsPanel != nil { rebuildSettingsPanel() }
         }
         guard let data = try? JSONSerialization.data(withJSONObject: outgoing, options: [.sortedKeys]) else { return }
         FileHandle.standardOutput.write(data + Data([10]))
@@ -2648,7 +2685,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let branch = (listener.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pathText: String
             if listener.harness == "human" {
-                let chs = (listener.channels ?? []).filter { !["mac", "this mac", "desktop banner", "desktop notifications", "hub", ""].contains($0.lowercased()) && !$0.hasPrefix("@") && cleanHostDisplay($0).lowercased() != cleanHostDisplay(listener.host_name ?? "").lowercased() }
+                let chs = (listener.channels ?? []).filter { !["mac", "this mac", "desktop banner", "desktop notifications", "hub", ""].contains($0.lowercased()) && !$0.hasPrefix("@") }
                 let banner=settings?.desktop_banner_enabled != false
                 pathText = chs.isEmpty ? (banner ? "Desktop banner" : "Banner off · Inbox only") : (chs.joined(separator:" · ") + (banner ? " · Banner" : " only · Banner off"))
             } else {
@@ -3115,15 +3152,23 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         case "escape":
             if uninstallConfirmOpen { uninstallConfirmOpen = false; uninstallPurgeData = false; rebuildSettingsPanel() }
             else if addHubFormOpen { addHubFormOpen = false; pendingHubSave = nil; inviteParseRequest=""; rebuildSettingsPanel() }
-            else if !editingHubGateway.isEmpty {
+            else if channelUiStates.values.contains(where: { $0.editingGateway }) {
                 for (hub, channels) in channelSettingsByHub {
-                    for ch in channels where editingHubGateway.contains("\(hub)|\(ch.id)") { clearChannelDrafts(ch, scope:"hub", hub:hub) }
+                    for ch in channels where channelUiStates["\(hub)|\(ch.id)"]?.editingGateway == true {
+                        clearChannelDrafts(ch, scope:"hub", hub:hub)
+                        channelUiStates["\(hub)|\(ch.id)"]?.resetGateway()
+                    }
                 }
-                editingHubGateway.removeAll(); rebuildSettingsPanel()
+                rebuildSettingsPanel()
             }
-            else if !editingPersonalChannel.isEmpty {
-                for (hub,channels) in channelSettingsByHub { for ch in channels where editingPersonalChannel.contains("\(hub)|\(ch.id)") { clearChannelDrafts(ch,scope:"user",hub:hub); resetPersonalChannelUi("\(hub)|\(ch.id)") } }
-                editingPersonalChannel.removeAll(); manualChannelEntry.removeAll(); rebuildSettingsPanel()
+            else if channelUiStates.values.contains(where: { $0.editingPersonal }) {
+                for (hub, channels) in channelSettingsByHub {
+                    for ch in channels where channelUiStates["\(hub)|\(ch.id)"]?.editingPersonal == true {
+                        clearChannelDrafts(ch, scope:"user", hub:hub)
+                        channelUiStates["\(hub)|\(ch.id)"]?.resetPersonal()
+                    }
+                }
+                rebuildSettingsPanel()
             }
             else { closeSettingsPanel(emitAction:true) }
         case "return":
@@ -3449,21 +3494,22 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         var chCursorY: CGFloat = cursorY
         for ch in resolvedChannels {
             let visibleFields = ch.fields.filter { $0.hidden != true }
-            let instruction = channelInstructions["\(effectiveChannelHub)|\(ch.id)"] ?? ch.pairing_instruction ?? ""
+            let channelKey = "\(effectiveChannelHub)|\(ch.id)"
+            let channelUi = channelUiStates[channelKey] ?? ChannelUiState()
+            let instruction = channelUi.pairingInstruction
             let instructionHeight = instruction.isEmpty ? CGFloat(0) : max(16, ceil((instruction as NSString).boundingRect(with: NSSize(width: 432, height: CGFloat.greatestFiniteMagnitude), options: [.usesLineFragmentOrigin], attributes: [.font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)]).height) + 4)
             let guide = (ch.setup_guide ?? []).joined(separator:"\n")
             let hubFields = visibleFields.filter { $0.scope == "hub" }
-            let channelKey = "\(effectiveChannelHub)|\(ch.id)"
             let disclosure = ch.pairing_supported && ch.pairing_manual_disclosure == true
-            let manualExpanded = manualChannelEntry.contains(channelKey)
+            let manualExpanded = channelUi.manualEntry
             let userFields = visibleFields.filter { $0.scope != "hub" }
             let formFields = disclosure && !manualExpanded ? [] : userFields
             let hasHubScopeFields = ch.fields.contains { $0.scope == "hub" }
             let hubFieldsH = CGFloat(hubFields.count) * 26
             let userFieldsH = CGFloat(formFields.count) * 26 + (disclosure && instruction.isEmpty ? 24 : 0)
             let gatewayActive = !hasHubScopeFields || ch.hub_provided || ch.status != "not_configured" || (hasHubScopeFields && ch.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })
-            let hubGatewayExpanded = !gatewayActive || editingHubGateway.contains(channelKey)
-            let personalCollapsed = gatewayActive && ch.configured && !editingPersonalChannel.contains(channelKey) && instruction.isEmpty
+            let hubGatewayExpanded = !gatewayActive || channelUi.editingGateway
+            let personalCollapsed = gatewayActive && ch.configured && !channelUi.editingPersonal && instruction.isEmpty
             let guideH: CGFloat = !gatewayActive && !guide.isEmpty && !hubFields.isEmpty ? max(13,ceil((guide as NSString).boundingRect(with:NSSize(width:432,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height)+2) : 0
             let currentUser=settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? hubs.first(where:{$0.name==effectiveChannelHub})?.user ?? "local"
             let gatewayRole = !hubFields.isEmpty ? (guideH > 0 ? "" : "Configured once by the Hub owner. Shared by everyone on this Hub.") :
@@ -3474,7 +3520,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let gatewayRoleH=roleHeight(gatewayRole)
             let hubStratumH: CGFloat = hubGatewayExpanded ? 36 + gatewayRoleH + guideH + hubFieldsH + (!hubFields.isEmpty ? 32 : 0) : 36
             let userStratumH: CGFloat = !gatewayActive ? 0 : (personalCollapsed ? 36 : 36 + userFieldsH + (instructionHeight > 0 ? instructionHeight + 34 : 0) + 34)
-            let channelResult = channelResults["\(effectiveChannelHub)|\(ch.id)"]
+            let channelResult = ch.warning == true || ch.status == "error" ? nil : channelUi.testResult
             let showDetail = ch.status == "error" || ch.warning == true || channelResult != nil
             let detailHeight = showDetail ? max(14,ceil((presentationError(channelResult?.detail ?? ch.detail) as NSString).boundingRect(with:NSSize(width:422,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10.5)]).height)) : 0
             let headerHeight: CGFloat = showDetail ? 38 + detailHeight : 38
@@ -3538,7 +3584,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 clear.label.font = .systemFont(ofSize:10.5)
                 clear.style = .destructiveHover
                 clear.identifier=NSUserInterfaceItemIdentifier("clear_channel_service:\(ch.id)")
-                clear.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch); self.resetPersonalChannelUi(channelKey); self.editingHubGateway.remove(channelKey); self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
+                clear.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch); self.emit(["op":"disconnect_human_channel","hub":self.effectiveChannelHub,"channel_id":ch.id,"reset_hub":true,"reset_user":false]) }
                 hubStratum.addSubview(clear)
                 if hubGatewayExpanded { gatewayLeading.append(clear) } else { gatewayTop.append(clear) }
             }
@@ -3569,7 +3615,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     let fieldId="channel_field:\(ch.id):\(f.key)"
                     let labelView=textLabel(f.label,NSRect(x:12,y:fieldY+3,width:labelW,height:15),size:11,weight:.medium)
                     labelView.toolTip=f.label; container.addSubview(labelView)
-                    let initialVal=channelFieldDrafts[draftKey(fieldId)] ?? (f.value ?? "")
+                    let initialVal=channelUi.drafts[f.key] ?? (f.value ?? "")
                     let inputField=makeEditableField(fieldId,frame:NSRect(x:inputX,y:fieldY,width:inputW,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret")
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     fieldY-=26
@@ -3596,7 +3642,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 var vals: [String: String] = [:]
                 for f in ch.fields where f.hidden != true && f.scope == scopeFilter {
                     let fid = "channel_field:\(chId):\(f.key)"
-                    let draft=self.channelFieldDrafts[self.draftKey(fid)]
+                    let draft=self.channelUiStates[channelKey]?.drafts[f.key]
                     if f.type == "secret" && f.configured {
                         if let d=draft, !d.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, d != (f.value ?? "") { vals[f.key]=d }
                     } else {
@@ -3615,7 +3661,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     if gatewayActive {
                         let cancel=MenuControl("Cancel",frame:NSRect(x:232,y:6,width:66,height:24))
                         cancel.identifier=NSUserInterfaceItemIdentifier("cancel_edit_hub_service:\(ch.id)")
-                        cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch, scope:"hub"); self?.editingHubGateway.remove(channelKey); self?.rebuildSettingsPanel() }
+                        cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch, scope:"hub"); self?.channelUiStates[channelKey]?.resetGateway(); self?.rebuildSettingsPanel() }
                         hubStratum.addSubview(cancel); gatewayTrailing.insert(cancel, at: 0)
                     }
                 } else {
@@ -3623,7 +3669,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     edit.style = .neutral
                     edit.label.font = .systemFont(ofSize:10.5)
                     edit.identifier=NSUserInterfaceItemIdentifier("edit_hub_service:\(ch.id)")
-                    edit.pressed={ [weak self] in self?.editingHubGateway.insert(channelKey); self?.rebuildSettingsPanel() }
+                    edit.pressed={ [weak self] in self?.channelUiStates[channelKey, default: ChannelUiState()].editingGateway = true; self?.rebuildSettingsPanel() }
                     hubStratum.addSubview(edit); gatewayTop.insert(edit, at: 0)
                 }
             }
@@ -3631,7 +3677,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let manual=MenuControl(manualExpanded ? "Hide manual entry" : "Enter Chat ID manually…",frame:NSRect(x:12,y:40,width:190,height:22),paddingX:0)
                 manual.label.alignment = .left; manual.layoutContents()
                 manual.style = .subtleHeader; manual.identifier=NSUserInterfaceItemIdentifier("manual_channel:\(ch.id)")
-                manual.pressed={ [weak self] in guard let self=self else{return}; if manualExpanded { self.manualChannelEntry.remove(channelKey) } else { self.manualChannelEntry.insert(channelKey) }; self.rebuildSettingsPanel() }
+                manual.pressed={ [weak self] in guard let self=self else{return}; self.channelUiStates[channelKey, default: ChannelUiState()].manualEntry.toggle(); self.rebuildSettingsPanel() }
                 userStratum.addSubview(manual)
             }
             if ch.pairing_supported && !personalCollapsed && gatewayActive && instruction.isEmpty {
@@ -3651,10 +3697,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 copy.label.font = .systemFont(ofSize:10.5)
                 copy.identifier=NSUserInterfaceItemIdentifier("copy_pair_command:\(ch.id)")
                 copy.pressed={ [weak self, weak copy] in
-                    self?.copyText(ch.pairing_command ?? ch.pairing_code ?? instruction, control: copy)
+                    self?.copyText(channelUi.pairingCommand ?? instruction, control: copy)
                 }
-                if Date() < (pairCopiedUntil[channelKey] ?? .distantPast) { copy.copied() }
-                if let raw=ch.pairing_url, let url=URL(string:raw) {
+                if Date() < channelUi.pairCopiedUntil { copy.copied() }
+                if let raw=channelUi.pairingURL, let url=URL(string:raw) {
                     let open=MenuControl(ch.pairing_open_url_label ?? "Open Pairing Link ↗",frame:NSRect(x:12,y:42,width:150,height:22))
                     open.identifier=NSUserInterfaceItemIdentifier("open_pair_url:\(ch.id)"); open.style = .prominent
                     open.pressed={ if !usesPrivatePasteboard { NSWorkspace.shared.open(url) } }
@@ -3665,8 +3711,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 cancel.identifier=NSUserInterfaceItemIdentifier("cancel_pair_channel:\(ch.id)")
                 cancel.pressed={ [weak self] in
                     guard let self=self else{return}
-                    self.channelInstructions.removeValue(forKey:channelKey)
-                    self.resetPersonalChannelUi(channelKey)
                     self.emit(["op":"channel_cancel_pair","hub":self.effectiveChannelHub,"channel_id":chId])
                 }
                 userStratum.addSubview(cancel); pairingActions.append(cancel)
@@ -3680,7 +3724,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let unpair=MenuControl("Unpair",frame:NSRect(x:196,y:6,width:MenuControl.intrinsicWidth("Unpair"),height:24),radius:6)
                 unpair.style = .destructiveHover
                 unpair.identifier=NSUserInterfaceItemIdentifier("unpair_channel:\(ch.id)")
-                unpair.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch, scope:"user"); self.resetPersonalChannelUi(channelKey); self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":chId,"reset_user":true]) }
+                unpair.pressed={ [weak self] in guard let self=self else{return}; self.clearChannelDrafts(ch, scope:"user"); self.emit(["op":"channel_unpair","hub":self.effectiveChannelHub,"channel_id":chId,"reset_user":true]) }
                 userStratum.addSubview(unpair); personalActions.append(unpair)
             }
             let testBtn = MenuControl("Send Test", frame: NSRect(x: 290, y: 6, width: MenuControl.intrinsicWidth("Send Test"), height: 24), radius: 6)
@@ -3704,19 +3748,19 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             gate(saveBtn)
             if !personalCollapsed && gatewayActive && (!disclosure || manualExpanded) { userStratum.addSubview(saveBtn) } else { saveBtn.isHidden=true }
-            if Date() < (channelSavedUntil["\(channelKey)|user"] ?? .distantPast) { saveBtn.copied("✓ Saved") }
+            if Date() < (channelUi.savedUntil["user"] ?? .distantPast) { saveBtn.copied("✓ Saved") }
 
             layoutBar(in: hubStratum, y: hubStratumH-29, height: 22, flexible: hubTitle, trailing: [gatewayStatus] + gatewayTop)
             if hubGatewayExpanded { layoutBar(in: hubStratum, y: 8, height: 24, leading: gatewayLeading, trailing: gatewayTrailing) }
             if personalCollapsed {
                 let chatId = userFields.first?.value ?? ""
-                let saved = Date() < (channelSavedUntil["\(channelKey)|user"] ?? .distantPast)
+                let saved = Date() < (channelUi.savedUntil["user"] ?? .distantPast)
                 let summary = textLabel(saved ? "✓ Saved" : "Paired · \(ch.display_label ?? chatId)", NSRect(x:12,y:10,width:188,height:16),size:10,color:saved ? CitoPalette.successText : CitoPalette.secondaryText)
                 summary.identifier = NSUserInterfaceItemIdentifier("channel_summary:\(ch.id)"); summary.toolTip = chatId; summary.lineBreakMode = .byTruncatingMiddle
                 userStratum.addSubview(summary)
                 let edit = MenuControl("Edit…",frame:NSRect(x:0,y:6,width:MenuControl.intrinsicWidth("Edit…"),height:24))
                 edit.identifier = NSUserInterfaceItemIdentifier("edit_user_channel:\(ch.id)"); edit.style = .neutral
-                edit.pressed = { [weak self] in self?.editingPersonalChannel.insert(channelKey); self?.manualChannelEntry.insert(channelKey); self?.rebuildSettingsPanel() }
+                edit.pressed = { [weak self] in self?.channelUiStates[channelKey, default: ChannelUiState()].editingPersonal = true; self?.channelUiStates[channelKey, default: ChannelUiState()].manualEntry = true; self?.rebuildSettingsPanel() }
                 userStratum.addSubview(edit)
                 for case let button as MenuControl in [testBtn, edit] + personalActions {
                     button.label.font = .systemFont(ofSize: 10.5)
@@ -3732,10 +3776,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                     layoutBar(in:userStratum,y:userStratumH-29,height:22,flexible:userTitle,trailing:topActions)
                 }
                 var trailing: [NSView] = [testBtn,saveBtn]
-                if editingPersonalChannel.contains(channelKey) {
+                if channelUi.editingPersonal {
                     let cancel=MenuControl("Cancel",frame:NSRect(x:0,y:8,width:62,height:24))
                     cancel.identifier=NSUserInterfaceItemIdentifier("cancel_edit_user_channel:\(ch.id)")
-                    cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch,scope:"user"); self?.resetPersonalChannelUi(channelKey); self?.rebuildSettingsPanel() }
+                    cancel.pressed={ [weak self] in self?.clearChannelDrafts(ch,scope:"user"); self?.channelUiStates[channelKey]?.resetPersonal(); self?.rebuildSettingsPanel() }
                     userStratum.addSubview(cancel); trailing.insert(cancel,at:0)
                 }
                 if testBtn.isHidden && saveBtn.isHidden && personalActions.count == 1 {
@@ -4995,11 +5039,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if let field = obj.object as? NSTextField, field === composerInputField { composerDraftIdempotencyKey = UUID().uuidString }
         if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostHubPortDraft=field.stringValue; hostHubPortSaved=false; hostHubPortError=nil; if let root=settingsPanel?.contentView { findControl(in:root,id:"apply_host_hub_port")?.isEnabled = !hostHubPortPending && Int(field.stringValue) != settings?.host_hub.port } }
         if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue {
-            if id.hasPrefix("channel_field:") {
-                channelFieldDrafts[draftKey(id)] = field.stringValue
-                if let ch=(channelSettingsByHub[effectiveChannelHub] ?? []).first(where:{id.hasPrefix("channel_field:\($0.id):")}), ch.pairing_manual_disclosure == true, !ch.configured, let root=settingsPanel?.contentView, let test=findControl(in:root,id:"test_channel:\(ch.id)") {
+            if id.hasPrefix("channel_field:"),
+               let ch=(channelSettingsByHub[effectiveChannelHub] ?? []).first(where:{id.hasPrefix("channel_field:\($0.id):")}),
+               let schema=ch.fields.first(where:{id == "channel_field:\(ch.id):\($0.key)"}) {
+                let key = "\(effectiveChannelHub)|\(ch.id)"
+                channelUiStates[key, default: ChannelUiState()].drafts[schema.key] = field.stringValue
+                if ch.pairing_manual_disclosure == true, !ch.configured, let root=settingsPanel?.contentView, let test=findControl(in:root,id:"test_channel:\(ch.id)") {
                     test.isEnabled=ch.fields.filter{$0.scope != "hub" && $0.hidden != true}.contains { f in
-                        let value=channelFieldDrafts[draftKey("channel_field:\(ch.id):\(f.key)")] ?? f.value ?? ""
+                        let value=channelUiStates[key]?.drafts[f.key] ?? f.value ?? ""
                         return !value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
                     }
                 }
@@ -5336,7 +5383,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let defaultLayout: Bool
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
-                case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && editingHubGateway.isEmpty && editingPersonalChannel.isEmpty && manualChannelEntry.isEmpty && settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.human_paused != true && (settings?.channels ?? []).allSatisfy { (channelInstructions["\(effectiveChannelHub)|\($0.id)"] ?? $0.pairing_instruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelResults["\(effectiveChannelHub)|\($0.id)"] == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
+                case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && !channelUiStates.values.contains(where: { $0.editingGateway || $0.editingPersonal || $0.manualEntry }) && settings?.hubs.first(where:{$0.name==effectiveChannelHub})?.human_paused != true && (settings?.channels ?? []).allSatisfy { (channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.pairingInstruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.testResult == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
                 case "settings_hubs_tab": defaultLayout = !addHubFormOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }

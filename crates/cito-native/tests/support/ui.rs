@@ -264,22 +264,29 @@ fn v39_human_summary_banner_pause_all_and_unavailable_details_follow_live_state(
     human["display_address"] = json!("@alice");
     human["host_name"] = json!("arbitrary-desktop.local");
     for (channels, enabled, summary) in [
-        (json!(["arbitrary-desktop.local"]), true, "Desktop banner"),
+        (json!([]), true, "Desktop banner"),
+        (json!([]), false, "Banner off · Inbox only"),
         (
-            json!(["arbitrary-desktop.local"]),
-            false,
-            "Banner off · Inbox only",
+            json!(["arbitrary-desktop"]),
+            true,
+            "arbitrary-desktop · Banner",
         ),
         (
-            json!(["arbitrary-desktop.local", "Telegram", "other-mac.local"]),
+            json!(["arbitrary-desktop"]),
+            false,
+            "arbitrary-desktop only · Banner off",
+        ),
+        (
+            json!(["arbitrary-desktop.local"]),
+            true,
+            "arbitrary-desktop.local · Banner",
+        ),
+        (
+            json!(["Telegram", "other-mac.local"]),
             true,
             "Telegram · other-mac.local · Banner",
         ),
-        (
-            json!(["arbitrary-desktop.local", "Telegram"]),
-            false,
-            "Telegram only · Banner off",
-        ),
+        (json!(["Telegram"]), false, "Telegram only · Banner off"),
     ] {
         human["channels"] = channels;
         cfg["desktop_banner_enabled"] = json!(enabled);
@@ -440,6 +447,199 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     let s = inspect(&f, p);
     assert!(!node(&s, "settings_items", "channel_summary:channel").is_null());
     assert!(node(&s, "settings_items", "channel_field:channel:account").is_null());
+}
+
+#[test]
+fn v39_pairing_invalidation_rejects_late_receipts_without_clipboard_or_instruction_effects() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    for transition in [
+        "cancel_pair_channel",
+        "unpair_channel",
+        "clear_channel_service",
+        "external_pair",
+    ] {
+        let mut cfg = settings();
+        let paired = transition != "external_pair";
+        cfg["channels"][0]["configured"] = json!(paired);
+        cfg["channels"][0]["status"] = json!(if paired { "ready" } else { "hub_ready" });
+        cfg["channels"][0]["fields"][1]["configured"] = json!(paired);
+        cfg["channels"][0]["fields"][1]["value"] = json!(if paired { "42" } else { "" });
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        if paired {
+            control(&f, p, "edit_user_channel:channel");
+            control(&f, p, "save_channel:channel");
+            inspect(&f, p);
+            let save = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|v| v["op"] == "channel_save")
+                .unwrap();
+            f.send(p,json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
+            assert_eq!(
+                node(&inspect(&f, p), "settings_items", "channel_summary:channel")["text"],
+                "✓ Saved"
+            );
+            control(&f, p, "edit_user_channel:channel");
+        }
+        control(&f, p, "pair_channel:channel");
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == "channel_pair")
+            .unwrap();
+        // A live inventory can expose the pending code before the action receipt arrives.
+        cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-pending");
+        cfg["channels"][0]["pairing_command"] = json!("/start cito-pending");
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        assert!(!node(
+            &inspect(&f, p),
+            "settings_items",
+            "pairing_instruction:channel"
+        )
+        .is_null());
+        f.send(p, json!({"op":"test_clipboard","text":"keep clipboard"}));
+        if transition == "external_pair" {
+            cfg["channels"][0]["configured"] = json!(true);
+            cfg["channels"][0]["status"] = json!("ready");
+            cfg["channels"][0]["pairing_instruction"] = Value::Null;
+            cfg["channels"][0]["pairing_command"] = Value::Null;
+            f.send(p, json!({"op":"settings","settings":cfg}));
+        } else {
+            control(&f, p, &format!("{transition}:channel"));
+        }
+        // Check before any cancellation/unpair acknowledgement: local invalidation is immediate.
+        let s = inspect(&f, p);
+        assert!(
+            node(&s, "settings_items", "pairing_instruction:channel").is_null(),
+            "{transition}"
+        );
+        assert!(
+            node(&s, "settings_items", "copy_pair_command:channel").is_null(),
+            "{transition}"
+        );
+        assert_ne!(
+            node(&s, "settings_items", "channel_summary:channel")["text"],
+            "✓ Saved",
+            "{transition}"
+        );
+        let late = json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-late","pairing_command":"/start cito-late","pairing_url":"https://example.com/late"});
+        f.send(p, late.clone());
+        let s = inspect(&f, p);
+        assert_eq!(s["clipboard"], "keep clipboard", "{transition}");
+        assert!(
+            node(&s, "settings_items", "pairing_instruction:channel").is_null(),
+            "{transition}"
+        );
+        assert!(
+            node(&s, "settings_items", "copy_pair_command:channel").is_null(),
+            "{transition}"
+        );
+        cfg["channels"][0]["pairing_instruction"] = Value::Null;
+        cfg["channels"][0]["pairing_command"] = Value::Null;
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        f.send(p, late);
+        assert_eq!(
+            inspect(&f, p)["clipboard"],
+            "keep clipboard",
+            "{transition}"
+        );
+    }
+}
+
+#[test]
+fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("42");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "test_channel:channel");
+    inspect(&f, p);
+    assert!(f.frames(p).iter().any(|v| v["op"] == "channel_test"));
+    let tested = "Test message accepted by the channel";
+    f.send(
+        p,
+        json!({"op":"channel_test_result","channel_id":"channel","ok":true,"detail":tested}),
+    );
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        tested
+    );
+    for (status, warning, detail) in [
+        (
+            "ready",
+            true,
+            "HTTP 409: another polling request is active. Stop the other poller.",
+        ),
+        (
+            "ready",
+            true,
+            "Delivery outcome unknown. Check the destination before retrying.",
+        ),
+        (
+            "error",
+            false,
+            "HTTP 401: credentials rejected. Update the gateway token.",
+        ),
+    ] {
+        cfg["channels"][0]["status"] = json!(status);
+        cfg["channels"][0]["warning"] = json!(warning);
+        cfg["channels"][0]["detail"] = json!(detail);
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+            detail
+        );
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_detail:channel")["tooltip"],
+            detail
+        );
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_status:channel")["text"],
+            if status == "error" {
+                "⚠ Error"
+            } else {
+                "Connected"
+            }
+        );
+        cfg["channels"][0]["status"] = json!("ready");
+        cfg["channels"][0]["warning"] = json!(false);
+        cfg["channels"][0]["detail"] = json!("Connected");
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_status:channel")["text"],
+            "Connected"
+        );
+        // The last test receipt remains useful after health recovers, until the next mutation.
+        assert_eq!(
+            node(&s, "settings_items", "settings_channel_detail:channel")["text"],
+            tested
+        );
+    }
 }
 
 #[test]
@@ -3905,7 +4105,10 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
         36,
         "Clearing a gateway also leaves its old edit mode"
     );
-    f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","instruction":"Send the link command below","pairing_command":"/link 123456"}));
+    control(&f, p, "pair_channel:channel");
+    inspect(&f, p);
+    let request = latest("channel_pair");
+    f.send(p, json!({"op":"pair_code","hub":"personal","channel_id":"channel","request_id":request["request_id"],"instruction":"Send the link command below","pairing_command":"/link 123456"}));
     control(&f, p, "copy_pair_command:channel");
     assert_eq!(inspect(&f, p)["clipboard"], "/link 123456");
 }
@@ -6122,7 +6325,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     human["scoped_id"] = json!("local:alice-76e846d115ce642f");
     human["display_address"] = json!("@alice");
     human["host_name"] = json!("mac-studio.local");
-    human["channels"] = json!(["mac-studio.local"]);
+    human["channels"] = json!([]);
     frame["listeners"] = json!([agent, human]);
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);

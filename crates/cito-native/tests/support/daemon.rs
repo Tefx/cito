@@ -1117,14 +1117,14 @@ fn selected_remote_channel_refresh_is_nonblocking_and_recovers_invalidated_slots
     script(
         &proxy_script,
         r#"#!/usr/bin/env python3
-# purpose: Hold real inventory responses until the test releases each request.
+# purpose: Gate inventory responses by identity, credential, and binding state.
 # usage: python3 inventory-proxy.py LISTEN_PORT HUB_PORT
 # effects: Loopback HTTP only; Fixture owns and reaps the process.
 # requires: Python standard library and the sandbox Hub.
 import http.server, json, socketserver, sys, threading, urllib.request
 lock = threading.Lock()
-hold = False
-pending = []
+gates = []
+pending = {}
 completed = []
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
@@ -1135,27 +1135,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try: self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError): pass
     def do_GET(self):
-        global hold
         with lock:
-            if self.path == '/hold': hold = True
             if self.path.startswith('/release/'):
-                pending[int(self.path.rsplit('/', 1)[1]) - 1].set()
-            body = json.dumps({'waiting': len(pending), 'completed': completed}).encode()
+                pending[self.path.rsplit('/', 1)[1]].set()
+            body = json.dumps({'waiting': [name for name, gate in pending.items() if not gate.is_set()],
+                'started': list(pending), 'completed': completed}).encode()
         self.reply(body)
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-Length']))
+        if self.path == '/gate':
+            with lock: gates.append(json.loads(body))
+            self.reply(b'{}')
+            return
         request = urllib.request.Request('http://127.0.0.1:' + sys.argv[2] + '/v1/rpc', data=body,
             headers={k: v for k, v in self.headers.items() if k.lower() in ('authorization', 'x-cito-user', 'content-type')})
         with urllib.request.urlopen(request, timeout=2) as response: result = response.read()
         gate = None
+        name = None
         if json.loads(body)['op'] == 'human_channels_list':
+            channel = json.loads(result)['result']['channels'][0]
             with lock:
-                gate = threading.Event() if hold else None
-                if gate: pending.append(gate)
+                for spec in gates:
+                    if spec['name'] not in pending and spec['user'] == self.headers.get('X-Cito-User') and (
+                        'Bearer ' + spec['token'] == self.headers.get('Authorization')) and (
+                        spec['configured'] == channel['configured']):
+                        name = spec['name']
+                        gate = pending[name] = threading.Event()
+                        break
             if gate and not gate.wait(10): return
         self.reply(result)
         if gate:
-            with lock: completed.append(pending.index(gate) + 1)
+            with lock: completed.append(name)
 socketserver.ThreadingTCPServer.allow_reuse_address = True
 server = socketserver.ThreadingTCPServer(('127.0.0.1', int(sys.argv[1])), Handler)
 print(json.dumps({'op': 'ready'}), flush=True)
@@ -1212,11 +1222,31 @@ server.serve_forever()
     assert_eq!(status, 200);
     assert_eq!(response["query"], query);
     assert_eq!(response["request_id"], "padded-query");
-    assert_eq!(http(proxy_port, "/hold", None).0, 200);
+    let gate = |name: &str, user: &str, token: &str, configured: bool| {
+        assert_eq!(
+            http(
+                proxy_port,
+                "/gate",
+                Some(&json!({"name":name,"user":user,"token":token,"configured":configured}))
+            )
+            .0,
+            200
+        );
+    };
+    let seen = |name: &str| {
+        http(proxy_port, "/status", None).1["started"]
+            .as_array()
+            .is_some_and(|names| names.contains(&json!(name)))
+    };
+    let release =
+        |name: &str| assert_eq!(http(proxy_port, &format!("/release/{name}"), None).0, 200);
+    gate("alice-old", "alice", "rotated-credential", true);
+    gate("bob-current", "bob", "rotated-credential", false);
+    gate("bob-periodic", "bob", "rotated-credential", false);
     let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
     config["hubs"]["shared"]["token"] = json!("rotated-credential");
     fs::write(&f.config, config.to_string()).unwrap();
-    wait(|| http(proxy_port, "/status", None).1["waiting"] == 1);
+    wait(|| seen("alice-old"));
     // The server has accepted the RPC and holds its response until explicit release.
     let local = |path: &str| -> Value {
         ureq::get(&format!("http://127.0.0.1:{}{path}", f.port))
@@ -1241,7 +1271,7 @@ server.serve_forever()
         assert_eq!(opened["ok"], true);
         assert_eq!(
             http(proxy_port, "/status", None).1["waiting"],
-            1,
+            json!(["alice-old"]),
             "{op} must share the held inventory request"
         );
         assert_eq!(local("/health")["ok"], true);
@@ -1262,17 +1292,17 @@ server.serve_forever()
     // receive Alice's configured personal binding, including after its late reply.
     config["hubs"]["shared"]["user"] = json!("bob");
     fs::write(&f.config, config.to_string()).unwrap();
-    wait(|| http(proxy_port, "/status", None).1["waiting"] == 2);
+    wait(|| seen("bob-current"));
     assert_eq!(local("/health")["ok"], true);
-    assert_eq!(http(proxy_port, "/release/2", None).0, 200);
+    release("bob-current");
     wait(|| {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
     });
-    assert_eq!(http(proxy_port, "/release/1", None).0, 200);
+    release("alice-old");
     wait(|| {
         http(proxy_port, "/status", None).1["completed"]
             .as_array()
-            .is_some_and(|ids| ids.contains(&json!(1)))
+            .is_some_and(|ids| ids.contains(&json!("alice-old")))
     });
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], false);
@@ -1280,9 +1310,15 @@ server.serve_forever()
 
     // A mutation queued behind an old inventory must await its own schema and
     // post-mutation inventory before acknowledging, without retaining service.
+    // Exercise a real extra periodic response; it cannot consume a later profile's gates.
+    wait(|| seen("bob-periodic"));
+    release("bob-periodic");
+    gate("save-inventory", "bob", "next-credential", false);
+    gate("save-schema", "bob", "next-credential", false);
+    gate("save-post", "bob", "next-credential", true);
     config["hubs"]["shared"]["token"] = json!("next-credential");
     fs::write(&f.config, config.to_string()).unwrap();
-    wait(|| http(proxy_port, "/status", None).1["waiting"] == 3);
+    wait(|| seen("save-inventory"));
     std::thread::scope(|scope| {
         let saved = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -1291,16 +1327,16 @@ server.serve_forever()
                 .and_then(|response| response.into_json::<Value>().map_err(Into::into))
         });
         assert_eq!(local("/health")["ok"], true);
-        assert_eq!(http(proxy_port, "/status", None).1["waiting"], 3);
-        assert_eq!(http(proxy_port, "/release/3", None).0, 200);
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 4);
+        assert!(!seen("save-schema"));
+        release("save-inventory");
+        wait(|| seen("save-schema"));
         assert_eq!(
             local("/health")["ok"],
             true,
             "Schema lookup must release service"
         );
-        assert_eq!(http(proxy_port, "/release/4", None).0, 200);
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 5);
+        release("save-schema");
+        wait(|| seen("save-post"));
         assert!(
             !saved.is_finished(),
             "The acknowledgement must await post-mutation inventory"
@@ -1314,7 +1350,7 @@ server.serve_forever()
             f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
             false
         );
-        assert_eq!(http(proxy_port, "/release/5", None).0, 200);
+        release("save-post");
         let result = saved.join().unwrap().unwrap();
         assert_eq!(result["channels"][0]["status"], "ready");
     });
@@ -1324,6 +1360,8 @@ server.serve_forever()
 
     // A replaced slot cannot acknowledge an in-flight mutation against the new
     // identity, even when its remote mutation already committed before replacement.
+    gate("unpair-post", "bob", "next-credential", false);
+    gate("replacement", "bob", "replacement-credential", false);
     std::thread::scope(|scope| {
         let changed = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -1332,10 +1370,10 @@ server.serve_forever()
                     json!({"op":"channel_unpair","hub":"shared","channel_id":"remote-channel"}),
                 )
         });
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 6);
+        wait(|| seen("unpair-post"));
         config["hubs"]["shared"]["token"] = json!("replacement-credential");
         fs::write(&f.config, config.to_string()).unwrap();
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 7);
+        wait(|| seen("replacement"));
         let failure = changed.join().unwrap().unwrap_err();
         match failure {
             ureq::Error::Status(400, response) => assert!(response
@@ -1346,15 +1384,15 @@ server.serve_forever()
         }
     });
     assert_eq!(local("/health")["ok"], true);
-    assert_eq!(http(proxy_port, "/release/7", None).0, 200);
+    release("replacement");
     wait(|| {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
     });
-    assert_eq!(http(proxy_port, "/release/6", None).0, 200);
+    release("unpair-post");
     wait(|| {
         http(proxy_port, "/status", None).1["completed"]
             .as_array()
-            .is_some_and(|ids| ids.contains(&json!(6)))
+            .is_some_and(|ids| ids.contains(&json!("unpair-post")))
     });
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
