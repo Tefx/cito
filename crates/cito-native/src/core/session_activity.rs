@@ -7,7 +7,7 @@ use crate::plugins::{
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::thread::{self, JoinHandle};
@@ -31,6 +31,10 @@ struct Discovery {
     stale: bool,
     refreshed_at: u64,
     started_at: u64,
+    revision: Option<Arc<AtomicU64>>,
+    started_revision: u64,
+    seen_revision: u64,
+    refreshed_revision: u64,
     due: Instant,
     worker: Option<Worker<Vec<Value>>>,
 }
@@ -104,6 +108,10 @@ impl SessionActivity {
                     stale: false,
                     refreshed_at: 0,
                     started_at: 0,
+                    revision: None,
+                    started_revision: 0,
+                    seen_revision: 0,
+                    refreshed_revision: 0,
                     due: Instant::now(),
                     worker: None,
                 })
@@ -125,6 +133,9 @@ impl SessionActivity {
     /// Revoke cached enrollment authority while preserving presentation and workers.
     pub fn mark_stale(&mut self, harness: &str) {
         for provider in self.discovery.iter_mut().filter(|p| p.plugin.id == harness) {
+            if let Some(revision) = &provider.revision {
+                revision.fetch_add(1, Ordering::SeqCst);
+            }
             provider.stale = true;
             provider.due = Instant::now();
         }
@@ -141,7 +152,13 @@ impl SessionActivity {
     pub fn candidates(&self) -> impl Iterator<Item = Value> + '_ {
         self.discovery
             .iter()
-            .filter(|provider| !provider.stale && provider.worker.is_none())
+            .filter(|provider| {
+                !provider.stale
+                    && provider.worker.is_none()
+                    && provider.revision.as_ref().is_none_or(|revision| {
+                        revision.load(Ordering::SeqCst) == provider.refreshed_revision
+                    })
+            })
             .flat_map(|provider| {
                 provider.cached.iter().map(move |candidate| {
                     let mut candidate = candidate.clone();
@@ -217,6 +234,21 @@ impl SessionActivity {
         if self.closed {
             return Ok(false);
         }
+        for provider in &mut self.discovery {
+            if provider.revision.is_none() {
+                provider.revision = Some(state.discovery_revision(&provider.plugin.id)?);
+            }
+            let revision = provider
+                .revision
+                .as_ref()
+                .map(|revision| revision.load(Ordering::SeqCst))
+                .unwrap_or(0);
+            if revision != provider.seen_revision {
+                provider.seen_revision = revision;
+                provider.stale = true;
+                provider.due = Instant::now();
+            }
+        }
         let changed = self.reap_discovery();
         for provider in &mut self.discovery {
             for candidate in &mut provider.cached {
@@ -289,6 +321,11 @@ impl SessionActivity {
             if provider.worker.is_some() || provider.due > Instant::now() {
                 continue;
             }
+            provider.started_revision = provider
+                .revision
+                .as_ref()
+                .map(|revision| revision.load(Ordering::SeqCst))
+                .unwrap_or(0);
             provider.started_at = now_ms();
             let plugin = provider.plugin.clone();
             let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
@@ -345,15 +382,25 @@ impl SessionActivity {
                         None
                     }
                 };
-                provider.stale = rows.is_none();
+                provider.stale = rows.is_none()
+                    || provider.revision.as_ref().is_some_and(|revision| {
+                        revision.load(Ordering::SeqCst) != provider.started_revision
+                    });
+                let invalidated = provider.stale && rows.is_some();
                 if let Some(rows) = rows {
                     // A refresh already in flight at revocation is not newer evidence,
                     // even if its result is joined after the revocation transaction.
                     provider.refreshed_at = provider.started_at;
+                    provider.refreshed_revision = provider.started_revision;
                     changed |= rows != provider.cached;
                     provider.cached = rows;
                 }
-                provider.due = Instant::now() + REFRESH_INTERVAL;
+                provider.due = Instant::now()
+                    + if invalidated {
+                        Duration::ZERO
+                    } else {
+                        REFRESH_INTERVAL
+                    };
             }
         }
         changed
@@ -928,6 +975,40 @@ print(json.dumps(response), flush=True)
             switched,
             "Private freshness metadata must not leak into presentation"
         );
+        // State clones invalidate a confirmed inventory synchronously, without
+        // borrowing worker ownership or waiting for the daemon's next tick.
+        f.state.clone().invalidate_discovery("agent")?;
+        assert_eq!(activity.candidates().count(), 0);
+        assert_eq!(activity.available(&[], 1), switched);
+        for invalidated in [true, false] {
+            let revision = f.state.discovery_revision("agent")?;
+            activity.discovery[0].started_revision = revision.load(Ordering::SeqCst);
+            let (release, wait) = std::sync::mpsc::channel();
+            let rows = switched.clone();
+            activity.discovery[0].worker = Some(std::thread::spawn(move || {
+                wait.recv_timeout(Duration::from_secs(3))
+                    .map_err(|e| e.to_string())?;
+                Ok(rows)
+            }));
+            if invalidated {
+                f.state.clone().invalidate_discovery("agent")?;
+            }
+            release.send(()).map_err(|e| e.to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !activity.discovery[0]
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+            {
+                if Instant::now() >= deadline {
+                    return Err("Controlled discovery did not finish".into());
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            activity.reap_discovery();
+            assert_eq!(activity.candidates().count(), usize::from(!invalidated));
+            assert_eq!(activity.available(&[], 1), switched);
+        }
         activity.discovery[0].worker = Some(std::thread::spawn(|| Ok(vec![])));
         pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
         assert!(

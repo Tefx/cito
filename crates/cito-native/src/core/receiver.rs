@@ -300,6 +300,7 @@ pub fn probe_listener(
         Ok(false)
     })?;
     if revoked {
+        local.invalidate_discovery(string(row, "harness"))?;
         let channel = format!("{}:{}", string(row, "host_id"), string(row, "harness"));
         let _ = detach_channel_expected(client, string(row, "listener_id"), &channel, row);
     }
@@ -458,6 +459,7 @@ fn dispatch_listener(
                     )?;
                     let changed=local.db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
                     if changed > 0 {
+                        local.invalidate_discovery(string(row, "harness"))?;
                         detach_channel_expected(client, id, &channel, row)?;
                     }
                 }

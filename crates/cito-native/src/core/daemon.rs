@@ -1079,15 +1079,8 @@ impl DaemonService {
         for row in previous {
             self.unlisten_id(hub, string(&row, "listener_id"))?;
         }
-        self.state.db.execute(
-            "UPDATE local_listeners SET endpoint_pid=? WHERE hub=? AND harness=? AND session_id=?",
-            &[
-                caller["endpoint_pid"].clone(),
-                json!(hub),
-                caller["harness"].clone(),
-                caller["session_id"].clone(),
-            ],
-        )?;
+        // Registration commits the Hub-scoped PID and transition timestamp together.
+        // Do not rewrite binding metadata after releasing registration authority.
         let _ = self.slot(hub)?.directory();
         result["listener_id"] = json!(self.scoped(hub, string(&result, "listener_id")));
         Ok(result)
@@ -1145,6 +1138,9 @@ impl DaemonService {
             }
             Ok(())
         })?;
+        if let Some(row) = &row {
+            self.state.invalidate_discovery(string(row, "harness"))?;
+        }
         drop(registration);
         // A failed Hub write leaves durable pending work; poll/reconnect retries it.
         if let Some(client) = client {
@@ -2099,20 +2095,16 @@ impl DaemonService {
         let Some(activity) = &self.session_activity else {
             return Ok(());
         };
-        let mut latest_revoked_at: HashMap<(String, String), u64> = HashMap::new();
+        let mut transitions: HashMap<(String, String), Vec<Value>> = HashMap::new();
         for row in self.state.db.query(
-            "SELECT harness,session_id,updated_at FROM local_listeners WHERE status='UNLISTENED'",
+            "SELECT harness,session_id,status,endpoint_pid,updated_at FROM local_listeners WHERE status IN ('UNLISTENED','ACTIVE')",
             &[],
         )? {
             let key = (
                 string(&row, "harness").to_owned(),
                 string(&row, "session_id").to_owned(),
             );
-            let revoked = row["updated_at"].as_u64().unwrap_or(0);
-            latest_revoked_at
-                .entry(key)
-                .and_modify(|stamp| *stamp = (*stamp).max(revoked))
-                .or_insert(revoked);
+            transitions.entry(key).or_default().push(row);
         }
         let mut stale_harnesses = HashSet::new();
         for candidate in activity.candidates().filter(|candidate| {
@@ -2133,10 +2125,23 @@ impl DaemonService {
                 string(&candidate, "harness").to_owned(),
                 string(&candidate, "session_id").to_owned(),
             );
-            if latest_revoked_at
+            let candidate_pid = candidate["endpoint_pid"].as_u64().unwrap_or(0);
+            let cutoff = transitions
                 .get(&key)
-                .is_some_and(|&revoked| candidate["discovered_at"].as_u64().unwrap_or(0) <= revoked)
-            {
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row["status"] == "UNLISTENED"
+                        || row["status"] == "ACTIVE"
+                            && candidate_pid > 0
+                            && row["endpoint_pid"]
+                                .as_u64()
+                                .is_some_and(|pid| pid > 0 && pid != candidate_pid)
+                })
+                .filter_map(|row| row["updated_at"].as_u64())
+                .max()
+                .unwrap_or(0);
+            if cutoff > 0 && candidate["discovered_at"].as_u64().unwrap_or(0) <= cutoff {
                 stale_harnesses.insert(key.0);
                 continue;
             }
@@ -2159,10 +2164,16 @@ impl DaemonService {
                     continue;
                 }
                 // Recheck all Hubs after setup and each preceding destination registration.
-                let live_revoked_at = self.state.db.query(
-                    "SELECT MAX(updated_at) AS revoked_at FROM local_listeners WHERE status='UNLISTENED' AND harness=? AND session_id=?",
-                    &[json!(key.0), json!(key.1)],
-                )?.first().and_then(|row| row["revoked_at"].as_u64()).unwrap_or(0);
+                let live_revoked_at = self
+                    .state
+                    .db
+                    .query(
+                        super::registration::DISCOVERY_CUTOFF_SQL,
+                        &[json!(key.0), json!(key.1), json!(candidate_pid)],
+                    )?
+                    .first()
+                    .and_then(|row| row["revoked_at"].as_u64())
+                    .unwrap_or(0);
                 if live_revoked_at > 0
                     && candidate["discovered_at"].as_u64().unwrap_or(0) <= live_revoked_at
                 {
@@ -5648,7 +5659,10 @@ elif request['op'] == 'setup_inspect':
     if marker.exists():
         revoke = json.loads(marker.read_text())
         with sqlite3.connect(root / 'state' / 'state.sqlite') as db:
-            db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
+            if 'endpoint_pid' in revoke:
+                db.execute("UPDATE local_listeners SET endpoint_pid=?,updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (revoke['endpoint_pid'], time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
+            else:
+                db.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND harness='fixture' AND session_id=? AND status='ACTIVE'", (time.time_ns() // 1000000, revoke['hub'], revoke['session_id']))
     result.update(installed=True, configured=True, paths=[])
 print(json.dumps(result), flush=True)
 "#).map_err(|e|e.to_string())?;
@@ -5720,11 +5734,28 @@ print(json.dumps(result), flush=True)
                     service.refresh_available()?;
                     if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=2 { return Err("New discovery must restore enrollment on both Hubs".into()); }
                 }
-                for after_save in [false, true] {
+                let p2 = crate::support::process_parent(std::process::id())
+                    .filter(|pid| *pid != std::process::id() && crate::support::alive(*pid))
+                    .ok_or("Missing second live PID")?;
+                for (after_save, fail_detach, rebind) in [
+                    (false, false, false),
+                    (true, false, false),
+                    (true, true, false),
+                    (false, false, true),
+                    (true, false, true),
+                ] {
                     for slot in service.slots.values_mut() {
                         slot.config["autoListen"] = json!(false);
                     }
-                    let session = if after_save {
+                    let session = if rebind {
+                        if after_save {
+                            "rebind-save"
+                        } else {
+                            "rebind-read"
+                        }
+                    } else if fail_detach {
+                        "inflight-retry"
+                    } else if after_save {
                         "inflight-save"
                     } else {
                         "inflight-read"
@@ -5785,8 +5816,11 @@ print(json.dumps(result), flush=True)
                     for (hub, slot) in &mut service.slots {
                         slot.config["autoListen"] = json!(hub == "work");
                     }
+                    let remote_db =
+                        super::super::database::Database::open(&dir.join("other-hub/hub.sqlite"))?;
+                    let mut backend_unavailable = false;
                     let daemon = &mut service;
-                    std::thread::scope(|scope| -> Result<(), String> {
+                    let outcome = std::thread::scope(|scope| -> Result<(), String> {
                         let pending=writer.transaction(|connection| {
                             let pending=scope.spawn(move ||daemon.auto_listen());
                             let deadline=Instant::now()+Duration::from_secs(3);
@@ -5801,8 +5835,19 @@ print(json.dumps(result), flush=True)
                             if after_save {
                                 // Commit after the Hub save while registration waits for
                                 // its local write lock; model the inclusive same-ms cutoff.
-                                let changed=connection.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub='local' AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?",&[json!(discovered_at),json!(id),captured["binding_generation"].clone(),captured["owner_token"].clone()])?;
+                                let changed=connection.execute("UPDATE local_listeners SET status=?,endpoint_pid=?,updated_at=? WHERE hub='local' AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?",&[json!(if rebind { "ACTIVE" } else { "UNLISTENED" }),json!(if rebind {p2} else {std::process::id()}),json!(discovered_at),json!(id),captured["binding_generation"].clone(),captured["owner_token"].clone()])?;
                                 if changed!=1 { return Err("Expected a fenced cross-Hub revocation".into()); }
+                                if fail_detach {
+                                    // Preserve saved data while failing the actual cleanup RPC below
+                                    // HubClient; no production hooks or network server are needed.
+                                    remote_db.execute("ALTER TABLE hub_kv RENAME TO unavailable_hub_kv", &[])?;
+                                    backend_unavailable=true;
+                                }
+                            } else if rebind {
+                                state.pause_listener_for(&captured)?;
+                                let mut rebound=candidate.clone();
+                                rebound["endpoint_pid"]=json!(p2);
+                                super::super::registration::register_listener(&state,&a,string(&captured,"host_id"),&json!({"about":"Rebound"}),&rebound)?;
                             } else {
                                 super::super::receiver::probe_listener(&state,&a,&captured,&probe,&config.state_dir)?;
                             }
@@ -5812,11 +5857,22 @@ print(json.dumps(result), flush=True)
                             .join()
                             .map_err(|_| "Auto-Listen worker panicked")??;
                         Ok(())
-                    })?;
+                    });
+                    if backend_unavailable {
+                        remote_db
+                            .execute("ALTER TABLE unavailable_hub_kv RENAME TO hub_kv", &[])?;
+                    }
+                    outcome?;
                     let revoked = state
                         .listener("local", id)?
                         .ok_or("Missing revoked source")?;
-                    assert_eq!(revoked["status"], "UNLISTENED");
+                    assert_eq!(
+                        revoked["status"],
+                        if rebind { "ACTIVE" } else { "UNLISTENED" }
+                    );
+                    if rebind {
+                        assert_eq!(revoked["endpoint_pid"], p2);
+                    }
                     assert!(revoked["updated_at"]
                         .as_u64()
                         .is_some_and(|stamp| stamp >= discovered_at));
@@ -5826,7 +5882,23 @@ print(json.dumps(result), flush=True)
                     {
                         return Err("Stale discovery left an ACTIVE destination binding".into());
                     }
+                    if fail_detach {
+                        let retained = state.listener("work", id)?.ok_or("Missing retry owner")?;
+                        let remote = b.kv_get(id)?.ok_or("Missing orphaned channel")?.0;
+                        assert_eq!(retained["status"], "UNLISTENED");
+                        assert_eq!(retained["binding_generation"], remote["binding_generation"]);
+                        assert_eq!(
+                            retained["owner_token"],
+                            remote["channels"][&channel]["owner_token"]
+                        );
+                        assert_eq!(remote["channels"][&channel]["state"], "ACTIVE");
+                        if state.db.query("SELECT 1 FROM pending_hub_detaches WHERE hub='work' AND listener_id=?", &[json!(id)])?.is_empty() {
+                            return Err("Failed compensation lost its durable retry intent".into());
+                        }
+                        DaemonService::reconcile_unlistened(&state, &b, &service.host_id)?;
+                    }
                     if after_save {
+                        assert!(state.db.query("SELECT 1 FROM pending_hub_detaches WHERE hub='work' AND listener_id=?", &[json!(id)])?.is_empty());
                         let remote = b.kv_get(id)?.ok_or("Missing compensated Node")?.0;
                         if remote["channels"][&channel]["state"] != "UNLISTENED"
                             || remote["channels"]["sibling:fixture"]["state"] != "ACTIVE"
@@ -5835,9 +5907,11 @@ print(json.dumps(result), flush=True)
                         {
                             return Err("Compensation must detach only the stale channel and retain its sibling".into());
                         }
-                        super::super::receiver::detach_channel_expected(
-                            &a, id, &channel, &captured,
-                        )?;
+                        if !rebind {
+                            super::super::receiver::detach_channel_expected(
+                                &a, id, &channel, &captured,
+                            )?;
+                        }
                     } else if b.kv_get(id)?.is_some() {
                         return Err("A pre-save veto must not create a remote Node".into());
                     }
@@ -5850,7 +5924,7 @@ print(json.dumps(result), flush=True)
                             "STALE_DISCOVERY must invalidate cached enrollment authority".into(),
                         );
                     }
-                    if !after_save {
+                    if !after_save && !rebind {
                         // Explicit Listen omits the private fence even when caller metadata
                         // came from discovery; a retained revocation must not veto intent.
                         service.listen("work", &json!({"about":"Manual intent"}), &cached)?;
@@ -5863,7 +5937,22 @@ print(json.dumps(result), flush=True)
                         service.unlisten_id("work", id)?;
                     }
                     for slot in service.slots.values_mut() {
-                        slot.config["autoListen"] = json!(true);
+                        slot.config["autoListen"] = json!(false);
+                    }
+                    if rebind {
+                        let mut next = candidate.clone();
+                        next["endpoint_pid"] = json!(p2);
+                        fs::write(dir.join("candidate.json"), next.to_string())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // Discovery start must be strictly later even at millisecond resolution.
+                    let cutoff = state.db.query("SELECT MAX(updated_at) AS cutoff FROM local_listeners WHERE harness='fixture' AND session_id=?", &[json!(session)])?.first().and_then(|row|row["cutoff"].as_u64()).unwrap_or(0);
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while now_ms() <= cutoff {
+                        if Instant::now() >= deadline {
+                            return Err("Clock did not advance past enrollment cutoff".into());
+                        }
+                        thread::sleep(Duration::from_millis(1));
                     }
                     service.refresh_available()?;
                     let fresh = service
@@ -5876,6 +5965,18 @@ print(json.dumps(result), flush=True)
                         })
                         .ok_or("Missing fresh recovery candidate")?;
                     assert!(fresh["discovered_at"].as_u64() > revoked["updated_at"].as_u64());
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(true);
+                    }
+                    service.auto_listen()?;
+                    if rebind {
+                        assert_eq!(
+                            state
+                                .listener("work", id)?
+                                .ok_or("Missing fresh P2 binding")?["endpoint_pid"],
+                            p2
+                        );
+                    }
                     for hub in ["local", "work"] {
                         assert_eq!(
                             state
@@ -5887,6 +5988,141 @@ print(json.dumps(result), flush=True)
                     assert_eq!(
                         b.kv_get(id)?.ok_or("Missing recovered Node")?.0["channels"][&channel]
                             ["state"],
+                        "ACTIVE"
+                    );
+                }
+                for mode in ["manual", "snapshot", "snapshot-direct", "preflight"] {
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(false);
+                    }
+                    let session = format!("active-{mode}");
+                    let candidate = json!({"harness":"fixture","session_id":session,"title":"Review","cwd":"","endpoint_pid":std::process::id()});
+                    fs::write(dir.join("candidate.json"), candidate.to_string())
+                        .map_err(|e| e.to_string())?;
+                    let initial =
+                        service.listen("local", &json!({"about":"Review"}), &candidate)?;
+                    service.refresh_available()?;
+                    let cached = service
+                        .session_activity
+                        .as_ref()
+                        .and_then(|activity| {
+                            activity
+                                .candidates()
+                                .find(|row| row["session_id"] == session)
+                        })
+                        .ok_or("Missing P1 snapshot")?;
+                    let id = string(&initial, "canonical_listener_id");
+                    let captured = service
+                        .state
+                        .listener("local", id)?
+                        .ok_or("Missing P1 binding")?;
+                    let mut rebound = candidate.clone();
+                    rebound["endpoint_pid"] = json!(p2);
+                    if mode == "manual" {
+                        service.state.pause_listener_for(&captured)?;
+                        assert!(
+                            !service
+                                .session_activity
+                                .as_ref()
+                                .is_some_and(|activity| activity
+                                    .candidates()
+                                    .any(|row| row["session_id"] == session)),
+                            "Revocation must invalidate cache before the next tick"
+                        );
+                        // A successful explicit Listen must invalidate even a currently
+                        // confirmed inventory, independently of the prior pause event.
+                        service.refresh_available()?;
+                        assert!(service
+                            .session_activity
+                            .as_ref()
+                            .is_some_and(|activity| activity
+                                .candidates()
+                                .any(|row| row["session_id"] == session)));
+                        service.listen("local", &json!({"about":"Rebound"}), &rebound)?;
+                    } else if mode.starts_with("snapshot") {
+                        // A separate state handle exercises the durable SQL fence without
+                        // relying on the daemon's in-memory invalidation notification.
+                        let independent = LocalState::open(&config.state_dir)?;
+                        if mode == "snapshot" {
+                            independent.pause_listener_for(&captured)?;
+                        }
+                        super::super::registration::register_listener(
+                            &independent,
+                            service.slot("local")?,
+                            &service.host_id,
+                            &json!({"about":"Rebound"}),
+                            &rebound,
+                        )?;
+                        assert!(service
+                            .session_activity
+                            .as_ref()
+                            .is_some_and(|activity| activity
+                                .candidates()
+                                .any(|row| row["session_id"] == session)));
+                    } else {
+                        // Setup runs after the initial snapshot and before live preflight.
+                        fs::write(
+                            dir.join("revoke.json"),
+                            json!({"hub":"local","session_id":session,"endpoint_pid":p2})
+                                .to_string(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    for (hub, slot) in &mut service.slots {
+                        slot.config["autoListen"] = json!(hub == "work");
+                    }
+                    service.auto_listen()?;
+                    if mode == "preflight" {
+                        fs::remove_file(dir.join("revoke.json")).map_err(|e| e.to_string())?;
+                    }
+                    let active = service
+                        .state
+                        .listener("local", id)?
+                        .ok_or("Missing P2 binding")?;
+                    assert_eq!(active["status"], "ACTIVE");
+                    assert_eq!(active["endpoint_pid"], p2);
+                    assert!(active["updated_at"].as_u64() >= cached["discovered_at"].as_u64());
+                    if service.state.listener("work", id)?.is_some() {
+                        return Err("Cached P1 crossed an ACTIVE P2 rebind".into());
+                    }
+                    if service.session_activity.as_ref().is_some_and(|activity| {
+                        activity
+                            .candidates()
+                            .any(|row| row["session_id"] == session)
+                    }) {
+                        return Err("Rebind did not invalidate P1 discovery".into());
+                    }
+                    for slot in service.slots.values_mut() {
+                        slot.config["autoListen"] = json!(false);
+                    }
+                    fs::write(dir.join("candidate.json"), rebound.to_string())
+                        .map_err(|e| e.to_string())?;
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while now_ms() <= active["updated_at"].as_u64().unwrap_or(0) {
+                        if Instant::now() >= deadline {
+                            return Err("Clock did not advance past rebind cutoff".into());
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    service.refresh_available()?;
+                    service
+                        .slots
+                        .get_mut("work")
+                        .ok_or("Missing destination")?
+                        .config["autoListen"] = json!(true);
+                    service.auto_listen()?;
+                    assert_eq!(
+                        service
+                            .state
+                            .listener("work", id)?
+                            .ok_or("Missing P2 enrollment")?["endpoint_pid"],
+                        p2
+                    );
+                    assert_eq!(
+                        service
+                            .state
+                            .listener("work", id)?
+                            .ok_or("Missing P2 enrollment")?["status"],
                         "ACTIVE"
                     );
                 }

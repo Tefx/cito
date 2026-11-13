@@ -5,7 +5,15 @@ use super::{
 };
 use crate::plugins::now_ms;
 use serde_json::{json, Value};
-use std::{os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    collections::HashMap,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+};
 
 #[cfg(test)]
 #[path = "state_tests.rs"]
@@ -14,6 +22,7 @@ mod tests;
 #[derive(Clone)]
 pub struct LocalState {
     pub db: Database,
+    discovery_revisions: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
 }
 impl LocalState {
     pub fn open(dir: &Path) -> Result<Self, String> {
@@ -78,7 +87,28 @@ impl LocalState {
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
         })?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            discovery_revisions: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    /// Share provider invalidation with receiver clones, without sharing worker ownership.
+    pub(super) fn discovery_revision(&self, harness: &str) -> Result<Arc<AtomicU64>, String> {
+        let mut revisions = self
+            .discovery_revisions
+            .lock()
+            .map_err(|_| "Discovery revision lock poisoned")?;
+        Ok(revisions.entry(harness.to_owned()).or_default().clone())
+    }
+    pub(super) fn invalidate_discovery(&self, harness: &str) -> Result<(), String> {
+        let revisions = self
+            .discovery_revisions
+            .lock()
+            .map_err(|_| "Discovery revision lock poisoned")?;
+        if let Some(revision) = revisions.get(harness) {
+            revision.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
     }
     pub fn custom_title(&self, harness: &str, session: &str) -> Result<Option<String>, String> {
         Ok(self
@@ -336,7 +366,7 @@ impl LocalState {
         status: &str,
         reason: &str,
     ) -> Result<bool, String> {
-        self.db.transaction(|c| {
+        let changed = self.db.transaction(|c| {
             let hub=string(listener,"hub");
             let current=current_listener(c,hub,string(listener,"listener_id"))?;
             // A retained pause can be fenced for a changed profile, but a stale
@@ -345,7 +375,11 @@ impl LocalState {
             c.execute("UPDATE local_listeners SET status=?,updated_at=?,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=? AND binding_generation=? AND COALESCE(owner_token,'')=? AND status=?", &[json!(status),json!(now_ms()),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone(),listener["owner_token"].clone(),listener["status"].clone()])?;
             c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason=?,dispatcher_token=NULL WHERE hub=? AND listener_id=? AND binding_generation<=? AND state IN ('RECEIVED','DISPATCHING')", &[json!(reason),json!(hub),listener["listener_id"].clone(),listener["binding_generation"].clone()])?;
             Ok(true)
-        })
+        })?;
+        if changed {
+            self.invalidate_discovery(string(listener, "harness"))?;
+        }
+        Ok(changed)
     }
     pub fn restore_passive(&self, hub: &str, listener: &Value) -> Result<(), String> {
         self.db.execute("UPDATE local_signals SET state='RECEIVED',held_reason=NULL WHERE hub=? AND listener_id=? AND binding_generation=? AND state='STORED_PASSIVE' AND acknowledged_at_ms IS NULL AND (held_reason IS NULL OR (held_reason='driver_unavailable' AND NOT EXISTS(SELECT 1 FROM wake_retries w WHERE w.hub=local_signals.hub AND w.listener_id=local_signals.listener_id AND w.retry_at_ms>?))) AND EXISTS(SELECT 1 FROM local_listeners WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?)", &[json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), json!(now_ms()), json!(hub), listener["listener_id"].clone(), listener["binding_generation"].clone(), listener["owner_token"].clone()])?;
