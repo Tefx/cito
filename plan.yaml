@@ -10397,7 +10397,7 @@ phases:
 - id: v39
   name: 'V39 Stage 22: Notification Banner Readability, Human-Channel Routing Clarity,
     Pairing-First Telegram Flow & Cross-Surface Lifecycle Closure (U1–U6)'
-  status: pending
+  status: in_progress
   gate: All finalized U1–U6 requirements in docs/DESIGN.md §24 (§24.1–§24.3) pass;
     all inspectMenu() mechanical invariants equal [] across all surfaces in Light
     and Dark appearances (including live Light/Dark .popover rendering of BannerWindow,
@@ -10465,7 +10465,7 @@ phases:
   - id: v39.impl
     name: V39 U1–U6 Notification Banner Readability, Orthogonal Human/Banner Routing,
       Pairing-First Telegram Flow, Activity/Directory Scope & Settings/Visual Closure
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement finalized docs/DESIGN.md §24 (U1–U6, §24.1–§24.3) across\
       \ src/macos/cito-ui.swift, crates/cito-native/src/core/{daemon,hub,state,setup,config,cli,receiver}.rs,\
@@ -10606,6 +10606,8 @@ phases:
     - crates/cito-native/src/core/cli.rs
     - crates/cito-native/src/core/receiver.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-13T20:05:39.704378Z'
   - id: v39.review
     name: 'V39 Contract-and-Simplicity Review & Fix, Live Light/Dark Banner Verification
       and Push to main (No Release Tag) [REQUIRES_SKILL: contract-and-simplicity]'
