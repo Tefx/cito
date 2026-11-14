@@ -786,9 +786,7 @@ impl DaemonService {
                 clear()?;
                 continue;
             }
-            if remote["channels"][&channel]["state"] == "ACTIVE"
-                || human && remote["human_paused"] != true
-            {
+            if remote["channels"][&channel]["state"] == "ACTIVE" {
                 detach_channel_expected(client, id, &channel, &captured)?;
             }
             clear()?;
@@ -1927,9 +1925,14 @@ impl DaemonService {
             self.receivers.insert(key,thread::spawn(move||{
                 let channel=format!("{}:{}",host_id,string(&row,"harness"));
                 if row["harness"] == "human" {
+                    let updated = slot.cached_directory().iter()
+                        .find(|record| record["listener_id"] == row["listener_id"])
+                        .and_then(|record| record["channels"][&channel]["updated_at_ms"].as_u64());
+                    if updated.is_none_or(|updated| slot.server_now().saturating_sub(updated) >= 20_000) {
                     if let Err(error) = slot.human_request("human_device_heartbeat",&json!({"node_id":row["listener_id"],"channel_id":channel,"binding_generation":row["binding_generation"],"owner_token":row["owner_token"]})) {
                         if error.starts_with("STALE_GENERATION:") { let _ = state.fence_listener_for(&row,"fenced_before_dispatch"); }
                         return;
+                    }
                     }
                 } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
                     if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
@@ -1942,7 +1945,7 @@ impl DaemonService {
                     }
                     if let Some(ch) = remote["channels"].get_mut(&channel).and_then(Value::as_object_mut) {
                         let updated=ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
-                        if now_ms().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(now_ms())); changed=true; }
+                        if slot.server_now().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(slot.server_now())); changed=true; }
                     }
                     if changed { let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision)); }
                 }
@@ -2207,11 +2210,13 @@ impl DaemonService {
                 .cloned()
                 .unwrap_or_default();
         }
-        let inbox_paused = self.human_projection(channel_hub)["human_paused"] == true;
-        for channel in &mut channels {
-            channel["inbox_paused"] = json!(inbox_paused);
-            channel["delivery_enabled"] =
-                json!(channel["enabled"] == true && channel["configured"] == true && !inbox_paused);
+        if let Some(inbox_paused) = self.human_projection(channel_hub)["human_paused"].as_bool() {
+            for channel in &mut channels {
+                channel["inbox_paused"] = json!(inbox_paused);
+                channel["delivery_enabled"] = json!(
+                    channel["enabled"] == true && channel["configured"] == true && !inbox_paused
+                );
+            }
         }
         let raw = self.raw_config().unwrap_or_else(|_| json!({}));
         if let Ok((_, configured, _)) =
@@ -2526,10 +2531,7 @@ impl DaemonService {
         let record = slot.and_then(|slot| {
             slot.cached_directory().into_iter().find(|row| {
                 row["harness"] == "human"
-                    && super::auth::principal_ids_equal(
-                        string(row, "principal_id"),
-                        string(&slot.identity, "principal_id"),
-                    )
+                    && super::auth::principal_matches(string(row, "principal_id"), &slot.identity)
             })
         });
         let current =
@@ -3216,7 +3218,7 @@ impl DaemonService {
             "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
                 let ids = action["signal_ids"].as_array().cloned().unwrap_or_default();
                 let rows = self.state.db.query(
-                    "SELECT s.* FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
+                    "SELECT s.*,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
                     &[json!(action["filter"].as_str().unwrap_or(&self.activity_filter))],
                 )?;
                 for row in rows {
@@ -3224,8 +3226,16 @@ impl DaemonService {
                     if !requested_hub.is_empty() && row["hub"] != requested_hub {
                         continue;
                     }
-                    if op == "mark_all_activity_read"
-                        || action["ack_all"] == true
+                    let bulk = op == "mark_all_activity_read" || action["ack_all"] == true;
+                    if bulk
+                        && !super::state::matches_activity(
+                            &row,
+                            action["query"].as_str().unwrap_or(""),
+                        )
+                    {
+                        continue;
+                    }
+                    if bulk
                         || ids.iter().any(|id| {
                             id == &row["signal_id"]
                                 || id.as_str()
@@ -5543,6 +5553,7 @@ mod tests {
                 remote["owner_token"] = json!("sibling-owner");
                 remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
                 old.kv_save(id, &remote, Some(revision))?;
+                let remote = old.kv_get(id)?.ok_or("Missing Hub-stamped sibling")?.0;
                 assert!(service.unlisten_id("local", id)?);
                 let authority = service.state.registration_lock("local")?;
                 assert!(Arc::ptr_eq(&old.registration, &authority));
@@ -6514,7 +6525,8 @@ print(json.dumps(result), flush=True)
         };
         fs::write(
             &config.config_path,
-            json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}).to_string(),
+            json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://","enabled":false}}})
+                .to_string(),
         )
         .map_err(|e| e.to_string())?;
         let plugins = LoadedPlugins {
@@ -6537,6 +6549,72 @@ print(json.dumps(result), flush=True)
             assert_eq!(unread()?, vec![json!({"hub":"work"})]);
             service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"]}))?;
             assert!(unread()?.is_empty());
+            for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
+                state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
+            }
+            let (_, matched, _) = state.query_activity("all", " review ")?;
+            assert_eq!(matched, 1);
+            service.action(&json!({"op":"ack_signals","ack_all":true,"query":" review "}))?;
+            let remaining = state.db.query(
+                "SELECT signal_id FROM local_signals WHERE acknowledged_at_ms IS NULL",
+                &[],
+            )?;
+            assert_eq!(remaining, vec![json!({"signal_id":"unmatched"})]);
+            service
+                .action(&json!({"op":"ack_signals","signal_ids":["unmatched"],"query":"review"}))?;
+            assert!(unread()?.is_empty());
+
+            let client = service.slot("local")?.clone();
+            let human =
+                super::super::registration::local_node(&state, &client, "human", "default")?
+                    .ok_or("Missing Human")?;
+            let id = string(&human, "listener_id");
+            let channel = format!("{}:human", service.host_id);
+            let hub_db =
+                super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
+            for (age, expected_heartbeats) in [(0, 0), (21_000, 1), (0, 0)] {
+                let mut remote = client.kv_get(id)?.ok_or("Missing remote Human")?.0;
+                remote["channels"][&channel]["updated_at_ms"] = json!(now_ms() - age);
+                hub_db.execute(
+                    "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+                    &[json!(remote.to_string()), json!(id)],
+                )?;
+                client.directory()?;
+                let count = || -> Result<u64, String> {
+                    Ok(hub_db.query("SELECT COUNT(*) AS n FROM hub_audit_log WHERE action='human_device_heartbeat'", &[])?[0]["n"].as_u64().unwrap_or(0))
+                };
+                let before = count()?;
+                service.poll()?;
+                for (_, task) in service.receivers.drain() {
+                    task.join().map_err(|_| "Receiver panicked")?;
+                }
+                assert_eq!(
+                    count()? - before,
+                    expected_heartbeats,
+                    "Heartbeat age {age}"
+                );
+            }
+
+            // Settings can arrive before Directory, and must retain the inventory's policy.
+            let remote = HubClient::new(
+                "local".into(),
+                json!({"url":"https://hub.example.com","authMode":"token"}),
+                "alice",
+                None,
+            );
+            let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&remote)));
+            inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"channels":[{"id":"messenger","enabled":true,"configured":true,"inbox_paused":true,"delivery_enabled":false}]});
+            service
+                .channel_inventories
+                .insert("local".into(), inventory);
+            service.slots.insert("local".into(), remote);
+            assert_eq!(
+                service.human_projection("local")["human_state_status"],
+                "unknown"
+            );
+            let settings = service.settings_for_hub("local");
+            assert_eq!(settings["channels"][0]["inbox_paused"], true);
+            assert_eq!(settings["channels"][0]["delivery_enabled"], false);
             Ok(())
         })();
         service.shutdown();

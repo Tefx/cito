@@ -20,14 +20,16 @@ pub struct ChannelPlugin {
     pub command: Vec<String>,
 }
 
-pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<ChannelPlugin>, String> {
+pub fn discover(
+    roots: &[(PathBuf, bool)],
+    user_root: Option<&Path>,
+) -> Result<Vec<ChannelPlugin>, String> {
     let mut plugins = Vec::new();
-    let mut seen_dirs = HashSet::new();
     let mut seen_ids = HashSet::new();
     if let Some(state) = user_root.and_then(Path::parent) {
         super::plugins::cleanup_retired_companion(state)?;
     }
-    for root in roots {
+    for (root, is_builtin) in roots {
         if !root.exists() {
             continue;
         }
@@ -48,7 +50,7 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
             if dir_name == "human" {
                 continue;
             }
-            if seen_ids.contains(dir_name) || seen_dirs.contains(dir_name) {
+            if seen_ids.contains(dir_name) {
                 continue;
             }
             let m: Value =
@@ -57,67 +59,21 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
             if m["id"].as_str() == Some("human") {
                 continue;
             }
-            seen_dirs.insert(dir_name.to_owned());
-            let id = m["id"].as_str().ok_or("PLUGIN_LOAD_ERROR: missing id")?;
-            if id.is_empty()
-                || id.len() > 32
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
-                || !id.as_bytes()[0].is_ascii_alphanumeric()
-            {
-                return Err(format!(
-                    "PLUGIN_LOAD_ERROR: invalid id in {}",
-                    path.display()
-                ));
-            }
+            let descriptor = super::plugins::parse_manifest(&dir, *is_builtin, &m)
+                .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", path.display()))?;
             // A higher-priority manifest owns its ID even if it changes kind.
-            if !seen_ids.insert(id.to_owned()) {
+            if !seen_ids.insert(descriptor.id.clone()) {
                 continue;
             }
-            if !matches!(m["kind"].as_str(), Some("human" | "human-channel"))
-                || m["scope"].as_str() == Some("user")
-            {
+            if descriptor.kind != "human-channel" || m["scope"] == "user" {
                 continue;
             }
-            if m["displayName"]
-                .as_str()
-                .is_none_or(|s| s.trim().is_empty())
-            {
-                return Err(format!("PLUGIN_LOAD_ERROR: {id}: displayName required"));
-            }
-            let mut command = match m.get("command") {
-                Some(Value::Array(items)) if !items.is_empty() => items
-                    .iter()
-                    .map(|v| {
-                        v.as_str()
-                            .filter(|s| !s.is_empty())
-                            .map(String::from)
-                            .ok_or(
-                                "PLUGIN_LOAD_ERROR: command must contain nonempty strings"
-                                    .to_owned(),
-                            )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                None if dir.join("index.js").exists() => {
-                    vec!["node".into(), dir.join("index.js").to_string_lossy().into()]
-                }
-                None if dir.join("index.ts").exists() => vec![
-                    "node".into(),
-                    "--experimental-strip-types".into(),
-                    dir.join("index.ts").to_string_lossy().into(),
-                ],
-                _ => {
-                    return Err(format!(
-                        "PLUGIN_LOAD_ERROR: {id}: command or entrypoint required"
-                    ))
-                }
-            };
+            let mut command = descriptor.command;
             if command[0].starts_with("./") || command[0].starts_with("../") {
                 command[0] = dir.join(&command[0]).to_string_lossy().into();
             }
             plugins.push(ChannelPlugin {
-                id: id.into(),
+                id: descriptor.id,
                 dir,
                 command,
                 manifest: m,
@@ -126,40 +82,6 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
     }
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(plugins)
-}
-
-pub fn default_roots(data_dir: &Path) -> Vec<PathBuf> {
-    roots_for_executable(data_dir, std::env::current_exe().ok().as_deref())
-}
-
-fn roots_for_executable(data_dir: &Path, executable: Option<&Path>) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(extra) = std::env::var("CITO_PLUGIN_PATH") {
-        for part in extra.split(':').filter(|part| !part.trim().is_empty()) {
-            if let Ok(path) = super::plugins::expand_home_dir(
-                part.trim(),
-                "CITO_PLUGIN_PATH",
-                std::env::var("HOME").ok().as_deref(),
-            ) {
-                roots.push(path);
-            }
-        }
-    }
-    if let Ok(dir) = std::env::var("CITO_PLUGIN_DIR") {
-        roots.push(PathBuf::from(dir));
-    }
-    roots.push(data_dir.join("plugins"));
-    if let Ok(dir) = std::env::var("CITO_BUILTIN_PLUGINS_DIR") {
-        roots.push(PathBuf::from(dir));
-    }
-    roots.push(super::plugins::staged_plugins_dir(data_dir));
-    if let Some(dir) = executable.and_then(Path::parent) {
-        roots.push(dir.join("../Resources/plugins"));
-        roots.push(dir.join("../plugins"));
-    }
-    // Also supports development without relying on the process working directory.
-    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"));
-    roots
 }
 
 #[cfg(test)]

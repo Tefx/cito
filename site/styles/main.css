@@ -416,7 +416,7 @@ code, pre {
   justify-content: center;
   background-color: #090B0F;
   background-image:
-    radial-gradient(circle at 50% 35%, rgba(245, 158, 11, 0.08), transparent 70%),
+    radial-gradient(circle at 50% 35%, rgba(56, 189, 248, 0.08), transparent 70%),
     radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px);
   background-size: 100% 100%, 20px 20px;
 }
@@ -429,11 +429,6 @@ code, pre {
 
 .docs-figure-stage {
   min-height: 18rem;
-}
-
-.docs-figure-stage--compact {
-  min-height: 10.5rem;
-  padding: 1.75rem 1.5rem;
 }
 
 /* 1:1 Proportional Logical Sizing:

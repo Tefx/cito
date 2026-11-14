@@ -611,6 +611,7 @@ fn in_flight_rebind_aborts_and_reaps_real_child_without_touching_new_owner() -> 
             remote["owner_token"] = json!("sibling-owner");
             remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
             f.client.kv_save(id, &remote, Some(revision))?;
+            let remote = f.client.kv_get(id)?.ok_or("Missing Hub-stamped binding")?.0;
             let fail = matches!(cleanup, "retry" | "newer");
             if cleanup == "enqueue_failure" {
                 f.state.db.execute("CREATE TRIGGER reject_detach BEFORE INSERT ON pending_hub_detaches BEGIN SELECT RAISE(ABORT,'fixture queue failure'); END",&[])?;
@@ -842,7 +843,7 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
     let db = f.hub_db()?;
     let id = string(&f.row, "listener_id");
     let channel = "host:fixture";
-    let (mut registration, revision) = f.client.kv_get(id)?.ok_or("Missing registration")?;
+    let (mut registration, _) = f.client.kv_get(id)?.ok_or("Missing registration")?;
     let initial_heartbeat = now_ms();
     // Model a wake approaching the channel's TTL without a minute-long sleep.
     registration["channels"][channel]["updated_at_ms"] = json!(initial_heartbeat - 55_000);
@@ -850,7 +851,11 @@ fn ten_second_renewal_extends_leases_and_channel_heartbeat_while_real_child_is_o
     registration["channels"]["sibling:fixture"] = json!({"state":"ACTIVE","updated_at_ms":1});
     registration["owner_token"] = json!("legacy-sibling-owner");
     let sibling = registration["channels"]["sibling:fixture"].clone();
-    f.client.kv_save(id, &registration, Some(revision))?;
+    // Age persisted Hub timestamps directly; a normal write renews on the Hub clock.
+    db.execute(
+        "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+        &[json!(registration.to_string()), json!(id)],
+    )?;
     let initial = db.query("SELECT claim_until_ms FROM hub_signals", &[])?[0]["claim_until_ms"]
         .as_u64()
         .ok_or("Missing claim deadline")?;
@@ -1071,6 +1076,7 @@ fn channel_takeover_blocks_stale_detach_and_fences_before_spawn() -> Result<(), 
     remote["channels"]["host:fixture"]["owner_token"] = json!("winner-owner");
     remote["channels"]["sibling:fixture"] = json!({"state":"ACTIVE"});
     f.client.kv_save(id, &remote, Some(revision))?;
+    let remote = f.client.kv_get(id)?.ok_or("Missing Hub-stamped binding")?.0;
     let error = detach_channel_expected(&f.client, id, "host:fixture", &f.row)
         .expect_err("Stale owner must not detach the winner");
     assert!(error.starts_with("STALE_GENERATION:"));

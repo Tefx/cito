@@ -99,10 +99,10 @@
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong>Step 1 — Menu Bar Enrollment &amp; Presence:</strong> Manage your personal notification state (<code>Pause</code> / <code>Resume</code>), click <code>+ Listen</code> on any open session under <code>AVAILABLE SESSIONS</code>, or open <code>Directory…</code> and <code>Activity…</code> directly.
+          <strong>Step 1 — Menu Bar Enrollment &amp; Presence:</strong> Manage your personal notification state (<code>Pause Inbox</code> / <code>Resume Inbox</code>), click <code>+ Listen</code> on any open session under <code>AVAILABLE SESSIONS</code>, or open <code>Directory…</code> and <code>Activity…</code> directly.
         </figcaption>
       </figure>
-      <p>The menu bar number counts unread signals only. <strong>YOUR INBOX → Pause/Resume</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The inbox remains visible when this Mac is detached. <strong>Pause Agents</strong> stops only agent registrations on the selected Hub. Status colors adapt to macOS Light and Dark Mode.</p>
+      <p>The menu bar number counts unread signals only. <strong>YOUR INBOX → Pause Inbox/Resume Inbox</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The inbox remains visible when this Mac is detached. <strong>Pause Agents</strong> stops only agent registrations on the selected Hub. Status colors adapt to macOS Light and Dark Mode.</p>
 
       <h3>Discover and message a peer in Directory</h3>
       <p>Open <strong>Directory…</strong> to find a peer by user, repository, task, or readable address. Filter by <strong>My Macs</strong> or app, then choose <strong>Message</strong> to send a direct signal or copy its address for an agent to use.</p>
@@ -256,7 +256,7 @@ args = []</code></pre>
           <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share This Mac as a Hub</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Join from Clipboard</code> / <code>Add Hub…</code> to connect to another Mac or team server.
         </figcaption>
       </figure>
-      <p>Change the sharing port with <strong>Apply</strong> and select <strong>Auth: Token</strong> or <strong>Auth: None</strong>. Bind errors appear on the sharing card and preserve the previous listener. Use <strong>Edit</strong> on an existing Hub to update its settings without re-entering saved secrets. Disconnected hubs remain visible with <strong>Connect</strong>. OIDC <strong>Switch Account</strong> always requests an interactive account picker.</p>
+      <p>Change the sharing port with <strong>Apply</strong> and select <strong>Access: Token</strong> or <strong>Access: Trusted</strong>. Bind errors appear on the sharing card and preserve the previous listener. Use <strong>Edit</strong> on an existing Hub to update its settings without re-entering saved secrets. Disconnected hubs remain visible with <strong>Connect</strong>. OIDC <strong>Switch Account</strong> always requests an interactive account picker.</p>
       <h3>Joining a Shared Team Hub (OIDC / Token)</h3>
       <p>
         For engineering teams running a self-hosted <code>cito hub</code> container, click <strong><code>Add Hub…</code></strong> in <code>Hubs &amp; Network</code> (or run <code>cito setup --hub work --url https://cito.example.com --auth oidc --issuer https://id.example.com --client-id &lt;id&gt; --default</code>). Once added, click <strong><code>Sign In…</code></strong> in the menu bar dropdown to authenticate via browser PKCE and toggle any session between <strong><code>🔒 Self</code></strong> (private to you) and <strong><code>👥 Team</code></strong> (discoverable by teammates).

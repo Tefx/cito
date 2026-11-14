@@ -173,6 +173,10 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     inspect(&f, p);
     control(&f, p, "activity_clear");
     let confirm = inspect(&f, p);
+    assert_eq!(
+        node(&confirm, "directory_items", "activity_clear_confirm_label")["text"],
+        "Clear 3 All Activity messages?"
+    );
     assert!(!node(&confirm, "directory_items", "activity_clear_confirm_commit").is_null());
     control(&f, p, "activity_clear_confirm_cancel");
     inspect(&f, p);
@@ -180,6 +184,23 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         .frames(p)
         .iter()
         .any(|v| v["op"] == "clear_activity_history"));
+    f.send(
+        p,
+        json!({"op":"test_directory_query","query":"Build passed"}),
+    );
+    inspect(&f, p);
+    control(&f, p, "activity_clear");
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "directory_items",
+            "activity_clear_confirm_label"
+        )["text"],
+        "Clear 1 matching messages?"
+    );
+    control(&f, p, "activity_clear_confirm_cancel");
+    f.send(p, json!({"op":"test_directory_query","query":""}));
+    inspect(&f, p);
     control(&f, p, "activity_clear");
     f.send(p, json!({"op":"test_directory_key","key":"escape"}));
     let cancelled = inspect(&f, p);
@@ -210,6 +231,120 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
         inspect(&f, p);
         render_png_as(&f, p, "settings", file, Some("dark"));
     }
+}
+
+#[test]
+fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["hubs"][0]["human_listener_id"] = json!("inbox");
+    frame["hubs"][0]["human_state_status"] = json!("current");
+    frame["hubs"][0]["human_scope"] = json!("workspace");
+    frame["listeners"][0]["scope"] = json!("workspace");
+    let agent_id = frame["listeners"][0]["scoped_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let full_address = format!("{}/fixture#abcd", "long-account-".repeat(8));
+    frame["listeners"][0]["display_address"] = json!(full_address);
+    f.send(p, frame.clone());
+    let copy_id = format!("copy:{agent_id}");
+    let compact = node(&inspect(&f, p), "items", &copy_id)["text"].clone();
+    assert_ne!(compact, full_address);
+    control(&f, p, &copy_id);
+    inspect(&f, p);
+    f.send(p, json!({"op":"test_expire_copy_feedback","id":copy_id}));
+    let restored = inspect(&f, p);
+    assert_eq!(node(&restored, "items", &copy_id)["text"], compact);
+    assert_eq!(
+        node(&restored, "items", &copy_id)["accessibility_label"],
+        full_address
+    );
+    for mode in ["oidc", "token"] {
+        frame["hubs"][0]["auth_mode"] = json!(mode);
+        f.send(p, frame.clone());
+        control(&f, p, "open_directory");
+        send_fixture(
+            &f,
+            p,
+            json!({"op":"directory","peers":if mode=="token"{vec![peer("other")]}else{vec![]},"matched_count":if mode=="token"{1}else{0},"online_count":1}),
+        );
+        let s = inspect(&f, p);
+        let inbox = node(&s, "items", "scope:inbox");
+        let agent = node(&s, "items", &format!("scope:{agent_id}"));
+        assert_eq!(inbox["text"], "Team", "{mode}");
+        assert_eq!(inbox["symbol"], "person.2.fill");
+        assert_eq!(inbox["background"], agent["background"]);
+        assert!(inbox["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains("Visibility: Team"));
+    }
+    // A confirmed empty reply owns the result even when state still contains seeds.
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"matched_count":0,"online_count":0}),
+    );
+    control(&f, p, "close_directory");
+    control(&f, p, "open_directory");
+    f.send(p, frame.clone());
+    let empty = inspect(&f, p);
+    assert_eq!(empty["directory_selected_id"], "");
+    assert_eq!(empty["directory_matched_count"], 0);
+
+    frame["unread_count"] = json!(2);
+    frame["activity"] = json!([("review","Review ready"),("build","Build passed")].into_iter().map(|(id,message)| json!({"hub":"personal","signal_id":id,"listener_id":"inbox","from_user":"bob","from_host_name":"desktop","from_title":"Sender","target_harness":"human","target_title":"Human","target_scoped_id":"personal:inbox","message":message,"created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})).collect::<Vec<_>>());
+    f.send(p, frame.clone());
+    assert_eq!(inspect(&f, p)["unread_count"], 2);
+    control(&f, p, "dir_mode:activity");
+    control(&f, p, "act_filter:all");
+    f.send(
+        p,
+        json!({"op":"test_directory_query","query":"Review ready"}),
+    );
+    inspect(&f, p);
+    control(&f, p, "activity_mark_all_read");
+    let read = inspect(&f, p);
+    assert_eq!(read["unread_count"], 1);
+    assert!(f
+        .frames(p)
+        .iter()
+        .any(|a| a["op"] == "ack_signals" && a["ack_all"] == true && a["query"] == "Review ready"));
+    f.send(
+        p,
+        json!({"op":"test_directory_query","query":"Build passed"}),
+    );
+    let remaining = inspect(&f, p);
+    assert_eq!(
+        node(&remaining, "directory_items", "activity_mark_all_read")["enabled"],
+        true
+    );
+
+    let mut cfg = settings();
+    cfg["hubs"][0]["human_paused"] = json!(true);
+    cfg["hubs"][0]["human_state_status"] = json!("current");
+    cfg["hubs"][0]["status"] = json!("disconnected");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    let paused = inspect(&f, p);
+    assert!(node(&paused, "settings_items", "human_paused_banner").is_object());
+    assert_eq!(
+        node(&paused, "settings_items", "resume_human_channels")["enabled"],
+        false
+    );
+    control(&f, p, "open_uninstall_confirm");
+    control(&f, p, "uninstall_purge_data");
+    let purge = inspect(&f, p);
+    assert!(
+        node(&purge, "settings_items", "confirm_disconnect_all")["tooltip"]
+            .as_str()
+            .unwrap()
+            .contains("delete local data and Hub settings")
+    );
 }
 
 #[test]
@@ -5294,7 +5429,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     f.send(p, next.clone());
     let scope_before = node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh");
     assert_eq!(scope_before["width"], 68);
-    assert_eq!(scope_before["tooltip"], "Visibility: Only Me (@alice) — only your own sessions and devices on 'work' can message this session. Click to share with Team.");
+    assert_eq!(scope_before["tooltip"], "Visibility: Only Me (@alice) — only your own sessions and devices on 'work' can message this node. Click to share with Team.");
     control(&f, p, "scope:work:repo-workabcdefgh");
     wait(|| {
         f.frames(p)
@@ -5307,7 +5442,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     assert_eq!(scope_after["width"], scope_before["width"]);
     assert_eq!(scope_after["x"], scope_before["x"]);
     let scope_team = scope_after;
-    assert_eq!(scope_team["tooltip"], "Visibility: Team — anyone connected to 'work' can discover and message this session. Click to restrict to Only Me.");
+    assert_eq!(scope_team["tooltip"], "Visibility: Team — anyone connected to 'work' can discover and message this node. Click to restrict to Only Me.");
     control(&f, p, "scope:work:repo-workabcdefgh");
     let scope_self = node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh");
     assert_eq!(scope_self["text"], "Self");
@@ -6671,7 +6806,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     let restored = inspect(&f, l.ui);
     let button = node(&restored, "directory_items", &control_id);
     assert_eq!(button["text"], "Copy");
-    assert_eq!(button["accessibility_label"], "Copy");
+    assert_eq!(button["accessibility_label"], "Copy message");
     let frames: Vec<_> = l
         .frames
         .iter()

@@ -590,6 +590,7 @@ final class MenuControl: NSControl {
     var maximumWidth: CGFloat = .greatestFiniteMagnitude
     var feedbackTimer: Timer?
     var restingTitle: String?
+    var restingAccessibilityLabel: String?
     private(set) var isHovered = false
     private var trackingArea: NSTrackingArea?
     static weak var activeHovered: MenuControl?
@@ -758,7 +759,10 @@ final class MenuControl: NSControl {
         applyVisualState()
     }
     func copied(_ message: String = "✓ Copied") {
-        if feedbackTimer == nil { restingTitle = label.stringValue }
+        if feedbackTimer == nil {
+            restingTitle = label.stringValue
+            restingAccessibilityLabel = accessibilityLabel()
+        }
         feedbackTimer?.invalidate()
         leadingSymbolView?.isHidden = true
         label.stringValue = message; label.textColor = CitoPalette.successText
@@ -770,7 +774,9 @@ final class MenuControl: NSControl {
             }
             self.feedbackTimer = nil
             self.label.stringValue = self.restingTitle ?? self.accessibilityLabel() ?? ""
+            self.setAccessibilityLabel(self.restingAccessibilityLabel)
             self.restingTitle = nil
+            self.restingAccessibilityLabel = nil
             self.layoutContents()
             self.applyVisualState()
         }
@@ -943,6 +949,7 @@ struct HubConfigItem: Decodable, Equatable {
     let client_id: String?
     var human_paused: Bool? = nil
     var human_about: String? = nil
+    var human_state_status: String? = nil
 }
 struct SettingsPayload: Decodable, Equatable {
     let apps: [AppSetupItem]
@@ -1113,6 +1120,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         copyControl.feedbackTimer?.invalidate()
         copyControl.feedbackTimer = nil
         copyControl.restingTitle = nil
+        copyControl.restingAccessibilityLabel = nil
         copyControl.isHidden = false
         copyControl.setHovered(false)
         copyControl.frame = NSRect(x: 544 - MenuControl.intrinsicWidth("Message", leadingSymbol:"bubble.left") - 6 - copyWidth, y: 15, width: copyWidth, height: 22)
@@ -1226,6 +1234,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         if !keepCopyFeedback {
             copyControl.feedbackTimer?.invalidate(); copyControl.feedbackTimer = nil
             copyControl.restingTitle = nil
+            copyControl.restingAccessibilityLabel = nil
             copyControl.label.stringValue = "Copy"
         }
         copyControl.style = .neutral
@@ -1897,10 +1906,10 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             if op == "test_directory_query", let query = object["query"] as? String {
                 if directoryPanel == nil { openDirectoryPanel() }
-                directorySearchField?.stringValue = query
-                directoryQuery = query
-                applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
-                queryDirectory()
+                if let field = directorySearchField {
+                    field.stringValue = query
+                    controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:field))
+                }
                 return
             }
             if ["test_focus_field", "test_settings_input"].contains(op), let id = object["id"] as? String, id.hasPrefix("channel_field:") {
@@ -2317,6 +2326,28 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         if attention { detail="Hub connection needs attention" }
         button.toolTip="Cito · " + detail; button.setAccessibilityLabel(button.toolTip)
     }
+    func scopeToggle(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl? {
+        let hasOtherUsers = directoryAllPeers.contains { $0.hub == hub && !$0.user.isEmpty && $0.user != user }
+            || listeners.contains { $0.hub == hub && !($0.user ?? "").isEmpty && $0.user != user }
+        guard hubs.first(where: { $0.name == hub })?.auth_mode == "oidc" || hasOtherUsers else { return nil }
+        let team = scope == "workspace"
+        let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill")
+        control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
+        updateScopeControl(control, scope:scope, hub:hub, user:user)
+        return control
+    }
+
+    func updateScopeControl(_ control: MenuControl, scope: String, hub: String, user: String) {
+        let team = scope == "workspace"
+        control.label.stringValue = team ? "Team" : "Self"
+        control.setLeadingSymbol(team ? "person.2.fill" : "lock.fill")
+        control.setAccessibilityLabel(control.label.stringValue)
+        control.style = team ? .prominent : .neutral
+        control.toolTip = team
+            ? "Visibility: Team — anyone connected to '\(hub)' can discover and message this node. Click to restrict to Only Me."
+            : "Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(hub)' can message this node. Click to share with Team."
+    }
+
     func rebuild() {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
         rebuildCount += 1
@@ -2560,11 +2591,9 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         toggle.pressed={ [weak self] in self?.updateInbox(paused:!paused,hub:targetHub) }
         card.addSubview(toggle)
         var inboxActions: [NSView] = []
-        if targetHubObj?.auth_mode == "oidc", let id=targetHubObj?.human_listener_id {
-            let team=targetHubObj?.human_scope=="workspace"
-            let scope=MenuControl(team ? "Team" : "Self",frame:NSRect(x:0,y:30,width:60,height:22))
-            scope.identifier=NSUserInterfaceItemIdentifier("scope:\(id)")
-            scope.pressed={ [weak self] in self?.updateInbox(hub:targetHub,scope:team ? "self" : "workspace") }
+        if let id = targetHubObj?.human_listener_id,
+           let scope = scopeToggle(hub:targetHub,user:targetUser,scope:targetHubObj?.human_scope ?? "self",id:id,y:30) {
+            scope.pressed = { [weak self] in self?.updateInbox(hub:targetHub,scope:targetHubObj?.human_scope == "workspace" ? "self" : "workspace") }
             scope.isEnabled=toggle.isEnabled; card.addSubview(scope); inboxActions.append(scope)
         }
         inboxActions.append(toggle)
@@ -2575,11 +2604,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         agentHeader.addSubview(textLabel("LISTENING SESSIONS",NSRect(x:16,y:3,width:344,height:16),size:10,weight:.semibold,color:CitoPalette.secondaryText))
         _ = host(agentHeader,id:"listening_sessions_header")
         let orderedListeners = listeners.filter { $0.harness != "human" }
-        if orderedListeners.isEmpty {
-            let empty=NSView(frame:NSRect(x:0,y:0,width:380,height:34))
-            empty.addSubview(textLabel("No agent sessions listening",NSRect(x:16,y:8,width:344,height:18),size:11,color:CitoPalette.secondaryText))
-            _ = host(empty,id:"empty_agent_sessions")
-        }
         for listener in orderedListeners {
             let sessionKey = "\(listener.harness):\(listener.session_id)"
             let aboutText = (listener.about ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2599,10 +2623,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let badge = makeHarnessBadge(NSRect(x: 12, y: cardHeight - 43, width: 28, height: 28),
                 radius: 7, iconInset: 6, harness: listener.harness, harnesses: map)
             card.addSubview(badge)
-            let listenerHub = hubs.first(where: { $0.name == listener.hub })
-            let hasOtherUsers = directoryAllPeers.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user }) || listeners.contains(where: { $0.hub == listener.hub && !($0.user ?? "").isEmpty && $0.user != user })
-            let showScopeToggle = listenerHub?.auth_mode == "oidc" || hasOtherUsers
-            let scopeWidth: CGFloat = 68
             var sessionActions: [NSView] = []
             let title = textLabel(displayTitle,
                 NSRect(x: titleX, y: cardHeight - 26, width: 40, height: 18), size: 13, weight: .semibold)
@@ -2635,39 +2655,26 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let path = textLabel(pathText,
                 NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
-            if showScopeToggle {
+            if let scopeBtn = scopeToggle(hub:listener.hub,user:user,scope:listener.scope,id:listener.scoped_id,y:cardHeight-28) {
                 var scope = listener.scope
-                let scopeBtn = MenuControl(scope == "self" ? "Self" : "Team", frame: NSRect(x: 0, y: cardHeight - 28, width: scopeWidth, height: 22),
-                    leadingSymbol: scope == "self" ? "lock.fill" : "person.2.fill")
-                scopeBtn.identifier = NSUserInterfaceItemIdentifier("scope:\(listener.scoped_id)")
-                let scopeColor = { [weak scopeBtn] in
-                    scopeBtn?.style = scope == "workspace" ? .prominent : .neutral
-                    scopeBtn?.toolTip = scope == "self"
-                        ? "Visibility: Only Me (@\(user)) — only your own sessions and devices on '\(listener.hub)' can message this session. Click to share with Team."
-                        : "Visibility: Team — anyone connected to '\(listener.hub)' can discover and message this session. Click to restrict to Only Me."
-                }
-                scopeColor()
                 scopeBtn.pressed = { [weak self, weak scopeBtn] in
-                    guard let self = self else { return }
+                    guard let self = self, let scopeBtn = scopeBtn else { return }
                     self.pendingMutation = true
                     scope = scope == "self" ? "workspace" : "self"
-                    scopeBtn?.label.stringValue = scope == "self" ? "Self" : "Team"
-                    scopeBtn?.setLeadingSymbol(scope == "self" ? "lock.fill" : "person.2.fill")
-                    scopeBtn?.setAccessibilityLabel(scopeBtn?.label.stringValue); scopeColor()
-                    self.emit(["op": "set_scope", "hub": listener.hub, "listener_id": listener.listener_id, "scope": scope])
+                    self.updateScopeControl(scopeBtn, scope:scope, hub:listener.hub, user:user)
+                    self.emit(["op":"set_scope","hub":listener.hub,"listener_id":listener.listener_id,"scope":scope])
                 }
                 card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
             }
-            let personal = listener.harness == "human"
             let stop = MenuControl("Pause", frame: NSRect(x: 0, y: cardHeight - 28, width: 52, height: 22))
-            stop.toolTip = personal ? "Pause all human channels on this Hub, including this Mac and external channels" : "Pause listening for this session"
+            stop.toolTip = "Pause listening for this session"
             stop.style = .neutral
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
             layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: CitoMetrics.gap, trailing: sessionActions)
             let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
-            if !personal && renamingSessionKey == sessionKey {
+            if renamingSessionKey == sessionKey {
                 title.isHidden = true
                 let field = NSTextField(string: renameDraft ?? listener.title)
                 field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
@@ -2675,7 +2682,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 field.delegate = self; field.font = .systemFont(ofSize: 13)
                 card.addSubview(field); renameField = field
                 DispatchQueue.main.async { field.window?.makeFirstResponder(field); field.selectText(nil) }
-            } else if !personal {
+            } else {
                 let titleW = max(24, min(rightEdge - titleX - 24, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
                 title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
                 let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 2, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
@@ -2683,8 +2690,6 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 renameBtn.style = .subtleHeader; renameBtn.toolTip = "Rename session"
                 renameBtn.pressed = { [weak self] in self?.renameField = nil; self?.renamingSessionKey = sessionKey; self?.rebuild() }
                 card.addSubview(renameBtn)
-            } else {
-                title.frame.size.width = max(24, rightEdge - titleX - 6)
             }
             layoutBar(in: card, insetLeft: titleX, insetRight: 10, y: 7, height: 19, leading: [copy], flexible: path)
         }
@@ -2704,14 +2709,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             scroll.documentView = doc; _ = host(scroll, id: "active_scroll")
         }
-        if listeners.isEmpty {
+        if orderedListeners.isEmpty {
             if available.isEmpty {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 92))
                 let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 86), radius: 10, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
                 icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
                 icon.contentTintColor = CitoPalette.secondaryText; card.addSubview(icon)
-                card.addSubview(textLabel("No active listeners", NSRect(x: 44, y: 57, width: 304, height: 18), size: 13, weight: .semibold))
+                card.addSubview(textLabel("No agent sessions listening", NSRect(x: 44, y: 57, width: 304, height: 18), size: 13, weight: .semibold))
                 let subtitle = !(settings?.apps.contains(where:{$0.isConfigured}) ?? true) ? "Connect your coding apps in Settings to start" : "Open a coding session in your app or configure Human Channels"
                 let emptyHint = textLabel(subtitle, NSRect(x:44,y:32,width:304,height:26),size:10,color:CitoPalette.secondaryText)
                 emptyHint.maximumNumberOfLines = 2; emptyHint.lineBreakMode = .byWordWrapping
@@ -2731,7 +2736,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 let icon = NSImageView(frame: NSRect(x: 12, y: 7, width: 14, height: 14))
                 icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
                 icon.contentTintColor = CitoPalette.secondaryText; pill.addSubview(icon)
-                pill.addSubview(textLabel("No active listeners — click + Listen below",
+                pill.addSubview(textLabel("No agent sessions listening — click + Listen below",
                     NSRect(x: 32, y: 6, width: 316, height: 16), size: 11, color: CitoPalette.secondaryText))
                 row.addSubview(pill); _ = host(row, id: "empty")
             }
@@ -2888,7 +2893,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 groupControl.label.frame = NSRect(x: 34, y: 4, width: 310, height: 16)
                 groupControl.label.font = .systemFont(ofSize: 11.5, weight: .semibold)
                 groupControl.label.alignment = .left
-                groupControl.label.lineBreakMode = .byTruncatingMiddle; groupControl.toolTip = groupTitle
+                groupControl.label.lineBreakMode = .byTruncatingMiddle
                 groupControl.pressed = { [weak self] in
                     guard let self = self else { return }
                     if self.collapsedGroups.contains(harness) { self.collapsedGroups.remove(harness) }
@@ -3365,6 +3370,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             paused.addSubview(title)
             let resume=MenuControl("Resume Inbox",frame:NSRect(x:0,y:10,width:MenuControl.intrinsicWidth("Resume Inbox"),height:24))
             resume.identifier=NSUserInterfaceItemIdentifier("resume_human_channels")
+            let channelHub = settings?.hubs.first(where: { $0.name == effectiveChannelHub })
+            resume.isEnabled = channelHub?.status == "connected" && channelHub?.human_state_status == "current"
             resume.pressed={ [weak self] in guard let self=self else{return}; self.updateInbox(paused:false,hub:self.effectiveChannelHub) }
             paused.addSubview(resume)
             layoutBar(in:paused,y:10,height:24,flexible:title,trailing:[resume])
@@ -3599,7 +3606,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
             }
             if disclosure && !personalCollapsed && gatewayActive && instruction.isEmpty {
-                let manual=MenuControl(manualExpanded ? "Hide manual entry" : "Enter \(userFields.first?.label ?? "account") manually…",frame:NSRect(x:12,y:40,width:190,height:22),paddingX:0)
+                let manual=MenuControl(manualExpanded ? "▾ Hide manual entry" : "▸ Enter \(userFields.first?.label ?? "account") manually…",frame:NSRect(x:12,y:40,width:190,height:22),paddingX:0)
                 manual.label.alignment = .left; manual.layoutContents()
                 manual.style = .subtleHeader; manual.identifier=NSUserInterfaceItemIdentifier("manual_channel:\(ch.id)")
                 manual.pressed={ [weak self] in guard let self=self else{return}; self.channelUiStates[channelKey, default: ChannelUiState()].manualEntry.toggle(); self.rebuildSettingsPanel() }
@@ -4155,7 +4162,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             let disconnect=MenuControl(disconnectTitle,frame:NSRect(x:112,y:16,width:MenuControl.intrinsicWidth(disconnectTitle),height:24),radius:6)
             disconnect.identifier=NSUserInterfaceItemIdentifier("confirm_disconnect_all")
             disconnect.style = .destructive
-            disconnect.toolTip = "Disconnect all Agent Apps and keep Cito running"
+            disconnect.toolTip = uninstallPurgeData ? "Disconnect all Agent Apps and delete local data and Hub settings" : "Disconnect all Agent Apps and keep Cito running"
             disconnect.pressed = { [weak self] in
                 guard let self = self else { return }
                 let purge = self.uninstallPurgeData
@@ -4360,11 +4367,14 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         markReadBtn.isHidden = true
         markReadBtn.pressed = { [weak self] in
             guard let self = self else { return }
-            self.unreadCount = self.activityFilter == "me" ? max(0,self.unreadCount-self.activityUnreadCount) : 0
+            let matched = Set(self.activityFilteredItems.map { "\($0.hub):\($0.signal_id)" })
+            let matchedUnread = self.serverActivityFilter == self.activityFilter && self.serverActivityQuery == self.directoryQuery
+                ? self.activityUnreadCount : self.activityFilteredItems.filter { $0.unread }.count
+            self.unreadCount = max(0,self.unreadCount-matchedUnread)
             self.activityUnreadCount = 0
             self.serverActivityFilter = nil
             self.activityAllItems = self.activityAllItems.map { item in
-                if self.activityFilter == "me" && item.target_harness != "human" { return item }
+                if !matched.contains("\(item.hub):\(item.signal_id)") { return item }
                 return ActivityItem(
                     hub: item.hub, signal_id: item.signal_id, listener_id: item.listener_id,
                     from_user: item.from_user, from_host_name: item.from_host_name,
@@ -4378,7 +4388,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             }
             self.updateDirectoryModePills()
             self.applyActivityFilter()
-            self.emit(["op": "ack_signals", "ack_all": true,"filter":self.activityFilter])
+            self.emit(["op": "ack_signals", "ack_all": true,"filter":self.activityFilter,"query":self.directoryQuery])
             self.queryDirectory()
         }
         facetBar.addSubview(markReadBtn)
@@ -4805,8 +4815,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
 
     func seedDirectoryPeersIfEmpty() {
         // Until the first Directory reply, the latest state frame owns these seed rows.
-        guard directoryAllPeers.isEmpty || serverDirectoryQuery == nil else { return }
-        serverDirectoryQuery = nil
+        guard serverDirectoryQuery == nil else { return }
         directoryAllPeers = listeners.map { listener in
             let user = listener.user ?? listener.owner_user ?? hubs.first(where: { $0.name == listener.hub })?.user ?? ""
             let host = (listener.host_name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4822,6 +4831,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     }
 
     func openDirectoryPanel(mode: String = "directory") {
+        activityClearConfirm = false
         ensureDirectoryPanel()
         seedDirectoryPeersIfEmpty()
         directoryVisible = true

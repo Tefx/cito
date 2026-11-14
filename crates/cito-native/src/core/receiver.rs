@@ -80,7 +80,7 @@ fn plugin_request_owned(
                     };
                     if renewal_due {
                         if let Some(ch) = remote["channels"].get_mut(channel) {
-                            let now = now_ms();
+                            let now = client.server_now();
                             ch.as_object_mut()
                                 .ok_or("INVALID_INPUT: Listener channel must be an object")?
                                 .insert("updated_at_ms".into(), json!(now));
@@ -596,7 +596,7 @@ pub fn detach_channel_expected(
                 .ok_or("INVALID_INPUT: Listener channel must be an object")?
                 .insert("state".into(), json!("UNLISTENED"));
         }
-        super::lease::reconcile_registration_state(&mut remote, now_ms());
+        super::lease::reconcile_registration_state(&mut remote, client.server_now());
         match client.kv_save(id, &remote, Some(revision)) {
             Ok(_) => return Ok(()),
             Err(error) if error.starts_with("10071:") => {}

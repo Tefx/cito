@@ -97,6 +97,159 @@ fn human_device_fencing_inbox_cas_and_publish_pause_are_atomic() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn fresh_device_adopts_retained_human_identity_and_verified_alias() {
+    for alias in [false, true] {
+        let dir = temp();
+        let e = Arc::new(HubEngine::open(&dir.join("hub")).unwrap());
+        e.set_plugin_roots(&[]).unwrap();
+        let mut client = super::super::transport::HubClient::new(
+            "local".into(),
+            json!({"url":"local://"}),
+            "alice",
+            Some(e.clone()),
+        );
+        let stored_pid = "none#alice";
+        if alias {
+            client.identity = json!({"principal_id":"oidc:https://id.example.com|alice","legacy_principal_id":stored_pid,"owner_user":"alice","oidc":true});
+        }
+        // A retained v1 key need not be derivable by this freshly enrolled Mac.
+        let legacy_id = format!("c_{}", &hash("cito-v1|none#alice|human|default")[..16]);
+        e.inner.db.transaction(|c| {
+            let mut record = json!({"listener_id":legacy_id,"public_id":"alice-legacy","principal_id":stored_pid,"owner_user":"alice","harness":"human","session_id":"default","title":"Human","about":"Release approvals","scope":"self","human_paused":true,"human_control_revision":7,"binding_generation":1,"channels":{"sibling:human":{"host_id":"sibling","state":"ACTIVE","binding_generation":9,"owner_token":"sibling-owner","updated_at_ms":now_ms()}}});
+            save_human(c, &legacy_id, &mut record)?; Ok(())
+        }).unwrap();
+        let before = client.kv_get(&legacy_id).unwrap().unwrap().0;
+        let local = super::super::state::LocalState::open(&dir.join("state")).unwrap();
+        for automatic in [true, false] {
+            let args = json!({"about":"Must not overwrite","scope":"workspace"});
+            let caller = json!({"harness":"human","session_id":"default"});
+            let enrolled = if automatic {
+                super::super::registration::register_automatic_human(
+                    &local, &client, "fresh", &args, &caller,
+                )
+            } else {
+                super::super::registration::register_listener(
+                    &local, &client, "fresh", &args, &caller,
+                )
+            }
+            .unwrap();
+            assert_eq!(enrolled["canonical_listener_id"], legacy_id);
+            assert!(local.listener("local", &legacy_id).unwrap().is_some());
+            let record = client.kv_get(&legacy_id).unwrap().unwrap().0;
+            for field in ["about", "scope", "human_paused", "human_control_revision"] {
+                assert_eq!(record[field], before[field]);
+            }
+            assert_eq!(
+                record["channels"]["sibling:human"],
+                before["channels"]["sibling:human"]
+            );
+            assert_eq!(record["channels"]["fresh:human"]["state"], "ACTIVE");
+        }
+        e.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
+    for (mode, expected) in [("none", "workspace"), ("token", "self"), ("oidc", "self")] {
+        for device_first in [true, false] {
+            let dir = temp();
+            let e = HubEngine::open_with_auth_mode(&dir, mode).unwrap();
+            e.set_plugin_roots(&[]).unwrap();
+            let owner = json!({"principal_id":"none#alice","owner_user":"alice","auth_mode":mode});
+            let device = json!({"host_id":"mac","channel_id":"mac:human","binding_generation":1,"owner_token":"owner"});
+            if device_first {
+                e.rpc("human_device_attach", &device, Some(&owner)).unwrap();
+            }
+            e.inner.db.transaction(|c| {
+                attach(c, &json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"messenger"}), true, e.inner.default_human_scope, None)
+            }).unwrap();
+            if !device_first {
+                e.rpc("human_device_attach", &device, Some(&owner)).unwrap();
+            }
+            let record = e
+                .inner
+                .db
+                .transaction(|c| {
+                    Ok(parse(
+                        &kv_row(c, &listener_id("none#alice", "human", "default"))?.unwrap(),
+                        "value",
+                    ))
+                })
+                .unwrap();
+            assert_eq!(
+                record["scope"], expected,
+                "{mode}, device_first={device_first}"
+            );
+            e.shutdown();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
+#[test]
+fn hub_stamps_changed_agent_leases_and_prunes_audit_history() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    for skew in [-120_000, 120_000] {
+        let id = format!("agent_{}", if skew < 0 { "behind" } else { "ahead" });
+        let client_time = now_ms() + skew;
+        let mut record = json!({"listener_id":id,"harness":"fixture","session_id":"session","principal_id":"none#alice","scope":"workspace","state":"ACTIVE","binding_generation":1,"channels":{"mac:fixture":{"host_id":"mac","state":"ACTIVE","owner_token":"owner","updated_at_ms":client_time},"sibling:fixture":{"host_id":"sibling","state":"ACTIVE","updated_at_ms":client_time}}});
+        e.rpc("kv_create", &json!({"key":id,"data":record}), None)
+            .unwrap();
+        let read = || {
+            let wire = e.rpc("kv_get", &json!({"key":id}), None).unwrap();
+            (
+                serde_json::from_slice::<Value>(&B64.decode(s(&wire, "value_b64")).unwrap())
+                    .unwrap(),
+                wire["server_now_ms"].as_u64().unwrap(),
+            )
+        };
+        let (registered, server_now) = read();
+        assert!(
+            registered["channels"]["mac:fixture"]["updated_at_ms"]
+                .as_u64()
+                .unwrap()
+                .abs_diff(server_now)
+                < 1000
+        );
+        record = registered;
+        let sibling = record["channels"]["sibling:fixture"].clone();
+        record["channels"]["mac:fixture"]["updated_at_ms"] = json!(client_time + 1);
+        e.rpc("kv_put", &json!({"key":id,"data":record}), None)
+            .unwrap();
+        let (renewed, server_now) = read();
+        assert_eq!(renewed["channels"]["sibling:fixture"], sibling);
+        assert!(
+            renewed["channels"]["mac:fixture"]["updated_at_ms"]
+                .as_u64()
+                .unwrap()
+                .abs_diff(server_now)
+                < 1000
+        );
+        assert_eq!(evaluate_node_lease(&renewed, server_now), "ACTIVE");
+        let snapshot = e.rpc("kv_snapshot", &json!({}), None).unwrap();
+        assert!(snapshot["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["key"] == id));
+        send(&e, &id, &format!("signal_{id}"));
+    }
+    e.inner.db.transaction(|c| {
+        c.execute("INSERT INTO hub_audit_log(ts_ms,principal_id,action,target_id) VALUES(?,'alice','old','node'),(?,'alice','recent','node')", &[json!(now_ms()-604_800_001),json!(now_ms())])?;
+        prune(c)?;
+        assert!(c.query("SELECT id FROM hub_audit_log WHERE action='old'", &[])?.is_empty());
+        assert_eq!(c.query("SELECT id FROM hub_audit_log WHERE action='recent'", &[])?.len(), 1);
+        Ok(())
+    }).unwrap();
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn put(e: &HubEngine, id: &str, pid: &str, scope: &str) {
     e.rpc("kv_put",&json!({"key":id,"data_b64":encoded(&json!({"listener_id":id,"principal_id":pid,"owner_user":"alice","scope":scope,"harness":"fixture","session_id":"s1","binding_generation":1,"state":"ACTIVE","updated_at_ms":now_ms()}))}),None).unwrap();
 }
@@ -375,7 +528,9 @@ fn unthreaded_reply_requires_one_recent_sender_and_threaded_reply_disambiguates_
 fn stopped_channel_process_waits_for_its_reader_callback() {
     let dir = temp();
     let root = fixture(&dir);
-    let mut plugin = hub_plugins::discover(&[root], None).unwrap().remove(0);
+    let mut plugin = hub_plugins::discover(&[(root, false)], None)
+        .unwrap()
+        .remove(0);
     plugin.command = vec![
         "/bin/sh".into(),
         "-c".into(),
@@ -489,7 +644,7 @@ fn channel_lifecycle_secret_patches_pair_superseding_and_readiness() {
                     &[],
                 )?
                 .ok_or("missing binding")?;
-                let id = find_human(c, s(&b, "principal_id"))?.ok_or("missing node")?;
+                let id = find_human(c, &b)?.ok_or("missing node")?;
                 Ok(parse(&kv_row(c, &id)?.ok_or("missing row")?, "value"))
             })
             .unwrap()
@@ -730,7 +885,7 @@ fn attach_rejects_non_object_registrations_without_overwriting_kv() -> Result<()
             assert_eq!(
                 e.inner
                     .db
-                    .transaction(|c| attach(c, &binding, true, false, None)),
+                    .transaction(|c| attach(c, &binding, true, "workspace", None)),
                 Err("INVALID_INPUT: Listener must be an object".into()),
             );
             let row = e
@@ -1167,7 +1322,7 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
 fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open_with_remote(&dir, true).unwrap();
+    let e = HubEngine::open_with_auth_mode(&dir, "token").unwrap();
     e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
     let owner = json!({"principal_id":"none#alice.smith","owner_user":"alice.smith"});
     e.rpc(
@@ -1193,7 +1348,7 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
         .unwrap()
         .contains("fixture-account"));
     e.shutdown();
-    let e = HubEngine::open_with_remote(&dir, true).unwrap();
+    let e = HubEngine::open_with_auth_mode(&dir, "token").unwrap();
     e.set_plugin_roots(&[root]).unwrap();
     let list = e
         .rpc("human_channels_list", &json!({}), Some(&owner))
@@ -1240,7 +1395,7 @@ fn pairing_instruction_persists_and_admin_guard_covers_all_paths() {
     let human = e
         .inner
         .db
-        .transaction(|c| find_human(c, s(&user, "principal_id")))
+        .transaction(|c| find_human(c, &user))
         .unwrap()
         .unwrap();
     let node = e.rpc("kv_get", &json!({"key":human}), Some(&user)).unwrap();
@@ -1363,7 +1518,9 @@ fn subscriptions_unregister_on_drop_without_waiting_for_an_event() {
 fn channel_shutdown_kills_descendants_holding_stdout_open() {
     let dir = temp();
     let root = fixture(&dir);
-    let mut plugin = hub_plugins::discover(&[root], None).unwrap().remove(0);
+    let mut plugin = hub_plugins::discover(&[(root, false)], None)
+        .unwrap()
+        .remove(0);
     plugin.command = vec![
         "/bin/sh".into(),
         "-c".into(),
@@ -2056,7 +2213,7 @@ fn http_wire_and_stoppable_shared_engine() {
 fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
     let dir = temp();
     let root = fixture(&dir);
-    let e = HubEngine::open_with_remote(&dir, true).unwrap();
+    let e = HubEngine::open_with_auth_mode(&dir, "oidc").unwrap();
     e.set_plugin_roots(&[root]).unwrap();
     let legacy = "https://id.example.com#subject";
     let caller = json!({"principal_id":"oidc:https://id.example.com|subject","legacy_principal_id":legacy,"sub":"subject","owner_user":"alice","oidc":true});
@@ -2507,7 +2664,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
     let binding = json!({"principal_id":"none#alice","owner_user":"alice","plugin_id":"fixture"});
     e.inner.db.transaction(|c| {
         c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user) VALUES('none#alice','fixture','alice')",&[])?;
-        attach(c,&binding,true,false,None)
+        attach(c,&binding,true,"workspace",None)
     }).unwrap();
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "retry");
@@ -2520,7 +2677,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
                 "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
                 &[json!(reg.to_string()), json!(node)],
             )?;
-            attach(c, &binding, true, false, None)?;
+            attach(c, &binding, true, "workspace", None)?;
             assert_eq!(
                 parse(&kv_row(c, &node)?.unwrap(), "value")["state"],
                 "UNLISTENED"

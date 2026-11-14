@@ -1,6 +1,6 @@
 //! Shared registration serializes background enrollment with explicit local intent.
 use super::{
-    auth::principal_ids_equal,
+    auth::{principal_ids_equal, principal_matches},
     identity::{listener_id, listener_id_candidates, local_host_name, public_listener_id, string},
     state::LocalState,
     transport::HubClient,
@@ -61,7 +61,7 @@ pub fn local_node(
     Ok(state.db.query(
         "SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY status='ACTIVE' DESC,binding_generation DESC",
         &[json!(client.name), json!(harness), json!(session)],
-    )?.into_iter().find(|row| principal_ids_equal(string(row,"principal_id"), string(&client.identity,"principal_id"))))
+    )?.into_iter().find(|row| principal_matches(string(row,"principal_id"), &client.identity)))
 }
 
 pub fn local_node_id(
@@ -165,13 +165,16 @@ fn register_human_device(
     caller: &Value,
 ) -> Result<Value, String> {
     let previous = local_node(state, client, "human", "default")?;
-    let id = previous
-        .as_ref()
-        .map(|r| string(r, "listener_id").to_owned())
-        .unwrap_or_else(|| {
-            listener_id(string(&client.identity, "principal_id"), "human", "default")
-        });
-    let remote = client.kv_get(&id)?.map(|(r, _)| r).unwrap_or(Value::Null);
+    // The Hub owns Human identity, including retained keys and verified aliases.
+    let remote = client
+        .directory()?
+        .into_iter()
+        .find(|record| {
+            record["harness"] == "human"
+                && record["session_id"] == "default"
+                && principal_matches(string(record, "principal_id"), &client.identity)
+        })
+        .unwrap_or(Value::Null);
     let channel = format!("{host}:human");
     let reuse = previous
         .as_ref()
@@ -195,8 +198,12 @@ fn register_human_device(
     let token = reuse
         .map(|r| string(r, "owner_token").to_owned())
         .unwrap_or_else(random_uuid_v4);
-    let result = client.human_request("human_device_attach", &json!({"node_id":id,"channel_id":channel,"host_id":host,"host_name":local_host_name(),"binding_generation":generation,"owner_token":token}))?;
+    let result = client.human_request("human_device_attach", &json!({"channel_id":channel,"host_id":host,"host_name":local_host_name(),"binding_generation":generation,"owner_token":token}))?;
     let record = &result["record"];
+    let id = record["listener_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("STATE_ERROR: Hub returned no Human identity")?;
     let public = record["public_id"].clone();
     state.db.transaction(|c| {
         if client.closed.load(std::sync::atomic::Ordering::SeqCst) { return Err("NATS_UNAVAILABLE: Hub disconnected during enrollment".into()); }
@@ -381,10 +388,10 @@ fn register_locked(
             .as_object()
             .cloned()
             .unwrap_or_default();
-        channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":"wake_exclusive","priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":now_ms()}));
+        channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":"wake_exclusive","priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":client.server_now()}));
         let mut value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
         value["custom_title"] = json!(custom_title.is_some());
-        super::lease::reconcile_registration_state(&mut value, now_ms());
+        super::lease::reconcile_registration_state(&mut value, client.server_now());
         if discovered_at > 0
             && state
                 .db
@@ -758,6 +765,26 @@ mod tests {
             let final_record = client.kv_get(id)?.ok_or("Missing Human")?.0;
             assert_eq!(final_record["human_control_revision"], 3);
             assert_eq!(final_record["scope"], "self");
+            assert_eq!(
+                final_record["channels"]["first-host:human"]["binding_generation"],
+                2
+            );
+            assert_eq!(
+                final_record["channels"]["second-host:human"]["binding_generation"],
+                1
+            );
+            client.rpc("js_publish", &json!({"subject":format!("cito.signal.{id}"),"data":{"signal_id":"after-reattach","to":id,"target_generation":final_record["binding_generation"],"from":{"principal_id":client.identity["principal_id"],"user":"alice","host_name":"desktop","title":"Sender"},"message":"Fresh Human message"}}))?;
+            for state in [&first, &second] {
+                let row = state.listener("work", id)?.ok_or("Missing local Human")?;
+                super::super::receiver::poll_listener(state, &client, &row, None, &root, |_| {})?;
+                let signals = state.db.query(
+                    "SELECT state,held_reason FROM local_signals WHERE signal_id='after-reattach'",
+                    &[],
+                )?;
+                assert_eq!(signals.len(), 1);
+                assert_eq!(signals[0]["state"], "RECEIVED");
+                assert!(signals[0]["held_reason"].is_null());
+            }
             assert_eq!(
                 final_record["channels"]["first-host:human"]["state"],
                 "ACTIVE"

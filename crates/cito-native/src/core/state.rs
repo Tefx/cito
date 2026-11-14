@@ -199,7 +199,9 @@ impl LocalState {
                 // Privacy drops still advance the durable transport cursor.
                 return Ok(false);
             }
-            let stale = signal["target_generation"] != current["binding_generation"];
+            // Human device generations fence attachment ownership, not the shared inbox.
+            let stale = current["harness"] != "human"
+                && signal["target_generation"] != current["binding_generation"];
             let already_acked = acked.is_number();
             let changed = c.execute("INSERT OR IGNORE INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_harness,from_listener_id,from_title,from_about,message,held_reason,in_reply_to,created_at,expires_at_ms,state,acknowledged_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", &[
                 json!(hub), signal["signal_id"].clone(), listener["listener_id"].clone(), json!(seq), current["binding_generation"].clone(),

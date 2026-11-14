@@ -2,6 +2,43 @@ use super::*;
 use std::fs;
 
 #[test]
+fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {
+    let root = std::env::temp_dir().join(format!(
+        "cito-manifest-parity-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    let roots = vec![(root.clone(), false)];
+    let dir = root.join("sample");
+    fs::create_dir_all(&dir).unwrap();
+    let valid = json!({"id":"sample","kind":"human","displayName":"Sample","command":["./driver"]});
+    for (field, invalid) in [
+        ("id", json!("different")),
+        ("displayName", json!("x".repeat(65))),
+        ("displayName", json!("Bad\n")),
+        ("displayName", json!("Bad\u{0085}name")),
+    ] {
+        let mut manifest = valid.clone();
+        manifest[field] = invalid;
+        fs::write(dir.join("plugin.json"), manifest.to_string()).unwrap();
+        assert!(super::super::plugins::parse_manifest_dir(&dir, false).is_err());
+        assert!(discover(&roots, Some(&root)).is_err());
+    }
+    let mut script = valid.clone();
+    script.as_object_mut().unwrap().remove("command");
+    fs::write(dir.join("index.js"), "process.exit(0)").unwrap();
+    fs::write(dir.join("plugin.json"), script.to_string()).unwrap();
+    assert!(super::super::plugins::parse_manifest_dir(&dir, true).is_err());
+    let native = super::super::plugins::parse_manifest_dir(&dir, false).unwrap();
+    let hub = discover(&roots, Some(&root)).unwrap();
+    assert!(discover(&[(root.clone(), true)], Some(&root)).is_err());
+    assert_eq!(hub[0].command, native.command);
+    script["scope"] = json!("user");
+    fs::write(dir.join("plugin.json"), script.to_string()).unwrap();
+    assert!(discover(&roots, Some(&root)).unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
     let dir = std::env::temp_dir().join(format!(
         "cito-plugin-roots-{}",
@@ -106,14 +143,21 @@ fn packaged_roots_worker() {
             expected.canonicalize().unwrap()
         );
     };
-    let plugins = discover(&default_roots(&data), Some(&data.join("plugins"))).unwrap();
+    let plugins = discover(
+        &super::super::plugins::plugin_roots_for_executable(
+            &data,
+            std::env::current_exe().ok().as_deref(),
+        ),
+        Some(&data.join("plugins")),
+    )
+    .unwrap();
     assert_plugin(&plugins, "brew-fixture", dir.join("builtin/brew-fixture"));
     assert_plugin(&plugins, "extra-fixture", dir.join("extra/extra-fixture"));
     assert_plugin(&plugins, "data-fixture", data.join("plugins/data-fixture"));
 
     // The app layout is data only: no copied executable or launched application.
     let exe = dir.join("Cito.app/Contents/MacOS/cito");
-    let roots = roots_for_executable(&data, Some(&exe));
+    let roots = super::super::plugins::plugin_roots_for_executable(&data, Some(&exe));
     let plugins = discover(&roots, Some(&data.join("plugins"))).unwrap();
     assert_plugin(
         &plugins,

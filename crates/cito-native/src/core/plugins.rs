@@ -334,13 +334,24 @@ pub fn resolve_builtin_plugins_dir() -> Option<PathBuf> {
 }
 
 pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescriptor, String> {
+    let raw = fs::read_to_string(dir.join("plugin.json")).map_err(|e| e.to_string())?;
+    parse_manifest(
+        dir,
+        is_builtin,
+        &serde_json::from_str(&raw).map_err(|e| e.to_string())?,
+    )
+}
+
+pub(super) fn parse_manifest(
+    dir: &Path,
+    is_builtin: bool,
+    manifest: &Value,
+) -> Result<PluginDescriptor, String> {
     let dir_name = dir
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| "Invalid plugin dir".to_string())?;
-    let manifest_path = dir.join("plugin.json");
-    let raw = fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
-    let Value::Object(map) = serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())? else {
+        .ok_or("Invalid plugin dir")?;
+    let Value::Object(map) = manifest else {
         return Err("Manifest is not an object".to_string());
     };
     let id = map
@@ -350,18 +361,18 @@ pub fn parse_manifest_dir(dir: &Path, is_builtin: bool) -> Result<PluginDescript
         .filter(|s| validate_harness_id(s))
         .ok_or_else(|| "Invalid plugin id".to_string())?
         .to_string();
+    if id == "human" {
+        return Err("PLUGIN_LOAD_ERROR: human is an internal companion".into());
+    }
     if id != dir_name {
         return Err("Plugin id does not match directory name".to_string());
     }
     let display_name = map
         .get("displayName")
         .and_then(|v| v.as_str())
+        .filter(|s| s.len() <= 64 && !s.chars().any(char::is_control))
         .map(str::trim)
-        .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 64
-                && !s.chars().any(|c| (c as u32) <= 0x1f || (c as u32) == 0x7f)
-        })
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| "Invalid displayName".to_string())?
         .to_string();
     let kind = match map
@@ -578,33 +589,64 @@ pub fn load_plugins_readonly(state_dir: &Path) -> LoadedPlugins {
     load_plugins_with_cleanup(state_dir, false)
 }
 
+pub fn plugin_roots_for_executable(
+    state_dir: &Path,
+    executable: Option<&Path>,
+) -> Vec<(PathBuf, bool)> {
+    let mut roots = Vec::new();
+    if let Ok(extra) = env::var("CITO_PLUGIN_PATH") {
+        for part in extra.split(':').filter(|part| !part.trim().is_empty()) {
+            if let Ok(path) = expand_home_dir(
+                part.trim(),
+                "CITO_PLUGIN_PATH",
+                env::var("HOME").ok().as_deref(),
+            ) {
+                roots.push((path, false));
+            }
+        }
+    }
+    if let Ok(dir) = env::var("CITO_PLUGIN_DIR") {
+        roots.push((PathBuf::from(dir), false));
+    }
+    roots.push((state_dir.join("plugins"), false));
+    if let Ok(dir) = env::var("CITO_BUILTIN_PLUGINS_DIR") {
+        if let Ok(path) = expand_home_dir(
+            &dir,
+            "CITO_BUILTIN_PLUGINS_DIR",
+            env::var("HOME").ok().as_deref(),
+        ) {
+            roots.push((path, true));
+        }
+    }
+    roots.push((staged_plugins_dir(state_dir), true));
+    if let Some(dir) = executable.and_then(Path::parent) {
+        for rel in [
+            "../Resources/plugins",
+            "../plugins",
+            "../share/cito/plugins",
+        ] {
+            roots.push((dir.join(rel), true));
+        }
+    }
+    roots.push((
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins"),
+        true,
+    ));
+    roots
+}
+
 fn load_plugins_with_cleanup(state_dir: &Path, cleanup_legacy: bool) -> LoadedPlugins {
     if cleanup_legacy {
         if let Err(error) = cleanup_retired_companion(state_dir) {
             eprintln!("{error}");
         }
     }
-    let mut external_roots = Vec::new();
-    if let Ok(extra) = env::var("CITO_PLUGIN_PATH") {
-        for part in extra.split(':').filter(|s| !s.trim().is_empty()) {
-            if let Ok(path) = expand_home_dir(
-                part.trim(),
-                "CITO_PLUGIN_PATH",
-                env::var("HOME").ok().as_deref(),
-            ) {
-                external_roots.push(path);
-            }
-        }
-    }
-    external_roots.push(state_dir.join("plugins"));
-    let mut builtin_roots: Vec<_> = resolve_builtin_plugins_dir().into_iter().collect();
-    if builtin_roots
-        .first()
-        .is_some_and(|root| is_staged_plugins_root(root, state_dir))
-    {
-        // A deleted staged descriptor must remain discoverable for Repair.
-        builtin_roots.extend(super::setup::resolve_bundled_plugins_root());
-    }
+    let (builtin_roots, external_roots): (Vec<_>, Vec<_>) =
+        plugin_roots_for_executable(state_dir, env::current_exe().ok().as_deref())
+            .into_iter()
+            .partition(|(_, builtin)| *builtin);
+    let builtin_roots: Vec<_> = builtin_roots.into_iter().map(|(path, _)| path).collect();
+    let external_roots: Vec<_> = external_roots.into_iter().map(|(path, _)| path).collect();
     load_plugins_from_roots(
         &external_roots,
         &builtin_roots,

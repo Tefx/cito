@@ -641,9 +641,11 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
                         assert_eq!(plugin.plugin_dir, source.join(id));
                     }
                 } else {
-                    let channels =
-                        hub_plugins::discover(&[user.clone(), source.clone()], Some(&user))
-                            .unwrap();
+                    let channels = hub_plugins::discover(
+                        &[(user.clone(), false), (source.clone(), true)],
+                        Some(&user),
+                    )
+                    .unwrap();
                     assert_eq!(
                         channels.iter().find(|p| p.id == "telegram").unwrap().dir,
                         source.join("telegram")
@@ -759,9 +761,14 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
                 assert_eq!(manifest["version"], plugins::CITO_VERSION);
             }
         } else {
-            let loaded =
-                hub_plugins::discover(&hub_plugins::default_roots(&state), Some(&user_root))
-                    .unwrap();
+            let loaded = hub_plugins::discover(
+                &plugins::plugin_roots_for_executable(
+                    &state,
+                    std::env::current_exe().ok().as_deref(),
+                ),
+                Some(&user_root),
+            )
+            .unwrap();
             let channel = loaded.iter().find(|p| p.id == "telegram").unwrap();
             assert_eq!(channel.manifest["version"], plugins::CITO_VERSION);
             assert!(channel.dir.ends_with("plugins/telegram"));
@@ -808,9 +815,14 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
                 assert!(!plugin.is_builtin);
                 assert_eq!(plugin.plugin_dir, user_root.join(id));
             }
-            let channels =
-                hub_plugins::discover(&hub_plugins::default_roots(&state), Some(&user_root))
-                    .unwrap();
+            let channels = hub_plugins::discover(
+                &plugins::plugin_roots_for_executable(
+                    &state,
+                    std::env::current_exe().ok().as_deref(),
+                ),
+                Some(&user_root),
+            )
+            .unwrap();
             assert_eq!(
                 channels.iter().find(|p| p.id == "telegram").unwrap().dir,
                 user_root.join("telegram")
