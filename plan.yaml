@@ -12585,3 +12585,95 @@ phases:
       Spec link:
 
       - docs/DESIGN.md (§1–§8 @ 6f6a76d)'
+- id: v44
+  name: V44 In-Flight Codex Wake Attribution Coordination & Pathway Audit Closure
+    (v0.21.3)
+  status: pending
+  gate: In-flight Codex wake attribution in plugins/codex/native.rs is coordinated
+    with discover_sessions qualification/checkpointing across both rollout and no-rollout
+    fallback branches without recording failed wakes as cito_effect or blocking subsequent
+    user_turn recovery; barrier-controlled regression test in crates/cito-native/tests/support/plugins.rs
+    passes; pathway-auditor Delta review closes F6 REPAIR_REGRESSION and the core/daemon/mcp.rs:717
+    DaemonService::tool() coverage gap; cargo fmt --all -- --check, cargo clippy --workspace
+    --all-targets -- -D warnings, cargo test --workspace (RUST_TEST_THREADS=2), and
+    cargo build --release (0 warnings + codesign --verify --strict on staged binaries)
+    pass; /Applications/Cito.app is rebuilt and restarted; main is pushed to origin/main
+    at version 0.21.3 with NO release tag.
+  context: Close the remaining F6 REPAIR_REGRESSION in plugins/codex/native.rs (discover_sessions
+    observing/checkpointing a wake's own source effect while an in-flight wake command
+    is still executing before delivery attribution settles) and the core/daemon/mcp.rs:717
+    DaemonService::tool() coverage gap from the v43.review Round 2 pathway-auditor
+    Delta report, rebuild/stage release binaries, restart /Applications/Cito.app,
+    and push main to origin/main at version 0.21.3 with NO release tag.
+  depends_on:
+  - v43
+  steps:
+  - id: v44.fix
+    name: Coordinate In-Flight Codex Wake Attribution with discover_sessions & Add
+      Barrier-Controlled Regression Test
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - plugins/codex/**\n    - crates/cito-native/tests/support/plugins.rs\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Coordinate in-flight `wake`\
+      \ attribution in `plugins/codex/native.rs` with `discover_sessions` qualification/checkpointing\
+      \ so neither the rollout branch nor the no-rollout fallback can qualify or checkpoint\
+      \ an in-flight `wake`'s own source effect as `user_turn`/`unknown` before delivery\
+      \ attribution settles, while still leaving failed deliveries clean (not recording\
+      \ failed wakes as `cito_effect`) and allowing subsequent genuine user turns\
+      \ to recover `user_turn`.\n- Add a barrier-controlled regression test in `crates/cito-native/tests/support/plugins.rs`\
+      \ that publishes the source effect during an active `wake`, permits `discover_sessions`\
+      \ before `wake` completes, then confirms delivery—verifying neither fallback\
+      \ nor rollout credits the wake as user activity, and that a subsequent genuine\
+      \ user turn recovers.\n\nBoundary:\n- Owner: `rust-senior`. Isolated worktree\
+      \ transaction modifying `plugins/codex/**` and `crates/cito-native/tests/support/plugins.rs`.\n\
+      \nAdmit:\n- Depends on Phase `v43` completion (`84b9cc9`).\n- Verification:\
+      \ `cargo fmt --all -- --check` and targeted `RUST_TEST_THREADS=2 cargo test\
+      \ -p cito-native --test native plugins::` pass with 0 compiler warnings. Consumed\
+      \ by `v44.verify`.\n\nRecovery:\n- Reconcile in-flight wake coordination and\
+      \ test assertions in place within the worktree before completion."
+    verification: 'cargo fmt --all -- --check && RUST_TEST_THREADS=2 cargo test -p
+      cito-native --test native plugins::'
+    refs:
+    - docs/DESIGN.md
+    - plugins/codex/native.rs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: rust-senior
+  - id: v44.verify
+    name: Pathway-Auditor Delta Closure (F6 & DaemonService::tool() Coverage), Release
+      Staging Rebuild, Cito.app Restart & Push to main
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - bin/**\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Dispatch `pathway-auditor`\
+      \ to close the `F6` `REPAIR_REGRESSION` in `plugins/codex/native.rs` and the\
+      \ `core/daemon/mcp.rs:717` (`DaemonService::tool()`) coverage gap (fixing any\
+      \ remaining discrepancy in place if surfaced).\n- Run `cargo fmt --all -- --check`,\
+      \ `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`\
+      \ (`RUST_TEST_THREADS=2`), and `cargo build --release` (0 compiler warnings\
+      \ + `codesign --verify --strict` on staged binaries `bin/*` and `plugins/codex/bin/cito-plugin-codex`).\n\
+      - Rebuild and restart `/Applications/Cito.app`, and push `main` to `origin/main`\
+      \ at version `0.21.3` with **NO release tag**.\n\nBoundary:\n- Owner: `senior-engineer`.\
+      \ Dispatches `pathway-auditor`, rebuilds/stages release binaries (`bin/` + `plugins/codex/bin/cito-plugin-codex`),\
+      \ restarts `/Applications/Cito.app`, and pushes `main` to `origin/main` at version\
+      \ `0.21.3` with NO release tag.\n\nAdmit:\n- Depends on `v44.fix` completion.\n\
+      - Verification: `pathway-auditor` Delta report closes `F6` and the `DaemonService::tool()`\
+      \ coverage gap; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets\
+      \ -- -D warnings`, `RUST_TEST_THREADS=2 cargo test --workspace`, `cargo build\
+      \ --release`, `codesign --verify --strict`, `/Applications/Cito.app` restart,\
+      \ and `git push origin main` pass cleanly.\n\nRecovery:\n- Repair any surfaced\
+      \ review, build, or staging issue in place and re-verify before pushing `main`\
+      \ to `origin/main`."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && RUST_TEST_THREADS=2 cargo test --workspace && cargo build
+      --release
+    refs:
+    - docs/DESIGN.md
+    - plugins/codex/native.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - bin/cito-native-darwin-arm64
+    - bin/cito-ui-darwin-arm64
+    - plugins/codex/bin/cito-plugin-codex
+    depends_on:
+    - v44.fix
+    agent: senior-engineer
