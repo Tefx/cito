@@ -49,6 +49,48 @@ fn admit(f: &Fixture, s: &Value, seq: u64) -> Result<bool, String> {
 }
 
 #[test]
+fn v4_pending_ack_migration_never_guesses_original_hub_identity() -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.state.db.execute("UPDATE local_listeners SET hub_url='local://'; DROP TABLE pending_hub_acks; CREATE TABLE pending_hub_acks(hub TEXT NOT NULL,node_id TEXT NOT NULL,signal_id TEXT NOT NULL,channel_id TEXT NOT NULL,acked_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,node_id,signal_id)); INSERT INTO pending_hub_acks VALUES('local','c_1','legacy','host:agent',1); PRAGMA user_version=4;",&[])?;
+    let upgraded = LocalState::open(&f.dir)?;
+    let rows = upgraded.db.query("SELECT * FROM pending_hub_acks", &[])?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["signal_id"], "legacy");
+    assert!(rows[0]["hub_url"].is_null() && rows[0]["principal_id"].is_null());
+    assert_eq!(
+        upgraded.db.query("PRAGMA user_version", &[])?[0]["user_version"],
+        6
+    );
+    Ok(())
+}
+#[test]
+fn signal_origin_upgrade_leaves_legacy_rows_unbound_and_new_admissions_immutable(
+) -> Result<(), String> {
+    let f = Fixture::new()?;
+    f.seed("legacy", 1)?;
+    f.state.db.execute("ALTER TABLE local_signals DROP COLUMN hub_url; ALTER TABLE local_signals DROP COLUMN principal_id; PRAGMA user_version=5", &[])?;
+    let state = LocalState::open(&f.dir)?;
+    assert!(state.db.query("SELECT * FROM local_signals", &[])?[0]["hub_url"].is_null());
+    state
+        .db
+        .execute("UPDATE local_listeners SET hub_url=\'local://\'", &[])?;
+    admit(&f, &signal("origin", "none#alice", 1), 2)?;
+    state.db.execute("UPDATE local_listeners SET hub_url=\'https://other.example.com\',principal_id=\'none#bob\'", &[])?;
+    state.acknowledge(
+        "local",
+        "c_1",
+        &[json!("origin"), json!("legacy")],
+        "host:agent",
+    )?;
+    let rows = state
+        .db
+        .query("SELECT * FROM pending_hub_acks ORDER BY signal_id", &[])?;
+    assert!(rows[0]["hub_url"].is_null() && rows[0]["principal_id"].is_null());
+    assert_eq!(rows[1]["hub_url"], "local://");
+    assert_eq!(rows[1]["principal_id"], "none#alice");
+    Ok(())
+}
+#[test]
 fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() -> Result<(), String>
 {
     let f = Fixture::new()?;
@@ -188,7 +230,7 @@ fn full_unread_count_and_non_destructive_v4_reopen() -> Result<(), String> {
     assert_eq!(second.activity()?.1, 100);
     assert_eq!(
         second.db.query("PRAGMA user_version", &[])?[0]["user_version"],
-        4
+        6
     );
     assert_eq!(
         second.listener("local", "c_1")?.ok_or("Missing listener")?["dispatcher_token"],
@@ -758,7 +800,7 @@ fn additive_queue_confirmation_upgrade_keeps_v4_data_and_indexes() -> Result<(),
     assert_eq!(reopened.db.query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('signals_listener','signals_batch')", &[])?.len(), 2);
     assert_eq!(
         reopened.db.query("PRAGMA user_version", &[])?[0]["user_version"],
-        4
+        6
     );
     Ok(())
 }

@@ -35,7 +35,7 @@ impl LocalState {
         let db = Database::open(&dir.join("state.sqlite"))?;
         db.transaction(|c| {
             let version=c.query("PRAGMA user_version",&[])?.first().and_then(|v|v["user_version"].as_i64()).unwrap_or(0);
-            if version>4 { return Err(format!("Unsupported state schema version {version}")); }
+            if version>6 { return Err(format!("Unsupported state schema version {version}")); }
             if version < 4 {
                 c.execute("DROP TABLE IF EXISTS local_pairwise_wakes; DROP TABLE IF EXISTS local_signals; DROP TABLE IF EXISTS local_listeners; DROP TABLE IF EXISTS local_sent_idempotency; DROP TABLE IF EXISTS pending_hub_acks; DROP TABLE IF EXISTS pending_hub_detaches; DROP TABLE IF EXISTS wake_retries; DROP TABLE IF EXISTS daemon_owner;", &[])?;
             }
@@ -70,7 +70,7 @@ impl LocalState {
                 CREATE TABLE IF NOT EXISTS pending_hub_acks(hub TEXT NOT NULL,node_id TEXT NOT NULL,signal_id TEXT NOT NULL,channel_id TEXT NOT NULL,acked_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,node_id,signal_id));
                 CREATE TABLE IF NOT EXISTS pending_hub_detaches(hub TEXT NOT NULL,listener_id TEXT NOT NULL,hub_url TEXT,PRIMARY KEY(hub,listener_id));
                 CREATE TABLE IF NOT EXISTS wake_retries(hub TEXT NOT NULL,listener_id TEXT NOT NULL,retry_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,listener_id));
-                PRAGMA user_version=4;",&[])?;
+                PRAGMA user_version=6;",&[])?;
             // Additive V4 extension: a successful insertion and an unknown insertion
             // both set queue_written, but only the former may become business-read.
             if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "queue_confirmed") {
@@ -86,6 +86,20 @@ impl LocalState {
             }
             if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "activity_hidden") {
                 c.execute("ALTER TABLE local_signals ADD COLUMN activity_hidden INTEGER NOT NULL DEFAULT 0", &[])?;
+            }
+            if !c.query("PRAGMA table_info(pending_hub_acks)", &[])?.iter().any(|r| r["name"] == "hub_url") {
+                c.execute("ALTER TABLE pending_hub_acks ADD COLUMN hub_url TEXT; ALTER TABLE pending_hub_acks ADD COLUMN principal_id TEXT;", &[])?;
+                // Legacy rows have no original Hub identity. Keep them unbound:
+                // a current listener can already belong to a replacement profile.
+            }
+            c.execute("CREATE INDEX IF NOT EXISTS pending_hub_acks_binding ON pending_hub_acks(hub,hub_url,principal_id,acked_at_ms)",&[])?;
+            if !c.query("PRAGMA table_info(local_listeners)", &[])?.iter().any(|r| r["name"] == "ack_scan_seq") {
+                c.execute("ALTER TABLE local_listeners ADD COLUMN ack_scan_seq INTEGER NOT NULL DEFAULT 0", &[])?;
+            }
+            if !c.query("PRAGMA table_info(local_signals)", &[])?.iter().any(|r| r["name"] == "hub_url") {
+                c.execute("ALTER TABLE local_signals ADD COLUMN hub_url TEXT; ALTER TABLE local_signals ADD COLUMN principal_id TEXT;", &[])?;
+                // Existing signals have no trustworthy admission identity: a listener
+                // may already belong to a replacement profile. Leave them unbound.
             }
             // Opening another handle must never steal a live dispatch lease. Frozen
             // rows recover after lease expiry, or the daemon's explicit startup hook.
@@ -203,13 +217,14 @@ impl LocalState {
             let stale = current["harness"] != "human"
                 && signal["target_generation"] != current["binding_generation"];
             let already_acked = acked.is_number();
-            let changed = c.execute("INSERT OR IGNORE INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_harness,from_listener_id,from_title,from_about,message,held_reason,in_reply_to,created_at,expires_at_ms,state,acknowledged_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", &[
+            let changed = c.execute("INSERT OR IGNORE INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_harness,from_listener_id,from_title,from_about,message,held_reason,in_reply_to,created_at,expires_at_ms,state,acknowledged_at_ms,hub_url,principal_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", &[
                 json!(hub), signal["signal_id"].clone(), listener["listener_id"].clone(), json!(seq), current["binding_generation"].clone(),
                 signal["from"]["user"].clone(), signal["from"]["host_name"].clone(), signal["from"]["harness"].clone(), signal["from"]["listener_id"].clone(),
                 json!(string(&signal["from"], "title")), signal["from"]["about"].clone(), signal["message"].clone(),
                 if stale { json!("stale_generation") } else { Value::Null },
                 signal["in_reply_to"].clone(), json!(created), json!(expires), json!(if stale || already_acked { "STORED_PASSIVE" } else { "RECEIVED" }),
-                if already_acked { acked.clone() } else { Value::Null }
+                if already_acked { acked.clone() } else { Value::Null },
+                current["hub_url"].clone(), current["principal_id"].clone()
             ])?;
             if already_acked {
                 c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND signal_id=?", &[acked.clone(), json!(hub), signal["signal_id"].clone()])?;
@@ -371,7 +386,7 @@ impl LocalState {
             let delivered = delivered && accepted;
             c.execute("UPDATE local_signals SET state=CASE WHEN batch_expires_at_ms<=? AND ?<>'DISPATCHED' THEN 'EXPIRED_UNSENT' WHEN acknowledged_at_ms IS NOT NULL AND ?<>'DISPATCHED' THEN 'STORED_PASSIVE' ELSE ? END,held_reason=?,queue_written=MAX(queue_written,?),queue_confirmed=MAX(queue_confirmed,?),acknowledged_at_ms=CASE WHEN ? THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END,dispatcher_token=NULL WHERE hub=? AND batch_id=? AND dispatcher_token=? AND state='DISPATCHING'", &[json!(now_ms()), json!(state), json!(state), json!(state), json!(reason), json!(queue_written), json!(queue_confirmed), json!(delivered), json!(now_ms()), json!(hub), batch["batch_id"].clone(), batch["dispatcher_token"].clone()])?;
             if delivered {
-                c.execute("INSERT OR IGNORE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) SELECT hub,listener_id,signal_id,?,acknowledged_at_ms FROM local_signals WHERE hub=? AND batch_id=? AND acknowledged_at_ms IS NOT NULL", &[json!(format!("{}:{}", string(listener, "host_id"), string(listener, "harness"))), json!(hub), batch["batch_id"].clone()])?;
+                c.execute("INSERT OR IGNORE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT s.hub,s.listener_id,s.signal_id,?,s.acknowledged_at_ms,s.hub_url,s.principal_id FROM local_signals s WHERE s.hub=? AND s.batch_id=? AND s.acknowledged_at_ms IS NOT NULL", &[json!(format!("{}:{}", string(listener, "host_id"), string(listener, "harness"))), json!(hub), batch["batch_id"].clone()])?;
             }
             if re_batch {
                 c.execute("UPDATE local_signals SET batch_id=NULL,batch_card=NULL,batch_expires_at_ms=NULL WHERE hub=? AND batch_id=? AND state='RECEIVED' AND acknowledged_at_ms IS NULL", &[json!(hub), batch["batch_id"].clone()])?;
@@ -427,7 +442,7 @@ impl LocalState {
     ) -> Result<(), String> {
         self.db.transaction(|c| { for id in ids {
             c.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(now_ms()),json!(hub),json!(node),id.clone()])?;
-            c.execute("INSERT OR REPLACE INTO pending_hub_acks VALUES(?,?,?,?,?)",&[json!(hub),json!(node),id.clone(),json!(channel),json!(now_ms())])?;
+            c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,signal_id,?,?,hub_url,principal_id FROM local_signals WHERE hub=? AND listener_id=? AND signal_id=?",&[json!(channel),json!(now_ms()),json!(hub),json!(node),id.clone()])?;
         } Ok(()) })
     }
     pub fn activity(&self) -> Result<(Vec<Value>, u64), String> {

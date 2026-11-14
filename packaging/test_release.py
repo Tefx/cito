@@ -227,13 +227,25 @@ class ArtifactTests(unittest.TestCase):
             for path in (helper, app / "Contents/Helpers/cito-native", resources / "AppIcon.icns"):
                 path.write_bytes(b"component fixture")
 
+            plugin = resources / "plugins/fixture/bin/channel"
+            plugin.parent.mkdir(parents=True)
+            plugin.write_bytes(b"executable fixture")
+            plugin.chmod(0o755)
+            wrong_architecture = False
+
             def native(command, **kwargs):
                 output = "cito v1.2.3\n" if command[-1] == "--version" else "arm64\n"
+                if wrong_architecture and command[-1] == plugin:
+                    output = "x86_64\n"
                 return subprocess.CompletedProcess(command, 0, output, "")
 
             with patch.object(release, "run", side_effect=native) as commands:
                 release.verify_bundle(app, "1.2.3")
                 self.assertTrue(any(call.args[0][-1] == helper for call in commands.call_args_list))
+                self.assertTrue(any(call.args[0][-1] == plugin for call in commands.call_args_list))
+                wrong_architecture = True
+                with self.assertRaisesRegex(release.ReleaseError, "arm64"):
+                    release.verify_bundle(app, "1.2.3")
             helper.unlink()
             retired = resources / "plugins/human/bin/cito-ui"
             retired.parent.mkdir(parents=True)

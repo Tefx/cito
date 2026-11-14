@@ -73,6 +73,7 @@
       <ul>
         <li><code>id</code>: <code>^[a-z0-9][a-z0-9_-]{0,31}$</code>; external plugin directory names must match the ID. <code>displayName</code> must be non-empty.</li>
         <li><code>kind</code>: <code>agent-harness</code> or <code>human-channel</code> (the shorthand values <code>agent</code> and <code>human</code> normalize to those names).</li>
+        <li><code>pidBound</code>: optional boolean, default <code>true</code>. Set <code>false</code> for desktop-backed sessions without a per-session OS PID; the menu keeps these groups expanded under Auto-Listen instead of treating them as closed sessions.</li>
         <li><code>tier</code>: <code>stable</code> or <code>experimental</code> (default <code>stable</code>).</li>
         <li><code>command</code>: a non-empty array of <code>[executable, ...args]</code>. Executables starting with <code>./</code> or <code>../</code> resolve relative to the plugin directory.</li>
         <li><code>sfSymbol</code>, <code>tint</code>, and <code>cliFlag</code> control presentation and CLI enrollment. <code>scope</code> defaults to <code>hub</code>; <code>fields</code> and <code>pairing</code> declare configuration and account binding.</li>
@@ -136,8 +137,9 @@
     { "key": "apiToken", "scope": "hub", "label": "API Token", "type": "secret", "required": true },
     { "key": "recipientId", "scope": "user", "label": "Recipient ID", "type": "string", "required": true }
   ],
-  "pairing": { "supported": true, "actionLabel": "Pair Account…" }
+  "pairing": { "supported": true, "actionLabel": "Pair Account…", "openUrlLabel": "Open Pairing Link ↗", "manualDisclosure": true }
 }</code></pre>
+      <p>The Inbox Control Bar in Settings → Human Channels applies shared Pause/Resume and visibility independently of channel setup. It preserves each channel binding and displays deduplicated active delivery paths. External channels deliver alerts even when this Mac is offline.</p>
       <h3>Hub → plugin (stdin NDJSON)</h3>
       <ul>
         <li><code>configure</code>: <code>hub_config</code>, <code>bindings</code> (each with <code>principal_id</code>, <code>user</code>, <code>config</code>), and persisted <code>cursor</code>.</li>
@@ -155,7 +157,7 @@
         <li><code>pair_redeem</code>: provide <code>code</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>is_private_chat</code>, <code>display_label</code>, and <code>user_config_patch</code>.</li>
         <li><code>inbound_reply</code>: provide <code>update_id</code>, <code>external_chat_id</code>, <code>external_user_id</code>, <code>reply_to_external_msg_id</code>, and <code>text</code>. The Hub resolves the reply target and routes a regular signal.</li>
         <li><code>cursor_save</code>: persist the channel's external update <code>cursor</code> after receiving <code>reply_ack</code>.</li>
-        <li><code>rpc_result</code>: echo <code>req_id</code>, <code>ok</code>, and <code>error</code>; pair formatting returns <code>instruction</code>, an exact copyable <code>pairing_command</code> (for example, <code>/start cito-a1b2c3d4e5</code>), and optionally <code>bot_username</code>, while testing returns <code>detail</code>.</li>
+        <li><code>rpc_result</code>: echo <code>req_id</code>, <code>ok</code>, and <code>error</code>; pair formatting returns <code>instruction</code>, an exact copyable <code>pairing_command</code> (for example, <code>/start cito-a1b2c3d4e5</code>), and optionally <code>bot_username</code> and <code>pairing_url</code>, while testing returns <code>detail</code>.</li>
       </ul>
       <pre><code>{"op":"delivered","delivery_id":"d_1","ok":true,"external_msg_id":"102","external_msg_ids":["101","102"],"error":null}
 {"op":"inbound_reply","update_id":"u_99","external_chat_id":"room-1","external_user_id":"user-1","reply_to_external_msg_id":"102","text":"Ship it"}
@@ -176,7 +178,7 @@
         The Hub validates the pairing code and ownership before accepting the binding. Starting another pair, cancelling, or unpairing consumes old codes. Human replies and agent messages use the same Hub signaling path. A confirmed <code>reply_ack</code> means reply deduplication, signal publication, and source read acknowledgement committed atomically. Advance a polling cursor only after that acknowledgement, or isolate errors per update so one failed reply cannot skip later updates.
       </p>
       <p>
-        Agent manifests may provide <code>postSetupHint</code> and <code>postDisconnectHint</code>. Channel manifests may provide <code>setupGuide</code> (an array of instructions), <code>fields[].configuredPlaceholder</code>, <code>fields[].helpText</code>, and <code>pairing.helpText</code>. The Hub projects these as <code>setup_guide</code>, <code>configured_placeholder</code>, <code>help_text</code>, and <code>pairing_help_text</code>.
+        Agent manifests may provide <code>postSetupHint</code> and <code>postDisconnectHint</code>. Channel manifests may provide <code>pairing.openUrlLabel</code> for the returned <code>pairing_url</code> link and <code>pairing.manualDisclosure</code> to collapse manual account fields behind a disclosure. The UI auto-copies the command only for the matching pairing receipt. Channel manifests may provide <code>setupGuide</code> (an array of instructions), <code>fields[].configuredPlaceholder</code>, <code>fields[].helpText</code>, and <code>pairing.helpText</code>. The Hub projects these as <code>setup_guide</code>, <code>configured_placeholder</code>, <code>help_text</code>, and <code>pairing_help_text</code>.
       </p>
       <p>
         Field <code>hidden</code> is an access-control visibility flag: non-admin OIDC users cannot edit Hub-scoped fields. <code>redacted</code> independently suppresses secret values on the wire; <code>configured</code> reports whether a saved value exists. Omitted or blank configured secrets retain saved credentials unless an explicit clear/reset flag is provided. A channel <code>test</code> request receives merged candidate values without persisting them. Handle changed credentials or an empty cursor by resetting polling state; callbacks from a stopped process cannot outlive its shutdown.

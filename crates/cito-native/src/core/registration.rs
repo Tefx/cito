@@ -192,6 +192,11 @@ fn register_human_device(
                     .as_u64()
                     .unwrap_or(0),
             )
+            .max(
+                remote["device_generation_fences"][&channel]
+                    .as_u64()
+                    .unwrap_or(0),
+            )
             .checked_add(1)
             .filter(|g| *g <= i64::MAX as u64)
             .ok_or("STALE_GENERATION: Device generation exhausted")?
@@ -617,6 +622,7 @@ mod tests {
                 sf_symbol: "terminal".into(),
                 tint: "blue".into(),
                 cli_flag: false,
+                pid_bound: true,
                 plugin_dir: root.clone(),
                 is_builtin: false,
                 command: vec![
@@ -758,10 +764,10 @@ mod tests {
             );
             let resumed = client.kv_get(id)?.ok_or("Missing Human")?.0;
             assert_eq!(resumed["about"], "Release approvals");
-            assert_eq!(
-                resumed["channels"]["first-host:human"]["state"],
-                "UNLISTENED"
-            );
+            assert!(resumed["channels"].get("first-host:human").is_none());
+            assert!(resumed["device_generation_fences"]["first-host:human"]
+                .as_u64()
+                .is_some());
             assert_eq!(resumed["channels"]["second-host:human"]["state"], "ACTIVE");
             register_listener(
                 &first,

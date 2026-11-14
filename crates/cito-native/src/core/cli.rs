@@ -73,14 +73,14 @@ pub fn parse_cli(
             "--channel" => {
                 meta.insert("channel".into(), json!(read_value(args, &mut i, flag)?));
             }
-            "--scope" if matches!(cmd, "listen" | "inbox") => {
+            "--scope" if matches!(cmd, "listen" | "unlisten" | "inbox") => {
                 let value = read_value(args, &mut i, flag)?;
                 if !matches!(value.as_str(), "self" | "workspace") {
                     return Err("Invalid --scope".into());
                 }
                 input.insert("scope".into(), json!(value));
             }
-            "--team" if matches!(cmd, "listen" | "inbox") => {
+            "--team" if matches!(cmd, "listen" | "unlisten" | "inbox") => {
                 if input.get("scope") == Some(&json!("self")) {
                     return Err("Conflicting --team and --scope self".into());
                 }
@@ -88,6 +88,11 @@ pub fn parse_cli(
             }
             "--about" if cmd == "inbox" => {
                 input.insert("about".into(), json!(read_value(args, &mut i, flag)?));
+            }
+            "--about" if matches!(cmd, "listen" | "unlisten") => {
+                return Err(
+                    "INVALID_INPUT: Use cito inbox to change the Human inbox description".into(),
+                )
             }
             "--title" | "-t" if cmd == "listen" => {
                 input.insert("title".into(), json!(read_value(args, &mut i, flag)?));
@@ -166,6 +171,15 @@ pub fn parse_cli(
             return Err(format!("Unknown harness: {h}"));
         }
     }
+    if matches!(cmd, "listen" | "unlisten")
+        && meta.get("expected_harness") == Some(&json!("human"))
+        && (input.contains_key("scope") || !positionals.is_empty())
+    {
+        return Err("INVALID_INPUT: Human device commands do not accept policy flags or descriptions; use cito inbox".into());
+    }
+    if cmd == "unlisten" && input.contains_key("scope") {
+        return Err("INVALID_INPUT: Use cito inbox for scope policy".into());
+    }
     if cmd == "find" {
         if let Some(h) = meta.remove("expected_harness") {
             input.insert("harness".into(), h);
@@ -237,6 +251,168 @@ pub fn parse_cli(
     );
     Ok((Value::Object(input), Value::Object(meta)))
 }
+fn presentation_error(raw: &str) -> String {
+    if raw.starts_with("CONTROL_REVISION_CONFLICT:") {
+        return "Inbox changed on another device. Review the current state and try again.".into();
+    }
+    let mut message = raw;
+    let mut candidate = raw;
+    if let Some((hub, rest)) = raw.split_once(": ") {
+        if hub.starts_with(|c: char| c.is_ascii_lowercase())
+            && hub
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            candidate = rest;
+        }
+    }
+    while let Some((code, rest)) = candidate.split_once(':') {
+        if code.len() < 2
+            || !code.starts_with(|c: char| c.is_ascii_uppercase())
+            || !code
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        {
+            break;
+        }
+        candidate = rest.trim_start();
+        message = candidate;
+    }
+    if let Some((prefix, suffix)) = message.rsplit_once("(os error ") {
+        if suffix
+            .strip_suffix(')')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+        {
+            message = prefix.trim_end();
+        }
+    }
+    if message.starts_with("Hub URL must use") {
+        return "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
+            .into();
+    }
+    if message.starts_with("CITO_NATS_URL") {
+        return "Enter a valid Hub URL (http://ip:4291 or https://host).".into();
+    }
+    if let Some(reason) = message.strip_prefix("Cannot bind host hub listener: ") {
+        return format!("Cannot start sharing: {reason}");
+    }
+    let mut message = message.to_owned();
+    for (token, copy) in [
+        ("DISCONNECTED_RETAINED", "Temporarily offline"),
+        ("UNLISTENED", "Not listening"),
+        ("EXPIRED", "Offline"),
+        ("ACTIVE", "Active"),
+        ("local://", "Built-in on this Mac"),
+        ("CITO_OIDC_ISSUER", "OIDC issuer URL"),
+        ("CITO_OIDC_CLIENT_ID", "OIDC client ID"),
+        ("CITO_HUB_TOKEN", "shared access token"),
+        ("CITO_AUTH_MODE", "access mode"),
+        (" (http://127.0.0.1 is allowed for tests)", ""),
+    ] {
+        message = message.replace(token, copy);
+    }
+    message
+}
+pub fn format_status(payload: &Value) -> String {
+    use std::fmt::Write;
+    let mut text = String::new();
+    let label = |row: &Value| {
+        payload["harnesses"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["id"] == row["harness"])
+            .and_then(|p| p["display_name"].as_str())
+            .unwrap_or_else(|| row["harness"].as_str().unwrap_or("Agent"))
+            .to_owned()
+    };
+    let _ = writeln!(text, "LISTENING AGENT SESSIONS");
+    for row in payload["listeners"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["harness"] != "human")
+    {
+        let _ = writeln!(
+            text,
+            "  {} · {} · {}",
+            label(row),
+            row["title"].as_str().unwrap_or("Session"),
+            row["display_address"].as_str().unwrap_or("")
+        );
+    }
+    let _ = writeln!(text, "AVAILABLE SESSIONS");
+    for row in payload["available"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            text,
+            "  {} · {} · {}{}",
+            label(row),
+            row["session_id"].as_str().unwrap_or(""),
+            row["cwd"].as_str().unwrap_or(""),
+            if row["needs_reload"] == true {
+                " · Reload the app integration to listen"
+            } else {
+                ""
+            }
+        );
+    }
+    let _ = writeln!(text, "HUMAN INBOXES");
+    for hub in payload["hubs"].as_array().into_iter().flatten() {
+        let device = payload["listeners"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["harness"] == "human" && r["hub"] == hub["name"]);
+        let status = if hub["human_state_status"] == "unknown" {
+            "Unknown"
+        } else if hub["human_paused"] == true {
+            "Paused"
+        } else {
+            match hub["human_availability"].as_str() {
+                Some("ACTIVE") => "Active",
+                Some("DISCONNECTED_RETAINED") => "Reconnecting",
+                _ => "Unavailable",
+            }
+        };
+        let _ = writeln!(
+            text,
+            "  {} · {} · This device {}{}",
+            hub["name"].as_str().unwrap_or("Hub"),
+            status,
+            if device { "attached" } else { "detached" },
+            if hub["human_state_status"] == "stale" {
+                " · Cached state"
+            } else {
+                ""
+            }
+        );
+    }
+    let _ = writeln!(text, "HUBS");
+    for hub in payload["hubs"].as_array().into_iter().flatten() {
+        let status = match hub["status"].as_str() {
+            Some("connected") => "Connected",
+            Some("connecting") => "Connecting",
+            Some("auth_required") => "Sign in required",
+            _ => "Unavailable",
+        };
+        let error = hub["error"]
+            .as_str()
+            .map(presentation_error)
+            .unwrap_or_default();
+        let _ = writeln!(
+            text,
+            "  {} · {}{}",
+            hub["name"].as_str().unwrap_or("Hub"),
+            status,
+            if error.is_empty() {
+                String::new()
+            } else {
+                format!(" · {error}")
+            }
+        );
+    }
+    text
+}
 pub fn control_request(config: &NativeConfig, action: &Value) -> Result<Value, String> {
     let response = crate::plugins::http_post_json(
         config.daemon_port,
@@ -297,24 +473,7 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
         if args.iter().any(|a| a == "--json") || !matches!(cmd, "listen" | "unlisten" | "status") {
             println!("{payload}");
         } else if cmd == "status" {
-            for (heading, key) in [
-                ("ACTIVE LISTENERS", "listeners"),
-                ("AVAILABLE SESSIONS", "available"),
-                ("HUBS", "hubs"),
-            ] {
-                println!("{heading}");
-                for row in payload[key].as_array().into_iter().flatten() {
-                    println!(
-                        "  {} {} {}",
-                        row["display_address"]
-                            .as_str()
-                            .or_else(|| row["name"].as_str())
-                            .unwrap_or(""),
-                        row["title"].as_str().unwrap_or(""),
-                        row["status"].as_str().unwrap_or("")
-                    );
-                }
-            }
+            print!("{}", format_status(&payload));
         } else if cmd == "listen" {
             println!(
                 "Listening as {} ({}): {}",
@@ -338,6 +497,58 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn human_device_policy_rejection_distinguishes_generated_description() {
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        for cmd in ["listen", "unlisten"] {
+            for extra in [
+                vec!["--scope", "workspace"],
+                vec!["--team"],
+                vec!["Description"],
+                vec!["--about", "Description"],
+            ] {
+                let args = [vec!["--harness", "human"], extra]
+                    .concat()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let error = parse_cli(cmd, &args, &plugins).unwrap_err();
+                assert!(
+                    error.starts_with("INVALID_INPUT:") && error.contains("cito inbox"),
+                    "{error}"
+                );
+            }
+        }
+        assert!(parse_cli("listen", &["--harness".into(), "human".into()], &plugins).is_ok());
+        let formatted = format_status(
+            &json!({"listeners":[{"harness":"human","hub":"work"},{"harness":"agent","title":"Review","display_address":"alice/agent#abc"}],"harnesses":[{"id":"agent","display_name":"Editor"}],"available":[{"harness":"agent","session_id":"pending","cwd":"/repo","needs_reload":true}],"hubs":[{"name":"work","status":"auth_required","human_state_status":"current","human_paused":true,"error":"work: UNAUTHORIZED: Sign in required (os error 1)"}]}),
+        );
+        assert!(formatted.contains("Editor · Review"));
+        assert!(formatted.contains("Reload the app integration"));
+        assert!(formatted.contains("Paused · This device attached"));
+        assert!(formatted.contains("Sign in required"));
+        assert!(!formatted.contains("UNAUTHORIZED"));
+        assert_eq!(
+            presentation_error("work: FAILED: Detail: ACTIVE on local://"),
+            "Detail: Active on Built-in on this Mac"
+        );
+        assert_eq!(
+            presentation_error("Cannot bind host hub listener: Address in use (os error 48)"),
+            "Cannot start sharing: Address in use"
+        );
+        assert_eq!(
+            presentation_error("CONTROL_REVISION_CONFLICT: stale"),
+            "Inbox changed on another device. Review the current state and try again."
+        );
+        assert!(
+            !formatted.contains("UNAUTHORIZED")
+                && !formatted.contains("os error")
+                && !formatted.contains("auth_required")
+        );
+    }
     #[test]
     fn flag_errors_precede_effects() {
         let p = LoadedPlugins {

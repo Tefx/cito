@@ -95,6 +95,7 @@ impl Fixture {
             sf_symbol: String::new(),
             tint: String::new(),
             cli_flag: false,
+            pid_bound: true,
             plugin_dir: self.dir.clone(),
             is_builtin: false,
             command: vec!["/usr/bin/python3".into(), "-c".into(), script],

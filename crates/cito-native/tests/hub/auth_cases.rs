@@ -51,8 +51,12 @@ fn verifier(alg: Algorithm) -> (OidcVerifier, EncodingKey) {
         EncodingKey::from_ed_pem(include_bytes!("fixtures/ed25519-private.pem")).unwrap()
     };
     let verifier = OidcVerifier::new("https://id.example.com", "client").unwrap();
-    verifier.cache.lock().unwrap().keys =
-        Some(serde_json::from_value(json!({"keys":[jwk]})).unwrap());
+    {
+        let mut cache = verifier.cache.lock().unwrap();
+        cache.keys = Some(serde_json::from_value(json!({"keys":[jwk]})).unwrap());
+        cache.loaded_at = Some(Instant::now());
+        cache.refresh_at = Some(Instant::now());
+    }
     (verifier, key)
 }
 #[test]
@@ -71,7 +75,7 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let claims = json!({"iss":"https://id.example.com","sub":"subject","aud":["other","client"],"exp":now+300,"nbf":now-1,"preferred_username":"alice.smith"});
+        let claims = json!({"iss":"https://id.example.com","sub":"subject","aud":["other","client"],"azp":"client","exp":now+300,"nbf":now-1,"preferred_username":"alice.smith"});
         let mut header = Header::new(alg);
         header.kid = Some("test-key".into());
         let signed = |claims: &Value| encode(&header, claims, &key).unwrap();
@@ -89,6 +93,8 @@ fn real_supported_asymmetric_signatures_and_claim_validation() {
         for (k, value) in [
             ("iss", json!("https://other.example.com")),
             ("aud", json!("other")),
+            ("azp", json!("other")),
+            ("azp", Value::Null),
             ("exp", json!(now - 30)),
             ("nbf", json!(now + 60)),
             ("nbf", json!("invalid")),
@@ -290,11 +296,16 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
     };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let issuer = format!("http://{}/", listener.local_addr().unwrap());
     let (seed, key) = verifier(Algorithm::RS256);
-    let keys = serde_json::to_value(seed.cache.lock().unwrap().keys.as_ref().unwrap()).unwrap();
+    let keys = Arc::new(Mutex::new(
+        serde_json::to_value(seed.cache.lock().unwrap().keys.as_ref().unwrap()).unwrap(),
+    ));
+    let served_keys = keys.clone();
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let requested = requests.clone();
     let discovery = Arc::new(Mutex::new(
-        json!({"issuer":issuer,"jwks_uri":format!("{issuer}/keys.json")}),
+        json!({"issuer":issuer,"jwks_uri":format!("{issuer}keys.json")}),
     ));
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
@@ -322,7 +333,8 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
                     let body = if path == "/.well-known/openid-configuration" {
                         advertised.lock().unwrap().to_string()
                     } else if path == "/keys.json" {
-                        keys.to_string()
+                        requested.fetch_add(1, Ordering::SeqCst);
+                        served_keys.lock().unwrap().to_string()
                     } else {
                         panic!("Unexpected fixture path: {path}")
                     };
@@ -364,6 +376,59 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         verifier.verify(&token).unwrap()["principal_id"],
         format!("oidc:{issuer}|subject")
     );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    {
+        let mut cache = verifier.cache.lock().unwrap();
+        let mut keys = serde_json::to_value(cache.keys.as_ref().unwrap()).unwrap();
+        let modulus = keys["keys"][0]["n"].as_str().unwrap();
+        let mut bytes = URL_SAFE_NO_PAD.decode(modulus).unwrap();
+        bytes[30] ^= 1;
+        keys["keys"][0]["n"] = json!(URL_SAFE_NO_PAD.encode(bytes));
+        cache.keys = Some(serde_json::from_value(keys).unwrap());
+        cache.refresh_at = Some(Instant::now() - Duration::from_secs(61));
+    }
+    assert!(
+        verifier.verify(&token).is_ok(),
+        "Known-kid signature miss must refresh a rotated key"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    {
+        let mut cache = verifier.cache.lock().unwrap();
+        cache.loaded_at = Some(Instant::now() - Duration::from_secs(301));
+        cache.refresh_at = Some(Instant::now() - Duration::from_secs(301));
+    }
+    verifier.verify(&token).unwrap();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        3,
+        "Known keys have a bounded cache lifetime"
+    );
+    keys.lock().unwrap()["keys"][0]["use"] = json!("enc");
+    {
+        let mut cache = verifier.cache.lock().unwrap();
+        let mut wrong = serde_json::to_value(cache.keys.as_ref().unwrap()).unwrap();
+        let mut modulus = URL_SAFE_NO_PAD
+            .decode(wrong["keys"][0]["n"].as_str().unwrap())
+            .unwrap();
+        modulus[30] ^= 1;
+        wrong["keys"][0]["n"] = json!(URL_SAFE_NO_PAD.encode(modulus));
+        cache.keys = Some(serde_json::from_value(wrong).unwrap());
+        cache.refresh_at = Some(Instant::now() - Duration::from_secs(61));
+    }
+    assert!(
+        verifier
+            .verify(&token)
+            .unwrap_err()
+            .contains("not a verification key"),
+        "Refreshed keys retain all algorithm and use checks"
+    );
+    keys.lock().unwrap()["keys"][0]["use"] = json!("sig");
+    {
+        let mut cache = verifier.cache.lock().unwrap();
+        cache.loaded_at = Some(Instant::now() - Duration::from_secs(301));
+        cache.refresh_at = Some(Instant::now() - Duration::from_secs(301));
+    }
+    verifier.verify(&token).unwrap();
     let mut parts: Vec<String> = token.split('.').map(String::from).collect();
     let mut signature = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();
     signature[0] ^= 1;
@@ -389,6 +454,137 @@ fn http_loopback_discovery_and_jwks_verify_real_signatures() {
         .starts_with("AUTH_UNAVAILABLE"));
 }
 
+#[test]
+fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
+    use std::io::{Read, Write};
+    let (verifier, key) = verifier(Algorithm::RS256);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-key".into());
+    let token = encode(&header,&json!({"iss":"https://id.example.com","aud":"client","sub":"subject","exp":now as f64-0.5}),&key).unwrap();
+    assert!(
+        verifier.verify(&token).is_ok(),
+        "Clock leeway admits authentication, but must not extend SSE lifetime"
+    );
+    let auth = HubAuth {
+        mode: "oidc".into(),
+        token: None,
+        verifier: Some(verifier),
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "cito-sse-expiry-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    let engine = crate::core::hub::HubEngine::open(&dir).unwrap();
+    let server = engine.start_server("127.0.0.1", 0, auth).unwrap();
+    let mut stream = std::net::TcpStream::connect(server.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /v1/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.ends_with(":ok\n\n"),
+        "Expired streams emit no keepalives"
+    );
+    server.shutdown();
+    engine.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let (verifier, key) = verifier(Algorithm::RS256);
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        + 0.4;
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-key".into());
+    let token = encode(
+        &header,
+        &json!({"iss":"https://id.example.com","aud":"client","sub":"subject","exp":expires}),
+        &key,
+    )
+    .unwrap();
+    let principal = verifier.verify(&token).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "cito-sse-transition-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    let engine = crate::core::hub::HubEngine::open(&dir).unwrap();
+    let server = engine
+        .start_server(
+            "127.0.0.1",
+            0,
+            HubAuth {
+                mode: "oidc".into(),
+                token: None,
+                verifier: Some(verifier),
+            },
+        )
+        .unwrap();
+    let mut stream = std::net::TcpStream::connect(server.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /v1/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == ":ok\n" {
+            break;
+        }
+    }
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let publish = |key: &str| {
+        engine.rpc("kv_create", &json!({"key":key,"data":{"principal_id":principal["principal_id"],"harness":"fixture","session_id":key,"scope":"workspace","state":"ACTIVE","channels":{}}}), None).unwrap()
+    };
+    publish("before-expiry");
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        line.starts_with("data: ") && line.contains("before-expiry"),
+        "{line}"
+    );
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    // The fractional token lifetime is the test's short, explicit timing input.
+    let remaining = (expires
+        - std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64())
+    .max(0.0);
+    std::thread::sleep(Duration::from_secs_f64(remaining) + Duration::from_millis(20));
+    publish("after-expiry");
+    let mut trailing = String::new();
+    reader.read_to_string(&mut trailing).unwrap();
+    server.shutdown();
+    engine.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(
+        trailing.is_empty(),
+        "No event or keepalive may cross token expiry: {trailing}"
+    );
+}
 #[test]
 fn caller_deadline_bounds_cache_wait_and_cached_verification() {
     let (v, key) = verifier(Algorithm::RS256);

@@ -62,8 +62,8 @@ fn setup(req: &Value) -> Result<Value> {
         .unwrap_or_else(|| state(req).join("runtime/plugins/claude"))
         .join("bin/cito-claude-hook");
     let desired = json!({"command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
-    let v = read_json(&path)?;
     if op == "setup_inspect" {
+        let v = read_json(&path)?;
         let hooks_ok = EVENTS.iter().all(|e| {
             v["hooks"][e]
                 .as_array()
@@ -86,24 +86,13 @@ fn setup(req: &Value) -> Result<Value> {
             json!({"ok":true,"installed":dir.exists(),"configured":v["mcpServers"]["cito"]==desired&&hooks_ok,"paths":[path]}),
         );
     }
-    if op == "setup_apply" {
-        if let Some(cmd) = str_at(&v["mcpServers"]["cito"], "command") {
-            if cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") && req["force"] != true {
-                return Ok(
-                    json!({"ok":true,"actions":[{"target":"claude","path":path,"status":"conflict","backupPath":null,"detail":"Conflicting MCP command; pass --force to replace"}]}),
-                );
-            }
-        }
-    }
     let remove = op == "setup_remove";
     let action = json_mutate(req, "claude", &path, |v| {
-        if !remove && req["force"] != true {
-            if let Some(cmd) = str_at(&v["mcpServers"]["cito"], "command") {
-                if cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") {
-                    return Err("Conflicting MCP command; pass --force to replace".into());
-                }
-            }
-        }
+        check_mcp_command(
+            req,
+            str_at(&v["mcpServers"]["cito"], "command"),
+            command.to_str().unwrap_or(""),
+        )?;
         clean_hooks(v);
         if let Some(servers) = v.get_mut("mcpServers").and_then(Value::as_object_mut) {
             servers.remove("cito");
@@ -187,7 +176,7 @@ pub fn append_wake(req: &Value, sid: &str) -> Result<()> {
     f.sync_all().map_err(|e| e.to_string())
 }
 fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
-    // Lock both identities in stable order and validate every queue before deleting any.
+    // Snapshot under both identity locks; output and ACK continuation retire rows later.
     let mut lock_sessions = sessions.to_vec();
     lock_sessions.sort_unstable();
     lock_sessions.dedup();
@@ -216,7 +205,6 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
         paths.extend(staged);
         paths.push(path);
     }
-    let mut consumed = vec![];
     let mut rows = vec![];
     let mut seen = HashSet::new();
     for p in paths {
@@ -232,12 +220,88 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
                 }
             }
         }
-        consumed.push(p);
-    }
-    for path in consumed {
-        fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(rows)
+}
+fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool) -> Result<()> {
+    let ids: HashSet<_> = wakes.iter().filter_map(|w| str_at(w, "batch_id")).collect();
+    let mut sessions = sessions.to_vec();
+    sessions.sort();
+    sessions.dedup();
+    let _locks = sessions
+        .iter()
+        .map(|sid| queue_lock(req, sid))
+        .collect::<Result<Vec<_>>>()?;
+    for sid in sessions {
+        let path = queue(req, &sid)?;
+        let prefix = format!(
+            "{}.draining-",
+            path.file_name()
+                .ok_or("Invalid queue path")?
+                .to_string_lossy()
+        );
+        let mut paths = vec![path.clone()];
+        if let Some(parent) = path.parent() {
+            paths.extend(
+                fs::read_dir(parent)
+                    .map_err(|e| e.to_string())?
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                    .map(|e| e.path()),
+            );
+        }
+        for path in paths {
+            let Some(content) = read_optional(&path)? else {
+                continue;
+            };
+            let mut retained = Vec::new();
+            for line in content.lines() {
+                if let Ok(mut value) = serde_json::from_str::<Value>(line) {
+                    if str_at(&value, "batch_id").is_some_and(|id| ids.contains(id)) {
+                        if !retire {
+                            value["output_delivered"] = json!(true);
+                            retained.push(value.to_string());
+                        }
+                        continue;
+                    }
+                }
+                retained.push(line.to_owned());
+            }
+            if retained.is_empty() {
+                fs::remove_file(&path).map_err(|e| e.to_string())?;
+            } else {
+                atomic_write(&path, format!("{}\n", retained.join("\n")).as_bytes())?;
+            }
+        }
+    }
+    Ok(())
+}
+fn persist_hook_acks(req: &Value, sessions: &[String], wakes: &[Value]) -> Result<()> {
+    let local = crate::core::state::LocalState::open(&state(req))?;
+    for wake in wakes {
+        let rows = local.db.query("SELECT s.* FROM local_signals s JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.batch_id=? AND l.harness='claude'", &[wake["batch_id"].clone()])?;
+        if rows.is_empty() {
+            return Err("ACK continuation has no matching local batch".into());
+        }
+        for row in rows {
+            let listener = local
+                .listener(
+                    str_at(&row, "hub").unwrap_or(""),
+                    str_at(&row, "listener_id").unwrap_or(""),
+                )?
+                .ok_or("ACK listener missing")?;
+            if !sessions.iter().any(|sid| listener["session_id"] == *sid) {
+                return Err("ACK session mismatch".into());
+            }
+            local.acknowledge(
+                str_at(&row, "hub").unwrap_or(""),
+                str_at(&row, "listener_id").unwrap_or(""),
+                &[row["signal_id"].clone()],
+                &format!("{}:claude", str_at(&listener, "host_id").unwrap_or("")),
+            )?;
+        }
+    }
+    Ok(())
 }
 fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
     let slug: String = cwd
@@ -407,11 +471,26 @@ fn badge(req: &Value, sid: &str) -> Result<()> {
     }
 }
 fn bridge(req: &Value) -> Result<Value> {
-    let p = pid(req).ok_or("Endpoint PID is required")?;
-    socket_call(
-        &state(req).join(format!("sockets/claude-pid-{p}.sock")),
-        &json!({"op":"identify"}),
-    )
+    let mut p = pid(req).ok_or("Endpoint PID is required")?;
+    let mut visited = HashSet::new();
+    while p > 1 && visited.insert(p) {
+        if let Ok(response) = socket_call(
+            &state(req).join(format!("sockets/claude-pid-{p}.sock")),
+            &json!({"op":"identify"}),
+        ) {
+            if response["ok"] == true {
+                return Ok(response);
+            }
+        }
+        if !matches!(str_at(req, "op"), Some("resolve_caller" | "verify")) {
+            break;
+        }
+        let Some(parent) = process_parent(p) else {
+            break;
+        };
+        p = parent;
+    }
+    Err("Endpoint bridge is unavailable".into())
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
@@ -443,25 +522,20 @@ pub fn handle(req: &Value) -> Result<Value> {
                         let mut r = req.clone();
                         r["endpoint_pid"] = json!(p);
                         let response = bridge(&r);
-                        if alive(p) {
-                            if let Err(error) = &response {
-                                return Err(error.clone());
-                            }
-                        }
                         if let Ok(v) = response {
-                            if v["ok"] == false && alive(p) {
-                                return Err(str_at(&v, "message")
-                                    .unwrap_or("Claude bridge identification failed")
-                                    .to_string());
+                            if v["ok"] == false {
+                                continue;
                             }
                             if v["ok"] == true {
-                                sessions.push(caller(
+                                let mut session = caller(
                                     "claude",
                                     str_at(&v, "session_id").unwrap_or(""),
                                     str_at(&v, "cwd").unwrap_or(""),
                                     Some(p),
                                     str_at(&v, "session_name"),
-                                ));
+                                );
+                                session["updated_at_ms"] = v["updated_at_ms"].clone();
+                                sessions.push(session);
                             }
                         }
                     }
@@ -541,20 +615,40 @@ pub fn handle(req: &Value) -> Result<Value> {
             }
             Ok(json!({"ok":true,"caller":remember_process(c)}))
         }
-        "probe" => match bridge(req) {
-            Ok(v) if v["ok"] == true => Ok(
-                json!({"ok":true,"status":if v["session_id"]==req["session_id"]{"alive"}else{"switched"},"current_session_id":v["session_id"],"reason":null}),
-            ),
-            _ if pid(req).is_some_and(|p| !alive(p)) => Ok(
-                json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process is closed"}),
-            ),
-            _ => match resolve(req) {
-                Ok(current) => Ok(
-                    json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
+        "probe" => {
+            if let Some(p) = pid(req) {
+                if let Ok(binding) = read_json(&binding_path(req, p)) {
+                    if let Ok(current) = process_identity(p) {
+                        if !matches_process(str_at(&current, "command").unwrap_or(""))
+                            || (binding["process_identity"].is_object()
+                                && binding["process_identity"] != current)
+                            || str_at(&binding, "start")
+                                .is_some_and(|start| process_start(p).as_deref() != Some(start))
+                        {
+                            return Ok(
+                                json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
+                            );
+                        }
+                    }
+                }
+            }
+            match bridge(req) {
+                Ok(v) if v["ok"] == true => Ok(
+                    json!({"ok":true,"status":if v["session_id"]==req["session_id"]{"alive"}else{"switched"},"current_session_id":v["session_id"],"reason":null}),
                 ),
-                Err(reason) => Ok(json!({"ok":true,"status":"transient_error","reason":reason})),
-            },
-        },
+                _ if pid(req).is_some_and(|p| !alive(p)) => Ok(
+                    json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process is closed"}),
+                ),
+                _ => match resolve(req) {
+                    Ok(current) => Ok(
+                        json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
+                    ),
+                    Err(reason) => {
+                        Ok(json!({"ok":true,"status":"transient_error","reason":reason}))
+                    }
+                },
+            }
+        }
         "update_badge" => {
             badge(
                 req,
@@ -595,6 +689,8 @@ pub fn hook_main() {
         eprintln!("Usage: cito-claude-hook (reads a hook JSON payload on stdin)");
         return;
     }
+    let mut continuation = None;
+    let mut delivery_locks = Vec::new();
     let result = (|| -> Result<Value> {
         let mut raw = String::new();
         std::io::stdin()
@@ -647,6 +743,14 @@ pub fn hook_main() {
             .into_iter()
             .chain(std::iter::once(sid.as_str()))
             .collect();
+        let mut ordered = sessions.clone();
+        ordered.sort();
+        ordered.dedup();
+        for session in ordered {
+            delivery_locks.push(FileLock::acquire(
+                &queue(&req, session)?.with_extension("delivery.lock"),
+            )?);
+        }
         let mut wakes = drain_wakes(&req, &sessions)?;
         // Drain order follows recovered staging files, then the active queue.
         let mut seen = HashSet::new();
@@ -660,6 +764,7 @@ pub fn hook_main() {
         }
         let content = wakes
             .iter()
+            .filter(|r| r["output_delivered"] != true)
             .filter_map(|r| r["content"].as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -696,17 +801,57 @@ pub fn hook_main() {
             .unwrap_or(4290);
         let ack_session = alias.as_deref().unwrap_or(&sid);
         let ack = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":wakes.iter().map(|r|r["batch_id"].clone()).collect::<Vec<_>>()},"_meta":{"claudeSessionId":ack_session,"cwd":req["cwd"]}}});
-        let _ = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
-            .timeout(Duration::from_millis(500))
-            .send_json(ack);
-        if event == "Stop" && wakes.iter().any(|v| v["wake"] != false) {
+        continuation = Some((
+            req.clone(),
+            sessions.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            wakes.clone(),
+            port,
+            ack,
+        ));
+        if content.is_empty() {
+            Ok(json!({}))
+        } else if event == "Stop"
+            && wakes
+                .iter()
+                .any(|v| v["wake"] != false && v["output_delivered"] != true)
+        {
             Ok(json!({"decision":"block","reason":content}))
         } else {
             Ok(json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":content}}))
         }
     })();
     match result {
-        Ok(v) => emit(&v),
+        Ok(v) => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            if writeln!(output, "{v}")
+                .and_then(|_| output.flush())
+                .is_err()
+            {
+                return;
+            }
+            if let Some((req, sessions, wakes, port, ack)) = continuation {
+                if let Err(error) = settle_wakes(&req, &sessions, &wakes, false) {
+                    eprintln!("cito-claude-hook: {error}");
+                    return;
+                }
+                let confirmed = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
+                    .timeout(Duration::from_millis(500))
+                    .send_json(ack)
+                    .ok()
+                    .and_then(|r| r.into_json::<Value>().ok())
+                    .is_some_and(|r| {
+                        r.get("result").is_some()
+                            && r.get("error").is_none()
+                            && r["result"]["isError"] != true
+                    });
+                if confirmed || persist_hook_acks(&req, &sessions, &wakes).is_ok() {
+                    if let Err(error) = settle_wakes(&req, &sessions, &wakes, true) {
+                        eprintln!("cito-claude-hook: {error}");
+                    }
+                }
+            }
+        }
         Err(e) => {
             eprintln!("cito-claude-hook: {e}");
             emit(&json!({}));

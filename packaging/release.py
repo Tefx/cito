@@ -132,8 +132,10 @@ def verify_bundle(app, expected):
         result = run([app / "Contents/MacOS/Cito", "--version"], env=isolated_env(Path(directory)))
     if result.stdout.strip() != f"cito v{expected}":
         raise ReleaseError("Bundled CLI version does not match the release version.")
-    for name in ("cito-native", "cito-ui"):
-        if run(["/usr/bin/lipo", "-archs", app / "Contents/Helpers" / name]).stdout.strip() != "arm64":
+    executables = [app / "Contents/Helpers" / name for name in ("cito-native", "cito-ui")]
+    executables.extend(sorted(path for path in (app / "Contents/Resources/plugins").glob("*/bin/*") if path.is_file() and os.access(path, os.X_OK)))
+    for executable in executables:
+        if run(["/usr/bin/lipo", "-archs", executable]).stdout.strip() != "arm64":
             raise ReleaseError("The release requires arm64 native executables.")
 
 

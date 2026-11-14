@@ -44,6 +44,8 @@ CITO_AUTH_MODE=oidc CITO_OIDC_ISSUER=https://id.example.com CITO_OIDC_CLIENT_ID=
   docker compose -f deploy/hub/docker-compose.yml up -d --build
 ```
 
+The image sets `CITO_BUILTIN_PLUGINS_DIR=/app/plugins` for bundled plugins. User-installed plugins under `/data/plugins/<id>/` override the bundled copies. Set `CITO_PLUGIN_PATH` to a platform-separated list of additional plugin search roots when mounting external plugins; these roots take priority over both `/data/plugins` and bundled plugins.
+
 The named volume persists `/data/hub.sqlite`. Configure a TLS reverse proxy (such as Caddy or Nginx) or a private mesh network (such as Tailscale) before exposing the port to remote clients.
 
 ## 3. Shared Human Channels (Telegram)

@@ -313,8 +313,10 @@ impl Runtime {
                     self.pending.clear();
                     self.reply_chats.clear();
                     self.pair_chats.clear();
-                } else if self.pending.is_empty() {
-                    self.cursor = id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0);
+                } else {
+                    self.cursor = self
+                        .cursor
+                        .max(id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0));
                 }
             }
             "format_pair" | "test" => emit(&rpc(&self.config, &r)),
@@ -361,22 +363,9 @@ impl Runtime {
                     }
                 }
             }
-            "on_acked" => {
-                if let (Some(chat), Some(ids)) = (
-                    str_at(&r["user_config"], "chatId"),
-                    r["external_msg_ids"].as_array(),
-                ) {
-                    for msg in ids {
-                        if let Some(mid) = id(msg) {
-                            let _ = api(
-                                &self.config,
-                                "editMessageReplyMarkup",
-                                json!({"chat_id":chat,"message_id":mid.parse::<u64>().ok(),"reply_markup":{"inline_keyboard":[]}}),
-                            );
-                        }
-                    }
-                }
-            }
+            // Deliveries contain no inline keyboard, so acknowledgment requires
+            // no remote markup edit. Repeated ACKs remain side-effect free.
+            "on_acked" => {}
             _ => eprintln!("Unknown Telegram plugin operation"),
         };
         true
@@ -445,5 +434,38 @@ pub fn main() {
             next_poll = std::time::Instant::now() + Duration::from_millis(100);
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn configure_retains_monotonic_cursor_and_ack_without_keyboard_is_noop() {
+        let mut runtime = Runtime {
+            config: json!({"botToken":"first"}),
+            cursor: 20,
+            pending: VecDeque::new(),
+            reply_chats: HashMap::new(),
+            pair_chats: HashMap::new(),
+        };
+        runtime.request(json!({"op":"configure","hub_config":{"botToken":"first"},"cursor":"10"}));
+        assert_eq!(runtime.cursor, 20);
+        runtime.pending.push_back(Pending {
+            cursor: 21,
+            key: Some("pending".into()),
+            done: false,
+        });
+        runtime.request(json!({"op":"configure","hub_config":{"botToken":"first"},"cursor":"30"}));
+        assert_eq!(runtime.cursor, 30);
+        assert_eq!(runtime.pending.len(), 1);
+        runtime
+            .request(json!({"op":"configure","hub_config":{"botToken":"second"},"cursor":"999"}));
+        assert_eq!(runtime.cursor, 0);
+        assert!(runtime.pending.is_empty());
+        assert!(runtime.request(
+            json!({"op":"on_acked","user_config":{"chatId":"1"},"external_msg_ids":["7"]})
+        ));
+        assert_eq!(runtime.cursor, 0);
     }
 }

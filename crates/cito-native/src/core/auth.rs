@@ -73,6 +73,7 @@ fn validate_oidc_endpoint(value: &str, setting: &str, issuer: bool) -> Result<()
 struct KeyCache {
     keys: Option<JwkSet>,
     refresh_at: Option<Instant>,
+    loaded_at: Option<Instant>,
     refreshing: bool,
     unavailable: bool,
 }
@@ -107,7 +108,7 @@ impl OidcVerifier {
             return Err("INVALID_INPUT: CITO_OIDC_CLIENT_ID must not be empty".into());
         }
         Ok(Self {
-            issuer: issuer.trim_end_matches('/').into(),
+            issuer: issuer.into(),
             client_id: client_id.into(),
             cache: Mutex::new(KeyCache::default()),
             refreshed: Condvar::new(),
@@ -133,7 +134,10 @@ impl OidcVerifier {
     fn refresh(&self, deadline: Option<Instant>) -> Result<JwkSet, String> {
         let discovery_response = self
             .agent
-            .get(&format!("{}/.well-known/openid-configuration", self.issuer))
+            .get(&format!(
+                "{}/.well-known/openid-configuration",
+                self.issuer.trim_end_matches('/')
+            ))
             .timeout(Self::request_timeout(deadline)?)
             .call()
             .map_err(|e| format!("AUTH_UNAVAILABLE: OIDC discovery: {e}"))?;
@@ -180,6 +184,7 @@ impl OidcVerifier {
         &self,
         kid: &str,
         deadline: Option<Instant>,
+        mut force_refresh: bool,
     ) -> Result<jsonwebtoken::jwk::Jwk, String> {
         let cooldown = env_value("CITO_JWKS_COOLDOWN_MS")
             .and_then(|s| s.parse::<u64>().ok())
@@ -191,8 +196,14 @@ impl OidcVerifier {
             .map_err(|_| "AUTH_UNAVAILABLE: key cache poisoned")?;
         loop {
             Self::request_timeout(deadline)?;
-            if let Some(key) = cache.keys.as_ref().and_then(|keys| keys.find(kid)) {
-                return Ok(key.clone());
+            if !force_refresh
+                && cache
+                    .loaded_at
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(300))
+            {
+                if let Some(key) = cache.keys.as_ref().and_then(|keys| keys.find(kid)) {
+                    return Ok(key.clone());
+                }
             }
             if cache.refreshing {
                 cache = if let Some(at) = deadline {
@@ -237,6 +248,8 @@ impl OidcVerifier {
             match refreshed {
                 Ok(keys) => {
                     cache.keys = Some(keys);
+                    cache.loaded_at = Some(Instant::now());
+                    force_refresh = false;
                     cache.unavailable = false;
                 }
                 Err(error) => {
@@ -280,36 +293,58 @@ impl OidcVerifier {
             .as_deref()
             .filter(|kid| !kid.is_empty())
             .ok_or("AUTHORIZATION_VIOLATION: JWT kid is required")?;
-        let jwk = self.verification_key(kid, deadline)?;
-        if jwk
-            .common
-            .public_key_use
-            .as_ref()
-            .is_some_and(|use_| *use_ != jsonwebtoken::jwk::PublicKeyUse::Signature)
-            || jwk
+        let jwk = self.verification_key(kid, deadline, false)?;
+        let decoding_key = |jwk: &jsonwebtoken::jwk::Jwk| -> Result<DecodingKey, String> {
+            if jwk
                 .common
-                .key_operations
+                .public_key_use
                 .as_ref()
-                .is_some_and(|ops| !ops.contains(&jsonwebtoken::jwk::KeyOperations::Verify))
-        {
-            return Err("AUTHORIZATION_VIOLATION: JWK is not a verification key".into());
-        }
-        if let Some(alg) = jwk.common.key_algorithm {
-            if format!("{alg:?}") != format!("{:?}", header.alg) {
+                .is_some_and(|use_| *use_ != jsonwebtoken::jwk::PublicKeyUse::Signature)
+                || jwk
+                    .common
+                    .key_operations
+                    .as_ref()
+                    .is_some_and(|ops| !ops.contains(&jsonwebtoken::jwk::KeyOperations::Verify))
+            {
+                return Err("AUTHORIZATION_VIOLATION: JWK is not a verification key".into());
+            }
+            if jwk
+                .common
+                .key_algorithm
+                .is_some_and(|alg| format!("{alg:?}") != format!("{:?}", header.alg))
+            {
                 return Err("AUTHORIZATION_VIOLATION: JWT key algorithm mismatch".into());
             }
-        }
-        let key = DecodingKey::from_jwk(&jwk)
-            .map_err(|_| "AUTHORIZATION_VIOLATION: invalid verification key")?;
+            DecodingKey::from_jwk(jwk)
+                .map_err(|_| "AUTHORIZATION_VIOLATION: invalid verification key".into())
+        };
+        let key = decoding_key(&jwk)?;
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         validation.validate_nbf = true;
         validation.leeway = 30;
-        let claims = decode::<Value>(token, &key, &validation)
+        let decoded = decode::<Value>(token, &key, &validation);
+        let decoded = if decoded
+            .as_ref()
+            .is_err_and(|e| matches!(e.kind(), jsonwebtoken::errors::ErrorKind::InvalidSignature))
+        {
+            let refreshed = self.verification_key(kid, deadline, true)?;
+            let key = decoding_key(&refreshed)?;
+            decode::<Value>(token, &key, &validation)
+        } else {
+            decoded
+        };
+        let claims = decoded
             .map_err(|_| "AUTHORIZATION_VIOLATION: invalid JWT signature or claims")?
             .claims;
+        if (claims["aud"].as_array().is_some_and(|aud| aud.len() > 1)
+            || claims.get("azp").is_some())
+            && claims["azp"].as_str() != Some(self.client_id.as_str())
+        {
+            return Err("AUTHORIZATION_VIOLATION: invalid authorized party".into());
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "AUTH_UNAVAILABLE: invalid system clock")?
@@ -345,7 +380,7 @@ impl OidcVerifier {
             })
             .collect();
         Ok(
-            json!({"principal_id": format!("oidc:{}|{}", self.issuer, sub), "owner_user": owner, "sub": sub, "oidc": true, "legacy_principal_id":format!("{}#{}",self.issuer,sub)}),
+            json!({"principal_id": format!("oidc:{}|{}", self.issuer, sub), "owner_user": owner, "sub": sub, "oidc": true, "token_expires_at":claims["exp"], "legacy_principal_id":format!("{}#{}",self.issuer,sub)}),
         )
     }
 }

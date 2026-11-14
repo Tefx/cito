@@ -8,6 +8,7 @@
   "sfSymbol": "terminal.fill",
   "tint": "blue",
   "cliFlag": true,
+  "pidBound": false,
   "command": [
     "./bin/cito-plugin-codex"
   ],

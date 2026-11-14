@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use toml_edit::{value, DocumentMut, Item, Table};
 fn matches_process(command: &str) -> bool {
     let Some((program, script)) = process_entrypoint(command) else {
@@ -114,40 +114,16 @@ fn setup(req: &Value) -> Result<Value> {
         );
     }
     let remove = op == "setup_remove";
-    let old = read_optional(&path)?;
-    let doc = parse(old.as_deref())?;
-    if !remove {
-        if let Some(cmd) = doc
-            .get("mcp_servers")
-            .and_then(|v| v.get("cito"))
-            .and_then(|v| v.get("command"))
-            .and_then(Item::as_str)
-        {
-            if cmd != command
-                && cmd != "cito-mcp"
-                && !cmd.ends_with("/cito-mcp")
-                && req["force"] != true
-            {
-                return Ok(
-                    json!({"ok":true,"actions":[{"target":"codex","path":path,"status":"conflict","backupPath":null,"detail":"Conflicting MCP command; pass --force to replace"}]}),
-                );
-            }
-        }
-    }
     let action = mutate(req, "codex", &path, |old| {
         let mut d = parse(old)?;
-        if !remove && req["force"] != true {
-            if let Some(cmd) = d
-                .get("mcp_servers")
+        check_mcp_command(
+            req,
+            d.get("mcp_servers")
                 .and_then(|v| v.get("cito"))
                 .and_then(|v| v.get("command"))
-                .and_then(Item::as_str)
-            {
-                if cmd != command && cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") {
-                    return Err("Conflicting MCP command; pass --force to replace".into());
-                }
-            }
-        }
+                .and_then(Item::as_str),
+            &command,
+        )?;
         if remove {
             if let Some(t) = d.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
                 t.remove("cito");
@@ -205,7 +181,8 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
     if !path.try_exists().map_err(|e| e.to_string())? {
         return Ok(vec![]);
     }
-    let columns = sqlite_rows(&path, "PRAGMA table_info(threads)")?;
+    let connection = ReadOnlySqlite::open(&path, Duration::from_millis(1200))?;
+    let columns = connection.rows("PRAGMA table_info(threads)")?;
     let has = |name: &str| columns.iter().any(|c| c["name"] == name);
     if !has("id") || !has("cwd") {
         return Ok(vec![]);
@@ -248,9 +225,8 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
-    Ok(sqlite_rows(
-        &path,
-        &format!(
+    Ok(connection
+        .rows(&format!(
             "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
             predicates.join(" AND "),
             order.join(", "),
@@ -259,12 +235,11 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
             } else {
                 ""
             }
-        ),
-    )?
-    .into_iter()
-    // Preserve caller validation for whitespace-only IDs and working directories.
-    .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
-    .collect())
+        ))?
+        .into_iter()
+        // Preserve caller validation for whitespace-only IDs and working directories.
+        .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
+        .collect())
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];
@@ -329,26 +304,6 @@ fn row_caller(req: &Value, r: &Value) -> Value {
             "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
     }
     caller("codex", str_at(r, "id").unwrap_or(""), cwd, pid(req), title)
-}
-fn command_exit(mut command: Command, deadline: Instant) -> Result<Option<bool>> {
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(Some(status.success())),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.to_string());
-            }
-            Ok(None) => {}
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
@@ -456,6 +411,14 @@ pub fn handle(req: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"caller":remember_process(c)}))
         }
         "probe" => {
+            let inspection = setup(
+                &json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"],"plugin_dir":req["plugin_dir"]}),
+            )?;
+            if inspection["configured"] != true {
+                return Ok(
+                    json!({"ok":true,"status":"closed_definitive","reason":"Integration is disconnected"}),
+                );
+            }
             let id = str_at(req, "session_id").unwrap_or("");
             let archived = sqlite_rows(
                 &db(req),
@@ -500,7 +463,8 @@ pub fn handle(req: &Value) -> Result<Value> {
                         }
                     }
                 }
-                command_exit(command, Instant::now() + timeout)
+                run_command_with_timeout(command, timeout)
+                    .map(|output| output.map(|o| o.status.success()))
             };
             let already_queued = req["queue_written"] == true;
             let queue_confirmed = if already_queued {

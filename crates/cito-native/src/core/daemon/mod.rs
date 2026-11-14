@@ -1,0 +1,1340 @@
+use self::channels::ChannelInventory;
+use self::http_actions::{handle_http, respond, InteractiveLogin};
+use self::ui_ipc::{spawn_ui, UiChild, UiMailbox};
+use crate::core::{
+    config::repair_default_hub,
+    hub::HubEngine,
+    identity::{hash, listener_id, string},
+    receiver::{detach_channel_expected, poll_listener},
+    state::LocalState,
+    transport::HubClient,
+};
+use crate::plugins::{now_ms, random_uuid_v4, LoadedPlugins, NativeConfig, CITO_VERSION};
+use crate::setup::ensure_cli_shims_native;
+use base64::Engine;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::net::TcpListener;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+mod channels;
+mod host_hub;
+mod http_actions;
+mod mcp;
+mod projection;
+#[cfg(test)]
+mod tests;
+mod ui_ipc;
+pub use ui_ipc::{bounded_frame, FRAME_LIMIT};
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn handle_daemon_sig(_: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    let fd = SIGNAL_PIPE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: write is async-signal-safe; the nonblocking self-pipe stays open
+        // until all handlers are restored at shutdown. No locks or allocations occur.
+        unsafe {
+            libc::write(fd, b"x".as_ptr().cast(), 1);
+        }
+    }
+}
+
+fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
+
+struct OidcRecovery {
+    config: Value,
+    rejected: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    worker: thread::JoinHandle<Result<(String, Value), String>>,
+}
+
+type SetupResult = Result<(bool, bool, Vec<String>), String>;
+
+struct SetupInspection {
+    generation: u64,
+    value: SetupResult,
+    worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
+}
+
+pub struct DaemonService {
+    pub config: NativeConfig,
+    pub plugins: LoadedPlugins,
+    pub state: LocalState,
+    pub local: Arc<HubEngine>,
+    pub slots: HashMap<String, HubClient>,
+    events: Vec<thread::JoinHandle<()>>,
+    receivers: HashMap<String, thread::JoinHandle<()>>,
+    caller_cache: Mutex<HashMap<u64, Value>>,
+    probes: HashMap<String, (Instant, Option<thread::JoinHandle<()>>)>,
+    session_activity: Option<super::session_activity::SessionActivity>,
+    ui: Option<Arc<UiMailbox>>,
+    logins: HashMap<String, Arc<InteractiveLogin>>,
+    last_ui: Instant,
+    closing: bool,
+    host_id: String,
+    host_server: Option<super::hub::HubServer>,
+    applied_host_config: Option<Value>,
+    host_hub_reload_failed: bool,
+    uninstall: Option<bool>,
+    active_settings_hub: Option<String>,
+    oidc_recoveries: HashMap<String, OidcRecovery>,
+    retired_auth: Vec<OidcRecovery>,
+    last_app_action: HashMap<String, String>,
+    setup_inspections: HashMap<String, SetupInspection>,
+    last_host_hub_error: Option<String>,
+    last_hub_errors: HashMap<String, (String, bool)>,
+    channel_inventories: HashMap<String, Arc<ChannelInventory>>,
+    activity_filter: String,
+    activity_query: String,
+}
+
+pub fn run_daemon(config: &NativeConfig, plugins: &LoadedPlugins) {
+    if let Err(e) = run_daemon_inner(config, plugins) {
+        eprintln!("cito daemon: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<(), String> {
+    if crate::plugins::handover_stale_daemon(config)? {
+        return Ok(());
+    }
+    fs::create_dir_all(&config.state_dir).map_err(|e| e.to_string())?;
+    fs::set_permissions(&config.state_dir, fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(config.state_dir.join("daemon.lock"))
+        .map_err(|e| e.to_string())?;
+    // SAFETY: descriptor is live for daemon lifetime. Nonblocking lock prevents dual writers.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("Daemon owner lock is held".into());
+    }
+    let listener =
+        TcpListener::bind(("127.0.0.1", config.daemon_port)).map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let service = Arc::new(Mutex::new(DaemonService::open(config, plugins)?));
+    {
+        let mut s = service.lock().map_err(|_| "Service lock poisoned")?;
+        s.state.db.execute(
+            "INSERT OR REPLACE INTO daemon_owner VALUES(1,?,?)",
+            &[json!(std::process::id()), json!(config.daemon_port)],
+        )?;
+        s.sync_host_hub()?;
+    }
+    let mut pipe = [-1; 2];
+    // SAFETY: pipe points at two writable descriptors; flags keep signal writes nonblocking.
+    if unsafe { libc::pipe(pipe.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let read_pipe = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
+    let write_pipe = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
+    unsafe {
+        libc::fcntl(write_pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    SIGNAL_PIPE.store(write_pipe.as_raw_fd(), Ordering::SeqCst);
+    let previous_term = unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            handle_daemon_sig as *const () as libc::sighandler_t,
+        )
+    };
+    let previous_int = unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_daemon_sig as *const () as libc::sighandler_t,
+        )
+    };
+    let mut ui = spawn_ui(service.clone());
+    let mut retired_ui: Vec<UiChild> = Vec::new();
+    let health = Arc::new(
+        json!({"ok":true,"pid":std::process::id(),"stateDir":config.state_dir,"version":CITO_VERSION}),
+    );
+    let mut calls: Vec<thread::JoinHandle<()>> = Vec::new();
+    let mut last_poll = Instant::now();
+    'running: while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let s = service.clone();
+                    if calls.iter().filter(|call| !call.is_finished()).count() >= 64 {
+                        let mut stream = stream;
+                        respond(
+                            &mut stream,
+                            503,
+                            &json!({"error":"Too many daemon connections"}),
+                        );
+                    } else {
+                        let health = health.clone();
+                        calls.push(thread::spawn(move || handle_http(stream, s, health)));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    eprintln!("cito accept: {e}");
+                    break 'running;
+                }
+            }
+        }
+        if last_poll.elapsed() > Duration::from_millis(250) {
+            if let Ok(mut s) = service.try_lock() {
+                if let Err(e) = s.poll() {
+                    eprintln!("cito poll: {e}");
+                }
+                last_poll = Instant::now();
+            }
+        }
+        let mut pending = Vec::new();
+        for call in calls.drain(..) {
+            if call.is_finished() {
+                let _ = call.join();
+            } else {
+                pending.push(call);
+            }
+        }
+        calls = pending;
+        if ui
+            .as_mut()
+            .is_some_and(|u| u.child.try_wait().ok().flatten().is_some())
+        {
+            let restart = if let Ok(mut s) = service.try_lock() {
+                if let Some(mailbox) = s.ui.take() {
+                    mailbox.close();
+                }
+                !s.closing && !shutdown_requested()
+            } else {
+                false
+            };
+            if restart {
+                if let Some(old) = ui.take() {
+                    retired_ui.push(old);
+                }
+                ui = spawn_ui(service.clone());
+            }
+        }
+        let mut pending_ui = Vec::new();
+        for old in retired_ui.drain(..) {
+            if old.reader.is_finished() && old.writer.is_finished() {
+                let _ = old.reader.join();
+                let _ = old.writer.join();
+            } else {
+                pending_ui.push(old);
+            }
+        }
+        retired_ui = pending_ui;
+        let mut poll = libc::pollfd {
+            fd: read_pipe.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe {
+            libc::poll(&mut poll, 1, 20);
+        }
+    }
+    drop(listener);
+    // Set closing before draining calls, then close the final host server after drain.
+    if let Ok(mut s) = service.lock() {
+        s.closing = true;
+    }
+    for call in calls {
+        let _ = call.join();
+    }
+    let (uninstall, mut session_activity) = if let Ok(mut s) = service.lock() {
+        s.shutdown();
+        (s.uninstall, s.session_activity.take())
+    } else {
+        (None, None)
+    };
+    // Plugin workers drain after receivers stop, without retaining the service mutex.
+    if let Some(activity) = session_activity.as_mut() {
+        if let Err(error) = activity.shutdown() {
+            eprintln!("cito badge cleanup: {error}");
+        }
+    }
+    for mut ui in ui.take().into_iter().chain(retired_ui) {
+        if ui.child.try_wait().ok().flatten().is_none() {
+            let _ = ui.child.kill();
+        }
+        let _ = ui.child.wait();
+        let _ = ui.reader.join();
+        let _ = ui.writer.join();
+    }
+    drop(service);
+    if let Some(purge) = uninstall {
+        super::setup::uninstall_setup_with_owner(
+            &config.state_dir,
+            &config.config_path,
+            &config.home_dir,
+            plugins,
+            purge,
+            Some(&lock),
+        )?;
+    }
+    unsafe {
+        libc::signal(libc::SIGTERM, previous_term);
+        libc::signal(libc::SIGINT, previous_int);
+    }
+    SIGNAL_PIPE.store(-1, Ordering::SeqCst);
+    drop(write_pipe);
+    drop(read_pipe);
+    Ok(())
+}
+
+pub use super::cli::run_cli_command;
+
+impl DaemonService {
+    pub fn open(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<Self, String> {
+        ensure_cli_shims_native(&config.state_dir, plugins)?;
+        let discovered = crate::plugins::load_plugins(&config.state_dir);
+        let mut active_plugins = plugins.clone();
+        for plugin in &mut active_plugins.plugins {
+            if plugin.plugin_dir.join("plugin.json").is_file() {
+                if let Some(current) = discovered.find_by_id(&plugin.id) {
+                    *plugin = current.clone();
+                }
+            }
+        }
+        let plugins = &active_plugins;
+        let state = LocalState::open(&config.state_dir)?;
+        // Daemon construction runs only after acquiring the exclusive owner lock.
+        state.recover_dispatch_leases()?;
+        let local = Arc::new(HubEngine::open(&config.state_dir)?);
+        let host_path = config.state_dir.join("host-id");
+        let host_id = match fs::read_to_string(&host_path) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let s = random_uuid_v4();
+                fs::write(&host_path, &s).map_err(|e| e.to_string())?;
+                s
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        if !crate::is_valid_transcript_uuid(&host_id) {
+            return Err("Invalid host-id UUID".into());
+        }
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        let mut service = Self {
+            config: config.clone(),
+            plugins: plugins.clone(),
+            state,
+            local,
+            slots: HashMap::new(),
+            events: Vec::new(),
+            receivers: HashMap::new(),
+            caller_cache: Mutex::new(HashMap::new()),
+            probes: HashMap::new(),
+            session_activity: Some(super::session_activity::SessionActivity::new(
+                config, plugins,
+            )),
+            ui: None,
+            logins: HashMap::new(),
+            last_ui: Instant::now() - Duration::from_secs(1),
+            closing: false,
+            host_id,
+            host_server: None,
+            applied_host_config: None,
+            host_hub_reload_failed: false,
+            uninstall: None,
+            active_settings_hub: None,
+            oidc_recoveries: HashMap::new(),
+            retired_auth: Vec::new(),
+            last_app_action: HashMap::new(),
+            setup_inspections: HashMap::new(),
+            last_host_hub_error: None,
+            last_hub_errors: HashMap::new(),
+            channel_inventories: HashMap::new(),
+            activity_filter: "all".into(),
+            activity_query: String::new(),
+        };
+        // Inspect before the service is published to HTTP/UI workers.
+        for plugin in service.plugins.agent_plugins() {
+            service.setup_inspections.insert(
+                plugin.id.clone(),
+                SetupInspection {
+                    generation: 0,
+                    value: super::setup::try_inspect_plugin_setup(plugin),
+                    worker: None,
+                },
+            );
+        }
+        service.reload_slots()?;
+        Ok(service)
+    }
+
+    fn inspect_setup(
+        &self,
+        plugin: &crate::plugins::PluginDescriptor,
+    ) -> Result<(bool, bool, Vec<String>), String> {
+        self.setup_inspections
+            .get(&plugin.id)
+            .map(|entry| entry.value.clone())
+            .unwrap_or_else(|| Err("Setup inspection pending".into()))
+    }
+
+    fn invalidate_setup(&mut self, id: &str) {
+        if self.plugins.find_by_id(id).is_none() {
+            return;
+        }
+        let entry = self
+            .setup_inspections
+            .entry(id.to_owned())
+            .or_insert_with(|| SetupInspection {
+                generation: 0,
+                value: Err("Setup inspection pending".into()),
+                worker: None,
+            });
+        entry.generation = entry.generation.wrapping_add(1);
+        if entry.worker.is_none() {
+            if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+                entry.worker = Some((
+                    entry.generation,
+                    thread::spawn(move || super::setup::try_inspect_plugin_setup(&plugin)),
+                ));
+            }
+        }
+        self.refresh_setup_inspections();
+    }
+
+    fn refresh_setup_inspections(&mut self) {
+        let mut changed = false;
+        for (id, entry) in &mut self.setup_inspections {
+            if entry
+                .worker
+                .as_ref()
+                .is_some_and(|(_, worker)| worker.is_finished())
+            {
+                let (generation, worker) = entry.worker.take().unwrap();
+                let value = worker
+                    .join()
+                    .unwrap_or_else(|_| Err("Setup inspection worker panicked".into()));
+                if generation == entry.generation {
+                    entry.value = value;
+                    changed = true;
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            // A superseded completion is discarded and refreshed at the latest generation.
+            if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+                let generation = entry.generation;
+                entry.worker = Some((
+                    generation,
+                    thread::spawn(move || super::setup::try_inspect_plugin_setup(&plugin)),
+                ));
+            }
+        }
+        if changed {
+            self.emit(json!({"op":"settings","settings":self.settings()}));
+        }
+    }
+
+    fn raw_config(&self) -> Result<Value, String> {
+        match fs::read_to_string(&self.config.config_path) {
+            Ok(s) => serde_json::from_str(&s).map_err(|e| format!("Invalid config.json: {e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn get_effective_user(&self) -> Result<String, String> {
+        let raw = self.raw_config()?;
+        let user = std::env::var("CITO_USER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| raw["user"].as_str().map(str::to_string))
+            .unwrap_or_else(|| self.config.user.clone());
+        if !crate::plugins::validate_user(&user) {
+            return Err("INVALID_INPUT: Invalid user".into());
+        }
+        Ok(user.to_ascii_lowercase())
+    }
+
+    pub fn reload_slots(&mut self) -> Result<(), String> {
+        if self.closing {
+            return Ok(());
+        }
+        self.retired_auth
+            .retain(|recovery| !recovery.worker.is_finished());
+        let _ = self.sync_host_hub();
+        let mut raw = self.raw_config()?;
+        self.config.user = self.get_effective_user()?;
+        repair_default_hub(&mut raw);
+        let (default, hubs, _) =
+            crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+        self.config.default_hub = std::env::var("CITO_HUB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or(default);
+        let mut keep = Vec::new();
+        for (name, mut hub) in hubs {
+            if hub["enabled"] == false {
+                continue;
+            }
+            if self.logins.contains_key(&name)
+                && self.slots.get(&name).is_some_and(|old| old.config == hub)
+            {
+                keep.push(name);
+                continue;
+            }
+            let auth = hub
+                .get("authMode")
+                .or_else(|| hub.get("auth"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_ascii_lowercase();
+            if !matches!(auth.as_str(), "none" | "token" | "oidc") {
+                return Err("INVALID_INPUT: authMode must be none, token or oidc".into());
+            }
+            hub["authMode"] = json!(auth);
+            if let Some(o) = hub.as_object_mut() {
+                o.remove("auth");
+            }
+            if hub["url"].is_null() {
+                hub["url"] = json!("local://");
+            }
+            let user = self.config.effective_user(&name)?.to_ascii_lowercase();
+            keep.push(name.clone());
+            let rejected_hash = self
+                .slots
+                .get(&name)
+                .filter(|old| old.config == hub)
+                .and_then(|old| {
+                    old.rejected_bearer
+                        .lock()
+                        .ok()
+                        .and_then(|v| v.clone())
+                        .or_else(|| old.auth_rejected_hash.clone())
+                        .or_else(|| {
+                            old.status
+                                .lock()
+                                .ok()
+                                .filter(|status| status.as_str() == "auth_required")
+                                .and_then(|_| old.bearer.as_deref().map(hash))
+                        })
+                });
+            let mut recovered = None;
+            if let Some(pending) = self.oidc_recoveries.remove(&name) {
+                if pending.config != hub || pending.rejected != rejected_hash {
+                    pending.cancelled.store(true, Ordering::SeqCst);
+                    self.retired_auth.push(pending);
+                } else if pending.worker.is_finished() {
+                    recovered = Some(pending.worker.join().unwrap_or_else(|_| {
+                        Err("AUTH_UNAVAILABLE: recovery worker panicked".into())
+                    }));
+                } else {
+                    self.oidc_recoveries.insert(name.clone(), pending);
+                    if self.slots.get(&name).is_some_and(|old| old.config == hub) {
+                        continue;
+                    }
+                }
+            }
+            if recovered.is_none()
+                && self.slots.get(&name).is_some_and(|old| {
+                    old.config == hub
+                        && (auth == "oidc" || string(&old.identity, "owner_user") == user)
+                        && (auth != "oidc"
+                            || old.auth_retry_at > now_ms()
+                            || (rejected_hash.is_none() && old.expires_at > now_ms() / 1000 + 30))
+                })
+            {
+                continue;
+            }
+            self.channel_inventories.remove(&name);
+            let registration = self.state.registration_lock(&name)?;
+            let previous = self.slots.remove(&name);
+            if let Some(old) = previous {
+                let changed = old.config["url"] != hub["url"]
+                    || (auth != "oidc"
+                        && !super::auth::principal_ids_equal(
+                            string(&old.identity, "principal_id"),
+                            &format!("none#{user}"),
+                        ));
+                if changed {
+                    for row in self
+                        .state
+                        .active()?
+                        .into_iter()
+                        .filter(|r| r["hub"] == name)
+                    {
+                        let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
+                        let _ = detach_channel_expected(
+                            &old,
+                            string(&row, "listener_id"),
+                            &channel,
+                            &row,
+                        );
+                    }
+                }
+                old.closed.store(true, Ordering::SeqCst);
+                if changed {
+                    for row in self
+                        .state
+                        .active()?
+                        .into_iter()
+                        .filter(|row| row["hub"] == name)
+                    {
+                        self.state
+                            .fence_listener_for(&row, "fenced_before_dispatch")?;
+                    }
+                }
+            }
+            let mut client = HubClient::new(
+                name.clone(),
+                hub.clone(),
+                &user,
+                if hub["url"] == "local://" {
+                    Some(self.local.clone())
+                } else {
+                    None
+                },
+            );
+            client.registration = registration;
+            if auth == "oidc" {
+                if recovered.is_none() && !self.oidc_recoveries.contains_key(&name) {
+                    let dir = self.config.state_dir.clone();
+                    let hub_name = name.clone();
+                    let config = hub.clone();
+                    let rejected = rejected_hash.clone();
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let cancel = cancelled.clone();
+                    let worker = thread::spawn(move || {
+                        super::login::recover_cancellable(
+                            &dir,
+                            &hub_name,
+                            &config,
+                            rejected.as_deref(),
+                            false,
+                            &|| cancel.load(Ordering::SeqCst) || shutdown_requested(),
+                        )
+                    });
+                    self.oidc_recoveries.insert(
+                        name.clone(),
+                        OidcRecovery {
+                            config: hub.clone(),
+                            rejected: rejected_hash.clone(),
+                            cancelled,
+                            worker,
+                        },
+                    );
+                }
+                match recovered.unwrap_or_else(|| Err("AUTH_UNAVAILABLE: recovery pending".into()))
+                {
+                    Ok((token, identity)) => {
+                        client.expires_at = token
+                            .split('.')
+                            .nth(1)
+                            .and_then(|p| {
+                                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                    .decode(p)
+                                    .ok()
+                            })
+                            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                            .and_then(|v| v["exp"].as_u64())
+                            .unwrap_or(0);
+                        client.bearer = Some(token);
+                        client.identity = identity;
+                    }
+                    Err(_) => {
+                        client.bearer = None;
+                        client.expires_at = 0;
+                        client.auth_retry_at = now_ms() + 5000;
+                        client.auth_rejected_hash = rejected_hash;
+                        if let Some(identity) =
+                            super::login::offline_identity(&self.config.state_dir, &name, &hub)
+                        {
+                            client.identity = identity;
+                        }
+                        if let Ok(mut status) = client.status.lock() {
+                            *status = "auth_required".into();
+                        }
+                    }
+                }
+            }
+            // Disabled profiles have no previous slot. Durable binding identity must
+            // still be checked before any receiver can use the replacement client.
+            for row in self.state.db.query(
+                "SELECT * FROM local_listeners WHERE hub=? AND status != \'FENCED_INACTIVE\'",
+                &[json!(name)],
+            )? {
+                let changed = !super::auth::principal_ids_equal(
+                    string(&row, "principal_id"),
+                    string(&client.identity, "principal_id"),
+                ) || row["hub_url"]
+                    .as_str()
+                    .is_some_and(|url| url != string(&hub, "url"));
+                if changed {
+                    self.state
+                        .fence_listener_for(&row, "fenced_before_dispatch")?;
+                } else if row["hub_url"].is_null() {
+                    // Legacy bindings predate URL persistence; record the first known profile.
+                    self.state.db.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=? AND hub_url IS NULL", &[hub["url"].clone(),row["hub"].clone(),row["listener_id"].clone()])?;
+                }
+            }
+            if auth != "oidc" || client.bearer.is_some() {
+                if let Some(events) = client.start_events() {
+                    self.events.push(events);
+                }
+            }
+            self.slots.insert(name.clone(), client);
+        }
+        let obsolete: Vec<_> = self
+            .oidc_recoveries
+            .keys()
+            .filter(|name| !keep.contains(name))
+            .cloned()
+            .collect();
+        for name in obsolete {
+            if let Some(pending) = self.oidc_recoveries.remove(&name) {
+                pending.cancelled.store(true, Ordering::SeqCst);
+                self.retired_auth.push(pending);
+            }
+        }
+        let removed: Vec<String> = self
+            .slots
+            .keys()
+            .filter(|k| !keep.contains(k))
+            .cloned()
+            .collect();
+        for name in removed {
+            self.channel_inventories.remove(&name);
+            if let Some(slot) = self.slots.remove(&name) {
+                slot.closed.store(true, Ordering::SeqCst);
+            }
+        }
+        if self
+            .active_settings_hub
+            .as_ref()
+            .is_some_and(|hub| !self.slots.contains_key(hub))
+        {
+            self.active_settings_hub = None;
+        }
+        self.ensure_human_nodes()?;
+        Ok(())
+    }
+
+    pub(super) fn reconcile_unlistened(
+        state: &LocalState,
+        client: &HubClient,
+        host_id: &str,
+    ) -> Result<(), String> {
+        // Re-read durable intent under the enrollment lock: an explicit re-enable
+        // supersedes any pending detach before this worker can mutate the Hub.
+        let registration = state.registration_lock(&client.name)?;
+        let _registration = registration
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        for pending in state.db.query(
+            "SELECT * FROM pending_hub_detaches WHERE hub=?",
+            &[json!(client.name)],
+        )? {
+            let id = string(&pending, "listener_id");
+            let Some(row) = state
+                .listener(&client.name, id)?
+                .filter(|row| row["status"] == "UNLISTENED")
+            else {
+                state.db.execute("DELETE FROM pending_hub_detaches WHERE hub=?1 AND listener_id=?2 AND NOT EXISTS (SELECT 1 FROM local_listeners WHERE hub=?1 AND listener_id=?2 AND status='UNLISTENED')", &[json!(client.name),json!(id)])?;
+                continue;
+            };
+            // Fence the local intent, including a pre-enrollment Human pause whose
+            // remote detach must adopt the remote generation and owner.
+            let clear = || {
+                state.clear_pending_detach_if_current(
+                    &client.name,
+                    id,
+                    row["binding_generation"].as_u64().unwrap_or(0),
+                    string(&row, "owner_token"),
+                )
+            };
+            if pending["hub_url"].as_str() != Some(string(&client.config, "url")) {
+                clear()?;
+                continue;
+            }
+            if !super::auth::principal_ids_equal(
+                string(&row, "principal_id"),
+                string(&client.identity, "principal_id"),
+            ) {
+                continue;
+            }
+            let channel = format!("{host_id}:{}", string(&row, "harness"));
+            let Some((remote, _)) = client.kv_get(id)? else {
+                clear()?;
+                continue;
+            };
+            let human = row["harness"] == "human";
+            let captured = if human
+                && row["binding_generation"] == 0
+                && id == listener_id(string(&client.identity, "principal_id"), "human", "default")
+            {
+                // Pause can precede automatic enrollment on this Mac.
+                let mut captured = remote.clone();
+                if let Some(owner) = remote["channels"][&channel]["owner_token"].as_str() {
+                    captured["owner_token"] = json!(owner);
+                    captured["binding_generation"] =
+                        remote["channels"][&channel]["binding_generation"].clone();
+                }
+                captured
+            } else {
+                row.clone()
+            };
+            if !super::registration::remote_matches_listener(&remote, &captured, &channel) {
+                clear()?;
+                continue;
+            }
+            if remote["channels"][&channel]["state"] == "ACTIVE" {
+                detach_channel_expected(client, id, &channel, &captured)?;
+            }
+            clear()?;
+        }
+        Ok(())
+    }
+
+    // Callers hold the Hub registration lock across the authoritative read/write
+    // and projection, so an older snapshot cannot overwrite a newer policy result.
+    pub(super) fn reconcile_human_scope(
+        state: &LocalState,
+        client: &HubClient,
+        host_id: &str,
+        remote: &Value,
+    ) -> Result<(), String> {
+        if remote["harness"] != "human" || client.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(row) = state.listener(&client.name, string(remote, "listener_id"))? else {
+            return Ok(());
+        };
+        let channel = format!("{host_id}:human");
+        if row["status"] == "ACTIVE"
+            && super::auth::principal_ids_equal(
+                string(&row, "principal_id"),
+                string(&client.identity, "principal_id"),
+            )
+            && super::registration::remote_matches_listener(remote, &row, &channel)
+        {
+            state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+        }
+        Ok(())
+    }
+
+    fn ensure_human_nodes(&mut self) -> Result<(), String> {
+        for (slot_name, client) in self.slots.clone() {
+            if client.local.is_some() {
+                let _ = Self::reconcile_unlistened(&self.state, &client, &self.host_id);
+            }
+            if client.config["authMode"] == "oidc" && client.bearer.is_none() {
+                continue;
+            }
+            if super::registration::local_node(&self.state, &client, "human", "default")?
+                .is_some_and(|r| r["status"] == "ACTIVE")
+            {
+                continue;
+            }
+            let args = json!({"about":"Human receiver"});
+            let caller = json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
+            if client.local.is_some() {
+                match super::registration::register_automatic_human(
+                    &self.state,
+                    &client,
+                    &self.host_id,
+                    &args,
+                    &caller,
+                ) {
+                    // A Hub-wide pause can predate this local profile. Enrollment is
+                    // optional; preserving that pause must not reject unrelated settings.
+                    Err(error) if error.starts_with("BINDING_REQUIRED:") => {}
+                    result => {
+                        result?;
+                    }
+                }
+                continue;
+            }
+            let key = format!("auto:{slot_name}");
+            if self.receivers.contains_key(&key) {
+                continue;
+            }
+            let state = self.state.clone();
+            let host = self.host_id.clone();
+            self.receivers.insert(
+                key,
+                thread::spawn(move || {
+                    let _ = super::registration::register_automatic_human(
+                        &state, &client, &host, &args, &caller,
+                    );
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    fn slot(&self, name: &str) -> Result<&HubClient, String> {
+        self.slots
+            .get(name)
+            .ok_or_else(|| format!("INVALID_INPUT: Unknown or disabled hub: {name}"))
+    }
+
+    fn scoped(&self, hub: &str, id: &str) -> String {
+        if self.slots.len() == 1 && matches!(self.config.default_hub.as_str(), "local" | "default")
+        {
+            id.into()
+        } else {
+            format!("{hub}:{id}")
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<(), String> {
+        self.refresh_setup_inspections();
+        self.reload_slots()?;
+        self.flush_acks();
+        // Successful background RPCs or event reconnection supersede transport
+        // errors, but cannot resolve a rejected configuration edit.
+        self.last_hub_errors.retain(|hub, (_, transient)| {
+            !*transient
+                || self
+                    .slots
+                    .get(hub)
+                    .is_none_or(|slot| slot.connection_status() != "connected")
+        });
+        let finished: Vec<String> = self
+            .receivers
+            .iter()
+            .filter(|(_, t)| t.is_finished())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in finished {
+            if let Some(thread) = self.receivers.remove(&key) {
+                let _ = thread.join();
+            }
+        }
+        // The registry owns background tasks; the per-hub owner serializes these
+        // tasks with explicit reads and mutations outside the service mutex.
+        if let Some(slot) = self
+            .active_settings_hub
+            .as_ref()
+            .and_then(|hub| self.slots.get(hub))
+            .filter(|slot| slot.local.is_none())
+            .cloned()
+        {
+            let key = format!("channels:{}", slot.name);
+            let inventory = self.channel_inventory(&slot);
+            let (due, observed_gen) = {
+                let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
+                (
+                    cached.value["status"] == "loading" || cached.retry_at <= Instant::now(),
+                    cached.completed_gen,
+                )
+            };
+            if due && !self.receivers.contains_key(&key) {
+                self.receivers.insert(
+                    key,
+                    thread::spawn(move || {
+                        let _ = inventory.refresh(&slot, observed_gen);
+                    }),
+                );
+            }
+        }
+        for (hub, slot) in &self.slots {
+            let key = format!("directory:{hub}");
+            if !self.receivers.contains_key(&key)
+                && (slot.config["authMode"] != "oidc" || slot.bearer.is_some())
+            {
+                let slot = slot.clone();
+                let state = self.state.clone();
+                let host_id = self.host_id.clone();
+                self.receivers.insert(
+                    key,
+                    thread::spawn(move || {
+                        let refreshed = (|| -> Result<(), String> {
+                            let registration = state.registration_lock(&slot.name)?;
+                            let _registration = registration
+                                .lock()
+                                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                            for remote in slot.directory()? {
+                                Self::reconcile_human_scope(&state, &slot, &host_id, &remote)?;
+                            }
+                            Ok(())
+                        })();
+                        if refreshed.is_ok() && slot.local.is_none() {
+                            let _ = Self::reconcile_unlistened(&state, &slot, &host_id);
+                        }
+                    }),
+                );
+            }
+        }
+        for row in self.state.active()? {
+            let hub = string(&row, "hub");
+            let probe_key = format!("{hub}:{}", string(&row, "listener_id"));
+            let probe = self
+                .probes
+                .entry(probe_key)
+                .or_insert_with(|| (Instant::now() + Duration::from_secs(1), None));
+            if probe.1.as_ref().is_some_and(|t| t.is_finished()) {
+                if let Some(t) = probe.1.take() {
+                    let _ = t.join();
+                }
+                probe.0 = Instant::now() + Duration::from_millis(500);
+            }
+            if probe.1.is_none() && probe.0 <= Instant::now() && row["harness"] != "human" {
+                if let (Some(plugin), Some(client)) = (
+                    self.plugins.find_by_id(string(&row, "harness")).cloned(),
+                    self.slots
+                        .get(hub)
+                        .filter(|s| !s.closed.load(Ordering::SeqCst))
+                        .cloned(),
+                ) {
+                    let state = self.state.clone();
+                    let captured = row.clone();
+                    let dir = self.config.state_dir.clone();
+                    probe.1 = Some(thread::spawn(move || {
+                        let _ = super::receiver::probe_listener(
+                            &state, &client, &captured, &plugin, &dir,
+                        );
+                    }));
+                }
+            }
+            let key = format!("{hub}:{}", string(&row, "listener_id"));
+            if self.receivers.contains_key(&key) {
+                continue;
+            }
+            let Ok(slot) = self.slot(hub).cloned() else {
+                continue;
+            };
+            if slot.config["authMode"] == "oidc" && slot.bearer.is_none() {
+                continue;
+            }
+            let state = self.state.clone();
+            let state_dir = self.config.state_dir.clone();
+            let host_id = self.host_id.clone();
+            let plugin = self.plugins.find_by_id(string(&row, "harness")).cloned();
+            self.receivers.insert(key,thread::spawn(move||{
+                let channel=format!("{}:{}",host_id,string(&row,"harness"));
+                if row["harness"] == "human" {
+                    let updated = slot.cached_directory().iter()
+                        .find(|record| record["listener_id"] == row["listener_id"])
+                        .and_then(|record| record["channels"][&channel]["updated_at_ms"].as_u64());
+                    if updated.is_none_or(|updated| slot.server_now().saturating_sub(updated) >= 20_000) {
+                    if let Err(error) = slot.human_request("human_device_heartbeat",&json!({"node_id":row["listener_id"],"channel_id":channel,"binding_generation":row["binding_generation"],"owner_token":row["owner_token"]})) {
+                        if error.starts_with("STALE_GENERATION:") { let _ = state.fence_listener_for(&row,"fenced_before_dispatch"); }
+                        return;
+                    }
+                    }
+                } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
+                    if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
+                    let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
+                    let mut changed = false;
+                    if let Ok(Some(title)) = state.custom_title(string(&row,"harness"),string(&row,"session_id")) {
+                        if remote["title"] != title || remote["custom_title"] != true {
+                            remote["title"] = json!(title); remote["custom_title"] = json!(true); changed = true;
+                        }
+                    }
+                    if let Some(ch) = remote["channels"].get_mut(&channel).and_then(Value::as_object_mut) {
+                        let updated=ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
+                        if slot.server_now().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(slot.server_now())); changed=true; }
+                    }
+                    if changed { let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision)); }
+                }
+                if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |_| {}) {
+                    if !slot.closed.load(Ordering::SeqCst) { eprintln!("cito receiver {}: {error}",slot.name); }
+                }
+            }));
+        }
+        let live = self.live_receivers()?;
+        let changed = self
+            .session_activity
+            .as_mut()
+            .map(|activity| activity.tick(&self.state, &live))
+            .transpose()?
+            .unwrap_or(false);
+        self.auto_listen()?;
+        if changed || self.last_ui.elapsed() >= Duration::from_secs(1) {
+            self.push_ui();
+            self.last_ui = Instant::now();
+        }
+        Ok(())
+    }
+
+    fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
+        self.slot(hub)?;
+        // Serialize enabling fresh discovery with deferred detaches and enrollment.
+        let registration = self.state.registration_lock(hub)?;
+        let _registration = registration
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        self.mutate_config(|v| {
+            if v["hubs"].is_null() {
+                v["hubs"] = json!({"local":{"url":"local://"}});
+            }
+            v["hubs"][hub]["autoListen"] = json!(enabled);
+            Ok(())
+        })?;
+        if enabled {
+            self.state.db.transaction(|c| {
+                c.execute("UPDATE local_listeners SET updated_at=? WHERE hub=? AND harness!='human' AND status='UNLISTENED'", &[json!(now_ms()),json!(hub)])?;
+                Ok(())
+            })?;
+        }
+        if let Some(slot) = self.slots.get_mut(hub) {
+            slot.config["autoListen"] = json!(enabled);
+        }
+        if enabled {
+            if let Some(activity) = self.session_activity.as_mut() {
+                activity.refresh_discovery();
+            }
+        }
+        Ok(())
+    }
+
+    /// Opt-in enrollment uses discovery liveness, never historical SQLite rows.
+    fn auto_listen(&mut self) -> Result<(), String> {
+        let hubs: Vec<_> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| {
+                slot.config["autoListen"] == true && slot.connection_status() == "connected"
+            })
+            .collect();
+        if hubs.is_empty() {
+            return Ok(());
+        }
+        let Some(activity) = &self.session_activity else {
+            return Ok(());
+        };
+        let mut transitions: HashMap<(String, String), Vec<Value>> = HashMap::new();
+        for row in self.state.db.query(
+            "SELECT harness,session_id,status,endpoint_pid,updated_at FROM local_listeners WHERE status IN ('UNLISTENED','ACTIVE')",
+            &[],
+        )? {
+            let key = (
+                string(&row, "harness").to_owned(),
+                string(&row, "session_id").to_owned(),
+            );
+            transitions.entry(key).or_default().push(row);
+        }
+        let mut stale_harnesses = HashSet::new();
+        for candidate in activity.candidates().filter(|candidate| {
+            candidate["endpoint_pid"]
+                .as_u64()
+                .and_then(|p| u32::try_from(p).ok())
+                .is_some_and(crate::support::alive)
+                && candidate["needs_reload"] != true
+                && self
+                    .plugins
+                    .find_by_id(string(candidate, "harness"))
+                    .is_some_and(|plugin| {
+                        self.setup_inspections
+                            .get(&plugin.id)
+                            .is_some_and(|entry| entry.worker.is_none())
+                            && self
+                                .inspect_setup(plugin)
+                                .is_ok_and(|(_, configured, _)| configured)
+                    })
+        }) {
+            let key = (
+                string(&candidate, "harness").to_owned(),
+                string(&candidate, "session_id").to_owned(),
+            );
+            let candidate_pid = candidate["endpoint_pid"].as_u64().unwrap_or(0);
+            let cutoff = transitions
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row["status"] == "UNLISTENED"
+                        || row["status"] == "ACTIVE"
+                            && candidate_pid > 0
+                            && row["endpoint_pid"]
+                                .as_u64()
+                                .is_some_and(|pid| pid > 0 && pid != candidate_pid)
+                })
+                .filter_map(|row| row["updated_at"].as_u64())
+                .max()
+                .unwrap_or(0);
+            if cutoff > 0 && candidate["discovered_at"].as_u64().unwrap_or(0) <= cutoff {
+                stale_harnesses.insert(key.0);
+                continue;
+            }
+            for (hub, slot) in &hubs {
+                let rows = self.state.db.query(
+                    "SELECT status, principal_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
+                    &[
+                        json!(hub),
+                        candidate["harness"].clone(),
+                        candidate["session_id"].clone(),
+                    ],
+                )?;
+                if rows.iter().any(|row| {
+                    row["status"] == "ACTIVE"
+                        && super::auth::principal_ids_equal(
+                            string(row, "principal_id"),
+                            string(&slot.identity, "principal_id"),
+                        )
+                }) {
+                    continue;
+                }
+                // Recheck all Hubs after setup and each preceding destination registration.
+                let live_revoked_at = self
+                    .state
+                    .db
+                    .query(
+                        super::registration::DISCOVERY_CUTOFF_SQL,
+                        &[json!(key.0), json!(key.1), json!(candidate_pid)],
+                    )?
+                    .first()
+                    .and_then(|row| row["revoked_at"].as_u64())
+                    .unwrap_or(0);
+                if live_revoked_at > 0
+                    && candidate["discovered_at"].as_u64().unwrap_or(0) <= live_revoked_at
+                {
+                    stale_harnesses.insert(key.0.clone());
+                    break;
+                }
+                // One unavailable endpoint must not prevent enrollment on other Hubs.
+                if let Err(error) = self.listen(
+                    hub,
+                    &json!({"about":candidate["title"],"discovered_at":candidate["discovered_at"]}),
+                    &candidate,
+                ) {
+                    if error.starts_with("STALE_DISCOVERY") {
+                        stale_harnesses.insert(key.0.clone());
+                        break;
+                    }
+                    eprintln!("cito auto-listen {hub}: {error}");
+                }
+            }
+        }
+        if let Some(activity) = self.session_activity.as_mut() {
+            for harness in stale_harnesses {
+                activity.mark_stale(&harness);
+            }
+        }
+        Ok(())
+    }
+
+    /// Give fast providers a bounded first-render opportunity. Workers retain
+    /// ownership after the deadline and are reaped by the regular poll path.
+    fn refresh_available(&mut self) -> Result<(), String> {
+        let live = self.live_receivers()?;
+        if let Some(activity) = self.session_activity.as_mut() {
+            activity.refresh_discovery();
+            activity.tick(&self.state, &live)?;
+            let deadline = Instant::now() + Duration::from_millis(1500);
+            while activity.discovery_pending() && Instant::now() < deadline && !shutdown_requested()
+            {
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+                activity.tick(&self.state, &live)?;
+            }
+        }
+        self.auto_listen()
+    }
+    fn mutate_config(
+        &self,
+        action: impl FnOnce(&mut Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if let Some(parent) = self.config.config_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        crate::plugins::with_config_lock(&self.config.config_path, || {
+            let mut raw = self.raw_config()?;
+            if !raw.is_object() {
+                return Err("INVALID_INPUT: Config must be an object".into());
+            }
+            action(&mut raw)?;
+            let rendered = serde_json::to_string_pretty(&raw).map_err(|e| e.to_string())?;
+            let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&rendered))
+                .map_err(|error| format!("INVALID_INPUT: {error}"))?;
+            for key in ["defaultHub", "default_hub"] {
+                if raw
+                    .get(key)
+                    .is_some_and(|value| value.as_str().is_none_or(|name| !hubs.contains_key(name)))
+                {
+                    return Err("INVALID_INPUT: Invalid defaultHub".into());
+                }
+            }
+            for cfg in hubs.values().chain(std::iter::once(&raw)) {
+                if let Some(user) = cfg.get("user").filter(|user| !user.is_null()) {
+                    if !user.as_str().is_some_and(crate::plugins::validate_user) {
+                        return Err("INVALID_INPUT: User must contain 1-64 ASCII letters, numbers, dots, underscores or hyphens".into());
+                    }
+                }
+            }
+            let tmp = self
+                .config
+                .config_path
+                .with_extension(format!("json.{}.tmp", std::process::id()));
+            fs::write(&tmp, rendered).map_err(|e| e.to_string())?;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+            fs::rename(tmp, &self.config.config_path).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+    }
+    fn shutdown(&mut self) {
+        // The caller sets closing while holding the service mutex after all calls drain.
+        self.closing = true;
+        for entry in self.setup_inspections.values_mut() {
+            if let Some((_, worker)) = entry.worker.take() {
+                let _ = worker.join();
+            }
+        }
+        for pending in self
+            .oidc_recoveries
+            .values()
+            .chain(self.retired_auth.iter())
+        {
+            pending.cancelled.store(true, Ordering::SeqCst);
+        }
+        for pending in self
+            .oidc_recoveries
+            .drain()
+            .map(|(_, p)| p)
+            .chain(self.retired_auth.drain(..))
+        {
+            let _ = pending.worker.join();
+        }
+        for slot in self.slots.values() {
+            slot.closed.store(true, Ordering::SeqCst);
+        }
+        for (_, receiver) in self.receivers.drain() {
+            let _ = receiver.join();
+        }
+        for (_, (_, probe)) in self.probes.drain() {
+            if let Some(probe) = probe {
+                let _ = probe.join();
+            }
+        }
+        self.host_server.take();
+        self.local.shutdown();
+        if let Some(ui) = self.ui.take() {
+            ui.close();
+        }
+        for event in self.events.drain(..) {
+            let _ = event.join();
+        }
+        let _ = self.state.db.execute(
+            "DELETE FROM daemon_owner WHERE pid=?",
+            &[json!(std::process::id())],
+        );
+    }
+}

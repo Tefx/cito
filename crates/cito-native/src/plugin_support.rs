@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -89,25 +89,33 @@ pub fn one_shot(handler: fn(&Value) -> Result<Value>) {
     emit(&result.unwrap_or_else(|e| error("PLUGIN_EXEC_FAILED", e)));
 }
 
-// Each file mutation locks a stable sibling inode before reading; rename never replaces the lock.
+// Unlink only while holding the lock. Waiters retry if the path no longer names
+// their locked inode, so cleanup cannot split concurrent read/modify/write owners.
 pub struct FileLock(File);
 impl FileLock {
     pub fn acquire(path: &Path) -> Result<Self> {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
-        let f = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| e.to_string())?; // SAFETY: flock only borrows this live file descriptor; Drop releases it.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
+        loop {
+            let f = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| e.to_string())?;
+            // SAFETY: flock borrows this live descriptor; Drop releases it.
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            let lock = Self(f);
+            let held = lock.0.metadata().map_err(|e| e.to_string())?;
+            if fs::metadata(path).is_ok_and(|m| m.dev() == held.dev() && m.ino() == held.ino()) {
+                return Ok(lock);
+            }
         }
-        Ok(Self(f))
     }
 }
 use std::os::unix::fs::OpenOptionsExt;
@@ -142,6 +150,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp_name = path.as_os_str().to_os_string();
     tmp_name.push(format!(".tmp-{}-{}", std::process::id(), now_ms()));
     let tmp = PathBuf::from(tmp_name);
+    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
     let mut f = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -150,6 +159,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|e| e.to_string())?;
     let r = (|| {
         f.write_all(bytes).map_err(|e| e.to_string())?;
+        if let Some(permissions) = permissions {
+            f.set_permissions(permissions).map_err(|e| e.to_string())?;
+        }
         f.sync_all().map_err(|e| e.to_string())?;
         fs::rename(&tmp, path).map_err(|e| e.to_string())
     })();
@@ -176,6 +188,36 @@ pub fn read_json(path: &Path) -> Result<Value> {
     }
     Ok(v)
 }
+fn mutation_path(path: &Path, remaining: u8) -> Result<PathBuf> {
+    if remaining == 0 {
+        return Err("Too many symbolic links in configuration path".into());
+    }
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        let target = fs::read_link(path).map_err(|e| e.to_string())?;
+        return mutation_path(
+            &path.parent().unwrap_or(Path::new(".")).join(target),
+            remaining - 1,
+        );
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    match (parent, path.file_name()) {
+        (Some(parent), Some(name)) => Ok(mutation_path(parent, remaining)?.join(name)),
+        _ => Ok(path.to_owned()),
+    }
+}
+const MCP_CONFLICT: &str = "Conflicting MCP command; pass --force to replace";
+pub fn check_mcp_command(req: &Value, command: Option<&str>, expected: &str) -> Result<()> {
+    if req["op"] != "setup_remove"
+        && req["force"] != true
+        && command.is_some_and(|c| c != expected && c != "cito-mcp" && !c.ends_with("/cito-mcp"))
+    {
+        return Err(MCP_CONFLICT.into());
+    }
+    Ok(())
+}
 pub fn mutate(
     req: &Value,
     id: &str,
@@ -184,6 +226,8 @@ pub fn mutate(
 ) -> Result<Value> {
     let dry = req["dry_run"] == true;
     let remove = req["op"] == "setup_remove";
+    let canonical = mutation_path(path, 40)?;
+    let path = canonical.as_path();
     let lock_path = {
         let mut s = path.as_os_str().to_os_string();
         s.push(".cito.lock");
@@ -196,7 +240,14 @@ pub fn mutate(
             Some(FileLock::acquire(&lock_path)?)
         };
         let old = read_optional(path)?;
-        let next = transform(old.as_deref())?;
+        let next = match transform(old.as_deref()) {
+            Err(error) if error == MCP_CONFLICT => {
+                return Ok(
+                    json!({"target":id,"path":path,"status":"conflict","backupPath":null,"detail":error}),
+                )
+            }
+            result => result?,
+        };
         let changed = next.as_deref() != old.as_deref();
         let status = if !changed {
             "unchanged"
@@ -227,8 +278,11 @@ pub fn mutate(
                 }
             }
         }
-        if !dry && remove {
-            clean_sidecars(path);
+        if !dry && (remove || old.is_none() && !changed) {
+            if remove {
+                clean_sidecars(path);
+            }
+            let _ = fs::remove_file(&lock_path);
         }
         (status, backup)
     };
@@ -562,6 +616,35 @@ pub fn normalize_repo(origin: &str) -> Option<String> {
         Some(path.to_string())
     }
 }
+pub fn run_command_with_timeout(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Result<Option<std::process::Output>> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+            Ok(None) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
 fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut command = Command::new("git");
@@ -579,26 +662,7 @@ fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     ] {
         command.env_remove(key);
     }
-    let mut child = command.spawn().ok()?;
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-        if start.elapsed() > Duration::from_secs(1) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let output = child.wait_with_output().ok()?;
+    let output = run_command_with_timeout(command, Duration::from_secs(1)).ok()??;
     if !output.status.success() {
         return None;
     }
@@ -707,47 +771,196 @@ unsafe extern "C" fn collect(
     rows.push(Value::Object(row));
     0
 }
-pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
-    let p = std::ffi::CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-    let sql = std::ffi::CString::new(sql).map_err(|e| e.to_string())?;
-    let mut db = std::ptr::null_mut();
-    let mut rows: Vec<Value> = Vec::new(); // SAFETY: C strings live for the calls, db is closed on every path; callback only borrows rows synchronously.
-    unsafe {
-        if sqlite3_open_v2(p.as_ptr(), &mut db, 1, std::ptr::null()) != 0 {
-            if !db.is_null() {
-                sqlite3_close(db);
+/// One read-only connection and one shared deadline per discovery tick.
+/// The handle stays on its creating thread; Drop closes it after all callbacks return.
+pub struct ReadOnlySqlite {
+    db: *mut libc::c_void,
+    deadline: std::time::Instant,
+}
+impl ReadOnlySqlite {
+    pub fn open(path: &Path, budget: Duration) -> Result<Self> {
+        let deadline = std::time::Instant::now() + budget;
+        let path =
+            std::ffi::CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+        loop {
+            let mut db = std::ptr::null_mut();
+            // SAFETY: path is a live C string, the output pointer is valid, and
+            // every failed open is closed before retrying. Flags request read-only.
+            let rc = unsafe { sqlite3_open_v2(path.as_ptr(), &mut db, 1, std::ptr::null()) };
+            if rc == 0 {
+                return Ok(Self { db, deadline });
             }
-            return Err("Cannot open session database".into());
-        }
-        if sqlite3_busy_timeout(db, 1000) != 0 {
-            sqlite3_close(db);
-            return Err("Cannot configure session database busy timeout".into());
-        }
-        let mut err = std::ptr::null_mut();
-        let rc = sqlite3_exec(
-            db,
-            sql.as_ptr(),
-            Some(collect),
-            &mut rows as *mut _ as *mut libc::c_void,
-            &mut err,
-        );
-        let message = if err.is_null() {
-            None
-        } else {
-            let s = std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned();
-            sqlite3_free(err as *mut libc::c_void);
-            Some(s)
-        };
-        sqlite3_close(db);
-        if rc != 0 {
-            return Err(message.unwrap_or_else(|| "Session database query failed".into()));
+            if !db.is_null() {
+                unsafe {
+                    sqlite3_close(db);
+                }
+            }
+            if !matches!(rc, 5 | 6 | 14) || std::time::Instant::now() >= deadline {
+                return Err(format!("Cannot open session database (SQLite {rc})"));
+            }
+            std::thread::sleep(
+                Duration::from_millis(10)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
         }
     }
-    Ok(rows)
+    pub fn rows(&self, sql: &str) -> Result<Vec<Value>> {
+        let sql = std::ffi::CString::new(sql).map_err(|e| e.to_string())?;
+        loop {
+            let remaining = self
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("Session database deadline exceeded".into());
+            }
+            let mut rows: Vec<Value> = Vec::new();
+            let mut err = std::ptr::null_mut();
+            // SAFETY: this owns the connection, SQL lives through exec, and the
+            // synchronous callback exclusively borrows rows. SQLite owns err.
+            let rc = unsafe {
+                sqlite3_busy_timeout(self.db, remaining.as_millis().min(50) as i32);
+                sqlite3_exec(
+                    self.db,
+                    sql.as_ptr(),
+                    Some(collect),
+                    &mut rows as *mut _ as *mut libc::c_void,
+                    &mut err,
+                )
+            };
+            let message = if err.is_null() {
+                "Session database query failed".into()
+            } else {
+                let message = unsafe { std::ffi::CStr::from_ptr(err) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe {
+                    sqlite3_free(err.cast());
+                }
+                message
+            };
+            if rc == 0 {
+                return Ok(rows);
+            }
+            if !matches!(rc, 5 | 6) {
+                return Err(message);
+            }
+            std::thread::sleep(
+                Duration::from_millis(5).min(
+                    self.deadline
+                        .saturating_duration_since(std::time::Instant::now()),
+                ),
+            );
+        }
+    }
+}
+impl Drop for ReadOnlySqlite {
+    fn drop(&mut self) {
+        // SAFETY: this uniquely owns a successfully opened handle; no statements escape rows().
+        unsafe {
+            sqlite3_close(self.db);
+        }
+    }
+}
+pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
+    ReadOnlySqlite::open(path, Duration::from_millis(1200))?.rows(sql)
 }
 #[cfg(test)]
 mod tests {
-    use super::process_entrypoint;
+    use super::*;
+    #[test]
+    fn mutation_preserves_symlink_target_mode_and_absent_file_cleanliness() {
+        let root = std::env::temp_dir().join(format!(
+            "cito-mutate-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("settings");
+        let link = root.join("alias");
+        fs::write(&target, "original").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        mutate(&json!({"op":"setup_apply"}), "fixture", &link, |old| {
+            assert_eq!(old, Some("original"));
+            Ok(Some("updated".into()))
+        })
+        .unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        mutate(&json!({"op":"setup_remove"}), "fixture", &link, |_| {
+            Ok(None)
+        })
+        .unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!target.exists());
+        assert!(!root.join("settings.cito.lock").exists());
+        let missing = root.join("missing");
+        mutate(&json!({"op":"setup_remove"}), "fixture", &missing, |_| {
+            Ok(None)
+        })
+        .unwrap();
+        assert!(!root.join("missing.cito.lock").exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let dangling = root.join("dangling");
+        std::os::unix::fs::symlink("new/parent/settings", &dangling).unwrap();
+        mutate(&json!({"op":"setup_apply"}), "fixture", &dangling, |old| {
+            assert_eq!(old, None);
+            Ok(Some("created through link".into()))
+        })
+        .unwrap();
+        assert!(fs::symlink_metadata(&dangling)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(root.join("new/parent/settings")).unwrap(),
+            "created through link"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn remove_sidecar_and_absent_file_creation_share_one_mutation_owner() {
+        let root =
+            std::env::temp_dir().join(format!("cito-lock-{}-{}", std::process::id(), now_ms()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let workers: Vec<_> = (0..12)
+            .map(|_| {
+                let (path, barrier) = (path.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..8 {
+                        mutate(&json!({"op":"setup_remove"}), "fixture", &path, |old| {
+                            let n: usize = old.unwrap_or("0").parse().unwrap();
+                            std::thread::sleep(Duration::from_millis(1));
+                            Ok(Some((n + 1).to_string()))
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "96");
+        assert!(!root.join("settings.cito.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn interpreter_entrypoint_ignores_loader_values_and_rejects_eval() {
         assert_eq!(process_entrypoint("node --require /tmp/preload.js --experimental-strip-types /tmp/program.js --session other"), Some(("node", Some("/tmp/program.js"))));
