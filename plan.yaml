@@ -11811,7 +11811,7 @@ phases:
   - id: v42.rust-core
     name: 'V42 Rust Core Decoupling (daemon.rs, hub.rs, setup.rs) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Decouple `crates/cito-native/src/core/daemon.rs` (7,511L), `crates/cito-native/src/core/hub.rs`\
       \ (2,764L), and `crates/cito-native/src/core/setup.rs` (2,430L) into cohesive\
@@ -11849,10 +11849,12 @@ phases:
     depends_on:
     - v42.design
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-14T16:55:56.129246Z'
   - id: v42.swift-ui
     name: 'V42 macOS Swift UI Decoupling (src/macos/cito-ui.swift & build.rs) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Decouple `src/macos/cito-ui.swift` (5,571L) into cohesive AppKit/domain\
       \ Swift modules under `src/macos/` per the `v42.design` blueprint (`[REQUIRES_SKILL:\
@@ -11884,10 +11886,12 @@ phases:
     depends_on:
     - v42.design
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-14T16:55:56.129366Z'
   - id: v42.tests
     name: 'V42 Integration Test Suite Decoupling (tests/support/ui.rs & daemon.rs)
       [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Decouple `crates/cito-native/tests/support/ui.rs` (7,513L) and `crates/cito-native/tests/support/daemon.rs`\
       \ (5,431L) into cohesive domain-organized test submodules under `crates/cito-native/tests/`\
@@ -11922,6 +11926,8 @@ phases:
     depends_on:
     - v42.design
     agent: rust-engineer
+    claimed_by: rust-engineer
+    claimed_at: '2026-11-14T16:55:56.129432Z'
   - id: v42.gate
     name: 'V42 Terminal Acceptance Gate: Contract-and-Simplicity Audit & Full §8.1
       Verification Suite [REQUIRES_SKILL: contract-and-simplicity]'
