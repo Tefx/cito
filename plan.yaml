@@ -12147,7 +12147,7 @@ phases:
   - id: v43.core
     name: 'V43 Rust Core, Daemon, SQLite v7 Migration, Plugins & CLI/MCP Closure:
       Unified Pin/Auto-Listen (Semantic A) & M-A/M-B Diagnostic Pipeline'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/plugins.rs\n\
       \    - crates/cito-native/tests/support/daemon/**\n    - plugins/codex/**\n\
@@ -12303,6 +12303,31 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-14T18:55:55.566675Z'
+    done_at: '2026-11-14T20:03:00.427099+00:00'
+    evidence: 'Artifact:
+
+      - Commit: fa4c192703c3a02429129e39f85638ec83d42401 (rebased and merged cleanly
+      to main; candidate ref refs/vectl/candidates/v43.core retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed (0 compiler
+      warnings)
+
+      - Run: cargo test -p cito-native --lib (PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH
+      RUST_TEST_THREADS=2) -> 210 passed, 4 ignored subprocess workers, 0 failed
+
+      - Run: cargo test -p cito-native --test native plugins:: -> 24 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native daemon:: -> 60 passed, 0 failed
+
+      - §1.2 lexical check on crates/cito-native/src/core/ -> 0 matches
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8 @ 6f6a76d; Semantic A & M-A/M-B)'
   - id: v43.ui
     name: 'V43 macOS Swift UI & Headless Oracle Closure: Conditional Pin Toggle, Semantic
       A Tooltips, Multi-Line Error Wrapping & Word-Boundary Jargon Sanitization'
