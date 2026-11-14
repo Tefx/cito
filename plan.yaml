@@ -10740,7 +10740,7 @@ phases:
 - id: v40
   name: V40 Clean-Slate Unified Node-Channel Architecture, Hub-Authoritative Human
     Inbox, Four-Surface macOS UI, Cobalt Brand Identity & Full Docs/Site Closure (R1–R5)
-  status: pending
+  status: in_progress
   gate: All binding V40 requirements in docs/DESIGN.md (§1–§8, R1–R5) pass; cargo
     fmt --all -- --check, cargo clippy --workspace --all-targets -- -D warnings, cargo
     test --workspace, cargo build --release (0 warnings), node crates/cito-native/tests/support/site-clipboard.mjs,
@@ -10798,7 +10798,7 @@ phases:
     name: V40 R1–R5 Clean-Slate Popup/Pseudo-Plugin Removal, Hub-Authoritative Human
       Inbox & CLI/MCP Boundary, Four-Surface macOS UI Closure, WCAG AA Cobalt Brand
       Assets & Docs/Site Sync
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement all binding V40 requirements in docs/DESIGN.md (1..EOF,\
       \ §1–§8, R1–R5) across Rust core, Swift macOS UI, Telegram plugin, brand assets,\
@@ -10970,6 +10970,8 @@ phases:
     - README.md
     - site/index.html
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-14T05:22:19.718795Z'
   - id: v40.review
     name: 'V40 Contract-and-Simplicity Review & Fix, Visual Asset/Screenshot Inspection,
       Dual-Mac & Relocated Bundle Verification and Push to main (No Release Tag) [REQUIRES_SKILL:
