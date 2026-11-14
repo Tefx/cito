@@ -11631,3 +11631,245 @@ phases:
     depends_on:
     - v41.ui
     agent: senior-engineer
+- id: v42
+  name: 'V42 Decoupling & Structural Remediation of Oversized Core, Swift UI, and
+    Test Modules [REQUIRES_SKILL: contract-and-simplicity]'
+  status: locked
+  gate: All v42 decoupling steps (v42.design, v42.rust-core, v42.swift-ui, v42.tests)
+    and terminal gate v42.gate pass with zero behavioral regression, KEEP_TOGETHER
+    fidelity on cohesive engines, §1.2 semantic zero-hardcoding across crates/cito-native/src/core/
+    and src/macos/, and the full §8.1 verification suite (cargo fmt --all -- --check,
+    cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace,
+    cargo build --release with 0 compiler warnings, node crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check, and python3 -m unittest discover -s packaging)
+    at version 0.21.3 with NO release tag.
+  context: 'Decouple and structurally remediate the six oversized hotspot modules
+    identified on main (crates/cito-native/tests/support/ui.rs 7,513L; crates/cito-native/src/core/daemon.rs
+    7,511L; src/macos/cito-ui.swift 5,571L; crates/cito-native/tests/support/daemon.rs
+    5,431L; crates/cito-native/src/core/hub.rs 2,764L; crates/cito-native/src/core/setup.rs
+    2,430L) under [REQUIRES_SKILL: contract-and-simplicity]. Start with a read-only
+    architectural boundary blueprint (v42.design) that separates mixed lifecycles/authority
+    domains while preserving genuinely cohesive single-engine modules (KEEP_TOGETHER,
+    zero mechanical line-count slicing), then execute three parallel implementation
+    tracks with strictly disjoint mutable file surfaces (v42.rust-core on crates/cito-native/src/core/**,
+    v42.swift-ui on src/macos/** + crates/cito-native/build.rs, and v42.tests on crates/cito-native/tests/**),
+    and conclude with an independent terminal gate (v42.gate) running the full §8.1
+    verification suite at version 0.21.3 with no release tag.'
+  depends_on:
+  - v41
+  steps:
+  - id: v42.design
+    name: 'V42 Architectural Decoupling Blueprint for Core, Swift UI, and Test Hotspots
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: review\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
+      - Produce a read-only architectural decoupling blueprint under `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` covering the 6 oversized modules on `main`:\n  1.\
+      \ `crates/cito-native/src/core/daemon.rs` (7,511L), `crates/cito-native/src/core/hub.rs`\
+      \ (2,764L), and `crates/cito-native/src/core/setup.rs` (2,430L)\n  2. `src/macos/cito-ui.swift`\
+      \ (5,571L) and `crates/cito-native/build.rs`\n  3. `crates/cito-native/tests/support/ui.rs`\
+      \ (7,513L), `crates/cito-native/tests/support/daemon.rs` (5,431L), `crates/cito-native/tests/native.rs`,\
+      \ and `crates/cito-native/tests/support/mod.rs`\n- Classify each hotspot by\
+      \ real domain, state ownership, and lifecycle boundaries (`[DECOUPLE]` vs. `KEEP_TOGETHER`\
+      \ for genuinely cohesive engines—zero mechanical line-count slicing or shallow\
+      \ `part1`/`part2` splits).\n- Specify the exact target submodule hierarchy,\
+      \ visibility/re-export seams (`crates/cito-native/src/core/mod.rs`, `crates/cito-native/src/lib.rs`,\
+      \ `crates/cito-native/tests/native.rs`), and whether splitting `src/macos/cito-ui.swift`\
+      \ into multiple `.swift` files under `src/macos/` requires updating `crates/cito-native/build.rs`\
+      \ `swiftc` inputs and `cargo:rerun-if-changed` directives while preserving `docs/DESIGN.md`\
+      \ §1.2 zero-hardcoding and English-only rules.\n- Confirm strictly disjoint\
+      \ mutable file ownership across the three parallel implementation tracks:\n\
+      \  - `v42.rust-core`: `crates/cito-native/src/core/**` (and `crates/cito-native/src/lib.rs`\
+      \ if needed)\n  - `v42.swift-ui`: `src/macos/**` and `crates/cito-native/build.rs`\n\
+      \  - `v42.tests`: `crates/cito-native/tests/**`\n\nBoundary:\n- Owner: `structural-auditor`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only inspection and boundary\
+      \ blueprint; modifies no repository files.\n\nAdmit:\n- Depends on Phase `v41`\
+      \ completion.\n- Verification: complete `1..EOF` coverage receipt across all\
+      \ 6 target hotspots and boundary wiring files (`crates/cito-native/src/core/mod.rs`,\
+      \ `crates/cito-native/src/lib.rs`, `crates/cito-native/build.rs`, `crates/cito-native/tests/native.rs`,\
+      \ `crates/cito-native/tests/support/mod.rs`), producing an actionable submodule\
+      \ and ownership specification consumed by `v42.rust-core`, `v42.swift-ui`, and\
+      \ `v42.tests`.\n\nRecovery:\n- If any cross-track file coupling is discovered,\
+      \ resolve the ownership assignment explicitly in the blueprint before downstream\
+      \ implementation claims begin."
+    verification: cargo test -p cito-native --lib -- --list && cargo test -p cito-native
+      --test native -- --list
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/mod.rs
+    - crates/cito-native/src/lib.rs
+    - src/macos/cito-ui.swift
+    - crates/cito-native/build.rs
+    - crates/cito-native/tests/native.rs
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    agent: structural-auditor
+  - id: v42.rust-core
+    name: 'V42 Rust Core Decoupling (daemon.rs, hub.rs, setup.rs) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Decouple `crates/cito-native/src/core/daemon.rs` (7,511L), `crates/cito-native/src/core/hub.rs`\
+      \ (2,764L), and `crates/cito-native/src/core/setup.rs` (2,430L) into cohesive\
+      \ domain/lifecycle submodules under `crates/cito-native/src/core/` per the `v42.design`\
+      \ blueprint (`[REQUIRES_SKILL: contract-and-simplicity]`):\n  1. Respect all\
+      \ `KEEP_TOGETHER` decisions for genuinely cohesive state engines; split only\
+      \ along genuine authority, protocol, and lifecycle seams without introducing\
+      \ shallow pass-through wrappers or fracturing lock/state invariants.\n  2. Preserve\
+      \ all public and crate-visible module paths and re-exports (`cito_native::core::{daemon,\
+      \ hub, setup, ...}` and `cito_native::{daemon, database, hub, plugins, setup}`)\
+      \ so `crates/cito-native/src/main.rs` and `crates/cito-native/tests/**` compile\
+      \ with zero signature or behavioral changes.\n  3. Preserve `docs/DESIGN.md`\
+      \ §1.2 zero concrete agent/channel hardcoding and English-only rules across\
+      \ all files under `crates/cito-native/src/core/`.\n\nImplementation Notes (Non-Binding):\n\
+      - Keep mutable changes strictly within `crates/cito-native/src/core/**` (and\
+      \ `crates/cito-native/src/lib.rs` if needed). Do not touch `src/macos/**`, `crates/cito-native/build.rs`,\
+      \ or `crates/cito-native/tests/**` so this step merges cleanly in parallel with\
+      \ `v42.swift-ui` and `v42.tests`.\n\nBoundary:\n- Owner: `rust-senior` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Isolated worktree transaction modifying only `crates/cito-native/src/core/**`\
+      \ (and `crates/cito-native/src/lib.rs` if required).\n\nAdmit:\n- Depends on\
+      \ `v42.design`.\n- Verification: fast targeted unit and integration filters\
+      \ (`cargo test -p cito-native --lib`, `daemon::`, `plugins::`, `hub::`) pass\
+      \ with 0 compiler warnings. Consumed by `v42.gate`.\n\nRecovery:\n- Reconcile\
+      \ module visibility, borrow/lock boundaries, and re-exports in place within\
+      \ the worktree before completion."
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native daemon:: && cargo test -p cito-native --test native plugins::'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/lib.rs
+    - crates/cito-native/src/core/mod.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/setup.rs
+    depends_on:
+    - v42.design
+    agent: rust-senior
+  - id: v42.swift-ui
+    name: 'V42 macOS Swift UI Decoupling (src/macos/cito-ui.swift & build.rs) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Decouple `src/macos/cito-ui.swift` (5,571L) into cohesive AppKit/domain\
+      \ Swift modules under `src/macos/` per the `v42.design` blueprint (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`):\n  1. Separate independent UI surfaces, IPC/model\
+      \ decoding, and layout/theme primitives per `v42.design` while respecting `KEEP_TOGETHER`\
+      \ decisions and preserving 100% identical runtime behavior, geometry, accessibility\
+      \ labels/tooltips, and headless inspection hooks.\n  2. Update `crates/cito-native/build.rs`\
+      \ if multiple `.swift` files under `src/macos/` are compiled into `bin/cito-ui-darwin-arm64`\
+      \ (passing all `src/macos/*.swift` sources deterministically to `/usr/bin/swiftc`\
+      \ and emitting `cargo:rerun-if-changed` for `src/macos` and every Swift source\
+      \ file).\n  3. Preserve `docs/DESIGN.md` §1.2 zero concrete agent/channel hardcoding\
+      \ and English-only UI/code policies across all `src/macos/**` files.\n\nImplementation\
+      \ Notes (Non-Binding):\n- Keep mutable changes strictly within `src/macos/**`\
+      \ and `crates/cito-native/build.rs`. Do not touch `crates/cito-native/src/**`\
+      \ or `crates/cito-native/tests/**` so this step merges cleanly in parallel with\
+      \ `v42.rust-core` and `v42.tests`.\n\nBoundary:\n- Owner: `senior-engineer`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Isolated worktree transaction\
+      \ modifying only `src/macos/**` and `crates/cito-native/build.rs`.\n\nAdmit:\n\
+      - Depends on `v42.design`.\n- Verification: `cargo build` rebuilds and signs\
+      \ `bin/cito-ui-darwin-arm64` cleanly and targeted `cargo test -p cito-native\
+      \ --test native ui::` checks pass. Consumed by `v42.gate`.\n\nRecovery:\n- Repair\
+      \ any `swiftc` multi-file symbol visibility, entrypoint (`@main` / `main.swift`),\
+      \ or AppKit headless test discrepancy in place within the worktree before completion."
+    verification: 'cargo build && cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/build.rs
+    depends_on:
+    - v42.design
+    agent: senior-engineer
+  - id: v42.tests
+    name: 'V42 Integration Test Suite Decoupling (tests/support/ui.rs & daemon.rs)
+      [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Decouple `crates/cito-native/tests/support/ui.rs` (7,513L) and `crates/cito-native/tests/support/daemon.rs`\
+      \ (5,431L) into cohesive domain-organized test submodules under `crates/cito-native/tests/`\
+      \ per the `v42.design` blueprint (`[REQUIRES_SKILL: contract-and-simplicity]`):\n\
+      \  1. Organize test suites and shared fixture helpers cleanly by functional\
+      \ domain while respecting `KEEP_TOGETHER` decisions and preserving `support::serial()`\
+      \ process-test mutex serialization and per-fixture environment-cleared sandboxes.\n\
+      \  2. Preserve the top-level `daemon::*` and `ui::*` test module namespaces\
+      \ in `crates/cito-native/tests/native.rs` so existing targeted test filters\
+      \ (`cargo test -p cito-native --test native daemon::`, `cargo test -p cito-native\
+      \ --test native ui::`) continue to select and run the complete test inventory\
+      \ without dropping any test cases.\n  3. Preserve all Gate 1 stimulus calibration\
+      \ and assertion sensitivity without weakening test oracles.\n\nImplementation\
+      \ Notes (Non-Binding):\n- Keep mutable changes strictly within `crates/cito-native/tests/**`.\
+      \ Do not touch `crates/cito-native/src/**`, `crates/cito-native/build.rs`, or\
+      \ `src/macos/**` so this step merges cleanly in parallel with `v42.rust-core`\
+      \ and `v42.swift-ui`.\n\nBoundary:\n- Owner: `rust-engineer` (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`). Isolated worktree transaction modifying only `crates/cito-native/tests/**`.\n\
+      \nAdmit:\n- Depends on `v42.design`.\n- Verification: `cargo test -p cito-native\
+      \ --test native -- --list` confirms test inventory preservation and targeted\
+      \ `daemon::` and `ui::` test runs pass cleanly. Consumed by `v42.gate`.\n\n\
+      Recovery:\n- Reconcile test submodule visibility, helper imports, and test filter\
+      \ paths in place within the worktree before completion."
+    verification: 'cargo test -p cito-native --test native -- --list && cargo test
+      -p cito-native --test native daemon:: && cargo test -p cito-native --test native
+      ui::'
+    refs:
+    - crates/cito-native/tests/native.rs
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    depends_on:
+    - v42.design
+    agent: rust-engineer
+  - id: v42.gate
+    name: 'V42 Terminal Acceptance Gate: Contract-and-Simplicity Audit & Full §8.1
+      Verification Suite [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
+      - Execute the independent terminal acceptance gate for Phase `v42` under `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`, certifying that the integrated decoupling of `crates/cito-native/src/core/{daemon,hub,setup}.rs`,\
+      \ `src/macos/cito-ui.swift` (`+ crates/cito-native/build.rs`), and `crates/cito-native/tests/support/{ui,daemon}.rs`\
+      \ introduces zero behavioral regressions, honors `v42.design` `KEEP_TOGETHER`\
+      \ and domain boundaries, and satisfies all repository contracts at version `0.21.3`\
+      \ with NO release tag:\n  1. Verify `docs/DESIGN.md` §1.2 semantic zero-hardcoding\
+      \ across all files in `crates/cito-native/src/core/**` and `src/macos/**`, plus\
+      \ English-only UI/code/docs compliance.\n  2. Run and verify the full `docs/DESIGN.md`\
+      \ §8.1 verification suite:\n     - `cargo fmt --all -- --check`\n     - `cargo\
+      \ clippy --workspace --all-targets -- -D warnings`\n     - `cargo test --workspace`\n\
+      \     - `cargo build --release` (0 compiler warnings)\n     - `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \     - `python3 packaging/release.py check` (confirming version `0.21.3`)\n\
+      \     - `python3 -m unittest discover -s packaging`\n\nBoundary:\n- Owner: `gate-reviewer`\
+      \ (`[REQUIRES_SKILL: contract-and-simplicity]`). Read-only terminal phase gate\
+      \ (`no_repo_change`); does not create a release tag.\n\nAdmit:\n- Included phases/steps:\
+      \ `v42` (`v42.design`, `v42.rust-core`, `v42.swift-ui`, `v42.tests`) on top\
+      \ of completed `v41`.\n- Consumed evidence: `v42.design` blueprint, integrated\
+      \ commits from `v42.rust-core`, `v42.swift-ui`, and `v42.tests`, and fresh execution\
+      \ of the §8.1 verification suite on the integrated `main` commit.\n\nRecovery:\n\
+      - If any regression, hardcoding violation, dropped test, or clippy/build warning\
+      \ is found, fail the gate with concrete file:line evidence so a single scoped\
+      \ repair step can resolve it before re-running Delta gate verification."
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test --workspace && cargo build --release && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/Cargo.toml
+    - crates/cito-native/build.rs
+    - crates/cito-native/src/lib.rs
+    - crates/cito-native/src/core/mod.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/setup.rs
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/native.rs
+    - crates/cito-native/tests/support/mod.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - packaging/release.py
+    depends_on:
+    - v42.rust-core
+    - v42.swift-ui
+    - v42.tests
+    agent: gate-reviewer
