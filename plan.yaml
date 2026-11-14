@@ -10798,7 +10798,7 @@ phases:
     name: V40 R1–R5 Clean-Slate Popup/Pseudo-Plugin Removal, Hub-Authoritative Human
       Inbox & CLI/MCP Boundary, Four-Surface macOS UI Closure, WCAG AA Cobalt Brand
       Assets & Docs/Site Sync
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement all binding V40 requirements in docs/DESIGN.md (1..EOF,\
       \ §1–§8, R1–R5) across Rust core, Swift macOS UI, Telegram plugin, brand assets,\
@@ -10972,6 +10972,44 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-14T05:22:19.718795Z'
+    done_at: '2026-11-14T08:46:36.579412+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 527f7bbe262909f868d43628d913f64f50fddc56 (rebased candidate 2d822be5d8b5423181bc369717da6868d925712a
+      onto main; retained ref refs/vectl/candidates/v40.impl)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed (exit 0)
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> Passed (exit
+      0)
+
+      - Run: cargo build --release -> Passed (0 compiler warnings; staged bin/AppIcon.icns,
+      bin/cito-native-darwin-arm64, bin/cito-ui-darwin-arm64, plugins/*/bin/*)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test --workspace -> 295 passed (178 lib + 3 plugin + 114 integration),
+      4 ignored subprocess worker entries, 0 failed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH python3 packaging/release.py
+      check -> Passed (version 0.21.3)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH python3 -m unittest
+      discover -s packaging -> 15 passed
+
+      - Visual Inspection: Visually verified app-icon-master.png, og-card.png, and
+      all 6 refreshed Retina screenshots (menu-dark.png, directory-dark.png, activity-dark.png,
+      settings-apps-dark.png, settings-channels-dark.png, settings-hubs-dark.png)
+      via read.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8, R1–R5)'
   - id: v40.review
     name: 'V40 Contract-and-Simplicity Review & Fix, Visual Asset/Screenshot Inspection,
       Dual-Mac & Relocated Bundle Verification and Push to main (No Release Tag) [REQUIRES_SKILL:
