@@ -12588,7 +12588,7 @@ phases:
 - id: v44
   name: V44 In-Flight Codex Wake Attribution Coordination & Pathway Audit Closure
     (v0.21.3)
-  status: pending
+  status: in_progress
   gate: In-flight Codex wake attribution in plugins/codex/native.rs is coordinated
     with discover_sessions qualification/checkpointing across both rollout and no-rollout
     fallback branches without recording failed wakes as cito_effect or blocking subsequent
@@ -12611,7 +12611,7 @@ phases:
   - id: v44.fix
     name: Coordinate In-Flight Codex Wake Attribution with discover_sessions & Add
       Barrier-Controlled Regression Test
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - plugins/codex/**\n    - crates/cito-native/tests/support/plugins.rs\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Coordinate in-flight `wake`\
@@ -12638,6 +12638,8 @@ phases:
     - plugins/codex/native.rs
     - crates/cito-native/tests/support/plugins.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-14T21:24:47.928188Z'
   - id: v44.verify
     name: Pathway-Auditor Delta Closure (F6 & DaemonService::tool() Coverage), Release
       Staging Rebuild, Cito.app Restart & Push to main
