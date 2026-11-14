@@ -11811,7 +11811,7 @@ phases:
   - id: v42.rust-core
     name: 'V42 Rust Core Decoupling (daemon.rs, hub.rs, setup.rs) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Decouple `crates/cito-native/src/core/daemon.rs` (7,511L), `crates/cito-native/src/core/hub.rs`\
       \ (2,764L), and `crates/cito-native/src/core/setup.rs` (2,430L) into cohesive\
@@ -11851,6 +11851,30 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-14T16:55:56.129246Z'
+    done_at: '2026-11-14T17:07:28.571718+00:00'
+    evidence: 'Artifact:
+
+      - Commit: fe23abe (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v42.rust-core
+      retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed
+
+      - Run: cargo test -p cito-native --lib (CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2)
+      -> 201 passed, 4 ignored, 0 failed
+
+      - Run: cargo test -p cito-native --test native daemon:: -- --list -> 59 tests;
+      daemon::r1_ (2 passed) & daemon::setup_inspection (1 passed)
+
+      - DESIGN §1.2 lexical scan across crates/cito-native/src/core/ -> 0 matches;
+      0 compiler warnings
+
+
+      Spec link:
+
+      - /tmp/v42-design-blueprint.md (§2.A, §3)'
   - id: v42.swift-ui
     name: 'V42 macOS Swift UI Decoupling (src/macos/cito-ui.swift & build.rs) [REQUIRES_SKILL:
       contract-and-simplicity]'
