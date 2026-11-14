@@ -155,7 +155,6 @@ impl Fixture {
             ("CITO_PI_ALLOW_HEADLESS_DISCOVERY", "1".into()),
             ("CITO_DISABLE_UI", "1".into()),
             ("CITO_UI_HEADLESS", "1".into()),
-            ("CITO_BANNER_HEADLESS", "1".into()),
             (
                 "CITO_BUILTIN_PLUGINS_DIR",
                 root().join("plugins").display().to_string(),

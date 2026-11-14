@@ -59,7 +59,7 @@ function cardLines(content: unknown): string[] {
   const text = typeof content === "string" ? content : Array.isArray(content)
     ? content.filter(part => part?.type === "text").map(part => part.text).join("\n") : "";
   const clean = stripVTControlCharacters(text).replace(/\t/g, "  ").replace(/\r/g, "");
-  return clean.startsWith("🔔 Cito") ? clean.split("\n") : ["🔔 Cito", "", ...clean.split("\n")];
+  return clean.startsWith("Cito") ? clean.split("\n") : ["Cito", "", ...clean.split("\n")];
 }
 const notificationRenderer: NotificationRenderer = (message, options, theme) => ({
   render(width) {
@@ -453,7 +453,7 @@ export default function citoBridge(pi: BridgeAPI): void {
         const payload = await callMcpTool(tool, toolArgs);
         if (sessionId !== commandSessionId) return;
         if (tool === "cito_listen") {
-          activeBadge ??= `🔔 ${String(payload.listener_id ?? "cito")}`;
+          activeBadge ??= `Cito · ${String(payload.listener_id ?? "cito")}`;
           ctx.ui.notify?.(`Cito listening as ${String(payload.listener_id)} (${String(payload.scope)})`, "info");
         } else if (targetHub) {
           ctx.ui.notify?.(`Cito stopped listening on ${targetHub}`, "info");

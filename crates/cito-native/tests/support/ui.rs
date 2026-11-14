@@ -81,94 +81,137 @@ impl<'a> ClosedLoop<'a> {
 }
 
 #[test]
-fn v39_banner_material_hover_close_badges_and_late_mute_are_independent() {
+fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let p = f.spawn(
-        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
-        &[],
-        &[("CITO_BANNER_DISMISS_MS", "200")],
-    );
+    let p = start(&f);
     let mut frame = state();
-    frame["settings"] = settings();
-    frame["harnesses"] = json!([{"id":"sender","display_name":"Sender","sf_symbol":"terminal","tint":"purple","kind":"agent","tier":"stable","order":0},{"id":"target","display_name":"Target","sf_symbol":"star.fill","tint":"blue","kind":"agent","tier":"stable","order":1}]);
-    f.send(p, frame.clone());
-    let mut notification = banner();
-    notification["payload"]["target_harness"] = json!("human");
-    notification["payload"]["from_harness"] = json!("sender");
-    f.send(p, notification.clone());
-    f.send(
+    let mut cfg = settings();
+    cfg["apps"][2]["id"] = json!("claude");
+    cfg["apps"][2]["display_name"] = json!("Claude Code");
+    cfg["channels"][0]["id"] = json!("telegram");
+    cfg["channels"][0]["display_name"] = json!("Telegram");
+    cfg["channels"][0]["pairing_manual_disclosure"] = json!(true);
+    cfg["channels"][0]["fields"][0]["label"] = json!("Bot Token");
+    cfg["channels"][0]["fields"][1]["label"] = json!("Chat ID");
+    cfg["host_hub"] = json!({"enabled":true,"running":true,"port":4291,"endpoint_url":"http://192.0.2.10:4291","lan_url":"http://192.0.2.10:4291","token":"example-token","auth_mode":"token","invite_command":"cito setup --hub work --url http://192.0.2.10:4291 --default"});
+    frame["settings"] = cfg.clone();
+    frame["harnesses"][0]["id"] = json!("pi");
+    frame["harnesses"][0]["display_name"] = json!("Pi");
+    frame["listeners"][0]["harness"] = json!("pi");
+    frame["listeners"][0]["display_address"] = json!("alice/pi#abcd");
+    frame["listeners"][0]["title"] = json!("Release review");
+    frame["listeners"][0]["cwd"] = json!("~/work/service");
+    frame["directory_online_count"] = json!(3);
+    frame["hubs"][0]["human_listener_id"] = json!("human-node");
+    frame["hubs"][0]["human_control_revision"] = json!(4);
+    frame["hubs"][0]["human_state_status"] = json!("current");
+    frame["hubs"][0]["human_paused"] = json!(false);
+    frame["hubs"][0]["attachments"] = json!([{"channel_id":"hub:telegram","location":"hub","plugin_id":"telegram","display_name":"Telegram","availability":"ACTIVE","is_local":false},{"channel_id":"here:human","location":"device","host_id":"here","display_name":"laptop","availability":"ACTIVE","is_local":true}]);
+    frame["unread_count"] = json!(2);
+    frame["activity"]=json!([("review","The review is ready. Can you check the final changes?",true,true),("build","Build passed. All checks are green.",false,false),("reply","Approved. Please continue with the next step.",true,true)].into_iter().map(|(id,message,unread,for_me)|json!({"hub":"personal","signal_id":id,"listener_id":"human-node","from_user":"bob","from_host_name":"desktop","from_harness":"pi","from_title":"Release review","from_scoped_id":"personal:sender","from_display_address":"bob/pi#abcd","target_harness":if for_me{"human"}else{"pi"},"target_title":"Build session","target_scoped_id":"personal:receiver","message":message,"created_at":"2030-01-01T00:00:00Z","unread":unread,"for_me":for_me})).collect::<Vec<_>>());
+    f.send(p, frame);
+    let s = inspect(&f, p);
+    assert!(s["button_tooltip"].as_str().unwrap().contains("unread"));
+    let activity = node(&s, "items", "open_activity");
+    assert!(!activity["tooltip"].as_str().unwrap().is_empty());
+    assert!(nodes(&activity["children"])
+        .iter()
+        .all(|child| child["tooltip"].as_str().unwrap_or("").is_empty()));
+    render_png_as(&f, p, "menu", "menu-dark.png", Some("dark"));
+    control(&f, p, "open_directory");
+    let mut schema = peer("schema");
+    schema["harness"] = json!("pi");
+    schema["display_address"] = json!("bob/pi#df0a");
+    let mut review = peer("review");
+    review["harness"] = json!("pi");
+    review["display_address"] = json!("bob/pi#c97a");
+    let mut inbox = peer("inbox");
+    inbox["harness"] = json!("human");
+    inbox["title"] = json!("Human");
+    inbox["about"] = json!("Human");
+    inbox["repo"] = Value::Null;
+    inbox["branch"] = Value::Null;
+    inbox["display_address"] = json!("@bob");
+    inbox["attachments"] = json!([{"channel_id":"hub:telegram","location":"hub","plugin_id":"telegram","display_name":"Telegram","availability":"ACTIVE","is_local":false}]);
+    send_fixture(
+        &f,
         p,
-        json!({"op":"test_hover","id":"banner_root","hovered":true}),
+        json!({"op":"directory","peers":[schema,review,inbox],"matched_count":3,"online_count":3}),
     );
-    for appearance in ["light", "dark"] {
-        let s = inspect_as(&f, p, Some(appearance));
-        let root = node(&s, "banner_items", "banner_root");
-        assert_eq!(
-            (root["width"].clone(), root["height"].clone()),
-            (json!(380), json!(112))
-        );
-        assert_eq!(root["radius"], 14);
-        assert_eq!(root["live_material_valid"], true);
-        assert_eq!(root["accessibility_role"], "AXGroup");
-        assert!(node(&s, "banner_items", "banner_semantic_pill").is_null());
-        let badge = node(&s, "banner_items", "banner_icon_badge");
-        assert_eq!(
-            (
-                badge["x"].clone(),
-                badge["y"].clone(),
-                badge["width"].clone()
-            ),
-            (json!(14), json!(68), json!(30))
-        );
-        assert!(!node(&s, "banner_items", "plugin_symbol:sender").is_null());
-    }
-    f.send(
-        p,
-        json!({"op":"test_oracle_calibration","kind":"banner_material"}),
+    let directory = inspect(&f, p);
+    assert_eq!(
+        node(&directory, "directory_items", "directory_scope_track")["width"],
+        129
     );
     assert_eq!(
-        node(
-            &inspect_unchecked(&f, p, None),
-            "banner_items",
-            "banner_root"
-        )["live_material_valid"],
-        false
+        node(&directory, "directory_items", "directory_facet_separator")["x"],
+        151
     );
-    f.send(p, json!({"op":"test_oracle_calibration","kind":"reset"}));
-    // Coalescing must not re-arm a timer while the pointer remains on the card.
-    f.send(p, notification.clone());
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    let s = inspect(&f, p);
-    assert_eq!(s["banner_visible"], true);
-    assert_eq!(s["banner_hovered"], true);
+    render_png_as(&f, p, "directory", "directory-dark.png", Some("dark"));
+    control(&f, p, "copy_dir:personal:schema");
+    let copied = inspect(&f, p);
     assert_eq!(
-        node(&s, "banner_items", "banner_semantic_pill")["children"][0]["text"],
-        "×2"
+        node(&copied, "directory_items", "copy_dir:personal:schema")["accessibility_label"],
+        "✓ Copied"
     );
-    control(&f, p, "banner_close");
-    let s = inspect(&f, p);
-    assert_eq!(s["banner_visible"], false);
-    assert_eq!(s["banner_hovered"], false);
-    assert_eq!(s["directory_open"], false);
+    control(&f, p, "dir_mode:activity");
+    control(&f, p, "act_filter:all");
+    control(&f, p, "reply_activity:review");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Approved. Please continue."}),
+    );
+    let reply = inspect(&f, p);
+    assert_eq!(reply["composer_open"], true);
+    assert!(f
+        .frames(p)
+        .iter()
+        .any(|v| v["op"] == "ack_signals" && v["signal_ids"] == json!(["review"])));
+    render_png_as(&f, p, "directory", "activity-dark.png", Some("dark"));
+    control(&f, p, "composer_cancel");
+    inspect(&f, p);
+    control(&f, p, "activity_clear");
+    let confirm = inspect(&f, p);
+    assert!(!node(&confirm, "directory_items", "activity_clear_confirm_commit").is_null());
+    control(&f, p, "activity_clear_confirm_cancel");
+    inspect(&f, p);
     assert!(!f
         .frames(p)
         .iter()
-        .any(|v| v["op"] == "wake_clicked" || v["op"] == "ack_signals"));
-    notification["payload"]["target_harness"] = json!("target");
-    f.send(p, notification.clone());
-    let s = inspect(&f, p);
-    assert!(!node(&s, "banner_items", "plugin_symbol:target").is_null());
-    f.send(
-        p,
-        json!({"op":"test_hover","id":"banner_root","hovered":false}),
-    );
-    wait(|| inspect(&f, p)["banner_visible"] == false);
-    frame["settings"]["desktop_banner_enabled"] = json!(false);
-    f.send(p, frame);
-    f.send(p, notification);
-    assert_eq!(inspect(&f, p)["banner_visible"], false);
+        .any(|v| v["op"] == "clear_activity_history"));
+    control(&f, p, "activity_clear");
+    f.send(p, json!({"op":"test_directory_key","key":"escape"}));
+    let cancelled = inspect(&f, p);
+    assert_eq!(cancelled["directory_open"], true);
+    assert!(node(
+        &cancelled,
+        "directory_items",
+        "activity_clear_confirm_commit"
+    )
+    .is_null());
+    control(&f, p, "activity_clear");
+    control(&f, p, "activity_clear_confirm_commit");
+    inspect(&f, p);
+    let cleared = f
+        .frames(p)
+        .into_iter()
+        .find(|v| v["op"] == "clear_activity_history")
+        .unwrap();
+    assert_eq!(cleared["filter"], "all");
+    assert_eq!(cleared["query"], "");
+    control(&f, p, "open_settings");
+    for (tab, file) in [
+        ("apps", "settings-apps-dark.png"),
+        ("channels", "settings-channels-dark.png"),
+        ("hubs", "settings-hubs-dark.png"),
+    ] {
+        control(&f, p, &format!("settings_tab:{tab}"));
+        inspect(&f, p);
+        render_png_as(&f, p, "settings", file, Some("dark"));
+    }
 }
+
 #[test]
 fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh() {
     let _lock = serial();
@@ -250,7 +293,7 @@ fn v39_manifest_pairing_first_correlates_copy_and_preserves_feedback_on_refresh(
     );
 }
 #[test]
-fn v39_human_summary_banner_pause_all_and_unavailable_details_follow_live_state() {
+fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -263,61 +306,46 @@ fn v39_human_summary_banner_pause_all_and_unavailable_details_follow_live_state(
     human["scoped_id"] = json!("personal:human");
     human["display_address"] = json!("@alice");
     human["host_name"] = json!("arbitrary-desktop.local");
-    for (channels, enabled, summary) in [
-        (json!([]), true, "Desktop banner"),
-        (json!([]), false, "Banner off · Inbox only"),
+    frame["hubs"][0]["human_listener_id"] = json!("human-node");
+    frame["hubs"][0]["human_control_revision"] = json!(7);
+    frame["hubs"][0]["human_state_status"] = json!("current");
+    frame["hubs"][0]["human_paused"] = json!(false);
+    let local = json!({"channel_id":"here:human","location":"device","host_id":"here","display_name":"laptop.local","availability":"ACTIVE","is_local":true});
+    let other = json!({"channel_id":"other:human","location":"device","host_id":"other","display_name":"desktop.local","availability":"ACTIVE","is_local":false});
+    let external = json!({"channel_id":"hub:channel","location":"hub","plugin_id":"channel","display_name":"Messenger","availability":"ACTIVE","is_local":false});
+    for (attachments, summary) in [
+        (json!([]), "Activity inbox"),
+        (json!([local.clone()]), "Activity"),
+        (json!([local.clone(), other.clone()]), "Activity · +1 Mac"),
         (
-            json!(["arbitrary-desktop"]),
-            true,
-            "arbitrary-desktop · Banner",
+            json!([external.clone(), other.clone()]),
+            "Messenger · +1 Mac",
         ),
-        (
-            json!(["arbitrary-desktop"]),
-            false,
-            "arbitrary-desktop only · Banner off",
-        ),
-        (
-            json!(["arbitrary-desktop.local"]),
-            true,
-            "arbitrary-desktop.local · Banner",
-        ),
-        (
-            json!(["Telegram", "other-mac.local"]),
-            true,
-            "Telegram · other-mac.local · Banner",
-        ),
-        (json!(["Telegram"]), false, "Telegram only · Banner off"),
+        (json!([external, local]), "Messenger · Activity"),
     ] {
-        human["channels"] = channels;
-        cfg["desktop_banner_enabled"] = json!(enabled);
-        frame["listeners"] = json!([listener(), human]);
+        frame["hubs"][0]["attachments"] = attachments;
         frame["settings"] = cfg.clone();
         f.send(p, frame.clone());
-        let s = inspect(&f, p);
+        let snapshot = inspect(&f, p);
         assert!(
-            nodes(&s["items"]).iter().any(|n| n["text"] == summary),
+            nodes(&snapshot["items"])
+                .iter()
+                .any(|n| n["text"] == summary),
             "{summary}"
         );
-        assert_eq!(
-            node(&s, "items", "menu_toggle_desktop_banner")["symbol"],
-            if enabled {
-                "bell.fill"
-            } else {
-                "bell.slash.fill"
-            }
-        );
-        assert_eq!(node(&s, "items", "stop_all")["text"], "Pause All");
-        assert_eq!(node(&s, "items", "stop_all")["symbol"], "pause.fill");
-        control(&f, p, "menu_toggle_desktop_banner");
-        inspect(&f, p);
-        let toggle = f
-            .frames(p)
-            .into_iter()
-            .rev()
-            .find(|v| v["op"] == "set_desktop_banner")
-            .unwrap();
-        assert_eq!(toggle["enabled"], !enabled);
+        assert_eq!(node(&snapshot, "items", "stop_all")["text"], "Pause Agents");
+        assert_eq!(node(&snapshot, "items", "pause_inbox")["enabled"], true);
     }
+    control(&f, p, "pause_inbox");
+    inspect(&f, p);
+    let update = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "human_inbox_update")
+        .unwrap();
+    assert_eq!(update["expected_control_revision"], 7);
+    assert_eq!(update["paused"], true);
     control(&f, p, "stop_all");
     inspect(&f, p);
     let stop = f
@@ -1169,14 +1197,14 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     let s = inspect(&f, l.ui);
     assert_eq!(
         node(&s, "settings_items", "toggle_channel:channel")["text"],
-        "Pause"
+        "Pause Messenger"
     );
     assert_eq!(
         node(&s, "settings_items", "stratum_hub:channel")["height"],
         36
     );
     l.control("toggle_channel:channel");
-    l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Resume");
+    l.until(|s| node(s, "settings_items", "toggle_channel:channel")["text"] == "Resume Messenger");
     let paused = f
         .db("hub.sqlite")
         .query(
@@ -1264,7 +1292,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     // The same form remains open through validation and daemon errors, and closes
     // only on a real settings/state acknowledgement of the saved Hub.
     l.control("toggle_host_hub");
-    l.until(|s| node(s, "settings_items", "toggle_host_hub")["text"] == "Sharing");
+    l.until(|s| node(s, "settings_items", "toggle_host_hub")["text"] == "Stop Sharing");
     l.input("host_hub_port", &port().to_string());
     l.control("apply_host_hub_port");
     l.until(|s| node(s, "settings_items", "apply_host_hub_port")["text"] == "✓ Saved");
@@ -1969,17 +1997,12 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
             1040
         } else if surface == "directory" {
             1120
-        } else if surface == "banner" {
-            760
         } else {
             760
         }
     );
     if surface == "settings" {
         assert_eq!(height, 920);
-    }
-    if surface == "banner" {
-        assert_eq!(height, 224);
     }
     assert!(height > 100);
     inspect_as(f, p, appearance);
@@ -1997,7 +2020,10 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     });
     assert_eq!(s["count"], 0);
     assert_eq!(s["button_title"], "");
-    assert_eq!(node(&s, "items", "header_subtitle")["text"], "Idle");
+    assert_eq!(
+        node(&s, "items", "header_subtitle")["text"],
+        "Personal inbox active"
+    );
     assert!(node(&s, "items", "header_hub_strip").is_null());
     assert!(node(&s, "items", "drawer:local").is_null());
     assert!(node(&s, "items", "stop_all").is_null());
@@ -2009,26 +2035,27 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     );
     assert_eq!(
         f.rows("SELECT title, about FROM local_listeners WHERE harness='human'"),
-        vec![json!({"title":"Human","about":"Human receiver"})]
+        vec![json!({"title":"Human","about":"Human"})]
     );
     let id = f.rows("SELECT public_id FROM local_listeners WHERE harness='human'")[0]["public_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let row_id = format!("session:{id}");
-    assert_eq!(node(&s, "items", &row_id)["height"], 64);
-    let pause = node(&s, "items", &format!("stop:{id}"));
-    assert_eq!(pause["text"], "Pause");
+    let row_id = "human_inbox_card";
+    assert_eq!(node(&s, "items", row_id)["height"], 64);
+    let ready = l.until(|s| node(s, "items", "pause_inbox")["enabled"] == true);
+    let pause = node(&ready, "items", "pause_inbox");
+    assert_eq!(pause["text"], "Pause Inbox");
     assert_eq!(
         pause["tooltip"],
-        "Pause all human channels on this Hub, including this Mac and external channels"
+        "Pause your shared inbox on this Hub across every device and external channel"
     );
     assert!(node(&s, "items", &format!("switch_hub:{id}")).is_null());
-    l.control(&format!("stop:{id}"));
-    l.until(|s| !node(s, "items", "listen_human").is_null());
+    l.control("pause_inbox");
+    l.until(|s| node(s, "items", "listen_human")["enabled"] == true);
     l.control("listen_human");
-    let s = l.until(|s| !node(s, "items", &row_id).is_null());
-    assert_eq!(node(&s, "items", &row_id)["height"], 64);
+    let s = l.until(|s| node(s, "items", row_id)["height"] == 64);
+    assert_eq!(node(&s, "items", row_id)["height"], 64);
     assert!(nodes(&s["items"])
         .iter()
         .any(|n| n["text"] == "You (@alice)"));
@@ -2072,12 +2099,15 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
             Some(appearance),
         );
     }
-    let enrolled = f.tool(
+    let denied = f.tool_result(
         "cito_listen",
         json!({"about":"Human receiver"}),
         serde_json::from_str(HUMAN).unwrap(),
     );
-    assert_eq!(enrolled["title"], "Human");
+    assert_eq!(denied["isError"], true);
+    let denied: Value =
+        serde_json::from_str(denied["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(denied["error"]["code"], "FORBIDDEN");
     l.control("open_directory");
     let s = l.until(|s| !node(s, "directory_items", &format!("dir_title:{id}")).is_null());
     assert_eq!(
@@ -2086,21 +2116,26 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     );
     assert_eq!(
         node(&s, "directory_items", &format!("dir_meta:{id}"))["text"],
-        "Human · mac-studio"
+        "Inbox · mac-studio"
     );
-    f.tool(
-        "cito_listen",
-        json!({"about":"Release approvals"}),
-        serde_json::from_str(HUMAN).unwrap(),
-    );
-    l.until(|s| node(s, "items", &row_id)["height"] == 78);
-    l.control(&format!("stop:{id}"));
-    let paused = l.until(|s| !node(s, "items", "listen_human").is_null());
-    assert_eq!(node(&paused, "items", "human_paused_card")["height"], 78);
     assert_eq!(
-        node(&paused, "items", "human_paused_about")["text"],
-        "Release approvals"
+        f.action(json!({"op":"human_inbox_update","hub":"local","about":"Release approvals"}))
+            .0,
+        200
     );
+    let revision =
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_control_revision"].clone();
+    wait(|| {
+        l.pump();
+        l.frames
+            .iter()
+            .rev()
+            .find(|frame| frame["op"] == "state")
+            .is_some_and(|frame| frame["hubs"][0]["human_control_revision"] == revision)
+    });
+    l.control("pause_inbox");
+    let paused = l.until(|s| !node(s, "items", "listen_human").is_null());
+    assert_eq!(node(&paused, "items", "human_paused_card")["height"], 64);
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["hubs"][0]["human_paused"], true);
     assert_eq!(snapshot["hubs"][0]["human_about"], "Release approvals");
@@ -2109,10 +2144,10 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let paused_settings = l.until(|s| !node(s, "settings_items", "human_paused_banner").is_null());
     assert_eq!(paused_settings["low_contrast_labels"], json!([]));
     l.control("resume_human_channels");
-    l.until(|s| node(s, "items", &row_id)["height"] == 78);
+    l.until(|s| node(s, "items", row_id)["height"] == 64);
     l.control("close_settings");
     assert_eq!(
-        f.rows("SELECT about FROM local_listeners WHERE harness='human'")[0]["about"],
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_about"],
         "Release approvals"
     );
 }
@@ -2143,6 +2178,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         human["display_address"] = json!("@bob");
         human["title"] = json!(title);
         human["about"] = json!(about);
+        human["attachments"] = json!([{"channel_id":"remote:human","location":"device","host_id":"remote","display_name":"laptop","availability":"ACTIVE","is_local":false}]);
         let mut agent = peer("agent");
         agent["title"] = json!("Human");
         agent["about"] = json!("Human");
@@ -2155,9 +2191,9 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         assert_eq!(
             node(&s, "directory_items", "dir_meta:personal:human")["text"],
             if expected_about.is_empty() {
-                "Human · laptop".into()
+                "Inbox · laptop".into()
             } else {
-                format!("Human · laptop · {expected_about}")
+                format!("Inbox · laptop · {expected_about}")
             }
         );
         assert_eq!(
@@ -2203,6 +2239,10 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
     let mut shadow = agent.clone();
     shadow["hub"] = json!("local");
     shadow["scoped_id"] = json!("local:home");
+    shadow["display_address"] = json!(format!(
+        "local:{}",
+        shadow["display_address"].as_str().unwrap()
+    ));
     send_fixture(
         &f,
         p,
@@ -2221,7 +2261,9 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         node(&s, "directory_items", "dir_repo:personal:home")["text"],
         " · ~"
     );
-    assert!(node(&s, "directory_items", "dir_title:local:home").is_null());
+    assert!(!node(&s, "directory_items", "dir_title:local:home").is_null());
+    assert_eq!(s["directory_matched_count"], 2);
+    assert_eq!(s["directory_online_count"], 2);
     agent["about"] = json!("");
     send_fixture(&f, p, json!({"op":"directory","peers":[agent.clone()]}));
     assert_eq!(
@@ -2393,17 +2435,22 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
     assert_eq!(idle["button_title"], "");
     assert_eq!(
         node(&idle, "items", "header_subtitle")["text"],
-        "Notifications paused"
+        "Not listening"
     );
     for user in ["alice", "bob"] {
         human["user"] = json!(user);
         human["display_address"] = json!(format!("@{user}"));
         frame["listeners"] = json!([human.clone()]);
+        frame["hubs"][0]["user"] = json!(user);
+        frame["hubs"][0]["human_paused"] = json!(false);
+        frame["hubs"][0]["human_availability"] = json!("ACTIVE");
+        frame["hubs"][0]["human_state_status"] = json!("current");
+        frame["hubs"][0]["human_control_revision"] = json!(1);
         f.send(p, frame.clone());
         let s = inspect(&f, p);
         assert_eq!(s["count"], 0);
         assert_eq!(s["button_title"], "");
-        let row = node(&s, "items", "session:personal:human");
+        let row = node(&s, "items", "human_inbox_card");
         assert_eq!(row["height"], 64);
         let title = nodes(&row["children"])
             .into_iter()
@@ -2558,120 +2605,6 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
 }
 
 #[test]
-fn c4_wake_action_routes_agent_signals_to_activity_and_human_signals_to_reply() {
-    let _lock = serial();
-    let f = Fixture::new(json!({}));
-    let p = f.spawn(
-        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
-        &[],
-        &[("CITO_BANNER_DISMISS_MS", "10000")],
-    );
-    let mut frame = state();
-    frame["activity"] = json!([
-        ("personal", "sig_other", false),
-        ("personal", "sig_agent", false),
-        ("personal", "sig_human", true),
-        ("work", "sig_agent", false),
-        ("work", "sig_human", true),
-    ].into_iter().map(|(hub, id, for_me)| json!({
-        "hub":hub,"signal_id":id,"listener_id":"c_other","from_user":"alice",
-        "from_host_name":"desktop","from_harness":"fixture","from_title":"Sender",
-        "from_scoped_id":format!("{hub}:sender"),"target_harness":if for_me { "human" } else { "fixture" },
-        "target_title":"Receiver","target_scoped_id":format!("{hub}:other"),"message":"First line\nSecond line",
-        "created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":for_me
-    })).collect::<Vec<_>>());
-    f.send(p, frame);
-    control(&f, p, "open_activity");
-    for (harness, signal, hub, selected_index, selected_id) in [
-        ("fixture", "personal:sig_agent", "personal", 1, "sig_agent"),
-        ("human", "personal:sig_human", "personal", 2, "sig_human"),
-        (
-            "other-agent",
-            "personal:sig_missing",
-            "personal",
-            0,
-            "sig_other",
-        ),
-        ("human", "personal:sig_missing", "personal", 0, "sig_other"),
-        ("fixture", "sig_agent", "personal", 1, "sig_agent"),
-        ("fixture", "sig_agent", "work", 3, "sig_agent"),
-        ("fixture", "work:sig_agent", "work", 3, "sig_agent"),
-        ("fixture", "work:sig_agent", "", 3, "sig_agent"),
-        ("human", "sig_human", "work", 4, "sig_human"),
-        ("human", "work:sig_human", "", 4, "sig_human"),
-        ("fixture", "personal:sig_agent", "", 1, "sig_agent"),
-    ] {
-        f.send(
-            p,
-            json!({"op":"test_directory_query","query":"unmatched query"}),
-        );
-        control(&f, p, "act_filter:unread");
-        let mut wake = banner();
-        wake["payload"]["target_harness"] = json!(harness);
-        wake["payload"]["signal_id"] = json!(signal);
-        wake["payload"]["hub"] = json!(hub);
-        f.send(p, wake);
-        f.send(p, json!({"op":"test_click"}));
-        let s = inspect(&f, p);
-        assert_eq!(s["directory_mode"], "activity");
-        assert_eq!(s["directory_query"], "");
-        assert_eq!(node(&s, "directory_items", "directory_search")["text"], "");
-        assert_eq!(s["activity_filter"], "all");
-        assert_eq!(
-            s["directory_selected_id"], selected_id,
-            "{harness}: {hub}/{signal}"
-        );
-        assert_eq!(
-            s["directory_selected_index"], selected_index,
-            "{harness}: {hub}/{signal}"
-        );
-        if selected_index == 1 {
-            assert_eq!(
-                node(&s, "directory_items", "activity_row:sig_other")["height"],
-                60
-            );
-            let height = node(&s, "directory_items", "activity_row:sig_agent")["height"]
-                .as_f64()
-                .unwrap();
-            assert!(height > 60.0 && height < 108.0, "{height}");
-        }
-        if harness == "human" {
-            assert_eq!(s["wake_action_text"], "Reply in Cito ↩");
-            assert_eq!(s["composer_open"], true);
-            assert_eq!(s["composer_target"], "personal:sender-abcdefgh2345");
-            assert_eq!(s["composer_reply_signal_id"], signal);
-            assert_eq!(
-                node(&s, "directory_items", "directory_shortcuts")["text"],
-                "↵ Send    ⎋ Cancel Reply"
-            );
-        } else {
-            assert_eq!(s["wake_action_text"], "View in Activity ↗");
-            assert_eq!(s["composer_open"], false);
-            assert_eq!(s["composer_target"], "");
-            assert_eq!(
-                node(&s, "directory_items", "directory_shortcuts")["text"],
-                "⎋ Close"
-            );
-            f.send(p, json!({"op":"test_directory_key","key":"return"}));
-            assert_eq!(inspect(&f, p)["composer_open"], false);
-        }
-    }
-    for appearance in ["light", "dark"] {
-        assert_eq!(
-            inspect_as(&f, p, Some(appearance))["low_contrast_labels"],
-            json!([])
-        );
-        render_png_as(
-            &f,
-            p,
-            "directory",
-            &format!("c4_activity_agent_{appearance}.png"),
-            Some(appearance),
-        );
-    }
-}
-
-#[test]
 fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -2691,18 +2624,23 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let mut frame = state();
     frame["settings"] = cfg.clone();
     frame["listeners"] = json!([]);
+    for hub in frame["hubs"].as_array_mut().unwrap() {
+        hub["human_paused"] = json!(true);
+        hub["human_state_status"] = json!("current");
+        hub["human_control_revision"] = json!(7);
+        hub["human_availability"] = json!("UNLISTENED");
+    }
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s1","title":"Work session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
     let s = inspect(&f, p);
     assert_eq!(node(&s, "items", "human_paused_card")["height"], 64);
-    assert_eq!(node(&s, "items", "listen_human")["y"], 18);
-    assert!(node(&s, "items", "listen_human")["symbol"].is_null());
-    assert_eq!(node(&s, "items", "listen_human")["text"], "Resume");
+    assert_eq!(node(&s, "items", "listen_human")["text"], "Resume Inbox");
+    assert_eq!(node(&s, "items", "listen_human")["enabled"], true);
     render_png(&f, p, "menu", "menu_human_paused.png");
     let rendered = inspect(&f, p);
     for item in nodes(&s["items"]) {
-        if let Some(id) = item["id"].as_str().filter(|s| !s.is_empty()) {
+        if let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) {
             let restored = node(&rendered, "items", id);
             for coordinate in ["x", "y", "width", "height"] {
                 assert_eq!(
@@ -2713,205 +2651,75 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         }
     }
     for (status, expected) in [
-        ("auth_required", "Sign in above to receive notifications"),
-        ("connecting", "Connecting to receive notifications"),
-        ("unreachable", "Hub unavailable — reconnect above"),
-        ("error", "Hub unavailable — reconnect above"),
+        ("auth_required", "Sign in required"),
+        ("connecting", "Connecting…"),
+        ("unreachable", "Hub unavailable"),
+        ("error", "Hub unavailable"),
     ] {
         let mut unavailable = frame.clone();
         unavailable["hubs"][0]["status"] = json!(status);
-        unavailable["hubs"][0]["human_paused"] = json!(false);
         f.send(p, unavailable);
         control(&f, p, "target_hub:personal");
+        let snapshot = inspect(&f, p);
         assert_eq!(
-            node(&inspect(&f, p), "items", "human_listening_status")["text"],
+            node(&snapshot, "items", "header_subtitle")["text"],
             expected
         );
-        render_png(&f, p, "menu", &format!("r2_human_{status}.png"));
+        assert_eq!(node(&snapshot, "items", "listen_human")["enabled"], false);
+        assert_eq!(node(&snapshot, "items", "human_paused_card")["height"], 64);
+        render_png(&f, p, "menu", &format!("inbox_{status}.png"));
     }
-    let mut distinct = frame.clone();
-    distinct["hubs"][0]["human_paused"] = json!(true);
-    distinct["hubs"][0]["human_about"] = json!("Release approvals");
-    f.send(p, distinct);
-    let detail = inspect(&f, p);
-    assert_eq!(node(&detail, "items", "human_paused_card")["height"], 78);
-    assert_eq!(
-        node(&detail, "items", "human_paused_card")["children"][0]["height"],
-        72
-    );
-    assert_eq!(
-        node(&detail, "items", "human_paused_about")["text"],
-        "Release approvals"
-    );
-    assert_eq!(
-        node(&detail, "items", "human_listening_status")["text"],
-        "Notifications paused"
-    );
-    render_png(&f, p, "menu", "r2_human_paused_about.png");
-    for raw_about in [
+    // Resume uses shared policy CAS and never sends a replacement description.
+    for about in [
         Value::Null,
-        json!(""),
-        json!(" \n "),
         json!("Human"),
-        json!("Human receiver"),
-        json!("Human Node"),
-        json!("Human channel"),
-        json!("Session"),
-        json!("Coding session"),
-        json!("Default"),
-        json!("Agent"),
-        json!("Agent session"),
-        json!("CLI session"),
-        json!("alice"),
-        json!("@alice"),
-        json!(f.home.file_name().unwrap().to_str().unwrap()),
-        json!(" hUmAn NoDe "),
-        json!("You"),
         json!("You (@alice)"),
-        json!(" yOu (@ALICE) "),
-        json!(" Release approvals "),
+        json!("Release approvals"),
+        json!("café notes"),
     ] {
         let mut paused = frame.clone();
-        paused["hubs"][0]["human_paused"] = json!(true);
-        paused["hubs"][0]["human_about"] = raw_about.clone();
+        paused["hubs"][0]["human_about"] = about;
         f.send(p, paused.clone());
-        let height = if raw_about
-            .as_str()
-            .is_some_and(|about| about.trim() == "Release approvals")
-        {
-            78
-        } else {
+        assert_eq!(
+            node(&inspect(&f, p), "items", "human_paused_card")["height"],
             64
-        };
-        let measured = inspect(&f, p);
-        assert_eq!(
-            node(&measured, "items", "human_paused_card")["height"],
-            height
         );
-        assert_eq!(
-            node(&measured, "items", "human_paused_card")["children"][0]["height"],
-            height - 6
-        );
-        if raw_about == json!("You (@alice)") {
-            render_png(&f, p, "menu", "r3_human_display_title_about.png");
-        }
         control(&f, p, "listen_human");
         inspect(&f, p);
         let resume = f
             .frames(p)
             .into_iter()
             .rev()
-            .find(|action| action["op"] == "listen_session")
+            .find(|a| a["op"] == "human_inbox_update")
             .unwrap();
-        let trimmed = raw_about.as_str().unwrap_or("").trim();
+        assert_eq!(resume["hub"], "personal");
+        assert_eq!(resume["paused"], false);
+        assert_eq!(resume["expected_control_revision"], 7);
+        assert!(resume.get("about").is_none());
+        paused["hubs"][0]["human_paused"] = json!(false);
+        paused["hubs"][0]["human_control_revision"] = json!(8);
+        paused["hubs"][0]["human_availability"] = json!("ACTIVE");
+        f.send(p, paused);
         assert_eq!(
-            resume["about"],
-            if trimmed.is_empty() { "Human" } else { trimmed }
-        );
-        let mut human = listener();
-        human["harness"] = json!("human");
-        human["session_id"] = json!("default");
-        human["title"] = json!("Human");
-        human["about"] = resume["about"].clone();
-        human["display_address"] = json!("personal:@alice");
-        let row_id = format!("session:{}", human["scoped_id"].as_str().unwrap());
-        paused["listeners"] = json!([human]);
-        f.send(p, paused.clone());
-        let active = inspect(&f, p);
-        assert_eq!(node(&active, "items", &row_id)["height"], height);
-        assert_eq!(
-            node(&active, "items", &row_id)["children"][0]["height"],
-            height - 6
-        );
-        if raw_about
-            .as_str()
-            .is_some_and(|about| about.trim().to_ascii_lowercase().starts_with("you"))
-        {
-            paused["listeners"][0]["title"] = json!("Review desk");
-            paused["listeners"][0]["custom_title"] = json!(true);
-            f.send(p, paused);
-            assert_eq!(
-                node(&inspect(&f, p), "items", &row_id)["height"],
-                64,
-                "Generic Human aliases remain generic under a custom display title"
-            );
-        }
-    }
-    for (title, about, height) in [
-        ("café", "CAFÉ", 64),
-        ("CAFÉ", "café", 64),
-        ("café", "CAFÉ notes", 78),
-    ] {
-        let mut human = listener();
-        human["harness"] = json!("human");
-        human["session_id"] = json!("default");
-        human["custom_title"] = json!(true);
-        human["title"] = json!(title);
-        human["about"] = json!(about);
-        human["display_address"] = json!("personal:@alice");
-        let row_id = format!("session:{}", human["scoped_id"].as_str().unwrap());
-        let mut active = frame.clone();
-        active["listeners"] = json!([human]);
-        f.send(p, active);
-        assert_eq!(
-            node(&inspect(&f, p), "items", &row_id)["height"],
-            height,
-            "Unicode title equality must agree with Rust; distinct Unicode details remain visible"
+            node(&inspect(&f, p), "items", "human_inbox_card")["height"],
+            64
         );
     }
     f.send(p, frame.clone());
-    let paused_card = node(&s, "items", "human_paused_card")["children"][0].clone();
-    let paused_badge = &paused_card["children"][0];
-    assert_eq!(paused_badge["x"], 12);
-    assert_eq!(paused_badge["y"], 15);
-    assert_eq!(paused_badge["width"], 28);
-    assert_eq!(paused_badge["height"], 28);
-    assert_eq!(paused_badge["radius"], 7);
-    assert_eq!(paused_card["children"][1]["x"], 48);
-    for hub_count in [1, 2] {
-        let mut active = frame.clone();
-        active["hubs"].as_array_mut().unwrap().truncate(hub_count);
-        let mut human = listener();
-        human["harness"] = json!("human");
-        human["session_id"] = json!("default");
-        human["title"] = json!("Human");
-        human["display_address"] = json!("personal:@alice");
-        active["listeners"] = json!([human]);
-        f.send(p, active);
-        let snapshot = inspect(&f, p);
-        let card =
-            node(&snapshot, "items", "session:personal:repo-abcdefghijkl")["children"][0].clone();
-        for coordinate in ["x", "y", "width", "height", "radius"] {
-            assert_eq!(card["children"][0][coordinate], paused_badge[coordinate]);
-        }
-        assert_eq!(card["children"][1]["x"], 48);
-        assert_eq!(card["children"][1]["y"], paused_card["children"][1]["y"]);
-    }
-    f.send(p, frame.clone());
-    control(&f, p, "listen_human");
-    wait(|| {
-        f.frames(p).iter().any(|v| {
-            v["op"] == "listen_session"
-                && v["hub"] == "personal"
-                && v["harness"] == "human"
-                && v["session_id"] == "default"
-        })
-    });
     control(&f, p, "target_hub:work");
     control(&f, p, "listen_human");
-    wait(|| {
-        f.frames(p)
-            .iter()
-            .any(|v| v["op"] == "listen_session" && v["harness"] == "human" && v["hub"] == "work")
-    });
+    inspect(&f, p);
+    assert!(f.frames(p).iter().any(|a| a["op"] == "human_inbox_update"
+        && a["hub"] == "work"
+        && a["paused"] == false
+        && a["expected_control_revision"] == 7));
     control(&f, p, "open_settings");
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "onboarding_banner").is_null());
     assert!(node(&s, "settings_items", "apps_next_step_callout").is_null());
-    assert_eq!(
-        node(&s, "settings_items", "settings_app_tier:cursor")["width"],
-        88
-    );
+    let tier = node(&s, "settings_items", "settings_app_tier:cursor");
+    assert_eq!(tier["text"], "Experimental");
+    assert!(tier["width"].as_f64().unwrap() < 88.0);
     render_png(&f, p, "settings", "settings_apps.png");
     for tab in ["apps", "channels", "hubs"] {
         control(&f, p, &format!("settings_tab:{tab}"));
@@ -2939,7 +2747,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         .any(|n| n["id"] == "channel_field:channel:account"));
     assert_eq!(
         node(&s, "settings_items", "stratum_hub_title:channel")["text"],
-        "1. Shared Bot Gateway"
+        "1. Shared Hub Service"
     );
     assert!(node(&s, "settings_items", "stratum_user_title:channel").is_null());
     render_png(&f, p, "settings", "settings_channels_unconfigured.png");
@@ -2966,7 +2774,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "stratum_hub_status:channel")["text"],
-        "Bot Ready"
+        "Service Ready"
     );
     assert!(!node(&s, "settings_items", "clear_channel_service:channel").is_null());
     assert!(
@@ -3021,7 +2829,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let saved = inspect(&f, p);
     assert_eq!(
         node(&saved, "settings_items", "stratum_hub_title:channel")["text"],
-        "Bot Gateway"
+        "Hub Service"
     );
     assert_eq!(
         node(&saved, "settings_items", "stratum_hub_status:channel")["hidden"],
@@ -3056,7 +2864,14 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         cfg["channels"][0]["enabled"] = json!(enabled);
         f.send(p, json!({"op":"settings","settings":cfg}));
         let toggled = node(&inspect(&f, p), "settings_items", "toggle_channel:channel");
-        assert_eq!(toggled["text"], if enabled { "Pause" } else { "Resume" });
+        assert_eq!(
+            toggled["text"],
+            if enabled {
+                "Pause Human Channel"
+            } else {
+                "Resume Human Channel"
+            }
+        );
         for dimension in ["x", "width"] {
             assert_eq!(
                 toggled[dimension], reserved_toggle[dimension],
@@ -3134,31 +2949,33 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         (true, Some("Hub listener failed")),
         (true, None),
     ] {
+        let failure = error.filter(|message| !message.is_empty());
         cfg["host_hub"]["running"] = json!(running);
         cfg["host_hub"]["error"] = json!(error);
         f.send(p, json!({"op":"settings","settings":cfg}));
         let status = inspect(&f, p);
         let toggle = node(&status, "settings_items", "toggle_host_hub");
+        assert_eq!(toggle["text"], "Stop Sharing");
+        let dot = node(&status, "settings_items", "host_hub_status");
+        assert_eq!(dot["width"], 6);
         assert_eq!(
-            toggle["text"],
-            if error.is_some() {
-                "Failed"
-            } else if running {
-                "Sharing"
+            dot["tooltip"],
+            failure.unwrap_or(if running {
+                "Sharing is running"
             } else {
-                "Starting"
-            }
+                "Sharing is starting"
+            })
         );
         assert_eq!(toggle["width"], sharing_toggle["width"]);
         assert_eq!(toggle["x"], sharing_toggle["x"]);
         let prominent = node(&status, "settings_items", "settings_tab:hubs")["background"].clone();
         let invite = node(&status, "settings_items", "copy_hub_invite");
-        if running && error.is_none() {
+        if running && failure.is_none() {
             assert_ne!(toggle["background"], prominent);
             assert_eq!(invite["background"], prominent);
         } else {
             assert_ne!(invite["background"], prominent);
-            if error.is_none() {
+            if failure.is_none() {
                 assert_ne!(toggle["background"], prominent);
             }
         }
@@ -3169,16 +2986,10 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         if error == Some("Address already in use") {
             render_png(&f, p, "settings", "r3_host_hub_failed.png");
         }
-        if !running || error.is_some() {
+        if !running || failure.is_some() {
             assert_eq!(
                 warning["text"],
-                error
-                    .filter(|error| !error.is_empty())
-                    .unwrap_or(if running {
-                        "Hub sharing is unavailable"
-                    } else {
-                        "Hub server is not running"
-                    })
+                failure.unwrap_or("Hub server is not running")
             );
             assert!(
                 node(&status, "settings_items", "copy_hub_invite")["tooltip"]
@@ -3198,13 +3009,13 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     f.send(p, json!({"op":"settings","settings":cfg}));
     let off = inspect(&f, p);
     let toggle = node(&off, "settings_items", "toggle_host_hub");
-    assert_eq!(toggle["text"], "Share");
+    assert_eq!(toggle["text"], "Start Sharing");
     for dimension in ["x", "width"] {
         assert_eq!(toggle[dimension], sharing_toggle[dimension]);
     }
     assert_eq!(
         node(&off, "settings_items", "host_hub_error")["text"],
-        "Sharing is off — enable Share to accept connections"
+        "Choose Start Sharing to accept connections"
     );
     let off_invite = node(&off, "settings_items", "copy_hub_invite");
     assert_eq!(
@@ -3218,7 +3029,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     let off_error = inspect(&f, p);
     assert_eq!(
         node(&off_error, "settings_items", "toggle_host_hub")["text"],
-        "Share"
+        "Start Sharing"
     );
     assert_eq!(
         node(&off_error, "settings_items", "host_hub_error")["text"],
@@ -3300,7 +3111,6 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         let mut toggled = cfg.clone();
         toggled["host_hub"]["enabled"] = json!(enabled);
         toggled["hubs"][0]["enabled"] = json!(enabled);
-        toggled["desktop_banner_enabled"] = json!(enabled);
         toggled["host_hub"]["auth_mode"] = json!(if enabled { "token" } else { "none" });
         f.send(p, json!({"op":"settings","settings":toggled}));
         let snapshot = inspect(&f, p);
@@ -3309,7 +3119,6 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             "toggle_host_hub_auth",
             "toggle_hub:local",
             "edit_hub:local",
-            "toggle_desktop_banner",
         ]
         .into_iter()
         .map(|id| {
@@ -3672,11 +3481,13 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         assert!(node(&s, "items", "switch_hub:personal:repo-abcdefghijkl").is_null());
         let pill = node(&s, "items", &format!("hub:{hub}"));
         assert!(pill["tooltip"].as_str().unwrap().contains(&hub));
-        tooltip(&s, "items", &hub);
+        assert!(pill["tooltip"].as_str().unwrap().contains("Connected"));
         control(&f, p, "open_settings");
         let s = stress_inspect();
         tooltip(&s, "settings_items", &display_name);
-        tooltip(&s, "settings_items", &clean_error);
+        let app_status = node(&s, "settings_items", "settings_app_status:pi");
+        assert_eq!(app_status["tooltip"], clean_error);
+        assert_eq!(app_status["text"], format!("Connected · {clean_error}"));
         control(&f, p, "settings_tab:channels");
         let s = stress_inspect();
         tooltip(&s, "settings_items", &display_name);
@@ -3733,7 +3544,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
 }
 
 #[test]
-fn u3_paused_human_card_requires_no_active_person_and_excludes_offline_targets() {
+fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -3743,35 +3554,46 @@ fn u3_paused_human_card_requires_no_active_person_and_excludes_offline_targets()
     human["session_id"] = json!("default");
     human["display_address"] = json!("@alice");
     frame["listeners"] = json!([human]);
+    frame["hubs"][0]["human_paused"] = json!(false);
+    frame["hubs"][0]["human_availability"] = json!("ACTIVE");
+    for hub in frame["hubs"].as_array_mut().unwrap() {
+        hub["human_state_status"] = json!("current");
+        hub["human_control_revision"] = json!(3);
+    }
+    frame["hubs"][1]["human_paused"] = json!(true);
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
-    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    assert!(!node(&inspect(&f, p), "items", "human_inbox_card").is_null());
     control(&f, p, "target_hub:work");
-    let coalesced = inspect(&f, p);
-    assert!(!node(&coalesced, "items", "human_paused_card").is_null());
-    assert_eq!(coalesced["count"], 0);
+    let remote = inspect(&f, p);
+    assert_eq!(node(&remote, "items", "human_paused_card")["height"], 64);
     assert_eq!(
-        node(&coalesced, "items", "header_subtitle")["text"],
-        "Notifications paused"
+        node(&remote, "items", "header_subtitle")["text"],
+        "Inbox paused"
     );
-    assert!(node(&coalesced, "items", "session:personal:repo-abcdefghijkl").is_null());
+    assert_eq!(node(&remote, "items", "listen_human")["enabled"], true);
+    assert_eq!(remote["count"], 0);
+    assert!(node(&remote, "items", "session:personal:repo-abcdefghijkl").is_null());
     let mut empty = frame.clone();
     empty["available"] = json!([]);
     f.send(p, empty.clone());
-    let snapshot = inspect(&f, p);
-    assert!(node(&snapshot, "items", "available_empty_target").is_null());
+    assert!(node(&inspect(&f, p), "items", "available_empty_target").is_null());
     empty["hubs"][1]["auto_listen"] = json!(true);
     f.send(p, empty);
-    let snapshot = inspect(&f, p);
-    assert!(node(&snapshot, "items", "available_empty_target").is_null());
     assert_eq!(
-        node(&snapshot, "items", "toggle_auto_listen")["text"],
+        node(&inspect(&f, p), "items", "toggle_auto_listen")["text"],
         "Auto-Listen: On"
     );
     frame["hubs"][1]["status"] = json!("disconnected");
     f.send(p, frame.clone());
-    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    let offline = inspect(&f, p);
+    assert_eq!(node(&offline, "items", "human_paused_card")["height"], 64);
+    assert_eq!(node(&offline, "items", "listen_human")["enabled"], false);
+    assert_eq!(
+        node(&offline, "items", "header_subtitle")["text"],
+        "Hub unavailable"
+    );
     control(&f, p, "hub:work");
     assert_eq!(
         node(&inspect(&f, p), "items", "drawer:work")["hidden"],
@@ -3784,12 +3606,35 @@ fn u3_paused_human_card_requires_no_active_person_and_excludes_offline_targets()
     );
     frame["listeners"] = json!([]);
     f.send(p, frame.clone());
-    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    assert_eq!(
+        node(&inspect(&f, p), "items", "human_paused_card")["height"],
+        64
+    );
     control(&f, p, "hub:personal");
-    assert!(!node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    assert_eq!(
+        node(&inspect(&f, p), "items", "human_inbox_card")["height"],
+        64
+    );
     frame["hubs"][0]["status"] = json!("disconnected");
     f.send(p, frame);
-    assert!(node(&inspect(&f, p), "items", "human_paused_card").is_null());
+    assert_eq!(
+        node(&inspect(&f, p), "items", "pause_inbox")["enabled"],
+        false
+    );
+    let before = f
+        .frames(p)
+        .iter()
+        .filter(|a| a["op"] == "human_inbox_update")
+        .count();
+    control(&f, p, "pause_inbox");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .iter()
+            .filter(|a| a["op"] == "human_inbox_update")
+            .count(),
+        before
+    );
 }
 
 #[test]
@@ -3865,7 +3710,6 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
         f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
         let mut frame = state();
         frame["settings"] = cfg.clone();
-        frame["settings"]["desktop_banner_enabled"] = json!(false);
         f.send(p, frame);
         control(&f, p, "test_channel:channel");
         let s = inspect(&f, p);
@@ -3923,7 +3767,6 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
             let mut frame = state();
             frame["settings"] = cfg.clone();
-            frame["settings"]["desktop_banner_enabled"] = json!(false);
             f.send(p, frame);
             let s = inspect(&f, p);
             assert_eq!(
@@ -4045,11 +3888,11 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "settings_items", "settings_channel_status:channel")["text"],
-        "⏸ Paused"
+        "Paused"
     );
     assert_eq!(
         node(&s, "settings_items", "toggle_channel:channel")["text"],
-        "Resume"
+        "Resume Human Channel"
     );
     control(&f, p, "toggle_channel:channel");
     control(&f, p, "unpair_channel:channel");
@@ -4322,7 +4165,7 @@ fn lifecycle_onboarding_hub_edit_share_controls_disconnect_and_empty_actions() {
     assert!(node(&modal, "settings_items", "confirm_uninstall_all").is_null());
     assert_eq!(
         node(&modal, "settings_items", "confirm_disconnect_all")["text"],
-        "Disconnect All"
+        "Disconnect Apps"
     );
     control(&f, p, "confirm_disconnect_all");
     wait(|| {
@@ -4610,12 +4453,13 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     });
     control(&f, p, "act_filter:all");
     for (reason, label) in [
-        ("stale_generation", "session reloaded"),
-        ("driver_unavailable", "app unavailable"),
-        ("session_switched", "session changed"),
-        ("unlistened", "listening paused"),
-        ("unlistened_before_dispatch", "listening paused"),
-        ("fenced_before_dispatch", "connection changed"),
+        ("stale_generation", "Session reloaded"),
+        ("driver_unavailable", "App unavailable"),
+        ("session_switched", "Session changed"),
+        ("unlistened", "Listening paused"),
+        ("unlistened_before_dispatch", "Listening paused"),
+        ("fenced_before_dispatch", "Connection changed"),
+        ("sender_ack_timeout", "Awaiting acknowledgment"),
     ] {
         let mut item = activity[0].clone();
         item["held_reason"] = json!(reason);
@@ -4625,14 +4469,14 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
             json!({"op":"directory","peers":[],"activity":[item],"activity_filter":"all"}),
         );
         let snapshot = inspect(&f, p);
-        assert!(node(
-            &snapshot,
-            "directory_items",
-            "act_title:personal:sig_unread"
-        )["text"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("Held ({label})")));
+        assert_eq!(
+            node(&snapshot, "directory_items", "act_held:personal:sig_unread")["text"],
+            format!("Held: {label}")
+        );
+        assert_eq!(
+            node(&snapshot, "directory_items", "act_held:personal:sig_unread")["hidden"],
+            false
+        );
     }
     let many: Vec<_> = (0..10)
         .map(|i| {
@@ -5071,7 +4915,7 @@ fn appkit_available_scroll_hub_selector_and_noop_state_diff() {
     assert_eq!(s["count"], 0);
     assert_eq!(
         node(&s, "items", "header_subtitle")["text"],
-        "Notifications paused"
+        "Not listening"
     );
     assert_eq!(s["available_count"], 5);
     assert_eq!(node(&s, "items", "hub:work")["text"], "work");
@@ -5203,11 +5047,7 @@ fn state() -> Value {
 }
 fn start(f: &Fixture) -> usize {
     let ui = root().join("bin/cito-ui-darwin-arm64");
-    f.spawn(
-        ui.to_str().unwrap(),
-        &[],
-        &[("CITO_BANNER_DISMISS_MS", "80")],
-    )
+    f.spawn(ui.to_str().unwrap(), &[], &[])
 }
 fn inspect(f: &Fixture, p: usize) -> Value {
     inspect_as(f, p, None)
@@ -5243,7 +5083,7 @@ fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
         snapshot["truncated_labels"],
         json!([]),
         "{:?}",
-        ["items", "directory_items", "settings_items", "banner_items"]
+        ["items", "directory_items", "settings_items"]
             .into_iter()
             .flat_map(|key| nodes(&snapshot[key]))
             .filter(|n| snapshot["truncated_labels"]
@@ -5255,12 +5095,6 @@ fn inspect_as(f: &Fixture, p: usize, appearance: Option<&str>) -> Value {
     assert_eq!(snapshot["clipped_views"], json!([]));
     for key in ["low_contrast_labels", "jargon_leaks", "address_mismatches"] {
         assert_eq!(snapshot[key], json!([]), "{key}");
-    }
-    if snapshot["banner_visible"] == true {
-        assert_eq!(
-            node(&snapshot, "banner_items", "banner_root")["live_material_valid"],
-            true
-        );
     }
     snapshot
 }
@@ -5302,9 +5136,6 @@ fn send_fixture(f: &Fixture, p: usize, mut frame: Value) {
 }
 fn peer(id: &str) -> Value {
     json!({"hub":"personal","listener_id":format!("c_{id}"),"display_address":format!("bob/fixture#{}", &cito_native::core::identity::hash(id)[..4]),"public_id":id,"scoped_id":format!("personal:{id}"),"user":"bob","host_id":"remote","host_name":"laptop","harness":"fixture","title":id,"about":"Schema work","repo":"acme/service","branch":"main","scope":"workspace","last_seen_at":"2030-01-01T00:00:00Z","is_self_principal":false,"channels":["laptop"]})
-}
-fn banner() -> Value {
-    json!({"op":"banner","payload":{"target_harness":"fixture","target_session_id":"s1","target_title":"café conversation","from_user":"alice","from_host":"host","from_title":"sender","message":"hello café","effective_wake":true,"signal_id":"personal:sig_1","hub":"personal","from_scoped_id":"personal:sender-abcdefgh2345"}})
 }
 #[test]
 fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
@@ -5555,25 +5386,36 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     short_addresses["hubs"] =
         json!([{"name":"local","status":"connected","auth_mode":"none","user":"a"}]);
     short_addresses["listeners"] = json!([human]);
+    short_addresses["settings"] = settings();
+    short_addresses["settings"]["hubs"][0]["name"] = json!("local");
     f.send(p, short_addresses);
+    assert!(node(&inspect(&f, p), "items", "session:local:human:default").is_null());
+    control(&f, p, "open_directory");
+    let mut person = peer("human:default");
+    person["hub"] = json!("local");
+    person["scoped_id"] = json!("local:human:default");
+    person["user"] = json!("a");
+    person["harness"] = json!("human");
+    person["display_address"] = json!("@a");
+    send_fixture(&f, p, json!({"op":"directory","peers":[person]}));
     let before = inspect(&f, p);
-    assert!(!nodes(&before["items"])
-        .iter()
-        .any(|n| n["text"] == "Desktop notifications"));
-    let id = "copy:local:human:default";
-    assert_eq!(node(&before, "items", id)["text"], "@a");
+    let id = "copy_dir:local:human:default";
+    assert_eq!(node(&before, "directory_items", id)["text"], "@a");
     for appearance in ["light", "dark"] {
         control(&f, p, id);
         let copied = inspect_as(&f, p, Some(appearance));
         assert_eq!(copied["clipboard"], "@a");
-        assert_eq!(node(&copied, "items", id)["text"], "✓ Copied");
+        assert_eq!(node(&copied, "directory_items", id)["text"], "✓ Copied");
         assert_eq!(
-            node(&copied, "items", id)["width"],
-            node(&before, "items", id)["width"]
+            node(&copied, "directory_items", id)["width"],
+            node(&before, "directory_items", id)["width"]
         );
         assert_eq!(copied["clipped_views"], json!([]));
         assert_eq!(copied["truncated_labels"], json!([]));
     }
+    f.send(p, json!({"op":"test_directory_key","key":"escape"}));
+    send_fixture(&f, p, json!({"op":"directory","peers":[]}));
+    inspect(&f, p);
     // Isolate the address projection while keeping unrelated identity captions short.
     let full = format!("work:{}/fixture#abcd", "a".repeat(64));
     let mut long = listener();
@@ -5586,6 +5428,7 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     remote["scoped_id"] = json!("work:long-remote");
     remote["display_address"] = json!(full);
     let mut addresses = state();
+    addresses["settings"] = settings();
     addresses["listeners"] = json!([long]);
     addresses["my_remote_listeners"] = json!([remote.clone()]);
     f.send(p, addresses);
@@ -5896,7 +5739,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     control(&f, p, "composer_cancel");
     assert_eq!(
         node(&inspect(&f, p), "directory_items", "directory_shortcuts")["text"],
-        "↵ Copy Address    ⎋ Close"
+        "↵ Copy Address   ⇧↵ Message   ⎋ Close"
     );
     control(&f, p, "dir_mode:activity");
     let activity: Vec<_> = ["reply_a", "reply_b"]
@@ -6012,17 +5855,13 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
     assert_eq!(inspect(&f, p)["directory_open"], false);
 }
 fn settings() -> Value {
-    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"desktop_banner_enabled":true,"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"http://127.0.0.1:4291","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
+    json!({"apps":[{"id":"pi","display_name":"Pi","tier":"stable","installed":true,"configured":true,"status":"configured","detail":"Connected","paths":["/tmp/settings.json"]},{"id":"codex","display_name":"Codex","tier":"stable","installed":true,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]},{"id":"cursor","display_name":"Cursor","tier":"experimental","installed":false,"configured":false,"status":"not_configured","detail":"Click Set Up to connect","paths":[]}],"channels":[{"id":"channel","display_name":"Human Channel","sf_symbol":"paperplane.fill","tint":"blue","enabled":true,"configured":false,"status":"hub_ready","detail":"Ready","hub_provided":false,"pairing_supported":true,"fields":[{"key":"secret","scope":"hub","label":"Secret","type":"secret","required":true,"placeholder":"Token","value":"secret","configured":true},{"key":"account","scope":"user","label":"Account","type":"string","required":true,"placeholder":"Account","value":"","configured":false}]}],"hubs":[{"name":"personal","url":"local://","auth_mode":"none","enabled":true,"is_default":true,"status":"connected","user":"alice","error":null},{"name":"work","url":"http://127.0.0.1:4291","auth_mode":"none","enabled":true,"is_default":false,"status":"connected","user":"alice","error":null}],"host_hub":{"enabled":false,"running":false,"port":4291,"endpoint_url":"http://127.0.0.1:4291","token":"","invite_command":"","error":null},"launch_at_login":false})
 }
 #[test]
 fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let p = f.spawn(
-        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
-        &[],
-        &[("CITO_BANNER_DISMISS_MS", "60000")],
-    );
+    let p = start(&f);
     f.send(p, state());
     for appearance in ["light", "dark"] {
         for kind in [
@@ -6134,6 +5973,22 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             invalid["listeners"][0]["display_address"] = json!("alice/fixture#abcd");
             f.send(p, invalid);
             control(&f, p, if human { "hub:personal" } else { "hub:work" });
+            if human {
+                control(&f, p, "open_directory");
+                let mut person = peer("invalid-human");
+                person["harness"] = json!("human");
+                // Human address validation lives in the unified Directory, not an agent card.
+                inspect_unchecked(&f, p, Some(appearance));
+                let request = f
+                    .frames(p)
+                    .into_iter()
+                    .rev()
+                    .find(|a| {
+                        matches!(a["op"].as_str(), Some("query_directory" | "open_directory"))
+                    })
+                    .unwrap();
+                f.send(p,json!({"op":"directory","request_id":request["request_id"],"query":request["query"],"scope":request["scope"],"harness":request["harness"],"peers":[person]}));
+            }
             assert!(
                 !inspect_unchecked(&f, p, Some(appearance))["address_mismatches"]
                     .as_array()
@@ -6166,33 +6021,6 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
         let mut clean = state();
         clean["activity"] = json!([]);
         f.send(p, clean);
-        let mut invalid = banner();
-        invalid["payload"]["from_title"] = json!("[Passive] Sender");
-        f.send(p, invalid);
-        assert_eq!(
-            inspect_as(&f, p, Some(appearance))["jargon_leaks"],
-            json!([])
-        );
-        f.send(
-            p,
-            json!({"op":"test_oracle_calibration","kind":"banner_jargon"}),
-        );
-        assert!(inspect_unchecked(&f, p, Some(appearance))["jargon_leaks"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("banner_data:1")));
-        // Human metadata shares the same visible, user-data-aware first line.
-        let mut chrome = banner();
-        chrome["payload"]["target_harness"] = json!("human");
-        f.send(p, chrome);
-        assert_eq!(
-            node(
-                &inspect_unchecked(&f, p, Some(appearance)),
-                "banner_items",
-                "banner_data:1"
-            )["text"],
-            "@alice · sender → You"
-        );
         let mut user_titles = state();
         user_titles["listeners"][0]["title"] = json!("Human Node");
         user_titles["listeners"][0]["about"] = json!("[Passive] build");
@@ -6262,11 +6090,7 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
 fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let p = f.spawn(
-        root().join("bin/cito-ui-darwin-arm64").to_str().unwrap(),
-        &[],
-        &[("CITO_BANNER_DISMISS_MS", "60000")],
-    );
+    let p = start(&f);
     let capture = |surface: &str, state: &str| {
         let snapshot = inspect(&f, p);
         let strip = match surface {
@@ -6281,7 +6105,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                     (368.0 - (54.0 + subtitle_width).max(138.0)).max(44.0),
                 ))
             }
-            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 402.0)),
+            "directory" => Some(("directory_items", "directory_harness_scroll", 4.0, 387.0)),
             "settings" => Some(("settings_items", "channel_hub_strip", 6.0, 398.0)),
             _ => None,
         };
@@ -6323,7 +6147,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 let x = view["x"].as_f64().unwrap();
                 match surface {
                     "menu" => assert!((x + width - 368.0).abs() < 0.5),
-                    "directory" => assert_eq!(x, 142.0),
+                    "directory" => assert_eq!(x, 157.0),
                     "settings" => assert_eq!(x, 102.0),
                     _ => unreachable!(),
                 }
@@ -6399,6 +6223,11 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     human["display_address"] = json!("@alice");
     human["host_name"] = json!("mac-studio.local");
     human["channels"] = json!([]);
+    human["attachments"] = json!([{"channel_id":"here:human","location":"device","host_id":"here","display_name":"mac-studio.local","availability":"ACTIVE","is_local":true}]);
+    frame["hubs"][0]["attachments"] = human["attachments"].clone();
+    frame["hubs"][0]["human_state_status"] = json!("current");
+    frame["hubs"][0]["human_paused"] = json!(false);
+    frame["hubs"][0]["human_control_revision"] = json!(1);
     frame["listeners"] = json!([agent, human]);
     frame["available"] = json!([{"harness":"codex","session_id":"review","title":"api-server","cwd":"~/Projects/acme/service","branch":"main"}]);
     frame["unread_count"] = json!(2);
@@ -6408,7 +6237,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert_eq!(node(&s, "items", "plugin_icon:pi")["tint"], json!([]));
     assert_eq!(node(&s, "items", "plugin_icon:pi")["x"], 0);
     assert_eq!(node(&s, "items", "plugin_icon:pi")["width"], 28);
-    let copy = node(&s, "items", "copy:local:alice-76e846d115ce642f");
+    let copy = node(&s, "items", "copy:personal:repo-abcdefghijkl");
     assert!(nodes(&copy["children"])
         .iter()
         .any(|n| n["x"] == 0 && n["width"] == 12));
@@ -6432,7 +6261,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             .into_iter()
             .filter(|n| n["id"].as_str().is_some_and(|id| id.starts_with("stop:")))
             .collect();
-        assert_eq!(pauses.len(), 2);
+        assert_eq!(pauses.len(), 1);
         for pause in &pauses {
             assert_eq!(pause["text"], "Pause");
             assert!(pause["symbol"].is_null());
@@ -6474,7 +6303,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             "directory_items",
             "dir_meta:local:alice-76e846d115ce642f"
         )["text"],
-        "Human · mac-studio"
+        "Inbox · mac-studio"
     );
     assert!(!node(
         &seeded,
@@ -6639,10 +6468,10 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
                 "Copy Invite Code"
             );
             assert!(node(&s, "settings_items", "host_hub_guidance").is_null());
-            assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 148);
+            assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 160);
             assert_eq!(
                 node(&s, "settings_items", "paste_hub_invite")["text"],
-                "Paste Invite Code"
+                "Join from Clipboard"
             );
         }
         capture("settings", &format!("settings_{tab}"));
@@ -6654,7 +6483,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     );
     f.send(p,json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 148);
+    assert_eq!(node(&s, "settings_items", "host_hub_card")["height"], 160);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["y"], 8);
     assert_eq!(node(&s, "settings_items", "add_hub_form")["height"], 252);
     assert_eq!(node(&s, "settings_items", "hub_visibility_caption")["text"], "Personal Hubs connect your Macs automatically; Team Sign-In (OIDC) Hubs start private to your account (@user) until shared with Team.");
@@ -6706,50 +6535,6 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     control(&f, p, "cancel_uninstall_all");
     control(&f, p, "close_settings");
     assert_eq!(inspect(&f, p)["settings_open"], false);
-
-    for (kind, wake, name) in [
-        ("human", true, "banner_human_notification"),
-        ("pi", true, "banner_agent_notification"),
-        ("pi", false, "banner_agent_passive"),
-        ("human", false, "banner_human_passive"),
-    ] {
-        let mut notification = banner();
-        notification["payload"]["hub"] = json!("local");
-        notification["payload"]["target_harness"] = json!(kind);
-        notification["payload"]["target_title"] = json!("Review");
-        notification["payload"]["target_session_id"] =
-            json!(if kind == "human" { "default" } else { "s1" });
-        notification["payload"]["effective_wake"] = json!(wake);
-        notification["payload"]["message"] = json!("The review is ready.");
-        notification["payload"]["from_user"] = json!("bob");
-        notification["payload"]["from_title"] = json!("Review");
-        notification["payload"]["from_display_address"] = json!("bob/pi#abcd");
-        f.send(p, notification);
-        let s = inspect(&f, p);
-        let title_id = "banner_data:1";
-        assert_eq!(
-            node(&s, "banner_items", title_id)["text"],
-            if kind == "human" {
-                "@bob · Review → You"
-            } else {
-                "@bob → Review"
-            }
-        );
-        assert_eq!(node(&s, "banner_items", title_id)["hidden"], false);
-        if wake {
-            assert!(node(&s, "banner_items", "banner_semantic_pill").is_null());
-        } else {
-            assert_eq!(
-                node(&s, "banner_items", "banner_semantic_pill")["children"][0]["text"],
-                "Queued"
-            );
-        }
-        assert_eq!(
-            node(&s, "banner_items", "banner_root")["live_material_valid"],
-            true
-        );
-        capture("banner", name);
-    }
 }
 
 #[test]
@@ -6817,10 +6602,6 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
     );
     f.send(p, json!({"op":"test_settings_key","key":"escape"}));
     assert_eq!(inspect(&f, p)["settings_open"], true);
-    let mut notification = banner();
-    notification["payload"]["target_harness"] = json!("human");
-    notification["payload"]["effective_wake"] = json!(false);
-    f.send(p, notification);
     for appearance in ["light", "dark"] {
         let s = inspect_as(&f, p, Some(appearance));
         for invariant in [
@@ -6833,12 +6614,12 @@ fn v29_correlation_editor_keys_and_four_surface_oracle() {
         ] {
             assert_eq!(s[invariant], json!([]), "{appearance}: {invariant}");
         }
-        assert!(!s["banner_items"].as_array().unwrap().is_empty());
+        assert!(!s["settings_items"].as_array().unwrap().is_empty());
         render_png_as(
             &f,
             p,
-            "banner",
-            &format!("v29-banner-{appearance}.png"),
+            "settings",
+            &format!("v40-settings-{appearance}.png"),
             Some(appearance),
         );
     }
@@ -6890,7 +6671,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     let restored = inspect(&f, l.ui);
     let button = node(&restored, "directory_items", &control_id);
     assert_eq!(button["text"], "Copy");
-    assert_eq!(button["accessibility_label"], "Copy message");
+    assert_eq!(button["accessibility_label"], "Copy");
     let frames: Vec<_> = l
         .frames
         .iter()
@@ -6901,16 +6682,16 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         .iter()
         .all(|f| serde_json::to_vec(f).unwrap().len() < 262_144));
     l.control(&control_id);
-    let human = f.rows("SELECT public_id FROM local_listeners WHERE harness='human'")[0]
-        ["public_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    l.control(&format!("copy:{human}"));
+    let address = nodes(&restored["items"])
+        .into_iter()
+        .find(|n| n["id"].as_str().is_some_and(|id| id.starts_with("copy:")))
+        .unwrap();
+    let expected = address["text"].clone();
+    l.control(address["id"].as_str().unwrap());
     l.pump();
     assert_eq!(
         inspect(&f, l.ui)["clipboard"],
-        "@alice",
+        expected,
         "A newer clipboard action supersedes in-flight message chunks"
     );
     assert_eq!(inspect(&f, l.ui)["composer_open"], false);
@@ -6942,7 +6723,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
         addresses.iter().all(|n| n["text"] != "✓ Copied"),
         "An Activity completion must not decorate reused Directory cells"
     );
-    l.control(&format!("copy:{human}"));
+    l.control(address["id"].as_str().unwrap());
     l.control("dir_mode:activity");
     l.until(|s| !node(s, "directory_items", &control_id).is_null());
     for invalid_chunk in [false, true] {
@@ -6959,13 +6740,13 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             json!({"op":"error","source_op":"copy_activity_message","request_id":request["request_id"],"error":"COPY_FAILED: Message unavailable"})
         });
         let failed = inspect(&f, l.ui);
-        assert_eq!(failed["clipboard"], "@alice");
+        assert_eq!(failed["clipboard"], expected);
         let status = node(&failed, "directory_items", "directory_summary");
         assert_eq!(status["text"], "Message unavailable");
         assert_eq!(status["tooltip"], "Message unavailable");
         assert_eq!(status["hidden"], false);
         l.pump();
-        assert_eq!(inspect(&f, l.ui)["clipboard"], "@alice");
+        assert_eq!(inspect(&f, l.ui)["clipboard"], expected);
         let query = f
             .frames(l.ui)
             .into_iter()
@@ -6987,8 +6768,8 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
             node(&success, "directory_items", "directory_summary")["tooltip"],
             ""
         );
-        l.control(&format!("copy:{human}"));
-        assert_eq!(inspect(&f, l.ui)["clipboard"], "@alice");
+        l.control(address["id"].as_str().unwrap());
+        assert_eq!(inspect(&f, l.ui)["clipboard"], expected);
     }
     let mut state = f.action(json!({"op":"get_snapshot"})).1;
     state["settings"]["host_hub"]["enabled"] = json!(true);
@@ -7076,13 +6857,17 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     for (id, configured) in [("pi", true), ("codex", false), ("cursor", false)] {
         assert!(!node(&s, "settings_items", &format!("settings_app:{id}")).is_null());
         let status = node(&s, "settings_items", &format!("settings_app_status:{id}"));
-        assert_eq!(status["hidden"], !configured);
+        assert_eq!(status["hidden"], false);
         if configured {
             assert_eq!(status["text"], "Connected");
         }
         assert_eq!(
             node(&s, "settings_items", &format!("setup_app:{id}"))["text"],
-            if configured { "Re-check" } else { "Set Up" }
+            if configured {
+                "Check & Repair"
+            } else {
+                "Set Up"
+            }
         );
         assert_eq!(
             node(&s, "settings_items", &format!("remove_app:{id}")).is_null(),
@@ -7097,7 +6882,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     }
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "setup_app:pi")["text"],
-        "Re-check",
+        "Check & Repair",
         "A click alone cannot confirm a check"
     );
     let checked = f
@@ -7235,10 +7020,7 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         page.header("Content-Type"),
         Some("text/html; charset=utf-8")
     );
-    assert!(page
-        .into_string()
-        .unwrap()
-        .contains("Cito Hub is active on this Mac."));
+    assert!(page.into_string().unwrap().contains("This Hub is running."));
     let anonymous = ureq::get(&format!("{endpoint}/v1/rpc"))
         .timeout(std::time::Duration::from_secs(2))
         .call();
@@ -7432,7 +7214,7 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
 }
 
 #[test]
-fn appkit_fragmented_utf8_invalid_frames_wake_banner_and_eof() {
+fn appkit_fragmented_utf8_invalid_frames_activity_and_eof() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -7444,14 +7226,12 @@ fn appkit_fragmented_utf8_invalid_frames_wake_banner_and_eof() {
     f.send_raw(p, b"bad json\n");
     f.send_raw(p, &vec![b'x'; 1_048_577]);
     f.send_raw(p, b"\n");
-    f.send(p, banner());
-    wait(|| f.output(p, true).contains("display "));
-    wait(|| f.output(p, true).contains("banner hidden"));
+    f.send(p, state());
+    inspect(&f, p);
     assert!(!f.exited(p));
     assert!(f.output(p, true).contains("invalid frame"));
     assert!(f.output(p, true).contains("oversized frame"));
-    f.send(p, banner());
-    f.send(p, json!({"op":"test_click"}));
+    control(&f, p, "open_activity");
     wait(|| {
         f.frames(p)
             .iter()

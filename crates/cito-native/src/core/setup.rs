@@ -174,6 +174,7 @@ fn ensure_plugins_staged<'a>(
     state_dir: &Path,
     plugins: impl Iterator<Item = &'a PluginDescriptor>,
 ) -> Result<Vec<PathBuf>, String> {
+    super::plugins::cleanup_retired_companion(state_dir)?;
     let bin_dir = state_dir.join("bin");
     fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
@@ -748,7 +749,6 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
     for ui_cand in [
         pkg_root.join("bin/cito-ui-darwin-arm64"),
         pkg_root.join("Helpers/cito-ui"),
-        state_dir.join("bin/cito-ui"),
     ] {
         if ui_cand.is_file() {
             let helper_ui = helpers_dir.join("cito-ui");
@@ -1729,7 +1729,7 @@ mod tests {
     fn app_bundle_rejects_ui_copy_failure() {
         let (root, plugins) = fixture();
         fs::create_dir_all(root.join("bin")).unwrap();
-        let ui = root.join("bin/cito-ui");
+        let ui = root.join("bin/cito-ui-darwin-arm64");
         fs::write(&ui, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&ui, fs::Permissions::from_mode(0o000)).unwrap();
         let result = build_mac_app_bundle_from_root(None, &root, &plugins, &root);

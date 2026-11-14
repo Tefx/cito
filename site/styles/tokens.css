@@ -1,5 +1,5 @@
 :root {
-  /* Tactile Dark Obsidian & Warm Amber Signal Palette */
+  /* Slate surfaces and accessible Cito Blue accents. */
   --bg-canvas: #0C0E12;
   --bg-elevated: #12151C;
   --bg-surface: #171B24;
@@ -8,18 +8,18 @@
 
   --border-subtle: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --border-amber: rgba(245, 158, 11, 0.45);
+  --border-accent: rgba(56, 189, 248, 0.45);
 
   --text-primary: #F3F4F6;
   --text-secondary: #9CA3AF;
   --text-muted: #9CA3AF;
 
-  --accent-amber: #F59E0B;
-  --accent-amber-soft: rgba(245, 158, 11, 0.14);
-  --accent-amber-glow: rgba(245, 158, 11, 0.24);
+  --accent-primary: #38BDF8;
+  --accent-primary-soft: rgba(56, 189, 248, 0.14);
+  --accent-primary-glow: rgba(56, 189, 248, 0.24);
   --accent-green: #10B981;
   --accent-teal: #14B8A6;
-  --accent-blue: #38BDF8;
+  --accent-blue: var(--accent-primary);
 
   /* Typography */
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", system-ui, sans-serif;

@@ -21,7 +21,6 @@ fn main() {
         return;
     }
     let output = root.join("bin/cito-ui-darwin-arm64");
-    let staged = root.join("plugins/human/bin/cito-ui");
     let temporary = output.with_extension("tmp");
     run(
         "/usr/bin/swiftc",
@@ -40,6 +39,4 @@ fn main() {
         &["--force", "--sign", "-", temporary.to_str().unwrap()],
     );
     fs::rename(&temporary, &output).unwrap();
-    fs::create_dir_all(staged.parent().unwrap()).unwrap();
-    fs::copy(output, staged).unwrap();
 }

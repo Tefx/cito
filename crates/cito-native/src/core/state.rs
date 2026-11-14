@@ -451,22 +451,7 @@ impl LocalState {
             // Apply address normalization before pagination and counts, streaming
             // history so a broad search retains at most the visible page in memory.
             c.query_each(&format!("SELECT s.*, l.owner_user AS target_user, l.harness AS target_harness, l.title AS target_title{predicate} ORDER BY s.created_at DESC,s.signal_id ASC"), &params, |mut row| {
-                let address = |user: &str, harness: &str, raw_id: &str| {
-                    let id = super::identity::canonical_node_id(raw_id).unwrap_or_default();
-                    let suffix = id.strip_prefix("c_").unwrap_or("");
-                    if harness == "human" { format!("@{user}") }
-                    else if suffix.is_empty() { raw_id.to_owned() }
-                    else { format!("{}/{harness}#{suffix}", normalize_slug(user)) }
-                };
-                let source = address(string(&row, "from_user"), string(&row, "from_harness"), string(&row, "from_listener_id"));
-                let target = address(string(&row, "target_user"), string(&row, "target_harness"), string(&row, "listener_id"));
-                let mut searchable = format!("{}:{source} {}:{target} @{} @{}", string(&row, "hub"), string(&row, "hub"), string(&row, "from_user"), string(&row, "target_user"));
-                for field in ["message","from_user","from_host_name","from_title","target_title","signal_id","listener_id","from_harness","target_harness","from_listener_id"] {
-                    searchable.push(' ');
-                    searchable.push_str(string(&row, field));
-                }
-                if row["target_harness"] == "human" { searchable.push_str(" you"); }
-                if !searchable.to_lowercase().contains(&query) { return; }
+                if !matches_activity(&row, &query) { return; }
                 total += 1;
                 unread += u64::from(row["acknowledged_at_ms"].is_null());
                 if rows.len() < 80 {
@@ -479,6 +464,58 @@ impl LocalState {
             Ok((rows, total, unread))
         })
     }
+}
+
+pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
+    let address = |user: &str, harness: &str, raw_id: &str| {
+        let id = super::identity::canonical_node_id(raw_id).unwrap_or_default();
+        let suffix = id.strip_prefix("c_").unwrap_or("");
+        if harness == "human" {
+            format!("@{user}")
+        } else if suffix.is_empty() {
+            raw_id.to_owned()
+        } else {
+            format!("{}/{harness}#{suffix}", normalize_slug(user))
+        }
+    };
+    let source = address(
+        string(row, "from_user"),
+        string(row, "from_harness"),
+        string(row, "from_listener_id"),
+    );
+    let target = address(
+        string(row, "target_user"),
+        string(row, "target_harness"),
+        string(row, "listener_id"),
+    );
+    let mut searchable = format!(
+        "{}:{source} {}:{target} @{} @{}",
+        string(row, "hub"),
+        string(row, "hub"),
+        string(row, "from_user"),
+        string(row, "target_user")
+    );
+    for field in [
+        "message",
+        "from_user",
+        "from_host_name",
+        "from_title",
+        "target_title",
+        "signal_id",
+        "listener_id",
+        "from_harness",
+        "target_harness",
+        "from_listener_id",
+    ] {
+        searchable.push(' ');
+        searchable.push_str(string(row, field));
+    }
+    if row["target_harness"] == "human" {
+        searchable.push_str(" you");
+    }
+    searchable
+        .to_lowercase()
+        .contains(&query.trim().to_lowercase())
 }
 
 fn current_listener(c: &Connection, hub: &str, id: &str) -> Result<Value, String> {
@@ -562,7 +599,7 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
 pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_ids: bool) -> String {
     if signals.len() == 1 {
         return format!(
-            "🔔 Cito · {}\n\n{}",
+            "Cito · {}\n\n{}",
             format_sender(&signals[0], hub, qualify_ids),
             escape_card(string(&signals[0], "message"))
         );
@@ -587,7 +624,7 @@ pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_id
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
-        "🔔 Cito · {} notifications{target_part}\n\n{body}",
+        "Cito · {} notifications{target_part}\n\n{body}",
         signals.len()
     )
 }

@@ -132,10 +132,7 @@ fn delivery(config: &Value, req: &Value) -> Value {
         let from = str_at(&s["from"], "title")
             .or_else(|| str_at(&s["from"], "listener_id"))
             .unwrap_or("sender");
-        let text = format!(
-            "🔔 Cito · {from}\n\n{}",
-            s["message"].as_str().unwrap_or("")
-        );
+        let text = format!("Cito · {from}\n\n{}", s["message"].as_str().unwrap_or(""));
         let chars: Vec<char> = text.chars().collect();
         for chunk in chars.chunks(4096).skip(ids.len()) {
             let text: String = chunk.iter().collect();

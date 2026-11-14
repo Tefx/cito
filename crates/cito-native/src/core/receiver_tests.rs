@@ -263,7 +263,7 @@ fn rpc_error_fails_closed_even_with_one_channel_and_preserves_frozen_retry() -> 
     assert_eq!(requests[0]["text"], failed[0]["batch_card"]);
     assert_eq!(
         requests[0]["text"],
-        "🔔 Cito · bob@other · Sender\n\nmessage &lt;s&gt;"
+        "Cito · bob@other · Sender\n\nmessage &lt;s&gt;"
     );
     assert_eq!(f.rows()?[0]["state"], "DISPATCHED");
     assert!(f.rows()?[0]["acknowledged_at_ms"].is_number());

@@ -42,7 +42,7 @@ code, pre {
 .nav-cta, .secondary-button, .eyebrow, .moment-index, .harness-tag,
 .copy-command-pill .copy-badge { white-space: nowrap; flex-shrink: 0; }
 .step-num { flex-shrink: 0; }
-.docs-content a.text-link code { color: var(--accent-amber); }
+.docs-content a.text-link code { color: var(--accent-primary); }
 
 :focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 
@@ -102,7 +102,7 @@ code, pre {
 }
 
 .nav-cta:hover {
-  border-color: var(--border-amber);
+  border-color: var(--border-accent);
   background: var(--bg-surface-hover);
 }
 
@@ -131,7 +131,7 @@ code, pre {
   font-size: 0.78rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--accent-amber);
+  color: var(--accent-primary);
   margin-bottom: var(--space-sm);
 }
 
@@ -193,7 +193,7 @@ code, pre {
   padding: 0.82rem 1.25rem;
   border-radius: var(--radius-md);
   background: var(--bg-surface);
-  border: 1px solid var(--border-amber);
+  border: 1px solid var(--border-accent);
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 0.95rem;
@@ -203,11 +203,11 @@ code, pre {
 
 .copy-command-pill:hover {
   background: var(--bg-surface-hover);
-  border-color: var(--accent-amber);
+  border-color: var(--accent-primary);
 }
 
 .copy-command-pill .prompt-dollar {
-  color: var(--accent-amber);
+  color: var(--accent-primary);
   user-select: none;
 }
 
@@ -217,8 +217,8 @@ code, pre {
   font-weight: 550;
   padding: 0.22rem 0.58rem;
   border-radius: var(--radius-sm);
-  background: var(--accent-amber-soft);
-  color: var(--accent-amber);
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
 }
 
 .secondary-button {
@@ -272,7 +272,7 @@ code, pre {
 .moment-index {
   font-family: var(--font-mono);
   font-size: 0.8rem;
-  color: var(--accent-amber);
+  color: var(--accent-primary);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -302,7 +302,7 @@ code, pre {
 
 .moment-list li::before {
   content: "→ ";
-  color: var(--accent-amber);
+  color: var(--accent-primary);
   font-family: var(--font-mono);
 }
 
@@ -367,9 +367,9 @@ code, pre {
 
 .step-tab[aria-selected="true"],
 .preview-tabs button[aria-selected="true"] {
-  background: var(--accent-amber-soft);
-  border-color: var(--border-amber);
-  color: var(--accent-amber);
+  background: var(--accent-primary-soft);
+  border-color: var(--border-accent);
+  color: var(--accent-primary);
 }
 
 .step-num {
@@ -386,7 +386,7 @@ code, pre {
 }
 
 .step-tab[aria-selected="true"] .step-num {
-  background: var(--accent-amber);
+  background: var(--accent-primary);
   color: var(--bg-canvas);
 }
 
@@ -438,7 +438,7 @@ code, pre {
 
 /* 1:1 Proportional Logical Sizing:
    Every screenshot scales strictly by (--logical-w / 560) so 1pt of macOS UI
-   has the exact same visual size across Menu (380pt), Banner (388pt),
+   has the exact same visual size across Menu (380pt),
    Settings (520pt), and Directory/Activity (560pt). */
 .screenshot-img {
   display: block;
@@ -538,7 +538,7 @@ code, pre {
 .harness-tag {
   font-family: var(--font-mono);
   font-size: 0.75rem;
-  color: var(--accent-amber);
+  color: var(--accent-primary);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -568,7 +568,7 @@ code, pre {
   display: inline-flex;
   align-items: center;
   align-self: flex-start;
-  color: var(--accent-amber);
+  color: var(--accent-primary);
   font-weight: 550;
 }
 
@@ -734,7 +734,7 @@ code, pre {
   padding: 1.15rem 1.35rem;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
-  border-left: 3px solid var(--accent-amber);
+  border-left: 3px solid var(--accent-primary);
 }
 
 .docs-table {

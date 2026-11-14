@@ -1,35 +1,35 @@
-# Cito Brand & Website Raster Artwork Prompts (OpenAI Images 2.6)
+# Cito Brand & Website Artwork
 
-All studio raster assets in `site/assets/art/` and `bin/AppIcon.icns` were generated with **OpenAI Images 2.6** (`gpt-image-1.5` / Codex `image_gen`) using a unified industrial design language inspired by Teenage Engineering, Dieter Rams / Braun, and Apple macOS dark hardware aesthetics.
+Cito uses a clean cobalt identity and real AppKit screenshots. Assets must describe the shipped four-surface interface: menu bar, Directory, Activity, and Settings. Use generic users, repositories, and network examples.
 
-## 1. `site/assets/art/app-icon-master.png` -> `bin/AppIcon.icns`
-- **Target Resolution**: `1024 × 1024` master squircle, downsampled into all 10 standard macOS `.iconset` slices (`16×16` through `512×512@2x`) and compiled via `/usr/bin/iconutil -c icns -o bin/AppIcon.icns`.
-- **Prompt**:
-  > Macro product photography of a tactile macOS application icon squircle on a pure pitch-black background. Bead-blasted dark graphite anodized aluminum body (#14171F) with a subtle chamfered rim and a recessed matte-obsidian circular instrument dial. Inside the dial: an open C-shaped brushed silver transceiver arc on the left (opening toward the right), a glowing warm-amber central signal core (#F59E0B), and a single warm-amber outbound acoustic wave arc on the right. Soft studio rim lighting, crisp physical materials, zero text, zero neon purple/cyan glow.
+## App icon
 
-## 2. `site/assets/art/hero-stage.png`
-- **Target Resolution**: `1672 × 941` (16:9 widescreen hero backdrop).
-- **Prompt**:
-  > Calm dark-mode industrial desk stage in deep obsidian graphite (#0C0E12) with subtle brushed aluminum edges and soft warm-amber rim light (#F59E0B) casting a gentle horizon glow across a matte dark surface. Minimal architectural composition with generous negative space designed to frame a macOS menu bar and agent signaling stage. Zero text, zero clutter, zero neon gradients.
+- **Master:** `site/assets/art/app-icon-master.png`, 1024 × 1024.
+- **Design:** A satin cobalt squircle with the gradient `#1B6EF3 → #0057BF → #0048A8`. Center a white open C-shaped transceiver arc and signal core, with a pale `#E0F2FE` outbound wave. Keep the mark legible at 16 pixels and its contrast at least 4.5:1 against the background. No metal bezel, screws, amber light, or text.
+- **Outputs:** All ten standard macOS iconset slices (`16×16` through `512×512@2x`), compiled with `iconutil` into `bin/AppIcon.icns`; a 180 × 180 `site/apple-touch-icon.png`.
+- **Production:** The current master and derivatives are generated with native CoreGraphics and AppKit, then downsampled with `sips` and compiled with `iconutil`.
 
-## 3. `site/assets/art/moment-cross-harness.png`
-- **Target Resolution**: `1774 × 887` (2:1 editorial illustration).
-- **Prompt**:
-  > Minimalist top-down studio hardware sculpture representing three distinct coding agent nodes (brushed titanium, matte slate, and anodized dark bronze modules) resting on a dark graphite surface, connected by a single crisp warm-amber optical light trace (#F59E0B) passing a signal pulse directly from one node to another. Calm studio lighting, high tactile precision, zero text.
+## Vector identity
 
-## 4. `site/assets/art/moment-human-network.png`
-- **Target Resolution**: `1536 × 1024` (3:2 editorial illustration).
-- **Prompt**:
-  > Minimalist dark-mode studio composition showing a sleek anodized aluminum laptop edge and a pocket handheld transceiver silhouette linked by a warm-amber signal arc (#F59E0B) to a shared central hub ring on a calm matte-obsidian desk. Represents a human staying in the loop across desktop and mobile without friction. Zero text, tactile materials, soft warm lighting.
+`site/assets/brand/cito-mark.svg`, both `cito-logo-*.svg` wordmarks, and `site/favicon.svg` use the same white C/core and pale outbound wave on cobalt. Wordmarks use plain contrasting type without stroke outlines. Keep contrast above 4.5:1 in both page themes.
 
-## 5. `site/assets/og-card.png`
-- **Target Resolution**: `1200 × 630` (OpenGraph / social preview card).
-- **Composition**: Composited from `app-icon-master.png`, `hero-stage.png`, the Cito brand lockup, headline (*"Where your agents talk—with you, and each other."*), and primary install command (`brew install --cask tefx/tap/cito`).
+## Native interface captures
 
-## 6. `site/assets/art/architecture-topology.svg`
-- **Current Asset**: Hand-authored `960 × 420` SVG with labeled Agent Session Nodes, HubEngine, attached Human channels, and remote Hubs. Keep the protocol labels editable; do not regenerate this diagram as a raster image.
-- **Archived Raster Prompt** (`architecture-topology.png`, no longer used by the architecture page):
-- **Target Resolution**: `1408 × 768` (16:9 editorial architecture sculpture).
-- **Prompt**:
-  > Minimalist dark-mode studio hardware sculpture representing a symmetric signaling architecture on a matte obsidian graphite surface (#0C0E12). In the center sits a circular brushed dark-aluminum Hub ring with a warm amber core (#F59E0B). On the left side, three compact precision-machined metallic compute modules (representing coding agent sessions) connect to the central Hub via warm amber optical light traces. On the right side, a sleek anodized aluminum laptop edge and a pocket handheld transceiver silhouette connect to the same central Hub via warm amber optical light traces. Calm Dieter Rams / Teenage Engineering industrial aesthetic, soft studio rim lighting, zero text, zero labels, zero neon purple/cyan.
+Capture real headless AppKit views at 2× Retina resolution with the integration test `v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility` and `CITO_TEST_SNAPSHOT_DIR`. Inspect every image before copying it into `site/assets/screenshots/`:
 
+- `menu-dark.png`: Shared YOUR INBOX, attached channels, agent sessions, and unread navigation.
+- `directory-dark.png`: Unified Nodes, readable addresses, All Nodes/Mine filters, and Message actions.
+- `activity-dark.png`: Unread messages and an inline one-line reply composer.
+- `settings-apps-dark.png`: App setup states, status dots, and Check & Repair.
+- `settings-channels-dark.png`: Shared gateway and personal account pairing.
+- `settings-hubs-dark.png`: Sharing controls, connected Hubs, and the Default badge.
+
+Do not generate mock UI artwork or modify labels in an image editor. Screenshot geometry, tooltips, accessibility, and contrast are checked against the rendered native view tree.
+
+## Social preview
+
+`site/assets/og-card.png` is 1200 × 630. Use a neutral slate dot-grid, cobalt Cito lockup, the headline “Where your agents talk—with you, and each other.”, and `brew install --cask tefx/tap/cito`. Composite the current menu and Activity captures at their original aspect ratios. Keep the install command readable at social-preview scale.
+
+## Architecture diagram
+
+`site/assets/art/architecture-topology.svg` is an editable 960 × 420 vector diagram. Show symmetric Human and Agent Session Nodes, attached Channels, the single-authority HubEngine, and remote Hubs. Use Cito Blue for the Hub and primary paths, readable neutral cards, and semantic plugin colors with accessible contrast. Label the Mac interaction `Unread badge + 1-line reply`. Keep protocol labels editable; do not substitute a raster illustration.

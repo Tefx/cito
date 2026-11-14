@@ -215,6 +215,34 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("7", str(error.exception))
         self.assertNotIn("sensitive-fixture", str(error.exception))
 
+    def test_bundle_requires_direct_ui_helper_instead_of_a_plugin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Cito.app"
+            resources = app / "Contents/Resources"
+            (resources / "plugins").mkdir(parents=True)
+            (app / "Contents/Helpers").mkdir()
+            with (app / "Contents/Info.plist").open("wb") as stream:
+                plistlib.dump({"CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3"}, stream)
+            helper = app / "Contents/Helpers/cito-ui"
+            for path in (helper, app / "Contents/Helpers/cito-native", resources / "AppIcon.icns"):
+                path.write_bytes(b"component fixture")
+
+            def native(command, **kwargs):
+                output = "cito v1.2.3\n" if command[-1] == "--version" else "arm64\n"
+                return subprocess.CompletedProcess(command, 0, output, "")
+
+            with patch.object(release, "run", side_effect=native) as commands:
+                release.verify_bundle(app, "1.2.3")
+                self.assertTrue(any(call.args[0][-1] == helper for call in commands.call_args_list))
+            helper.unlink()
+            retired = resources / "plugins/human/bin/cito-ui"
+            retired.parent.mkdir(parents=True)
+            retired.write_bytes(b"retired component fixture")
+            with patch.object(release, "run") as commands:
+                with self.assertRaisesRegex(release.ReleaseError, "Contents/Helpers/cito-ui"):
+                    release.verify_bundle(app, "1.2.3")
+                commands.assert_not_called()
+
     def test_app_and_brew_environment_does_not_inherit_credentials(self):
         with patch.dict(os.environ, {"APPLE_CERTIFICATE_PASSWORD": "fixture", "GH_TOKEN": "fixture", "HOMEBREW_TAP_SSH_KEY": "fixture", "SSH_AUTH_SOCK": "fixture"}):
             env = release.isolated_env(Path("/tmp/isolated-home"))

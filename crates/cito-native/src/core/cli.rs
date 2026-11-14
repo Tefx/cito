@@ -73,18 +73,21 @@ pub fn parse_cli(
             "--channel" => {
                 meta.insert("channel".into(), json!(read_value(args, &mut i, flag)?));
             }
-            "--scope" if cmd == "listen" => {
+            "--scope" if matches!(cmd, "listen" | "inbox") => {
                 let value = read_value(args, &mut i, flag)?;
                 if !matches!(value.as_str(), "self" | "workspace") {
                     return Err("Invalid --scope".into());
                 }
                 input.insert("scope".into(), json!(value));
             }
-            "--team" if cmd == "listen" => {
+            "--team" if matches!(cmd, "listen" | "inbox") => {
                 if input.get("scope") == Some(&json!("self")) {
                     return Err("Conflicting --team and --scope self".into());
                 }
                 input.insert("scope".into(), json!("workspace"));
+            }
+            "--about" if cmd == "inbox" => {
+                input.insert("about".into(), json!(read_value(args, &mut i, flag)?));
             }
             "--title" | "-t" if cmd == "listen" => {
                 input.insert("title".into(), json!(read_value(args, &mut i, flag)?));
@@ -179,6 +182,20 @@ pub fn parse_cli(
                 positionals.join(" ")
             }),
         );
+    } else if cmd == "inbox"
+        && positionals.len() == 1
+        && matches!(positionals[0].as_str(), "pause" | "resume")
+    {
+        if !meta.is_empty()
+            || input
+                .keys()
+                .any(|key| !matches!(key.as_str(), "hub" | "scope" | "about"))
+        {
+            return Err(
+                "Inbox policy commands accept only --hub, --scope, --team and --about".into(),
+            );
+        }
+        input.insert("paused".into(), json!(positionals[0] == "pause"));
     } else if cmd == "rename" {
         if positionals.is_empty() {
             return Err("rename requires a title".into());
@@ -238,7 +255,17 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
     let result = (|| -> Result<(), String> {
         let (input, meta) = parse_cli(cmd, args, plugins)?;
         ensure_daemon(config)?;
-        let payload = if cmd == "rename" || cmd == "status" || input["all"] == true {
+        let payload = if cmd == "inbox" && input["paused"].is_boolean() {
+            let mut action = input.clone();
+            action["op"] = json!("human_inbox_update");
+            control_request(config, &action)?
+        } else if matches!(cmd, "listen" | "unlisten") && meta["expected_harness"] == "human" {
+            let mut action = json!({"op":"cli_human_device","attach":cmd=="listen"});
+            if let Some(hub) = input.get("hub") {
+                action["hub"] = hub.clone();
+            }
+            control_request(config, &action)?
+        } else if cmd == "rename" || cmd == "status" || input["all"] == true {
             let action = match cmd {
                 "rename" => json!({"op":"cli_rename","title":input["title"],"meta":meta}),
                 "status" => json!({"op":"get_snapshot"}),

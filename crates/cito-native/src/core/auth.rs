@@ -421,6 +421,8 @@ impl HubAuth {
         if diff != 0 {
             return Err("AUTHORIZATION_VIOLATION: invalid token".into());
         }
-        Ok(local_principal(&user))
+        let mut principal = local_principal(&user);
+        principal["auth_mode"] = json!("token");
+        Ok(principal)
     }
 }

@@ -24,19 +24,15 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
     let mut plugins = Vec::new();
     let mut seen_dirs = HashSet::new();
     let mut seen_ids = HashSet::new();
-    let bundled_companion = super::setup::resolve_bundled_plugin_dir("human");
+    if let Some(state) = user_root.and_then(Path::parent) {
+        super::plugins::cleanup_retired_companion(state)?;
+    }
     for root in roots {
         if !root.exists() {
             continue;
         }
         // A bundled fallback may share the user root's target without being a user copy.
-        let is_user_root = user_root.is_some_and(|user| {
-            root == user
-                || (super::plugins::same_plugin_root(root, user)
-                    && !bundled_companion
-                        .parent()
-                        .is_some_and(|bundled| super::plugins::same_plugin_root(root, bundled)))
-        });
+        let is_user_root = user_root.is_some_and(|user| root == user);
         for entry in std::fs::read_dir(root)
             .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", root.display()))?
         {
@@ -49,8 +45,7 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
             if is_user_root && super::plugins::remove_legacy_staged_plugin(&dir, true) {
                 continue;
             }
-            if dir_name == "human" && !super::plugins::same_plugin_root(&dir, &bundled_companion) {
-                // The internal companion is never supplied by an external root.
+            if dir_name == "human" {
                 continue;
             }
             if seen_ids.contains(dir_name) || seen_dirs.contains(dir_name) {
@@ -59,9 +54,7 @@ pub fn discover(roots: &[PathBuf], user_root: Option<&Path>) -> Result<Vec<Chann
             let m: Value =
                 serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
                     .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", path.display()))?;
-            if m["id"].as_str() == Some("human")
-                && !super::plugins::same_plugin_root(&dir, &bundled_companion)
-            {
+            if m["id"].as_str() == Some("human") {
                 continue;
             }
             seen_dirs.insert(dir_name.to_owned());

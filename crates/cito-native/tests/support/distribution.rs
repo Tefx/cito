@@ -237,10 +237,6 @@ fn distribution_versions_native_manifests_cask_and_signed_ui() {
         f.command("/usr/bin/codesign", &["--verify", ui.to_str().unwrap()], "")
             .0
     );
-    assert_eq!(
-        bytes,
-        fs::read(r.join("plugins/human/bin/cito-ui")).unwrap()
-    );
 }
 #[test]
 fn relocatable_signed_app_and_installed_shims_work_without_node() {
@@ -266,7 +262,36 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     );
     assert!(ok, "{out} {err}");
     let v: Value = serde_json::from_str(&out).unwrap();
-    let app = std::path::Path::new(v["appPath"].as_str().unwrap());
+    let original = std::path::Path::new(v["appPath"].as_str().unwrap());
+    let moved = f.dir.join("Relocated/Cito.app");
+    fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    fs::rename(original, &moved).unwrap();
+    let app = moved.as_path();
+    // Keep stdin open until the relocated helper processes its main-run-loop frames.
+    let helper = f.spawn(
+        app.join("Contents/Helpers/cito-ui").to_str().unwrap(),
+        &[],
+        &[],
+    );
+    f.send(helper,json!({"op":"state","hubs":[{"name":"local","status":"connected","auth_mode":"none","user":"alice"}],"listeners":[],"unread_count":0}));
+    f.send(helper, json!({"op":"test_inspect_menu"}));
+    wait(|| f.output(helper, true).contains("cito-ui: menu "));
+    let inspected: Value = serde_json::from_str(
+        f.output(helper, true)
+            .lines()
+            .find_map(|line| line.strip_prefix("cito-ui: menu "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inspected["count"], 0);
+    assert!(inspected["items"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(inspected["button_tooltip"]
+        .as_str()
+        .is_some_and(|text| !text.is_empty()));
+    f.eof(helper);
+    wait(|| f.exited(helper));
     for id in ["codex", "pi", "claude", "telegram"] {
         let source = fs::read(root().join("plugins").join(id).join("icon.png")).unwrap();
         assert_eq!(
@@ -411,8 +436,6 @@ fn website_links_resolve_under_pages_subpath_and_png_assets_decode() {
         ("assets/screenshots/settings-apps-dark.png", 1040, 920),
         ("assets/screenshots/settings-channels-dark.png", 1040, 920),
         ("assets/screenshots/settings-hubs-dark.png", 1040, 920),
-        ("assets/screenshots/banner-dark.png", 760, 224),
-        ("assets/screenshots/wake-card-dark.png", 760, 224),
     ] {
         let bytes = fs::read(site.join(path)).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
@@ -487,13 +510,9 @@ fn brand_svg_self_backing_and_foreground_contrast_on_both_readme_themes() {
         "site/favicon.svg",
     ] {
         let svg = fs::read_to_string(r.join(path)).unwrap();
-        let backing = if path.ends_with("favicon.svg") {
-            "0C0E12"
-        } else {
-            "14171F"
-        };
+        let backing = "0057BF";
         assert!(svg.contains(&format!("fill=\"#{backing}\"")), "{path}");
-        for fg in ["F3F4F6", "F59E0B"] {
+        for fg in ["FFFFFF", "E0F2FE"] {
             assert!(svg.contains(fg));
             assert!((luminance(fg) + 0.05) / (luminance(backing) + 0.05) > 4.5);
         }

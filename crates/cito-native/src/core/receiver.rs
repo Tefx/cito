@@ -574,6 +574,10 @@ pub fn detach_channel_expected(
     channel: &str,
     captured: &Value,
 ) -> Result<(), String> {
+    if channel.ends_with(":human") {
+        client.human_request("human_device_detach", &json!({"node_id":id,"channel_id":channel,"binding_generation":captured["binding_generation"],"owner_token":captured["owner_token"]}))?;
+        return Ok(());
+    }
     for _ in 0..3 {
         let Some((mut remote, revision)) = client.kv_get(id)? else {
             return Ok(());
@@ -592,12 +596,11 @@ pub fn detach_channel_expected(
                 .ok_or("INVALID_INPUT: Listener channel must be an object")?
                 .insert("state".into(), json!("UNLISTENED"));
         }
-        if channel.ends_with(":human") {
-            remote["human_paused"] = json!(true);
-        }
         super::lease::reconcile_registration_state(&mut remote, now_ms());
-        if client.kv_save(id, &remote, Some(revision)).is_ok() {
-            return Ok(());
+        match client.kv_save(id, &remote, Some(revision)) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.starts_with("10071:") => {}
+            Err(error) => return Err(error),
         }
     }
     Err("STALE_GENERATION: Channel detach CAS retries exhausted".into())

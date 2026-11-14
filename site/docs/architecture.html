@@ -114,8 +114,12 @@
       <ol>
         <li><strong>Layer 1 — Hub Service</strong>: Single-authority node registry, durable signal stream, read-state synchronization, and authentication/row-level security (<code>none</code>, <code>token</code>, and <code>oidc</code>). Runs identically in-process for zero-config single-Mac use (<code>local://</code>), shared over LAN (<code>:4291</code>), or deployed as a standalone <code>cito hub</code> server.</li>
         <li><strong>Layer 2 — Local Agent Host &amp; MCP Bridge</strong>: Local background daemon, lightweight MCP stdio proxy (<code>cito-mcp</code>), and out-of-process Agent Harness plugins that discover sessions and deliver wake cards.</li>
-        <li><strong>Layer 3 — Human Presence &amp; Messaging Channels</strong>: Four native macOS surfaces (Menu Bar dropdown, Directory &amp; Activity window with inline reply composer, 3-tab Settings window, and desktop Wake Banner) plus persistent Human Channel subprocesses such as Telegram.</li>
+        <li><strong>Layer 3 — Human Presence &amp; Messaging Channels</strong>: Four native macOS surfaces (Menu Bar dropdown, Directory, Activity with inline reply composer, and 3-tab Settings) plus persistent Human Channel subprocesses such as Telegram.</li>
       </ol>
+
+      <h3>Hub-authoritative Human inbox</h3>
+      <p>Each Hub owns one Human inbox per principal. Device attach, heartbeat, and detach operations mutate only that device's attachment, fenced by its binding generation and owner token. Inbox Pause/Resume, description, and visibility use a control-revision compare-and-swap; a stale Pause cannot overwrite a newer Resume. Paused inboxes reject new publication atomically, while detaching one Mac preserves all other devices and channel bindings.</p>
+      <p>Availability uses the Hub clock: device ages below 60 seconds are active, 60 seconds through 30 minutes are disconnected but retained, and older devices expire. A complete Hub-hosted channel stays active without a device heartbeat. Expiry never pauses or deletes the Human profile. The native UI receives sanitized attachment projections without owner tokens and retains each Hub's distinct Node in Directory.</p>
 
       <h2 id="mcp-tools">5. Public MCP &amp; CLI Interfaces</h2>
       <h3>MCP Tools</h3>
@@ -131,12 +135,12 @@
           <tr>
             <td><code>cito_listen</code></td>
             <td><code>{ about, tag?, hub?, scope? }</code></td>
-            <td>Enrolls the calling session on the default or specified Hub with <code>"self"</code> or <code>"workspace"</code> visibility.</td>
+            <td>Enrolls the calling agent session on the default or specified Hub with <code>"self"</code> or <code>"workspace"</code> visibility.</td>
           </tr>
           <tr>
             <td><code>cito_unlisten</code></td>
             <td><code>{ hub? }</code></td>
-            <td>Revokes listening for the calling session on one Hub or all active Hubs.</td>
+            <td>Revokes listening for the calling agent session on one Hub or all active Hubs. Human enrollment through MCP returns <code>FORBIDDEN</code>.</td>
           </tr>
           <tr>
             <td><code>cito_find</code></td>
@@ -157,10 +161,12 @@
       </table>
 
       <h3>CLI Commands</h3>
+      <p><code>cito listen/unlisten --harness human</code> controls only this Mac's attachment. <code>cito inbox pause/resume</code> controls the shared Human inbox across all attached channels; Resume omits the description unless <code>--about</code> is supplied. <code>cito unlisten --all [--hub &lt;name&gt;]</code> stops agents only. Human inbox and device administration remain CLI/GUI-only.</p>
       <pre><code>cito listen [--scope &lt;self|workspace&gt;] [--team] [--hub &lt;hub&gt;] [--tag &lt;tag&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json] [about...]
 cito unlisten [--hub &lt;hub&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito find [--hub &lt;hub&gt;] [--user|-u &lt;user&gt;] [--host &lt;host&gt;] [--repo &lt;repo&gt;] [--query|-q &lt;query&gt;] [--harness &lt;id&gt;|--codex|--claude] [--limit &lt;1..50&gt;] [--json] [query...]
 cito send --to &lt;target&gt; --message|-m &lt;text&gt; [--hub &lt;hub&gt;] [--reply-to|--in-reply-to &lt;signal_id&gt;] [--idempotency-key &lt;key&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
+cito inbox pause|resume [--hub &lt;hub&gt;] [--scope &lt;self|workspace&gt;] [--team] [--about &lt;text&gt;]
 cito inbox [--hub &lt;hub&gt;] [--unread|--peek|--no-ack] [--ack-all] [--ack &lt;id&gt;...] [--limit &lt;1..1000&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito setup [--status] [--dry-run] [--force] [--enable &lt;harness&gt;] [--disable &lt;harness&gt;] [--uninstall [--purge-data]] [--hub &lt;name&gt; --url &lt;url&gt; [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--default]] [--share-hub|--no-share-hub] [--share-port &lt;port&gt;] [--login-item|--no-login-item] [--json]
 cito hub [--port &lt;port&gt;] [--bind &lt;addr&gt;] [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--data-dir &lt;dir&gt;]</code></pre>

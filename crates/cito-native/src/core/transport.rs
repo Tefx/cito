@@ -98,6 +98,9 @@ pub struct HubClient {
     pub auth_rejected_hash: Option<String>,
     pub rejected_bearer: Arc<Mutex<Option<String>>>,
     directory_cache: Arc<Mutex<Vec<Value>>>,
+    // Serialize network writers without holding the cache lock used by UI projections.
+    directory_updates: Arc<Mutex<()>>,
+    server_clock: Arc<Mutex<Option<(u64, Instant)>>>,
     pub local: Option<Arc<HubEngine>>,
     pub status: Arc<Mutex<String>>,
     pub closed: Arc<AtomicBool>,
@@ -122,6 +125,8 @@ impl HubClient {
             auth_rejected_hash: None,
             rejected_bearer: Arc::new(Mutex::new(None)),
             directory_cache: Arc::new(Mutex::new(Vec::new())),
+            directory_updates: Arc::new(Mutex::new(())),
+            server_clock: Arc::new(Mutex::new(None)),
             local,
             status: Arc::new(Mutex::new(status.into())),
             closed: Arc::new(AtomicBool::new(false)),
@@ -300,8 +305,44 @@ impl HubClient {
     pub fn cached_directory(&self) -> Vec<Value> {
         self.directory_cache
             .lock()
-            .map(|rows| rows.clone())
+            .map(|rows| {
+                let mut rows = rows.clone();
+                if let Ok(clock) = self.server_clock.lock() {
+                    if let Some((now, observed)) = *clock {
+                        for row in &mut rows {
+                            row["server_now_ms"] = json!(now.saturating_add(
+                                observed.elapsed().as_millis().min(u64::MAX as u128) as u64
+                            ));
+                        }
+                    }
+                }
+                rows
+            })
             .unwrap_or_default()
+    }
+    pub fn server_now(&self) -> u64 {
+        self.server_clock
+            .lock()
+            .ok()
+            .and_then(|clock| *clock)
+            .map(|(now, observed)| {
+                now.saturating_add(observed.elapsed().as_millis().min(u64::MAX as u128) as u64)
+            })
+            .unwrap_or(0)
+    }
+    fn observe_server_clock(&self, response: &Value) {
+        if let Some(now) = response["server_now_ms"].as_u64() {
+            if let Ok(mut clock) = self.server_clock.lock() {
+                let previous = clock
+                    .map(|(time, observed)| {
+                        time.saturating_add(
+                            observed.elapsed().as_millis().min(u64::MAX as u128) as u64
+                        )
+                    })
+                    .unwrap_or(0);
+                *clock = Some((now.max(previous), Instant::now()));
+            }
+        }
     }
     pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
         if self.local.is_some() {
@@ -362,8 +403,40 @@ impl HubClient {
             }
         }))
     }
+    pub fn human_request(&self, op: &str, params: &Value) -> Result<Value, String> {
+        let _update = self
+            .directory_updates
+            .lock()
+            .map_err(|_| "STATE_ERROR: Directory update lock poisoned")?;
+        let result = match self.rpc(op, params) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(state) = error
+                    .strip_prefix("CONTROL_REVISION_CONFLICT: ")
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                {
+                    self.cache_human(&state);
+                }
+                return Err(error);
+            }
+        };
+        self.cache_human(&result);
+        Ok(result)
+    }
+    fn cache_human(&self, result: &Value) {
+        self.observe_server_clock(result);
+        if result["record"].is_object() {
+            let mut record = result["record"].clone();
+            record["server_now_ms"] = result["server_now_ms"].clone();
+            if let Ok(mut cache) = self.directory_cache.lock() {
+                cache.retain(|row| row["listener_id"] != record["listener_id"]);
+                cache.push(record);
+            }
+        }
+    }
     pub fn kv_get(&self, id: &str) -> Result<Option<(Value, u64)>, String> {
         let value = self.rpc("kv_get", &json!({"key":id}))?;
+        self.observe_server_clock(&value);
         if value.is_null() {
             return Ok(None);
         }
@@ -373,13 +446,15 @@ impl HubClient {
         let bytes = STANDARD
             .decode(string(&value, "value_b64"))
             .map_err(|e| e.to_string())?;
-        Ok(Some((
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
-            value["revision"].as_u64().unwrap_or(0),
-        )))
+        let record: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        Ok(Some((record, value["revision"].as_u64().unwrap_or(0))))
     }
     pub fn kv_save(&self, id: &str, value: &Value, revision: Option<u64>) -> Result<Value, String> {
-        let data = STANDARD.encode(serde_json::to_vec(value).map_err(|e| e.to_string())?);
+        let mut value = value.clone();
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("server_now_ms");
+        }
+        let data = STANDARD.encode(serde_json::to_vec(&value).map_err(|e| e.to_string())?);
         self.rpc(
             if revision.is_some() {
                 "kv_update"
@@ -390,7 +465,12 @@ impl HubClient {
         )
     }
     pub fn directory(&self) -> Result<Vec<Value>, String> {
+        let _update = self
+            .directory_updates
+            .lock()
+            .map_err(|_| "STATE_ERROR: Directory update lock poisoned")?;
         let raw = self.rpc("kv_snapshot", &json!({}))?;
+        self.observe_server_clock(&raw);
         let items = raw
             .as_array()
             .or_else(|| raw["entries"].as_array())
@@ -403,7 +483,8 @@ impl HubClient {
                 continue;
             }
             if let Ok(data) = STANDARD.decode(string(&item, "value_b64")) {
-                if let Ok(row) = serde_json::from_slice::<Value>(&data) {
+                if let Ok(mut row) = serde_json::from_slice::<Value>(&data) {
+                    row["server_now_ms"] = raw["server_now_ms"].clone();
                     rows.push(row);
                 }
             }

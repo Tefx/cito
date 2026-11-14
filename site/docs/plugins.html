@@ -55,7 +55,7 @@
         <h1>Subprocess Plugin Authoring Guide</h1>
       </div>
       <p>
-        Cito launches agent harness and human channel integrations as subprocesses. A declarative <code>plugin.json</code> supplies the executable command, UI metadata, and configuration fields. Implement the protocol in any language; no in-process adapter or external SDK package is required. Write one JSON object per line to <code>stdout</code>, read requests from <code>stdin</code>, and send diagnostic logs to <code>stderr</code>.
+        Cito launches agent harness and external human channel integrations as subprocesses. The native macOS companion is an app helper at <code>Cito.app/Contents/Helpers/cito-ui</code>, outside plugin discovery; <code>human</code> is a reserved Node identity and cannot be used as a plugin ID. A declarative <code>plugin.json</code> supplies the executable command, UI metadata, and configuration fields. Implement the protocol in any language; no in-process adapter or external SDK package is required. Write one JSON object per line to <code>stdout</code>, read requests from <code>stdin</code>, and send diagnostic logs to <code>stderr</code>.
       </p>
 
       <h2 id="overview">1. Plugin Discovery &amp; Manifests</h2>
@@ -173,7 +173,7 @@
 {"op":"pair_redeem","code":"cito-a1b2c3d4e5","external_chat_id":"room-1","external_user_id":"user-1","is_private_chat":true,"display_label":"alice","user_config_patch":{"recipientId":"room-1"}}
 {"op":"pair_ack","code":"cito-a1b2c3d4e5","ok":true,"owner_user":"alice","error":null}</code></pre>
       <p>
-        The Hub validates the pairing code and ownership before accepting the binding. Starting another pair, cancelling, or unpairing consumes old codes. Human replies and agent messages use the same Hub signaling path.
+        The Hub validates the pairing code and ownership before accepting the binding. Starting another pair, cancelling, or unpairing consumes old codes. Human replies and agent messages use the same Hub signaling path. A confirmed <code>reply_ack</code> means reply deduplication, signal publication, and source read acknowledgement committed atomically. Advance a polling cursor only after that acknowledgement, or isolate errors per update so one failed reply cannot skip later updates.
       </p>
       <p>
         Agent manifests may provide <code>postSetupHint</code> and <code>postDisconnectHint</code>. Channel manifests may provide <code>setupGuide</code> (an array of instructions), <code>fields[].configuredPlaceholder</code>, <code>fields[].helpText</code>, and <code>pairing.helpText</code>. The Hub projects these as <code>setup_guide</code>, <code>configured_placeholder</code>, <code>help_text</code>, and <code>pairing_help_text</code>.

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" width="64" height="64" fill="none" role="img" aria-label="Cito">
-  <rect x="0" y="0" width="18" height="18" rx="4" fill="#0C0E12" />
-  <path d="M 12.09 5.32 A 5.50 5.50 0 1 0 12.09 12.68" stroke="#F3F4F6" stroke-width="1.75" stroke-linecap="round" />
-  <circle cx="8" cy="9" r="1.65" fill="#F59E0B" />
-  <path d="M 14.84 5.36 A 7.75 7.75 0 0 1 14.84 12.64" stroke="#F59E0B" stroke-width="1.65" stroke-linecap="round" />
+  <rect width="18" height="18" rx="4" fill="#0057BF"/>
+  <path d="M 12.09 5.32 A 5.50 5.50 0 1 0 12.09 12.68" stroke="#FFFFFF" stroke-width="1.65" stroke-linecap="round"/>
+  <circle cx="8" cy="9" r="1.65" fill="#FFFFFF"/>
+  <path d="M 14.84 5.36 A 7.75 7.75 0 0 1 14.84 12.64" stroke="#E0F2FE" stroke-width="1.55" stroke-linecap="round"/>
 </svg>

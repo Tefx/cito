@@ -65,7 +65,7 @@ assert.match(diagram, /<title id="title">[^<]+<\/title>/);
 assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
 const expected = [
   ['menu-dark.png', 'directory-dark.png'],
-  ['banner-dark.png', 'activity-dark.png'],
+  ['menu-dark.png', 'activity-dark.png'],
   ['settings-apps-dark.png', 'settings-channels-dark.png', 'settings-hubs-dark.png']
 ];
 const ids = [...homepage.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
@@ -161,7 +161,7 @@ const sections = Object.fromEntries(headings.map((heading, index) => [
 for (const [section, screenshots] of Object.entries({
   'settings-walkthrough': ['menu-dark.png', 'directory-dark.png', 'activity-dark.png'],
   'agent-apps': ['settings-apps-dark.png'],
-  'telegram-pairing': ['settings-channels-dark.png', 'banner-dark.png'],
+  'telegram-pairing': ['settings-channels-dark.png'],
   'lan-and-team-hubs': ['settings-hubs-dark.png']
 })) {
   const figures = [...sections[section].matchAll(/<figure\b[^>]*>([\s\S]*?)<\/figure>/g)];
@@ -173,7 +173,6 @@ for (const [section, screenshots] of Object.entries({
   }
   assert.equal([...sections[section].matchAll(/class="docs-figure docs-figure--staged"/g)].length, screenshots.length);
 }
-assert.match(sections['telegram-pairing'], /docs-figure-stage--compact[\s\S]*banner-dark\.png/);
 const daily = sections['settings-walkthrough'];
 assert.equal([...daily.matchAll(/<h3>/g)].length, 3);
 for (const part of daily.split('<h3>').slice(1)) assert.equal([...part.matchAll(/<figure\b/g)].length, 1);

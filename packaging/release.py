@@ -27,7 +27,6 @@ VERSION_FILES = (
     "plugins/pi/plugin.json",
     "plugins/codex/plugin.json",
     "plugins/claude/plugin.json",
-    "plugins/human/plugin.json",
     "plugins/telegram/plugin.json",
 )
 MACHO_MAGIC = {
@@ -113,7 +112,7 @@ def isolated_env(home):
     return {
         **inherited, "HOME": str(home), "CITO_STATE_DIR": str(home / ".cito"),
         "CITO_CONFIG_PATH": str(home / ".cito/config.json"),
-        "CITO_DISABLE_UI": "1", "CITO_UI_HEADLESS": "1", "CITO_BANNER_HEADLESS": "1",
+        "CITO_DISABLE_UI": "1", "CITO_UI_HEADLESS": "1",
         "CITO_CODESIGN_IDENTITY": "", "APPLE_SIGNING_IDENTITY": "",
     }
 

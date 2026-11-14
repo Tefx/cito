@@ -5,6 +5,98 @@ fn temp() -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+#[test]
+fn human_device_fencing_inbox_cas_and_publish_pause_are_atomic() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let id = listener_id("none#alice", "human", "default");
+    let device = |host: &str, generation: u64, token: &str| json!({"node_id":id,"channel_id":format!("{host}:human"),"host_id":host,"host_name":host,"binding_generation":generation,"owner_token":token});
+    let a = device("laptop", 1, "a");
+    let b = device("desktop", 1, "b");
+    let attached = e.rpc("human_device_attach", &a, Some(&owner)).unwrap();
+    assert_eq!(attached["record"]["about"], "Human");
+    assert_eq!(attached["record"]["scope"], "workspace");
+    assert_eq!(
+        attached["record"]["channels"]["laptop:human"]["updated_at_ms"],
+        attached["server_now_ms"]
+    );
+    e.rpc("human_device_attach", &b, Some(&owner)).unwrap();
+    e.inner.db.transaction(|c| {
+        let mut reg=parse(&kv_row(c,&id)?.unwrap(),"value");
+        reg["channels"]["hub:messenger"]=json!({"channel_id":"hub:messenger","host_id":"hub","display_name":"Messenger","state":"ACTIVE","updated_at_ms":1});
+        save_human(c,&id,&mut reg)?; Ok(())
+    }).unwrap();
+    let pause=e.rpc("human_inbox_update",&json!({"node_id":id,"expected_control_revision":1,"paused":true,"about":"Approvals","scope":"self"}),Some(&owner)).unwrap();
+    let sibling = pause["record"]["channels"]["desktop:human"].clone();
+    let detached = e.rpc("human_device_detach", &a, Some(&owner)).unwrap();
+    assert_eq!(detached["record"]["human_paused"], true);
+    assert_eq!(detached["record"]["human_control_revision"], 2);
+    assert_eq!(detached["record"]["channels"]["desktop:human"], sibling);
+    assert_eq!(
+        detached["record"]["channels"]["hub:messenger"]["state"],
+        "ACTIVE"
+    );
+    assert_eq!(detached["record"]["about"], "Approvals");
+    assert!(e.rpc("js_publish",&json!({"subject":format!("cito.signal.{id}"),"data":{"signal_id":"paused","message":"blocked"}}),Some(&owner)).unwrap_err().starts_with("LISTENER_NOT_FOUND:"));
+    let resume = e
+        .rpc(
+            "human_inbox_update",
+            &json!({"node_id":id,"expected_control_revision":2,"paused":false}),
+            Some(&owner),
+        )
+        .unwrap();
+    assert_eq!(resume["record"]["about"], "Approvals");
+    assert_eq!(resume["record"]["scope"], "self");
+    assert!(e
+        .rpc(
+            "human_inbox_update",
+            &json!({"node_id":id,"expected_control_revision":2,"paused":true}),
+            Some(&owner)
+        )
+        .unwrap_err()
+        .starts_with("CONTROL_REVISION_CONFLICT:"));
+    let heartbeat = e.rpc("human_device_heartbeat", &b, Some(&owner)).unwrap();
+    assert_eq!(heartbeat["record"]["human_control_revision"], 3);
+    assert_eq!(heartbeat["record"]["human_paused"], false);
+    let replacement = device("desktop", 2, "replacement");
+    e.rpc("human_device_attach", &replacement, Some(&owner))
+        .unwrap();
+    for op in [
+        "human_device_attach",
+        "human_device_heartbeat",
+        "human_device_detach",
+    ] {
+        assert!(e
+            .rpc(op, &b, Some(&owner))
+            .unwrap_err()
+            .starts_with("STALE_GENERATION:"));
+    }
+    let state = e
+        .rpc("human_device_heartbeat", &replacement, Some(&owner))
+        .unwrap();
+    assert_eq!(
+        state["record"]["channels"]["laptop:human"]["state"],
+        "UNLISTENED"
+    );
+    assert!(e
+        .rpc(
+            "kv_put",
+            &json!({"key":id,"data":state["record"]}),
+            Some(&owner)
+        )
+        .unwrap_err()
+        .starts_with("FORBIDDEN:"));
+    let stranger = json!({"principal_id":"none#bob","owner_user":"bob"});
+    assert!(e
+        .rpc("human_device_detach", &replacement, Some(&stranger))
+        .unwrap_err()
+        .starts_with("FORBIDDEN:"));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn put(e: &HubEngine, id: &str, pid: &str, scope: &str) {
     e.rpc("kv_put",&json!({"key":id,"data_b64":encoded(&json!({"listener_id":id,"principal_id":pid,"owner_user":"alice","scope":scope,"harness":"fixture","session_id":"s1","binding_generation":1,"state":"ACTIVE","updated_at_ms":now_ms()}))}),None).unwrap();
 }
@@ -1416,23 +1508,19 @@ fn principal_alias_reregistration_preserves_replay_and_ack_message_ids() {
             let node = listener_id(node_pid, "human", "default");
             registration["listener_id"] = json!(node);
             registration["principal_id"] = json!(node_pid);
-            e.rpc("kv_delete", &json!({"key":old_node}), None).unwrap();
-            e.rpc(
-                "kv_put",
-                &json!({"key":node,"data_b64":encoded(&registration)}),
-                None,
-            )
-            .unwrap();
-            // A newer unrelated Human node must not capture this binding's replay.
-            let mut unrelated = registration.clone();
-            unrelated["principal_id"] = json!("oidc:https://id.example.com|unrelated");
-            unrelated["listener_id"] = json!("unrelated-human");
-            e.rpc(
-                "kv_put",
-                &json!({"key":"unrelated-human","data_b64":encoded(&unrelated)}),
-                None,
-            )
-            .unwrap();
+            // Seed historical principal aliases directly; public whole-record Human writes are forbidden.
+            e.inner
+                .db
+                .transaction(|c| {
+                    c.execute("DELETE FROM hub_kv WHERE key=?", &[json!(old_node)])?;
+                    save_human(c, &node, &mut registration)?;
+                    let mut unrelated = registration.clone();
+                    unrelated["principal_id"] = json!("oidc:https://id.example.com|unrelated");
+                    unrelated["listener_id"] = json!("unrelated-human");
+                    save_human(c, "unrelated-human", &mut unrelated)?;
+                    Ok(())
+                })
+                .unwrap();
             send(&e, &node, signal);
             wait_for(|| {
                 !e.inner.db.query(
@@ -1698,6 +1786,83 @@ fn reply_dedup_target_validation_and_ack_commit_together() {
     e.inner.db.transaction(|c|{c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,user_config_json) VALUES(?,'fixture','alice',?)",&[json!(pid),json!(json!({"_external_chat_id":"room","_external_user_id":"user"}).to_string())])?;c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES('fixture',?,'chunk-1','original','work:sender')",&[json!(pid)])?;Ok(())}).unwrap();
     e.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,delivered_ms) VALUES('fixture',?,'original',1,'delivered','work:sender',?)", &[json!(pid),json!(now_ms())]).unwrap();
     let frame = json!({"op":"inbound_reply","update_id":"u1","external_chat_id":"room","external_user_id":"user","reply_to_external_msg_id":"chunk-1","text":"Approved"});
+    let events = e.subscribe(None).unwrap();
+    e.inner.db.execute("CREATE TRIGGER fail_source_ack BEFORE UPDATE OF acked_at_ms ON hub_signals WHEN OLD.signal_id='original' BEGIN SELECT RAISE(ABORT,'source ack failure'); END",&[]).unwrap();
+    assert!(e
+        .inbound_reply("fixture", &frame)
+        .unwrap_err()
+        .contains("source ack failure"));
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT signal_id,acked_at_ms FROM hub_signals", &[])
+            .unwrap(),
+        vec![json!({"signal_id":"original","acked_at_ms":null})]
+    );
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT update_id FROM hub_processed_replies WHERE update_id='u1'",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+    assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    e.inner
+        .db
+        .execute("DROP TRIGGER fail_source_ack", &[])
+        .unwrap();
+    // Fail notification preparation only after publication is visible in the transaction.
+    e.inner
+        .db
+        .execute(
+            "ALTER TABLE hub_channel_delivery_msgs RENAME TO reply_maps",
+            &[],
+        )
+        .unwrap();
+    e.inner.db.execute("CREATE VIEW hub_channel_delivery_msgs AS SELECT plugin_id,principal_id,CASE WHEN EXISTS(SELECT 1 FROM hub_signals WHERE subject='cito.signal.sender') THEN abs(-9223372036854775808) ELSE external_msg_id END AS external_msg_id,signal_id,from_listener_id FROM reply_maps",&[]).unwrap();
+    e.inner.db.execute("CREATE TRIGGER prune_reply_maps INSTEAD OF DELETE ON hub_channel_delivery_msgs BEGIN DELETE FROM reply_maps WHERE plugin_id=OLD.plugin_id AND principal_id=OLD.principal_id AND external_msg_id=OLD.external_msg_id; END",&[]).unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT external_msg_id FROM hub_channel_delivery_msgs", &[])
+            .unwrap()[0]["external_msg_id"],
+        "chunk-1"
+    );
+    let preparation_failure = e.inbound_reply("fixture", &frame).unwrap_err();
+    assert!(
+        preparation_failure.contains("integer overflow"),
+        "{preparation_failure}"
+    );
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT signal_id,acked_at_ms FROM hub_signals", &[])
+            .unwrap(),
+        vec![json!({"signal_id":"original","acked_at_ms":null})]
+    );
+    assert!(e
+        .inner
+        .db
+        .query(
+            "SELECT update_id FROM hub_processed_replies WHERE update_id='u1'",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
+    assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    e.inner
+        .db
+        .execute("DROP VIEW hub_channel_delivery_msgs", &[])
+        .unwrap();
+    e.inner
+        .db
+        .execute(
+            "ALTER TABLE reply_maps RENAME TO hub_channel_delivery_msgs",
+            &[],
+        )
+        .unwrap();
     assert_eq!(e.inbound_reply("fixture", &frame).unwrap()["ok"], true);
     assert_eq!(
         e.inbound_reply("fixture", &frame).unwrap()["duplicate"],

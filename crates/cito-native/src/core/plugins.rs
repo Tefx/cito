@@ -551,6 +551,25 @@ pub(super) fn same_plugin_root(left: &Path, right: &Path) -> bool {
             .is_some_and(|(left, right)| left == right)
 }
 
+pub fn cleanup_retired_companion(state_dir: &Path) -> Result<(), String> {
+    for path in [
+        state_dir.join("plugins/human"),
+        state_dir.join("runtime/plugins/human"),
+    ] {
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "Cannot remove retired companion {}: {e}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn load_plugins(state_dir: &Path) -> LoadedPlugins {
     load_plugins_with_cleanup(state_dir, true)
 }
@@ -560,6 +579,11 @@ pub fn load_plugins_readonly(state_dir: &Path) -> LoadedPlugins {
 }
 
 fn load_plugins_with_cleanup(state_dir: &Path, cleanup_legacy: bool) -> LoadedPlugins {
+    if cleanup_legacy {
+        if let Err(error) = cleanup_retired_companion(state_dir) {
+            eprintln!("{error}");
+        }
+    }
     let mut external_roots = Vec::new();
     if let Ok(extra) = env::var("CITO_PLUGIN_PATH") {
         for part in extra.split(':').filter(|s| !s.trim().is_empty()) {
@@ -616,12 +640,11 @@ fn load_plugins_from_roots(
             if is_user_root && remove_legacy_staged_plugin(&sub, cleanup_legacy) {
                 continue;
             }
-            if !is_builtin
-                && (sub.file_name().is_some_and(|name| name == "human")
-                    || fs::read(sub.join("plugin.json"))
-                        .ok()
-                        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-                        .is_some_and(|manifest| manifest["id"].as_str() == Some("human")))
+            if sub.file_name().is_some_and(|name| name == "human")
+                || fs::read(sub.join("plugin.json"))
+                    .ok()
+                    .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                    .is_some_and(|manifest| manifest["id"].as_str() == Some("human"))
             {
                 continue;
             }
@@ -1433,19 +1456,19 @@ mod tests {
             None,
             false,
         );
-        let companion = loaded.find_by_id("human").unwrap();
-        assert!(companion.is_builtin);
-        assert_eq!(companion.plugin_dir, builtin.join("human"));
+        assert!(loaded.find_by_id("human").is_none());
         assert!(external.join("human/plugin.json").is_file());
-        assert!(!loaded.rejected_ids.contains("alias"));
-        // Even a malformed external companion directory must not reject the bundled one.
-        fs::write(external.join("human/plugin.json"), "{").unwrap();
-        assert!(
-            load_plugins_from_roots(&[external], &[builtin], None, false)
-                .find_by_id("human")
-                .unwrap()
-                .is_builtin
-        );
+        let state = root.join("state");
+        for path in [
+            state.join("plugins/human"),
+            state.join("runtime/plugins/human"),
+        ] {
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("orphan"), "no manifest").unwrap();
+        }
+        cleanup_retired_companion(&state).unwrap();
+        assert!(!state.join("plugins/human").exists());
+        assert!(!state.join("runtime/plugins/human").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

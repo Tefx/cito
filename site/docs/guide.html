@@ -102,7 +102,7 @@
           <strong>Step 1 — Menu Bar Enrollment &amp; Presence:</strong> Manage your personal notification state (<code>Pause</code> / <code>Resume</code>), click <code>+ Listen</code> on any open session under <code>AVAILABLE SESSIONS</code>, or open <code>Directory…</code> and <code>Activity…</code> directly.
         </figcaption>
       </figure>
-      <p>The menu bar counts distinct agent sessions; your Human Node does not add a permanent “1”, and unread signals have a separate monochrome count. <strong>Pause</strong> suspends your personal notifications across this Hub while preserving unread Activity and channel credentials; <strong>Resume</strong> keeps the personal card compact. <strong>Pause All</strong> stops agent registrations on the selected Hub while preserving human channels. Status colors adapt to macOS Light and Dark Mode.</p>
+      <p>The menu bar number counts unread signals only. <strong>YOUR INBOX → Pause/Resume</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The inbox remains visible when this Mac is detached. <strong>Pause Agents</strong> stops only agent registrations on the selected Hub. Status colors adapt to macOS Light and Dark Mode.</p>
 
       <h3>Discover and message a peer in Directory</h3>
       <p>Open <strong>Directory…</strong> to find a peer by user, repository, task, or readable address. Filter by <strong>My Macs</strong> or app, then choose <strong>Message</strong> to send a direct signal or copy its address for an agent to use.</p>
@@ -112,19 +112,19 @@
             class="screenshot-img"
             style="--logical-w: 560; --logical-h: 440;"
             src="../assets/screenshots/directory-dark.png"
-            alt="Native Directory with All and My Macs scope filters, app filter pills, Message button, and copyable session address chips"
+            alt="Native Directory with All Nodes and Mine scope filters, app filter pills, Message button, and copyable session address chips"
             width="1120"
             height="880"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong>Step 2 — Directory Discovery &amp; Direct Messaging:</strong> Filter online nodes by <code>All</code> / <code>My Macs</code> or coding app, click a readable <code>alice/pi#8a4f</code> chip to copy its exact send address, or click <code>Message</code> to open the inline composer.
+          <strong>Step 2 — Directory Discovery &amp; Direct Messaging:</strong> Filter online nodes by <code>All Nodes</code> / <code>Mine</code> or coding app, click a readable <code>alice/pi#8a4f</code> chip to copy its exact send address, or click <code>Message</code> to open the inline composer.
         </figcaption>
       </figure>
 
       <h3>Read and reply in Activity</h3>
-      <p>Open <strong>Activity…</strong> directly, regardless of the unread count, to review incoming signals. Human-targeted banners say <strong>Reply in Cito ↩</strong> and open the inline reply composer; agent-targeted banners say <strong>View in Activity ↗</strong> and open the matching activity without a composer. Use <strong>Reply</strong> or Return on a signal addressed to your Human Node to send a one-line decision and wake the waiting agent.</p>
+      <p>Open <strong>Activity…</strong> directly, regardless of the unread count, to review incoming signals. Incoming messages increment the unread menu bar badge and enter Activity. External channels can also deliver them when you are away. Use <strong>Reply</strong> or Return on a signal addressed to your Human Node to send a one-line decision and wake the waiting agent.</p>
       <figure class="docs-figure docs-figure--staged">
         <div class="docs-figure-stage">
           <img
@@ -141,7 +141,7 @@
           <strong>Step 3 — Activity Stream &amp; 1-Line Reply:</strong> Filter by <code>For Me</code>, <code>All Activity</code>, or <code>Unread</code>; click <code>↩ Reply</code> (or press Return) on any signal addressed to you to reply inline, or use <code>Copy</code>, <code>✓ Read All</code>, and <code>Clear</code>.
         </figcaption>
       </figure>
-      <p>Filter before paging through history. <strong>Read All</strong> and <strong>Clear</strong> obey the current Activity filter: <strong>For Me</strong> affects only messages addressed to you. <strong>Read All</strong> acknowledges unread signals; <strong>Clear</strong> hides history without acknowledging pending agent work or changing delivery and retry checkpoints. Turning <strong>Mac Desktop Banner</strong> off in Settings hides floating banners on this Mac while Activity and external channels remain active.</p>
+      <p>Filter before paging through history. <strong>Read All</strong> and <strong>Clear…</strong> obey both the current filter and search query: <strong>For Me</strong> affects only messages addressed to you. <strong>Read All</strong> acknowledges unread signals. <strong>Clear…</strong> shows an inline confirmation with the affected count; <strong>Cancel</strong> or Escape leaves history unchanged. Confirming <strong>Clear</strong> hides history without acknowledging pending agent work or changing delivery and retry checkpoints. Opening <strong>Reply</strong> marks that message read.</p>
       <p><strong>Native text editing:</strong> Settings, Directory search, and the message composer support the macOS <strong>Edit</strong> menu and <code>⌘V</code> Paste, <code>⌘A</code> Select All, <code>⌘C</code> Copy, <code>⌘X</code> Cut, <code>⌘Z</code> Undo, and <code>⇧⌘Z</code> Redo. Password fields support paste, selection, undo, and redo while blocking Copy and Cut to prevent secret extraction.</p>
 
       <h2 id="agent-apps">3. Agent Apps Setup</h2>
@@ -158,10 +158,10 @@
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong><code>Settings… (⌘,) → Agent Apps</code>:</strong> Click <code>Set Up</code> to register an installed coding harness, <code>Re-check</code> to verify its configuration paths, or <code>Disconnect</code> to remove Cito's integration cleanly.
+          <strong><code>Settings… (⌘,) → Agent Apps</code>:</strong> Click <code>Set Up</code> to register an installed coding harness, <code>Check &amp; Repair</code> to verify its configuration paths, or <code>Disconnect</code> to remove Cito's integration cleanly.
         </figcaption>
       </figure>
-      <p>Cito opens this tab on first launch without silently changing your user files. <strong>Re-check</strong> inspects a connected app; <strong>Repair</strong> restores missing staged files. The Settings footer offers <strong>Start Cito at Login</strong> and <strong>Disconnect All…</strong>, including an option to delete local data and Hub settings.</p>
+      <p>Cito opens this tab on first launch without silently changing your user files. <strong>Check &amp; Repair</strong> checks a connected app and repairs its integration; <strong>Repair</strong> restores missing staged files. The Settings footer offers <strong>Start Cito at Login</strong> and <strong>Disconnect Agent Apps…</strong>, including an option to delete local data and Hub settings.</p>
       <p>
         While <code>Cito.app</code> and the <strong><code>Agent Apps</code></strong> tab in <code>Settings…</code> (<code>⌘,</code>) manage these configuration files automatically (writing the expanded absolute path for your macOS account), you can also inspect what gets registered for each harness:
       </p>
@@ -206,7 +206,7 @@ args = []</code></pre>
       </p>
       <ol>
         <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top.</li>
-        <li>Under <strong><code>1. Shared Bot Gateway</code></strong>, paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) and click <strong><code>Save Gateway Token</code></strong>. A managed Hub may already provide this gateway.</li>
+        <li>Under <strong><code>1. Shared Hub Service</code></strong>, paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) and click <strong><code>Save Gateway Token</code></strong>. A managed Hub may already provide this gateway.</li>
         <li>Under <strong><code>2. Your Personal Account (@&lt;user&gt;)</code></strong>, click <strong><code>Pair Account…</code></strong> and follow the short-lived 10-character Base32 command shown on the card. Pairing is optional; leave your personal account unpaired if you do not want phone notifications yet.</li>
         <li>Send the generated <code>/start cito-&lt;token&gt;</code> message to your bot in a private Telegram chat. Your Telegram <code>Chat ID</code> binds to your user profile automatically.</li>
         <li>When an agent messages <code>@self</code>, you can <strong>swipe-to-reply</strong> on any Telegram notification (or send a plain message within 7 days of the most recent alert) to route your reply straight back to that agent through the Hub.</li>
@@ -218,41 +218,26 @@ args = []</code></pre>
             class="screenshot-img"
             style="--logical-w: 520; --logical-h: 460;"
             src="../assets/screenshots/settings-channels-dark.png"
-            alt="Settings Human Channels tab showing Mac Desktop Banner toggle, collapsed Shared Bot Gateway, and Personal Account pairing controls"
+            alt="Settings Human Channels tab showing shared gateway credentials and Telegram personal account pairing controls"
             width="1040"
             height="920"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong><code>Settings… (⌘,) → Human Channels</code>:</strong> Shared Bot Gateway credentials (<code>1. Shared Bot Gateway</code>) stay separate from your personal Telegram binding (<code>2. Your Personal Account</code>).
+          <strong><code>Settings… (⌘,) → Human Channels</code>:</strong> Shared Hub Service credentials (<code>1. Shared Hub Service</code>) stay separate from your personal Telegram binding (<code>2. Your Personal Account</code>).
         </figcaption>
       </figure>
       <p><strong>Reply routing:</strong> An agent calling <code>cito_send</code> is automatically enrolled as a listener when it has not already enrolled, giving replies a return address; explicitly stopped sessions remain stopped. Telegram delivery mappings remain available for 7 days, so you can reply from Telegram or the Mac menu bar <strong>Activity</strong> stream while the session remains reachable. This reply window is separate from the ten-minute pairing-code expiry.</p>
-      <figure class="docs-figure docs-figure--staged">
-        <div class="docs-figure-stage docs-figure-stage--compact">
-          <img
-            class="screenshot-img"
-            style="--logical-w: 380; --logical-h: 112;"
-            src="../assets/screenshots/banner-dark.png"
-            alt="Cito direct message banner with sender metadata, a close button, and inline-reply navigation"
-            width="760"
-            height="224"
-            loading="lazy"
-          />
-        </div>
-        <figcaption class="docs-figcaption">
-          <strong>Desktop Message Banner:</strong> Normal live messages show sender metadata without a status pill. Deferred messages show <code>Held</code> or <code>Queued</code>; coalesced messages show a compact count. Human-targeted messages show <code>Reply in Cito ↩</code> and open the inline reply composer; agent-targeted messages show <code>View in Activity ↗</code>. Hover pauses dismissal, and the close button dismisses without marking the message read.
-        </figcaption>
-      </figure>
-      <p>Saved Bot Tokens stay redacted. The active Hub Gateway collapses; click <strong>Change Token…</strong> to edit it, leave the field blank to retain the token, or use <strong>Clear Token</strong> to remove the gateway. Personal pairing becomes available once the gateway is ready. Paired accounts collapse to a summary; click <strong>Edit…</strong> to reveal the Chat ID and Save controls. <strong>Send Test</strong> uses candidate values without saving them; <strong>Save</strong> commits personal fields. <strong>Pause</strong> retains your Chat ID; <strong>Unpair</strong> removes your personal binding without clearing the gateway. <strong>Copy Command</strong> copies the active pairing command; <strong>Cancel</strong> invalidates it. A new pairing command supersedes earlier commands and expires after ten minutes.</p>
-      <p>Follow the onboarding guidance in <strong>Agent Apps</strong> to set up your coding app and start listening. In <strong>Activity</strong>, <strong>Read All</strong> and <strong>Clear</strong> follow the selected filter, including <strong>For Me</strong>. <strong>Clear</strong> hides local history without acknowledging pending agent work; each row's <strong>Copy</strong> action retrieves the full message, including text shortened in the preview. <strong>Repair</strong> restores missing staged files. <strong>Disconnect All…</strong> opens a confirmation; <strong>Disconnect All</strong> stops agent listeners and removes app integrations while keeping Cito and your human channels running. Selecting <strong>Also delete local data and Hub settings</strong> additionally stops human listeners, clears local activity and agent listener records, and resets configured Hubs to the default local Hub.</p>
+      <p><strong>Shared inbox versus this Mac:</strong> <code>cito inbox pause|resume [--hub &lt;name&gt;] [--scope &lt;self|workspace&gt;] [--about &lt;text&gt;]</code> changes Hub-wide Human policy. Resume preserves the description unless explicitly supplied. <code>cito listen/unlisten --harness human</code> attaches or detaches this Mac only; detaching does not pause other devices or external channels. Device attachments stay live for 60 seconds, are retained through 30 minutes of disconnection, and then expire without deleting or pausing the Human profile.</p>
+      <p>Saved Bot Tokens stay redacted. The active Hub Gateway collapses; click <strong>Change Token…</strong> to edit it, leave the field blank to retain the token, or use <strong>Clear Token</strong> to remove only its credential while preserving personal bindings. Personal pairing becomes available once the gateway is ready. Paired accounts collapse to a summary; click <strong>Edit…</strong> to reveal the Chat ID and Save controls. <strong>Send Test</strong> uses candidate values without saving them; <strong>Save</strong> commits personal fields. <strong>Pause Telegram</strong> retains your Chat ID; <strong>Unpair</strong> removes your personal binding without clearing the gateway. <strong>Copy Command</strong> copies the active pairing command; <strong>Cancel</strong> invalidates it. A new pairing command supersedes earlier commands and expires after ten minutes.</p>
+      <p>Follow the onboarding guidance in <strong>Agent Apps</strong> to set up your coding app and start listening. In <strong>Activity</strong>, <strong>Read All</strong> and <strong>Clear</strong> follow the selected filter, including <strong>For Me</strong>. <strong>Clear</strong> hides local history without acknowledging pending agent work; each row's <strong>Copy</strong> action retrieves the full message, including text shortened in the preview. <strong>Repair</strong> restores missing staged files. <strong>Disconnect Agent Apps…</strong> opens a confirmation; <strong>Disconnect Apps</strong> stops agent listeners and removes app integrations while keeping Cito and your human channels running. Selecting <strong>Also delete local data and Hub settings</strong> additionally stops human listeners, clears local activity and agent listener records, and resets configured Hubs to the default local Hub.</p>
       <h2 id="lan-and-team-hubs">5. LAN, Tailscale &amp; Team Hub Setup</h2>
       <h3>Sharing Across Your Own Macs (LAN / Tailscale)</h3>
       <ol>
-        <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and toggle on <strong><code>Share This Mac as a Hub</code></strong>.</li>
+        <li>On your primary Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>Start Sharing</code></strong> under <strong><code>Share This Mac as a Hub</code></strong>.</li>
         <li>Click <strong><code>Copy Invite Code</code></strong> to copy a <code>cito setup</code> command containing the host's preferred Tailscale or LAN endpoint and configured access settings.</li>
-        <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>Paste Invite Code</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
+        <li>On your second Mac, open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Hubs &amp; Network</code></strong> and click <strong><code>Join from Clipboard</code></strong> (or run the copied command in your terminal). Both Macs now share the same Hub and your Human Node stays reachable on both machines without session eviction.</li>
       </ol>
 
       <figure class="docs-figure docs-figure--staged">
@@ -261,14 +246,14 @@ args = []</code></pre>
             class="screenshot-img"
             style="--logical-w: 520; --logical-h: 460;"
             src="../assets/screenshots/settings-hubs-dark.png"
-            alt="Settings Hubs and Network tab with Share This Mac as a Hub card, Paste Invite Code, Add Hub, and Connected Hubs list"
+            alt="Settings Hubs and Network tab with Share This Mac as a Hub card, Join from Clipboard, Add Hub, and connected Hubs with a Default badge"
             width="1040"
             height="920"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share This Mac as a Hub</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Paste Invite Code</code> / <code>Add Hub…</code> to connect to another Mac or team server.
+          <strong><code>Settings… (⌘,) → Hubs &amp; Network</code>:</strong> Enable <code>Share This Mac as a Hub</code> to reveal port, authentication, and <code>Copy Invite Code</code> controls, or click <code>Join from Clipboard</code> / <code>Add Hub…</code> to connect to another Mac or team server.
         </figcaption>
       </figure>
       <p>Change the sharing port with <strong>Apply</strong> and select <strong>Auth: Token</strong> or <strong>Auth: None</strong>. Bind errors appear on the sharing card and preserve the previous listener. Use <strong>Edit</strong> on an existing Hub to update its settings without re-entering saved secrets. Disconnected hubs remain visible with <strong>Connect</strong>. OIDC <strong>Switch Account</strong> always requests an interactive account picker.</p>
