@@ -11141,7 +11141,7 @@ phases:
     Discovery & Async Settlement, Ack/Cursor/Queue Integrity, CLI/GUI/MCP/Plugin Parity,
     Strict OIDC/URL/Transport, Bounded Buffers & Push-Down Queries, and Option A Menu
     Slimming'
-  status: in_progress
+  status: done
   gate: 'All binding V41 requirements in docs/DESIGN.md (§1–§8 @ efa491d) and admitted
     mechanisms M1–M7 (including Option A Menu slimming) pass; cargo fmt --all -- --check,
     cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace,
@@ -11597,7 +11597,7 @@ phases:
     name: 'V41 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Dual-Mac & Bundle Verification, and Push to main (No Release Tag) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Execute a full `[REQUIRES_SKILL: contract-and-simplicity]` review\
       \ and consolidation pass across all `v41.core` and `v41.ui` changes (`docs/DESIGN.md`\
@@ -11661,10 +11661,63 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-14T15:28:06.677504Z'
+    done_at: '2026-11-14T16:51:17.722825+00:00'
+    evidence: 'Artifact:
+
+      - Commit: b145d615390540eabd62aaf0b0c50464253886a9 (integrated main with v41.core
+      e6ccca7, v41.ui c8abecb, v41.review Round 1 fa72175, Round 2 b145d61; version
+      0.21.3, zero release tag created).
+
+
+      Review & Convergence Summary ([REQUIRES_SKILL: contract-and-simplicity]):
+
+      - Round 1 Focused Discovery (pathway-auditor, structural-auditor, uiux-auditor
+      on 081a95f): identified 12 Tier 1 + 4 Tier 2 items -> all 16 fixed in fa72175.
+
+      - Round 2 Semantic-Impact Delta Re-Review (all 3 auditors on fa72175): uiux-auditor
+      & pathway-auditor confirmed closure; structural-auditor identified 1 repair
+      regression (premature setup_apply/setup_remove_app/setup_disconnect_all receipts
+      before setup_inspections settle) -> fixed in b145d61 with real-daemon mailbox
+      regression test.
+
+
+      Verification on integrated main (b145d61):
+
+      - cargo fmt --all -- --check && git diff --check -> Passed (exit 0)
+
+      - cargo clippy --workspace --all-targets -- -D warnings -> Passed (0 warnings
+      in v41-review b145d61)
+
+      - cargo build --release -> Passed (0 compiler warnings; codesign --verify --strict
+      OK on all 7 staged binaries)
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2 cargo
+      test --workspace -> 349 passed (201 lib + 2 bin + 3 claude + 3 codex + 4 telegram
+      + 136 native integration), 4 ignored subprocess workers, 0 failed
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - python3 packaging/release.py check -> Passed (0.21.3)
+
+      - python3 -m unittest discover -s packaging -> 15 passed
+
+      - Local /Applications/Cito.app build & codesign --verify --strict --deep /Applications/Cito.app
+      -> Passed (12,106,882 bytes; cito v0.21.3)
+
+      - §1.2 zero-hardcoding check across crates/cito-native/src/core/ and src/macos/
+      -> Clean (only AppKit layout variable `let slack` at cito-ui.swift:1880-1881)
+
+      - Visual read inspection -> Verified refreshed menu-dark.png, settings-channels-dark.png,
+      and og-card.png.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8 @ efa491d; M1–M7 & Option A Menu Slimming)'
 - id: v42
   name: 'V42 Decoupling & Structural Remediation of Oversized Core, Swift UI, and
     Test Modules [REQUIRES_SKILL: contract-and-simplicity]'
-  status: locked
+  status: pending
   gate: All v42 decoupling steps (v42.design, v42.rust-core, v42.swift-ui, v42.tests)
     and terminal gate v42.gate pass with zero behavioral regression, KEEP_TOGETHER
     fidelity on cohesive engines, §1.2 semantic zero-hardcoding across crates/cito-native/src/core/
