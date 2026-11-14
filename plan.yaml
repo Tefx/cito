@@ -11238,7 +11238,7 @@ phases:
   - id: v41.core
     name: V41 Rust Core, Daemon, Hub, OIDC/Transport, CLI/MCP, Plugins & Packaging
       Closure (M1–M6 & M7 Backend/Packaging)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement all Rust core, daemon, Hub, OIDC, transport, CLI/MCP,\
       \ subprocess plugin, Docker/packaging, and backend test requirements in docs/DESIGN.md\
@@ -11404,6 +11404,38 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-14T12:25:26.451337Z'
+    done_at: '2026-11-14T14:30:33.809835+00:00'
+    evidence: 'Artifact:
+
+      - Commit: e6ccca7b0fffdf78e4a2ba3b12a524799ba94904 (merged cleanly to main;
+      candidate ref refs/vectl/candidates/v41.core retained)
+
+
+      Verification:
+
+      - Run: cargo test -p cito-native --lib (PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH
+      RUST_TEST_THREADS=2) -> 197 passed, 4 ignored subprocess workers, 0 failed
+
+      - Run: cargo test -p cito-native --test native daemon:: -> 57 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native plugins:: -> 22 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native distribution:: -> 7 passed, 0
+      failed
+
+      - Run: cargo test -p cito-native --bin cito-native -> 2 passed; cargo test -p
+      cito-native --bin cito-plugin-telegram -> 3 passed
+
+      - Run: python3 -m unittest discover -s packaging -> 15 passed; python3 packaging/release.py
+      check -> 0.21.3
+
+      - Run: sh -n bin/cito bin/cito-daemon bin/cito-hub bin/cito-mcp bin/cito-test-runner
+      && cargo fmt --all -- --check && git diff --check -> Passed (0 compiler warnings)
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8 @ efa491d; M1–M6 & M7 Backend/Packaging)'
   - id: v41.ui
     name: V41 Option A Menu Slimming, Settings Human Channels Inbox Control Bar, Four-Surface
       AppKit UI Hygiene & Docs/Site/Screenshot Sync (M2 UI & M7)
