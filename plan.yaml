@@ -11854,7 +11854,7 @@ phases:
   - id: v42.swift-ui
     name: 'V42 macOS Swift UI Decoupling (src/macos/cito-ui.swift & build.rs) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Decouple `src/macos/cito-ui.swift` (5,571L) into cohesive AppKit/domain\
       \ Swift modules under `src/macos/` per the `v42.design` blueprint (`[REQUIRES_SKILL:\
@@ -11888,6 +11888,32 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-14T16:55:56.129366Z'
+    done_at: '2026-11-14T17:01:46.293313+00:00'
+    evidence: 'Artifact:
+
+      - Commit: d169049176db7a970d7447dd243fc373d64437c2 (rebased and merged cleanly
+      to main; candidate ref refs/vectl/candidates/v42.swift-ui retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed
+
+      - Run: cargo build -p cito-native -> Passed (0 compiler/Swift warnings across
+      10 src/macos/*.swift files + updated crates/cito-native/build.rs)
+
+      - Run: codesign --verify --strict bin/cito-ui-darwin-arm64 -> Passed
+
+      - Run: cargo test -p cito-native --test native ui::u3_u11 && ui::hub_drawer
+      -> 2 passed
+
+      - §1.2 lexical check on src/macos/ -> Only permitted `let slack = ...` geometry
+      variable matched
+
+
+      Spec link:
+
+      - /tmp/v42-design-blueprint.md (§2.B, §3)'
   - id: v42.tests
     name: 'V42 Integration Test Suite Decoupling (tests/support/ui.rs & daemon.rs)
       [REQUIRES_SKILL: contract-and-simplicity]'
