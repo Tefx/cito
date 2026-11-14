@@ -255,6 +255,19 @@ fn presentation_error(raw: &str) -> String {
     if raw.starts_with("CONTROL_REVISION_CONFLICT:") {
         return "Inbox changed on another device. Review the current state and try again.".into();
     }
+    if let Ok(response) = serde_json::from_str::<Value>(raw) {
+        return presentation_error(&crate::support::response_diagnostic(
+            &response,
+            "The request failed",
+        ));
+    }
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("unable to open database")
+        || lower.contains("sqlite_cantopen")
+        || lower.contains("(sqlite ")
+    {
+        return "Session database is unavailable. Check the app and its data location.".into();
+    }
     let mut message = raw;
     let mut candidate = raw;
     if let Some((hub, rest)) = raw.split_once(": ") {
@@ -264,15 +277,22 @@ fn presentation_error(raw: &str) -> String {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         {
             candidate = rest;
+            message = candidate;
         }
     }
     while let Some((code, rest)) = candidate.split_once(':') {
-        if code.len() < 2
-            || !code.starts_with(|c: char| c.is_ascii_uppercase())
-            || !code
+        let code = code.trim();
+        let protocol_code = code.len() >= 2
+            && code
                 .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-        {
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit());
+        let label = !code.is_empty()
+            && code
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        let wrapper = ["discovery rejected", "badge rejected", "error"]
+            .contains(&code.to_ascii_lowercase().as_str());
+        if !protocol_code && !label && !wrapper {
             break;
         }
         candidate = rest.trim_start();
@@ -296,7 +316,23 @@ fn presentation_error(raw: &str) -> String {
     if let Some(reason) = message.strip_prefix("Cannot bind host hub listener: ") {
         return format!("Cannot start sharing: {reason}");
     }
-    let mut message = message.to_owned();
+    let mut message = message
+        .split(';')
+        .map(|part| {
+            let part = part.trim();
+            if let Some((code, rest)) = part.split_once(':') {
+                if code.len() >= 2
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    return rest.trim();
+                }
+            }
+            part
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     for (token, copy) in [
         ("DISCONNECTED_RETAINED", "Temporarily offline"),
         ("UNLISTENED", "Not listening"),
@@ -309,7 +345,28 @@ fn presentation_error(raw: &str) -> String {
         ("CITO_AUTH_MODE", "access mode"),
         (" (http://127.0.0.1 is allowed for tests)", ""),
     ] {
-        message = message.replace(token, copy);
+        if token.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') {
+            let mut replaced = String::new();
+            let mut cursor = 0;
+            for (start, _) in message.match_indices(token) {
+                let end = start + token.len();
+                let word = |c: char| c.is_alphanumeric() || c == '_';
+                if message[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !word(c))
+                    && message[end..].chars().next().is_none_or(|c| !word(c))
+                {
+                    replaced.push_str(&message[cursor..start]);
+                    replaced.push_str(copy);
+                    cursor = end;
+                }
+            }
+            replaced.push_str(&message[cursor..]);
+            message = replaced;
+        } else {
+            message = message.replace(token, copy);
+        }
     }
     message
 }
@@ -460,13 +517,18 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
             let rpc = crate::extract_jsonrpc_from_http_body(&response.body)
                 .ok_or_else(|| format!("HTTP {}", response.status))?;
             if let Some(error) = rpc.get("error") {
-                return Err(error.to_string());
+                return Err(crate::support::response_diagnostic(
+                    &json!({"error":error}),
+                    "The request failed",
+                ));
             }
             let text = rpc["result"]["content"][0]["text"]
                 .as_str()
                 .ok_or("Invalid daemon response")?;
             if rpc["result"]["isError"] == true {
-                return Err(text.into());
+                return Err(serde_json::from_str::<Value>(text)
+                    .map(|v| crate::support::response_diagnostic(&v, "The request failed"))
+                    .unwrap_or_else(|_| text.to_owned()));
             }
             serde_json::from_str(text).map_err(|e| e.to_string())?
         };
@@ -490,7 +552,11 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
         Ok(())
     })();
     if let Err(e) = result {
-        eprintln!("{e}");
+        if args.iter().any(|a| a == "--json") {
+            eprintln!("{e}");
+        } else {
+            eprintln!("{}", presentation_error(&e));
+        }
         std::process::exit(1);
     }
 }
@@ -548,6 +614,17 @@ mod tests {
                 && !formatted.contains("os error")
                 && !formatted.contains("auth_required")
         );
+    }
+    #[test]
+    fn diagnostics_use_word_boundaries_and_strip_protocol_wrappers() {
+        for (input,expected) in [
+            ("INACTIVE EXPIRED_UNSENT ACTIVE EXPIRED","INACTIVE EXPIRED_UNSENT Active Offline"),
+            ("work: PLUGIN_EXEC_FAILED: fixture: Discovery rejected: OFFLINE: Retry; AUTH_FAILED: Sign in","Retry; Sign in"),
+            ("10071: 10037: Conflict","Conflict"),
+            ("Badge rejected: BADGE_UNAVAILABLE: Retry later","Retry later"),
+            (r#"{"ok":false,"error_code":"OFFLINE","message":"Retry later"}"#,"Retry later"),
+            ("SQLITE_CANTOPEN: unable to open database file (SQLite 14)","Session database is unavailable. Check the app and its data location."),
+        ] { assert_eq!(presentation_error(input),expected,"{input}"); }
     }
     #[test]
     fn flag_errors_precede_effects() {

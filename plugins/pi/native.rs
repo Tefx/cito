@@ -328,6 +328,9 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
                 searched.push(p);
                 if let Ok(v) = identify(req, p) {
                     responded = true;
+                    if v["ok"] != true {
+                        return Err(response_diagnostic(&v, "Pi bridge rejected identification"));
+                    }
                     if v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
@@ -527,7 +530,12 @@ pub fn handle(input: &Value) -> Result<Value> {
                     Ok(reply) if reply["error"] == "SESSION_MISMATCH" => {
                         return Ok(json!({"ok":true,"outcome":"session_switched","reason":null}))
                     }
-                    _ => {}
+                    Ok(reply) => {
+                        return Ok(
+                            json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&reply,"Pi bridge rejected delivery")}),
+                        );
+                    }
+                    Err(_) => {}
                 }
                 if attempt < 2 {
                     std::thread::sleep(std::time::Duration::from_secs(attempt + 1));

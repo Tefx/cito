@@ -22,6 +22,11 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     f.daemon(&[]);
     let available = || f.action(json!({"op":"get_snapshot"})).1["available"].clone();
     assert_eq!(available(), json!([]));
+    assert!(!f.action(json!({"op":"get_snapshot"})).1["discovery"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["harness"] == "pi"));
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
     let candidates = available();
     let candidate = candidates
@@ -72,7 +77,11 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     );
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
-        false
+        true
+    );
+    assert_eq!(
+        f.rows("SELECT user_stopped FROM local_listeners WHERE harness='pi'")[0]["user_stopped"],
+        1
     );
     // Re-enabling requests fresh discovery before restoring agent enrollment,
     // while preserving the independent Human pause on the same Hub.
@@ -110,6 +119,13 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
         200
     );
     assert_eq!(available(), json!([]));
+    wait(|| {
+        !f.action(json!({"op":"get_snapshot"})).1["discovery"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["harness"] == "pi")
+    });
     assert_eq!(f.action(json!({"op":"setup_apply","harness":"pi"})).0, 200);
     assert_eq!(f.action(json!({"op":"setup_disconnect_all"})).0, 200);
     assert_eq!(available(), json!([]));
@@ -568,7 +584,7 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
         200
     );
     assert_eq!(f.action(json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"session-1"})).0, 200);
-    assert_eq!(local_auto_listen(), false);
+    assert_eq!(local_auto_listen(), true);
     f.stop(daemon);
     let mut preferences: Value =
         serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
@@ -624,6 +640,18 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     config["configured"] = json!(true);
     config["status"] = json!("alive");
     fs::write(&options, config.to_string()).unwrap();
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    assert_eq!(f.rows("SELECT user_stopped FROM local_listeners WHERE harness='fixture' AND session_id='live'")[0]["user_stopped"],1);
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='fixture' AND session_id='live'")
+            [0]["status"],
+        "UNLISTENED"
+    );
+    assert_eq!(
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":true}))
+            .0,
+        200
+    );
     wait(|| {
         snapshot()["listeners"]
             .as_array()

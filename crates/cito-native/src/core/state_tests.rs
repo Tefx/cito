@@ -49,6 +49,103 @@ fn admit(f: &Fixture, s: &Value, seq: u64) -> Result<bool, String> {
 }
 
 #[test]
+fn listener_lifecycle_upgrade_backfills_versions_four_five_and_six_without_losing_work(
+) -> Result<(), String> {
+    for version in [4, 5, 6] {
+        let f = Fixture::new()?;
+        f.seed("retained", 1)?;
+        f.state
+            .db
+            .execute("INSERT INTO wake_retries VALUES('local','c_1',99)", &[])?;
+        for column in [
+            "listen_mode",
+            "user_stopped",
+            "retirement_reason",
+            "retired_activity_revision",
+            "last_activity_at_ms",
+            "last_activity_revision",
+        ] {
+            f.state.db.execute(
+                &format!("ALTER TABLE local_listeners DROP COLUMN {column}"),
+                &[],
+            )?;
+        }
+        f.state
+            .db
+            .execute(&format!("PRAGMA user_version={version}"), &[])?;
+        for _ in 0..2 {
+            let state = LocalState::open(&f.dir)?;
+            let row = state
+                .listener("local", "c_1")?
+                .ok_or("Missing migrated listener")?;
+            assert_eq!(row["listen_mode"], "manual");
+            assert_eq!(row["user_stopped"], 0);
+            for key in [
+                "retirement_reason",
+                "retired_activity_revision",
+                "last_activity_at_ms",
+            ] {
+                assert!(row[key].is_null(), "{key}");
+            }
+            assert_eq!(row["binding_generation"], 1);
+            assert_eq!(state.db.query("SELECT * FROM local_signals", &[])?.len(), 1);
+            assert_eq!(
+                state
+                    .db
+                    .query("SELECT retry_at_ms FROM wake_retries", &[])?[0]["retry_at_ms"],
+                99
+            );
+            assert_eq!(
+                state.db.query("PRAGMA user_version", &[])?[0]["user_version"],
+                7
+            );
+        }
+    }
+    Ok(())
+}
+#[test]
+fn inbound_activity_is_credited_once_per_signal_and_dispatch_grace_once_per_delivery(
+) -> Result<(), String> {
+    let f = Fixture::new()?;
+    assert!(admit(&f, &signal("one", "none#alice", 1), 1)?);
+    let initial = f.listener()?["last_activity_at_ms"]
+        .as_u64()
+        .ok_or("Missing activity credit")?;
+    f.state.db.execute(
+        "UPDATE local_listeners SET last_activity_at_ms=?",
+        &[json!(initial - 100)],
+    )?;
+    assert!(!admit(&f, &signal("one", "none#alice", 1), 1)?);
+    assert_eq!(f.listener()?["last_activity_at_ms"], initial - 100);
+    let listener = f.listener()?;
+    let batch = f.state.claim_wake_batch("local", "c_1")?;
+    assert!(!batch.is_empty());
+    f.state.finish_wake_batch(
+        &listener,
+        &batch[0],
+        "DISPATCHED",
+        None,
+        true,
+        true,
+        false,
+        false,
+    )?;
+    let delivered = f.rows()?[0]["delivered_at_ms"].clone();
+    assert!(delivered.is_number());
+    f.state.finish_wake_batch(
+        &listener,
+        &batch[0],
+        "DISPATCHED",
+        None,
+        true,
+        true,
+        false,
+        false,
+    )?;
+    assert_eq!(f.rows()?[0]["delivered_at_ms"], delivered);
+    Ok(())
+}
+#[test]
 fn v4_pending_ack_migration_never_guesses_original_hub_identity() -> Result<(), String> {
     let f = Fixture::new()?;
     f.state.db.execute("UPDATE local_listeners SET hub_url='local://'; DROP TABLE pending_hub_acks; CREATE TABLE pending_hub_acks(hub TEXT NOT NULL,node_id TEXT NOT NULL,signal_id TEXT NOT NULL,channel_id TEXT NOT NULL,acked_at_ms INTEGER NOT NULL,PRIMARY KEY(hub,node_id,signal_id)); INSERT INTO pending_hub_acks VALUES('local','c_1','legacy','host:agent',1); PRAGMA user_version=4;",&[])?;
@@ -59,7 +156,7 @@ fn v4_pending_ack_migration_never_guesses_original_hub_identity() -> Result<(), 
     assert!(rows[0]["hub_url"].is_null() && rows[0]["principal_id"].is_null());
     assert_eq!(
         upgraded.db.query("PRAGMA user_version", &[])?[0]["user_version"],
-        6
+        7
     );
     Ok(())
 }
@@ -230,7 +327,7 @@ fn full_unread_count_and_non_destructive_v4_reopen() -> Result<(), String> {
     assert_eq!(second.activity()?.1, 100);
     assert_eq!(
         second.db.query("PRAGMA user_version", &[])?[0]["user_version"],
-        6
+        7
     );
     assert_eq!(
         second.listener("local", "c_1")?.ok_or("Missing listener")?["dispatcher_token"],
@@ -800,7 +897,7 @@ fn additive_queue_confirmation_upgrade_keeps_v4_data_and_indexes() -> Result<(),
     assert_eq!(reopened.db.query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('signals_listener','signals_batch')", &[])?.len(), 2);
     assert_eq!(
         reopened.db.query("PRAGMA user_version", &[])?[0]["user_version"],
-        6
+        7
     );
     Ok(())
 }

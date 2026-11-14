@@ -405,7 +405,13 @@ pub(super) fn handle_http(
                 Ok(mut payload) => {
                     if name == "cito_send" {
                         if let Err(error) = wait_send_receipt(&service, &mut payload) {
-                            payload = json!({"ok":false,"error":{"code":"NATS_UNAVAILABLE","message":error,"retryable":true}});
+                            let (code, message) = error
+                                .split_once(':')
+                                .filter(|(c, _)| {
+                                    c.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+                                })
+                                .unwrap_or(("NATS_UNAVAILABLE", &error));
+                            payload = json!({"ok":false,"error":{"code":code,"message":message.trim(),"retryable":true}});
                             return respond(
                                 &mut stream,
                                 200,
@@ -631,13 +637,32 @@ impl DaemonService {
             }
             "unlisten_session" => {
                 let mut detach_errors = Vec::new();
-                for row in self.state.db.query(
-                    "SELECT * FROM local_listeners WHERE harness=? AND session_id=? AND status!='FENCED_INACTIVE'",
-                    &[action["harness"].clone(), action["session_id"].clone()],
-                )? {
-                    if (action["hub"].is_null() || row["hub"] == hub) && self.slots.get(string(&row,"hub")).is_some_and(|slot| crate::core::auth::principal_ids_equal(string(&row,"principal_id"),string(&slot.identity,"principal_id"))) {
-                        let name = string(&row, "hub");
-                        if let Err(error) = self.pause_listener(name, string(&row, "listener_id")) { detach_errors.push(format!("{name}: {error}")); }
+                if action["harness"] != "human" {
+                    let targets: Vec<String> = self
+                        .slots
+                        .keys()
+                        .filter(|name| action["hub"].is_null() || name.as_str() == hub)
+                        .cloned()
+                        .collect();
+                    for name in targets {
+                        self.ensure_agent_stop_row(
+                            &name,
+                            string(action, "harness"),
+                            string(action, "session_id"),
+                        )?;
+                        let slot = self.slot(&name)?;
+                        let rows=self.state.db.query("SELECT * FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE'",&[json!(name),action["harness"].clone(),action["session_id"].clone()])?;
+                        for row in rows.into_iter().filter(|row| {
+                            crate::core::auth::principal_ids_equal(
+                                string(row, "principal_id"),
+                                string(&slot.identity, "principal_id"),
+                            )
+                        }) {
+                            if let Err(error) = self.unlisten_id(&name, string(&row, "listener_id"))
+                            {
+                                detach_errors.push(format!("{name}: {error}"));
+                            }
+                        }
                     }
                 }
                 if action["harness"] == "human" && action["session_id"] == "default" {
@@ -710,9 +735,11 @@ impl DaemonService {
                     .into_iter()
                     .filter(|r| r["harness"] == id)
                 {
-                    if let Err(error) =
-                        self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))
-                    {
+                    if let Err(error) = self.retire_id(
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    ) {
                         detach_errors.push(error);
                     }
                 }
@@ -1318,6 +1345,18 @@ impl DaemonService {
                 self.pause_listener(&hub, id)?;
             }
             "unlisten_all" => {
+                // Bulk stop owns Hub policy even when no listener is active.
+                let raw = self.raw_config()?;
+                let (_, configured, _) =
+                    crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+                let targets: Vec<String> = configured
+                    .keys()
+                    .filter(|name| action["hub"].is_null() || action["hub"] == name.as_str())
+                    .cloned()
+                    .collect();
+                if targets.is_empty() && action["hub"].is_string() {
+                    return Err("INVALID_INPUT: Unknown hub".into());
+                }
                 let mut removed = 0;
                 let mut detach_errors = Vec::new();
                 for row in self.state.active()?.into_iter().filter(|row| {
@@ -1332,10 +1371,47 @@ impl DaemonService {
                         }
                     }
                 }
+                for name in targets {
+                    if let Err(error) = self.set_auto_listen(&name, false) {
+                        detach_errors.push(format!("{name}: {error}"));
+                    }
+                }
                 if !detach_errors.is_empty() {
                     return Err(format!("DETACH_PENDING: {}", detach_errors.join("; ")));
                 }
                 return Ok(json!({"ok":true,"removed":removed}));
+            }
+            "set_listen_mode" => {
+                let mode = string(action, "listen_mode");
+                if !matches!(mode, "auto" | "manual") {
+                    return Err("INVALID_INPUT: listen_mode must be auto or manual".into());
+                }
+                let slot = self.slot(&hub)?;
+                if mode == "auto" && slot.config["autoListen"] != true {
+                    return Err(
+                        "INVALID_INPUT: Enable Auto-Listen before unpinning a session".into(),
+                    );
+                }
+                let lock = self.state.registration_lock(&hub)?;
+                let _guard = lock
+                    .lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                let row = self
+                    .state
+                    .listener(&hub, string(action, "listener_id"))?
+                    .filter(|r| r["harness"] != "human" && r["status"] == "ACTIVE")
+                    .ok_or("LISTENER_NOT_FOUND: Session is not active")?;
+                let activity = self
+                    .session_activity
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|a| a.candidates())
+                    .find(|c| {
+                        c["harness"] == row["harness"] && c["session_id"] == row["session_id"]
+                    })
+                    .and_then(|c| super::super::state::qualifying_activity(&c));
+                let at = activity.map(|(_, at)| at).unwrap_or_else(now_ms);
+                self.state.db.execute("UPDATE local_listeners SET listen_mode=?,user_stopped=0,retirement_reason=NULL,retired_activity_revision=NULL,last_activity_at_ms=CASE WHEN listen_mode='manual' AND ?='auto' THEN MAX(COALESCE(last_activity_at_ms,0),?) ELSE last_activity_at_ms END WHERE hub=? AND listener_id=?", &[json!(mode),json!(mode),json!(at),json!(hub),row["listener_id"].clone()])?;
             }
             "set_scope" => {
                 let id = string(action, "listener_id");
@@ -1539,7 +1615,11 @@ impl DaemonService {
                     .into_iter()
                     .filter(|row| action["purge_data"] == true || row["harness"] != "human")
                 {
-                    self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
+                    self.retire_id(
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    )?;
                 }
                 for p in self
                     .plugins
@@ -1643,6 +1723,15 @@ impl DaemonService {
                         }
                     }
                     self.local.reset_data()?;
+                    match fs::remove_dir_all(self.config.state_dir.join("activity")) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => {
+                            return Err(
+                                "STATE_ERROR: Cannot remove session activity metadata".into()
+                            )
+                        }
+                    }
                     self.state.db.transaction(|db| {
                         db.execute("DELETE FROM local_sent_idempotency; DELETE FROM pending_hub_acks; DELETE FROM pending_hub_detaches; DELETE FROM wake_retries;", &[])?;
                         db.execute("DELETE FROM local_signals", &[])?;

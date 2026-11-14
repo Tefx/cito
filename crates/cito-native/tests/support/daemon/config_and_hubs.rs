@@ -76,9 +76,12 @@ fn gui_purge_removes_credentials_idempotency_hub_history_and_personal_profile_da
         "delete this credential",
     )
     .unwrap();
+    fs::create_dir_all(f.state.join("activity/fixture")).unwrap();
+    fs::write(f.state.join("activity/fixture/source.json"), "{}").unwrap();
     let result = f.action(json!({"op":"setup_disconnect_all","purge_data":true}));
     assert_eq!(result.0, 200, "{}", result.1);
     assert!(!f.state.join("oidc-token-work.json").exists());
+    assert!(!f.state.join("activity").exists());
     for table in [
         "local_signals",
         "local_sent_idempotency",

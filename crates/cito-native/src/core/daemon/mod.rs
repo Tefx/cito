@@ -1040,7 +1040,8 @@ impl DaemonService {
                 } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
                     if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
-                    let mut changed = false;
+                    let mut changed = remote["listen_mode"] != row["listen_mode"];
+                    remote["listen_mode"] = row["listen_mode"].clone();
                     if let Ok(Some(title)) = state.custom_title(string(&row,"harness"),string(&row,"session_id")) {
                         if remote["title"] != title || remote["custom_title"] != true {
                             remote["title"] = json!(title); remote["custom_title"] = json!(true); changed = true;
@@ -1073,7 +1074,14 @@ impl DaemonService {
     }
 
     fn set_auto_listen(&mut self, hub: &str, enabled: bool) -> Result<(), String> {
-        self.slot(hub)?;
+        if !self.slots.contains_key(hub) {
+            let raw = self.raw_config()?;
+            let (_, hubs, _) =
+                crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+            if !hubs.contains_key(hub) {
+                return Err(format!("INVALID_INPUT: Unknown hub: {hub}"));
+            }
+        }
         // Serialize enabling fresh discovery with deferred detaches and enrollment.
         let registration = self.state.registration_lock(hub)?;
         let _registration = registration
@@ -1088,141 +1096,222 @@ impl DaemonService {
         })?;
         if enabled {
             self.state.db.transaction(|c| {
-                c.execute("UPDATE local_listeners SET updated_at=? WHERE hub=? AND harness!='human' AND status='UNLISTENED'", &[json!(now_ms()),json!(hub)])?;
+                c.execute(
+                    "UPDATE local_listeners SET user_stopped=0 WHERE hub=? AND harness!='human'",
+                    &[json!(hub)],
+                )?;
                 Ok(())
             })?;
         }
         if let Some(slot) = self.slots.get_mut(hub) {
             slot.config["autoListen"] = json!(enabled);
         }
+        drop(_registration);
+        if !enabled {
+            let mut errors = Vec::new();
+            for row in self.state.active()?.into_iter().filter(|r| {
+                r["hub"] == hub && r["harness"] != "human" && r["listen_mode"] == "auto"
+            }) {
+                if let Err(error) =
+                    self.retire_id(hub, string(&row, "listener_id"), "auto_disabled")
+                {
+                    errors.push(error);
+                }
+            }
+            if !errors.is_empty() {
+                return Err(format!("DETACH_PENDING: {}", errors.join("; ")));
+            }
+        }
         if enabled {
             if let Some(activity) = self.session_activity.as_mut() {
+                for plugin in self.plugins.agent_plugins() {
+                    activity.mark_stale(&plugin.id);
+                }
                 activity.refresh_discovery();
             }
         }
         Ok(())
     }
 
-    /// Opt-in enrollment uses discovery liveness, never historical SQLite rows.
+    /// Reconcile source activity independently of discovery scans and Hub heartbeats.
     fn auto_listen(&mut self) -> Result<(), String> {
-        let hubs: Vec<_> = self
-            .slots
-            .iter()
-            .filter(|(_, slot)| {
-                slot.config["autoListen"] == true && slot.connection_status() == "connected"
-            })
-            .collect();
-        if hubs.is_empty() {
-            return Ok(());
-        }
-        let Some(activity) = &self.session_activity else {
-            return Ok(());
-        };
-        let mut transitions: HashMap<(String, String), Vec<Value>> = HashMap::new();
-        for row in self.state.db.query(
-            "SELECT harness,session_id,status,endpoint_pid,updated_at FROM local_listeners WHERE status IN ('UNLISTENED','ACTIVE')",
-            &[],
-        )? {
-            let key = (
-                string(&row, "harness").to_owned(),
-                string(&row, "session_id").to_owned(),
-            );
-            transitions.entry(key).or_default().push(row);
-        }
-        let mut stale_harnesses = HashSet::new();
-        for candidate in activity.candidates().filter(|candidate| {
-            candidate["endpoint_pid"]
-                .as_u64()
-                .and_then(|p| u32::try_from(p).ok())
-                .is_some_and(crate::support::alive)
-                && candidate["needs_reload"] != true
-                && self
-                    .plugins
-                    .find_by_id(string(candidate, "harness"))
-                    .is_some_and(|plugin| {
-                        self.setup_inspections
-                            .get(&plugin.id)
-                            .is_some_and(|entry| entry.worker.is_none())
-                            && self
-                                .inspect_setup(plugin)
-                                .is_ok_and(|(_, configured, _)| configured)
-                    })
-        }) {
-            let key = (
-                string(&candidate, "harness").to_owned(),
-                string(&candidate, "session_id").to_owned(),
-            );
-            let candidate_pid = candidate["endpoint_pid"].as_u64().unwrap_or(0);
-            let cutoff = transitions
-                .get(&key)
-                .into_iter()
-                .flatten()
-                .filter(|row| {
-                    row["status"] == "UNLISTENED"
-                        || row["status"] == "ACTIVE"
-                            && candidate_pid > 0
-                            && row["endpoint_pid"]
-                                .as_u64()
-                                .is_some_and(|pid| pid > 0 && pid != candidate_pid)
+        use super::state::{activity_revision, qualifying_activity};
+        use crate::plugins::AutoListenMode;
+        let candidates: Vec<Value> = self
+            .session_activity
+            .as_ref()
+            .map(|a| a.candidates().collect())
+            .unwrap_or_default();
+        for row in self
+            .state
+            .active()?
+            .into_iter()
+            .filter(|r| r["harness"] != "human")
+        {
+            if let Some((revision, at)) = candidates
+                .iter()
+                .find(|c| c["harness"] == row["harness"] && c["session_id"] == row["session_id"])
+                .and_then(qualifying_activity)
+                .filter(|(revision, _)| {
+                    activity_revision(&row, "last_activity_revision")
+                        .is_none_or(|old| *revision > old)
                 })
-                .filter_map(|row| row["updated_at"].as_u64())
-                .max()
-                .unwrap_or(0);
-            if cutoff > 0 && candidate["discovered_at"].as_u64().unwrap_or(0) <= cutoff {
-                stale_harnesses.insert(key.0);
+            {
+                self.state.db.execute("UPDATE local_listeners SET last_activity_revision=?,last_activity_at_ms=MAX(COALESCE(last_activity_at_ms,0),?) WHERE hub=? AND listener_id=? AND status='ACTIVE'", &[json!(revision.to_string()),json!(at.min(now_ms())),row["hub"].clone(),row["listener_id"].clone()])?;
+            }
+        }
+        // Retirement and dispatch claims share the registration and SQLite locks.
+        for row in self
+            .state
+            .active()?
+            .into_iter()
+            .filter(|r| r["harness"] != "human" && r["listen_mode"] == "auto")
+        {
+            let Some(timeout) = self
+                .plugins
+                .find_by_id(string(&row, "harness"))
+                .and_then(|p| p.auto_listen.idle_timeout_ms)
+            else {
+                continue;
+            };
+            let hub = string(&row, "hub");
+            let lock = self.state.registration_lock(hub)?;
+            let guard = lock
+                .lock()
+                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+            let retired = self.state.db.transaction(|c| {
+                let now = now_ms();
+                let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='idle',retired_activity_revision=last_activity_revision,updated_at=?1 WHERE hub=?2 AND listener_id=?3 AND status='ACTIVE' AND listen_mode='auto' AND ?1-COALESCE(last_activity_at_ms,?1)>?4 AND lease_until_ms<=?1 AND NOT EXISTS(SELECT 1 FROM local_signals s WHERE s.hub=?2 AND s.listener_id=?3 AND ((s.state IN ('RECEIVED','DISPATCHING') AND s.held_reason IS NULL AND s.acknowledged_at_ms IS NULL AND s.expires_at_ms>?1) OR s.delivered_at_ms+300000>?1))", &[json!(now),json!(hub),row["listener_id"].clone(),json!(timeout)])?;
+                if changed > 0 {
+                    c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),row["listener_id"].clone(),row["hub_url"].clone()])?;
+                }
+                Ok(changed > 0)
+            })?;
+            drop(guard);
+            if retired {
+                self.state.invalidate_discovery(string(&row, "harness"))?;
+                if let Some(slot) = self.slots.get(hub) {
+                    Self::reconcile_unlistened(&self.state, slot, &self.host_id)?;
+                }
+            }
+        }
+        let mut stale = HashSet::new();
+        for candidate in candidates {
+            let harness = string(&candidate, "harness");
+            let Some(plugin) = self.plugins.find_by_id(harness) else {
+                continue;
+            };
+            if self
+                .last_app_action
+                .get(harness)
+                .is_some_and(|action| action == "disconnect")
+            {
                 continue;
             }
-            for (hub, slot) in &hubs {
-                let rows = self.state.db.query(
-                    "SELECT status, principal_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=?",
-                    &[
-                        json!(hub),
-                        candidate["harness"].clone(),
-                        candidate["session_id"].clone(),
-                    ],
-                )?;
-                if rows.iter().any(|row| {
-                    row["status"] == "ACTIVE"
-                        && super::auth::principal_ids_equal(
-                            string(row, "principal_id"),
-                            string(&slot.identity, "principal_id"),
-                        )
-                }) {
+            if !self
+                .setup_inspections
+                .get(harness)
+                .is_some_and(|e| e.worker.is_none())
+                || !self
+                    .inspect_setup(plugin)
+                    .is_ok_and(|(_, configured, _)| configured)
+                || candidate["needs_reload"] == true
+            {
+                continue;
+            }
+            let endpoint_alive = candidate["endpoint_pid"]
+                .as_u64()
+                .and_then(|p| u32::try_from(p).ok())
+                .is_some_and(crate::support::alive);
+            if (plugin.auto_listen.mode == AutoListenMode::Endpoint
+                || candidate["endpoint_pid"].is_number())
+                && !endpoint_alive
+            {
+                continue;
+            }
+            for (hub, slot) in &self.slots {
+                if slot.connection_status() != "connected" {
                     continue;
                 }
-                // Recheck all Hubs after setup and each preceding destination registration.
-                let live_revoked_at = self
-                    .state
-                    .db
-                    .query(
-                        super::registration::DISCOVERY_CUTOFF_SQL,
-                        &[json!(key.0), json!(key.1), json!(candidate_pid)],
-                    )?
-                    .first()
-                    .and_then(|row| row["revoked_at"].as_u64())
-                    .unwrap_or(0);
-                if live_revoked_at > 0
-                    && candidate["discovered_at"].as_u64().unwrap_or(0) <= live_revoked_at
+                let prior = super::registration::local_node(
+                    &self.state,
+                    slot,
+                    harness,
+                    string(&candidate, "session_id"),
+                )?;
+                if prior
+                    .as_ref()
+                    .is_some_and(|r| r["status"] == "ACTIVE" || r["user_stopped"] == 1)
                 {
-                    stale_harnesses.insert(key.0.clone());
-                    break;
+                    continue;
                 }
-                // One unavailable endpoint must not prevent enrollment on other Hubs.
-                if let Err(error) = self.listen(
-                    hub,
-                    &json!({"about":candidate["title"],"discovered_at":candidate["discovered_at"]}),
-                    &candidate,
-                ) {
-                    if error.starts_with("STALE_DISCOVERY") {
-                        stale_harnesses.insert(key.0.clone());
-                        break;
+                let restoring = prior.as_ref().is_some_and(|r| {
+                    matches!(
+                        r["retirement_reason"].as_str(),
+                        Some("hard_exit" | "disconnected")
+                    )
+                });
+                let manual =
+                    restoring && prior.as_ref().is_some_and(|r| r["listen_mode"] == "manual");
+                if !manual && slot.config["autoListen"] != true {
+                    continue;
+                }
+                if restoring
+                    && !manual
+                    && plugin.auto_listen.idle_timeout_ms.is_some_and(|ttl| {
+                        prior
+                            .as_ref()
+                            .and_then(|r| r["last_activity_at_ms"].as_u64())
+                            .is_some_and(|at| now_ms().saturating_sub(at) > ttl)
+                    })
+                {
+                    let advanced = qualifying_activity(&candidate).is_some_and(|(revision, at)| {
+                        now_ms().saturating_sub(at)
+                            <= plugin.auto_listen.recent_window_ms.unwrap_or(900_000)
+                            && prior
+                                .as_ref()
+                                .and_then(|r| activity_revision(r, "last_activity_revision"))
+                                .is_none_or(|old| revision > old)
+                    });
+                    if !advanced {
+                        continue;
                     }
-                    eprintln!("cito auto-listen {hub}: {error}");
+                }
+                if plugin.auto_listen.mode == AutoListenMode::Activity && !manual {
+                    let fresh = qualifying_activity(&candidate).is_some_and(|(revision, at)| {
+                        now_ms().saturating_sub(at)
+                            <= plugin.auto_listen.recent_window_ms.unwrap_or(900_000)
+                            && prior
+                                .as_ref()
+                                .and_then(|r| activity_revision(r, "retired_activity_revision"))
+                                .is_none_or(|old| revision > old)
+                    });
+                    let unexpired = restoring
+                        && prior
+                            .as_ref()
+                            .and_then(|r| r["last_activity_at_ms"].as_u64())
+                            .is_some_and(|at| {
+                                plugin
+                                    .auto_listen
+                                    .idle_timeout_ms
+                                    .is_none_or(|ttl| now_ms().saturating_sub(at) <= ttl)
+                            });
+                    if !fresh && !unexpired {
+                        continue;
+                    }
+                }
+                let args = json!({"about":candidate["title"],"discovered_at":candidate["discovered_at"],"_auto":true,"_restore":restoring});
+                if let Err(error) = self.listen(hub, &args, &candidate) {
+                    if error.starts_with("STALE_DISCOVERY") {
+                        stale.insert(harness.to_owned());
+                    } else {
+                        eprintln!("cito auto-listen {hub}: {error}");
+                    }
                 }
             }
         }
         if let Some(activity) = self.session_activity.as_mut() {
-            for harness in stale_harnesses {
+            for harness in stale {
                 activity.mark_stale(&harness);
             }
         }

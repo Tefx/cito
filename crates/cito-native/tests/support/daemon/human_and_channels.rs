@@ -1463,7 +1463,7 @@ fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
         let args = [vec!["listen", "--harness", "human"], extra].concat();
         let (ok, _, error) = f.command(NATIVE, &args, "");
         assert!(
-            !ok && error.contains("INVALID_INPUT") && error.contains("cito inbox"),
+            !ok && !error.contains("INVALID_INPUT") && error.contains("cito inbox"),
             "{error}"
         );
         assert!(!f

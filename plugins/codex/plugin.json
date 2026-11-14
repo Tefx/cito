@@ -8,6 +8,7 @@
   "sfSymbol": "terminal.fill",
   "tint": "blue",
   "cliFlag": true,
+  "autoListen": {"mode": "activity", "recentWindowMs": 900000, "idleTimeoutMs": 3600000},
   "pidBound": false,
   "command": [
     "./bin/cito-plugin-codex"

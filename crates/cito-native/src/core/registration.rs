@@ -273,6 +273,27 @@ fn register_locked(
         .as_deref()
         .unwrap_or_else(|| string(caller, "title"));
     let initial_local = local_node(state, client, harness, session)?;
+    let automatic = args["_auto"] == true;
+    let restoring = args["_restore"] == true;
+    if automatic
+        && initial_local
+            .as_ref()
+            .is_some_and(|r| r["user_stopped"] == 1)
+    {
+        return Err("STALE_DISCOVERY: Session was stopped".into());
+    }
+    let listen_mode = if automatic {
+        if restoring {
+            initial_local
+                .as_ref()
+                .and_then(|r| r["listen_mode"].as_str())
+                .unwrap_or("auto")
+        } else {
+            "auto"
+        }
+    } else {
+        "manual"
+    };
     let mut id = initial_local
         .as_ref()
         .map(|row| string(row, "listener_id").to_string())
@@ -397,6 +418,7 @@ fn register_locked(
         channels.insert(channel.clone(),json!({"channel_id":channel,"kind":harness,"host_id":host_id,"host_name":host_name,"delivery_mode":"wake_exclusive","priority":100,"state":"ACTIVE","owner_token":owner,"updated_at_ms":client.server_now()}));
         let mut value = json!({"listener_id":id,"public_id":public,"tag":tag,"principal_id":client.identity["principal_id"],"owner_user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"cwd":string(caller,"cwd"),"repo":caller["repo"],"branch":caller["branch"],"title":title,"about":about,"scope":scope,"state":"ACTIVE","binding_generation":generation,"owner_token":node_owner,"channels":channels});
         value["custom_title"] = json!(custom_title.is_some());
+        value["listen_mode"] = json!(listen_mode);
         super::lease::reconcile_registration_state(&mut value, client.server_now());
         if discovered_at > 0
             && state
@@ -436,6 +458,15 @@ fn register_locked(
                 &[json!(hub),json!(id),json!(public),tag.clone(),client.identity["principal_id"].clone(),client.identity["owner_user"].clone(),json!(host_id),json!(host_name),json!(harness),json!(session),caller["endpoint_pid"].clone(),json!(string(caller,"cwd")),caller["repo"].clone(),caller["branch"].clone(),json!(title),json!(about),json!(scope),json!(if stale { "UNLISTENED" } else { "ACTIVE" }),json!(generation),json!(owner),json!(now_ms().max(cutoff))],
             )?;
             if changed == 0 { return Err("STALE_GENERATION: Local binding was replaced".into()); }
+            let source = super::state::qualifying_activity(caller);
+            let seeded = source.map(|(_, at)| at.min(now_ms())).unwrap_or_else(now_ms);
+            let advancing = source.filter(|(revision,_)| local.as_ref().and_then(|r|super::state::activity_revision(r,"last_activity_revision")).is_none_or(|old|*revision>old));
+            // Preserve a retained clock and concurrent inbound credits. A genuinely
+            // advancing user turn may renew it; reopening the provider alone cannot.
+            connection.execute("UPDATE local_listeners SET listen_mode=?,user_stopped=0,retirement_reason=NULL,retired_activity_revision=NULL,last_activity_at_ms=CASE WHEN ? THEN MAX(COALESCE(last_activity_at_ms,?),?) ELSE ? END WHERE hub=? AND listener_id=?", &[json!(listen_mode),json!(automatic),json!(seeded),json!(advancing.map(|(_,at)|at.min(now_ms())).unwrap_or(0)),json!(seeded),json!(hub),json!(id)])?;
+            if let Some((revision, _)) = advancing {
+                connection.execute("UPDATE local_listeners SET last_activity_revision=? WHERE hub=? AND listener_id=?", &[json!(revision.to_string()),json!(hub),json!(id)])?;
+            }
             connection.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=?", &[client.config["url"].clone(),json!(hub),json!(id)])?;
             if stale {
                 // Retain both the published owner and retry intent before any cleanup IO.
@@ -474,7 +505,7 @@ fn register_locked(
             }
         }
         return Ok(
-            json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
+            json!({"ok":true,"status":"listening","hub":hub,"listener_id":public,"canonical_listener_id":id,"binding_generation":generation,"user":client.identity["owner_user"],"host_id":host_id,"host_name":host_name,"harness":harness,"session_id":session,"listen_mode":listen_mode,"about":about,"repo":caller["repo"],"branch":caller["branch"],"title":title,"scope":scope,"lease_ttl_seconds":60}),
         );
     }
     Err("STALE_GENERATION: Listener CAS retries exhausted".into())
@@ -623,6 +654,7 @@ mod tests {
                 tint: "blue".into(),
                 cli_flag: false,
                 pid_bound: true,
+                auto_listen: Default::default(),
                 plugin_dir: root.clone(),
                 is_builtin: false,
                 command: vec![

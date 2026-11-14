@@ -478,9 +478,8 @@ fn bridge(req: &Value) -> Result<Value> {
             &state(req).join(format!("sockets/claude-pid-{p}.sock")),
             &json!({"op":"identify"}),
         ) {
-            if response["ok"] == true {
-                return Ok(response);
-            }
+            // A live responder's rejection is authoritative, unlike no response.
+            return Ok(response);
         }
         if !matches!(str_at(req, "op"), Some("resolve_caller" | "verify")) {
             break;
@@ -550,11 +549,16 @@ pub fn handle(req: &Value) -> Result<Value> {
             };
             let response = bridge(req).ok();
             let endpoint_responded = response.is_some();
+            let rejection = response
+                .as_ref()
+                .filter(|v| v["ok"] != true)
+                .map(|v| response_diagnostic(v, "Claude bridge rejected the request"));
             let live = response.filter(|v| v["ok"] == true);
-            if live.is_none() && endpoint_responded && req.get("cached_caller").is_some() {
+            if live.is_none() && endpoint_responded {
                 return Ok(error(
                     "SESSION_NOT_OPEN",
-                    "Claude bridge did not identify an open session",
+                    rejection
+                        .unwrap_or_else(|| "Claude bridge did not identify an open session".into()),
                 ));
             }
             if live.is_none()
@@ -671,9 +675,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                             &json!({"op":"deliver","session_id":sid,"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false}),
                         )?;
                         return Ok(
-                            json!({"ok":true,"outcome":if r["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":null}),
+                            json!({"ok":true,"outcome":if r["ok"]==true{"delivered_unconfirmed"}else{"driver_unavailable"},"reason":if r["ok"]==true {Value::Null} else {json!(response_diagnostic(&r,"Claude bridge rejected delivery"))}}),
                         );
                     }
+                    return Ok(
+                        json!({"ok":true,"outcome":"driver_unavailable","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
+                    );
                 }
             }
             append_wake(req, &sid)?;

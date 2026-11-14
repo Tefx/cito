@@ -309,6 +309,12 @@ pub fn probe_listener(
         None,
         Some((local, row)),
     )?;
+    if result["ok"] != true {
+        return Err(crate::support::response_diagnostic(
+            &result,
+            "Session probe failed",
+        ));
+    }
     let status = string(&result, "status");
     let failures = if status == "alive" {
         0
@@ -333,7 +339,7 @@ pub fn probe_listener(
     let revoked = local.db.transaction(|c| {
         c.execute("UPDATE local_listeners SET consecutive_probe_failures=CASE WHEN ?=0 THEN 0 ELSE consecutive_probe_failures+1 END WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(failures),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         if revoke {
-            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+            let changed = c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=? AND status='ACTIVE'", &[json!(now_ms()),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
             if changed > 0 {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') AND acknowledged_at_ms IS NULL", &[row["hub"].clone(),row["listener_id"].clone()])?;
                 c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[row["hub"].clone(),row["listener_id"].clone(),client.config["url"].clone()])?;
@@ -508,7 +514,7 @@ fn dispatch_listener(
                         false,
                     )?;
                     let changed=local.db.transaction(|c| {
-                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
+                        let changed=c.execute("UPDATE local_listeners SET status='UNLISTENED',retirement_reason='hard_exit',updated_at=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND COALESCE(owner_token,'')=?", &[json!(now_ms()),json!(hub), json!(id), row["binding_generation"].clone(), row["owner_token"].clone()])?;
                         if changed>0 {
                             c.execute("INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) VALUES(?,?,?) ON CONFLICT(hub,listener_id) DO UPDATE SET hub_url=excluded.hub_url", &[json!(hub),json!(id),client.config["url"].clone()])?;
                         }
@@ -603,9 +609,13 @@ fn dispatch_listener(
             )?;
             return Err(e.message);
         }
-        _ => {
+        Ok(result) => {
             local.finish_wake_batch(row, first, "DISPATCHING", None, false, false, false, false)?;
             local.schedule_wake_retry_for(row, 1500)?;
+            return Err(crate::support::response_diagnostic(
+                &result,
+                "Session delivery failed",
+            ));
         }
     }
     Ok(())

@@ -423,7 +423,7 @@ impl DaemonService {
         )?;
         // The new remote/local binding commits before the previous endpoint is revoked.
         for row in previous {
-            self.unlisten_id(hub, string(&row, "listener_id"))?;
+            self.retire_id(hub, string(&row, "listener_id"), "hard_exit")?;
         }
         // Registration commits the Hub-scoped PID and transition timestamp together.
         // Do not rewrite binding metadata after releasing registration authority.
@@ -432,22 +432,35 @@ impl DaemonService {
         Ok(result)
     }
 
-    pub(super) fn pause_listener(&mut self, hub: &str, id: &str) -> Result<bool, String> {
-        if self
-            .state
-            .listener(hub, id)?
-            .is_some_and(|row| row["harness"] != "human" && row["status"] == "ACTIVE")
-            && self
-                .slots
-                .get(hub)
-                .is_some_and(|slot| slot.config["autoListen"] == true)
-        {
-            self.set_auto_listen(hub, false)?;
+    /// Stop intent exists even if this session has never been enrolled.
+    pub(super) fn ensure_agent_stop_row(
+        &self,
+        hub: &str,
+        harness: &str,
+        session: &str,
+    ) -> Result<String, String> {
+        if harness.is_empty() || harness == "human" || session.is_empty() {
+            return Err("INVALID_INPUT: An agent session is required".into());
         }
+        let slot = self.slot(hub)?;
+        let lock = self.state.registration_lock(hub)?;
+        let _guard = lock
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        let id = super::super::registration::local_node_id(&self.state, slot, harness, session)?;
+        self.state.db.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,user_stopped,retirement_reason,hub_url) VALUES(?,?,?,?,?,?,?,?,?,'','','','self','UNLISTENED',1,'user',?)", &[json!(hub),json!(id),json!(crate::core::identity::public_listener_id(string(&slot.identity,"owner_user"),&id)),slot.identity["principal_id"].clone(),slot.identity["owner_user"].clone(),json!(self.host_id),json!(local_host_name()),json!(harness),json!(session),slot.config["url"].clone()])?;
+        Ok(id)
+    }
+
+    pub(super) fn pause_listener(&mut self, hub: &str, id: &str) -> Result<bool, String> {
         self.unlisten_id(hub, id)
     }
 
     pub(super) fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
+        self.retire_id(hub, id, "user")
+    }
+
+    pub(super) fn retire_id(&self, hub: &str, id: &str, reason: &str) -> Result<bool, String> {
         let client = self.slots.get(hub);
         let hub_url = if let Some(client) = client {
             Some(string(&client.config, "url").to_owned())
@@ -468,7 +481,7 @@ impl DaemonService {
         self.state.db.transaction(|c| {
             if row.is_some() {
                 c.execute("UPDATE local_signals SET state='STORED_PASSIVE',held_reason='unlistened',dispatcher_token=NULL WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND state IN ('RECEIVED','DISPATCHING')", &[json!(hub),json!(id)])?;
-                c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=? WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(hub),json!(id)])?;
+                c.execute("UPDATE local_listeners SET status='UNLISTENED',updated_at=?,user_stopped=CASE WHEN harness!='human' AND ?='user' THEN 1 ELSE user_stopped END,retirement_reason=CASE WHEN harness!='human' THEN ? ELSE NULL END,retired_activity_revision=CASE WHEN ?='idle' THEN last_activity_revision ELSE retired_activity_revision END,dispatcher_token=NULL,lease_until_ms=0 WHERE hub=? AND listener_id=?", &[json!(now_ms()),json!(reason),json!(reason),json!(reason),json!(hub),json!(id)])?;
             } else if let Some(client) = client.filter(|client|id==listener_id(string(&client.identity,"principal_id"),"human","default")) {
                 // Persist intent before queued automatic enrollment can obtain the lock.
                 c.execute("INSERT OR IGNORE INTO local_listeners(hub,listener_id,public_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status) VALUES(?,?,?,?,?,?,?,'human','default','','','Human','self','UNLISTENED')",&[
@@ -798,10 +811,8 @@ impl DaemonService {
                 let mut removed = 0;
                 let mut detach_errors = Vec::new();
                 for hub in hubs {
-                    let slot = self.slot(&hub)?;
-                    let id = crate::core::registration::local_node_id(
-                        &self.state,
-                        slot,
+                    let id = self.ensure_agent_stop_row(
+                        &hub,
                         string(&caller, "harness"),
                         string(&caller, "session_id"),
                     )?;

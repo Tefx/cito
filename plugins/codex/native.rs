@@ -1,6 +1,6 @@
 use crate::support::*;
 use serde_json::{json, Value};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -158,23 +158,204 @@ fn setup(req: &Value) -> Result<Value> {
     })?;
     Ok(json!({"ok":true,"actions":[action]}))
 }
+fn activity_at(row: &Value) -> Option<(u64, u64)> {
+    let revision = str_at(row, "recency_at_ms")
+        .or_else(|| str_at(row, "updated_at"))?
+        .parse::<u64>()
+        .ok()?;
+    Some((
+        revision,
+        if revision < 100_000_000_000 {
+            revision.saturating_mul(1000)
+        } else {
+            revision
+        },
+    ))
+}
+fn effect_path(req: &Value, sid: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    state(req)
+        .join("activity/codex")
+        .join(format!("{:x}.json", Sha256::digest(sid.as_bytes())))
+}
+fn record_effect(req: &Value, sid: &str, text: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let path = effect_path(req, sid);
+    std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
+        .map_err(|_| "Cannot save activity attribution")?;
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    let mut ledger = read_json(&path)?;
+    let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+    let mut effects = ledger["effects"].as_array().cloned().unwrap_or_default();
+    if !effects.contains(&hash) {
+        effects.push(hash);
+    }
+    ledger["effects"] = json!(effects);
+    save_activity(&path, &ledger)
+}
+fn save_activity(path: &Path, value: &Value) -> Result<()> {
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let result =
+        std::fs::write(&temp, value.to_string()).and_then(|_| std::fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result.map_err(|_| "Cannot save session activity".into())
+}
+fn source_activity(req: &Value, row: &Value) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    let path = effect_path(req, str_at(row, "id").unwrap_or(""));
+    std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
+        .map_err(|_| "Cannot save session activity")?;
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    let ledger = read_json(&path)?;
+    let Some((source_revision, recency)) = activity_at(row) else {
+        return Ok(Value::Null);
+    };
+    let cursor_path = path.with_extension("source.json");
+    let mut cached = read_json(&cursor_path)?;
+    // Retain the maximum observed source integer, never a refresh counter. This
+    // also prevents a source timestamp rollback from decreasing the revision.
+    let revision = source_revision.max(cached["revision"].as_u64().unwrap_or(0));
+    if let Some(rollout) = str_at(row, "rollout_path") {
+        match std::fs::File::open(rollout) {
+            Ok(mut file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| "Cannot inspect session activity")?;
+                let same_source = cached["device"] == metadata.dev()
+                    && cached["inode"] == metadata.ino()
+                    && cached["offset"]
+                        .as_u64()
+                        .is_some_and(|offset| offset <= metadata.len());
+                let mut offset = if same_source {
+                    cached["offset"].as_u64().unwrap_or(0)
+                } else {
+                    0
+                };
+                let mut latest = if same_source {
+                    cached["user_at_ms"].as_u64()
+                } else {
+                    None
+                };
+                let mut saw_effect = same_source && cached["saw_effect"] == true;
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|_| "Cannot read session activity")?;
+                let mut reader = BufReader::new(file);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    let n = reader
+                        .read_line(&mut line)
+                        .map_err(|_| "Cannot read session activity")?;
+                    // Never checkpoint a partially appended JSONL record.
+                    if n == 0 || !line.ends_with('\n') {
+                        break;
+                    }
+                    offset += n as u64;
+                    let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    let payload = &event["payload"];
+                    let text = if payload["type"] == "user_message" {
+                        payload["message"].as_str().map(str::to_owned)
+                    } else if payload["type"] == "message" && payload["role"] == "user" {
+                        payload["content"].as_array().map(|a| {
+                            a.iter()
+                                .filter_map(|v| v["text"].as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                    } else {
+                        None
+                    };
+                    let Some(text) = text else {
+                        continue;
+                    };
+                    let hash = json!(format!("{:x}", Sha256::digest(text.as_bytes())));
+                    let effect = ledger["effects"]
+                        .as_array()
+                        .is_some_and(|effects| effects.contains(&hash));
+                    if effect {
+                        saw_effect = true;
+                    } else if let Some(at) =
+                        event["timestamp"].as_str().and_then(activity_timestamp)
+                    {
+                        latest = Some(latest.unwrap_or(0).max(at));
+                    }
+                }
+                // The cursor bounds repeat work, not the activity revision. Revision
+                // remains the durable DB source integer across scans and restarts.
+                save_activity(
+                    &cursor_path,
+                    &json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision}),
+                )?;
+                if let Some(at) = latest {
+                    return Ok(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
+                }
+                if saw_effect {
+                    return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Cannot read session activity".into()),
+        }
+    }
+    cached["revision"] = json!(revision);
+    save_activity(&cursor_path, &cached)?;
+    if ledger["effects"]
+        .as_array()
+        .is_some_and(|effects| !effects.is_empty())
+    {
+        // Recency without an explicit source user event after a known wake is
+        // ambiguous. Do not invent user activity from our own effect.
+        return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+    }
+    Ok(json!({"revision":revision,"at_ms":recency,"kind":"unknown"}))
+}
+fn activity_timestamp(raw: &str) -> Option<u64> {
+    // SAFETY: libc::tm has valid zero-initialized fields before strptime fills them.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let input = std::ffi::CString::new(raw).ok()?;
+    // SAFETY: both C strings and tm remain live through strptime/timegm.
+    let rest = unsafe { libc::strptime(input.as_ptr(), c"%Y-%m-%dT%H:%M:%S".as_ptr(), &mut tm) };
+    if rest.is_null() {
+        return None;
+    }
+    let seconds = unsafe { libc::timegm(&mut tm) };
+    let fraction = raw
+        .get(19..)?
+        .strip_prefix('.')
+        .map(|s| {
+            s.chars()
+                .take_while(char::is_ascii_digit)
+                .take(3)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let ms = format!("{fraction:0<3}").parse::<u64>().ok()?;
+    u64::try_from(seconds)
+        .ok()?
+        .checked_mul(1000)?
+        .checked_add(ms)
+}
 fn row_for_id(req: &Value, id: &str) -> Result<Option<Value>> {
     let path = db(req);
     if !path.try_exists().map_err(|e| e.to_string())? {
         return Ok(None);
     }
-    if sqlite_rows(&path, "PRAGMA table_info(threads)")?.is_empty() {
+    let connection = ReadOnlySqlite::open(&path, Duration::from_millis(1200))?;
+    if connection.rows("PRAGMA table_info(threads)")?.is_empty() {
         return Ok(None);
     }
-    Ok(sqlite_rows(
-        &path,
-        &format!(
+    Ok(connection
+        .rows(&format!(
             "SELECT * FROM threads WHERE id = '{}'",
             id.replace('\'', "''")
-        ),
-    )?
-    .into_iter()
-    .next())
+        ))?
+        .into_iter()
+        .next())
 }
 fn try_rows(req: &Value) -> Result<Vec<Value>> {
     let path = db(req);
@@ -199,12 +380,18 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         "archived",
         "thread_source",
         "source",
+        "rollout_path",
     ]
     .into_iter()
     .filter(|column| has(column))
     .collect::<Vec<_>>()
     .join(", ");
-    let mut predicates = vec!["id IS NOT NULL", "id != ''", "cwd IS NOT NULL", "cwd != ''"];
+    let mut predicates = vec![
+        "id IS NOT NULL",
+        "trim(id,char(9)||char(10)||char(13)||' ') != ''",
+        "cwd IS NOT NULL",
+        "trim(cwd,char(9)||char(10)||char(13)||' ') != ''",
+    ];
     if has("archived") && req["cli_cmd"] != "unlisten" {
         predicates.push("archived = 0");
     }
@@ -225,16 +412,25 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
+    let predicate = predicates.join(" AND ");
+    let order = order.join(", ");
+    let window = if req["op"] == "discover_sessions" {
+        let recency = match (has("recency_at_ms"), has("updated_at")) {
+            (true, true) => "COALESCE(recency_at_ms,updated_at,0)",
+            (true, false) => "COALESCE(recency_at_ms,0)",
+            (false, true) => "COALESCE(updated_at,0)",
+            (false, false) => "0",
+        };
+        let cutoff = now_ms().saturating_sub(req["recent_window_ms"].as_u64().unwrap_or(900_000));
+        // One coherent snapshot contains the small Menu slice plus every active
+        // source row. Historical inventories never bound automatic enrollment.
+        format!(" AND (rowid IN (SELECT rowid FROM threads WHERE {predicate} ORDER BY {order} LIMIT 8) OR CASE WHEN {recency}<100000000000 THEN {recency}*1000 ELSE {recency} END >= {cutoff})")
+    } else {
+        String::new()
+    };
     Ok(connection
         .rows(&format!(
-            "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
-            predicates.join(" AND "),
-            order.join(", "),
-            if req["op"] == "discover_sessions" {
-                " LIMIT 32"
-            } else {
-                ""
-            }
+            "SELECT {projection} FROM threads WHERE {predicate}{window} ORDER BY {order}"
         ))?
         .into_iter()
         // Preserve caller validation for whitespace-only IDs and working directories.
@@ -321,16 +517,16 @@ pub fn handle(req: &Value) -> Result<Value> {
             let sessions = if running {
                 try_rows(req)?
                     .iter()
-                    .take(8)
                     .map(|r| {
                         let mut c = row_caller(req, r);
+                        c["activity"] = source_activity(req, r)?;
                         c["updated_at_ms"] = json!(str_at(r, "recency_at_ms")
                             .or_else(|| str_at(r, "updated_at"))
                             .and_then(|s| s.parse::<u64>().ok())
                             .map(|t| if t < 100_000_000_000 { t * 1000 } else { t }));
-                        c
+                        Ok(c)
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>>>()?
             } else {
                 vec![]
             };
@@ -420,16 +616,8 @@ pub fn handle(req: &Value) -> Result<Value> {
                 );
             }
             let id = str_at(req, "session_id").unwrap_or("");
-            let archived = sqlite_rows(
-                &db(req),
-                &format!(
-                    "SELECT archived FROM threads WHERE id = '{}'",
-                    id.replace('\'', "''")
-                ),
-            )
-            .ok()
-            .and_then(|r| r.first().cloned())
-            .and_then(|r| r["archived"].as_str().map(|s| s != "0"));
+            let archived =
+                row_for_id(req, id)?.and_then(|r| r["archived"].as_str().map(|s| s != "0"));
             let status = if archived == Some(true) {
                 "closed_definitive"
             } else {
@@ -467,6 +655,11 @@ pub fn handle(req: &Value) -> Result<Value> {
                     .map(|output| output.map(|o| o.status.success()))
             };
             let already_queued = req["queue_written"] == true;
+            // Persist effect attribution before submitting it; retries never turn it
+            // into a new user turn, even if the provider updates recency later.
+            if !already_queued {
+                record_effect(req, sid, text)?;
+            }
             let queue_confirmed = if already_queued {
                 req["queue_confirmed"] == true
             } else {

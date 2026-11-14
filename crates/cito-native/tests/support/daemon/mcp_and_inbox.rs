@@ -541,6 +541,25 @@ fn http_origin_guard_strict_tool_schemas_and_singleton_port_ownership() {
     f.daemon(&[]);
 }
 #[test]
+fn cli_formats_real_mcp_error_envelopes_without_json_or_internal_codes() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let _daemon = f.daemon(&[]);
+    let (ok, _, error) = f.command(
+        NATIVE,
+        &["send", "--to", "c_0000000000000000", "--message", "hello"],
+        "",
+    );
+    assert!(!ok, "Unknown targets must fail");
+    assert!(error.contains("Target listener does not exist"), "{error}");
+    assert!(
+        !error.contains("error_code")
+            && !error.contains("{")
+            && !error.contains("LISTENER_NOT_FOUND"),
+        "{error}"
+    );
+}
+#[test]
 fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -549,7 +568,7 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
     let daemon = f.daemon(&[]);
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        6
+        7
     );
     assert!(db
         .query(
@@ -665,7 +684,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .all(|v| v["message"].as_str().unwrap().chars().count() <= 512));
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        6
+        7
     );
     assert_eq!(
         db.query("SELECT COUNT(*) AS n FROM local_signals", &[])

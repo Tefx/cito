@@ -26,6 +26,7 @@ pub struct PluginDescriptor {
     pub tint: String,
     pub cli_flag: bool,
     pub pid_bound: bool,
+    pub auto_listen: AutoListen,
     pub plugin_dir: PathBuf,
     pub is_builtin: bool,
     pub command: Vec<String>,
@@ -33,6 +34,19 @@ pub struct PluginDescriptor {
     pub fields: Vec<Value>,
     pub post_setup_hint: Option<String>,
     pub post_disconnect_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AutoListen {
+    pub mode: AutoListenMode,
+    pub recent_window_ms: Option<u64>,
+    pub idle_timeout_ms: Option<u64>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoListenMode {
+    #[default]
+    Endpoint,
+    Activity,
 }
 
 #[derive(Clone, Debug)]
@@ -453,6 +467,30 @@ pub(super) fn parse_manifest(
         tint,
         cli_flag,
         pid_bound: map.get("pidBound").and_then(Value::as_bool).unwrap_or(true),
+        auto_listen: {
+            let value = map.get("autoListen");
+            if value.is_some_and(|v| !v.is_object()) {
+                return Err("PLUGIN_LOAD_ERROR: autoListen must be an object".into());
+            }
+            let mode = match value.and_then(|v| v.get("mode")).and_then(Value::as_str) {
+                None | Some("endpoint") => AutoListenMode::Endpoint,
+                Some("activity") => AutoListenMode::Activity,
+                _ => return Err("PLUGIN_LOAD_ERROR: Invalid autoListen mode".into()),
+            };
+            for key in ["recentWindowMs", "idleTimeoutMs"] {
+                if value
+                    .and_then(|v| v.get(key))
+                    .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+                {
+                    return Err(format!("PLUGIN_LOAD_ERROR: Invalid autoListen {key}"));
+                }
+            }
+            AutoListen {
+                mode,
+                recent_window_ms: value.and_then(|v| v["recentWindowMs"].as_u64()),
+                idle_timeout_ms: value.and_then(|v| v["idleTimeoutMs"].as_u64()),
+            }
+        },
         plugin_dir: dir.to_path_buf(),
         is_builtin,
         command,
@@ -1055,7 +1093,10 @@ pub fn plugin_request_with_progress(
                         if !success {
                             return Err(format!(
                                 "Plugin exited {code}: {}",
-                                String::from_utf8_lossy(&errors)
+                                crate::support::bounded_diagnostic(
+                                    &String::from_utf8_lossy(&errors),
+                                    "Plugin process failed"
+                                )
                             ));
                         }
                         let output = std::str::from_utf8(&output).map_err(|e| e.to_string())?;
@@ -1592,6 +1633,22 @@ mod tests {
             assert_eq!(result["error_code"], "PLUGIN_EXEC_FAILED");
             fs::remove_dir_all(root).unwrap();
         }
+        let (root, plugin) = fixture("printf '%06000d\\n' 1 >&2; exit 4");
+        let error = plugin_request(&plugin, &json!({"op":"probe"})).unwrap_err();
+        assert!(
+            error.chars().count() < 600,
+            "Subprocess stderr must stay bounded"
+        );
+        fs::remove_dir_all(root).unwrap();
+        let (root, plugin) =
+            fixture("printf '{\"ok\":false,\"error_code\":\"OFFLINE\",\"message\":\"Retry\"}\\n'");
+        let envelope = plugin_request(&plugin, &json!({"op":"probe"})).unwrap();
+        assert_eq!(
+            envelope["ok"], false,
+            "MCP still owns negative envelope routing"
+        );
+        assert_eq!(envelope["error_code"], "OFFLINE");
+        fs::remove_dir_all(root).unwrap();
         let (root, plugin) = fixture("echo $$ > child.pid; exec /bin/sleep 10");
         let started = Instant::now();
         let result = plugin_request_with_timeout(
@@ -1640,6 +1697,32 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn manifest_auto_listen_is_optional_typed_and_independent_of_pid_binding() {
+        let (root, plugin) = fixture("/bin/cat");
+        assert_eq!(plugin.auto_listen.mode, AutoListenMode::Endpoint);
+        assert_eq!(plugin.auto_listen.idle_timeout_ms, None);
+        let path = plugin.plugin_dir.join("plugin.json");
+        let mut value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["pidBound"] = json!(false);
+        value["autoListen"] =
+            json!({"mode":"activity","recentWindowMs":900000,"idleTimeoutMs":3600000});
+        fs::write(&path, value.to_string()).unwrap();
+        let parsed = parse_manifest_dir(&plugin.plugin_dir, false).unwrap();
+        assert!(!parsed.pid_bound);
+        assert_eq!(parsed.auto_listen.mode, AutoListenMode::Activity);
+        assert_eq!(parsed.auto_listen.idle_timeout_ms, Some(3_600_000));
+        for invalid in [
+            json!({"mode":"invalid"}),
+            json!({"mode":"endpoint","idleTimeoutMs":-1}),
+            json!("activity"),
+        ] {
+            value["autoListen"] = invalid;
+            fs::write(&path, value.to_string()).unwrap();
+            assert!(parse_manifest_dir(&plugin.plugin_dir, false).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn manifest_kind_aliases_and_script_fallback() {
         let (root, plugin) = fixture("/bin/cat");

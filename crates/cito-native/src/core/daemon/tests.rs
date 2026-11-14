@@ -23,6 +23,333 @@ fn settle_setup_inspections(service: &mut DaemonService) {
 }
 
 #[test]
+fn activity_auto_listen_pin_stop_idle_and_reopen_follow_orthogonal_intent() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-lifecycle-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(
+        &config.config_path,
+        json!({"hubs":{"local":{"url":"local://","autoListen":true}}}).to_string(),
+    )
+    .map_err(|e| e.to_string())?;
+    let script = dir.join("provider.py");
+    fs::write(
+        &script,
+        r#"import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+r = json.loads(sys.stdin.readline())
+op = r['op']
+v = dict(ok=True)
+if op == 'setup_inspect': v.update(installed=True, configured=True, paths=[])
+elif op == 'discover_sessions': v['sessions'] = json.loads((root/'sessions.json').read_text())
+elif op == 'probe': v['status'] = (root/'probe.txt').read_text()
+print(json.dumps(v))
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let plugin = crate::plugins::PluginDescriptor {
+        id: "fixture".into(),
+        kind: "agent-harness".into(),
+        display_name: "Fixture".into(),
+        tier: "test".into(),
+        order: 0,
+        sf_symbol: "terminal".into(),
+        tint: "blue".into(),
+        cli_flag: false,
+        pid_bound: false,
+        auto_listen: crate::plugins::AutoListen {
+            mode: crate::plugins::AutoListenMode::Activity,
+            recent_window_ms: Some(900_000),
+            idle_timeout_ms: Some(3_600_000),
+        },
+        plugin_dir: dir.clone(),
+        is_builtin: false,
+        command: vec![
+            "/usr/bin/python3".into(),
+            script.to_string_lossy().into_owned(),
+        ],
+        channel_env: None,
+        fields: vec![],
+        post_setup_hint: None,
+        post_disconnect_hint: None,
+    };
+    let plugins = LoadedPlugins {
+        plugins: vec![plugin.clone()],
+        rejected_ids: HashSet::new(),
+    };
+    let mut candidates:Vec<Value>=(0..12).map(|i|json!({"harness":"fixture","session_id":format!("s{i}"),"title":"Work","cwd":"/workspace","activity":{"revision":10,"at_ms":now_ms(),"kind":"unknown"}})).collect();
+    let save = |rows: &Vec<Value>| {
+        fs::write(dir.join("sessions.json"), json!(rows).to_string()).map_err(|e| e.to_string())
+    };
+    save(&candidates)?;
+    fs::write(dir.join("probe.txt"), "alive").map_err(|e| e.to_string())?;
+    let mut service = DaemonService::open(&config, &plugins)?;
+    service.local.set_plugin_roots(&[])?;
+    let result = (|| {
+        settle_setup_inspections(&mut service);
+        service.refresh_available()?;
+        let agents = || {
+            service.state.active().map(|rows| {
+                rows.into_iter()
+                    .filter(|r| r["harness"] == "fixture")
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            agents()?.len(),
+            12,
+            "Activity candidates must not inherit the eight-card menu limit"
+        );
+        assert!(agents()?.iter().all(|r| r["listen_mode"] == "auto"));
+        let id = listener_id("none#alice", "fixture", "s0");
+        let row = || {
+            service
+                .state
+                .listener("local", &id)
+                .and_then(|r| r.ok_or("Missing row".into()))
+        };
+        assert_eq!(row()?["last_activity_revision"], "10");
+        service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
+        service.set_auto_listen("local", false)?;
+        assert_eq!(
+            service
+                .state
+                .active()?
+                .iter()
+                .filter(|r| r["harness"] == "fixture")
+                .count(),
+            1
+        );
+        assert_eq!(
+            service.state.listener("local", &id)?.ok_or("Missing pin")?["listen_mode"],
+            "manual"
+        );
+        assert!(service
+            .action(
+                &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"})
+            )
+            .unwrap_err()
+            .starts_with("INVALID_INPUT:"));
+        service.set_auto_listen("local", true)?;
+        service.refresh_available()?;
+        service.action(
+            &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
+        )?;
+        service.action(
+            &json!({"op":"unlisten_session","hub":"local","harness":"fixture","session_id":"s0"}),
+        )?;
+        assert_eq!(service.slot("local")?.config["autoListen"], true);
+        candidates[0]["activity"]["revision"] = json!(11);
+        save(&candidates)?;
+        service.refresh_available()?;
+        let reopened = LocalState::open(&config.state_dir)?;
+        let stopped = reopened
+            .listener("local", &id)?
+            .ok_or("Missing stopped row")?;
+        assert_eq!(stopped["user_stopped"], 1);
+        assert_eq!(stopped["status"], "UNLISTENED");
+        service.listen("local", &json!({"about":"Manual resume"}), &candidates[0])?;
+        let manual = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing manual row")?;
+        assert_eq!(manual["listen_mode"], "manual");
+        assert_eq!(manual["user_stopped"], 0);
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=? WHERE listener_id=?",
+            &[json!(now_ms() - 3_600_001), json!(id)],
+        )?;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing pinned row")?["status"],
+            "ACTIVE"
+        );
+        service.action(
+            &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
+        )?;
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=?,lease_until_ms=? WHERE listener_id=?",
+            &[
+                json!(now_ms() - 3_600_001),
+                json!(now_ms() + 30_000),
+                json!(id),
+            ],
+        )?;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing leased row")?["status"],
+            "ACTIVE"
+        );
+        service.state.db.execute(
+            "UPDATE local_listeners SET lease_until_ms=0 WHERE listener_id=?",
+            &[json!(id)],
+        )?;
+        service.state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,delivered_at_ms) VALUES('local','grace',?,1,1,'bob','host','Sender','hello','',?,'DISPATCHED',?)",&[json!(id),json!(now_ms()+1000),json!(now_ms())])?;
+        candidates[0]["activity"] = json!({"revision":12,"at_ms":now_ms(),"kind":"cito_effect"});
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing grace row")?["status"],
+            "ACTIVE"
+        );
+        service.state.db.execute(
+            "UPDATE local_signals SET delivered_at_ms=? WHERE signal_id='grace'",
+            &[json!(now_ms() - 300_001)],
+        )?;
+        service.auto_listen()?;
+        let retired = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing idle row")?;
+        assert_eq!(retired["status"], "UNLISTENED");
+        assert_eq!(retired["retirement_reason"], "idle");
+        assert_eq!(retired["retired_activity_revision"], "11");
+        assert_eq!(retired["user_stopped"], 0);
+        candidates[0]["activity"] = json!({"revision":11,"at_ms":now_ms(),"kind":"user_turn"});
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing idle row")?["status"],
+            "UNLISTENED"
+        );
+        candidates[0]["activity"]["revision"] = json!(13);
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing reactivated row")?["status"],
+            "ACTIVE"
+        );
+        // A long provider closure must not renew an expired automatic lease.
+        service.retire_id("local", &id, "hard_exit")?;
+        let old = now_ms() - 3_600_001;
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=? WHERE listener_id=?",
+            &[json!(old), json!(id)],
+        )?;
+        candidates[0]["activity"]["at_ms"] = json!(old);
+        save(&candidates)?;
+        service.refresh_available()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing expired row")?["status"],
+            "UNLISTENED"
+        );
+        candidates[0]["activity"] = json!({"revision":14,"at_ms":now_ms(),"kind":"user_turn"});
+        save(&candidates)?;
+        service.refresh_available()?;
+        service.auto_listen()?;
+        let renewed = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing renewed row")?;
+        assert_eq!(renewed["status"], "ACTIVE");
+        assert!(renewed["last_activity_at_ms"]
+            .as_u64()
+            .is_some_and(|at| at > old));
+        service.listen("local", &json!({"about":"Pinned"}), &candidates[0])?;
+        let captured = service.state.listener("local", &id)?.ok_or("Missing pin")?;
+        fs::write(dir.join("probe.txt"), "closed_definitive").map_err(|e| e.to_string())?;
+        super::super::receiver::probe_listener(
+            &service.state,
+            service.slot("local")?,
+            &captured,
+            &plugin,
+            &config.state_dir,
+        )?;
+        let closed = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing closed row")?;
+        assert_eq!(closed["user_stopped"], 0);
+        assert_eq!(closed["status"], "UNLISTENED");
+        fs::write(dir.join("probe.txt"), "alive").map_err(|e| e.to_string())?;
+        service.refresh_available()?;
+        let restored = service
+            .state
+            .listener("local", &id)?
+            .ok_or("Missing restored row")?;
+        assert_eq!(restored["listen_mode"], "manual");
+        assert_eq!(
+            restored["last_activity_at_ms"],
+            closed["last_activity_at_ms"]
+        );
+        service.action(
+            &json!({"op":"set_listen_mode","hub":"local","listener_id":id,"listen_mode":"auto"}),
+        )?;
+        // A still-pending wake protects the listener even without a dispatch lease.
+        service.state.db.execute(
+            "UPDATE local_listeners SET last_activity_at_ms=? WHERE listener_id=?",
+            &[json!(now_ms() - 3_600_001), json!(id)],
+        )?;
+        service.state.db.execute("UPDATE local_signals SET state='DISPATCHING',held_reason=NULL,acknowledged_at_ms=NULL,expires_at_ms=? WHERE signal_id='grace'",&[json!(now_ms()+30_000)])?;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing pending row")?["status"],
+            "ACTIVE"
+        );
+        service.state.db.execute("UPDATE local_signals SET state='DISPATCHED',acknowledged_at_ms=? WHERE signal_id='grace'",&[json!(now_ms())])?;
+        service
+            .plugins
+            .plugins
+            .iter_mut()
+            .find(|p| p.id == "fixture")
+            .ok_or("Missing plugin")?
+            .auto_listen
+            .idle_timeout_ms = None;
+        service.auto_listen()?;
+        assert_eq!(
+            service
+                .state
+                .listener("local", &id)?
+                .ok_or("Missing timeless row")?["status"],
+            "ACTIVE"
+        );
+        service.action(&json!({"op":"unlisten_all","hub":"local"}))?;
+        service.action(&json!({"op":"unlisten_all","hub":"local"}))?;
+        assert_eq!(service.slot("local")?.config["autoListen"], false);
+        assert!(service
+            .state
+            .active()?
+            .iter()
+            .all(|r| r["harness"] != "fixture"));
+        Ok(())
+    })();
+    if let Some(mut activity) = service.session_activity.take() {
+        activity.shutdown()?;
+    }
+    drop(service);
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
 fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
     let slot = HubClient::new(
         "work".into(),
@@ -63,7 +390,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
         user: "alice".into(),
         default_hub: "local".into(),
     };
-    fs::write(&config.config_path, json!({"user":"alice","hubs":{"local":{"url":"local://"},"archive":{"url":"https://hub.example.com","enabled":false}}}).to_string()).map_err(|e| e.to_string())?;
+    fs::write(&config.config_path, json!({"user":"alice","hubs":{"local":{"url":"local://"},"archive":{"url":"https://hub.example.com","enabled":false,"autoListen":true}}}).to_string()).map_err(|e| e.to_string())?;
     let plugins = LoadedPlugins {
         plugins: vec![],
         rejected_ids: HashSet::new(),
@@ -178,6 +505,10 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             .find(|hub| hub["name"] == "archive")
             .ok_or("Missing disabled Hub")?;
         assert_eq!(disabled["user"], service.config.effective_user("archive")?);
+        assert_eq!(
+            disabled["auto_listen"], false,
+            "Bulk stop disables even an empty disabled Hub"
+        );
         let personal = remaining[0].clone();
         let personal_signal = service.send(
             "local",
@@ -745,6 +1076,7 @@ print(json.dumps(result), flush=True)
                     tint: String::new(),
                     cli_flag: false,
                     pid_bound: true,
+                    auto_listen: Default::default(),
                     plugin_dir: dir.clone(),
                     is_builtin: false,
                     command: vec![
@@ -944,7 +1276,11 @@ print(json.dumps(result), flush=True)
                             Ok(())
                         })?;
                         fs::write(dir.join("candidate.json"), "[]").map_err(|e| e.to_string())?;
-                        service.set_auto_listen("work", false)?;
+                        assert!(
+                            service.set_auto_listen("work", false).is_err(),
+                            "Unavailable detach must remain visible"
+                        );
+                        assert_eq!(service.slot("work")?.config["autoListen"], false);
                         service.set_auto_listen("work", true)?;
                         service.refresh_available()?;
                         if state.db.query("SELECT 1 FROM pending_hub_detaches WHERE hub='work' AND listener_id=?",&[json!(id)])?.len()!=1 {
@@ -1085,10 +1421,13 @@ print(json.dumps(result), flush=True)
                     })
                     .ok_or("Missing fresh recovery candidate")?;
                 assert!(fresh["discovered_at"].as_u64() > revoked["updated_at"].as_u64());
-                for slot in service.slots.values_mut() {
-                    slot.config["autoListen"] = json!(true);
+                // Re-enabling explicitly clears per-session Stop intent; a fresh
+                // discovery alone no longer has that authority.
+                let hubs: Vec<_> = service.slots.keys().cloned().collect();
+                for hub in hubs {
+                    service.set_auto_listen(&hub, true)?;
                 }
-                service.auto_listen()?;
+                service.refresh_available()?;
                 if rebind {
                     assert_eq!(
                         state

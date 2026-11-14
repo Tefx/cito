@@ -471,10 +471,10 @@ pub fn try_inspect_plugin_setup(
                 })
                 .unwrap_or_default(),
         )),
-        Ok(response) => Err(response["error"]
-            .as_str()
-            .unwrap_or("Plugin inspection failed")
-            .into()),
+        Ok(response) => Err(crate::support::response_diagnostic(
+            &response,
+            "Plugin inspection failed",
+        )),
         Err(error) => Err(error),
     }
 }
@@ -487,12 +487,10 @@ fn plugin_setup_actions(
 ) -> Result<Vec<SetupAction>, String> {
     let response = setup_request(plugin, op, force, dry_run)?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(response
-            .get("message")
-            .or_else(|| response.get("error"))
-            .and_then(Value::as_str)
-            .unwrap_or("Plugin setup failed")
-            .to_string());
+        return Err(crate::support::response_diagnostic(
+            &response,
+            "Plugin setup failed",
+        ));
     }
     let actions = response
         .get("actions")

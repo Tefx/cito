@@ -140,6 +140,7 @@ impl SessionActivity {
         self.mark_stale(harness);
         for provider in self.discovery.iter_mut().filter(|p| p.plugin.id == harness) {
             provider.cached.clear();
+            provider.error = None;
         }
     }
     pub fn discovery_status(&self) -> Vec<Value> {
@@ -346,7 +347,7 @@ impl SessionActivity {
             provider.started_generation = provider.requested_generation;
             let plugin = provider.plugin.clone();
             let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
-                "plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
+                "recent_window_ms":plugin.auto_listen.recent_window_ms.unwrap_or(900_000),"plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
             provider.worker = Some(
                 thread::Builder::new()
@@ -358,8 +359,11 @@ impl SessionActivity {
                             DISCOVERY_TIMEOUT,
                             |_| check_running(&stopping),
                         )?;
-                        if response["ok"] == false {
-                            return Err(format!("Discovery rejected: {response}"));
+                        if response["ok"] != true {
+                            return Err(crate::support::response_diagnostic(
+                                &response,
+                                "Session discovery failed",
+                            ));
                         }
                         let rows = response["sessions"]
                             .as_array()
@@ -583,7 +587,10 @@ fn send_badge(
     if response["ok"] == true {
         Ok(())
     } else {
-        Err(format!("Badge rejected: {response}"))
+        Err(crate::support::response_diagnostic(
+            &response,
+            "Session badge update failed",
+        ))
     }
 }
 
@@ -749,6 +756,7 @@ else:
         (root / 'failed').touch()
     response = dict(ok=not fail)
     previous.unlink(missing_ok=True)
+response = opts.get('response', response)
 record('end', response=response)
 print(json.dumps(response), flush=True)
 "#;
@@ -801,6 +809,7 @@ print(json.dumps(response), flush=True)
                 tint: "blue".into(),
                 cli_flag: false,
                 pid_bound: true,
+                auto_listen: Default::default(),
                 plugin_dir: path.clone(),
                 is_builtin: false,
                 channel_env: None,
@@ -923,7 +932,13 @@ print(json.dumps(response), flush=True)
         let started = Instant::now();
         activity.tick(&f.state, &[])?;
         assert!(started.elapsed() < Duration::from_millis(200));
-        pump(&mut activity, &f, &[], |a| a.available(&[], 1).len() == 2)?;
+        pump(&mut activity, &f, &[], |a| a.available(&[], 1).len() == 2).map_err(|e| {
+            format!(
+                "{e}; fast={:?}; other={:?}",
+                f.records("fast"),
+                f.records("other")
+            )
+        })?;
         assert!(
             started.elapsed() < Duration::from_millis(1400),
             "Fast providers waited for slow provider"
@@ -980,6 +995,72 @@ print(json.dumps(response), flush=True)
         assert!(!activity.candidates().any(|r| r["session_id"] == "old"));
         assert_eq!(activity.discovery_status()[0]["status"], "ready");
         activity.shutdown()?;
+        Ok(())
+    }
+    #[test]
+    fn subprocess_discovery_badge_and_setup_use_canonical_diagnostics() -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        let rejection = json!({"ok":false,"error_code":"PROVIDER_OFFLINE","message":"The provider is unavailable","extra":{"private":"not displayed"}});
+        f.provider("agent", json!({"response":rejection}))?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &[], |a| {
+            a.discovery_status()[0]["status"] == "error"
+        })?;
+        assert_eq!(
+            activity.discovery_status()[0]["error"],
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        let request = badge_request(
+            &f.config.state_dir,
+            &activity.env,
+            &Intent {
+                session_id: "session".into(),
+                endpoint_pid: None,
+                badge: Some("1".into()),
+            },
+        );
+        assert_eq!(
+            send_badge(&f.plugins.plugins[0], &request, &AtomicBool::new(false)).unwrap_err(),
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        activity.remove_candidates("agent");
+        assert!(activity.discovery_status()[0]["error"].is_null());
+        fs::write(
+            f.dir.join("agent/options.json"),
+            json!({"response":{"sessions":[]}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        activity.refresh_discovery();
+        pump(&mut activity, &f, &[], |a| {
+            a.discovery_status()[0]["status"] == "error"
+        })?;
+        assert_eq!(
+            activity.discovery_status()[0]["error"],
+            "Session discovery failed",
+            "A missing ok is not success"
+        );
+        assert_eq!(
+            send_badge(&f.plugins.plugins[0], &request, &AtomicBool::new(false)).unwrap_err(),
+            "Session badge update failed"
+        );
+        activity.shutdown()?;
+        let mut plugin = f.plugins.plugins[0].clone();
+        plugin.command = vec![
+            "/usr/bin/python3".into(),
+            "-c".into(),
+            format!(
+                "import json,sys; json.load(sys.stdin); print({:?})",
+                rejection.to_string()
+            ),
+        ];
+        assert_eq!(
+            crate::setup::try_inspect_plugin_setup(&plugin).unwrap_err(),
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
+        assert_eq!(
+            crate::setup::apply_plugin_setup(&plugin, false, false).unwrap_err(),
+            "PROVIDER_OFFLINE: The provider is unavailable"
+        );
         Ok(())
     }
     #[test]

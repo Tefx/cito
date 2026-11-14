@@ -2,6 +2,61 @@ use super::support::*;
 use std::os::unix::net::UnixListener;
 
 #[test]
+fn live_bridge_rejections_survive_identification_and_wake() {
+    use std::io::{BufRead, BufReader, Write};
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let path = f
+            .state
+            .join(format!("sockets/{id}-pid-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            let mut count = 0;
+            while count < 2 && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                            .unwrap();
+                        let mut line = String::new();
+                        BufReader::new(stream.try_clone().unwrap())
+                            .read_line(&mut line)
+                            .unwrap();
+                        writeln!(stream,"{}",json!({"ok":false,"error_code":"BRIDGE_REJECTED","message":"Session is unavailable"})).unwrap();
+                        count += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(2))
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            count
+        });
+        let identify=f.plugin(bin,json!({"op":"verify","endpoint_pid":std::process::id(),"session_id":"session","cached_caller":{},"meta":{}}));
+        let wake=f.plugin(bin,json!({"op":"wake","endpoint_pid":std::process::id(),"session_id":"session","text":"hello"}));
+        assert_eq!(server.join().unwrap(), 2);
+        fs::remove_file(path).unwrap();
+        assert_eq!(identify["ok"], false, "{id}: {identify}");
+        assert!(
+            identify.to_string().contains("Session is unavailable"),
+            "{id}: {identify}"
+        );
+        assert_eq!(wake["outcome"], "driver_unavailable", "{id}: {wake}");
+        assert!(
+            wake["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Session is unavailable"),
+            "{id}: {wake}"
+        );
+    }
+}
+#[test]
 fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -600,6 +655,135 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
     }
 }
 #[test]
+fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let home = f.dir.join("source #?%");
+    fs::create_dir_all(&home).unwrap();
+    f.env.insert(
+        "CITO_CODEX_HOME".into(),
+        home.to_string_lossy().into_owned(),
+    );
+    assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let source = f.dir.join("source.sqlite");
+    let db = cito_native::database::Database::open(&source).unwrap();
+    db.execute("PRAGMA journal_mode=WAL; CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT); PRAGMA wal_checkpoint(TRUNCATE)",&[]).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let rollout = f.dir.join("rollout.jsonl");
+    fs::write(&rollout,"{\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"User work\"}}\n").unwrap();
+    for i in 0..12 {
+        db.execute(
+            "INSERT INTO threads VALUES(?,'/repo',0,?,NULL)",
+            &[json!(format!("recent-{i}")), json!(now + i)],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "INSERT INTO threads VALUES('thread','/repo',0,?,?)",
+        &[json!(now), json!(rollout)],
+    )
+    .unwrap();
+    let path = home.join("state_5.sqlite");
+    fs::copy(&source, &path).unwrap();
+    fs::copy(
+        source.with_extension("sqlite-wal"),
+        path.with_extension("sqlite-wal"),
+    )
+    .unwrap();
+    assert!(!path.with_extension("sqlite-shm").exists());
+    let discover = |f: &Fixture| f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    let first = discover(&f);
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["sessions"].as_array().unwrap().len(), 13);
+    let activity = |v: &Value| {
+        v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["session_id"] == "thread")
+            .unwrap()["activity"]
+            .clone()
+    };
+    let before = activity(&first);
+    assert_eq!(before["kind"], "user_turn");
+    assert_eq!(before["at_ms"], 1_767_225_600_000u64);
+    assert_eq!(
+        activity(&discover(&f)),
+        before,
+        "Provider restarts and refreshes preserve source revisions"
+    );
+    let binary = f.dir.join("queue");
+    script(&binary, "#!/bin/sh\nexit 0\n");
+    f.env.insert(
+        "CITO_CODEX_BIN".into(),
+        binary.to_string_lossy().into_owned(),
+    );
+    let wake = "Cito · Incoming work";
+    let queued = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":wake,"checkpoint_only":true}),
+    );
+    assert_eq!(queued["queue_written"], true, "{queued}");
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout).unwrap();
+    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:01:00.000Z","payload":{"type":"user_message","message":wake}})).unwrap();
+    assert_eq!(
+        activity(&discover(&f)),
+        before,
+        "Cito effects cannot renew qualifying user activity"
+    );
+    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":"Next user turn"}})).unwrap();
+    // Tool output after a user turn can exceed a fixed tail slice. It must not
+    // hide the qualifying turn or become new activity on subsequent refreshes.
+    writeln!(file,"{}",json!({"timestamp":"2026-01-01T00:03:00.000Z","payload":{"type":"tool_output","text":"x".repeat(300_000)}})).unwrap();
+    let target = cito_native::database::Database::open(&path).unwrap();
+    target
+        .execute(
+            "UPDATE threads SET recency_at_ms=? WHERE id='thread'",
+            &[json!(now + 1)],
+        )
+        .unwrap();
+    let after = activity(&discover(&f));
+    assert!(after["revision"].as_u64() > before["revision"].as_u64());
+    assert_eq!(after["at_ms"], 1_767_225_720_000u64);
+    target
+        .execute(
+            "UPDATE threads SET recency_at_ms=? WHERE id='thread'",
+            &[json!(now - 10)],
+        )
+        .unwrap();
+    assert_eq!(
+        activity(&discover(&f))["revision"],
+        after["revision"],
+        "Durable source high-water revisions cannot regress after a provider timestamp rollback"
+    );
+    assert_eq!(activity(&discover(&f))["at_ms"], after["at_ms"]);
+    drop(file);
+    target
+        .execute("UPDATE threads SET archived=1 WHERE id='thread'", &[])
+        .unwrap();
+    assert_eq!(
+        f.plugin(CODEX, json!({"op":"probe","session_id":"thread"}))["status"],
+        "closed_definitive"
+    );
+    target.execute("ALTER TABLE threads RENAME TO saved_threads; CREATE VIEW threads AS SELECT id,cwd,missing_function(archived) AS archived FROM saved_threads",&[]).unwrap();
+    let rejected = f.plugin(CODEX, json!({"op":"probe","session_id":"thread"}));
+    assert_eq!(
+        rejected["ok"], false,
+        "An archived lookup error cannot become alive: {rejected}"
+    );
+    assert!(rejected["status"].is_null());
+    let text = rejected.to_string();
+    assert!(!text.contains("missing_function") && !text.contains("SQLite"));
+}
+#[test]
 fn codex_metadata_validation_and_sqlite_thread_projection() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -752,7 +936,7 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         }
         Ok(())
     }).unwrap();
-    // Eligibility must precede LIMIT 32: 35 newer subagents and invalid rows
+    // Eligibility must precede the Menu slice: 35 newer subagents and invalid rows
     // cannot hide the older user thread, whose source columns are both NULL.
     let discovered = discover();
     assert_eq!(discovered["sessions"].as_array().unwrap().len(), 1);

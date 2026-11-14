@@ -8,6 +8,7 @@
   "sfSymbol": "cpu.fill",
   "tint": "orange",
   "cliFlag": true,
+  "autoListen": {"mode": "endpoint", "idleTimeoutMs": null},
   "command": [
     "./bin/cito-plugin-claude"
   ],

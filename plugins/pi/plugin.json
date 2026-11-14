@@ -8,6 +8,7 @@
   "sfSymbol": "terminal.fill",
   "tint": "amber",
   "cliFlag": true,
+  "autoListen": {"mode": "endpoint", "idleTimeoutMs": null},
   "command": [
     "./bin/cito-plugin-pi"
   ],

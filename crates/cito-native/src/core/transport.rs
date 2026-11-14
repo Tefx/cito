@@ -204,8 +204,16 @@ impl HubClient {
             return Err("Hub response exceeds frame limit".into());
         }
         let response: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if response["ok"] == false || response.get("error").is_some() {
-            return Err(response.to_string());
+        if response["ok"] == false || !response["error"].is_null() {
+            return Err(hub_error(
+                response["error"]["code"]
+                    .as_str()
+                    .unwrap_or("NATS_UNAVAILABLE"),
+                response["error"]["message"]
+                    .as_str()
+                    .or_else(|| response["message"].as_str())
+                    .unwrap_or("Hub rejected request"),
+            ));
         }
         if let Ok(mut status) = self.status.lock() {
             *status = "connected".into();

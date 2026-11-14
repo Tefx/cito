@@ -139,6 +139,25 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 drop(reader);
+                let input: Value = serde_json::from_slice(&body).unwrap();
+                if matches!(input["op"].as_str(), Some("fixture_error" | "fixture_null")) {
+                    let response = if input["op"] == "fixture_error" {
+                        json!({"ok":false,"error":{"code":"FORBIDDEN","message":"Request denied"}})
+                    } else {
+                        json!({"ok":true,"error":null,"result":{"value":"accepted"}})
+                    };
+                    let body = response.to_string();
+                    write!(
+                        tls,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                    tls.conn.send_close_notify();
+                    tls.flush().unwrap();
+                    continue;
+                }
                 let mut upstream = TcpStream::connect(target).unwrap();
                 upstream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -159,6 +178,18 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
     (f, client)
 }
 
+#[test]
+fn https_rpc_extracts_error_envelopes_and_accepts_null_error() {
+    let (_fixture, client) = fixture("127.0.0.1", true);
+    assert_eq!(
+        client.rpc("fixture_error", &json!({})).unwrap_err(),
+        "FORBIDDEN: Request denied"
+    );
+    assert_eq!(
+        client.rpc("fixture_null", &json!({})).unwrap()["value"],
+        "accepted"
+    );
+}
 #[test]
 fn ipv6_loopback_hub_rpc_round_trip() {
     let (f, client) = fixture("::1", false);
