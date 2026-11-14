@@ -11014,7 +11014,7 @@ phases:
     name: 'V40 Contract-and-Simplicity Review & Fix, Visual Asset/Screenshot Inspection,
       Dual-Mac & Relocated Bundle Verification and Push to main (No Release Tag) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Run [REQUIRES_SKILL: contract-and-simplicity] review & fix across\
       \ all v40.impl changes (docs/DESIGN.md §1–§8, R1–R5), closing all contract,\
@@ -11067,3 +11067,5 @@ phases:
     depends_on:
     - v40.impl
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-14T08:47:07.582916Z'
