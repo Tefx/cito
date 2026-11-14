@@ -11744,7 +11744,7 @@ phases:
   - id: v42.design
     name: 'V42 Architectural Decoupling Blueprint for Core, Swift UI, and Test Hotspots
       [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: review\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Produce a read-only architectural decoupling blueprint under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]` covering the 6 oversized modules on `main`:\n  1.\
@@ -11793,6 +11793,21 @@ phases:
     agent: structural-auditor
     claimed_by: structural-auditor
     claimed_at: '2026-11-14T16:51:47.676645Z'
+    done_at: '2026-11-14T16:55:52.479749+00:00'
+    evidence: "Artifact:\n- Read-only architectural blueprint: /tmp/v42-design-blueprint.md\
+      \ (180 lines, structural-auditor Full-File 1..EOF 11/11 assigned files, Uninspected\
+      \ Gaps: NONE).\n\nClassification & Disjoint Surfaces:\n- KEEP_TOGETHER: crates/cito-native/src/core/hub.rs\
+      \ (2,779L) and crates/cito-native/src/core/setup.rs (2,439L).\n- DECOUPLE:\n\
+      \  1. v42.rust-core: crates/cito-native/src/core/daemon/{mod,ui_ipc,host_hub,channels,projection,mcp,http_actions,tests}.rs\
+      \ (replacing core/daemon.rs), preserving all pub/pub(crate) exports and core/mod.rs\
+      \ + lib.rs untouched.\n  2. v42.swift-ui: src/macos/{main,PaletteAndMetrics,Models,UIPrimitives,Companion,MenuSurface,DirectoryCell,DirectorySurface,SettingsSurface,HeadlessOracle}.swift\
+      \ + crates/cito-native/build.rs (sorted *.swift + directory/file rerun-if-changed).\n\
+      \  3. v42.tests: crates/cito-native/tests/support/{ui,daemon}/ submodules +\
+      \ crates/cito-native/tests/native.rs (including lockstep --exact update for\
+      \ 4 self-re-exec tests in daemon::discovery_and_setup).\n- Overlap Check: v42.rust-core\
+      \ ∩ v42.swift-ui ∩ v42.tests = ∅.\n\nVerification:\n- Run: cargo test -p cito-native\
+      \ --lib -- --list && cargo test -p cito-native --test native -- --list -> Passed.\n\
+      \nSpec link:\n- docs/DESIGN.md (§1.2, §2.1–§2.2, §5.1–§5.2)"
   - id: v42.rust-core
     name: 'V42 Rust Core Decoupling (daemon.rs, hub.rs, setup.rs) [REQUIRES_SKILL:
       contract-and-simplicity]'
