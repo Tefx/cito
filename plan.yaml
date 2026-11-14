@@ -11141,7 +11141,7 @@ phases:
     Discovery & Async Settlement, Ack/Cursor/Queue Integrity, CLI/GUI/MCP/Plugin Parity,
     Strict OIDC/URL/Transport, Bounded Buffers & Push-Down Queries, and Option A Menu
     Slimming'
-  status: pending
+  status: in_progress
   gate: 'All binding V41 requirements in docs/DESIGN.md (§1–§8 @ efa491d) and admitted
     mechanisms M1–M7 (including Option A Menu slimming) pass; cargo fmt --all -- --check,
     cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace,
@@ -11238,7 +11238,7 @@ phases:
   - id: v41.core
     name: V41 Rust Core, Daemon, Hub, OIDC/Transport, CLI/MCP, Plugins & Packaging
       Closure (M1–M6 & M7 Backend/Packaging)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement all Rust core, daemon, Hub, OIDC, transport, CLI/MCP,\
       \ subprocess plugin, Docker/packaging, and backend test requirements in docs/DESIGN.md\
@@ -11402,6 +11402,8 @@ phases:
     - crates/cito-native/tests/support/daemon.rs
     - crates/cito-native/tests/support/plugins.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-14T12:25:26.451337Z'
   - id: v41.ui
     name: V41 Option A Menu Slimming, Settings Human Channels Inbox Control Bar, Four-Surface
       AppKit UI Hygiene & Docs/Site/Screenshot Sync (M2 UI & M7)
