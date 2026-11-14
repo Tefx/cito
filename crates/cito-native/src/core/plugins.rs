@@ -472,9 +472,10 @@ pub(super) fn parse_manifest(
             if value.is_some_and(|v| !v.is_object()) {
                 return Err("PLUGIN_LOAD_ERROR: autoListen must be an object".into());
             }
-            let mode = match value.and_then(|v| v.get("mode")).and_then(Value::as_str) {
-                None | Some("endpoint") => AutoListenMode::Endpoint,
-                Some("activity") => AutoListenMode::Activity,
+            let mode = match value.and_then(|v| v.get("mode")) {
+                None => AutoListenMode::Endpoint,
+                Some(Value::String(mode)) if mode == "endpoint" => AutoListenMode::Endpoint,
+                Some(Value::String(mode)) if mode == "activity" => AutoListenMode::Activity,
                 _ => return Err("PLUGIN_LOAD_ERROR: Invalid autoListen mode".into()),
             };
             for key in ["recentWindowMs", "idleTimeoutMs"] {
@@ -1714,6 +1715,11 @@ mod tests {
         assert_eq!(parsed.auto_listen.idle_timeout_ms, Some(3_600_000));
         for invalid in [
             json!({"mode":"invalid"}),
+            json!({"mode":false}),
+            json!({"mode":null}),
+            json!({"mode":1}),
+            json!({"mode":[]}),
+            json!({"mode":{}}),
             json!({"mode":"endpoint","idleTimeoutMs":-1}),
             json!("activity"),
         ] {

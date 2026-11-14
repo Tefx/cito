@@ -128,6 +128,19 @@ fn errors_unwrap_protocol_diagnostics_preserve_word_boundaries_and_expand_discov
         let s = inspect(&f, p);
         assert_eq!(node(&s, "items", "hub_error:personal")["text"], expected, "{raw}");
     }
+    let vectors: Vec<[String; 2]> =
+        serde_json::from_str(include_str!("../diagnostics.json")).unwrap();
+    for [raw, expected] in vectors {
+        let mut frame = state();
+        frame["hubs"][0]["error"] = json!(raw);
+        f.send(p, frame);
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "items", "hub_error:personal")["text"],
+            expected,
+            "{raw}"
+        );
+    }
     let clean = "Cannot scan the session directory. Check the app data location and permissions, then refresh discovery to try again. ".repeat(4);
     for appearance in ["light", "dark"] {
         let mut frame = state();

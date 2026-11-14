@@ -191,6 +191,89 @@ fn https_rpc_extracts_error_envelopes_and_accepts_null_error() {
     );
 }
 #[test]
+fn http_rpc_response_status_and_error_envelopes() {
+    for (status, body, expected, state) in [
+        (
+            200,
+            json!({"ok":true,"error":null,"result":{"value":"accepted"}}),
+            Ok(json!({"value":"accepted"})),
+            "connected",
+        ),
+        (
+            200,
+            json!({"error":{"code":"FORBIDDEN","message":"Denied"}}),
+            Err("FORBIDDEN: Denied"),
+            "connected",
+        ),
+        (
+            200,
+            json!({"ok":false,"message":"Retry"}),
+            Err("NATS_UNAVAILABLE: Retry"),
+            "connected",
+        ),
+        (
+            401,
+            json!({}),
+            Err("UNAUTHORIZED: Hub rejected request"),
+            "auth_required",
+        ),
+        (
+            403,
+            json!({}),
+            Err("FORBIDDEN: Hub rejected request"),
+            "connected",
+        ),
+        (
+            500,
+            json!({"message":"Retry"}),
+            Err("INVALID_INPUT: Retry"),
+            "connected",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let raw = body.to_string();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.to_ascii_lowercase().starts_with("content-length:") {
+                    length = line.split(':').nth(1).unwrap().trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            write!(
+                socket,
+                "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}",
+                raw.len()
+            )
+            .unwrap();
+        });
+        let client = HubClient::new(
+            "work".into(),
+            json!({"url":format!("http://{address}")}),
+            "alice",
+            None,
+        );
+        *client.status.lock().unwrap() = "reconnecting".into();
+        let actual = client.rpc("fixture", &json!({}));
+        server.join().unwrap();
+        assert_eq!(actual, expected.map_err(str::to_owned));
+        assert_eq!(client.connection_status(), state);
+    }
+}
+#[test]
 fn ipv6_loopback_hub_rpc_round_trip() {
     let (f, client) = fixture("::1", false);
     assert!(f.server.address.is_ipv6());

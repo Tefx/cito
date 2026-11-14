@@ -160,33 +160,7 @@ impl HubClient {
         }
         let result = match request.send_json(json!({"op":op,"params":params})) {
             Ok(response) => response,
-            Err(ureq::Error::Status(status, response)) => {
-                if status == 401 {
-                    self.reject_bearer();
-                }
-                if let Ok(mut state) = self.status.lock() {
-                    *state = if status == 401 {
-                        "auth_required".into()
-                    } else {
-                        "connected".into()
-                    };
-                }
-                let body: Value = serde_json::from_reader(response.into_reader().take(65_536))
-                    .unwrap_or(Value::Null);
-                let code = body["error"]["code"].as_str().unwrap_or(if status == 401 {
-                    "UNAUTHORIZED"
-                } else if status == 403 {
-                    "FORBIDDEN"
-                } else {
-                    "INVALID_INPUT"
-                });
-                return Err(hub_error(
-                    code,
-                    body["error"]["message"]
-                        .as_str()
-                        .unwrap_or("Hub rejected request"),
-                ));
-            }
+            Err(ureq::Error::Status(_, response)) => response,
             Err(error) => {
                 if let Ok(mut status) = self.status.lock() {
                     *status = "reconnecting".into();
@@ -194,6 +168,7 @@ impl HubClient {
                 return Err(format!("NATS_UNAVAILABLE: {error}"));
             }
         };
+        let status = result.status();
         let mut bytes = Vec::new();
         result
             .into_reader()
@@ -203,20 +178,39 @@ impl HubClient {
         if bytes.len() > 8 * 1024 * 1024 {
             return Err("Hub response exceeds frame limit".into());
         }
-        let response: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if response["ok"] == false || !response["error"].is_null() {
+        self.parse_rpc_response(status, &bytes)
+    }
+    fn parse_rpc_response(&self, status: u16, bytes: &[u8]) -> Result<Value, String> {
+        if status == 401 {
+            self.reject_bearer();
+        }
+        if let Ok(mut state) = self.status.lock() {
+            *state = if status == 401 {
+                "auth_required"
+            } else {
+                "connected"
+            }
+            .into();
+        }
+        let response: Value = match serde_json::from_slice(bytes) {
+            Ok(value) => value,
+            Err(_) if status != 200 => Value::Null,
+            Err(error) => return Err(error.to_string()),
+        };
+        if status != 200 || response["ok"] == false || !response["error"].is_null() {
+            let fallback = match status {
+                401 => "UNAUTHORIZED",
+                403 => "FORBIDDEN",
+                200 => "NATS_UNAVAILABLE",
+                _ => "INVALID_INPUT",
+            };
             return Err(hub_error(
-                response["error"]["code"]
-                    .as_str()
-                    .unwrap_or("NATS_UNAVAILABLE"),
+                response["error"]["code"].as_str().unwrap_or(fallback),
                 response["error"]["message"]
                     .as_str()
                     .or_else(|| response["message"].as_str())
                     .unwrap_or("Hub rejected request"),
             ));
-        }
-        if let Ok(mut status) = self.status.lock() {
-            *status = "connected".into();
         }
         Ok(response.get("result").cloned().unwrap_or(response))
     }
@@ -230,7 +224,7 @@ impl HubClient {
         let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
         let deadline = Instant::now() + Duration::from_secs(10);
         let addresses = url.socket_addrs(|| None).map_err(|e| e.to_string())?;
-        let result = (|| -> Result<Value, String> {
+        let result = (|| {
             let mut connected = None;
             let mut last_error = "Hub address unavailable".to_owned();
             for address in addresses {
@@ -269,31 +263,8 @@ impl HubClient {
                 .map(|v| format!("Authorization: Bearer {v}\r\n"))
                 .unwrap_or_default();
             write!(stream,"POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nX-Cito-User: {}\r\n{bearer}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",url.path(),string(&self.identity,"owner_user"),body.len()).map_err(|e|format!("NATS_UNAVAILABLE: {e}"))?;
-            let reply = crate::plugins::read_http_response(&mut stream)
-                .map_err(|e| format!("NATS_UNAVAILABLE: {e}"))?;
-            let response: Value =
-                serde_json::from_str(&reply.body).map_err(|e| format!("NATS_UNAVAILABLE: {e}"))?;
-            if reply.status != 200 || response["ok"] == false {
-                if reply.status == 401 {
-                    self.reject_bearer();
-                }
-                let code = response["error"]["code"]
-                    .as_str()
-                    .unwrap_or("NATS_UNAVAILABLE");
-                if let Ok(mut status) = self.status.lock() {
-                    *status = if reply.status == 401 {
-                        "auth_required"
-                    } else {
-                        "connected"
-                    }
-                    .into();
-                }
-                return Err(hub_error(code, string(&response["error"], "message")));
-            }
-            if let Ok(mut status) = self.status.lock() {
-                *status = "connected".into();
-            }
-            Ok(response.get("result").cloned().unwrap_or(response))
+            crate::plugins::read_http_response(&mut stream)
+                .map_err(|e| format!("NATS_UNAVAILABLE: {e}"))
         })();
         if result
             .as_ref()
@@ -303,7 +274,8 @@ impl HubClient {
                 *status = "disconnected".into();
             }
         }
-        result
+        let reply = result?;
+        self.parse_rpc_response(reply.status, reply.body.as_bytes())
     }
     fn reject_bearer(&self) {
         if let Ok(mut rejected) = self.rejected_bearer.lock() {

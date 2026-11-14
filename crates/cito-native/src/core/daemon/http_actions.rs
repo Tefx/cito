@@ -1342,16 +1342,17 @@ impl DaemonService {
             }
             "unlisten" => {
                 let id = string(action, "listener_id");
-                self.pause_listener(&hub, id)?;
+                self.unlisten_id(&hub, id)?;
             }
             "unlisten_all" => {
                 // Bulk stop owns Hub policy even when no listener is active.
                 let raw = self.raw_config()?;
                 let (_, configured, _) =
                     crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+                let selected_hub = action.get("hub").filter(|hub| !hub.is_null());
                 let targets: Vec<String> = configured
                     .keys()
-                    .filter(|name| action["hub"].is_null() || action["hub"] == name.as_str())
+                    .filter(|name| selected_hub.is_none_or(|hub| *hub == name.as_str()))
                     .cloned()
                     .collect();
                 if targets.is_empty() && action["hub"].is_string() {
@@ -1360,10 +1361,9 @@ impl DaemonService {
                 let mut removed = 0;
                 let mut detach_errors = Vec::new();
                 for row in self.state.active()?.into_iter().filter(|row| {
-                    row["harness"] != "human"
-                        && action.get("hub").is_none_or(|hub| row["hub"] == *hub)
+                    row["harness"] != "human" && selected_hub.is_none_or(|hub| row["hub"] == *hub)
                 }) {
-                    match self.pause_listener(string(&row, "hub"), string(&row, "listener_id")) {
+                    match self.unlisten_id(string(&row, "hub"), string(&row, "listener_id")) {
                         Ok(true) => removed += 1,
                         Ok(false) => {}
                         Err(error) => {
@@ -1753,7 +1753,11 @@ impl DaemonService {
             }
             "setup_uninstall_all" => {
                 for row in self.state.active()? {
-                    let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"));
+                    let _ = self.retire_id(
+                        string(&row, "hub"),
+                        string(&row, "listener_id"),
+                        "disconnected",
+                    );
                 }
                 self.uninstall = Some(action["purge_data"].as_bool().unwrap_or(false));
                 request_shutdown();

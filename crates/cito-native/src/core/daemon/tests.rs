@@ -331,14 +331,40 @@ print(json.dumps(v))
                 .ok_or("Missing timeless row")?["status"],
             "ACTIVE"
         );
-        service.action(&json!({"op":"unlisten_all","hub":"local"}))?;
-        service.action(&json!({"op":"unlisten_all","hub":"local"}))?;
-        assert_eq!(service.slot("local")?.config["autoListen"], false);
-        assert!(service
-            .state
-            .active()?
-            .iter()
-            .all(|r| r["harness"] != "fixture"));
+        for action in [
+            json!({"op":"unlisten_all"}),
+            json!({"op":"unlisten_all","hub":null}),
+            json!({"op":"unlisten_all","hub":"local"}),
+        ] {
+            service.set_auto_listen("local", true)?;
+            for candidate in &candidates[..2] {
+                service.listen("local", &json!({"about":"Stop witness"}), candidate)?;
+            }
+            let auto_id = listener_id("none#alice", "fixture", "s1");
+            service.action(&json!({"op":"set_listen_mode","hub":"local","listener_id":auto_id,"listen_mode":"auto"}))?;
+            let expected = service
+                .state
+                .active()?
+                .iter()
+                .filter(|r| r["harness"] == "fixture")
+                .count();
+            assert!(expected >= 2);
+            assert_eq!(service.action(&action)?["removed"], expected, "{action}");
+            assert_eq!(service.action(&action)?["removed"], 0, "{action}");
+            assert_eq!(service.slot("local")?.config["autoListen"], false);
+            assert!(service
+                .state
+                .active()?
+                .iter()
+                .all(|r| r["harness"] != "fixture"));
+            for session in ["s0", "s1"] {
+                let row = service
+                    .state
+                    .listener("local", &listener_id("none#alice", "fixture", session))?
+                    .ok_or("Missing stopped row")?;
+                assert_eq!(row["user_stopped"], 1, "{action}");
+            }
+        }
         Ok(())
     })();
     if let Some(mut activity) = service.session_activity.take() {
@@ -408,7 +434,7 @@ fn agent_stop_all_and_url_scoped_send_reservations_preserve_personal_state() -> 
             "human",
             "default",
         );
-        service.pause_listener("local", &human_id)?;
+        service.unlisten_id("local", &human_id)?;
         assert_eq!(
             service
                 .state

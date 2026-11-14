@@ -132,6 +132,117 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
 }
 
 #[test]
+fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://","autoListen":true}}}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source
+        .execute(
+            "CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER)",
+            &[],
+        )
+        .unwrap();
+    let now = cito_native::plugins::now_ms();
+    for id in ["pinned", "automatic", "stopped"] {
+        source
+            .execute(
+                "INSERT INTO threads VALUES(?,'/repo',0,?)",
+                &[json!(id), json!(now)],
+            )
+            .unwrap();
+    }
+    assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    // Use this build's real provider, independently of checked-in release staging.
+    let plugin_dir = f.state.join("plugins/codex");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    let mut manifest: Value = serde_json::from_str(
+        &fs::read_to_string(root().join("plugins/codex/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manifest["command"] = json!([CODEX]);
+    fs::write(plugin_dir.join("plugin.json"), manifest.to_string()).unwrap();
+    f.daemon(&[]);
+    wait(|| {
+        f.rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
+            .len()
+            == 3
+    });
+    let pinned = f
+        .rows("SELECT * FROM local_listeners WHERE harness='codex' AND session_id='pinned'")[0]
+        .clone();
+    assert_eq!(f.action(json!({"op":"set_listen_mode","hub":"local","listener_id":pinned["listener_id"],"listen_mode":"manual"})).0, 200);
+    assert_eq!(
+        f.action(
+            json!({"op":"unlisten_session","hub":"local","harness":"codex","session_id":"stopped"})
+        )
+        .0,
+        200
+    );
+    // Integration close/reopen is deterministic even with unrelated host providers.
+    assert_eq!(
+        f.action(json!({"op":"setup_remove_app","harness":"codex"}))
+            .0,
+        200
+    );
+    f.stop(process);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
+        .is_empty());
+    let old = now - 1_800_000;
+    source
+        .execute("UPDATE threads SET recency_at_ms=?", &[json!(old)])
+        .unwrap();
+    f.db("state.sqlite").execute("UPDATE local_listeners SET last_activity_at_ms=?,last_activity_revision=? WHERE harness='codex'", &[json!(old),json!(old.to_string())]).unwrap();
+    for i in 0..8 {
+        source
+            .execute(
+                "INSERT INTO threads VALUES(?,'/repo',0,?)",
+                &[json!(format!("menu-{i}")), json!(old + 1000 + i)],
+            )
+            .unwrap();
+    }
+    let reopened = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(reopened, false).contains("ready"));
+    let sliced = f.plugin(
+        CODEX,
+        json!({"op":"discover_sessions","endpoint_pid":f.pid(reopened)}),
+    );
+    assert_eq!(sliced["sessions"].as_array().unwrap().len(), 8);
+    assert!(sliced["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["session_id"].as_str().unwrap().starts_with("menu-")));
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"codex"})).0,
+        200
+    );
+    assert_eq!(f.action(json!({"op":"refresh_available"})).0, 200);
+    wait(|| {
+        f.rows("SELECT * FROM local_listeners WHERE harness='codex' AND status='ACTIVE'")
+            .len()
+            == 2
+    });
+    let rows = f.rows("SELECT * FROM local_listeners WHERE harness='codex'");
+    for (id, mode) in [("pinned", "manual"), ("automatic", "auto")] {
+        let row = rows.iter().find(|r| r["session_id"] == id).unwrap();
+        assert_eq!(row["status"], "ACTIVE", "{row}");
+        assert_eq!(row["listen_mode"], mode);
+        assert_eq!(
+            row["last_activity_at_ms"], old,
+            "Reopen must preserve idle age"
+        );
+    }
+    let stopped = rows.iter().find(|r| r["session_id"] == "stopped").unwrap();
+    assert_eq!(stopped["status"], "UNLISTENED");
+    assert_eq!(stopped["user_stopped"], 1);
+}
+#[test]
 fn cli_disable_stops_active_listeners_and_invalidates_cached_discovery() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

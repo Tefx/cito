@@ -666,21 +666,24 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
         )["text"],
         tested
     );
-    for (status, warning, detail) in [
+    for (status, warning, detail, presented) in [
         (
             "ready",
             true,
             "HTTP 409: another polling request is active. Stop the other poller.",
+            "HTTP another polling request is active. Stop the other poller.",
         ),
         (
             "ready",
             true,
+            "Delivery outcome unknown. Check the destination before retrying.",
             "Delivery outcome unknown. Check the destination before retrying.",
         ),
         (
             "error",
             false,
             "HTTP 401: credentials rejected. Update the gateway token.",
+            "HTTP credentials rejected. Update the gateway token.",
         ),
     ] {
         cfg["channels"][0]["status"] = json!(status);
@@ -690,11 +693,11 @@ fn v39_live_channel_health_overrides_stored_test_success_and_recovers() {
         let s = inspect(&f, p);
         assert_eq!(
             node(&s, "settings_items", "settings_channel_detail:channel")["text"],
-            detail
+            presented
         );
         assert_eq!(
             node(&s, "settings_items", "settings_channel_detail:channel")["tooltip"],
-            detail
+            presented
         );
         assert_eq!(
             node(&s, "settings_items", "settings_channel_status:channel")["text"],

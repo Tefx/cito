@@ -1208,10 +1208,10 @@ impl DaemonService {
             {
                 continue;
             }
-            if !self
+            if self
                 .setup_inspections
                 .get(harness)
-                .is_some_and(|e| e.worker.is_none())
+                .is_none_or(|e| e.worker.is_some())
                 || !self
                     .inspect_setup(plugin)
                     .is_ok_and(|(_, configured, _)| configured)

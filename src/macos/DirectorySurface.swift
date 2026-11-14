@@ -20,7 +20,12 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let hasWarning = hasError || !directoryWarnings.isEmpty
         directoryWarningLabel?.isHidden = !hasWarning
         directoryWarningLabel?.stringValue = hasError ? (directoryMode == "activity" ? "Cannot update Activity. Please try again." : "Cannot refresh Directory. Showing the last available results.") : "Some Hubs are unavailable. Results may be incomplete."
-        directoryWarningLabel?.toolTip = directoryError.map(presentationError) ?? directoryWarnings.map(presentationError).joined(separator:"\n")
+        // Directory warnings carry a Hub label added by the daemon. Keep that
+        // scope while sanitizing only its diagnostic payload.
+        directoryWarningLabel?.toolTip = directoryError.map(presentationError) ?? directoryWarnings.map { warning in
+            guard let separator = warning.range(of:": ") else { return presentationError(warning) }
+            return String(warning[..<separator.lowerBound]) + ": " + presentationError(String(warning[separator.upperBound...]))
+        }.joined(separator:"\n")
         directoryWarningLabel?.textColor = hasError ? CitoPalette.dangerText : CitoPalette.secondaryText
         let bottom: CGFloat = directoryComposerBar?.isHidden == false ? 28 + (directoryComposerBar?.frame.height ?? 44) : 28
         directoryScrollView?.frame = NSRect(x:0,y:bottom,width:560,height:362-bottom-(hasWarning ? 28 : 0))

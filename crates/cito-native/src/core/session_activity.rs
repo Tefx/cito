@@ -346,7 +346,13 @@ impl SessionActivity {
             provider.started_at = now_ms();
             provider.started_generation = provider.requested_generation;
             let plugin = provider.plugin.clone();
+            // Restoration must not depend on a provider's recent/display slices.
+            let retained: Vec<Value> = state.db.query(
+                "SELECT DISTINCT session_id FROM local_listeners WHERE harness=? AND user_stopped=0 AND (status='ACTIVE' OR retirement_reason IN ('hard_exit','disconnected'))",
+                &[json!(plugin.id)],
+            )?.into_iter().map(|row| row["session_id"].clone()).collect();
             let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
+                "retained_session_ids":retained,
                 "recent_window_ms":plugin.auto_listen.recent_window_ms.unwrap_or(900_000),"plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
             provider.worker = Some(

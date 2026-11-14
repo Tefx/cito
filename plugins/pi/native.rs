@@ -313,7 +313,8 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
     out.sort_by_key(|(pid, _)| *pid);
     Ok(out)
 }
-fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
+type Candidates = (Vec<(u32, Value)>, bool, Option<String>);
+fn candidates(req: &Value) -> Result<Candidates> {
     let resolve = matches!(str_at(req, "op"), Some("resolve_caller" | "verify"));
     if resolve || pid(req).is_some() {
         let roots = if resolve {
@@ -329,7 +330,11 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
                 if let Ok(v) = identify(req, p) {
                     responded = true;
                     if v["ok"] != true {
-                        return Err(response_diagnostic(&v, "Pi bridge rejected identification"));
+                        return Ok((
+                            vec![],
+                            true,
+                            Some(response_diagnostic(&v, "Pi bridge rejected identification")),
+                        ));
                     }
                     if v["ok"] == true
                         && str_at(&v, "session_id").is_some()
@@ -337,7 +342,7 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
                         && v.get("pi_pid")
                             .is_none_or(|id| id.as_u64() == Some(p as u64))
                     {
-                        return Ok((vec![(p, v)], true));
+                        return Ok((vec![(p, v)], true, None));
                     }
                 }
                 let Some(parent) = process_parent(p) else {
@@ -359,11 +364,11 @@ fn candidates(req: &Value) -> Result<(Vec<(u32, Value)>, bool)> {
                 .into_iter()
                 .collect();
         }
-        return Ok((live, responded));
+        return Ok((live, responded, None));
     }
     let mut out = socket_candidates(req)?;
     process_candidates(req, &mut out)?;
-    Ok((out, false))
+    Ok((out, false, None))
 }
 fn as_caller(p: u32, v: &Value) -> Value {
     caller(
@@ -392,13 +397,13 @@ pub fn handle(input: &Value) -> Result<Value> {
             ));
         }
     }
-    let (cs, endpoint_responded) = if matches!(
+    let (cs, endpoint_responded, rejection) = if matches!(
         op,
         "resolve_caller" | "verify" | "probe" | "discover_sessions"
     ) {
         candidates(req)?
     } else {
-        (vec![], false)
+        (vec![], false, None)
     };
     match op {
         "discover_sessions" => Ok(
@@ -414,7 +419,7 @@ pub fn handle(input: &Value) -> Result<Value> {
             if cs.is_empty() && endpoint_responded {
                 return Ok(error(
                     "PI_BRIDGE_UNAVAILABLE",
-                    "No caller socket bridge found",
+                    rejection.unwrap_or_else(|| "No caller socket bridge found".into()),
                 ));
             }
             if cs.is_empty() {
@@ -472,6 +477,14 @@ pub fn handle(input: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"caller":remember_process(c)}))
         }
         "probe" => {
+            if let Some(reason) = rejection {
+                return Ok(json!({"ok":true,"status":"transient_error","reason":reason}));
+            }
+            if endpoint_responded && cs.is_empty() {
+                return Ok(
+                    json!({"ok":true,"status":"closed_definitive","reason":"No open session"}),
+                );
+            }
             if pid(req).is_some_and(|p| {
                 alive(p) && state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
             }) && cs.first().is_none_or(|(_, v)| v["needs_reload"] == true)

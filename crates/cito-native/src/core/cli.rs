@@ -252,52 +252,98 @@ pub fn parse_cli(
     Ok((Value::Object(input), Value::Object(meta)))
 }
 fn presentation_error(raw: &str) -> String {
-    if raw.starts_with("CONTROL_REVISION_CONFLICT:") {
-        return "Inbox changed on another device. Review the current state and try again.".into();
-    }
-    if let Ok(response) = serde_json::from_str::<Value>(raw) {
-        return presentation_error(&crate::support::response_diagnostic(
-            &response,
-            "The request failed",
-        ));
-    }
-    let lower = raw.to_ascii_lowercase();
-    if lower.contains("unable to open database")
-        || lower.contains("sqlite_cantopen")
-        || lower.contains("(sqlite ")
-    {
-        return "Session database is unavailable. Check the app and its data location.".into();
-    }
-    let mut message = raw;
-    let mut candidate = raw;
-    if let Some((hub, rest)) = raw.split_once(": ") {
-        if hub.starts_with(|c: char| c.is_ascii_lowercase())
-            && hub
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
-            candidate = rest;
-            message = candidate;
+    let protocol_code = |code: &str| {
+        code.len() >= 3
+            && ((code.starts_with(|c: char| c.is_ascii_uppercase())
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
+                || code.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut unwrapped = raw.trim().to_owned();
+    loop {
+        if unwrapped.starts_with("CONTROL_REVISION_CONFLICT:") {
+            return "Inbox changed on another device. Review the current state and try again."
+                .into();
         }
-    }
-    while let Some((code, rest)) = candidate.split_once(':') {
-        let code = code.trim();
-        let protocol_code = code.len() >= 2
-            && code
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit());
-        let label = !code.is_empty()
+        let lower = unwrapped.to_ascii_lowercase();
+        if [
+            "sqlite_",
+            "sqlite3",
+            "(sqlite",
+            "unable to open database",
+            "database is locked",
+            "database disk image is malformed",
+            "no such table:",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+        {
+            return "App database is unavailable. Check the app and its data location.".into();
+        }
+        if unwrapped.starts_with(['{', '[']) {
+            let detail = serde_json::from_str::<Value>(&unwrapped)
+                .ok()
+                .and_then(|v| {
+                    v["message"]
+                        .as_str()
+                        .or_else(|| v["error"]["message"].as_str())
+                        .or_else(|| v["error"].as_str())
+                        .map(str::to_owned)
+                });
+            match detail {
+                Some(detail) if !detail.is_empty() && detail != unwrapped => {
+                    unwrapped = detail;
+                    continue;
+                }
+                _ => return "The request failed. Try again.".into(),
+            }
+        }
+        let Some((code, rest)) = unwrapped.split_once(':') else {
+            break;
+        };
+        let label = code.starts_with(|c: char| c.is_ascii_lowercase())
             && code
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
         let wrapper = ["discovery rejected", "badge rejected", "error"]
             .contains(&code.to_ascii_lowercase().as_str());
-        if !protocol_code && !label && !wrapper {
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace))
+            || !(protocol_code(code) || label || wrapper)
+        {
             break;
         }
-        candidate = rest.trim_start();
-        message = candidate;
+        unwrapped = rest.trim_start().to_owned();
     }
+    // Strip protocol tokens anywhere, preserving word boundaries and URL/time colons.
+    let mut stripped = String::new();
+    let mut chars = unwrapped.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            let mut word = String::from(c);
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                word.push(chars.next().unwrap());
+            }
+            let mut after = chars.clone();
+            if protocol_code(&word)
+                && after.next() == Some(':')
+                && after.peek().is_none_or(|c| c.is_whitespace())
+            {
+                chars.next();
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+            } else {
+                stripped.push_str(&word);
+            }
+        } else {
+            stripped.push(c);
+        }
+    }
+    let mut message = stripped.as_str();
     if let Some((prefix, suffix)) = message.rsplit_once("(os error ") {
         if suffix
             .strip_suffix(')')
@@ -316,23 +362,7 @@ fn presentation_error(raw: &str) -> String {
     if let Some(reason) = message.strip_prefix("Cannot bind host hub listener: ") {
         return format!("Cannot start sharing: {reason}");
     }
-    let mut message = message
-        .split(';')
-        .map(|part| {
-            let part = part.trim();
-            if let Some((code, rest)) = part.split_once(':') {
-                if code.len() >= 2
-                    && code
-                        .bytes()
-                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-                {
-                    return rest.trim();
-                }
-            }
-            part
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
+    let mut message = message.to_owned();
     for (token, copy) in [
         ("DISCONNECTED_RETAINED", "Temporarily offline"),
         ("UNLISTENED", "Not listening"),
@@ -623,8 +653,13 @@ mod tests {
             ("10071: 10037: Conflict","Conflict"),
             ("Badge rejected: BADGE_UNAVAILABLE: Retry later","Retry later"),
             (r#"{"ok":false,"error_code":"OFFLINE","message":"Retry later"}"#,"Retry later"),
-            ("SQLITE_CANTOPEN: unable to open database file (SQLite 14)","Session database is unavailable. Check the app and its data location."),
+            ("SQLITE_CANTOPEN: unable to open database file (SQLite 14)","App database is unavailable. Check the app and its data location."),
         ] { assert_eq!(presentation_error(input),expected,"{input}"); }
+        let vectors: Vec<[String; 2]> =
+            serde_json::from_str(include_str!("../../tests/support/diagnostics.json")).unwrap();
+        for [input, expected] in vectors {
+            assert_eq!(presentation_error(&input), expected, "{input}");
+        }
     }
     #[test]
     fn flag_errors_precede_effects() {

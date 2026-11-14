@@ -178,7 +178,7 @@ fn effect_path(req: &Value, sid: &str) -> PathBuf {
         .join("activity/codex")
         .join(format!("{:x}.json", Sha256::digest(sid.as_bytes())))
 }
-fn record_effect(req: &Value, sid: &str, text: &str) -> Result<()> {
+fn record_effect(req: &Value, sid: &str, text: &str, activity: Option<(u64, u64)>) -> Result<()> {
     use sha2::{Digest, Sha256};
     let path = effect_path(req, sid);
     std::fs::create_dir_all(path.parent().ok_or("Invalid activity path")?)
@@ -191,6 +191,9 @@ fn record_effect(req: &Value, sid: &str, text: &str) -> Result<()> {
         effects.push(hash);
     }
     ledger["effects"] = json!(effects);
+    if let Some((revision, at)) = activity {
+        ledger["fallback"] = json!({"revision":revision,"at_ms":at});
+    }
     save_activity(&path, &ledger)
 }
 fn save_activity(path: &Path, value: &Value) -> Result<()> {
@@ -304,13 +307,16 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     }
     cached["revision"] = json!(revision);
     save_activity(&cursor_path, &cached)?;
-    if ledger["effects"]
-        .as_array()
-        .is_some_and(|effects| !effects.is_empty())
-    {
-        // Recency without an explicit source user event after a known wake is
-        // ambiguous. Do not invent user activity from our own effect.
-        return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+    if let (Some(effect_revision), Some(effect_at)) = (
+        ledger["fallback"]["revision"].as_u64(),
+        ledger["fallback"]["at_ms"].as_u64(),
+    ) {
+        let kind = if source_revision <= effect_revision || recency <= effect_at {
+            "cito_effect"
+        } else {
+            "user_turn"
+        };
+        return Ok(json!({"revision":revision,"at_ms":recency,"kind":kind}));
     }
     Ok(json!({"revision":revision,"at_ms":recency,"kind":"unknown"}))
 }
@@ -422,9 +428,16 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
             (false, false) => "0",
         };
         let cutoff = now_ms().saturating_sub(req["recent_window_ms"].as_u64().unwrap_or(900_000));
-        // One coherent snapshot contains the small Menu slice plus every active
-        // source row. Historical inventories never bound automatic enrollment.
-        format!(" AND (rowid IN (SELECT rowid FROM threads WHERE {predicate} ORDER BY {order} LIMIT 8) OR CASE WHEN {recency}<100000000000 THEN {recency}*1000 ELSE {recency} END >= {cutoff})")
+        let retained = req["retained_session_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // One coherent snapshot covers display, recent enrollment and restoration.
+        format!(" AND (id IN ({retained}) OR rowid IN (SELECT rowid FROM threads WHERE {predicate} ORDER BY {order} LIMIT 8) OR CASE WHEN {recency}<100000000000 THEN {recency}*1000 ELSE {recency} END >= {cutoff})")
     } else {
         String::new()
     };
@@ -655,11 +668,6 @@ pub fn handle(req: &Value) -> Result<Value> {
                     .map(|output| output.map(|o| o.status.success()))
             };
             let already_queued = req["queue_written"] == true;
-            // Persist effect attribution before submitting it; retries never turn it
-            // into a new user turn, even if the provider updates recency later.
-            if !already_queued {
-                record_effect(req, sid, text)?;
-            }
             let queue_confirmed = if already_queued {
                 req["queue_confirmed"] == true
             } else {
@@ -693,11 +701,22 @@ pub fn handle(req: &Value) -> Result<Value> {
                     thread::sleep(Duration::from_secs(attempt));
                 }
             };
+            // Attribution failure must not erase a confirmed insertion checkpoint:
+            // the host would otherwise retry a queue command that already committed.
+            let attribution_error = if !already_queued && queue_confirmed {
+                row_for_id(req, sid)
+                    .and_then(|row| {
+                        record_effect(req, sid, text, row.as_ref().and_then(activity_at))
+                    })
+                    .err()
+            } else {
+                None
+            };
             if !already_queued && req["checkpoint_only"] == true {
                 // Return the insertion checkpoint before requesting a separately
                 // fenced open. The host rechecks unreadness and binding ownership.
                 return Ok(
-                    json!({"ok":true,"outcome":"delivered_unconfirmed","queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":false,"continue_wake":true}),
+                    json!({"ok":true,"outcome":"delivered_unconfirmed","queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":false,"continue_wake":true,"reason":attribution_error}),
                 );
             }
             let mut opened = false;
@@ -715,7 +734,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 }
             }
             Ok(
-                json!({"ok":true,"outcome":if !already_queued && queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{None}else{Some("Codex open effect was not confirmed")}}),
+                json!({"ok":true,"outcome":if !already_queued && queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{attribution_error}else{Some("Codex open effect was not confirmed".into())}}),
             )
         }
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),

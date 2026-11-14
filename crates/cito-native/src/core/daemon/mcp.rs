@@ -452,10 +452,6 @@ impl DaemonService {
         Ok(id)
     }
 
-    pub(super) fn pause_listener(&mut self, hub: &str, id: &str) -> Result<bool, String> {
-        self.unlisten_id(hub, id)
-    }
-
     pub(super) fn unlisten_id(&self, hub: &str, id: &str) -> Result<bool, String> {
         self.retire_id(hub, id, "user")
     }
@@ -816,7 +812,7 @@ impl DaemonService {
                         string(&caller, "harness"),
                         string(&caller, "session_id"),
                     )?;
-                    match self.pause_listener(&hub, &id) {
+                    match self.unlisten_id(&hub, &id) {
                         Ok(true) => removed += 1,
                         Ok(false) => {}
                         Err(error) => detach_errors.push(format!("{hub}: {error}")),

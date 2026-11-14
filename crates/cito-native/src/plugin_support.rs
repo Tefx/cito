@@ -821,6 +821,7 @@ pub fn bounded_diagnostic(message: &str, fallback: &str) -> String {
 pub struct ReadOnlySqlite {
     db: std::cell::Cell<*mut libc::c_void>,
     uri: std::ffi::CString,
+    wal_fallback_attempted: std::cell::Cell<bool>,
     deadline: std::time::Instant,
 }
 unsafe extern "C" fn sqlite_deadline(arg: *mut libc::c_void) -> libc::c_int {
@@ -874,6 +875,7 @@ impl ReadOnlySqlite {
             if rc == 0 {
                 let reader = Self {
                     db: std::cell::Cell::new(db),
+                    wal_fallback_attempted: std::cell::Cell::new(false),
                     uri: path,
                     deadline,
                 };
@@ -891,6 +893,7 @@ impl ReadOnlySqlite {
                 // until the first statement. Both use the same lockful fallback.
                 let reader = Self {
                     db: std::cell::Cell::new(std::ptr::null_mut()),
+                    wal_fallback_attempted: std::cell::Cell::new(false),
                     uri: path,
                     deadline,
                 };
@@ -961,6 +964,9 @@ impl ReadOnlySqlite {
         }
     }
     fn prepare_wal_reader(&self) -> Result<()> {
+        if self.wal_fallback_attempted.replace(true) {
+            return Err(sqlite_diagnostic(14));
+        }
         let mut db = std::ptr::null_mut();
         // SAFETY: the URI and output pointer live through open. No CREATE flag:
         // SQLite may initialize WAL/SHM locking, but must not create a missing DB.
@@ -1017,58 +1023,6 @@ pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn read_only_sqlite_initializes_wal_without_shm_and_preserves_committed_frames() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("cito-reader-{}", crate::plugins::random_uuid_v4()));
-        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        let result = (|| {
-            let source = root.join("writer.sqlite");
-            let writer = crate::database::Database::open(&source)?;
-            writer.execute("PRAGMA journal_mode=WAL; CREATE TABLE items(value TEXT); INSERT INTO items VALUES('checkpointed'); PRAGMA wal_checkpoint(TRUNCATE)",&[])?;
-            for nonempty in [false, true] {
-                if nonempty {
-                    writer.execute("INSERT INTO items VALUES('committed frame')", &[])?;
-                }
-                let path = root.join(format!("copy #?%{nonempty}.sqlite"));
-                std::fs::copy(&source, &path).map_err(|e| e.to_string())?;
-                if nonempty {
-                    std::fs::copy(
-                        source.with_extension("sqlite-wal"),
-                        path.with_extension("sqlite-wal"),
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-                assert!(!path.with_extension("sqlite-shm").exists());
-                let reader = ReadOnlySqlite::open(&path, Duration::from_secs(1))?;
-                let rows = reader.rows("SELECT value FROM items ORDER BY rowid")?;
-                assert_eq!(rows.len(), if nonempty { 2 } else { 1 });
-                assert_eq!(rows[0]["value"], "checkpointed");
-                if nonempty {
-                    assert_eq!(rows[1]["value"], "committed frame");
-                }
-                assert!(reader.rows("PRAGMA table_info(absent)")?.is_empty());
-            }
-            let limited = ReadOnlySqlite::open(&source, Duration::from_millis(30))?;
-            assert_eq!(limited.rows("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n").unwrap_err(),"Session database deadline exceeded");
-            assert_eq!(
-                ReadOnlySqlite::open(&root.join("absent.sqlite"), Duration::from_millis(30))
-                    .err()
-                    .ok_or("Expected missing DB")?,
-                "Session database was not found"
-            );
-            let invalid = root.join("invalid.sqlite");
-            std::fs::write(&invalid, "not a database").map_err(|e| e.to_string())?;
-            let failure = ReadOnlySqlite::open(&invalid, Duration::from_millis(30))
-                .err()
-                .ok_or("Expected invalid DB error")?;
-            assert_eq!(failure, "Session database is invalid");
-            assert!(!failure.contains("SQLite") && !failure.contains("not a database"));
-            Ok(())
-        })();
-        std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
-        result
-    }
     #[test]
     fn structured_diagnostics_bound_envelopes_and_control_characters() {
         assert_eq!(

@@ -16,7 +16,7 @@ fn live_bridge_rejections_survive_identification_and_wake() {
         let server = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
             let mut count = 0;
-            while count < 2 && std::time::Instant::now() < deadline {
+            while count < if id == "pi" { 5 } else { 2 } && std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
@@ -26,7 +26,12 @@ fn live_bridge_rejections_survive_identification_and_wake() {
                         BufReader::new(stream.try_clone().unwrap())
                             .read_line(&mut line)
                             .unwrap();
-                        writeln!(stream,"{}",json!({"ok":false,"error_code":"BRIDGE_REJECTED","message":"Session is unavailable"})).unwrap();
+                        let response = if count == 4 {
+                            json!({"ok":true})
+                        } else {
+                            json!({"ok":false,"error_code":"BRIDGE_REJECTED","message":"Session is unavailable"})
+                        };
+                        writeln!(stream, "{response}").unwrap();
                         count += 1;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -39,7 +44,30 @@ fn live_bridge_rejections_survive_identification_and_wake() {
         });
         let identify=f.plugin(bin,json!({"op":"verify","endpoint_pid":std::process::id(),"session_id":"session","cached_caller":{},"meta":{}}));
         let wake=f.plugin(bin,json!({"op":"wake","endpoint_pid":std::process::id(),"session_id":"session","text":"hello"}));
-        assert_eq!(server.join().unwrap(), 2);
+        if id == "pi" {
+            assert_eq!(
+                identify["error_code"], "PI_BRIDGE_UNAVAILABLE",
+                "{identify}"
+            );
+            let resolve = f.plugin(
+                bin,
+                json!({"op":"resolve_caller","endpoint_pid":std::process::id()}),
+            );
+            assert_eq!(resolve["error_code"], "PI_BRIDGE_UNAVAILABLE", "{resolve}");
+            assert!(resolve["message"]
+                .as_str()
+                .unwrap()
+                .contains("Session is unavailable"));
+            let probe = f.plugin(bin, json!({"op":"probe","endpoint_pid":std::process::id()}));
+            assert_eq!(probe["status"], "transient_error", "{probe}");
+            assert!(probe["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Session is unavailable"));
+            let closed = f.plugin(bin, json!({"op":"probe","endpoint_pid":std::process::id()}));
+            assert_eq!(closed["status"], "closed_definitive", "{closed}");
+        }
+        assert_eq!(server.join().unwrap(), if id == "pi" { 5 } else { 2 });
         fs::remove_file(path).unwrap();
         assert_eq!(identify["ok"], false, "{id}: {identify}");
         assert!(
@@ -782,6 +810,79 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     assert!(rejected["status"].is_null());
     let text = rejected.to_string();
     assert!(!text.contains("missing_function") && !text.contains("SQLite"));
+}
+#[test]
+fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source
+        .execute(
+            "CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER)",
+            &[],
+        )
+        .unwrap();
+    let now = cito_native::plugins::now_ms();
+    source
+        .execute(
+            "INSERT INTO threads VALUES('thread','/repo',0,?)",
+            &[json!(now)],
+        )
+        .unwrap();
+    // A live, fixture-owned process stands in for the provider.
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let app = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(app, false).contains("ready"));
+    let activity = |f: &Fixture| {
+        f.plugin(
+            CODEX,
+            json!({"op":"discover_sessions","endpoint_pid":f.pid(app)}),
+        )["sessions"][0]["activity"]
+            .clone()
+    };
+    f.env.insert(
+        "CITO_CODEX_BIN".into(),
+        f.dir.join("missing").display().to_string(),
+    );
+    let failed = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"Wake","checkpoint_only":true}),
+    );
+    assert_eq!(failed["outcome"], "driver_unavailable", "{failed}");
+    assert_eq!(activity(&f)["kind"], "unknown");
+    let binary = f.dir.join("queue");
+    script(&binary, "#!/bin/sh\nexit 0\n");
+    f.env
+        .insert("CITO_CODEX_BIN".into(), binary.display().to_string());
+    let sent = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"Wake","checkpoint_only":true}),
+    );
+    assert_eq!(sent["queue_confirmed"], true, "{sent}");
+    let effect = activity(&f);
+    assert_eq!(effect["kind"], "cito_effect");
+    assert_eq!(activity(&f), effect, "Refresh cannot invent activity");
+    source
+        .execute("UPDATE threads SET recency_at_ms=?", &[json!(now + 1)])
+        .unwrap();
+    let user = activity(&f);
+    assert_eq!(user["kind"], "user_turn", "{user}");
+    assert_eq!(user["revision"], now + 1);
+    assert_eq!(activity(&f), user);
+    fs::remove_dir_all(f.state.join("activity")).unwrap();
+    fs::write(f.state.join("activity"), "not a directory").unwrap();
+    let confirmed = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"Another wake","checkpoint_only":true}),
+    );
+    assert_eq!(confirmed["queue_written"], true, "{confirmed}");
+    assert_eq!(confirmed["queue_confirmed"], true, "{confirmed}");
+    assert!(confirmed["reason"]
+        .as_str()
+        .unwrap()
+        .contains("attribution"));
 }
 #[test]
 fn codex_metadata_validation_and_sqlite_thread_projection() {

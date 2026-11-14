@@ -195,11 +195,11 @@ func presentationError(_ raw: String) -> String {
             guard let detail = detail, !detail.isEmpty, detail != message else { return "The request failed. Try again." }
             message = detail; continue
         }
-        let stripped = message.replacingOccurrences(of:"^(?:[a-z][a-z0-9_-]*|[A-Z][A-Z0-9_]+|[0-9]{3,}|(?i:Discovery rejected|Badge rejected|Error)):\\s*",with:"",options:.regularExpression)
+        let stripped = message.replacingOccurrences(of:"^(?:[a-z][a-z0-9_-]*|[A-Z][A-Z0-9_]{2,}|[0-9]{3,}|(?i:Discovery rejected|Badge rejected|Error)):(?:\\s+|$)",with:"",options:.regularExpression)
         if stripped == message { break }
         message = stripped
     }
-    message = message.replacingOccurrences(of:"\\b(?:[A-Z][A-Z0-9_]{2,}|[0-9]{3,}):\\s*",with:"",options:.regularExpression)
+    message = message.replacingOccurrences(of:"\\b(?:[A-Z][A-Z0-9_]{2,}|[0-9]{3,}):(?:\\s+|$)",with:"",options:.regularExpression)
         .replacingOccurrences(of: "\\s*\\(os error [0-9]+\\)$", with: "", options: .regularExpression)
     if message.hasPrefix("Hub URL must use") { return "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment." }
     if message.hasPrefix("CITO_NATS_URL") { return "Enter a valid Hub URL (http://ip:4291 or https://host)." }
