@@ -11597,7 +11597,7 @@ phases:
     name: 'V41 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Dual-Mac & Bundle Verification, and Push to main (No Release Tag) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Execute a full `[REQUIRES_SKILL: contract-and-simplicity]` review\
       \ and consolidation pass across all `v41.core` and `v41.ui` changes (`docs/DESIGN.md`\
@@ -11659,6 +11659,8 @@ phases:
     depends_on:
     - v41.ui
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-14T15:28:06.677504Z'
 - id: v42
   name: 'V42 Decoupling & Structural Remediation of Oversized Core, Swift UI, and
     Test Modules [REQUIRES_SKILL: contract-and-simplicity]'
