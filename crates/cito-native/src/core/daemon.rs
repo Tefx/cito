@@ -1,8 +1,10 @@
 use super::{
     auth::HubAuth,
+    config::repair_default_hub,
     hub::{HubEngine, HubServer},
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
     receiver::{detach_channel_expected, plugin_request, poll_listener},
+    registration::{distinct_label, is_generic_session_label},
     state::LocalState,
     transport::HubClient,
 };
@@ -148,36 +150,6 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     }
 }
 
-fn repair_default_hub(v: &mut Value) {
-    let hubs = v["hubs"].as_object();
-    let enabled = |cfg: &Value| cfg["enabled"] != false && cfg["disabled"] != true;
-    let current = v["default_hub"]
-        .as_str()
-        .or_else(|| v["defaultHub"].as_str())
-        .filter(|name| hubs.and_then(|h| h.get(*name)).is_some_and(enabled));
-    let fallback = current
-        .or_else(|| {
-            let hubs = hubs?;
-            hubs.get_key_value("local")
-                .filter(|(_, cfg)| enabled(cfg))
-                .map(|(name, _)| name.as_str())
-                .or_else(|| {
-                    hubs.iter()
-                        .filter(|(_, cfg)| enabled(cfg))
-                        .map(|(name, _)| name.as_str())
-                        .min()
-                })
-                .or_else(|| hubs.get_key_value("local").map(|(name, _)| name.as_str()))
-                .or_else(|| hubs.keys().map(String::as_str).min())
-        })
-        .unwrap_or("local")
-        .to_string();
-    if let Some(config) = v.as_object_mut() {
-        config.insert("default_hub".into(), json!(fallback));
-        config.remove("defaultHub");
-    }
-}
-
 // Presentation must cover local registrations before the asynchronous directory
 // cache catches up. Cached Hub rows retain their lease and attachment metadata.
 fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
@@ -207,25 +179,6 @@ fn address_peers(state: &LocalState, slot: &HubClient) -> Vec<Value> {
     }
     peers
 }
-fn is_generic_session_label(label: &str, user: &str, home_basename: &str) -> bool {
-    let label = label.trim();
-    let identity = label.strip_prefix('@').unwrap_or(label);
-    label.is_empty()
-        || identity.eq_ignore_ascii_case(user)
-        || identity.eq_ignore_ascii_case(home_basename)
-        || [
-            "agent",
-            "agent session",
-            "session",
-            "cli session",
-            "human",
-            "human node",
-            "human channel",
-        ]
-        .iter()
-        .any(|placeholder| label.eq_ignore_ascii_case(placeholder))
-}
-
 fn default_session_title(
     caller: &Value,
     home: &std::path::Path,
@@ -244,34 +197,14 @@ fn default_session_title(
         return raw.to_owned();
     }
     let about = about.trim();
-    if !is_generic_session_label(about, user, home_basename)
-        && !about.eq_ignore_ascii_case(title)
-        && !["coding session", "human receiver"].contains(&about.to_lowercase().as_str())
-    {
-        about.to_owned()
-    } else {
-        harness_name.to_owned()
-    }
+    distinct_label(about, title, user, home_basename)
+        .unwrap_or(harness_name)
+        .to_owned()
 }
 
-fn directory_identity(row: &Value) -> (String, String, String, String) {
-    let human = row["harness"] == "human" && row["is_self_principal"] == true;
-    (
-        string(row, "user").into(),
-        string(row, "harness").into(),
-        if human {
-            String::new()
-        } else {
-            string(row, "session_id").into()
-        },
-        if human {
-            String::new()
-        } else {
-            string(row, "host_id").into()
-        },
-    )
+fn directory_identity(row: &Value) -> (String, String) {
+    (string(row, "hub").into(), string(row, "listener_id").into())
 }
-
 fn sender_display_address(
     hub: &str,
     default_hub: &str,
@@ -320,14 +253,11 @@ struct UiMailbox {
     pending: Mutex<std::collections::VecDeque<(Option<String>, Vec<u8>)>>,
     ready: std::sync::Condvar,
     closed: AtomicBool,
-    banner_muted: AtomicBool,
 }
 impl UiMailbox {
     fn emit(&self, frame: Value) {
-        // Snapshots coalesce; command results and banners stay ordered.
-        let key = if frame["op"] == "banner" {
-            Some("banner".into())
-        } else if string(&frame, "request_id").is_empty()
+        // Passive snapshots coalesce; correlated command results stay ordered.
+        let key = if string(&frame, "request_id").is_empty()
             && string(&frame, "source_op").is_empty()
             && frame["confirm_hub_save"] != true
             && matches!(string(&frame, "op"), "state" | "settings" | "directory")
@@ -350,10 +280,7 @@ impl UiMailbox {
             return;
         }
         if let Ok(mut pending) = self.pending.lock() {
-            if key.as_deref() == Some("banner") && self.banner_muted.load(Ordering::SeqCst) {
-                return;
-            }
-            if let Some(key) = key.as_ref().filter(|key| key.as_str() != "banner") {
+            if let Some(key) = key.as_ref() {
                 if let Some((_, frame)) = pending
                     .iter_mut()
                     .find(|(old, _)| old.as_ref() == Some(key))
@@ -365,14 +292,6 @@ impl UiMailbox {
             }
             pending.push_back((key, bytes));
             self.ready.notify_one();
-        }
-    }
-    fn set_banner_enabled(&self, enabled: bool) {
-        if let Ok(mut pending) = self.pending.lock() {
-            self.banner_muted.store(!enabled, Ordering::SeqCst);
-            if !enabled {
-                pending.retain(|(key, _)| key.as_deref() != Some("banner"));
-            }
         }
     }
     fn next(&self) -> Option<Vec<u8>> {
@@ -867,12 +786,36 @@ impl DaemonService {
                 clear()?;
                 continue;
             }
-            if remote["channels"][&channel]["state"] == "ACTIVE"
-                || human && remote["human_paused"] != true
-            {
+            if remote["channels"][&channel]["state"] == "ACTIVE" {
                 detach_channel_expected(client, id, &channel, &captured)?;
             }
             clear()?;
+        }
+        Ok(())
+    }
+    // Callers hold the Hub registration lock across the authoritative read/write
+    // and projection, so an older snapshot cannot overwrite a newer policy result.
+    pub(super) fn reconcile_human_scope(
+        state: &LocalState,
+        client: &HubClient,
+        host_id: &str,
+        remote: &Value,
+    ) -> Result<(), String> {
+        if remote["harness"] != "human" || client.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(row) = state.listener(&client.name, string(remote, "listener_id"))? else {
+            return Ok(());
+        };
+        let channel = format!("{host_id}:human");
+        if row["status"] == "ACTIVE"
+            && super::auth::principal_ids_equal(
+                string(&row, "principal_id"),
+                string(&client.identity, "principal_id"),
+            )
+            && super::registration::remote_matches_listener(remote, &row, &channel)
+        {
+            state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
         }
         Ok(())
     }
@@ -1236,8 +1179,27 @@ impl DaemonService {
                         {
                             continue;
                         }
+                        let host_matches = |term: &str| {
+                            let term = term.to_lowercase();
+                            string(&row, "host_name").to_lowercase().contains(&term)
+                                || string(&row, "host_id").to_lowercase().contains(&term)
+                                || super::lease::attachments(&row, &self.host_id, now_ms())
+                                    .iter()
+                                    .any(|attachment| {
+                                        attachment["availability"] == "ACTIVE"
+                                            && (string(attachment, "display_name")
+                                                .to_lowercase()
+                                                .contains(&term)
+                                                || string(attachment, "host_id")
+                                                    .to_lowercase()
+                                                    .contains(&term))
+                                    })
+                        };
                         if ["user", "harness", "repo", "host"].iter().any(|key| {
                             let filter = string(args, key);
+                            if *key == "host" {
+                                return !filter.is_empty() && !host_matches(filter);
+                            }
                             let field = match *key {
                                 "user" => "owner_user",
                                 "host" => "host_name",
@@ -1292,7 +1254,7 @@ impl DaemonService {
                             } else if let Some(host) =
                                 token.strip_prefix("host:").filter(|s| !s.is_empty())
                             {
-                                contains("host_name", host) || contains("host_id", host)
+                                host_matches(host)
                             } else if let Some(harness) =
                                 token.strip_prefix("is:").filter(|s| !s.is_empty())
                             {
@@ -1319,33 +1281,23 @@ impl DaemonService {
                 Err(e) => warnings.push(json!({"hub":name,"message":e})),
             }
         }
-        if args["hub"] != "local" {
-            let shared: HashSet<_> = rows
-                .iter()
-                .filter(|r| r["hub"] != "local")
-                .map(directory_identity)
-                .collect();
-            rows.retain(|r| r["hub"] != "local" || !shared.contains(&directory_identity(r)));
-        }
+        let mut seen = HashSet::new();
+        rows.retain(|row| seen.insert(directory_identity(row)));
         rows.retain(include);
         rows.sort_by_key(|r| format!("{}:{}", string(r, "hub"), string(r, "listener_id")));
         let matched_count = rows.len();
-        let online_count = self
-            .slots
-            .values()
-            .map(|s| {
-                s.cached_directory()
-                    .into_iter()
-                    .filter(|r| super::lease::evaluate_node_lease(r, now_ms()) == "ACTIVE")
-                    .count()
-            })
-            .sum::<usize>();
+        let online_count = matched_count;
         rows.truncate(limit as usize);
         Ok(
             json!({"ok":true,"listeners":rows,"warnings":warnings,"matched_count":matched_count,"online_count":online_count}),
         )
     }
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
+        if matches!(name, "cito_listen" | "cito_unlisten")
+            && (args["harness"] == "human" || meta["expected_harness"] == "human")
+        {
+            return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
+        }
         validate_tool_input(name, args)?;
         if meta
             .get("expected_session_id")
@@ -1367,8 +1319,8 @@ impl DaemonService {
                 let caller = self
                     .caller(meta, true)?
                     .ok_or("BINDING_REQUIRED: Caller required")?;
-                if caller["harness"] == "human" && args.get("title").is_some() {
-                    return Err("INVALID_INPUT: Only agent sessions can be renamed".into());
+                if caller["harness"] == "human" {
+                    return Err("FORBIDDEN: Agent tools cannot attach Human devices".into());
                 }
                 let mut args = args.clone();
                 let raw = string(&caller, "title");
@@ -1421,6 +1373,9 @@ impl DaemonService {
                 let caller = self
                     .caller(meta, false)?
                     .ok_or("BINDING_REQUIRED: Caller required")?;
+                if caller["harness"] == "human" {
+                    return Err("FORBIDDEN: Agent tools cannot detach Human devices".into());
+                }
                 let hubs: Vec<String> = if args["hub"].is_string() {
                     vec![hub]
                 } else {
@@ -1559,7 +1514,7 @@ impl DaemonService {
                 .into_iter()
                 .filter(|row| {
                     matches!(
-                        super::lease::evaluate_node_lease(row, now_ms()),
+                        super::lease::evaluate_node_lease(row, slot.server_now()),
                         "ACTIVE" | "DISCONNECTED_RETAINED"
                     ) && string(row, "listener_id")
                         .strip_prefix("c_")
@@ -1624,7 +1579,7 @@ impl DaemonService {
             }
         }
         if handle.is_some() && matches.len() > 1 {
-            let now = now_ms();
+            let now = slot.server_now();
             let is_live = |row: &Value| {
                 matches!(
                     super::lease::evaluate_node_lease(row, now),
@@ -1652,7 +1607,7 @@ impl DaemonService {
         let target = matches
             .first()
             .ok_or("LISTENER_NOT_FOUND: Target listener does not exist")?;
-        match super::lease::evaluate_node_lease(target, now_ms()) {
+        match super::lease::evaluate_node_lease(target, slot.server_now()) {
             "UNLISTENED" => return Err("LISTENER_NOT_FOUND: Target listener was revoked".into()),
             "EXPIRED" => return Err("LISTENER_EXPIRED: Target listener expired".into()),
             _ => {}
@@ -1917,16 +1872,7 @@ impl DaemonService {
             let (due, observed_gen) = {
                 let cached = inventory.cached.lock().map_err(|e| e.to_string())?;
                 (
-                    cached.value["status"] == "loading"
-                        || (cached.retry_at <= Instant::now()
-                            && (cached.value["status"] == "error"
-                                || cached.value["channels"].as_array().is_some_and(|channels| {
-                                    channels.iter().any(|ch| {
-                                        matches!(string(ch, "status"), "pairing_pending" | "error")
-                                            || ch["pairing_pending"] == true
-                                            || ch["pairing_code"].is_string()
-                                    })
-                                }))),
+                    cached.value["status"] == "loading" || cached.retry_at <= Instant::now(),
                     cached.completed_gen,
                 )
             };
@@ -1950,7 +1896,17 @@ impl DaemonService {
                 self.receivers.insert(
                     key,
                     thread::spawn(move || {
-                        if slot.directory().is_ok() && slot.local.is_none() {
+                        let refreshed = (|| -> Result<(), String> {
+                            let registration = state.registration_lock(&slot.name)?;
+                            let _registration = registration
+                                .lock()
+                                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                            for remote in slot.directory()? {
+                                Self::reconcile_human_scope(&state, &slot, &host_id, &remote)?;
+                            }
+                            Ok(())
+                        })();
+                        if refreshed.is_ok() && slot.local.is_none() {
                             let _ = Self::reconcile_unlistened(&state, &slot, &host_id);
                         }
                     }),
@@ -2001,58 +1957,37 @@ impl DaemonService {
             let state = self.state.clone();
             let state_dir = self.config.state_dir.clone();
             let host_id = self.host_id.clone();
-            let ui = self.ui.clone();
-            let id_prefix = self.scoped(hub, "");
-            let default_hub = self.config.default_hub.clone();
             let plugin = self.plugins.find_by_id(string(&row, "harness")).cloned();
             self.receivers.insert(key,thread::spawn(move||{
                 let channel=format!("{}:{}",host_id,string(&row,"harness"));
-                if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
-                    if row["harness"]=="human" && remote["human_paused"]==true && super::auth::principal_ids_equal(string(&remote,"principal_id"),string(&row,"principal_id")) {
-                        let _=state.pause_listener_for(&row);return;
+                if row["harness"] == "human" {
+                    let updated = slot.cached_directory().iter()
+                        .find(|record| record["listener_id"] == row["listener_id"])
+                        .and_then(|record| record["channels"][&channel]["updated_at_ms"].as_u64());
+                    if updated.is_none_or(|updated| slot.server_now().saturating_sub(updated) >= 20_000) {
+                    if let Err(error) = slot.human_request("human_device_heartbeat",&json!({"node_id":row["listener_id"],"channel_id":channel,"binding_generation":row["binding_generation"],"owner_token":row["owner_token"]})) {
+                        if error.starts_with("STALE_GENERATION:") { let _ = state.fence_listener_for(&row,"fenced_before_dispatch"); }
+                        return;
                     }
+                    }
+                } else if let Ok(Some((mut remote,revision)))=slot.kv_get(string(&row,"listener_id")){
                     if !super::registration::remote_matches_listener(&remote,&row,&channel){let _=state.fence_listener_for(&row,"fenced_before_dispatch");return;}
                     let _=state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()]);
                     let mut changed = false;
                     if let Ok(Some(title)) = state.custom_title(string(&row,"harness"),string(&row,"session_id")) {
                         if remote["title"] != title || remote["custom_title"] != true {
-                            remote["title"] = json!(title);
-                            remote["custom_title"] = json!(true);
-                            changed = true;
+                            remote["title"] = json!(title); remote["custom_title"] = json!(true); changed = true;
                         }
                     }
-                    if let Some(ch) = remote["channels"]
-                        .as_object_mut()
-                        .and_then(|m| m.get_mut(&channel))
-                        .and_then(Value::as_object_mut)
-                    {
-                        let updated = ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
-                        if now_ms().saturating_sub(updated) >= 20_000 {
-                            ch.insert("updated_at_ms".into(), json!(now_ms()));
-                            changed = true;
-                        }
+                    if let Some(ch) = remote["channels"].get_mut(&channel).and_then(Value::as_object_mut) {
+                        let updated=ch.get("updated_at_ms").and_then(Value::as_u64).unwrap_or(0);
+                        if slot.server_now().saturating_sub(updated)>=20_000 { ch.insert("updated_at_ms".into(),json!(slot.server_now())); changed=true; }
                     }
-                    if changed { let _ = slot.kv_save(string(&row,"listener_id"), &remote, Some(revision)); }
+                    if changed { let _=slot.kv_save(string(&row,"listener_id"),&remote,Some(revision)); }
                 }
-                if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |signal| {
-                    if let Some(ui) = &ui {
-                        if !slot.closed.load(Ordering::SeqCst) {
-                            let peers = address_peers(&state, &slot);
-                            ui.emit(json!({"op":"banner","payload":{
-                                "target_harness":row["harness"],"target_session_id":row["session_id"],
-                                "target_title":row["title"],"target_cwd":row["cwd"],
-                                "from_user":signal["from"]["user"],"from_host":signal["from"]["host_name"],
-                                "from_title":string(&signal["from"],"title"),"message":signal["message"],
-                                "effective_wake":signal["target_generation"]==row["binding_generation"],
-                                "signal_id":format!("{id_prefix}{}",string(signal,"signal_id")),"hub":slot.name,
-                                "from_harness":signal["from"]["harness"],
-                                "from_scoped_id":signal["from"]["listener_id"].as_str().filter(|id|!id.is_empty()).map(|id|format!("{id_prefix}{id}")).or_else(|| (signal["from"]["harness"]=="human").then(||format!("{id_prefix}@{}",string(&signal["from"],"user")))),
-                                "from_display_address":sender_display_address(&slot.name,&default_hub,signal["from"]["listener_id"].as_str(),string(&signal["from"],"user"),string(&signal["from"],"harness"),&peers),
-                                "target_display_address":super::identity::display_address(&slot.name,&default_hub,&row,&peers),"count":1
-                            }}));
-                        }
-                    }
-                }){if !slot.closed.load(Ordering::SeqCst){eprintln!("cito receiver {}: {error}",slot.name);}}
+                if let Err(error)=poll_listener(&state,&slot,&row,plugin.as_ref(),&state_dir, |_| {}) {
+                    if !slot.closed.load(Ordering::SeqCst) { eprintln!("cito receiver {}: {error}",slot.name); }
+                }
             }));
         }
         let live = self.live_receivers()?;
@@ -2311,6 +2246,14 @@ impl DaemonService {
                 .cloned()
                 .unwrap_or_default();
         }
+        if let Some(inbox_paused) = self.human_projection(channel_hub)["human_paused"].as_bool() {
+            for channel in &mut channels {
+                channel["inbox_paused"] = json!(inbox_paused);
+                channel["delivery_enabled"] = json!(
+                    channel["enabled"] == true && channel["configured"] == true && !inbox_paused
+                );
+            }
+        }
         let raw = self.raw_config().unwrap_or_else(|_| json!({}));
         if let Ok((_, configured, _)) =
             crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))
@@ -2353,37 +2296,10 @@ impl DaemonService {
                     .cloned()
                     .unwrap_or(Value::Null);
             }
-            let human = self
-                .state
-                .db
-                .query(
-                    "SELECT * FROM local_listeners WHERE hub=? AND harness='human'",
-                    &[item["name"].clone()],
-                )
-                .unwrap_or_default()
-                .into_iter()
-                .find(|row| {
-                    self.slots.get(string(item, "name")).is_some_and(|slot| {
-                        super::auth::principal_ids_equal(
-                            string(row, "principal_id"),
-                            string(&slot.identity, "principal_id"),
-                        )
-                    })
-                });
-            item["human_paused"] = json!(human
-                .as_ref()
-                .is_some_and(|row| row["status"] == "UNLISTENED"));
-            item["human_about"] = human
-                .as_ref()
-                .and_then(|row| {
-                    super::registration::distinct_human_about(
-                        string(row, "about"),
-                        string(row, "title"),
-                        string(row, "owner_user"),
-                    )
-                })
-                .map(|about| json!(about))
-                .unwrap_or(Value::Null);
+            let projection = self.human_projection(string(item, "name"));
+            if let (Some(item), Some(fields)) = (item.as_object_mut(), projection.as_object()) {
+                item.extend(fields.clone());
+            }
             item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
         }
         let token = string(host, "token");
@@ -2416,7 +2332,7 @@ impl DaemonService {
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir),"desktop_banner_enabled":self.desktop_banner_enabled()})
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
     }
     fn channel_inventory(&mut self, slot: &HubClient) -> Arc<ChannelInventory> {
         let identity = remote_channels_identity(slot);
@@ -2562,7 +2478,11 @@ impl DaemonService {
                     .iter()
                     .find(|peer| peer["listener_id"] == row["listener_id"])
                 {
-                    row["channels"] = self.peer_dto(string(row, "hub"), peer)["channels"].clone();
+                    let mut peer = peer.clone();
+                    if let Some(channels) = peer["channels"].as_object_mut() {
+                        channels.remove(&format!("{}:human", self.host_id));
+                    }
+                    row["channels"] = self.peer_dto(string(row, "hub"), &peer)["channels"].clone();
                 }
             }
             row["custom_title"] = json!(self
@@ -2629,22 +2549,38 @@ impl DaemonService {
         )
     }
     fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":row["host_id"],"host_name":row["host_name"],"harness":row["harness"],"session_id":row["session_id"],"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.values().filter(|c| c["state"]=="ACTIVE").filter_map(|c| c["display_name"].as_str().filter(|name| !name.is_empty()).or_else(|| c["host_name"].as_str().filter(|name| *name != "Hub")).or_else(|| c["display_label"].as_str().filter(|label| !label.starts_with('@')))).filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default()})
+        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|super::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id"))),"channels":row["channels"].as_object().map(|m|m.values().filter(|c| c["state"]=="ACTIVE").filter_map(|c| c["display_name"].as_str().filter(|name| !name.is_empty()).or_else(|| c["host_name"].as_str().filter(|name| *name != "Hub")).or_else(|| c["display_label"].as_str().filter(|label| !label.starts_with('@')))).filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default()});
+        result["attachments"] = json!(super::lease::attachments(row, &self.host_id, now_ms()));
+        if row["harness"] == "human" {
+            result["human_listener_id"] = row["listener_id"].clone();
+            result["human_paused"] = json!(row["human_paused"] == true);
+            result["human_about"] = row["about"].clone();
+            result["human_control_revision"] = row["human_control_revision"].clone();
+            result["human_scope"] = row["scope"].clone();
+            result["human_availability"] = json!(super::lease::evaluate_node_lease(row, now_ms()));
+            result["human_state_status"] = json!("current");
+        }
+        result
+    }
+    fn human_projection(&self, hub: &str) -> Value {
+        let slot = self.slots.get(hub);
+        let record = slot.and_then(|slot| {
+            slot.cached_directory().into_iter().find(|row| {
+                row["harness"] == "human"
+                    && super::auth::principal_matches(string(row, "principal_id"), &slot.identity)
+            })
+        });
+        let current =
+            slot.is_some_and(|slot| slot.status.lock().is_ok_and(|s| s.as_str() == "connected"));
+        let Some(record) = record else {
+            return json!({"human_listener_id":null,"human_paused":null,"human_about":null,"human_control_revision":null,"human_availability":"UNLISTENED","human_scope":null,"human_state_status":"unknown","attachments":[]});
+        };
+        json!({"human_listener_id":record["listener_id"],"human_paused":record["human_paused"].as_bool().unwrap_or(false),"human_about":record["about"],"human_control_revision":record["human_control_revision"],"human_availability":super::lease::evaluate_node_lease(&record,now_ms()),"human_scope":record["scope"],"human_state_status":if current{"current"}else{"stale"},"attachments":super::lease::attachments(&record,&self.host_id,now_ms())})
     }
     fn emit(&self, frame: Value) {
         if let Some(ui) = &self.ui {
             ui.emit(frame);
         }
-    }
-    fn desktop_banner_enabled(&self) -> bool {
-        self.raw_config()
-            .ok()
-            .and_then(|raw| {
-                raw.get("desktopBannerEnabled")
-                    .or_else(|| raw.get("desktopBanner"))
-                    .and_then(Value::as_bool)
-            })
-            .unwrap_or(true)
     }
     fn push_ui(&self) {
         self.push_ui_result(None);
@@ -2713,8 +2649,7 @@ impl DaemonService {
         if result.is_ok()
             && matches!(
                 string(action, "op"),
-                "delete_activity"
-                    | "clear_activity_history"
+                "clear_activity_history"
                     | "ack_signals"
                     | "mark_activity_read"
                     | "mark_all_activity_read"
@@ -2808,6 +2743,54 @@ impl DaemonService {
         self.reload_slots()?;
         match op {
             "get_snapshot" => return self.snapshot(),
+            "cli_human_device" => {
+                if action["attach"] == true {
+                    let slot = self.slot(&hub)?;
+                    return self.listen(&hub,&json!({"about":"Human"}),&json!({"harness":"human","session_id":"default","cwd":"","title":"Human","principal_id":slot.identity["principal_id"]}));
+                }
+                let id = super::registration::local_node_id(
+                    &self.state,
+                    self.slot(&hub)?,
+                    "human",
+                    "default",
+                )?;
+                let removed = self.unlisten_id(&hub, &id)?;
+                return Ok(json!({"ok":true,"removed":u8::from(removed)}));
+            }
+            "human_inbox_update" => {
+                let slot = self.slot(&hub)?;
+                let registration = self.state.registration_lock(&hub)?;
+                let _registration = registration
+                    .lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                let id = slot
+                    .cached_directory()
+                    .into_iter()
+                    .find(|row| {
+                        row["harness"] == "human"
+                            && super::auth::principal_ids_equal(
+                                string(row, "principal_id"),
+                                string(&slot.identity, "principal_id"),
+                            )
+                    })
+                    .map(|row| string(&row, "listener_id").to_owned())
+                    .unwrap_or_else(|| {
+                        listener_id(string(&slot.identity, "principal_id"), "human", "default")
+                    });
+                let mut params = action.clone();
+                params["node_id"] = json!(id);
+                if params.get("expected_control_revision").is_none() {
+                    params["expected_control_revision"] = slot
+                        .kv_get(&id)?
+                        .map(|(row, _)| row["human_control_revision"].clone())
+                        .filter(|v| v.is_number())
+                        .unwrap_or(json!(1));
+                }
+                let result = slot.human_request("human_inbox_update", &params)?;
+                Self::reconcile_human_scope(&self.state, slot, &self.host_id, &result["record"])?;
+                self.push_ui();
+                return Ok(result);
+            }
             "cli_rename" => {
                 let caller = self
                     .caller(&action["meta"], true)?
@@ -2841,10 +2824,10 @@ impl DaemonService {
             }
             "unlisten_session" => {
                 for row in self.state.db.query(
-                    "SELECT * FROM local_listeners WHERE harness=? AND session_id=?",
+                    "SELECT * FROM local_listeners WHERE harness=? AND session_id=? AND status!='FENCED_INACTIVE'",
                     &[action["harness"].clone(), action["session_id"].clone()],
                 )? {
-                    if action["hub"].is_null() || row["hub"] == hub {
+                    if (action["hub"].is_null() || row["hub"] == hub) && self.slots.get(string(&row,"hub")).is_some_and(|slot| super::auth::principal_ids_equal(string(&row,"principal_id"),string(&slot.identity,"principal_id"))) {
                         let name = string(&row, "hub");
                         self.pause_listener(name, string(&row, "listener_id"))?;
                     }
@@ -2875,7 +2858,7 @@ impl DaemonService {
                     Ok(())
                 })?;
             }
-            "setup_apply" | "enable_app" => {
+            "setup_apply" => {
                 let id = action["harness"]
                     .as_str()
                     .or_else(|| action["app"].as_str())
@@ -2890,7 +2873,7 @@ impl DaemonService {
                 self.refresh_available()?;
                 self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
-            "setup_remove_app" | "disable_app" => {
+            "setup_remove_app" => {
                 let id = action["harness"]
                     .as_str()
                     .or_else(|| action["app"].as_str())
@@ -3275,7 +3258,7 @@ impl DaemonService {
             "ack_signals" | "mark_activity_read" | "mark_all_activity_read" => {
                 let ids = action["signal_ids"].as_array().cloned().unwrap_or_default();
                 let rows = self.state.db.query(
-                    "SELECT s.* FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
+                    "SELECT s.*,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND s.acknowledged_at_ms IS NULL AND (?!='me' OR l.harness='human')",
                     &[json!(action["filter"].as_str().unwrap_or(&self.activity_filter))],
                 )?;
                 for row in rows {
@@ -3283,8 +3266,16 @@ impl DaemonService {
                     if !requested_hub.is_empty() && row["hub"] != requested_hub {
                         continue;
                     }
-                    if op == "mark_all_activity_read"
-                        || action["ack_all"] == true
+                    let bulk = op == "mark_all_activity_read" || action["ack_all"] == true;
+                    if bulk
+                        && !super::state::matches_activity(
+                            &row,
+                            action["query"].as_str().unwrap_or(""),
+                        )
+                    {
+                        continue;
+                    }
+                    if bulk
                         || ids.iter().any(|id| {
                             id == &row["signal_id"]
                                 || id.as_str()
@@ -3340,8 +3331,9 @@ impl DaemonService {
                     let selected = action["hub"].as_str().unwrap_or("");
                     let signal_id = action["signal_id"].as_str().unwrap_or("");
                     let filter=action["filter"].as_str().unwrap_or(&self.activity_filter);
-                    let rows = c.query("SELECT s.*,l.harness AS target_harness FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)])?;
+                    let rows = c.query("SELECT s.*,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)])?;
                     for row in rows {
+                        if !super::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { continue; }
                         if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES(?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms())])?; }
                         c.execute("UPDATE local_signals SET activity_hidden=1,acknowledged_at_ms=CASE WHEN ?='human' THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END WHERE hub=? AND signal_id=?", &[row["target_harness"].clone(),json!(now_ms()),row["hub"].clone(),row["signal_id"].clone()])?;
                     }
@@ -3419,6 +3411,16 @@ impl DaemonService {
                     let (mut row, rev) = slot.kv_get(id)?.ok_or("LISTENER_NOT_FOUND")?;
                     if !row.is_object() {
                         return Err("INVALID_INPUT: Listener must be an object".into());
+                    }
+                    if row["harness"] == "human" {
+                        let result = slot.human_request("human_inbox_update",&json!({"node_id":id,"expected_control_revision":row["human_control_revision"],"scope":scope}))?;
+                        Self::reconcile_human_scope(
+                            &self.state,
+                            slot,
+                            &self.host_id,
+                            &result["record"],
+                        )?;
+                        return Ok(result);
                     }
                     row["scope"] = json!(scope);
                     match slot.kv_save(id, &row, Some(rev)) {
@@ -3589,21 +3591,6 @@ impl DaemonService {
                     &self.plugins,
                 )?;
             }
-            "set_desktop_banner" => {
-                let enabled = action["enabled"]
-                    .as_bool()
-                    .ok_or("INVALID_INPUT: enabled must be a boolean")?;
-                self.mutate_config(|v| {
-                    v["desktopBannerEnabled"] = json!(enabled);
-                    Ok(())
-                })?;
-                if let Some(ui) = &self.ui {
-                    ui.set_banner_enabled(enabled);
-                }
-                if !enabled {
-                    self.emit(json!({"op":"hide_banner"}));
-                }
-            }
             "setup_disconnect_all" => {
                 for row in self
                     .state
@@ -3642,9 +3629,9 @@ impl DaemonService {
                         )?;
                     }
                     self.mutate_config(|v| {
-                        v["defaultHub"] = json!("local");
+                        v["default_hub"] = json!("local");
                         if let Some(object) = v.as_object_mut() {
-                            object.remove("default_hub");
+                            object.remove("defaultHub");
                         }
                         v["hubs"] = json!({});
                         Ok(())
@@ -3661,14 +3648,14 @@ impl DaemonService {
                 }
                 self.emit(json!({"op":"settings","settings":self.settings()}));
             }
-            "setup_uninstall_all" | "uninstall_cito" => {
+            "setup_uninstall_all" => {
                 for row in self.state.active()? {
                     let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"));
                 }
                 self.uninstall = Some(action["purge_data"].as_bool().unwrap_or(false));
                 request_shutdown();
             }
-            "quit" | "quit_daemon" => request_shutdown(),
+            "quit" => request_shutdown(),
             "set_auto_listen" => {
                 if !self.slots.contains_key(&hub) {
                     return Err("INVALID_INPUT: Enabled hub required".into());
@@ -3688,7 +3675,7 @@ impl DaemonService {
             "close_settings" => {
                 self.active_settings_hub = None;
             }
-            "close_directory" | "copy_id" => {}
+            "close_directory" => {}
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;
@@ -4329,7 +4316,6 @@ fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
         "open_settings" | "settings_select_hub" => Some(ChannelActionKind::Read),
         "channel_save"
         | "save_hub_service"
-        | "configure_human_channel"
         | "disconnect_human_channel"
         | "channel_toggle"
         | "channel_unpair"
@@ -4337,8 +4323,7 @@ fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
         | "clear_channel_service"
         | "channel_test"
         | "test_human_channel"
-        | "channel_pair"
-        | "pair_human_channel" => Some(ChannelActionKind::Mutation),
+        | "channel_pair" => Some(ChannelActionKind::Mutation),
         _ => None,
     }
 }
@@ -4353,7 +4338,7 @@ fn channel_rpc(action: &Value) -> &'static str {
         "human_channels_configure"
     } else {
         match string(action, "op") {
-            "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
+            "channel_pair" => "human_channel_pair_start",
             "channel_test" | "test_human_channel" => "human_channels_test",
             _ => "human_channels_configure",
         }
@@ -4858,20 +4843,13 @@ struct UiChild {
 }
 fn resolve_ui_binary(
     root: &std::path::Path,
-    plugins: &LoadedPlugins,
     explicit: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    let plugin_binary = plugins.find_by_id("human").and_then(|plugin| {
-        let command = plugin.command.first()?;
-        Some(plugin.plugin_dir.join(command))
-    });
     explicit
         .into_iter()
-        .chain(plugin_binary)
         .chain([
             root.join("Helpers/cito-ui"),
-            root.join("Resources/plugins/human/bin/cito-ui"),
-            root.join("plugins/human/bin/cito-ui"),
+            root.join("bin/cito-ui-darwin-arm64"),
         ])
         .find(|path| path.is_file())
 }
@@ -4881,7 +4859,6 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
     }
     let bin = resolve_ui_binary(
         &resolve_package_root(),
-        &service.lock().ok()?.plugins,
         std::env::var_os("CITO_UI_BINARY").map(std::path::PathBuf::from),
     )?;
     let mut child = Command::new(bin)
@@ -4902,7 +4879,6 @@ fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
         }
     });
     if let Ok(mut s) = service.lock() {
-        mailbox.set_banner_enabled(s.desktop_banner_enabled());
         s.ui = Some(mailbox);
         s.push_ui();
     }
@@ -5223,48 +5199,30 @@ mod tests {
                     .ok_or("Missing pause placeholder")?["about"],
                 "Human"
             );
-            for (about, expected) in [
-                ("", None),
-                (" \n ", None),
-                ("Human", None),
-                ("Human receiver", None),
-                ("You (@alice)", None),
-                (" Release approvals ", Some("Release approvals")),
-            ] {
-                service.state.db.execute(
-                    "UPDATE local_listeners SET about=? WHERE hub=? AND listener_id=?",
-                    &[json!(about), json!("local"), json!(human_id)],
-                )?;
-                let snapshot = service.snapshot()?;
-                assert_eq!(snapshot["hubs"][0]["human_paused"], true);
-                assert_eq!(snapshot["hubs"][0]["human_about"], json!(expected));
-            }
-            for (title, about, expected) in [
-                ("Review desk", "Review desk", Value::Null),
-                ("café", "CAFÉ", Value::Null),
-                ("CAFÉ", "café", Value::Null),
-                ("café", "CAFÉ notes", json!("CAFÉ notes")),
-            ] {
-                service.state.db.execute(
-                    "UPDATE local_listeners SET title=?,about=? WHERE harness='human'",
-                    &[json!(title), json!(about)],
-                )?;
-                assert_eq!(service.snapshot()?["hubs"][0]["human_about"], expected);
-            }
-            for about in [None, Some(""), Some(" \n ")] {
-                let mut action = json!({"op":"listen_session","hub":"local","harness":"human","session_id":"default"});
-                if let Some(about) = about {
-                    action["about"] = json!(about);
-                }
-                let resumed = service.action(&action)?;
-                assert_eq!(resumed["about"], "Human");
-                assert_eq!(
-                    service
-                        .state
-                        .listener("local", &human_id)?
-                        .ok_or("Missing default Human")?["about"],
-                    "Human"
-                );
+            let updated=service.action(&json!({"op":"human_inbox_update","hub":"local","paused":true,"expected_control_revision":1,"about":"Release approvals","scope":"self"}))?;
+            assert_eq!(updated["record"]["human_paused"], true);
+            assert_eq!(
+                service.snapshot()?["hubs"][0]["human_about"],
+                "Release approvals"
+            );
+            assert_eq!(
+                service.snapshot()?["hubs"][0]["human_state_status"],
+                "current"
+            );
+            service.action(&json!({"op":"human_inbox_update","hub":"local","paused":false,"expected_control_revision":2}))?;
+            assert_eq!(
+                service.snapshot()?["hubs"][0]["human_about"],
+                "Release approvals"
+            );
+            for name in ["cito_listen", "cito_unlisten"] {
+                assert!(service
+                    .tool(
+                        name,
+                        &json!({"about":"Human"}),
+                        &json!({"expected_harness":"human"})
+                    )
+                    .unwrap_err()
+                    .starts_with("FORBIDDEN:"));
             }
             for harness in ["human", "fixture"] {
                 super::super::registration::register_listener(
@@ -5373,7 +5331,7 @@ mod tests {
                     .kv_get(string(&personal, "listener_id"))?
                     .ok_or("Missing paused registration")?
                     .0["human_paused"],
-                true
+                false
             );
             assert!(service
                 .state
@@ -5408,7 +5366,7 @@ mod tests {
                     .ok_or("Missing personal registration")?
                     .0["human_paused"],
                 false,
-                "A settled pause must not override another explicit resume"
+                "Device detach and sibling attach must preserve shared inbox policy"
             );
             client.closed.store(true, Ordering::SeqCst);
             service.unlisten_id("local", string(&personal, "listener_id"))?;
@@ -5526,7 +5484,7 @@ mod tests {
                     .kv_get(string(&personal, "listener_id"))?
                     .ok_or("Missing paused registration")?
                     .0["human_paused"],
-                true
+                false
             );
             assert!(service
                 .state
@@ -5639,6 +5597,7 @@ mod tests {
                 remote["owner_token"] = json!("sibling-owner");
                 remote["channels"]["sibling:fixture"] = json!({"channel_id":"sibling:fixture","kind":"fixture","host_id":"sibling","state":"ACTIVE","owner_token":"sibling-owner","priority":100,"updated_at_ms":now_ms()});
                 old.kv_save(id, &remote, Some(revision))?;
+                let remote = old.kv_get(id)?.ok_or("Missing Hub-stamped sibling")?.0;
                 assert!(service.unlisten_id("local", id)?);
                 let authority = service.state.registration_lock("local")?;
                 assert!(Arc::ptr_eq(&old.registration, &authority));
@@ -5931,7 +5890,7 @@ print(json.dumps(result), flush=True)
                     }
                     fs::remove_file(dir.join("revoke.json")).map_err(|e| e.to_string())?;
                     service.auto_listen()?;
-                    if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=0 { return Err("Stale presentation cannot regain enrollment authority".into()); }
+                    if !service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.is_empty() { return Err("Stale presentation cannot regain enrollment authority".into()); }
                     service.refresh_available()?;
                     if service.state.db.query("SELECT 1 FROM local_listeners WHERE harness='fixture' AND session_id=? AND status='ACTIVE'",&[json!(session)])?.len()!=2 { return Err("New discovery must restore enrollment on both Hubs".into()); }
                 }
@@ -6610,7 +6569,8 @@ print(json.dumps(result), flush=True)
         };
         fs::write(
             &config.config_path,
-            json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://"}}}).to_string(),
+            json!({"hubs":{"local":{"url":"local://"},"work":{"url":"local://","enabled":false}}})
+                .to_string(),
         )
         .map_err(|e| e.to_string())?;
         let plugins = LoadedPlugins {
@@ -6633,6 +6593,72 @@ print(json.dumps(result), flush=True)
             assert_eq!(unread()?, vec![json!({"hub":"work"})]);
             service.action(&json!({"op":"ack_signals","signal_ids":["work:shared"]}))?;
             assert!(unread()?.is_empty());
+            for (id, message) in [("matching", "review ready"), ("unmatched", "build passed")] {
+                state.db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local',?,'node',2,1,'alice','host','',?,'now',?,'RECEIVED')", &[json!(id),json!(message),json!(now_ms()+60_000)])?;
+            }
+            let (_, matched, _) = state.query_activity("all", " review ")?;
+            assert_eq!(matched, 1);
+            service.action(&json!({"op":"ack_signals","ack_all":true,"query":" review "}))?;
+            let remaining = state.db.query(
+                "SELECT signal_id FROM local_signals WHERE acknowledged_at_ms IS NULL",
+                &[],
+            )?;
+            assert_eq!(remaining, vec![json!({"signal_id":"unmatched"})]);
+            service
+                .action(&json!({"op":"ack_signals","signal_ids":["unmatched"],"query":"review"}))?;
+            assert!(unread()?.is_empty());
+
+            let client = service.slot("local")?.clone();
+            let human =
+                super::super::registration::local_node(&state, &client, "human", "default")?
+                    .ok_or("Missing Human")?;
+            let id = string(&human, "listener_id");
+            let channel = format!("{}:human", service.host_id);
+            let hub_db =
+                super::super::database::Database::open(&config.state_dir.join("hub.sqlite"))?;
+            for (age, expected_heartbeats) in [(0, 0), (21_000, 1), (0, 0)] {
+                let mut remote = client.kv_get(id)?.ok_or("Missing remote Human")?.0;
+                remote["channels"][&channel]["updated_at_ms"] = json!(now_ms() - age);
+                hub_db.execute(
+                    "UPDATE hub_kv SET value=CAST(? AS BLOB) WHERE key=?",
+                    &[json!(remote.to_string()), json!(id)],
+                )?;
+                client.directory()?;
+                let count = || -> Result<u64, String> {
+                    Ok(hub_db.query("SELECT COUNT(*) AS n FROM hub_audit_log WHERE action='human_device_heartbeat'", &[])?[0]["n"].as_u64().unwrap_or(0))
+                };
+                let before = count()?;
+                service.poll()?;
+                for (_, task) in service.receivers.drain() {
+                    task.join().map_err(|_| "Receiver panicked")?;
+                }
+                assert_eq!(
+                    count()? - before,
+                    expected_heartbeats,
+                    "Heartbeat age {age}"
+                );
+            }
+
+            // Settings can arrive before Directory, and must retain the inventory's policy.
+            let remote = HubClient::new(
+                "local".into(),
+                json!({"url":"https://hub.example.com","authMode":"token"}),
+                "alice",
+                None,
+            );
+            let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&remote)));
+            inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"channels":[{"id":"messenger","enabled":true,"configured":true,"inbox_paused":true,"delivery_enabled":false}]});
+            service
+                .channel_inventories
+                .insert("local".into(), inventory);
+            service.slots.insert("local".into(), remote);
+            assert_eq!(
+                service.human_projection("local")["human_state_status"],
+                "unknown"
+            );
+            let settings = service.settings_for_hub("local");
+            assert_eq!(settings["channels"][0]["inbox_paused"], true);
+            assert_eq!(settings["channels"][0]["delivery_enabled"], false);
             Ok(())
         })();
         service.shutdown();
@@ -6855,45 +6881,17 @@ print(json.dumps(result), flush=True)
             fs::create_dir_all(root.join("Helpers")).map_err(|e| e.to_string())?;
             let bin = root.join("Helpers/cito-ui");
             fs::write(&bin, "").map_err(|e| e.to_string())?;
-            let plugins = LoadedPlugins {
-                plugins: vec![],
-                rejected_ids: Default::default(),
-            };
-            assert_eq!(resolve_ui_binary(&root, &plugins, None), Some(bin));
+            assert_eq!(resolve_ui_binary(&root, None), Some(bin));
             let override_bin = dir.join("custom-ui");
             fs::write(&override_bin, "").map_err(|e| e.to_string())?;
             assert_eq!(
-                resolve_ui_binary(&root, &plugins, Some(override_bin.clone())),
+                resolve_ui_binary(&root, Some(override_bin.clone())),
                 Some(override_bin)
             );
             Ok(())
         })();
         let _ = fs::remove_dir_all(dir);
         result
-    }
-    #[test]
-    fn banner_mute_purges_queued_frames_and_rejects_late_emissions_without_losing_state(
-    ) -> Result<(), String> {
-        let mailbox = UiMailbox::default();
-        mailbox.emit(json!({"op":"banner","payload":{"message":"queued"}}));
-        mailbox.emit(json!({"op":"state","revision":1}));
-        mailbox.set_banner_enabled(false);
-        mailbox.emit(json!({"op":"banner","payload":{"message":"late"}}));
-        let frame: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing state")?)
-            .map_err(|e| e.to_string())?;
-        assert_eq!(frame, json!({"op":"state","revision":1}));
-        assert!(mailbox
-            .pending
-            .lock()
-            .map_err(|e| e.to_string())?
-            .is_empty());
-        mailbox.set_banner_enabled(true);
-        mailbox.emit(json!({"op":"banner","payload":{"message":"enabled"}}));
-        let frame: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing banner")?)
-            .map_err(|e| e.to_string())?;
-        assert_eq!(frame["payload"]["message"], "enabled");
-        mailbox.close();
-        Ok(())
     }
     #[test]
     fn coalesced_snapshots_retain_command_results() -> Result<(), String> {

@@ -656,9 +656,9 @@ fn format_badge(row: &Value, unread: u64) -> String {
         short
     };
     if unread > 0 {
-        format!("🔔 {short} ({unread})")
+        format!("Cito · {short} ({unread})")
     } else {
-        format!("🔔 {short}")
+        format!("Cito · {short}")
     }
 }
 fn normalize_badge_slug(raw: &str) -> String {
@@ -1151,7 +1151,7 @@ print(json.dumps(response), flush=True)
         })?;
         assert_eq!(
             f.effect("agent").ok_or("Missing badge")?["badge"],
-            "🔔 abcdefghijk (4)"
+            "Cito · abcdefghijk (4)"
         );
         let count = f.calls("agent", "update_badge").len();
         for _ in 0..10 {
@@ -1173,7 +1173,7 @@ print(json.dumps(response), flush=True)
         })?;
         assert_eq!(
             f.effect("agent").ok_or("Missing badge")?["badge"],
-            "🔔 abcdefghijk (2)"
+            "Cito · abcdefghijk (2)"
         );
         f.state.db.execute(
             "UPDATE local_signals SET acknowledged_at_ms=? WHERE hub='west'",
@@ -1186,7 +1186,7 @@ print(json.dumps(response), flush=True)
         })?;
         assert_eq!(
             f.effect("agent").ok_or("Missing badge")?["badge"],
-            "🔔 abcdefghijk"
+            "Cito · abcdefghijk"
         );
         pump(&mut activity, &f, &[], |a| {
             a.badges
@@ -1237,7 +1237,7 @@ print(json.dumps(response), flush=True)
         assert_eq!(calls[1]["req"]["session_id"], "new");
         assert_eq!(
             f.effect("agent").ok_or("Missing badge")?["badge"],
-            "🔔 new-session"
+            "Cito · new-session"
         );
         assert!(!f.records("agent").iter().any(|r| r["stage"] == "overlap"));
         let first_end = f
@@ -1280,8 +1280,8 @@ print(json.dumps(response), flush=True)
         })?;
         let calls = f.calls("agent", "update_badge");
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0]["req"]["badge"], "🔔 abcdefghijk");
-        assert_eq!(calls[1]["req"]["badge"], "🔔 abcdefghijk (1)");
+        assert_eq!(calls[0]["req"]["badge"], "Cito · abcdefghijk");
+        assert_eq!(calls[1]["req"]["badge"], "Cito · abcdefghijk (1)");
         let started = Instant::now();
         activity.shutdown()?;
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -1317,12 +1317,12 @@ print(json.dumps(response), flush=True)
         assert_eq!(desired[&Target::of(&row)].badge, None);
         assert_eq!(
             desired[&Target::of(&second)].badge,
-            Some("🔔 abcdefghijk (1)".into())
+            Some("Cito · abcdefghijk (1)".into())
         );
         let desired = desired_badges(&f.state, &[row.clone(), second])?;
         assert_eq!(
             desired[&Target::of(&row)].badge,
-            Some("🔔 abcdefghijk (1)".into())
+            Some("Cito · abcdefghijk (1)".into())
         );
         let mut activity = SessionActivity::new(&f.config, &f.plugins);
         // Restoring one session counts its persisted unread even without a new
@@ -1370,7 +1370,7 @@ print(json.dumps(response), flush=True)
         );
         assert_eq!(
             f.effect("agent").ok_or("Missing effect")?["badge"],
-            "🔔 abcdefghijk"
+            "Cito · abcdefghijk"
         );
         activity.shutdown()?;
         assert_reaped(&f);
@@ -1483,7 +1483,7 @@ print(json.dumps(response), flush=True)
         for public in ["topic-name-abcdefghijkl", "topic-name-0123456789abcdef"] {
             assert_eq!(
                 format_badge(&json!({"public_id":public,"harness":"agent"}), 0),
-                "🔔 topic-name"
+                "Cito · topic-name"
             );
         }
         assert_eq!(
@@ -1491,18 +1491,18 @@ print(json.dumps(response), flush=True)
                 &json!({"public_id":"------------x-abcdefghijkl","harness":"agent"}),
                 5
             ),
-            "🔔 agent (5)"
+            "Cito · agent (5)"
         );
         assert_eq!(
             format_badge(
                 &json!({"tag":"___","repo":"acme/some-repo","cwd":"/work/other","harness":"agent"}),
                 0
             ),
-            "🔔 some-repo"
+            "Cito · some-repo"
         );
         assert_eq!(
             format_badge(&json!({"tag":"abcdefghijkl-long","harness":"agent"}), 2),
-            "🔔 abcdefghijkl (2)"
+            "Cito · abcdefghijkl (2)"
         );
     }
 }

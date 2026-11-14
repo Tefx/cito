@@ -1,7 +1,8 @@
 use crate::plugins::{
     expand_home_dir, is_staged_plugins_root, now_ms, random_hex, resolve_builtin_plugins_dir,
-    selected_plugin_dir, staged_plugins_dir, validate_harness_id, validate_https_issuer,
-    validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor, CITO_VERSION,
+    selected_plugin_dir, staged_plugins_dir, try_random_hex, validate_harness_id,
+    validate_https_issuer, validate_hub_name, validate_nats_url, LoadedPlugins, PluginDescriptor,
+    CITO_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -173,6 +174,7 @@ fn ensure_plugins_staged<'a>(
     state_dir: &Path,
     plugins: impl Iterator<Item = &'a PluginDescriptor>,
 ) -> Result<Vec<PathBuf>, String> {
+    super::plugins::cleanup_retired_companion(state_dir)?;
     let bin_dir = state_dir.join("bin");
     fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
@@ -747,7 +749,6 @@ exec "$APP_CONTENTS/Helpers/cito-native" "$@"
     for ui_cand in [
         pkg_root.join("bin/cito-ui-darwin-arm64"),
         pkg_root.join("Helpers/cito-ui"),
-        state_dir.join("bin/cito-ui"),
     ] {
         if ui_cand.is_file() {
             let helper_ui = helpers_dir.join("cito-ui");
@@ -1444,41 +1445,29 @@ pub fn run_setup_cli(args: &[String]) {
                 prev.insert("enabled".into(), json!(en));
                 prev.insert("port".into(), json!(p));
                 if share_hub != Some(false) {
-                    let token = prev
+                    let token = match prev
                         .get("token")
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .unwrap_or_else(|| random_hex(32));
+                    {
+                        Some(token) => token.to_owned(),
+                        None => try_random_hex(32)?,
+                    };
                     prev.insert("token".into(), json!(token));
                 }
                 rest.insert("host_hub".to_string(), Value::Object(prev));
             }
 
-            let def_enabled = hubs
-                .get(&def_hub)
-                .and_then(|v| v.get("enabled"))
-                .and_then(|v| v.as_bool())
-                != Some(false);
-            if !hubs.contains_key(&def_hub) || !def_enabled {
-                def_hub = hubs
-                    .iter()
-                    .find(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()) != Some(false))
-                    .map(|(k, _)| k.clone())
-                    .or_else(|| hubs.keys().next().cloned())
-                    .unwrap_or_else(|| "local".to_string());
-            }
-            resolved_default_hub = def_hub.clone();
             let mut next_obj = Map::new();
             next_obj.insert("default_hub".to_string(), json!(def_hub));
             next_obj.insert("hubs".to_string(), Value::Object(hubs));
             for (k, v) in rest {
                 next_obj.insert(k, v);
             }
-            let next_content = format!(
-                "{}\n",
-                serde_json::to_string_pretty(&Value::Object(next_obj)).unwrap()
-            );
+            let mut next = Value::Object(next_obj);
+            super::config::repair_default_hub(&mut next);
+            resolved_default_hub = next["default_hub"].as_str().unwrap_or("local").to_owned();
+            let next_content = format!("{}\n", serde_json::to_string_pretty(&next).unwrap());
             match existing {
                 None => Ok((
                     "created".to_string(),
@@ -1740,7 +1729,7 @@ mod tests {
     fn app_bundle_rejects_ui_copy_failure() {
         let (root, plugins) = fixture();
         fs::create_dir_all(root.join("bin")).unwrap();
-        let ui = root.join("bin/cito-ui");
+        let ui = root.join("bin/cito-ui-darwin-arm64");
         fs::write(&ui, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&ui, fs::Permissions::from_mode(0o000)).unwrap();
         let result = build_mac_app_bundle_from_root(None, &root, &plugins, &root);

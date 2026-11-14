@@ -311,7 +311,7 @@ struct Inner {
     processes: Mutex<HashMap<String, Arc<ChannelProcess>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     lifecycle: Mutex<()>,
-    remote: AtomicBool,
+    default_human_scope: &'static str,
 }
 #[derive(Clone)]
 pub struct HubEngine {
@@ -319,9 +319,12 @@ pub struct HubEngine {
 }
 impl HubEngine {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
-        Self::open_with_remote(data_dir, false)
+        Self::open_with_auth_mode(data_dir, "none")
     }
-    pub fn open_with_remote(data_dir: &Path, remote: bool) -> Result<Self, String> {
+    pub fn open_with_auth_mode(data_dir: &Path, auth_mode: &str) -> Result<Self, String> {
+        if !matches!(auth_mode, "none" | "token" | "oidc") {
+            return Err("INVALID_INPUT: Unknown Hub auth mode".into());
+        }
         std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
         std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
@@ -333,7 +336,7 @@ impl HubEngine {
         db.execute("PRAGMA busy_timeout=5000", &[])?;
         db.transaction(|c|{
             for stmt in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()){c.execute(stmt,&[])?;}
-            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_pairing_codes","pairing_url","TEXT"),("hub_pairing_codes","bot_username","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
+            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","initial_human_scope","TEXT NOT NULL DEFAULT 'self'"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_pairing_codes","pairing_url","TEXT"),("hub_pairing_codes","bot_username","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
             for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
             c.execute("INSERT OR IGNORE INTO hub_meta(key,int_val) VALUES('kv_seq',0)",&[])?;
             // Existing single-message deliveries retain reply and acknowledgment mappings.
@@ -348,14 +351,24 @@ impl HubEngine {
                 user_plugins_dir: data_dir.join("plugins"),
                 closed: AtomicBool::new(false),
                 subscribers: Mutex::new(Vec::new()),
-                plugins: Mutex::new(Vec::new()),
+                plugins: Mutex::new(hub_plugins::discover(
+                    &super::plugins::plugin_roots_for_executable(
+                        data_dir,
+                        std::env::current_exe().ok().as_deref(),
+                    ),
+                    Some(&data_dir.join("plugins")),
+                )?),
                 processes: Mutex::new(HashMap::new()),
                 worker: Mutex::new(None),
                 lifecycle: Mutex::new(()),
-                remote: AtomicBool::new(remote),
+                default_human_scope: if auth_mode == "none" {
+                    "workspace"
+                } else {
+                    "self"
+                },
             }),
         };
-        engine.set_plugin_roots(&hub_plugins::default_roots(data_dir))?;
+        engine.seed_environment()?;
         engine.restore_attachments()?;
         let weak = Arc::downgrade(&engine.inner);
         let worker = thread::spawn(move || loop {
@@ -377,7 +390,8 @@ impl HubEngine {
         Ok(engine)
     }
     pub fn set_plugin_roots(&self, roots: &[PathBuf]) -> Result<(), String> {
-        let plugins = hub_plugins::discover(roots, Some(&self.inner.user_plugins_dir))?;
+        let roots: Vec<_> = roots.iter().map(|root| (root.clone(), false)).collect();
+        let plugins = hub_plugins::discover(&roots, Some(&self.inner.user_plugins_dir))?;
         *self
             .inner
             .plugins
@@ -466,6 +480,9 @@ impl HubEngine {
         for event in events {
             self.emit(event)
         }
+        if result["control_revision_conflict"] == true {
+            return Err(format!("CONTROL_REVISION_CONFLICT: {}", result));
+        }
         if op == "signal_ack" {
             self.notify_ack(params)?;
         }
@@ -482,7 +499,14 @@ impl HubEngine {
         caller: Option<&Value>,
         events: &mut Vec<Value>,
     ) -> Result<(Value, Option<Value>), String> {
+        maintain(c)?;
         let result = match op {
+            "human_device_attach"
+            | "human_device_heartbeat"
+            | "human_device_detach"
+            | "human_inbox_update" => {
+                human_operation(c, op, p, caller, self.inner.default_human_scope, events)
+            }
             "stream_info" => stream_info(c, required(p, "stream")?),
             "stream_add" | "stream_update" => {
                 admin(caller)?;
@@ -543,7 +567,10 @@ impl HubEngine {
                 if !visible(&row, caller) {
                     return Ok((json!({"forbidden_scope":true}), None));
                 }
-                kv_wire(&row)
+                let row = reconcile_human_row(c, row)?;
+                let mut wire = kv_wire(&row)?;
+                wire["server_now_ms"] = json!(now_ms());
+                Ok(wire)
             }
             "kv_keys" | "kv_snapshot" => {
                 let rows = c.query(&format!("{KV_SELECT} ORDER BY revision"), &[])?;
@@ -554,7 +581,13 @@ impl HubEngine {
                 if op == "kv_keys" {
                     Ok(json!({"keys":rows.iter().map(|r|r["key"].clone()).collect::<Vec<_>>()}))
                 } else {
-                    Ok(json!({"entries":rows.iter().map(kv_wire).collect::<Result<Vec<_>,_>>()?}))
+                    let rows = rows
+                        .into_iter()
+                        .map(|row| reconcile_human_row(c, row))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(
+                        json!({"entries":rows.iter().map(kv_wire).collect::<Result<Vec<_>,_>>()?,"server_now_ms":now_ms()}),
+                    )
                 }
             }
             "kv_create" | "kv_update" | "kv_put" | "kv_delete" => {
@@ -578,12 +611,21 @@ impl HubEngine {
                 {
                     return Err("10071: wrong last sequence".into());
                 }
-                let raw = if op == "kv_delete" {
+                let mut raw = if op == "kv_delete" {
                     Vec::new()
                 } else {
                     decode_payload(p)?
                 };
-                let data = payload_metadata(&raw);
+                let mut data = payload_metadata(&raw);
+                if data["harness"] == "human"
+                    || existing
+                        .as_ref()
+                        .is_some_and(|row| parse(row, "value")["harness"] == "human")
+                {
+                    return Err(
+                        "FORBIDDEN: Human records require explicit Human RPC operations".into(),
+                    );
+                }
                 if op != "kv_delete" {
                     if s(&data, "harness") == "human" && s(&data, "session_id") != "default" {
                         return Err("INVALID_INPUT: Human node session_id must be 'default'".into());
@@ -598,6 +640,27 @@ impl HubEngine {
                 }
                 let revision = next_revision(c)?;
                 let now = now_ms();
+                // Only changed attachments renew. Unmodified siblings retain their leases.
+                let previous = existing
+                    .as_ref()
+                    .map(|row| parse(row, "value"))
+                    .unwrap_or(Value::Null);
+                let mut renewed = false;
+                if let Some(channels) = data["channels"].as_object_mut() {
+                    for (id, channel) in channels {
+                        if channel["state"] == "ACTIVE" && *channel != previous["channels"][id] {
+                            channel["updated_at_ms"] = json!(now);
+                            renewed = true;
+                        }
+                    }
+                }
+                if renewed {
+                    if data["updated_at_ms"] != previous["updated_at_ms"] {
+                        data["updated_at_ms"] = json!(now);
+                    }
+                    super::lease::reconcile_registration_state(&mut data, now.max(0) as u64);
+                    raw = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
+                }
                 let owner = if op == "kv_delete" {
                     existing
                         .as_ref()
@@ -835,7 +898,7 @@ impl HubEngine {
                     c,
                     &b,
                     active,
-                    self.inner.remote.load(Ordering::SeqCst),
+                    self.inner.default_human_scope,
                     self.plugin(s(&b, "plugin_id")).ok().as_ref(),
                 )?;
             }
@@ -989,29 +1052,31 @@ impl HubEngine {
                 }
                 if reset_hub {
                     for b in c.query("SELECT * FROM hub_human_channels WHERE plugin_id=?", &[json!(id)])? {
-                        attach(c, &b, false, self.inner.remote.load(Ordering::SeqCst), Some(&plugin))?;
+                        attach(c, &b, false, initial_human_scope(caller, self.inner.default_human_scope), Some(&plugin))?;
                     }
                 }
                 if reset_user || p.get("user_config").is_some() || p.get("enabled").is_some() || p.get("display_label").is_some() {
                     let old = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?", &[caller["principal_id"].clone(), json!(id)])?;
                     let mut config = old.as_ref().map(|b| parse(b,"user_config_json")).unwrap_or(json!({}));
                     let mut label = old.as_ref().map(|b| b["display_label"].clone()).unwrap_or(Value::Null);
+                    let mut identity_changed = reset_user;
                     if reset_user { config = json!({}); label = Value::Null; }
                     else if let Some(patch) = p.get("user_config") {
                         let prev = config.clone();
                         merge_channel_config(&plugin, "user", &mut config, patch, clear_secret);
-                        let identity_changed = plugin.manifest["pairing"]["privateIdentityField"].as_str().map(|key|prev[key]!=config[key]).unwrap_or_else(||fields(&plugin).iter().any(|f| s(f,"scope") == "user" && prev[s(f,"key")] != config[s(f,"key")]));
+                        identity_changed = plugin.manifest["pairing"]["privateIdentityField"].as_str().map(|key|prev[key]!=config[key]).unwrap_or_else(||fields(&plugin).iter().any(|f| s(f,"scope") == "user" && prev[s(f,"key")] != config[s(f,"key")]));
                         if identity_changed {
+                            let cleared = plugin.manifest["pairing"]["privateIdentityField"].as_str().is_some_and(|identity| s(&config, identity).is_empty());
                             if let Some(m) = config.as_object_mut() {
                                 for key in ["_external_chat_id", "_external_user_id"] {
-                                    if patch.get(key).is_none() { m.remove(key); }
+                                    if patch.get(key).is_none() || cleared { m.remove(key); }
                                 }
                             }
                             label = Value::Null;
                         }
                     }
                     if let Some(identity) = plugin.manifest["pairing"]["privateIdentityField"].as_str() {
-                        if p["user_config"].get(identity).is_some() {
+                        if identity_changed && !s(&config, identity).is_empty() {
                             let chat = s(&config, identity).parse::<i64>().ok().filter(|n| *n > 0).map(|n| n.to_string());
                             config["_external_chat_id"] = json!(chat);
                             config["_external_user_id"] = json!(chat);
@@ -1021,7 +1086,7 @@ impl HubEngine {
                     replace_destination(c, &plugin, s(caller,"principal_id"), old.as_ref().map(|b|parse(b,"user_config_json")).as_ref(), &config)?;
                     if let Some(value) = p.get("display_label") { label = value.clone(); }
                     let enabled = !reset_user && p["enabled"].as_bool().unwrap_or_else(|| old.as_ref().is_none_or(|b| n(b,"enabled")==1));
-                    let boundary = if enabled && old.as_ref().is_none_or(|b| n(b,"enabled")==0) { max_seq(c)? } else { old.as_ref().map(|b| n(b,"last_delivered_seq")).unwrap_or(0) };
+                    let boundary = if enabled && old.as_ref().is_none_or(|b| n(b,"enabled")==0 && !identity_changed) { max_seq(c)? } else { old.as_ref().map(|b| n(b,"last_delivered_seq")).unwrap_or(0) };
                     c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET owner_user=excluded.owner_user,enabled=excluded.enabled,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
                         &[caller["principal_id"].clone(),json!(id),caller["owner_user"].clone(),json!(if enabled{1}else{0}),json!(config.to_string()),label,json!(boundary),json!(now_ms())])?;
                 }
@@ -1031,7 +1096,7 @@ impl HubEngine {
                 // Reconcile every binding when service readiness changes, including other principals.
                 for b in c.query("SELECT * FROM hub_human_channels WHERE plugin_id=?", &[json!(id)])? {
                     let active = n(&b,"enabled")==1 && ready(&plugin,&cfg,"hub") && ready(&plugin,&parse(&b,"user_config_json"),"user");
-                    attach(c,&b,active,self.inner.remote.load(Ordering::SeqCst), Some(&plugin))?;
+                    attach(c,&b,active,initial_human_scope(caller, self.inner.default_human_scope), Some(&plugin))?;
                 }
                 audit(c,s(caller,"principal_id"),"channel_configure",id,&json!({"enabled":p["enabled"]}))?;
                 Ok(())
@@ -1088,8 +1153,8 @@ impl HubEngine {
         let instruction = required(&result, "instruction")?;
         self.inner.db.transaction(|c| {
             cancel_pair(c,id,caller)?;
-            c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone()])?;
+            c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username,initial_human_scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(initial_human_scope(caller, self.inner.default_human_scope))])?;
             Ok(())
         })?;
         Ok(
@@ -1117,6 +1182,7 @@ impl HubEngine {
             .clone();
         let is_admin = admin(Some(caller)).is_ok();
         self.inner.db.transaction(|c| {
+            let inbox_paused = find_human(c,caller)?.and_then(|id| kv_row(c,&id).ok().flatten()).is_some_and(|row| parse(&row,"value")["human_paused"] == true);
             let mut channels=Vec::new();
             for plugin in plugins {
                 let (cfg,health) = service(c,&plugin.id)?;
@@ -1156,7 +1222,7 @@ impl HubEngine {
                 }).collect::<Vec<_>>();
                 channels.push(json!({"id":plugin.id,"display_name":plugin.manifest["displayName"],
                     "sf_symbol":plugin.manifest["sfSymbol"].as_str().unwrap_or("paperplane.fill"),"tint":plugin.manifest["tint"].as_str().unwrap_or("blue"),
-                    "enabled":enabled,"configured":hub_ready&&user_ready,"status":status,"detail":detail,"display_label":binding["display_label"],
+                    "enabled":enabled,"configured":hub_ready&&user_ready,"inbox_paused":inbox_paused,"delivery_enabled":enabled&&hub_ready&&user_ready&&!inbox_paused,"status":status,"detail":detail,"display_label":binding["display_label"],
                     "hub_provided":hub_ready&&fields(&plugin).iter().any(|f|s(f,"scope")=="hub"),
                     "setup_guide":plugin.manifest.get("setupGuide").cloned().unwrap_or(Value::Null),
                     "pairing_help_text":plugin.manifest["pairing"]["helpText"].as_str(),
@@ -1179,6 +1245,7 @@ impl HubEngine {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
+        self.inner.db.transaction(maintain)?;
         let plugins = self
             .inner
             .plugins
@@ -1229,7 +1296,7 @@ impl HubEngine {
         send_error.map_or(Ok(()), Err)
     }
     fn reserve_deliveries(&self, plugin: &ChannelPlugin) -> Result<Vec<Value>, String> {
-        self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,s(&b,"principal_id"))?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
+        self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
@@ -1307,7 +1374,7 @@ impl HubEngine {
             c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE code=?", &[json!(now_ms()), json!(code)])?;
             let binding = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
                 &[row["principal_id"].clone(), json!(id)])?.ok_or("Binding missing")?;
-            attach(c, &binding, active, self.inner.remote.load(Ordering::SeqCst), Some(&plugin))?;
+            attach(c, &binding, active, s(&row, "initial_human_scope"), Some(&plugin))?;
             Ok(json!({"op":"pair_ack","code":code,"ok":true,"owner_user":row["owner_user"],"error":null}))
         })?;
         // The callback runs on the child's reader thread; configure is a one-way write.
@@ -1322,32 +1389,36 @@ impl HubEngine {
         }
         Ok(result)
     }
-    fn notify_ack(&self, p: &Value) -> Result<(), String> {
-        let frames = self.inner.db.transaction(|c| {
-            let Some(node) = kv_row(c, s(p, "node_id"))? else {
-                return Ok(Vec::new());
-            };
-            let mut out = Vec::new();
-            for b in c.query("SELECT * FROM hub_human_channels WHERE enabled=1", &[])? {
-                if !principal_ids_equal(s(&b, "principal_id"), s(&node, "principal_id")) {
-                    continue;
-                }
-                let mut ext = Vec::new();
-                for id in ids(p)? {
-                    for row in c.query(
+    fn ack_frames(c: &Connection, p: &Value) -> Result<Vec<(String, Value)>, String> {
+        let Some(node) = kv_row(c, s(p, "node_id"))? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for b in c.query("SELECT * FROM hub_human_channels WHERE enabled=1", &[])? {
+            if !principal_ids_equal(s(&b, "principal_id"), s(&node, "principal_id")) {
+                continue;
+            }
+            let mut ext = Vec::new();
+            for id in ids(p)? {
+                for row in c.query(
                         "SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=?",
                         &[b["plugin_id"].clone(), b["principal_id"].clone(), json!(id)],
                     )? {
                         ext.push(row["external_msg_id"].clone());
                     }
-                }
-                out.push((
+            }
+            out.push((
                     s(&b, "plugin_id").to_owned(),
                     json!({"op":"on_acked","principal_id":b["principal_id"],"signal_ids":p["signal_ids"],"acked_at_ms":now_ms(),"external_msg_ids":ext,"user_config":parse(&b,"user_config_json")}),
                 ));
-            }
-            Ok(out)
-        })?;
+        }
+        Ok(out)
+    }
+    fn notify_ack(&self, p: &Value) -> Result<(), String> {
+        let frames = self.inner.db.transaction(|c| Self::ack_frames(c, p))?;
+        self.send_ack_frames(frames)
+    }
+    fn send_ack_frames(&self, frames: Vec<(String, Value)>) -> Result<(), String> {
         for (id, frame) in frames {
             let proc = self
                 .inner
@@ -1364,7 +1435,7 @@ impl HubEngine {
     }
     fn inbound_reply(&self, id: &str, f: &Value) -> Result<Value, String> {
         let mut events = Vec::new();
-        let mut ack_request = None;
+        let mut ack_frames = Vec::new();
         let result=self.inner.db.transaction(|c|{
         let update=required(f,"update_id")?;if one(c,"SELECT 1 AS n FROM hub_processed_replies WHERE plugin_id=? AND update_id=?",&[json!(id),json!(update)])?.is_some(){return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null}))}
         let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;
@@ -1388,17 +1459,15 @@ impl HubEngine {
         };
         if n(binding,"enabled")!=1 { return Err("FORBIDDEN: external account is paused".into()); }
         let request=json!({"to":required(&target,"from_listener_id")?,"message":required(f,"text")?,"in_reply_to":target["signal_id"]});
-        let (reply, request)=publish_human_reply(c,&binding,id,&request,&mut events)?;
-        ack_request=request;
+        let (reply, request)=publish_human_reply(c,binding,id,&request,&mut events)?;
+        if let Some(request)=request { ack_frames=Self::ack_frames(c,&request)?; }
         c.execute("INSERT INTO hub_processed_replies(plugin_id,update_id,processed_at_ms) VALUES(?,?,?)",&[json!(id),json!(update),json!(now_ms())])?;
         Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"signal_id":reply["signal_id"],"target_display":reply["target_display"],"error":null}))
         })?;
         for event in events {
             self.emit(event)
         }
-        if let Some(request) = ack_request {
-            self.notify_ack(&request)?;
-        }
+        self.send_ack_frames(ack_frames)?;
         Ok(result)
     }
 }
@@ -1446,7 +1515,7 @@ fn publish_human_reply(
         return Err("FORBIDDEN_TARGET_SCOPE: reply target is private".into());
     }
     let text = super::identity::sanitize_message(text)?;
-    let human = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
+    let human = find_human(c, sender)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let target_id = s(&target_row, "key");
     if human == target_id {
         return Err("SELF_SEND_FORBIDDEN: cannot reply to the same node".into());
@@ -1466,7 +1535,7 @@ fn publish_human_reply(
     let msg_id = p["msg_id"]
         .as_str()
         .map(|key| hash(&format!("{pid}|{host_id}|human|{target_id}|{key}")));
-    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":format!("@{owner} (Me)"),"about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
+    let payload = json!({"signal_id":sig,"to":target_id,"target_generation":registration["binding_generation"],"sender_endpoint_key":format!("{pid}|{host_id}|human|default"),"from":{"principal_id":pid,"user":owner,"host_id":host_id,"host_name":host_name,"harness":"human","listener_id":super::identity::public_listener_id(owner, &human),"title":"Human","about":"Human channel"},"message":text,"in_reply_to":in_reply_to});
     let published = publish(
         c,
         &format!("cito.signal.{target_id}"),
@@ -1539,6 +1608,24 @@ fn stream_info(c: &Connection, name: &str) -> Result<Value, String> {
     };
     Ok(json!({"config":config,"state":state,"ts":super::identity::iso(now_ms() as u64)}))
 }
+// Policy-only and idle Hubs still bound retained history. The database clock
+// also amortizes maintenance across RPCs and the channel-independent worker.
+fn maintain(c: &Connection) -> Result<(), String> {
+    let now = now_ms();
+    let last = one(
+        c,
+        "SELECT int_val FROM hub_meta WHERE key='last_maintenance_ms'",
+        &[],
+    )?
+    .map(|row| n(&row, "int_val"))
+    .unwrap_or(0);
+    if now >= last && now - last < 60_000 {
+        return Ok(());
+    }
+    prune(c)?;
+    c.execute("INSERT INTO hub_meta(key,int_val) VALUES('last_maintenance_ms',?) ON CONFLICT(key) DO UPDATE SET int_val=excluded.int_val", &[json!(now)])?;
+    Ok(())
+}
 fn prune(c: &Connection) -> Result<(), String> {
     let cfg = stream_info(c, SIGNALS)?["config"].clone();
     let now = now_ms();
@@ -1563,6 +1650,10 @@ fn prune(c: &Connection) -> Result<(), String> {
     )?;
     c.execute("DELETE FROM hub_channel_delivery_msgs WHERE NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=hub_channel_delivery_msgs.plugin_id AND d.principal_id=hub_channel_delivery_msgs.principal_id AND d.signal_id=hub_channel_delivery_msgs.signal_id)",&[])?;
     c.execute("DELETE FROM hub_consumer_acks WHERE NOT EXISTS(SELECT 1 FROM hub_signals s WHERE s.seq=hub_consumer_acks.seq)",&[])?;
+    c.execute(
+        "DELETE FROM hub_audit_log WHERE ts_ms<?",
+        &[json!(now - 604_800_000)],
+    )?;
     c.execute(
         "DELETE FROM hub_pairing_codes WHERE expires_ms<?",
         &[json!(now - 86_400_000)],
@@ -1627,6 +1718,9 @@ fn publish_payload(
     let target = subject
         .strip_prefix("cito.signal.")
         .ok_or("INVALID_INPUT: expected signal subject")?;
+    if kv_row(c, target)?.is_some_and(|row| parse(&row, "value")["human_paused"] == true) {
+        return Err("LISTENER_NOT_FOUND: Human inbox is paused".into());
+    }
     if oidc(caller) {
         if data.get("from").is_some() && !owns_principal(s(&data["from"], "principal_id"), caller) {
             return Err("PERMISSIONS_VIOLATION: sender principal mismatch".into());
@@ -1965,9 +2059,158 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
     }
 }
 
-fn find_human(c: &Connection, pid: &str) -> Result<Option<String>, String> {
+fn save_human(c: &Connection, id: &str, reg: &mut Value) -> Result<Value, String> {
+    let now = now_ms();
+    super::lease::reconcile_registration_state(reg, now.max(0) as u64);
+    let revision = next_revision(c)?;
+    c.execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,?,?,CAST(? AS BLOB),?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,created_ms=excluded.created_ms,value=excluded.value,principal_id=excluded.principal_id,scope=excluded.scope", &[json!(id),json!(revision),json!(now),json!(reg.to_string()),reg["principal_id"].clone(),reg["scope"].clone()])?;
+    Ok(
+        json!({"type":"kv","key":id,"revision":revision,"created_ms":now,"value_b64":encoded(reg),"operation":"PUT","principal_id":reg["principal_id"],"scope":reg["scope"]}),
+    )
+}
+
+fn reconcile_human_row(c: &Connection, row: Value) -> Result<Value, String> {
+    let mut reg = parse(&row, "value");
+    if reg["harness"] != "human" {
+        return Ok(row);
+    }
+    let before = reg.clone();
+    if reg["human_control_revision"].is_null() {
+        reg["human_control_revision"] = json!(1);
+    }
+    super::lease::reconcile_registration_state(&mut reg, now_ms().max(0) as u64);
+    if reg != before {
+        save_human(c, s(&row, "key"), &mut reg)?;
+        return kv_row(c, s(&row, "key"))?
+            .ok_or_else(|| "STATE_ERROR: Human record disappeared".into());
+    }
+    Ok(row)
+}
+
+fn initial_human_scope(principal: &Value, default_scope: &'static str) -> &'static str {
+    if oidc(Some(principal)) || principal["auth_mode"] == "token" {
+        "self"
+    } else {
+        default_scope
+    }
+}
+
+/// Each operation owns one explicit write set under the Hub database transaction.
+fn human_operation(
+    c: &Connection,
+    op: &str,
+    p: &Value,
+    caller: Option<&Value>,
+    default_scope: &'static str,
+    events: &mut Vec<Value>,
+) -> Result<Value, String> {
+    let caller = caller.ok_or("FORBIDDEN: Authenticated principal required")?;
+    let pid = required(caller, "principal_id")?;
+    let id = find_human(c, caller)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
+    if p.get("node_id").is_some_and(|node| node != &id) {
+        return Err("FORBIDDEN: Human operation belongs to another principal".into());
+    }
+    let old = kv_row(c, &id)?;
+    let mut reg = if let Some(old) = old {
+        if !owns_principal(s(&old, "principal_id"), Some(caller)) {
+            return Err("FORBIDDEN: Human principal mismatch".into());
+        }
+        parse(&old, "value")
+    } else {
+        if !matches!(op, "human_device_attach" | "human_inbox_update") {
+            return Err("LISTENER_NOT_FOUND: Human inbox not found".into());
+        }
+        json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(caller,"owner_user"),&id),"principal_id":pid,"owner_user":caller["owner_user"],"harness":"human","session_id":"default","title":"Human","about":"Human","scope":initial_human_scope(caller, default_scope),"human_paused":false,"human_control_revision":1,"binding_generation":1,"channels":{}})
+    };
+    if !reg.is_object() {
+        return Err("STATE_ERROR: Human record must be an object".into());
+    }
+    if reg["human_control_revision"].is_null() {
+        reg["human_control_revision"] = json!(1);
+    }
+    let now = now_ms();
+    if op == "human_inbox_update" {
+        let revision = reg["human_control_revision"]
+            .as_u64()
+            .ok_or("STATE_ERROR: Invalid Human control revision")?;
+        if p["expected_control_revision"].as_u64() != Some(revision) {
+            // Initialize legacy revisions even when the requested update conflicts.
+            // The current state travels with the error; callers must ask the user again.
+            events.push(save_human(c, &id, &mut reg)?);
+            return Ok(json!({"control_revision_conflict":true,"record":reg,"server_now_ms":now}));
+        }
+        for (input, field) in [
+            ("paused", "human_paused"),
+            ("scope", "scope"),
+            ("about", "about"),
+        ] {
+            if let Some(value) = p.get(input) {
+                let valid = match input {
+                    "paused" => value.is_boolean(),
+                    "scope" => matches!(value.as_str(), Some("self" | "workspace")),
+                    _ => value
+                        .as_str()
+                        .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 500),
+                };
+                if !valid {
+                    return Err(format!("INVALID_INPUT: Invalid {input}"));
+                }
+                reg[field] = value.clone();
+            }
+        }
+        reg["human_control_revision"] = json!(revision
+            .checked_add(1)
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or("STATE_ERROR: Human revision exhausted")?);
+    } else {
+        let channel = required(p, "channel_id")?;
+        let generation = p["binding_generation"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= i64::MAX as u64)
+            .ok_or("INVALID_INPUT: binding_generation required")?;
+        let token = required(p, "owner_token")?;
+        if !reg["channels"].is_object() {
+            reg["channels"] = json!({});
+        }
+        let existing = &reg["channels"][channel];
+        let same = existing["binding_generation"] == generation && existing["owner_token"] == token;
+        if op == "human_device_attach" {
+            let host = required(p, "host_id")?;
+            if host == "hub" || channel != format!("{host}:human") {
+                return Err("INVALID_INPUT: Device channel must match host_id".into());
+            }
+            if !existing.is_null()
+                && !same
+                && generation <= existing["binding_generation"].as_u64().unwrap_or(0)
+            {
+                return Err("STALE_GENERATION: Human device attachment superseded".into());
+            }
+            reg["channels"][channel] = json!({"channel_id":channel,"host_id":host,"host_name":p["host_name"],"kind":"human","delivery_mode":"notify_fanout","priority":100,"state":"ACTIVE","updated_at_ms":now,"binding_generation":generation,"owner_token":token});
+        } else {
+            if !same {
+                return Err("STALE_GENERATION: Human device attachment superseded".into());
+            }
+            if op == "human_device_heartbeat" {
+                reg["channels"][channel]["updated_at_ms"] = json!(now);
+            } else {
+                reg["channels"][channel]["state"] = json!("UNLISTENED");
+            }
+        }
+    }
+    events.push(save_human(c, &id, &mut reg)?);
+    audit(
+        c,
+        pid,
+        op,
+        &id,
+        &json!({"human_control_revision":reg["human_control_revision"]}),
+    )?;
+    Ok(json!({"record":reg,"server_now_ms":now}))
+}
+
+fn find_human(c: &Connection, principal: &Value) -> Result<Option<String>, String> {
     for row in c.query(&format!("{KV_SELECT} ORDER BY revision DESC"), &[])? {
-        if !principal_ids_equal(s(&row, "principal_id"), pid) {
+        if !principal_matches(s(&row, "principal_id"), principal) {
             continue;
         }
         let v = parse(&row, "value");
@@ -1993,18 +2236,21 @@ fn attach(
     c: &Connection,
     b: &Value,
     enabled: bool,
-    remote: bool,
+    default_scope: &str,
     plugin: Option<&ChannelPlugin>,
 ) -> Result<(), String> {
     let pid = required(b, "principal_id")?;
-    let id = find_human(c, pid)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
+    let id = find_human(c, b)?.unwrap_or_else(|| listener_id(pid, "human", "default"));
     let old = kv_row(c, &id)?;
-    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(b,"owner_user"), &id),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":format!("@{} (Me)",s(b,"owner_user")),"about":"Human node","scope":if remote{"self"}else{"workspace"},"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
+    let mut reg=old.as_ref().map(|r|parse(r,"value")).unwrap_or_else(||json!({"listener_id":id,"public_id":super::identity::public_listener_id(s(b,"owner_user"), &id),"principal_id":pid,"owner_user":b["owner_user"],"host_id":"hub","host_name":"Hub","harness":"human","session_id":"default","cwd":"","repo":null,"branch":null,"title":"Human","about":"Human","human_paused":false,"human_control_revision":1,"scope":default_scope,"state":"ACTIVE","binding_generation":1,"owner_token":"hub","channels":{}}));
     if !reg.is_object() {
         return Err("INVALID_INPUT: Listener must be an object".into());
     }
     if !reg["channels"].is_object() {
         reg["channels"] = json!({})
+    }
+    if reg["human_control_revision"].is_null() {
+        reg["human_control_revision"] = json!(1);
     }
     let channel = format!("hub:{}", s(b, "plugin_id"));
     reg["channels"][&channel] = json!({"channel_id":channel,"kind":"human","host_id":"hub","host_name":"Hub","display_name":plugin.map(|p|p.manifest["displayName"].clone()).unwrap_or_else(||b["plugin_id"].clone()),"display_label":b["display_label"],"delivery_mode":"notify_fanout","priority":100,"state":if enabled{"ACTIVE"}else{"UNLISTENED"},"updated_at_ms":now_ms()});
@@ -2215,7 +2461,7 @@ fn handle_http(
             }
         }
         if path == "/" && method == "GET" {
-            let body = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Cito Hub</title><body><h1>Cito Hub</h1><p>Cito Hub is active on this Mac. Open Cito → Settings → Hubs &amp; Network → Paste Invite Code on another Mac to connect.</p></body></html>";
+            let body = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Cito Hub</title><style>body{background:#12151c;color:#f3f4f6;font:18px system-ui;max-width:42rem;margin:12vh auto;padding:2rem}h1{color:#7dd3fc}code{color:#7dd3fc}</style><body><h1>Cito Hub</h1><p>This Hub is running. On another Mac, open Cito → Settings… → Hubs &amp; Network → Join from Clipboard to connect using a copied invite.</p><p>Your shared inbox connects all attached Macs and channels. Incoming messages appear in the menu bar unread badge and Activity, where you can reply in one line.</p></body></html>";
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
                 .map_err(|e| e.to_string())?;
             return Ok(());
@@ -2388,7 +2634,7 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
     } else {
         PathBuf::from(raw)
     };
-    let engine = HubEngine::open_with_remote(&data_dir, true)?;
+    let engine = HubEngine::open_with_auth_mode(&data_dir, &mode)?;
     let server = engine.start_server(&bind, port, auth)?;
     eprintln!("cito hub: ready on http://{} (auth={mode})", server.address);
     let host = if bind == "0.0.0.0" || bind == "::" {

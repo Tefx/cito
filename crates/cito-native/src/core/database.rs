@@ -180,9 +180,19 @@ impl Connection {
         Ok(unsafe { sqlite3_changes(self.raw) }.max(0) as usize)
     }
     pub fn query(&self, sql: &str, values: &[Value]) -> Result<Vec<Value>, String> {
+        let mut rows = Vec::new();
+        self.query_each(sql, values, |row| rows.push(row))?;
+        Ok(rows)
+    }
+    /// Stream rows while the caller holds the connection; callbacks must not reenter Database.
+    pub fn query_each(
+        &self,
+        sql: &str,
+        values: &[Value],
+        mut visit: impl FnMut(Value),
+    ) -> Result<(), String> {
         let mut stmt = self.prepare(sql)?;
         self.bound(&mut stmt, values)?;
-        let mut rows = Vec::new();
         loop {
             // SAFETY: statement and bindings are live, serialized by Database.
             let result = unsafe { sqlite3_step(stmt.0) };
@@ -221,10 +231,10 @@ impl Connection {
                     row.insert(name, value);
                 }
             }
-            rows.push(Value::Object(row));
+            visit(Value::Object(row));
         }
         drop(stmt);
-        Ok(rows)
+        Ok(())
     }
 }
 #[derive(Clone)]

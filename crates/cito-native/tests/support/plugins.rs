@@ -1326,7 +1326,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         "b".repeat(4090),
         "🚀".repeat(850)
     );
-    let expected = format!("🔔 Cito · work\n\n{message}");
+    let expected = format!("Cito · work\n\n{message}");
     f.send(p,json!({"op":"deliver","delivery_id":"large","config":{"chatId":"large"},"signal":{"from":{"title":"work"},"message":message}}));
     wait(|| {
         f.frames(p)
@@ -1384,7 +1384,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         "a".repeat(4070),
         "b".repeat(4800)
     );
-    let expected = format!("🔔 Cito · sender\n\n{message}");
+    let expected = format!("Cito · sender\n\n{message}");
     f.send(p,json!({"op":"deliver","delivery_id":"partial","config":{"chatId":"partial"},"signal":{"message":message}}));
     let partial = outcome("partial");
     assert_eq!(partial["ok"], false);

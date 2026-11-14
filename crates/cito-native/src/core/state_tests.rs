@@ -70,17 +70,29 @@ fn maximum_unicode_message_reaches_dispatch_within_the_wake_envelope_budget() ->
 fn hidden_activity_keeps_agent_dispatch_checkpoints_and_full_search_fields() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("pending", 1)?;
-    f.state.db.execute("UPDATE local_signals SET from_user='bob',from_harness='sender-app',from_listener_id='c_abcdef123456',from_title='Review'",&[])?;
+    f.state.db.execute("UPDATE local_signals SET from_user='bob',from_harness='sender-app',from_listener_id='bob-abcdef1234567890',from_title='Review'",&[])?;
     for query in [
         "@bob",
         "sender-app",
         "agent",
-        "c_abcdef123456",
+        "bob-abcdef1234567890",
         "bob/sender-app#abcd",
-        "alice/agent#1",
+        "c_1",
     ] {
         assert_eq!(f.state.query_activity("all", query)?.1, 1, "{query}");
     }
+    f.state.db.execute("UPDATE local_signals SET hub='work',from_user='Alice.Smith',from_harness='fixture',from_listener_id='alice-smith-abcdef1234567890'", &[])?;
+    for query in [
+        "alice-smith/fixture#abcd",
+        "work:alice-smith/fixture#abcd",
+        "work:alice-smith/fixture#abcdef1234567890",
+    ] {
+        let (rows, total, unread) = f.state.query_activity("all", query)?;
+        assert_eq!((rows.len(), total, unread), (1, 1, 1), "{query}");
+    }
+    f.state
+        .db
+        .execute("UPDATE local_signals SET hub='local'", &[])?;
     let batch = f.state.claim_wake_batch("local", "c_1")?;
     f.state.finish_wake_batch(
         &f.listener()?,
@@ -684,7 +696,7 @@ fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
     let one = json!({"from_user":"alice","from_host_name":"host.LOCAL","from_title":"Alice Smith","from_listener_id":"alice-smith-abcdefghijkl","message":"<x> & hello"});
     assert_eq!(
         format_wake_card(&target, std::slice::from_ref(&one), "cloud", true),
-        "🔔 Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl]\n\n&lt;x&gt; & hello"
+        "Cito · alice@host [↩ cloud:alice-smith-abcdefghijkl]\n\n&lt;x&gt; & hello"
     );
     for suffix in ["abcdefghijkl", "0123456789abcdef"] {
         let mut sender = one.clone();
@@ -695,7 +707,7 @@ fn native_card_matches_baseline_escaping_sender_and_multi_signal_layout() {
     distinct["from_title"] = json!("Different title");
     assert!(format_sender(&distinct, "local", false).contains("Different title"));
     let two = json!({"from_user":"bob","from_host_name":"other.local","from_title":" Sender <B> ","from_listener_id":null,"message":"second"});
-    assert_eq!(format_wake_card(&target, &[one, two], "local", false), "🔔 Cito · 2 notifications → &lt;Target&gt;\n\n[1] alice@host [↩ alice-smith-abcdefghijkl]\n&lt;x&gt; & hello\n\n[2] bob@other · Sender &lt;B&gt;\nsecond");
+    assert_eq!(format_wake_card(&target, &[one, two], "local", false), "Cito · 2 notifications → &lt;Target&gt;\n\n[1] alice@host [↩ alice-smith-abcdefghijkl]\n&lt;x&gt; & hello\n\n[2] bob@other · Sender &lt;B&gt;\nsecond");
 }
 
 #[test]

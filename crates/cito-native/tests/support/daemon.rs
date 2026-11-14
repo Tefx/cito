@@ -613,10 +613,10 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
         let source = std::path::PathBuf::from(std::env::var("CITO_BUILTIN_PLUGINS_DIR").unwrap());
         let user = state.join("plugins");
         assert_eq!(
-            setup::resolve_bundled_plugin_dir("human"),
-            source.join("human")
+            setup::resolve_bundled_plugin_dir("telegram"),
+            source.join("telegram")
         );
-        let originals: Vec<_> = ["human", "telegram", "pi"]
+        let originals: Vec<_> = ["telegram", "pi"]
             .into_iter()
             .map(|id| (id, fs::read(source.join(id).join("plugin.json")).unwrap()))
             .collect();
@@ -631,8 +631,8 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
                     }
                 }
                 let readonly = plugins::load_plugins_readonly(&state);
-                assert!(readonly.find_by_id("human").unwrap().is_builtin);
-                assert!(user.join("human").exists());
+                assert!(readonly.find_by_id("human").is_none());
+                assert!(user.join("telegram").exists());
                 if native {
                     let loaded = plugins::load_plugins(&state);
                     for (id, _) in &originals {
@@ -641,9 +641,11 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
                         assert_eq!(plugin.plugin_dir, source.join(id));
                     }
                 } else {
-                    let channels =
-                        hub_plugins::discover(&[user.clone(), source.clone()], Some(&user))
-                            .unwrap();
+                    let channels = hub_plugins::discover(
+                        &[(user.clone(), false), (source.clone(), true)],
+                        Some(&user),
+                    )
+                    .unwrap();
                     assert_eq!(
                         channels.iter().find(|p| p.id == "telegram").unwrap().dir,
                         source.join("telegram")
@@ -675,7 +677,7 @@ fn bundled_plugin_sources_survive_user_root_and_child_symlinks() {
     fs::create_dir_all(executable.parent().unwrap()).unwrap();
     fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
     let source = package.join("plugins");
-    for id in ["human", "telegram", "pi"] {
+    for id in ["telegram", "pi"] {
         fs::create_dir_all(source.join(id)).unwrap();
         fs::copy(
             root().join("plugins").join(id).join("plugin.json"),
@@ -748,7 +750,8 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
             let (config, loaded) = plugins::load_native_config().unwrap();
             assert_eq!(config.effective_user("local").unwrap(), config.user);
             fs::write(config_path, original_config).unwrap();
-            for id in ids {
+            assert!(loaded.find_by_id("human").is_none());
+            for id in ids.into_iter().filter(|id| *id != "human") {
                 let plugin = loaded.find_by_id(id).unwrap();
                 assert!(plugin.is_builtin, "{id}");
                 let manifest: Value = serde_json::from_slice(
@@ -758,9 +761,14 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
                 assert_eq!(manifest["version"], plugins::CITO_VERSION);
             }
         } else {
-            let loaded =
-                hub_plugins::discover(&hub_plugins::default_roots(&state), Some(&user_root))
-                    .unwrap();
+            let loaded = hub_plugins::discover(
+                &plugins::plugin_roots_for_executable(
+                    &state,
+                    std::env::current_exe().ok().as_deref(),
+                ),
+                Some(&user_root),
+            )
+            .unwrap();
             let channel = loaded.iter().find(|p| p.id == "telegram").unwrap();
             assert_eq!(channel.manifest["version"], plugins::CITO_VERSION);
             assert!(channel.dir.ends_with("plugins/telegram"));
@@ -779,7 +787,7 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
         fs::write(companion.join("plugin.json"), json!({"id":"human","kind":"human",
             "displayName":"Custom companion","version":plugins::CITO_VERSION,"command":["./run.sh"]}).to_string()).unwrap();
         let loaded = plugins::load_plugins(&state);
-        assert!(loaded.find_by_id("human").unwrap().is_builtin);
+        assert!(loaded.find_by_id("human").is_none());
         assert!(!companion.exists());
         // Custom commands survive any version; native-shaped commands survive at the current version.
         for (version, command) in [
@@ -807,9 +815,14 @@ fn legacy_staged_plugins_migrate_without_discarding_custom_overrides() {
                 assert!(!plugin.is_builtin);
                 assert_eq!(plugin.plugin_dir, user_root.join(id));
             }
-            let channels =
-                hub_plugins::discover(&hub_plugins::default_roots(&state), Some(&user_root))
-                    .unwrap();
+            let channels = hub_plugins::discover(
+                &plugins::plugin_roots_for_executable(
+                    &state,
+                    std::env::current_exe().ok().as_deref(),
+                ),
+                Some(&user_root),
+            )
+            .unwrap();
             assert_eq!(
                 channels.iter().find(|p| p.id == "telegram").unwrap().dir,
                 user_root.join("telegram")
@@ -1007,9 +1020,19 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         "fields":[{"key":"credential","scope":"hub","type":"secret","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
     let (_, port) = host.hub();
     let f = Fixture::new(
-        json!({"hubs":{"local":{"url":"local://"},"shared":{"url":format!("http://127.0.0.1:{port}")}},"default_hub":"local"}),
+        json!({"hubs":{"local":{"url":"local://"},"shared":{"url":format!("http://127.0.0.1:{port}"),"autoListen":false}},"default_hub":"local"}),
     );
     f.daemon(&[]);
+    assert_eq!(
+        f.action(json!({"op":"cli_human_device","hub":"shared","attach":true}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"cli_human_device","hub":"shared","attach":false}))
+            .0,
+        200
+    );
     assert!(!f.state.join("plugins/remote-channel").exists());
     let (status,result)=f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}}));
     assert_eq!(status, 200, "{result}");
@@ -1020,12 +1043,79 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
         db.query("SELECT * FROM hub_plugin_services", &[]).unwrap(),
         before
     );
+    let found = f.tool(
+        "cito_find",
+        json!({"hub":"shared","harness":"human"}),
+        human(),
+    );
+    let peer = &found["listeners"][0];
+    assert_eq!(found["matched_count"], 1);
+    assert_eq!(found["matched_count"], found["online_count"]);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE hub='shared' AND harness='human' AND status='ACTIVE'")
+        .is_empty());
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    let projected = snapshot["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "shared")
+        .unwrap();
+    let settings = snapshot["settings"]["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "shared")
+        .unwrap();
+    assert_eq!(projected["human_availability"], "ACTIVE");
+    assert_eq!(projected["human_state_status"], "current");
+    for key in [
+        "human_listener_id",
+        "human_paused",
+        "human_about",
+        "human_control_revision",
+        "human_availability",
+        "human_scope",
+        "human_state_status",
+        "attachments",
+    ] {
+        assert_eq!(projected[key], settings[key], "settings projection: {key}");
+        assert_eq!(projected[key], peer[key], "directory projection: {key}");
+    }
+    let attachment = projected["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["location"] == "hub")
+        .unwrap();
+    assert_eq!(attachment["location"], "hub");
+    assert_eq!(attachment["plugin_id"], "remote-channel");
+    assert_eq!(attachment["availability"], "ACTIVE");
+    assert_eq!(attachment["is_local"], false);
+    assert!(attachment.get("owner_token").is_none());
     assert_eq!(snapshot["settings"]["settings_hub"], "shared");
     let ch = &snapshot["settings"]["channels"][0];
     assert_eq!(ch["status"], "ready");
     assert_eq!(ch["fields"][0]["hidden"], false);
     assert_eq!(ch["setup_guide"], json!(["Configure service, then pair."]));
+    let bindings = db.query("SELECT * FROM hub_human_channels", &[]).unwrap();
+    assert_eq!(f.action(json!({"op":"human_inbox_update","hub":"shared","expected_control_revision":projected["human_control_revision"],"paused":true})).0,200);
+    let paused = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(paused["settings"]["channels"][0]["inbox_paused"], true);
+    assert_eq!(paused["settings"]["channels"][0]["delivery_enabled"], false);
+    assert_eq!(
+        f.action(json!({"op":"human_inbox_update","hub":"shared","paused":false}))
+            .0,
+        200
+    );
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["delivery_enabled"],
+        true
+    );
+    assert_eq!(
+        db.query("SELECT * FROM hub_human_channels", &[]).unwrap(),
+        bindings
+    );
     assert_eq!(f.action(json!({"op":"channel_toggle","hub":"shared","channel_id":"remote-channel","enabled":false})).1["channels"][0]["status"],"paused");
     assert_eq!(
         f.action(json!({"op":"channel_pair","hub":"shared","channel_id":"remote-channel"}))
@@ -1117,14 +1207,14 @@ fn selected_remote_channel_refresh_is_nonblocking_and_recovers_invalidated_slots
     script(
         &proxy_script,
         r#"#!/usr/bin/env python3
-# purpose: Hold real inventory responses until the test releases each request.
+# purpose: Gate inventory responses by identity, credential, and binding state.
 # usage: python3 inventory-proxy.py LISTEN_PORT HUB_PORT
 # effects: Loopback HTTP only; Fixture owns and reaps the process.
 # requires: Python standard library and the sandbox Hub.
 import http.server, json, socketserver, sys, threading, urllib.request
 lock = threading.Lock()
-hold = False
-pending = []
+gates = []
+pending = {}
 completed = []
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
@@ -1135,27 +1225,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try: self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError): pass
     def do_GET(self):
-        global hold
         with lock:
-            if self.path == '/hold': hold = True
             if self.path.startswith('/release/'):
-                pending[int(self.path.rsplit('/', 1)[1]) - 1].set()
-            body = json.dumps({'waiting': len(pending), 'completed': completed}).encode()
+                pending[self.path.rsplit('/', 1)[1]].set()
+            body = json.dumps({'waiting': [name for name, gate in pending.items() if not gate.is_set()],
+                'started': list(pending), 'completed': completed}).encode()
         self.reply(body)
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-Length']))
+        if self.path == '/gate':
+            with lock: gates.append(json.loads(body))
+            self.reply(b'{}')
+            return
         request = urllib.request.Request('http://127.0.0.1:' + sys.argv[2] + '/v1/rpc', data=body,
             headers={k: v for k, v in self.headers.items() if k.lower() in ('authorization', 'x-cito-user', 'content-type')})
         with urllib.request.urlopen(request, timeout=2) as response: result = response.read()
         gate = None
+        name = None
         if json.loads(body)['op'] == 'human_channels_list':
+            channel = json.loads(result)['result']['channels'][0]
             with lock:
-                gate = threading.Event() if hold else None
-                if gate: pending.append(gate)
+                for spec in gates:
+                    if spec['name'] not in pending and spec['user'] == self.headers.get('X-Cito-User') and (
+                        'Bearer ' + spec['token'] == self.headers.get('Authorization')) and (
+                        spec['configured'] == channel['configured']):
+                        name = spec['name']
+                        gate = pending[name] = threading.Event()
+                        break
             if gate and not gate.wait(10): return
         self.reply(result)
         if gate:
-            with lock: completed.append(pending.index(gate) + 1)
+            with lock: completed.append(name)
 socketserver.ThreadingTCPServer.allow_reuse_address = True
 server = socketserver.ThreadingTCPServer(('127.0.0.1', int(sys.argv[1])), Handler)
 print(json.dumps({'op': 'ready'}), flush=True)
@@ -1174,6 +1274,37 @@ server.serve_forever()
     wait(|| f.frames(proxy).iter().any(|frame| frame["op"] == "ready"));
     f.daemon(&[]);
     assert_eq!(f.action(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"credential":"saved","address":"room"}})).1["channels"][0]["status"], "ready");
+    assert_eq!(
+        f.action(json!({"op":"open_settings","hub":"shared"})).0,
+        200
+    );
+    let hub_db = host.db("hub/hub.sqlite");
+    let current_channel =
+        || f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0].clone();
+    wait(|| current_channel()["status"] == "ready");
+    hub_db
+        .execute(
+            "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id='remote-channel'",
+            &[json!(
+                json!({"poll_error":"HTTP 409: another getUpdates request"}).to_string()
+            )],
+        )
+        .unwrap();
+    wait(|| current_channel()["warning"] == true);
+    assert!(current_channel()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("409"));
+    hub_db.execute("UPDATE hub_plugin_services SET service_state_json='{}' WHERE plugin_id='remote-channel'", &[]).unwrap();
+    wait(|| current_channel()["warning"] == false);
+    hub_db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms,last_error) VALUES('remote-channel','none#alice','unknown-effect',1,'effect_unknown',CAST(strftime('%s','now') AS INTEGER)*1000,'Response lost')", &[]).unwrap();
+    wait(|| current_channel()["warning"] == true);
+    assert!(current_channel()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("outcome unknown"));
+    hub_db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='unknown-effect'", &[]).unwrap();
+    wait(|| current_channel()["warning"] == false);
     let query = "  remote-mac-42  ";
     let (status, response) = f.action(
         json!({"op":"query_directory","mode":"activity","query":query,"request_id":"padded-query"}),
@@ -1181,11 +1312,31 @@ server.serve_forever()
     assert_eq!(status, 200);
     assert_eq!(response["query"], query);
     assert_eq!(response["request_id"], "padded-query");
-    assert_eq!(http(proxy_port, "/hold", None).0, 200);
+    let gate = |name: &str, user: &str, token: &str, configured: bool| {
+        assert_eq!(
+            http(
+                proxy_port,
+                "/gate",
+                Some(&json!({"name":name,"user":user,"token":token,"configured":configured}))
+            )
+            .0,
+            200
+        );
+    };
+    let seen = |name: &str| {
+        http(proxy_port, "/status", None).1["started"]
+            .as_array()
+            .is_some_and(|names| names.contains(&json!(name)))
+    };
+    let release =
+        |name: &str| assert_eq!(http(proxy_port, &format!("/release/{name}"), None).0, 200);
+    gate("alice-old", "alice", "rotated-credential", true);
+    gate("bob-current", "bob", "rotated-credential", false);
+    gate("bob-periodic", "bob", "rotated-credential", false);
     let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
     config["hubs"]["shared"]["token"] = json!("rotated-credential");
     fs::write(&f.config, config.to_string()).unwrap();
-    wait(|| http(proxy_port, "/status", None).1["waiting"] == 1);
+    wait(|| seen("alice-old"));
     // The server has accepted the RPC and holds its response until explicit release.
     let local = |path: &str| -> Value {
         ureq::get(&format!("http://127.0.0.1:{}{path}", f.port))
@@ -1202,7 +1353,12 @@ server.serve_forever()
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
                 .timeout(std::time::Duration::from_millis(750))
                 .send_json(json!({"op":op,"hub":"shared"}))
-                .and_then(|response| response.into_json::<Value>().map_err(Into::into))
+                .map_err(|error| error.to_string())
+                .and_then(|response| {
+                    response
+                        .into_json::<Value>()
+                        .map_err(|error| error.to_string())
+                })
         })
         .join()
         .unwrap()
@@ -1210,7 +1366,7 @@ server.serve_forever()
         assert_eq!(opened["ok"], true);
         assert_eq!(
             http(proxy_port, "/status", None).1["waiting"],
-            1,
+            json!(["alice-old"]),
             "{op} must share the held inventory request"
         );
         assert_eq!(local("/health")["ok"], true);
@@ -1231,17 +1387,17 @@ server.serve_forever()
     // receive Alice's configured personal binding, including after its late reply.
     config["hubs"]["shared"]["user"] = json!("bob");
     fs::write(&f.config, config.to_string()).unwrap();
-    wait(|| http(proxy_port, "/status", None).1["waiting"] == 2);
+    wait(|| seen("bob-current"));
     assert_eq!(local("/health")["ok"], true);
-    assert_eq!(http(proxy_port, "/release/2", None).0, 200);
+    release("bob-current");
     wait(|| {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
     });
-    assert_eq!(http(proxy_port, "/release/1", None).0, 200);
+    release("alice-old");
     wait(|| {
         http(proxy_port, "/status", None).1["completed"]
             .as_array()
-            .is_some_and(|ids| ids.contains(&json!(1)))
+            .is_some_and(|ids| ids.contains(&json!("alice-old")))
     });
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], false);
@@ -1249,27 +1405,56 @@ server.serve_forever()
 
     // A mutation queued behind an old inventory must await its own schema and
     // post-mutation inventory before acknowledging, without retaining service.
+    // Exercise a real extra periodic response; it cannot consume a later profile's gates.
+    wait(|| seen("bob-periodic"));
+    release("bob-periodic");
+    gate("save-inventory", "bob", "next-credential", false);
+    gate("save-schema", "bob", "next-credential", false);
+    gate("save-post", "bob", "next-credential", true);
     config["hubs"]["shared"]["token"] = json!("next-credential");
     fs::write(&f.config, config.to_string()).unwrap();
-    wait(|| http(proxy_port, "/status", None).1["waiting"] == 3);
+    wait(|| seen("save-inventory"));
+    assert_eq!(
+        f.action(json!({"op":"settings_select_hub","hub":"local"}))
+            .0,
+        200
+    );
     std::thread::scope(|scope| {
         let saved = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
                 .timeout(std::time::Duration::from_secs(8))
                 .send_json(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"address":"bob-room"}}))
-                .and_then(|response| response.into_json::<Value>().map_err(Into::into))
+                .map_err(|error|error.to_string())
+                .and_then(|response| response.into_json::<Value>().map_err(|error|error.to_string()))
         });
+        // The mutation selects shared before waiting for the held inventory owner.
+        // Observe that dispatch, then select local while inventory is still held.
+        // This stops new periodic remote reads; any already queued read shares
+        // save-inventory's generation instead of consuming the schema gate.
+        wait(|| f.action(json!({"op":"get_snapshot"})).1["settings"]["settings_hub"] == "shared");
+        assert_eq!(
+            f.action(json!({"op":"settings_select_hub","hub":"local"}))
+                .0,
+            200
+        );
         assert_eq!(local("/health")["ok"], true);
-        assert_eq!(http(proxy_port, "/status", None).1["waiting"], 3);
-        assert_eq!(http(proxy_port, "/release/3", None).0, 200);
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 4);
+        assert!(!seen("save-schema"));
+        release("save-inventory");
+        wait(|| seen("save-schema"));
+        // Only the dispatched mutation can now own this RPC. Restore the remote
+        // selection while its schema is held, before checking the remaining flow.
+        assert_eq!(
+            f.action(json!({"op":"settings_select_hub","hub":"shared"}))
+                .0,
+            200
+        );
         assert_eq!(
             local("/health")["ok"],
             true,
             "Schema lookup must release service"
         );
-        assert_eq!(http(proxy_port, "/release/4", None).0, 200);
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 5);
+        release("save-schema");
+        wait(|| seen("save-post"));
         assert!(
             !saved.is_finished(),
             "The acknowledgement must await post-mutation inventory"
@@ -1283,7 +1468,7 @@ server.serve_forever()
             f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
             false
         );
-        assert_eq!(http(proxy_port, "/release/5", None).0, 200);
+        release("save-post");
         let result = saved.join().unwrap().unwrap();
         assert_eq!(result["channels"][0]["status"], "ready");
     });
@@ -1293,6 +1478,8 @@ server.serve_forever()
 
     // A replaced slot cannot acknowledge an in-flight mutation against the new
     // identity, even when its remote mutation already committed before replacement.
+    gate("unpair-post", "bob", "next-credential", false);
+    gate("replacement", "bob", "replacement-credential", false);
     std::thread::scope(|scope| {
         let changed = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -1300,13 +1487,14 @@ server.serve_forever()
                 .send_json(
                     json!({"op":"channel_unpair","hub":"shared","channel_id":"remote-channel"}),
                 )
+                .map_err(Box::new)
         });
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 6);
+        wait(|| seen("unpair-post"));
         config["hubs"]["shared"]["token"] = json!("replacement-credential");
         fs::write(&f.config, config.to_string()).unwrap();
-        wait(|| http(proxy_port, "/status", None).1["waiting"] == 7);
+        wait(|| seen("replacement"));
         let failure = changed.join().unwrap().unwrap_err();
-        match failure {
+        match *failure {
             ureq::Error::Status(400, response) => assert!(response
                 .into_string()
                 .unwrap()
@@ -1315,15 +1503,15 @@ server.serve_forever()
         }
     });
     assert_eq!(local("/health")["ok"], true);
-    assert_eq!(http(proxy_port, "/release/7", None).0, 200);
+    release("replacement");
     wait(|| {
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["status"] == "hub_ready"
     });
-    assert_eq!(http(proxy_port, "/release/6", None).0, 200);
+    release("unpair-post");
     wait(|| {
         http(proxy_port, "/status", None).1["completed"]
             .as_array()
-            .is_some_and(|ids| ids.contains(&json!(6)))
+            .is_some_and(|ids| ids.contains(&json!("unpair-post")))
     });
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["settings"]["channels"][0]["configured"],
@@ -1488,8 +1676,8 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     );
     assert!(f.rows("SELECT * FROM session_custom_titles").is_empty());
     let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
-    assert_eq!(config["defaultHub"], "local");
-    assert!(config.get("default_hub").is_none());
+    assert_eq!(config["default_hub"], "local");
+    assert!(config.get("defaultHub").is_none());
     assert_eq!(config["hubs"], json!({}));
     assert_eq!(service_config(), json!({}));
     assert!(f.rows("SELECT * FROM local_signals").is_empty());
@@ -1739,6 +1927,11 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
                 .any(|row| row["status"] == "ACTIVE")
         })
     });
+    let device =
+        a.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0].clone();
+    let sibling_device = sibling
+        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+        .clone();
     assert_eq!(
         a.action(
             json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"})
@@ -1746,32 +1939,35 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
         .0,
         200
     );
-    wait(|| {
-        sibling.rows("SELECT status FROM local_listeners WHERE hub=\'work\' AND harness=\'human\'")
-            [0]["status"]
-            == "UNLISTENED"
-    });
-    let paused_human = sibling
-        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
-        .clone();
     assert_eq!(
-        a.tool(
-            "cito_listen",
-            json!({"hub":"work","about":"Human receiver"}),
-            human()
-        )["ok"],
-        true
+        a.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+            ["status"],
+        "UNLISTENED"
     );
-    wait(|| {
-        sibling.rows("SELECT status FROM local_listeners WHERE hub='work' AND harness='human'")[0]
-            ["status"]
-            == "ACTIVE"
-    });
-    let resumed_human = sibling
+    let retained = sibling
         .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
         .clone();
-    assert_eq!(resumed_human["scope"], paused_human["scope"]);
-    assert_ne!(resumed_human["owner_token"], paused_human["owner_token"]);
+    assert_eq!(retained["status"], "ACTIVE");
+    assert_eq!(retained["owner_token"], sibling_device["owner_token"]);
+    assert_eq!(
+        a.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_paused"],
+        false
+    );
+    assert_eq!(
+        a.action(json!({"op":"cli_human_device","hub":"work","attach":true}))
+            .0,
+        200
+    );
+    let reattached =
+        a.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0].clone();
+    assert_eq!(reattached["status"], "ACTIVE");
+    assert!(reattached["binding_generation"].as_u64() > device["binding_generation"].as_u64());
+    assert_ne!(reattached["owner_token"], device["owner_token"]);
+    let unchanged = sibling
+        .rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human'")[0]
+        .clone();
+    assert_eq!(unchanged["scope"], sibling_device["scope"]);
+    assert_eq!(unchanged["owner_token"], sibling_device["owner_token"]);
     let sibling_row =
         sibling.rows("SELECT * FROM local_listeners WHERE harness='fixture'")[0].clone();
     // Hold only the sibling's dispatch lease; its receiver must keep polling unfenced.
@@ -2563,11 +2759,6 @@ fn ui_ipc_actions_mutate_real_state_and_only_sandbox_host_services() {
         .home
         .join("Library/LaunchAgents/com.tefx.cito.daemon.plist")
         .exists());
-    assert_eq!(
-        f.action(json!({"op":"set_desktop_banner","enabled":false}))
-            .0,
-        200
-    );
     let p = port();
     assert_eq!(f.action(json!({"op":"set_host_hub","enabled":true,"port":p,"bind":"127.0.0.1","auth_mode":"none"})).0,200);
     assert!(rpc(p, "kv_snapshot", json!({}))["entries"].is_array());
@@ -2698,6 +2889,11 @@ fn human() -> Value {
     serde_json::from_str(HUMAN).unwrap()
 }
 fn enroll(f: &Fixture, meta: Value) -> Value {
+    if meta["expected_harness"] == "human" {
+        let (status, result) = f.action(json!({"op":"cli_human_device","attach":true}));
+        assert_eq!(status, 200, "{result}");
+        return result;
+    }
     f.tool(
         "cito_listen",
         json!({"about":"Native receiver","scope":"workspace"}),
@@ -2871,9 +3067,297 @@ fn v29_malformed_inspection_stays_unknown_and_surfaces_error() {
 }
 
 #[test]
-fn desktop_banner_toggle_updates_existing_receivers_without_pausing_activity() {
+fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
     let _lock = serial();
-    let f = Fixture::new(json!({"desktopBannerEnabled":false}));
+    let host = Fixture::new(json!({}));
+    let (_, port) = host.hub();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}},"default_hub":"local"}),
+    );
+    let meta = f.provider("delivered_unconfirmed");
+    f.daemon(&[]);
+    for hub in ["local", "work"] {
+        f.tool(
+            "cito_listen",
+            json!({"hub":hub,"about":"Review work"}),
+            meta.clone(),
+        );
+    }
+    wait(|| {
+        f.rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
+            .len()
+            == 2
+    });
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+            .len(),
+        2
+    );
+    assert_eq!(f.action(json!({"op":"unlisten_all","hub":"work"})).0, 200);
+    assert_eq!(
+        f.rows("SELECT hub,status FROM local_listeners WHERE harness='fixture' ORDER BY hub"),
+        vec![
+            json!({"hub":"local","status":"ACTIVE"}),
+            json!({"hub":"work","status":"UNLISTENED"})
+        ]
+    );
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
+            .len(),
+        2
+    );
+    let human = f
+        .rows("SELECT * FROM local_listeners WHERE hub='local' AND harness='human'")
+        .remove(0);
+    let db = f.db("hub.sqlite");
+    let row = db
+        .query(
+            "SELECT CAST(value AS TEXT) AS value FROM hub_kv WHERE key=?",
+            &[human["listener_id"].clone()],
+        )
+        .unwrap()
+        .remove(0);
+    let mut remote: Value = serde_json::from_str(row["value"].as_str().unwrap()).unwrap();
+    assert!(remote["channels"]
+        .as_object()
+        .unwrap()
+        .contains_key(&format!("{}:human", human["host_id"].as_str().unwrap())));
+    remote["channels"]["remote-host:human"] =
+        json!({"state":"ACTIVE","host_name":"other-mac.local"});
+    remote["channels"]["hub:external"] =
+        json!({"state":"ACTIVE","display_name":"Telegram","host_name":"Hub"});
+    db.execute(
+        "UPDATE hub_kv SET value=CAST(? AS BLOB),revision=revision+1 WHERE key=?",
+        &[json!(remote.to_string()), human["listener_id"].clone()],
+    )
+    .unwrap();
+    wait(|| {
+        f.action(json!({"op":"get_snapshot"})).1["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["hub"] == "local" && row["harness"] == "human")
+            .is_some_and(|row| {
+                row["channels"].as_array().is_some_and(|names| {
+                    names.contains(&json!("Telegram"))
+                        && names.contains(&json!("other-mac.local"))
+                        && !names.contains(&human["host_name"])
+                })
+            })
+    });
+    assert_eq!(f.action(json!({"op":"unlisten_all"})).0, 200);
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE harness='human' AND status='ACTIVE'")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn remote_human_scope_updates_admit_cross_principal_activity() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let port = port();
+    let hub = host.spawn(
+        NATIVE,
+        &[
+            "hub",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--data-dir",
+            host.state.join("hub").to_str().unwrap(),
+            "--auth",
+            "token",
+            "--token",
+            "test-only",
+        ],
+        &[],
+    );
+    wait(|| {
+        assert!(!host.exited(hub), "{}", host.output(hub, true));
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let f = Fixture::new(
+        json!({"user":"alice","defaultHub":"work","hubs":{"work":{"url":url,"authMode":"token","token":"test-only"}}}),
+    );
+    let daemon = f.daemon(&[]);
+    let human = || {
+        f.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human' AND status='ACTIVE'").into_iter().next()
+    };
+    wait(|| human().is_some());
+    let id = human().unwrap()["listener_id"].clone();
+    assert_eq!(human().unwrap()["scope"], "self");
+    let rpc = |user: &str, op: &str, params: Value| {
+        let response: Value = ureq::post(&format!("{url}/v1/rpc"))
+            .set("Authorization", "Bearer test-only")
+            .set("X-Cito-User", user)
+            .send_json(json!({"op":op,"params":params}))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response["result"].clone()
+    };
+    let run = |args: &[&str]| {
+        let (ok, out, err) = f.command(NATIVE, args, "");
+        assert!(ok, "{args:?}: {out} {err}");
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let send_bob = |signal_id: &str| {
+        rpc(
+            "bob",
+            "js_publish",
+            json!({"subject":format!("cito.signal.{}", id.as_str().unwrap()),"data":{"to":id,"signal_id":signal_id,"from":{"principal_id":"none#bob","user":"bob","host_name":"other-mac","harness":"human","listener_id":"bob","title":"Bob"},"message":"Cross-principal review"}}),
+        );
+        let started = std::time::Instant::now();
+        wait(|| {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(11),
+                "{}; listener: {:?}",
+                f.output(daemon, true),
+                human()
+            );
+            !f.rows(&format!("SELECT signal_id FROM local_signals WHERE signal_id='{signal_id}' AND activity_hidden=0")).is_empty()
+        });
+        let activity = f.action(json!({"op":"get_snapshot"})).1["activity"].clone();
+        assert!(
+            activity
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["signal_id"] == signal_id),
+            "{activity}"
+        );
+    };
+    let resumed = run(&["inbox", "resume", "--hub", "work", "--team", "--json"]);
+    assert_eq!(resumed["record"]["scope"], "workspace");
+    assert_eq!(human().unwrap()["scope"], "workspace");
+    send_bob("cli-scope");
+    // A separate client changes policy without touching the daemon's directory cache.
+    let private = rpc(
+        "alice",
+        "human_inbox_update",
+        json!({"node_id":id,"expected_control_revision":resumed["record"]["human_control_revision"],"scope":"self"}),
+    );
+    wait(|| human().unwrap()["scope"] == "self");
+    rpc(
+        "alice",
+        "human_inbox_update",
+        json!({"node_id":id,"expected_control_revision":private["record"]["human_control_revision"],"scope":"workspace"}),
+    );
+    send_bob("other-mac-scope");
+    assert_eq!(human().unwrap()["scope"], "workspace");
+}
+
+#[test]
+fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    f.tool(
+        "cito_listen",
+        json!({"about":"Agent receiver"}),
+        meta.clone(),
+    );
+    let run = |args: &[&str]| {
+        let (ok, out, err) = f.command(NATIVE, args, "");
+        assert!(ok, "{args:?}: {out} {err}");
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    run(&[
+        "listen",
+        "--harness",
+        "human",
+        "Device enrollment",
+        "--json",
+    ]);
+    let paused = run(&[
+        "inbox",
+        "pause",
+        "--hub",
+        "local",
+        "--scope",
+        "self",
+        "--about",
+        "Release approvals",
+        "--json",
+    ]);
+    assert_eq!(paused["record"]["human_paused"], true);
+    assert_eq!(paused["record"]["scope"], "self");
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='human'")[0]["status"],
+        "ACTIVE"
+    );
+    let resumed = run(&["inbox", "resume", "--hub", "local", "--team", "--json"]);
+    assert_eq!(resumed["record"]["human_paused"], false);
+    assert_eq!(resumed["record"]["about"], "Release approvals");
+    assert_eq!(resumed["record"]["scope"], "workspace");
+    assert_eq!(
+        resumed["record"]["human_control_revision"].as_u64(),
+        paused["record"]["human_control_revision"]
+            .as_u64()
+            .map(|r| r + 1)
+    );
+    for tool in ["cito_listen", "cito_unlisten"] {
+        for (args, caller) in [
+            (json!({"harness":"human","about":"Forbidden"}), meta.clone()),
+            (json!({"about":"Forbidden"}), human()),
+        ] {
+            let denied = f.tool_result(tool, args, caller);
+            assert_eq!(denied["isError"], true);
+            assert!(denied["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("FORBIDDEN"));
+        }
+    }
+    run(&["unlisten", "--harness", "human", "--hub", "local", "--json"]);
+    let detached = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(detached["hubs"][0]["human_paused"], false);
+    assert_eq!(detached["hubs"][0]["human_about"], "Release approvals");
+    assert_eq!(
+        detached["hubs"][0]["human_control_revision"],
+        resumed["record"]["human_control_revision"]
+    );
+    let device = detached["hubs"][0]["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["is_local"] == true)
+        .unwrap();
+    assert_eq!(device["availability"], "UNLISTENED");
+    run(&[
+        "listen",
+        "--harness",
+        "human",
+        "Device enrollment",
+        "--json",
+    ]);
+    assert_eq!(
+        run(&["unlisten", "--all", "--hub", "local", "--json"])["removed"],
+        1
+    );
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='human'")[0]["status"],
+        "ACTIVE"
+    );
+    assert_eq!(
+        f.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"],
+        "UNLISTENED"
+    );
+}
+
+#[test]
+fn incoming_messages_update_unread_state_and_activity_until_read() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
     let meta = f.provider("delivered");
     let recorder = f.recording_ui();
     f.daemon(&[
@@ -2887,38 +3371,47 @@ fn desktop_banner_toggle_updates_existing_receivers_without_pausing_activity() {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .collect::<Vec<_>>()
     };
-    f.tool(
-        "cito_send",
-        json!({"to":"@self","message":"Muted notice"}),
-        meta.clone(),
-    );
-    wait(|| f.rows("SELECT * FROM local_signals").len() == 1);
-    assert!(!frames().iter().any(|v| v["op"] == "banner"));
-    assert_eq!(
-        f.action(json!({"op":"set_desktop_banner","enabled":"false"}))
-            .0,
-        400
-    );
-    assert_eq!(
-        f.action(json!({"op":"set_desktop_banner","enabled":true}))
-            .0,
-        200
-    );
-    f.tool(
-        "cito_send",
-        json!({"to":"@self","message":"Visible notice"}),
-        meta,
-    );
+    for message in ["Review requested", "Build completed"] {
+        let sent = f.tool(
+            "cito_send",
+            json!({"to":"@self","message":message}),
+            meta.clone(),
+        );
+        assert_eq!(sent["ok"], true, "{sent}");
+    }
     wait(|| {
         frames()
             .iter()
-            .any(|v| v["op"] == "banner" && v["payload"]["message"] == "Visible notice")
+            .any(|frame| frame["op"] == "state" && frame["unread_count"] == 2)
     });
-    assert_eq!(f.rows("SELECT * FROM local_signals").len(), 2);
+    assert_eq!(
+        f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL")
+            .len(),
+        2
+    );
+    let (status, activity) = f.action(json!({"op":"query_directory","filter":"me"}));
+    assert_eq!(status, 200);
+    assert_eq!(activity["activity_total"], 2);
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_paused"],
         false
     );
+    assert_eq!(
+        f.action(json!({"op":"ack_signals","filter":"me","ack_all":true}))
+            .0,
+        200
+    );
+    wait(|| {
+        f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NULL")
+            .is_empty()
+    });
+    wait(|| {
+        frames()
+            .iter()
+            .rev()
+            .find(|frame| frame["op"] == "state")
+            .is_some_and(|frame| frame["unread_count"] == 0)
+    });
 }
 #[test]
 fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations() {
@@ -3439,7 +3932,16 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
         )
         .unwrap();
     let all = f.tool("cito_find", json!({"harness":"fixture"}), human());
-    assert_eq!(all["listeners"].as_array().unwrap().len(), 2);
+    assert_eq!(all["listeners"].as_array().unwrap().len(), 3);
+    assert_eq!(all["matched_count"], all["online_count"]);
+    assert_eq!(all["matched_count"], 3);
+    let hubs: Vec<_> = all["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["hub"].as_str().unwrap())
+        .collect();
+    assert_eq!(hubs, vec!["local", "personal", "work"]);
     assert!(all["listeners"]
         .as_array()
         .unwrap()
@@ -3639,11 +4141,6 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
         .0,
         200
     );
-    assert_eq!(
-        f.action(json!({"op":"set_desktop_banner","enabled":false}))
-            .0,
-        200
-    );
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert!(!snapshot["listeners"]
         .as_array()
@@ -3717,7 +4214,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
     }
     assert_eq!(f.action(json!({"op":"paste_hub_invite","invite":"{\"name\":\"work\",\"url\":\"local://\",\"authMode\":\"none\"}"})).0,200);
     assert_eq!(
-        f.action(json!({"op":"set_desktop_banner","enabled":false}))
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
             .0,
         200
     );
@@ -3727,7 +4224,7 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         200
     );
     let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
-    assert_eq!(config["desktopBannerEnabled"], false);
+    assert_eq!(config["hubs"]["local"]["autoListen"], false);
     assert_eq!(config["hubs"]["other"]["url"], "local://");
     for (name,invite) in [
         ("remote",format!("http://127.0.0.1:{}",port())),
@@ -3827,10 +4324,9 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         root.header("Content-Type"),
         Some("text/html; charset=utf-8")
     );
-    assert!(root
-        .into_string()
-        .unwrap()
-        .contains("Paste Invite Code on another Mac"));
+    let landing = root.into_string().unwrap();
+    assert!(landing.contains("On another Mac"));
+    assert!(landing.contains("Join from Clipboard"));
     // The same host on another port remains a valid remote Hub.
     let different = if port == 65535 { port - 1 } else { port + 1 };
     let invite = json!({"name":"different-port","url":format!("http://127.0.0.1:{different}"),"auth_mode":"none"});
@@ -4355,12 +4851,12 @@ fn hub_saves_reject_invalid_candidates_without_poisoning_daemon() {
     f.stop(daemon);
     f.daemon(&[]);
     assert_eq!(
-        f.action(json!({"op":"set_desktop_banner","enabled":false}))
+        f.action(json!({"op":"set_auto_listen","hub":"local","enabled":false}))
             .0,
         200
     );
     let config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
-    assert_eq!(config["desktopBannerEnabled"], false);
+    assert_eq!(config["hubs"]["local"]["autoListen"], false);
 }
 #[test]
 fn stdio_signal_handlers_exit_cleanly_and_daemon_health_owns_sandbox() {

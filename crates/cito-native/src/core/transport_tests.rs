@@ -2,6 +2,36 @@ use super::*;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
+#[test]
+fn human_cache_projection_uses_monotonic_hub_time_without_waiting_for_network_writers() {
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":"http://127.0.0.1:1"}),
+        "alice",
+        None,
+    );
+    client.cache_human(&json!({"server_now_ms":1000,"record":{"listener_id":"c_fixture","harness":"human","human_paused":false,"channels":{"laptop:human":{"host_id":"laptop","state":"ACTIVE","updated_at_ms":1000}}}}));
+    let before = client.server_now();
+    client.observe_server_clock(&json!({"server_now_ms":1}));
+    assert!(
+        client.server_now() >= before,
+        "A delayed response cannot roll the observed Hub clock backward"
+    );
+    let writer = client.directory_updates.lock().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let rows = thread::scope(|scope| {
+        scope.spawn(|| tx.send(client.cached_directory()).unwrap());
+        let rows = rx.recv_timeout(Duration::from_millis(200));
+        drop(writer);
+        rows.expect("Cached UI projections must not wait for an in-flight network writer")
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        super::super::lease::evaluate_node_lease(&rows[0], u64::MAX),
+        "ACTIVE"
+    );
+}
+
 struct Fixture {
     engine: Arc<HubEngine>,
     server: super::super::hub::HubServer,

@@ -199,7 +199,9 @@ impl LocalState {
                 // Privacy drops still advance the durable transport cursor.
                 return Ok(false);
             }
-            let stale = signal["target_generation"] != current["binding_generation"];
+            // Human device generations fence attachment ownership, not the shared inbox.
+            let stale = current["harness"] != "human"
+                && signal["target_generation"] != current["binding_generation"];
             let already_acked = acked.is_number();
             let changed = c.execute("INSERT OR IGNORE INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_harness,from_listener_id,from_title,from_about,message,held_reason,in_reply_to,created_at,expires_at_ms,state,acknowledged_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", &[
                 json!(hub), signal["signal_id"].clone(), listener["listener_id"].clone(), json!(seq), current["binding_generation"].clone(),
@@ -437,15 +439,85 @@ impl LocalState {
         filter: &str,
         query: &str,
     ) -> Result<(Vec<Value>, u64, u64), String> {
-        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL) AND (?='' OR instr(lower(s.message||' @'||s.from_user||' '||s.from_host_name||' '||s.from_title||' '||COALESCE(l.title,'')||' '||s.signal_id||' '||s.listener_id||' '||COALESCE(s.from_harness,'')||' '||COALESCE(l.harness,'')||' '||COALESCE(s.from_listener_id,'')||' @'||s.from_user||'/'||COALESCE(s.from_harness,'')||'#'||CASE WHEN s.from_listener_id LIKE 'c_%' THEN substr(s.from_listener_id,3) ELSE COALESCE(s.from_listener_id,'') END||' @'||COALESCE(l.owner_user,'')||'/'||COALESCE(l.harness,'')||'#'||CASE WHEN s.listener_id LIKE 'c_%' THEN substr(s.listener_id,3) ELSE s.listener_id END||' '||CASE WHEN l.harness='human' THEN 'you' ELSE '' END),lower(?))>0)";
-        let query = query.trim();
-        let params = [json!(filter), json!(filter), json!(query), json!(query)];
+        let predicate = " FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)";
+        let query = query.trim().to_lowercase();
+        let params = [json!(filter), json!(filter)];
         self.db.transaction(|c| {
-            let counts = c.query(&format!("SELECT COUNT(*) AS total,COUNT(CASE WHEN s.acknowledged_at_ms IS NULL THEN 1 END) AS unread{predicate}"), &params)?;
-            let rows = c.query(&format!("SELECT s.*{predicate} ORDER BY s.created_at DESC,s.signal_id ASC LIMIT 80"), &params)?;
-            Ok((rows,counts[0]["total"].as_u64().unwrap_or(0),counts[0]["unread"].as_u64().unwrap_or(0)))
+            if query.is_empty() {
+                let counts = c.query(&format!("SELECT COUNT(*) AS total,COUNT(CASE WHEN s.acknowledged_at_ms IS NULL THEN 1 END) AS unread{predicate}"), &params)?;
+                let rows = c.query(&format!("SELECT s.*{predicate} ORDER BY s.created_at DESC,s.signal_id ASC LIMIT 80"), &params)?;
+                return Ok((rows, counts[0]["total"].as_u64().unwrap_or(0), counts[0]["unread"].as_u64().unwrap_or(0)));
+            }
+            let mut rows = Vec::new();
+            let (mut total, mut unread) = (0, 0);
+            // Apply address normalization before pagination and counts, streaming
+            // history so a broad search retains at most the visible page in memory.
+            c.query_each(&format!("SELECT s.*, l.owner_user AS target_user, l.harness AS target_harness, l.title AS target_title{predicate} ORDER BY s.created_at DESC,s.signal_id ASC"), &params, |mut row| {
+                if !matches_activity(&row, &query) { return; }
+                total += 1;
+                unread += u64::from(row["acknowledged_at_ms"].is_null());
+                if rows.len() < 80 {
+                    if let Some(fields) = row.as_object_mut() {
+                        for key in ["target_user", "target_harness", "target_title"] { fields.remove(key); }
+                    }
+                    rows.push(row);
+                }
+            })?;
+            Ok((rows, total, unread))
         })
     }
+}
+
+pub(super) fn matches_activity(row: &Value, query: &str) -> bool {
+    let address = |user: &str, harness: &str, raw_id: &str| {
+        let id = super::identity::canonical_node_id(raw_id).unwrap_or_default();
+        let suffix = id.strip_prefix("c_").unwrap_or("");
+        if harness == "human" {
+            format!("@{user}")
+        } else if suffix.is_empty() {
+            raw_id.to_owned()
+        } else {
+            format!("{}/{harness}#{suffix}", normalize_slug(user))
+        }
+    };
+    let source = address(
+        string(row, "from_user"),
+        string(row, "from_harness"),
+        string(row, "from_listener_id"),
+    );
+    let target = address(
+        string(row, "target_user"),
+        string(row, "target_harness"),
+        string(row, "listener_id"),
+    );
+    let mut searchable = format!(
+        "{}:{source} {}:{target} @{} @{}",
+        string(row, "hub"),
+        string(row, "hub"),
+        string(row, "from_user"),
+        string(row, "target_user")
+    );
+    for field in [
+        "message",
+        "from_user",
+        "from_host_name",
+        "from_title",
+        "target_title",
+        "signal_id",
+        "listener_id",
+        "from_harness",
+        "target_harness",
+        "from_listener_id",
+    ] {
+        searchable.push(' ');
+        searchable.push_str(string(row, field));
+    }
+    if row["target_harness"] == "human" {
+        searchable.push_str(" you");
+    }
+    searchable
+        .to_lowercase()
+        .contains(&query.trim().to_lowercase())
 }
 
 fn current_listener(c: &Connection, hub: &str, id: &str) -> Result<Value, String> {
@@ -529,7 +601,7 @@ fn format_sender(signal: &Value, hub: &str, qualify_ids: bool) -> String {
 pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_ids: bool) -> String {
     if signals.len() == 1 {
         return format!(
-            "🔔 Cito · {}\n\n{}",
+            "Cito · {}\n\n{}",
             format_sender(&signals[0], hub, qualify_ids),
             escape_card(string(&signals[0], "message"))
         );
@@ -554,7 +626,7 @@ pub fn format_wake_card(target: &Value, signals: &[Value], hub: &str, qualify_id
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
-        "🔔 Cito · {} notifications{target_part}\n\n{body}",
+        "Cito · {} notifications{target_part}\n\n{body}",
         signals.len()
     )
 }

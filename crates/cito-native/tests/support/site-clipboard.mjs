@@ -3,7 +3,7 @@
 // effects: none outside VM contexts.
 // requires: Node.js standard library only.
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync, readdirSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 const site = new URL('../../../../site/', import.meta.url);
 const source = readFileSync(new URL('scripts/hero-preview.js', site), 'utf8');
@@ -48,6 +48,12 @@ await missing.click();
 assert.equal(missing.badge.textContent, 'Copy failed');
 assert.equal(missing.button.disabled, false);
 
+for (const page of ['styles/main.css', 'index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)]) {
+  const content = readFileSync(new URL(page, site), 'utf8');
+  for (const retired of ['docs-figure-stage--compact', '245, 158, 11', 'Paste Invite Code', '$1', 'My Macs', 'BannerWindow', 'Desktop Banner', 'plugins/human']) {
+    assert.ok(!content.includes(retired), `${page} contains retired UI markup: ${retired}`);
+  }
+}
 const homepage = readFileSync(new URL('index.html', site), 'utf8');
 const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
 for (const page of ['index.html', 'docs/guide.html', 'docs/plugins.html', 'docs/architecture.html']) {
@@ -65,7 +71,7 @@ assert.match(diagram, /<title id="title">[^<]+<\/title>/);
 assert.match(diagram, /<desc id="desc">[^<]+<\/desc>/);
 const expected = [
   ['menu-dark.png', 'directory-dark.png'],
-  ['banner-dark.png', 'activity-dark.png'],
+  ['menu-dark.png', 'activity-dark.png'],
   ['settings-apps-dark.png', 'settings-channels-dark.png', 'settings-hubs-dark.png']
 ];
 const ids = [...homepage.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
@@ -161,19 +167,18 @@ const sections = Object.fromEntries(headings.map((heading, index) => [
 for (const [section, screenshots] of Object.entries({
   'settings-walkthrough': ['menu-dark.png', 'directory-dark.png', 'activity-dark.png'],
   'agent-apps': ['settings-apps-dark.png'],
-  'telegram-pairing': ['settings-channels-dark.png', 'banner-dark.png'],
+  'telegram-pairing': ['settings-channels-dark.png'],
   'lan-and-team-hubs': ['settings-hubs-dark.png']
 })) {
   const figures = [...sections[section].matchAll(/<figure\b[^>]*>([\s\S]*?)<\/figure>/g)];
   assert.deepEqual(figures.map(match => match[1].match(/screenshots\/([^"]+)/)[1]), screenshots);
   for (const figure of figures) {
-    assert.match(figure[1], /<div class="docs-figure-stage(?: docs-figure-stage--compact)?">/);
+    assert.match(figure[1], /<div class="docs-figure-stage">/);
     assert.match(figure[1], /<figcaption\b[^>]*>\s*\S[\s\S]*<\/figcaption>/);
     proportionalImage(figure[1]);
   }
   assert.equal([...sections[section].matchAll(/class="docs-figure docs-figure--staged"/g)].length, screenshots.length);
 }
-assert.match(sections['telegram-pairing'], /docs-figure-stage--compact[\s\S]*banner-dark\.png/);
 const daily = sections['settings-walkthrough'];
 assert.equal([...daily.matchAll(/<h3>/g)].length, 3);
 for (const part of daily.split('<h3>').slice(1)) assert.equal([...part.matchAll(/<figure\b/g)].length, 1);
