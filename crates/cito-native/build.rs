@@ -13,8 +13,17 @@ fn run(program: &str, args: &[&str]) {
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
     let root = Path::new(&manifest).join("../..");
-    let source = root.join("src/macos/cito-ui.swift");
-    println!("cargo:rerun-if-changed={}", source.display());
+    let source_dir = root.join("src/macos");
+    let mut sources: Vec<_> = fs::read_dir(&source_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "swift"))
+        .collect();
+    sources.sort();
+    println!("cargo:rerun-if-changed={}", source_dir.display());
+    for source in &sources {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
     println!("cargo:rerun-if-changed=build.rs");
     // Tests execute the same UI source as release packages, always in headless mode.
     if env::var("TARGET").as_deref() != Ok("aarch64-apple-darwin") {
@@ -22,17 +31,10 @@ fn main() {
     }
     let output = root.join("bin/cito-ui-darwin-arm64");
     let temporary = output.with_extension("tmp");
-    run(
-        "/usr/bin/swiftc",
-        &[
-            "-O",
-            "-target",
-            "arm64-apple-macos13.0",
-            source.to_str().unwrap(),
-            "-o",
-            temporary.to_str().unwrap(),
-        ],
-    );
+    let mut args = vec!["-O", "-target", "arm64-apple-macos13.0"];
+    args.extend(sources.iter().map(|source| source.to_str().unwrap()));
+    args.extend(["-o", temporary.to_str().unwrap()]);
+    run("/usr/bin/swiftc", &args);
     run("/usr/bin/strip", &["-x", temporary.to_str().unwrap()]);
     run(
         "/usr/bin/codesign",

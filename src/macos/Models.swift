@@ -1,0 +1,291 @@
+import AppKit
+
+struct HarnessMeta: Decodable, Equatable {
+    let id: String
+    let display_name: String
+    let sf_symbol: String
+    let tint: String
+    let tier: String
+    let order: Int
+    let kind: String?
+    let pid_bound: Bool?
+}
+struct HarnessVisual {
+    let id: String
+    let name: String
+    let symbol: String
+    let tint: NSColor
+    let tier: String
+    let order: Int
+}
+func resolveHarnessVisual(_ harness: String, harnesses: [String: HarnessMeta]) -> HarnessVisual {
+    if let meta = harnesses[harness] {
+        return HarnessVisual(
+            id: meta.id,
+            name: meta.display_name,
+            symbol: meta.sf_symbol,
+            tint: CitoPalette.badgeFill(meta.tint),
+            tier: meta.tier,
+            order: meta.order
+        )
+    }
+    if harness == "human" {
+        return HarnessVisual(
+            id: "human",
+            name: "Human",
+            symbol: "person.crop.circle.fill",
+            tint: CitoPalette.badgeFill("human"),
+            tier: "stable",
+            order: -1
+        )
+    }
+    return HarnessVisual(
+        id: harness,
+        name: harness.capitalized,
+        symbol: "bolt.horizontal.fill",
+        tint: CitoPalette.badgeFill("blue"),
+        tier: "custom",
+        order: 3
+    )
+}
+
+struct ChannelAttachment: Decodable, Equatable {
+    let channel_id: String, location: String, display_name: String, availability: String
+    let is_local: Bool
+    let host_id: String?, plugin_id: String?
+}
+
+struct DiscoveryState: Decodable, Equatable {
+    let harness: String, status: String
+    let error: String?
+}
+struct Hub: Decodable, Equatable {
+    let name: String, status: String, auth_mode: String
+    let user: String?, error: String?
+    let enabled: Bool?, auto_listen: Bool?
+    let human_paused: Bool?, human_about: String?
+    var human_listener_id: String? = nil
+    var human_control_revision: Int? = nil
+    var human_availability: String? = nil
+    var human_scope: String? = nil
+    var human_state_status: String? = nil
+    var attachments: [ChannelAttachment]? = nil
+}
+struct Listener: Decodable, Equatable {
+    let hub: String, listener_id: String, public_id: String, scoped_id: String
+    let harness: String, session_id: String, title: String, cwd: String, scope: String
+    let about: String?, repo: String?, branch: String?
+    let custom_title: Bool?
+    let display_address: String
+    let user: String?, owner_user: String?
+    let host_name: String?
+    let host_id: String?
+    let channels: [String]?
+    let attachments: [ChannelAttachment]?
+}
+struct Candidate: Decodable, Equatable {
+    let harness: String, session_id: String, title: String, cwd: String
+    let branch: String?, endpoint_pid: Int?, updated_at_ms: Double?
+    let listening_hubs: [String]?
+    let custom_title: Bool?
+    let needs_reload: Bool?
+    let reload_hint: String?
+}
+struct RemotePeer: Decodable, Equatable {
+    let hub: String?
+    let listener_id: String, public_id: String, scoped_id: String
+    let user: String, host_id: String, host_name: String, harness: String
+    let display_address: String
+    let title: String, about: String, scope: String, last_seen_at: String
+    var session_id: String? = nil
+    var custom_title: Bool? = nil
+    let cwd: String?, repo: String?, branch: String?
+    let is_self_principal: Bool?
+    let channels: [String]?
+    var attachments: [ChannelAttachment]? = nil
+}
+struct ActivityItem: Decodable, Equatable {
+    let hub: String
+    let signal_id: String
+    let listener_id: String
+    let from_user: String
+    let from_host_name: String
+    let from_harness: String?
+    let from_title: String
+    let from_scoped_id: String?
+    let from_display_address: String?
+    let target_display_address: String?
+    let message_truncated: Bool?
+    let target_harness: String
+    let target_title: String
+    let target_scoped_id: String
+    let message: String
+    let held_reason: String?
+    let in_reply_to: String?
+    let created_at: String
+    let unread: Bool
+    let for_me: Bool
+    var from_listener_id: String? = nil
+}
+struct ChannelFieldItem: Decodable, Equatable {
+    let key: String
+    let scope: String
+    let label: String
+    let type: String
+    let required: Bool
+    let placeholder: String
+    let value: String?
+    let configured: Bool
+    let hidden: Bool?
+    let redacted: Bool?
+    let configured_placeholder: String?
+    let help_text: String?
+}
+struct ChannelSetupItem: Decodable, Equatable {
+    let id: String
+    let display_name: String
+    let sf_symbol: String
+    let tint: String
+    let enabled: Bool
+    let configured: Bool
+    let status: String
+    let detail: String
+    let display_label: String?
+    let hub_provided: Bool
+    let pairing_supported: Bool
+    let pairing_action_label: String?
+    let pairing_code: String?
+    var pairing_command: String?
+    let pairing_instruction: String?
+    var pairing_url: String? = nil
+    var pairing_open_url_label: String? = nil
+    var pairing_manual_disclosure: Bool? = nil
+    var warning: Bool? = nil
+    var inbox_paused: Bool? = nil
+    var delivery_enabled: Bool? = nil
+    let fields: [ChannelFieldItem]
+    let setup_guide: [String]?
+    let pairing_help_text: String?
+}
+struct AppSetupItem: Decodable, Equatable {
+    let id: String
+    let display_name: String
+    let tier: String
+    let installed: Bool
+    let configured: Bool?
+    var isConfigured: Bool { configured == true }
+    let status: String
+    let detail: String
+    let paths: [String]
+}
+struct HostHubSummary: Decodable, Equatable {
+    let enabled: Bool
+    let running: Bool
+    let port: Int
+    let endpoint_url: String
+    var tailscale_url: String? = nil
+    var tailscale_invite_command: String? = nil
+    var lan_url: String? = nil
+    var lan_invite_command: String? = nil
+    let token: String
+    let invite_command: String
+    let auth_mode: String?
+    let error: String?
+}
+struct HubConfigItem: Decodable, Equatable {
+    let name: String
+    let url: String
+    let auth_mode: String
+    let enabled: Bool
+    let auto_listen: Bool?
+    let is_default: Bool
+    let status: String
+    let user: String?
+    let error: String?
+    let issuer: String?
+    let client_id: String?
+    var human_paused: Bool? = nil
+    var human_about: String? = nil
+    var human_state_status: String? = nil
+}
+struct SettingsPayload: Decodable, Equatable {
+    let apps: [AppSetupItem]
+    let channel_hub: String?
+    let settings_hub: String?
+    let channels: [ChannelSetupItem]?
+    let hubs: [HubConfigItem]
+    let host_hub: HostHubSummary
+    let launch_at_login: Bool
+}
+struct Frame: Decodable {
+    let op: String
+    let hub: String?
+    let ok: Bool?
+    let error: String?
+    let warnings: [String]?
+    let source_op: String?
+    let request_id: String?
+    let composer_error: String?
+    let channel_id: String?
+    let code: String?
+    let instruction: String?
+    let pairing_command: String?
+    let pairing_url: String?
+    let detail: String?
+    let hubs: [Hub]?
+    let listeners: [Listener]?
+    let available: [Candidate]?
+    let my_remote_listeners: [RemotePeer]?
+    let directory_online_count: Int?
+    let unread_count: Int?
+    let activity: [ActivityItem]?
+    let harnesses: [HarnessMeta]?
+    let discovery: [DiscoveryState]?
+    let settings: SettingsPayload?
+    let peers: [RemotePeer]?
+    let matched_count: Int?
+    let online_count: Int?
+    let query: String?
+    let scope: String?
+    let harness: String?
+    let activity_total: Int?
+    let activity_all_total: Int?
+    let activity_has_any: Bool?
+    let activity_unread_count: Int?
+    let activity_filter: String?
+    let activity_query: String?
+    let message: String?
+    let part: Int?
+    let complete: Bool?
+}
+
+struct ChannelUiState {
+    var editingGateway = false
+    var editingPersonal = false
+    var manualEntry = false
+    var drafts: [String: String] = [:]
+    var pendingPairRequest: String?
+    var pairingInstruction = ""
+    var pairingCommand: String?
+    var pairingURL: String?
+    var pairCopiedUntil = Date.distantPast
+    var savedUntil: [String: Date] = [:]
+    var testResult: (ok: Bool, detail: String)?
+    var testResultIsLatest = false
+
+    mutating func resetPersonal(preservePendingPair: Bool = false) {
+        editingPersonal = false
+        manualEntry = false
+        if !preservePendingPair { pendingPairRequest = nil }
+        pairingInstruction = ""
+        pairingCommand = nil
+        pairingURL = nil
+        pairCopiedUntil = .distantPast
+        savedUntil.removeValue(forKey: "user")
+    }
+    mutating func resetGateway() {
+        editingGateway = false
+        savedUntil.removeValue(forKey: "hub")
+    }
+    mutating func resetAll() { self = ChannelUiState() }
+}
