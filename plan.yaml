@@ -12331,7 +12331,7 @@ phases:
   - id: v43.ui
     name: 'V43 macOS Swift UI & Headless Oracle Closure: Conditional Pin Toggle, Semantic
       A Tooltips, Multi-Line Error Wrapping & Word-Boundary Jargon Sanitization'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - README.md\n    - site/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n\
@@ -12420,6 +12420,8 @@ phases:
     depends_on:
     - v43.core
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-14T20:03:07.034477Z'
   - id: v43.review
     name: 'V43 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Staged Binaries Rebuild & Push to main (No Release Tag) [REQUIRES_SKILL:
