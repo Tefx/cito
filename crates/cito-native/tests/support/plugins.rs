@@ -871,8 +871,12 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
     assert_eq!(user["kind"], "user_turn", "{user}");
     assert_eq!(user["revision"], now + 1);
     assert_eq!(activity(&f), user);
-    fs::remove_dir_all(f.state.join("activity")).unwrap();
-    fs::write(f.state.join("activity"), "not a directory").unwrap();
+    // Fail attribution after insertion, rather than preventing the new in-flight
+    // guard from being established before the queue command starts.
+    script(
+        &binary,
+        "#!/bin/sh\nrm -rf \"$CITO_STATE_DIR/activity\"\nprintf broken > \"$CITO_STATE_DIR/activity\"\nexit 0\n",
+    );
     let confirmed = f.plugin(
         CODEX,
         json!({"op":"wake","session_id":"thread","text":"Another wake","checkpoint_only":true}),
@@ -883,6 +887,199 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
         .as_str()
         .unwrap()
         .contains("attribution"));
+    script(
+        &binary,
+        "#!/bin/sh\ntouch \"$TMPDIR/queue-called\"\nexit 0\n",
+    );
+    let unguarded = f.plugin(
+        CODEX,
+        json!({"op":"wake","session_id":"thread","text":"Unguarded wake","checkpoint_only":true}),
+    );
+    assert_eq!(unguarded["queue_written"], false, "{unguarded}");
+    assert!(
+        !f.dir.join("queue-called").exists(),
+        "A wake must establish its guard before insertion"
+    );
+}
+#[test]
+fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
+    let _lock = serial();
+    for (with_rollout, prior_effect, deliver) in [
+        (false, false, true),
+        (false, true, true),
+        (true, false, true),
+        (false, false, false),
+        (true, false, false),
+    ] {
+        let mut f = Fixture::new(json!({}));
+        let source =
+            cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+        source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)", &[]).unwrap();
+        let now = cito_native::plugins::now_ms();
+        let rollout = f.dir.join("rollout.jsonl");
+        fs::write(&rollout, "{\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"Previous user turn\"}}\n").unwrap();
+        source
+            .execute(
+                "INSERT INTO threads VALUES('thread','/repo',0,?,?)",
+                &[
+                    json!(now),
+                    if with_rollout {
+                        json!(rollout)
+                    } else {
+                        Value::Null
+                    },
+                ],
+            )
+            .unwrap();
+        let app = f.dir.join("codex.mjs");
+        fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+        let app = f.spawn("node", &[app.to_str().unwrap()], &[]);
+        wait(|| f.output(app, false).contains("ready"));
+        // Seed an older fallback attribution so the race covers both unknown
+        // fallback activity and a previously recovered user_turn.
+        let binary = f.dir.join("queue");
+        script(&binary, "#!/bin/sh\nexit 0\n");
+        f.env
+            .insert("CITO_CODEX_BIN".into(), binary.display().to_string());
+        if prior_effect {
+            let seed = f.plugin(CODEX, json!({"op":"wake","session_id":"thread","text":"Earlier wake","checkpoint_only":true}));
+            assert_eq!(seed["queue_confirmed"], true, "{seed}");
+        }
+        source
+            .execute("UPDATE threads SET recency_at_ms=?", &[json!(now + 1)])
+            .unwrap();
+        let discover = |f: &Fixture| {
+            let response = f.plugin(
+                CODEX,
+                json!({"op":"discover_sessions","endpoint_pid":f.pid(app)}),
+            );
+            assert_eq!(response["ok"], true, "{response}");
+            response["sessions"][0]["activity"].clone()
+        };
+        let before = discover(&f);
+        assert_eq!(
+            before["kind"],
+            if with_rollout || prior_effect {
+                "user_turn"
+            } else {
+                "unknown"
+            }
+        );
+        let cursor = fs::read_dir(f.state.join("activity/codex"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().ends_with(".source.json"))
+            .unwrap();
+        let checkpoint = fs::read(&cursor).unwrap();
+        let marker = f.dir.join("published");
+        let release = f.dir.join("release");
+        script(
+            &binary,
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, sqlite3, sys, time
+root = pathlib.Path(os.environ["TMPDIR"])
+if os.environ["DELIVER"] == "1":
+    with sqlite3.connect(pathlib.Path(os.environ["HOME"]) / ".codex/state_5.sqlite") as db:
+        db.execute("UPDATE threads SET recency_at_ms=?", (int(os.environ["WAKE_REVISION"]),))
+    if os.environ["WITH_ROLLOUT"] == "1":
+        with (root / "rollout.jsonl").open("a") as file:
+            file.write(json.dumps({"timestamp":"2026-01-01T00:01:00.000Z", "payload":{"type":"user_message", "message":sys.argv[-1]}}) + "\n")
+(root / "published").touch()
+deadline = time.monotonic() + 8
+while not (root / "release").exists():
+    if time.monotonic() >= deadline:
+        sys.exit(2)
+    time.sleep(0.01)
+sys.exit(0 if os.environ["DELIVER"] == "1" else 1)
+"#,
+        );
+        f.env
+            .insert("DELIVER".into(), if deliver { "1" } else { "0" }.into());
+        f.env.insert(
+            "WITH_ROLLOUT".into(),
+            if with_rollout { "1" } else { "0" }.into(),
+        );
+        f.env.insert("WAKE_REVISION".into(), (now + 2).to_string());
+        let wake = f.spawn(CODEX, &[], &[]);
+        f.send(wake, json!({"op":"wake","session_id":"thread","text":"Cito wake","checkpoint_only":true,"state_dir":f.state,"env":f.env}));
+        f.eof(wake);
+        wait(|| {
+            assert!(!f.exited(wake), "{}", f.output(wake, true));
+            marker.exists()
+        });
+        assert!(!release.exists());
+        let inflight = discover(&f);
+        assert_eq!(inflight["kind"], "cito_effect", "{inflight}");
+        assert_eq!(
+            inflight["revision"],
+            if deliver { now + 2 } else { now + 1 }
+        );
+        assert_eq!(
+            fs::read(&cursor).unwrap(),
+            checkpoint,
+            "In-flight discovery must not checkpoint a queue record"
+        );
+        assert!(
+            !f.exited(wake),
+            "Discovery must run before queue completion"
+        );
+        assert!(f.frames(wake).is_empty());
+        fs::write(&release, "").unwrap();
+        wait(|| f.exited(wake));
+        let response = f.frames(wake).pop().unwrap();
+        if deliver {
+            assert_eq!(response["queue_confirmed"], true, "{response}");
+            let settled = discover(&f);
+            if with_rollout {
+                assert_eq!(settled["kind"], "user_turn");
+                assert_eq!(
+                    settled["at_ms"], before["at_ms"],
+                    "Wake cannot become a new user turn"
+                );
+            } else {
+                assert_eq!(settled["kind"], "cito_effect", "{settled}");
+            }
+        } else {
+            assert_eq!(response["queue_written"], false, "{response}");
+            assert_eq!(
+                discover(&f),
+                before,
+                "Failed delivery must release the guard without adding an effect"
+            );
+            let ledger = cursor.with_extension("").with_extension("json");
+            if ledger.exists() {
+                let ledger: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+                assert!(ledger["effects"].as_array().is_none_or(Vec::is_empty));
+                assert!(ledger["fallback"].is_null());
+            }
+        }
+        source
+            .execute("UPDATE threads SET recency_at_ms=?", &[json!(now + 3)])
+            .unwrap();
+        if with_rollout {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().append(true).open(&rollout).unwrap();
+            writeln!(file, "{}", json!({"timestamp":"2026-01-01T00:02:00.000Z","payload":{"type":"user_message","message":"Next genuine user turn"}})).unwrap();
+        }
+        let user = discover(&f);
+        assert_eq!(
+            user["kind"],
+            if deliver || with_rollout {
+                "user_turn"
+            } else {
+                "unknown"
+            }
+        );
+        assert_eq!(user["revision"], now + 3);
+        if with_rollout {
+            assert_eq!(user["at_ms"], 1_767_225_720_000u64);
+        }
+        assert_eq!(
+            discover(&f),
+            user,
+            "Repeated discovery must preserve settled attribution"
+        );
+    }
 }
 #[test]
 fn codex_metadata_validation_and_sqlite_thread_projection() {

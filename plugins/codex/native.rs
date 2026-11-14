@@ -205,6 +205,29 @@ fn save_activity(path: &Path, value: &Value) -> Result<()> {
     }
     result.map_err(|_| "Cannot save session activity".into())
 }
+fn idle_wake_guard(path: &Path) -> Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| "Cannot inspect in-flight wake")?;
+    // SAFETY: the descriptor stays owned by file. Closing it releases this shared
+    // lock, including on process exit. Wake uses an exclusive lock on the same path.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err("Cannot inspect in-flight wake".into())
+    }
+}
 fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -221,6 +244,12 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     // Retain the maximum observed source integer, never a refresh counter. This
     // also prevents a source timestamp rollback from decreasing the revision.
     let revision = source_revision.max(cached["revision"].as_u64().unwrap_or(0));
+    // Do not consume a user-shaped queue record before its attribution commits.
+    // Hold the shared guard through checkpointing so a wake cannot start mid-scan.
+    // The nonblocking acquisition avoids waiting on a wake that needs our ledger lock.
+    let Some(_idle) = idle_wake_guard(&path.with_extension("wake.lock"))? else {
+        return Ok(json!({"revision":revision,"at_ms":recency,"kind":"cito_effect"}));
+    };
     if let Some(rollout) = str_at(row, "rollout_path") {
         match std::fs::File::open(rollout) {
             Ok(mut file) => {
@@ -668,6 +697,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     .map(|output| output.map(|o| o.status.success()))
             };
             let already_queued = req["queue_written"] == true;
+            let mut wake_guard = None;
             let queue_confirmed = if already_queued {
                 req["queue_confirmed"] == true
             } else {
@@ -675,6 +705,18 @@ pub fn handle(req: &Value) -> Result<Value> {
                     return Ok(
                         json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":"Codex binary was not found"}),
                     );
+                };
+                // Serialize deliveries and exclude source qualification until the
+                // confirmed effect is durable. OS locks need no stale-PID recovery.
+                wake_guard = match FileLock::acquire(
+                    &effect_path(req, sid).with_extension("wake.lock"),
+                ) {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        return Ok(
+                            json!({"ok":true,"outcome":"driver_unavailable","queue_written":false,"reason":"Cannot guard wake attribution"}),
+                        )
+                    }
                 };
                 let mut attempt = 0;
                 loop {
@@ -712,6 +754,7 @@ pub fn handle(req: &Value) -> Result<Value> {
             } else {
                 None
             };
+            drop(wake_guard);
             if !already_queued && req["checkpoint_only"] == true {
                 // Return the insertion checkpoint before requesting a separately
                 // fenced open. The host rechecks unreadness and binding ownership.
