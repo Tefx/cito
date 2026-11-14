@@ -12078,7 +12078,7 @@ phases:
 - id: v43
   name: 'V43 Unified Pin & Activity-Driven Auto-Listen Lifecycle (Semantic A) + Read-Only
     SQLite WAL/SHM & Structured Diagnostic Pipeline (M-A & M-B) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All binding V43 requirements in docs/DESIGN.md (§1–§8 @ 6f6a76d) for the
     Unified Pin + Activity-Driven Auto-Listen Lifecycle (Semantic A) and Mechanisms
     M-A & M-B pass; cargo fmt --all -- --check, cargo clippy --workspace --all-targets
@@ -12452,7 +12452,7 @@ phases:
     name: 'V43 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Staged Binaries Rebuild & Push to main (No Release Tag) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
@@ -12534,3 +12534,54 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-14T20:22:42.529378Z'
+    done_at: '2026-11-14T21:21:38.126566+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 72758dcc413126a0a32bbf0ec386022c966fc076 (rebased and merged cleanly
+      to main; candidate ref refs/vectl/candidates/v43.review retained; version 0.21.3,
+      zero release tag).
+
+
+      Contract-and-Simplicity Review & Consolidation:
+
+      - Round 1 parallel discovery: uiux-auditor CLEAN (8/8 files); structural-auditor
+      5 Tier 1 + 2 Tier 2; pathway-auditor 4 Tier 1 -> synthesized into Frozen Finding
+      Ledger F1–F8.
+
+      - Consolidated fix commit 72758dc closed F1–F8 (Rust/Swift presentationError
+      parity + shared diagnostics.json corpus + URL/timestamp preservation, shared
+      HubClient rpc/rpc_http parser, unified unlisten_all hub selector, ReadOnlySqlite
+      one-attempt WAL fallback guard, retained Codex session restoration outside Menu/recent
+      slices, confirmed-delivery-only no-rollout fallback attribution + recovery,
+      strict autoListen.mode type validation, Pi bridge diagnostic symmetry + pause_listener
+      removal + disconnected uninstall retirement).
+
+      - Round 2 Delta re-review: structural-auditor ZERO_NEW_ISSUES; pathway-auditor
+      CLEAN (ZERO_NEW_ISSUES).
+
+
+      Full §8.1 Verification:
+
+      - cargo fmt --all -- --check && git diff --check -> Passed
+
+      - cargo clippy --workspace --all-targets -- -D warnings -> Passed (0 warnings)
+
+      - cargo test --workspace (RUST_TEST_THREADS=2) -> 372 passed, 0 failed (4 intentional
+      subprocess workers ignored)
+
+      - cargo build --release -> Passed (0 compiler warnings; all 7 staged binaries
+      codesign --verify --strict OK)
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - python3 packaging/release.py check -> Passed (0.21.3)
+
+      - python3 -m unittest discover -s packaging -> 15 passed
+
+      - §1.2 lexical check on core/ and src/macos/ + visual read inspection of AppIcon,
+      topology, OG card, and 6 screenshots -> Passed.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8 @ 6f6a76d)'
