@@ -10740,7 +10740,7 @@ phases:
 - id: v40
   name: V40 Clean-Slate Unified Node-Channel Architecture, Hub-Authoritative Human
     Inbox, Four-Surface macOS UI, Cobalt Brand Identity & Full Docs/Site Closure (R1–R5)
-  status: in_progress
+  status: done
   gate: All binding V40 requirements in docs/DESIGN.md (§1–§8, R1–R5) pass; cargo
     fmt --all -- --check, cargo clippy --workspace --all-targets -- -D warnings, cargo
     test --workspace, cargo build --release (0 warnings), node crates/cito-native/tests/support/site-clipboard.mjs,
@@ -11014,7 +11014,7 @@ phases:
     name: 'V40 Contract-and-Simplicity Review & Fix, Visual Asset/Screenshot Inspection,
       Dual-Mac & Relocated Bundle Verification and Push to main (No Release Tag) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Run [REQUIRES_SKILL: contract-and-simplicity] review & fix across\
       \ all v40.impl changes (docs/DESIGN.md §1–§8, R1–R5), closing all contract,\
@@ -11069,3 +11069,70 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-14T08:47:07.582916Z'
+    done_at: '2026-11-14T10:55:24.867499+00:00'
+    evidence: 'Artifact:
+
+      - Commit: ccdf126 (integrated main with v40.impl 527f7bb, Round 1 F1-F9 695b094,
+      Round 2 R2-F1..R2-F7 6dca908, Round 3 Tier 2 Human label normalization cd2c5a4,
+      and main-staged release binaries ccdf126; version 0.21.3, zero release tag created).
+
+
+      Review & Convergence Summary ([REQUIRES_SKILL: contract-and-simplicity]):
+
+      - Round 1 Exhaustive 2D Discovery (pathway-auditor, structural-auditor, uiux-auditor
+      on 527f7bb): identified 9 mechanisms (F1-F9) -> fixed in 695b094.
+
+      - Round 2 Semantic-Impact Delta Re-Review (all 3 auditors on e2fedeee): identified
+      R2-F1..R2-F7 -> fixed in 6dca908 (345e59b), with R2-F5 alias cleanup independently
+      confirmed via git diff & repo-wide rg.
+
+      - Round 3 Semantic-Impact Delta Re-Review (all 3 auditors on 345e59b): ZERO
+      Tier 1 findings across all 3 auditors; closed the sole Tier 2 item ("@<owner>
+      (Me)" -> "Human" + case-insensitive "@<user> (me)" generic recognition) in cd2c5a4
+      (b0afd05), verified on diff and full suite.
+
+
+      Verification on integrated main (ccdf126):
+
+      - cargo fmt --all -- --check && git diff --check -> Passed (exit 0)
+
+      - cargo clippy --workspace --all-targets -- -D warnings -> Passed in v40-review
+      (b0afd05) via 1.95.0 clippy-preview (Homebrew cargo lacks clippy binary on PATH;
+      zero warnings)
+
+      - cargo build --release -> Passed (exit 0, 0 compiler warnings; codesign --verify
+      --strict OK on all 7 staged binaries)
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2 cargo
+      test --workspace -> 305 passed (186 lib + 3 plugin + 116 integration), 4 ignored
+      subprocess workers, 0 failed (including relocated Cito.app/Contents/Helpers/cito-ui
+      test and two-Mac + Telegram detach vs human_inbox_update CAS / scope / pairing
+      provenance / audit retention / UI oracle tests)
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed (exit 0)
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH python3 packaging/release.py
+      check -> Passed (0.21.3)
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH python3 -m unittest discover
+      -s packaging -> 15 passed
+
+      - §1.2 zero-hardcoding check across crates/cito-native/src/core/ and src/macos/
+      -> Only AppKit layout variable `let slack = ...` at cito-ui.swift:1836-1837
+
+      - Visual read inspection -> Verified compiled AppIcon.icns slices (icon_512x512@2x.png,
+      icon_32x32.png), site/assets/art/app-icon-master.png, site/assets/og-card.png,
+      site/assets/art/architecture-topology.svg, and all 6 refreshed Retina screenshots
+      (menu-dark, directory-dark, activity-dark, settings-apps-dark, settings-channels-dark,
+      settings-hubs-dark).
+
+
+      Remaining External Check:
+
+      - Live dual-Mac interactive verification (Tefx-MBA + Tefx-MBP-Personal) after
+      pushing main to origin/main.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8, R1–R5)'
