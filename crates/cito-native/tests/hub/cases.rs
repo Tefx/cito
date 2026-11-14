@@ -183,6 +183,7 @@ fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
                 record["scope"], expected,
                 "{mode}, device_first={device_first}"
             );
+            assert_eq!(record["title"], "Human");
             e.shutdown();
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -2022,6 +2023,7 @@ fn human_reply_rpc_uses_fallback_node_and_rolls_back_publication_on_ack_failure(
     assert_eq!(payload["message"], "Approved");
     assert_eq!(payload["in_reply_to"], "original");
     assert_eq!(payload["from"]["principal_id"], "none#alice");
+    assert_eq!(payload["from"]["title"], "Human");
     assert_eq!(payload["from"]["host_id"], "desktop");
     assert_eq!(payload["from"]["host_name"], "Desktop");
     assert_eq!(published["seq"], reply["seq"]);

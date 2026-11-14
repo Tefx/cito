@@ -324,8 +324,9 @@ func isGenericSessionLabel(_ raw: String, user: String, homeBasename: String = (
     let label = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let identity = label.hasPrefix("@") ? String(label.dropFirst()) : label
     let homeBasename = homeBasename.lowercased()
-    return label.isEmpty || identity == user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() || identity == homeBasename
-        || label == "you (@\(user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()))"
+    let user = user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return label.isEmpty || identity == user || identity == homeBasename
+        || label == "you (@\(user))" || label == "@\(user) (me)"
         || ["agent", "agent session", "session", "cli session", "human", "human node", "human channel", "human receiver", "you", "coding session", "default"].contains(label)
 }
 func nodeDisplayTitle(_ title: String, harness: String, user: String, about: String? = nil, harnessName: String? = nil, customTitle: Bool = false) -> String {

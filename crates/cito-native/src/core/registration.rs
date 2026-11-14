@@ -111,6 +111,7 @@ pub(super) fn is_generic_session_label(label: &str, user: &str, home_basename: &
         || identity == user
         || identity == home
         || label == format!("you (@{user})")
+        || label == format!("@{user} (me)")
         || [
             "human",
             "human node",
@@ -504,12 +505,19 @@ mod tests {
             for (label, generic) in [
                 (" @ÉLODIE ", true),
                 ("You (@ÉLODIE)", true),
+                (" @ÉLODIE (Me) ", true),
+                ("@bob (Me)", false),
                 ("Élodie notes", false),
                 (" default ", true),
             ] {
                 assert_eq!(is_generic_session_label(label, "élodie", "home"), generic);
             }
             assert_eq!(distinct_label(" CAFÉ ", "café", "alice", "home"), None);
+            assert_eq!(distinct_label(" @BOB (mE) ", "", " Bob ", "home"), None);
+            assert_eq!(
+                distinct_label("Bob reviews", "", "bob", "home"),
+                Some("Bob reviews")
+            );
             Ok(())
         })();
         fs::remove_dir_all(root).map_err(|e| e.to_string())?;

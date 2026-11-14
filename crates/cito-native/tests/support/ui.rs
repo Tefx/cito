@@ -2547,6 +2547,21 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
             title
         );
     }
+    control(&f, p, "open_activity");
+    control(&f, p, "act_filter:all");
+    for (title, expected) in [
+        ("@bob (Me)", "@bob → Agent"),
+        (" @BOB (mE) ", "@bob → Agent"),
+        ("Release review", "@bob (Release review) → Agent"),
+    ] {
+        let mut frame = state();
+        frame["activity"] = json!([{"hub":"personal","signal_id":"legacy-human","listener_id":"target","from_user":"bob","from_host_name":"laptop","from_harness":"human","from_title":title,"target_harness":"fixture","target_title":"Agent","target_scoped_id":"personal:target","message":"Review complete","created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
+        f.send(p, frame);
+        assert_eq!(
+            node(&inspect(&f, p), "directory_items", "act_title:legacy-human")["text"],
+            expected
+        );
+    }
 }
 
 #[test]
