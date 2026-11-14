@@ -10737,3 +10737,293 @@ phases:
       Spec link:
 
       - docs/DESIGN.md §24 (§24.1–§24.3, U1–U6)'
+- id: v40
+  name: V40 Clean-Slate Unified Node-Channel Architecture, Hub-Authoritative Human
+    Inbox, Four-Surface macOS UI, Cobalt Brand Identity & Full Docs/Site Closure (R1–R5)
+  status: pending
+  gate: All binding V40 requirements in docs/DESIGN.md (§1–§8, R1–R5) pass; cargo
+    fmt --all -- --check, cargo clippy --workspace --all-targets -- -D warnings, cargo
+    test --workspace, cargo build --release (0 warnings), node crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check, and python3 -m unittest discover -s packaging
+    pass; relocated Cito.app/Contents/Helpers/cito-ui bundle execution, dual-Mac verification,
+    §1.2 zero-hardcoding semantic check, and visual inspection of AppIcon.icns, og-card.png,
+    architecture-topology.svg, and all 6 refreshed site/assets/screenshots/*.png pass;
+    contract-and-simplicity review & fix completes cleanly; main is pushed to origin/main
+    at version 0.21.3 with NO release tag.
+  context: 'Implement docs/DESIGN.md (1..EOF, §1–§8, R1–R5): (1) R1 clean-slate removal
+    of BannerWindow, ClickView, Mac Desktop Banner, 🔔, desktopBannerEnabled/desktopBanner,
+    set_desktop_banner, "banner"/"hide_banner", CITO_BANNER_HEADLESS, plugins/human/plugin.json
+    (plus unconditional upgrade deletion of ${stateDir}/{,runtime/}plugins/human and
+    rejection of id == "human" manifests), banner-dark.png, wake-card-dark.png, 4
+    unused metal rasters, and obsolete docs/ROADMAP.md, resolving native companion
+    directly as Cito.app/Contents/Helpers/cito-ui (bin/cito-ui-darwin-arm64, CITO_UI_BINARY)
+    with zero backwards compatibility shims; (2) R2 explicit Hub-authoritative Human
+    RPCs (human_device_attach with defaults, legacy revision-less 1 init, and ownership
+    fencing; human_device_heartbeat; human_device_detach; human_inbox_update with
+    human_control_revision CAS, Resume Inbox omitting about, and CONTROL_REVISION_CONFLICT),
+    publish_payload() atomic LISTENER_NOT_FOUND on human_paused, daemon.rs:poll never
+    marking local UNLISTENED on human_paused, Hub-clock server_now_ms lease pruning,
+    structured attachments & settings_for_hub/snapshot/ChannelInventory overlay, no
+    cross-Hub Human suppression + unified Rust Directory pipeline (matched_count ==
+    online_count, retiring Swift matchesDirectoryPeer), CLI (cito listen/unlisten
+    --harness human device-scoped, cito inbox pause/resume [--hub] [--scope <self|workspace>]
+    [--team] [--about] Hub-wide, cito unlisten --all agent-only) vs MCP FORBIDDEN
+    on Human mutations, already_claimed 30_500 ms retry + already_acked rebatching
+    + inbound_reply single-transaction atomicity + post-reply_ack cursor_save + channel
+    secret retain/replace/clear (reset_hub: true, reset_user: false); (3) R3 persistent
+    SurfaceView + .popover root preserving direct NSScrollView traversal + UiMailbox
+    request_id settlement, Agent Apps 2-line card + Check & Repair, Human Channels
+    status precedence (error > paused > pairing_pending > inbox_paused > ready > hub_ready
+    > not_configured) + dynamic Pause/Resume \(ch.display_name) + openUrlLabel fallback
+    + persistent recovery controls, Hubs & Network layoutBar + Start/Stop Sharing
+    + Join from Clipboard + [Default] + Disconnect Agent Apps… (setup_disconnect_all),
+    Menu YOUR INBOX (including offline/degraded/unknown + Not listening) + LISTENING
+    SESSIONS + targetHub-scoped Pause Agents + Hub Settings…, Directory & Activity
+    All Nodes | Mine (129pt) + ⇧↵ Message + Inbox · <attachments> + clear_activity_history
+    optional query + inline Clear… confirm (#BD1924 solid red) + all 7 held_reason
+    pills + Composer y: 5/y: 26 + Cancel/Close, unshadowed toolTips, dynamic MenuControl.accessibilityLabel,
+    inspectMenu() exporting button_tooltip/button_accessibility_label, and §1.2 semantic
+    zero-hardcoding check (fixing state_tests.rs generic fixture without altering
+    let slack); (4) R4–R5 WCAG AA Cobalt Blue AppIcon.icns (#1B6EF3–#0048A8 + #FFFFFF/#E0F2FE
+    > 4.5:1), cito-mark.svg, stroke-free cito-logo-{dark,light}.svg, favicon.svg,
+    og-card.png (--cask), architecture-topology.svg, 6 refreshed Retina screenshots,
+    README.md, site/**, hub.rs:2235, site-clipboard.mjs, distribution.rs, packaging/release.py,
+    and bin/cito-test-runner; (5) full §8.1 verification suite, contract-and-simplicity
+    review & fix, and push main to origin/main keeping version 0.21.3 with NO release
+    tag.'
+  depends_on:
+  - v39
+  steps:
+  - id: v40.impl
+    name: V40 R1–R5 Clean-Slate Popup/Pseudo-Plugin Removal, Hub-Authoritative Human
+      Inbox & CLI/MCP Boundary, Four-Surface macOS UI Closure, WCAG AA Cobalt Brand
+      Assets & Docs/Site Sync
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Implement all binding V40 requirements in docs/DESIGN.md (1..EOF,\
+      \ §1–§8, R1–R5) across Rust core, Swift macOS UI, Telegram plugin, brand assets,\
+      \ website/docs, packaging, and test suites:\n  1. Clean-slate removal (R1, §1.1,\
+      \ §2.1, §4.1, §5.1, §7.2, §8.2):\n     - Remove BannerWindow, ClickView, Mac\
+      \ Desktop Banner, \U0001F514, desktopBannerEnabled/desktopBanner, set_desktop_banner,\
+      \ \"banner\"/\"hide_banner\" frames, and CITO_BANNER_HEADLESS across src/macos/cito-ui.swift,\
+      \ crates/cito-native/src/core/, and tests.\n     - Remove plugins/human/plugin.json,\
+      \ unconditionally delete ${stateDir}/plugins/human and ${stateDir}/runtime/plugins/human\
+      \ during setup::ensure_plugins_staged and plugin discovery without requiring\
+      \ any bundled manifest, and ignore/reject any leftover id == \"human\" manifest\
+      \ in plugins.rs and hub_plugins.rs.\n     - Resolve native desktop companion\
+      \ directly as Cito.app/Contents/Helpers/cito-ui (dev bin/cito-ui-darwin-arm64,\
+      \ CITO_UI_BINARY override) with zero backwards compatibility shims.\n     -\
+      \ Delete retired popup screenshots (site/assets/screenshots/{banner-dark,wake-card-dark}.png),\
+      \ 4 unused metal rasters (site/assets/art/{hero-stage,moment-cross-harness,moment-human-network,architecture-topology}.png),\
+      \ and obsolete docs/ROADMAP.md.\n  2. Hub-authoritative Human inbox & CLI/MCP\
+      \ boundary (R2, §3.1–§3.5, §4.1):\n     - Replace whole-record kv_save Human\
+      \ mutations with four explicit principal-scoped Hub RPCs:\n       a) human_device_attach:\
+      \ writes only channels[\"<host_id>:human\"] (state: \"ACTIVE\", updated_at_ms:\
+      \ hub_now_ms) with (binding_generation, owner_token) ownership fencing (permitting\
+      \ absent channel, same-owner retry, or newer binding_generation; rejecting stale/superseded\
+      \ generation/token without mutating attachment or sibling devices); initializes\
+      \ defaults (human_paused: false, about: \"Human\", scope: \"workspace\" on local/none\
+      \ trusted Hubs or \"self\" on token/oidc remote Hubs, human_control_revision:\
+      \ 1) only on new record creation, or atomically initializes human_control_revision\
+      \ = 1 on legacy revision-less records while preserving stored human_paused/about/scope/attachments;\
+      \ returns updated record + server_now_ms.\n       b) human_device_heartbeat:\
+      \ verifies matching (binding_generation, owner_token), updates only updated_at_ms\
+      \ = hub_now_ms, runs reconcile_registration_state, and never advances human_control_revision\
+      \ or mutates human_paused/about/scope/siblings.\n       c) human_device_detach:\
+      \ verifies captured (binding_generation, owner_token), sets only channels[channel_id].state\
+      \ = \"UNLISTENED\", runs reconcile_registration_state, and never sets human_paused\
+      \ = true, advances human_control_revision, or alters about/scope/siblings.\n\
+      \       d) human_inbox_update: enforces expected_control_revision CAS against\
+      \ human_control_revision (after legacy 1 initialization), patches only explicitly\
+      \ present fields (Resume Inbox omits about so stored descriptions survive),\
+      \ increments human_control_revision += 1, preserves attachments/tokens, and\
+      \ returns CONTROL_REVISION_CONFLICT with current Hub inbox state on mismatch.\n\
+      \     - Enforce human_paused != true atomically inside hub.rs:publish_payload()\
+      \ transaction, rejecting sends to a paused Human inbox with LISTENER_NOT_FOUND\
+      \ (HTTP 404).\n     - Ensure daemon.rs:poll never marks local_listeners.status\
+      \ = 'UNLISTENED' on human_paused == true; route human set_scope through human_inbox_update\
+      \ CAS; filter status != 'FENCED_INACTIVE' and resolve current profile principal\
+      \ in unlisten_session.\n     - Reconcile leases using Hub clock (server_now_ms\
+      \ / hub_now_ms: <60s ACTIVE, 60s..=1800s DISCONNECTED_RETAINED, >1800s EXPIRED\
+      \ for devices; Hub-hosted channels stay ACTIVE across Mac disconnect; TTL expiry\
+      \ never sets human_paused = true).\n     - Project structured attachments (stripped\
+      \ of owner tokens), human_listener_id, human_paused, human_about, human_control_revision,\
+      \ human_availability, human_scope, and human_state_status (\"current\" | \"\
+      stale\" | \"unknown\") across snapshot(), peer_dto(), and settings_for_hub()\
+      \ even without a local Human listener; add inbox_paused and delivery_enabled\
+      \ to channel_list() and immediately invalidate/overlay cached ChannelInventory\
+      \ on human_inbox_update.\n     - Remove cross-Hub Human suppression (shadowKey/sharedKeys)\
+      \ and unify the Directory pipeline in Rust ((hub_identity, canonical_node_id)\
+      \ key, host: matching active attachments and session host metadata, matched_count\
+      \ == online_count, retiring Swift matchesDirectoryPeer while keeping seedDirectoryPeersIfEmpty\
+      \ fallback).\n     - Enforce CLI vs MCP boundary: device-scoped cito listen/unlisten\
+      \ --harness human, Hub-wide cito inbox pause/resume [--hub <name>] [--scope\
+      \ <self|workspace>] [--team] [--about <text>] (resume omitting about), agent-only\
+      \ cito unlisten --all [--hub <name>], and MCP cito_listen/cito_unlisten returning\
+      \ FORBIDDEN on harness == \"human\" / _meta.expected_harness == \"human\".\n\
+      \     - Schedule 30_500 ms fallback retry on already_claimed (STORED_PASSIVE\
+      \ with acknowledged_at_ms = NULL), mark acked_ids read and rebatch remaining\
+      \ unread signals immediately on already_acked, schedule pending RECEIVED rows\
+      \ on LocalState::admit duplicates when consumer_ack flush failed, commit hub.rs:inbound_reply\
+      \ (dedup + reply signal + source acked_at_ms/on_acked) in one SQLite transaction\
+      \ before reply_ack with post-reply_ack cursor_save in plugin, and enforce secret\
+      \ retain/replace/clear (Clear Token sending reset_hub: true, reset_user: false;\
+      \ non-mutating Send Test).\n  3. Four-surface macOS UI/UX (R3, §1.2, §5.1–§5.2,\
+      \ §7.1, §8.2):\n     - Mount persistent SurfaceView (cornerRadius: 14, .continuous)\
+      \ + NSVisualEffectView(material: .popover, blendingMode: .behindWindow, state:\
+      \ .active, masksToBounds: true) root on Directory (560x440) and Settings (520x460),\
+      \ mounting settings_header, scroll, and settings_footer directly on the persistent\
+      \ SurfaceView root (preserving direct NSScrollView traversal) and calling window.invalidateShadow();\
+      \ preserve correlated request_id command receipts in UiMailbox and user drafts\
+      \ across async settlement.\n     - Surface 1 & 2 (Status Item & 380pt Menu Popover):\
+      \ .active on agentCount > 0 || unreadCount > 0, \" 99+\" cap, dynamic status.button.toolTip;\
+      \ header subtitle priority ending in Not listening; Hub drawer action Hub Settings…\
+      \ (open_hub_settings:<hub>); YOUR INBOX visible even when offline/degraded/unknown\
+      \ (disabling Pause/Resume unless connected) with structured Line 2 summary (never\
+      \ raw .local hostnames; full cleaned host list in toolTip) and 58pt paused card;\
+      \ LISTENING SESSIONS header + cards + empty-agent card; footer [ Pause Agents\
+      \ ] (scoped to targetHub), [ Settings… ], and Quit Cito ⌘Q (no bell icon).\n\
+      \     - Surface 3 (Directory & Activity 560x440pt): All Nodes | Mine in 129pt\
+      \ (x: 16..145) directory_scope_track, separator at x: 151, directory_harness_scroll\
+      \ at (157, 3, 387, 26) (r=13, 2pt padding); Human rows Inbox · <attachments>;\
+      \ ⇧↵ Message shortcut in settingsKeyMonitor and doCommandBy: (\"↵ Copy Address\
+      \   ⇧↵ Message   ⎋ Close\"); clear_activity_history optional query predicate\
+      \ + inline Clear… confirm (\"Clear N matching messages?\" / \"Clear N <filter>\
+      \ messages?\", [ Cancel ] + solid red .destructive #BD1924 [ Clear ] via layoutBar(...,\
+      \ insetRight: 16), Esc cancel, reset on mode/filter/close/composer); all 7 held_reason\
+      \ pills (hidden on reuse); Composer 44pt/62pt (input row y: 10 or y: 26 with\
+      \ error at y: 5, x: 16, width: 528), \"Sending…\" ~76pt composer_send, non-button\
+      \ SurfaceView To: badge, and Cancel vs Close.\n     - Surface 4 (Settings 520x460pt):\
+      \ Agent Apps 2-line card (Line 1 badge + title + [Experimental] minWidth: 0\
+      \ + Set Up / Check & Repair / Repair / Disconnect; Line 2 6x6 semantic dot +\
+      \ status/detail) + 1-line section subtitle; Human Channels pure external channels\
+      \ without scrolling, human_paused_banner with Resume Inbox, status precedence\
+      \ error > paused > pairing_pending > inbox_paused > ready > hub_ready > not_configured,\
+      \ dynamic toggleWidth for Pause/Resume \\(ch.display_name), Pair Account… ->\
+      \ request_id auto-copy + manifest openUrlLabel (ch.pairing_open_url_label ??\
+      \ \"Open Pairing Link ↗\") + Cancel + collapsed manual Chat ID disclosure +\
+      \ remote Re-pair… 1Hz polling + persistent recovery controls on all error states\
+      \ including fields.isEmpty + [ Pause/Resume \\(ch.display_name) ] & [ Unpair\
+      \ ] on userStratum header bar during Edit…; Hubs & Network layoutBar on host_hub_card\
+      \ top row (Start Sharing / Stop Sharing), hostHeight +12pt (y=82), [ Copy Token\
+      \ ] + disabled Apply when unchanged, CONNECTED HUBS layoutBar (Join from Clipboard\
+      \ + + Add Hub…), auto-scroll add_hub_form, [Default] badge (minWidth: 0), effectiveTargetHub\
+      \ click & last-Hub disable guard, editingOriginalHub & NSNull user clear, canonical\
+      \ OIDC keys; Footer Disconnect Agent Apps… (setup_disconnect_all) with modal\
+      \ dynamic button (Disconnect Apps vs Disconnect & Delete Data).\n     - Remove\
+      \ internal label.toolTip shadowing, synchronize MenuControl.accessibilityLabel\
+      \ on label/title mutation, update inspectMenu() to drop banner fields and export\
+      \ button_tooltip and button_accessibility_label, and satisfy §1.2 semantic zero-hardcoding\
+      \ across crates/cito-native/src/core/ and src/macos/ (fixing state_tests.rs\
+      \ generic fixture without altering let slack).\n  4. Brand/assets/docs & test\
+      \ retargeting (R4–R5, §7.1–§7.2, §8.1–§8.2):\n     - Regenerate site/assets/art/app-icon-master.png\
+      \ (1024x1024 WCAG AA Cobalt Blue squircle #1B6EF3 -> #0057BF -> #0048A8, #FFFFFF\
+      \ C-arc & core + #E0F2FE/#FFFFFF wave arc, >= 4.5:1) and compile all 10 .iconset\
+      \ slices into bin/AppIcon.icns + site/apple-touch-icon.png.\n     - Update site/assets/brand/{cito-mark,cito-logo-dark,cito-logo-light}.svg\
+      \ and site/favicon.svg (> 4.5:1 SVG contrast in distribution.rs, stroke-free\
+      \ wordmarks in both cito-logo-dark.svg and cito-logo-light.svg).\n     - Regenerate\
+      \ site/assets/og-card.png (1200x630 neutral slate dot-grid, cobalt lockup, brew\
+      \ install --cask tefx/tap/cito, refreshed menu-dark.png/activity-dark.png preview)\
+      \ and refresh site/assets/art/architecture-topology.svg (Cito Blue vector cards,\
+      \ no #F59E0B on Pi/Hub, \"Unread badge + 1-line reply\").\n     - Synchronize\
+      \ site/styles/{tokens,main}.css, site/index.html, site/scripts/hero-preview.js,\
+      \ site/docs/{guide,architecture,plugins}.html, site/assets/IMAGEGEN_PROMPTS.md,\
+      \ README.md, hub.rs:2235 (GET /), crates/cito-native/tests/support/site-clipboard.mjs,\
+      \ crates/cito-native/tests/support/distribution.rs, packaging/release.py, and\
+      \ bin/cito-test-runner; re-capture all 6 remaining Retina screenshots (menu-dark.png,\
+      \ directory-dark.png, activity-dark.png, settings-apps-dark.png, settings-channels-dark.png,\
+      \ settings-hubs-dark.png) and add discriminating §8.1 regression tests.\n\n\
+      Implementation Notes (Non-Binding):\n- Follow docs/DESIGN.md §8.2 hazard map:\
+      \ retarget legacy tests and packaging/runner scripts directly to V40 contracts\
+      \ without compatibility shims; keep crate/app version at 0.21.3.\n\nBoundary:\n\
+      - Owner: rust-senior. Isolated worktree transaction modifying repository source,\
+      \ assets, docs, and tests.\n\nAdmit:\n- Witnessed inputs: finalized docs/DESIGN.md\
+      \ (1..EOF, §1–§8).\n- Verification: full §8.1 check suite passes with 0 warnings.\n\
+      \nRecovery:\n- Reconcile in-worktree compiler, clippy, test, asset, and packaging\
+      \ failures before completion; stop and escalate only on a contradictory spec\
+      \ requirement.\n"
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test --workspace && cargo build --release && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - plugins/telegram/native.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/tests/hub/cases.rs
+    - packaging/release.py
+    - bin/cito-test-runner
+    - README.md
+    - site/index.html
+    agent: rust-senior
+  - id: v40.review
+    name: 'V40 Contract-and-Simplicity Review & Fix, Visual Asset/Screenshot Inspection,
+      Dual-Mac & Relocated Bundle Verification and Push to main (No Release Tag) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Run [REQUIRES_SKILL: contract-and-simplicity] review & fix across\
+      \ all v40.impl changes (docs/DESIGN.md §1–§8, R1–R5), closing all contract,\
+      \ wiring, state-transition, CAS/fencing, UI geometry/accessibility, brand/contrast,\
+      \ and simplicity findings cleanly.\n- Execute and verify the complete §8.1 suite:\n\
+      \  1. cargo fmt --all -- --check\n  2. cargo clippy --workspace --all-targets\
+      \ -- -D warnings\n  3. cargo test --workspace\n  4. cargo build --release (0\
+      \ compiler warnings)\n  5. node crates/cito-native/tests/support/site-clipboard.mjs\n\
+      \  6. python3 packaging/release.py check && python3 -m unittest discover -s\
+      \ packaging\n  7. Relocated Cito.app/Contents/Helpers/cito-ui bundle execution\
+      \ and dual-Mac + Telegram detach vs human_inbox_update CAS verification\n  8.\
+      \ Visual read inspection of AppIcon.icns (site/assets/art/app-icon-master.png),\
+      \ site/assets/og-card.png, site/assets/art/architecture-topology.svg, and all\
+      \ 6 refreshed site/assets/screenshots/*.png, plus §1.2 semantic zero-hardcoding\
+      \ check across crates/cito-native/src/core/ and src/macos/\n- Keep version at\
+      \ 0.21.3 and push integrated main to origin/main with NO release tag.\n\nBoundary:\n\
+      - Owner: rust-senior with [REQUIRES_SKILL: contract-and-simplicity]. Modifies\
+      \ repository and pushes main to origin/main at version 0.21.3 without creating\
+      \ a release tag.\n\nAdmit:\n- Depends on v40.impl completion.\n- Verification:\
+      \ full §8.1 verification suite, visual asset/screenshot read inspection, dual-Mac\
+      \ verification, and git push origin main.\n\nRecovery:\n- Repair any review\
+      \ or regression finding in place and re-verify before pushing main to origin/main.\n"
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test --workspace && cargo build --release && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - plugins/telegram/native.rs
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/tests/hub/cases.rs
+    - packaging/release.py
+    - bin/cito-test-runner
+    - README.md
+    - site/index.html
+    depends_on:
+    - v40.impl
+    agent: rust-senior
