@@ -11439,7 +11439,7 @@ phases:
   - id: v41.ui
     name: V41 Option A Menu Slimming, Settings Human Channels Inbox Control Bar, Four-Surface
       AppKit UI Hygiene & Docs/Site/Screenshot Sync (M2 UI & M7)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement all macOS AppKit companion (`src/macos/cito-ui.swift`),\
       \ UI test oracle (`crates/cito-native/tests/support/ui.rs`), documentation/site\
@@ -11563,6 +11563,8 @@ phases:
     depends_on:
     - v41.core
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-14T14:30:39.043445Z'
   - id: v41.review
     name: 'V41 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Dual-Mac & Bundle Verification, and Push to main (No Release Tag) [REQUIRES_SKILL:
