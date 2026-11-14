@@ -11136,3 +11136,462 @@ phases:
       Spec link:
 
       - docs/DESIGN.md (§1–§8, R1–R5)'
+- id: v41
+  name: 'V41 Mechanism-Level Closure (M1–M7): Identity & Hub-Clock Projections, Lock-Free
+    Discovery & Async Settlement, Ack/Cursor/Queue Integrity, CLI/GUI/MCP/Plugin Parity,
+    Strict OIDC/URL/Transport, Bounded Buffers & Push-Down Queries, and Option A Menu
+    Slimming'
+  status: pending
+  gate: 'All binding V41 requirements in docs/DESIGN.md (§1–§8 @ efa491d) and admitted
+    mechanisms M1–M7 (including Option A Menu slimming) pass; cargo fmt --all -- --check,
+    cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace,
+    cargo build --release (0 warnings), node crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check, and python3 -m unittest discover -s packaging
+    pass; visual read inspection of AppIcon.icns, og-card.png, architecture-topology.svg,
+    and refreshed site/assets/screenshots/*.png (including menu-dark.png and settings-channels-dark.png),
+    §1.2 semantic zero-hardcoding check across crates/cito-native/src/core/ and src/macos/,
+    relocated Cito.app bundle & dual-Mac install verification, and [REQUIRES_SKILL:
+    contract-and-simplicity] full review & consolidation complete cleanly; main is
+    pushed to origin/main at version 0.21.3 with NO release tag.'
+  context: 'Implement docs/DESIGN.md (1..EOF, §1–§8 @ efa491d) and close all 7 admitted
+    mechanisms (M1–M7, plus Option A Menu slimming) without backwards-compatibility
+    shims or Stage 1 re-discovery: (1) M1 Identity, Projections & Freshness (prune
+    expired/unlistened superseded <host_id>:human entries sharing a host_name in hub.rs:reconcile_registration_state;
+    filter out UNLISTENED/EXPIRED and deduplicate by (location, display_name) preferring
+    is_local and ACTIVE in lease::attachments & UI; evaluate availability-aware active/retained
+    channels in peer_dto/host_matches/Directory search; evaluate snapshot() & peer_dto()
+    leases using Hub server_now_ms and project human_state_status identically across
+    hubs[*] and my_remote_listeners[*]; migrate oidc-token-<hub>.json and SQLite rows
+    across local_listeners, local_signals, pending_hub_acks, and pending_hub_detaches
+    on Hub rename; populate from.title from authoritative session_custom_titles /
+    local_listeners in daemon.rs:send before provider caller.title fallback); (2)
+    M2 Lock-Free Slow I/O, Discovery & Async Settlement (cache setup_inspect invalidated
+    on setup_apply/setup_remove and move reload_slots background OIDC recovery outside
+    the global service mutex so /health 500ms never stalls; preserve refresh generation
+    across in-flight workers in refresh_available/setup_apply, wait up to DISCOVERY_TIMEOUT
+    1500ms or emit state on worker completion, distinguish scanning/error from empty
+    results, and clear stale cached candidates on setup_remove_app/error; plugins/codex
+    single read-only state_5.sqlite connection per discovery tick within 1500ms budget
+    + transient CANTOPEN/BUSY retry + pidBound: false in plugin.json/HarnessMeta defaulting
+    to true; plugins/{pi,claude} per-endpoint socket error isolation; daemon.rs:finish_channel_action
+    preserving request_id/hub/channel/action on failure frames without conflating
+    non-test failures with channel_test_result; cito-ui.swift pendingHubSave settlement
+    on request_id + Hub name, Send Test precedence preserving ui.rs:796, rebuild timers
+    for hostHubPortSavedUntil/hubInvitePastedUntil/pairCopiedUntil, and pending-disabled/labeled
+    async buttons); (3) M3 Ack, Cursor, Queue & Delivery Progress Integrity (propagate
+    remote auth/transport failures or pending/unknown status on explicit unlisten_id/Human
+    detach while keeping pending_hub_detaches and capturing channels[id].binding_generation
+    on pre-reg detach; bind pending_hub_acks to (hub_url, principal_id) with state.sqlite
+    user_version bump if needed; plugins/telegram monotonic max cursor on non-token-rotating
+    configure and 0 only on botToken rotation + omit no-op editMessageReplyMarkup
+    in on_acked when no reply_markup was sent; cito-claude-hook retire durable wake
+    queue entries only after confirmed output delivery and durable/confirmed ACK continuation;
+    hub.rs:replay measure in_flight 60s timeout from per-delivery delivered_ms); (4)
+    M4 CLI/GUI/MCP/Plugin Parity & File Safety (cito setup --disable <harness> stops
+    active listeners & invalidates discovery + Codex probe verifies configured integration;
+    GUI Disconnect & Delete Data aligns with CLI --purge-data removing OIDC token
+    caches, local_sent_idempotency, and local Hub history; cito listen/unlisten --harness
+    human rejects --scope, --team, and explicit descriptions before side effects with
+    INVALID_INPUT while distinguishing generated defaults; strip caller session env
+    vars from daemon-spawned plugin environments unless explicitly provided per request;
+    plugins/claude probe maps OS PID reuse to closed_definitive, discover_sessions
+    preserves updated_at_ms, and bridge walks ancestor PIDs; main.rs mcp-stdio re-probes/recovers
+    daemon port/incarnation without auto-replaying unconfirmed mutating calls and
+    frames read_stdio_line strictly at \n boundaries; setup --build-app stages candidate
+    .app before in-place replacement, upgrades prune obsolete staged plugin files
+    and reload active-generation manifests, and uninstall acquires exclusive daemon.lock
+    ownership; plugin_support::mutate canonicalizes symlink targets before atomic
+    rename, preserves file modes, avoids unnecessary backup/lock creation on missing
+    files, and removes .cito.lock on setup_remove); (5) M5 OIDC, URL Validation &
+    Transport (preserve exact OIDC issuer including trailing / across config, cache,
+    discovery, JWT iss, and principal derivation; validate azp on multi-audience ID
+    tokens; enforce bounded JWKS cache refresh & throttled signature-miss re-fetch
+    for known kids; close SSE streams on JWT expiry; strict single URL validator rejecting
+    nats:///ws:///wss:// and allowing only local:///http:///https://; rpc_http iterates
+    resolved DNS addresses within shared deadline); (6) M6 Bounded Buffers & Push-Down
+    Pagination (bound UiMailbox, daemon HTTP connections, and sidecar stdout read_line;
+    bounded_frame trims root hubs and terminates cleanly while preserving request_id
+    receipts; push filters/limits down to storage/RPC for backlog_from, inbox, clear_activity_history,
+    and poll_listener; bound/prune hub_processed_replies monotonically against safe
+    cursor replay bounds); (7) M7 Option A Menu Slimming, UI Hygiene, Deployment &
+    Docs/Tests (remove Menu YOUR INBOX card and retire human_paused_banner/resume_human_channels;
+    mount <= 48pt Inbox Control Bar at top of Settings -> Human Channels fitting all
+    default resting single-channel states <= 368pt without scrolling; show clickable
+    "Inbox paused · Resume in Settings…" notice above LISTENING SESSIONS only when
+    human_paused == true; standardize Stop + targetHub-scoped Stop All disabling Auto-Listen
+    with explanatory tooltip and pidBound-aware AVAILABLE SESSIONS grouping; sanitize
+    all raw enums, scoped_id hashes, local://, (os error NN), <hub>: <CODE>: prefixes,
+    cito status DTO output, and duplicate Agent Apps status prefixes; scope Settings
+    Esc/Return to active tab/effectiveChannelHub, preserve NSMenu inline rename focus/selection
+    across refreshes, close cardMenu on ⌘,/⌘K, isolate collapsedGroups per (hub, harness),
+    guard Composer ⇧↵, keep Sending… width, reset Clear… confirm on search edits,
+    clear transient errors on panel/filter switches, preserve Directory ✓ Copied across
+    refreshes, validate Host Hub port 1...65535, filter seedDirectoryPeersIfEmpty,
+    fix Human Channels instrLabel/disclosure dynamic layout, unshadow all toolTip
+    + accessibilityLabel, fix deploy/hub/Dockerfile ENV CITO_BUILTIN_PLUGINS_DIR=/app/plugins,
+    packaging/release.py arm64 plugin bin check, Codex conflict/force tests, Telegram
+    cursor/on_acked & bin/cito* smoke tests, and sync README.md + site/** including
+    refreshed screenshots).'
+  depends_on:
+  - v40
+  steps:
+  - id: v41.core
+    name: V41 Rust Core, Daemon, Hub, OIDC/Transport, CLI/MCP, Plugins & Packaging
+      Closure (M1–M6 & M7 Backend/Packaging)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Implement all Rust core, daemon, Hub, OIDC, transport, CLI/MCP,\
+      \ subprocess plugin, Docker/packaging, and backend test requirements in docs/DESIGN.md\
+      \ (§1–§8 @ efa491d) covering M1–M6 and M7 backend/packaging items without backwards-compatibility\
+      \ shims:\n  1. M1 (Identity, Projections & Freshness — §3.1–§3.3, §5.1, §8.1–§8.2):\n\
+      \     - Prune expired/unlistened superseded `<host_id>:human` entries sharing\
+      \ a `host_name` (and expired device entries past retention while preserving\
+      \ active/retained siblings and generation fencing) in `hub.rs:reconcile_registration_state`.\n\
+      \     - Filter out `UNLISTENED` and `EXPIRED` attachments and deduplicate active/retained\
+      \ entries by `(location, display_name)` preferring `is_local` and `ACTIVE` in\
+      \ `lease::attachments`.\n     - Evaluate availability-aware active/retained\
+      \ `channels` (not stale top-level `state == ACTIVE` or expired top-level `host_name`)\
+      \ in `daemon.rs` `peer_dto`, `host_matches`, and Directory search.\n     - Evaluate\
+      \ node leases in `snapshot()` and `peer_dto()` using Hub `server_now_ms`, and\
+      \ project `human_state_status` (`\"current\" | \"stale\" | \"unknown\"`) consistently\
+      \ via `human_projection` across `hubs[*]` and `my_remote_listeners[*]`.\n  \
+      \   - Migrate `oidc-token-<hub>.json` and SQLite rows (`local_listeners`, `local_signals`,\
+      \ `pending_hub_acks`, `pending_hub_detaches`) cleanly on Hub rename (`setup_save_hub`\
+      \ / `action_inner`), and clear `active_settings_hub` on `close_settings` or\
+      \ Hub removal/disable.\n     - Populate `from.title` in `daemon.rs:send` from\
+      \ authoritative `session_custom_titles` / `local_listeners` before falling back\
+      \ to provider `caller.title`.\n  2. M2 Backend (Lock-Free Slow I/O, Discovery\
+      \ & Async Settlement — §2.2, §4.1–§4.2, §5.1, §8.1–§8.2):\n     - Cache `setup_inspect`\
+      \ results (invalidated on `setup_apply`/`setup_remove`) and move `reload_slots`\
+      \ background OIDC token recovery outside the global `service` mutex so `/health`\
+      \ (`500 ms` probe) and healthy Hubs never stall.\n     - Preserve refresh generation\
+      \ across in-flight workers in `refresh_available` / `setup_apply` (preventing\
+      \ stale reap `now + 5s` from overwriting newer requests), wait up to `DISCOVERY_TIMEOUT`\
+      \ (`1500 ms`) or emit an updated `state` frame upon worker completion, surface\
+      \ `scanning`/`error` status rather than conflating errors with empty results,\
+      \ and clear stale cached candidates on `setup_remove_app` or error.\n     -\
+      \ `plugins/codex`: use a single read-only `state_5.sqlite` connection per discovery\
+      \ tick bounded inside the outer `1500 ms` budget with transient `CANTOPEN`/`BUSY`\
+      \ retry; declare `\"pidBound\": false` in `plugins/codex/plugin.json` and parse\
+      \ `pidBound` (`pid_bound`, default `true`) in `HarnessMeta` / manifest schema.\n\
+      \     - `plugins/{pi,claude}`: isolate per-endpoint socket failures rather than\
+      \ discarding healthy discovered sessions.\n     - `daemon.rs:finish_channel_action`:\
+      \ preserve `request_id`, `hub`, `channel`, and `action` on failure frames, never\
+      \ conflating non-test saves/toggles/unpairs with `channel_test_result`.\n  3.\
+      \ M3 (Ack, Cursor, Queue & Delivery Progress Integrity — §3.2, §3.5, §4.2–§4.3,\
+      \ §6.1, §8.1):\n     - Propagate remote auth/transport failures (or explicit\
+      \ pending/unknown status) on explicit `unlisten_id` / Human detach while keeping\
+      \ `pending_hub_detaches`; capture `channels[id].binding_generation` on pre-registration\
+      \ detach.\n     - Bind each `pending_hub_acks` row to `(hub_url, principal_id)`\
+      \ (bumping `state.sqlite` `user_version` to `5` with clean migration if schema\
+      \ adds Hub/principal binding) and flush only against the matching Hub identity.\n\
+      \     - `plugins/telegram`: retain/advance `cursor` monotonically (`max`) across\
+      \ non-token-rotating `configure` frames and reset to `0` only on `botToken`\
+      \ rotation; omit no-op `editMessageReplyMarkup` calls in `on_acked` when no\
+      \ `reply_markup` was sent.\n     - `plugins/claude` (`cito-claude-hook`): retire\
+      \ durable wake queue entries only after confirmed output delivery and durable/confirmed\
+      \ ACK continuation (queuing `pending_hub_acks` on offline/error).\n     - `hub.rs:replay`:\
+      \ measure channel `in_flight` `60s` timeout from per-delivery `delivered_ms`,\
+      \ never refreshing merely because the plugin process stays alive.\n  4. M4 (CLI/GUI/MCP/Plugin\
+      \ Parity & File Safety — §2.2, §3.4, §4.1–§4.2, §5.1, §8.1–§8.2):\n     - `cito\
+      \ setup --disable <harness>`: disconnect/stop active listeners and invalidate\
+      \ discovery; verify in Codex `probe` that the integration remains configured.\n\
+      \     - Align GUI `Disconnect & Delete Data` (`setup_disconnect_all`) with CLI\
+      \ `--uninstall --purge-data` (removing OIDC token caches, `local_sent_idempotency`,\
+      \ and local Hub history).\n     - `cito listen --harness human` / `cito unlisten\
+      \ --harness human`: reject `--scope`, `--team`, and explicitly supplied descriptions\
+      \ before side effects (`INVALID_INPUT`, directing callers to `cito inbox`),\
+      \ distinguishing explicit arguments from internally generated default descriptions\
+      \ in `cli.rs`.\n     - Strip caller session env vars (`CODEX_THREAD_ID`, `CLAUDE_SESSION_ID`,\
+      \ etc.) from daemon-spawned plugin environments unless explicitly provided per\
+      \ request.\n     - `plugins/claude`: map OS PID reuse (`matches_process` / `process_identity`\
+      \ / `process_start` mismatch) to `closed_definitive` in `probe`; preserve `updated_at_ms`\
+      \ in `discover_sessions`; walk ancestor PIDs during `resolve_caller`/`verify`\
+      \ in `bridge`.\n     - `main.rs` (`mcp-stdio`): re-probe and recover daemon\
+      \ port/incarnation on subsequent requests after daemon restart/port change without\
+      \ auto-replaying unconfirmed mutating calls; fix `read_stdio_line` framing strictly\
+      \ at `\\n` boundaries so valid adjacent lines never fail the 1 MiB chunk check.\n\
+      \     - `setup --build-app`: stage candidate `.app` bundle before replacing\
+      \ an in-place target; prune obsolete staged plugin files and reload active-generation\
+      \ manifests during daemon/Hub upgrades; acquire exclusive `daemon.lock` ownership\
+      \ across `uninstall` cleanup.\n     - `plugin_support::mutate`: canonicalize\
+      \ existing symlink target paths before atomic rename, preserve original file\
+      \ permissions, avoid creating backup/lock artifacts when target files are absent,\
+      \ and remove `.cito.lock` sidecars on `setup_remove`.\n  5. M5 (OIDC, URL Validation\
+      \ & Transport — §6.2, §8.1):\n     - Preserve exact OIDC `issuer` strings (including\
+      \ trailing `/`) across config, cache keys, discovery matching, JWT `iss` validation,\
+      \ and principal derivation; validate `azp` on multi-audience ID tokens; enforce\
+      \ bounded JWKS cache refresh lifetime and throttled signature-miss re-fetch\
+      \ for known `kid`s; close SSE streams when the authenticated JWT expires.\n\
+      \     - Enforce one strict Hub URL validator rejecting `nats://`, `ws://`, and\
+      \ `wss://` (allowing only `local://`, `http://`, and `https://`), and iterate\
+      \ resolved DNS addresses in `rpc_http` within the shared deadline.\n  6. M6\
+      \ (Bounded Buffers & Push-Down Pagination — §3.5, §5.1, §6.2):\n     - Bound\
+      \ `UiMailbox`, daemon HTTP connections, and sidecar stdout `read_line`; make\
+      \ `bounded_frame` trim root `hubs` projections and terminate cleanly within\
+      \ `256 KiB` while preserving `request_id`-correlated receipts.\n     - Push\
+      \ filters, limits, and bounds down to SQLite/RPC for `backlog_from`, `inbox`,\
+      \ `clear_activity_history`, and `poll_listener` remote metadata lookup; bound\
+      \ and prune `hub_processed_replies` monotonically against safe cursor replay\
+      \ bounds.\n  7. M7 Backend, CLI Formatting, Deployment & Targeted Tests (§3.4,\
+      \ §5.2, §7.2, §8.1):\n     - Sanitize `cito status` read-only CLI/DTO formatting\
+      \ (human-readable labels for agent listeners, available sessions with reload\
+      \ hints, Human Inbox distinct from local device attach state, and Hub errors\
+      \ without raw enums or internal prefixes).\n     - Set `ENV CITO_BUILTIN_PLUGINS_DIR=/app/plugins`\
+      \ in `deploy/hub/Dockerfile` and document `CITO_PLUGIN_PATH` in `deploy/hub/README.md`.\n\
+      \     - Update `packaging/release.py:verify_bundle` (and `packaging/test_release.py`)\
+      \ to verify `arm64` on all bundled `Contents/Resources/plugins/*/bin/*` executables\
+      \ in addition to `cito-native` and `cito-ui`.\n     - Add discriminating unit/integration\
+      \ tests for M1–M6 and M7 backend items (including Codex multiline TOML `conflict`/`force`\
+      \ setup tests, Telegram monotonic `cursor` + `on_acked` tests, `bin/cito*` wrapper\
+      \ smoke tests, OIDC trailing-slash/`azp`/JWKS/SSE expiry tests, `read_stdio_line`\
+      \ framing, symlink-preserving `plugin_support::mutate`, and `pending_hub_acks`\
+      \ binding).\n\nImplementation Notes (Non-Binding):\n- Follow docs/DESIGN.md\
+      \ §8.2 hazard map. Keep inner-loop verification fast and targeted to affected\
+      \ Rust modules, packaging unit tests, and shell wrapper syntax checks; reserve\
+      \ full workspace clippy/release/UI-bundle sweeps for v41.review.\n\nBoundary:\n\
+      - Owner: rust-senior. Isolated worktree transaction modifying Rust workspace,\
+      \ subprocess plugins, Docker/packaging files, and backend tests.\n\nAdmit:\n\
+      - Witnessed inputs: docs/DESIGN.md (1..EOF, §1–§8 @ efa491d) and Admitted Finding\
+      \ Ledger M1–M7.\n- Verification: targeted cargo lib/hub/daemon/plugin tests,\
+      \ sh -n wrapper checks, and packaging unittest suite pass. Consumed by v41.ui\
+      \ and v41.review.\n\nRecovery:\n- Reconcile compiler, test, and schema migration\
+      \ issues in place within the worktree; escalate only if a spec requirement is\
+      \ contradictory.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native hub:: && sh -n bin/cito bin/cito-daemon bin/cito-hub bin/cito-mcp bin/cito-test-runner
+      && python3 -m unittest discover -s packaging'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/config.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/database.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/receiver_tests.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/transport_tests.rs
+    - plugins/codex/native.rs
+    - plugins/codex/plugin.json
+    - plugins/pi/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/claude/native.rs
+    - crates/cito-native/src/bin/cito-claude-hook.rs
+    - plugins/telegram/native.rs
+    - deploy/hub/Dockerfile
+    - deploy/hub/README.md
+    - packaging/release.py
+    - packaging/test_release.py
+    - crates/cito-native/tests/hub/cases.rs
+    - crates/cito-native/tests/hub/auth_cases.rs
+    - crates/cito-native/tests/hub/login_cases.rs
+    - crates/cito-native/tests/hub/hub_plugin_cases.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/plugins.rs
+    agent: rust-senior
+  - id: v41.ui
+    name: V41 Option A Menu Slimming, Settings Human Channels Inbox Control Bar, Four-Surface
+      AppKit UI Hygiene & Docs/Site/Screenshot Sync (M2 UI & M7)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Implement all macOS AppKit companion (`src/macos/cito-ui.swift`),\
+      \ UI test oracle (`crates/cito-native/tests/support/ui.rs`), documentation/site\
+      \ (`README.md`, `site/**`), and screenshot requirements in docs/DESIGN.md (§1.2–§1.3,\
+      \ §5.1–§5.2, §7.1–§7.2, §8.1–§8.2 @ efa491d) covering M2 UI and M7 (including\
+      \ Option A Menu slimming):\n  1. Option A Menu Popover Slimming & `Settings\
+      \ → Human Channels` Inbox Control Bar (§1.3, §5.2.3, §5.2.5, §8.1–§8.2):\n \
+      \    - Remove the dedicated `YOUR INBOX` card (`human_inbox_card` / `human_paused_card`)\
+      \ from the Menu Popover (`380pt`) and retire `human_paused_banner` / `resume_human_channels`\
+      \ (dropping the `human_paused != true` exclusion from `defaultLayout` once `Inbox\
+      \ Control Bar` replaces `human_paused_banner`).\n     - Show one compact clickable\
+      \ notice row above `LISTENING SESSIONS` (`\"Inbox paused · Resume in Settings…\"\
+      `, opening `Settings → Human Channels` for `effectiveTargetHub`, with `accessibilityLabel`)\
+      \ in the Menu Popover **only** when `human_paused == true` on the active Hub.\n\
+      \     - Mount the top **Inbox Control Bar** (`<= 48pt`, with `\"External channels\
+      \ deliver alerts even when this Mac is offline.\"` in its tooltip/subtitle)\
+      \ at the top of `Settings → Human Channels` for the selected Hub: displays `You\
+      \ (@<user>)`, clean active delivery summary (e.g. `\"Activity · MacBook Pro\"\
+      ` / `\"Telegram · Activity\"`, omitting `UNLISTENED`/`EXPIRED` and deduplicating\
+      \ hostnames in label and tooltip), **`[ Pause Inbox ]` / `[ Resume Inbox ]`**,\
+      \ OIDC/multi-user `[ Self / Team ]`, and clear paused copy (`\"Inbox alerts\
+      \ paused\"` / `\"Inbox paused · Activity & <channels> paused\"`), so all default\
+      \ resting single-channel states (active and paused, with multi-hub selector\
+      \ and up to 2 fields) fit within the `368pt` viewport without scrolling (expanded\
+      \ pairing instructions, inline editing, and multi-line error states may scroll\
+      \ cleanly).\n  2. Menu Popover Standardization & `pidBound`-Aware Session Grouping\
+      \ (§4.1, §5.2.3):\n     - Standardize listening session action button copy to\
+      \ **`Stop`** (which detaches that session and disables `Auto-Listen` for the\
+      \ selected Hub, with a tooltip warning about disabling `Auto-Listen`) and footer\
+      \ bulk action to **`[ Stop All ]`** (when `targetHub` `agentListeners.count\
+      \ > 0`, scoped via explicit `hub` on `unlisten_all` with pending disable); ensure\
+      \ `toggle_auto_listen` has an explanatory tooltip and shared `x = 46–48` keyline\
+      \ (`width <= 244pt`).\n     - Isolate `AVAILABLE SESSIONS` collapse state per\
+      \ `(hub, harness)` (`\"\\(targetHub):\\(harness)\"`), compute group count labels\
+      \ from actual `endpoint_pid != nil` counts (`\"N open\"`, `\"N recent\"`, or\
+      \ `\"N sessions\"` when mixed), and auto-collapse recent-only groups only when\
+      \ `pidBound != false` (`harnessMeta.pid_bound != false`) and `endpoint_pid ==\
+      \ nil && needs_reload != true`.\n     - Preserve `NSMenu` inline rename focus\
+      \ and selection across background refreshes (scheduling initial inline rename\
+      \ focus once via `RunLoop.main.perform(inModes: [.common, .eventTracking])`)\
+      \ and surface validation errors; close `cardMenu` on `⌘K` or `⌘,` before presenting\
+      \ `Directory` or `Settings`.\n  3. M2 UI Async Settlement, Precedence & Timers\
+      \ (§5.1, §5.2.5):\n     - Settle `pendingHubSave` on matching `request_id` +\
+      \ Hub name rather than raw unnormalized URL string equality.\n     - Implement\
+      \ `Send Test` precedence on `Human Channels`: a `channel_test_result` received\
+      \ while `warning`/`error` is active displays its feedback until a newer `settings`\
+      \ health frame arrives, while an older stored `testResult` stays suppressed\
+      \ behind newer live health warnings/errors and reappears on recovery (preserving\
+      \ `ui.rs:796`).\n     - Schedule rebuild timers for `hostHubPortSavedUntil`,\
+      \ `hubInvitePastedUntil`, and `pairCopiedUntil` so timed feedback badges expire\
+      \ visibly.\n     - Disable and show pending labels on async buttons (`Pause/Resume\
+      \ Inbox`, `Set Up`, `Disconnect`, `Join from Clipboard`, `Pair Account…`, `Add\
+      \ Hub`) until the matching receipt settles.\n  4. Surface 3 (Directory & Activity)\
+      \ & Surface 4 (Settings) Hygiene & Sanitization (§5.2.1–§5.2.6, §8.2):\n   \
+      \  - Sanitize all UI labels, subtitles, and tooltips through `presentationError`\
+      \ / display helpers so raw availability enums (`ACTIVE`, `UNLISTENED`, `DISCONNECTED_RETAINED`,\
+      \ `EXPIRED`), raw `scoped_id` hashes (prefer `display_address`), `local://`,\
+      \ `(os error NN)` suffixes, and `<hub>: <CODE>:` prefixes never appear; strip\
+      \ duplicate `\"Connected · \"` / `\"Disconnected · \"` status prefixes on `Agent\
+      \ Apps`.\n     - Scope Settings keyboard shortcuts (`Esc`, `Return`) strictly\
+      \ to `settingsActiveTab` and `effectiveChannelHub`; clear `settingsBannerError`\
+      \ and `hostHubPortError` on tab switch/close.\n     - Guard Directory `⇧↵ Message`\
+      \ when `directoryComposerBar` is already open; preserve Directory `✓ Copied`\
+      \ feedback across background `state` refreshes; filter initial `seedDirectoryPeersIfEmpty`\
+      \ by active scope/harness/query filters; reset Activity inline `Clear…` confirm\
+      \ on search-input edits as well as mode/filter/close/composer changes; clear\
+      \ stale `directoryActionError` on panel/filter switches; keep Composer `composer_send`\
+      \ wide enough for `\"Sending…\"` with matching tooltip; act cleanly on replyable\
+      \ (`for_me`) rows on `Return` without silent unlabeled acks.\n     - Validate\
+      \ `Host Hub` port range (`1...65535`) on `Start Sharing` / auth toggle; position\
+      \ `Human Channels` pairing `instrLabel` and `▸ Enter Chat ID manually` disclosure\
+      \ dynamically relative to form height without collision; remove internal `label.toolTip`\
+      \ shadowing on `header_hub_strip`, `toggle_group`, and `Directory…`/`Activity…`\
+      \ badges, and supply accurate `toolTip` + `accessibilityLabel` across all 4\
+      \ surfaces.\n  5. Tests, Documentation, Website & Screenshots Sync (§7.2, §8.1–§8.2):\n\
+      \     - Update `crates/cito-native/tests/support/ui.rs` (and `distribution.rs`\
+      \ / `site-clipboard.mjs` if affected) for Option A Menu slimming (no `YOUR INBOX`\
+      \ card, `\"Inbox paused · Resume in Settings…\"` notice when paused, `Stop`\
+      \ / `Stop All`), `Settings → Human Channels` `Inbox Control Bar` (including\
+      \ remote/Telegram-only and paused default-layout states fitting `<= 368pt`),\
+      \ Settings cross-tab key scoping, `Send Test` precedence, and `display_address`\
+      \ tooltips.\n     - Synchronize `README.md`, `site/index.html`, `site/docs/{architecture,guide,plugins}.html`,\
+      \ and `site/assets/IMAGEGEN_PROMPTS.md` with the simplified Menu Popover, `Settings\
+      \ → Human Channels` Inbox Control Bar, `cito_status`, `cito_listen(..., title?)`,\
+      \ full `cli.rs` subcommands, `openUrlLabel` / `manualDisclosure`, and `\"Start\
+      \ Sharing\"` copy; refresh affected Retina screenshots (`site/assets/screenshots/menu-dark.png`,\
+      \ `site/assets/screenshots/settings-channels-dark.png`, and any other changed\
+      \ screenshot or `site/assets/og-card.png` preview) and inspect them visually\
+      \ via `read`.\n\nImplementation Notes (Non-Binding):\n- Follow docs/DESIGN.md\
+      \ §8.2 hazard map. Compile `bin/cito-ui-darwin-arm64` and run targeted `support::ui::`,\
+      \ `support::distribution::`, and `site-clipboard.mjs` tests during iteration;\
+      \ reserve full workspace clippy/test/release sweeps for v41.review.\n\nBoundary:\n\
+      - Owner: senior-engineer. Isolated worktree transaction modifying `src/macos/cito-ui.swift`,\
+      \ UI/distribution tests, docs/site, and screenshots.\n\nAdmit:\n- Depends on\
+      \ `v41.core` completion.\n- Verification: targeted UI oracle tests (`support::ui::`),\
+      \ distribution checks (`support::distribution::`), `site-clipboard.mjs`, and\
+      \ visual `read` inspection of refreshed screenshots pass. Consumed by `v41.review`.\n\
+      \nRecovery:\n- Repair any AppKit geometry, focus, accessibility, or test oracle\
+      \ discrepancy in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --test native support::ui:: && cargo
+      test -p cito-native --test native support::distribution:: && node crates/cito-native/tests/support/site-clipboard.mjs'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - README.md
+    - site/index.html
+    - site/docs/architecture.html
+    - site/docs/guide.html
+    - site/docs/plugins.html
+    - site/assets/IMAGEGEN_PROMPTS.md
+    - site/assets/og-card.png
+    - site/assets/screenshots/menu-dark.png
+    - site/assets/screenshots/settings-channels-dark.png
+    - site/assets/screenshots/directory-dark.png
+    - site/assets/screenshots/activity-dark.png
+    - site/assets/screenshots/settings-apps-dark.png
+    - site/assets/screenshots/settings-hubs-dark.png
+    depends_on:
+    - v41.core
+    agent: senior-engineer
+  - id: v41.review
+    name: 'V41 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
+      Suite, Dual-Mac & Bundle Verification, and Push to main (No Release Tag) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
+      Deliver:\n- Execute a full `[REQUIRES_SKILL: contract-and-simplicity]` review\
+      \ and consolidation pass across all `v41.core` and `v41.ui` changes (`docs/DESIGN.md`\
+      \ §1–§8 @ `efa491d`, `M1`–`M7`), verifying complete end-to-end wiring, single-authority\
+      \ projections, lock-free slow I/O, async `request_id` settlement, bounded buffers/queries,\
+      \ Option A UI geometry/accessibility, and test economy, and fixing any identified\
+      \ issues in place.\n- Run and verify the complete `docs/DESIGN.md` §8.1 verification\
+      \ suite:\n  1. `cargo fmt --all -- --check`\n  2. `cargo clippy --workspace\
+      \ --all-targets -- -D warnings`\n  3. `cargo test --workspace`\n  4. `cargo\
+      \ build --release` (0 compiler warnings)\n  5. `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \  6. `python3 packaging/release.py check && python3 -m unittest discover -s\
+      \ packaging`\n  7. Relocated `Cito.app/Contents/Helpers/cito-ui` bundle verification\
+      \ and dual-Mac install/runtime verification\n  8. Visual `read` inspection of\
+      \ `AppIcon.icns` (`site/assets/art/app-icon-master.png`), `site/assets/og-card.png`,\
+      \ `site/assets/art/architecture-topology.svg`, and all refreshed `site/assets/screenshots/*.png`\
+      \ (especially `menu-dark.png` and `settings-channels-dark.png`), plus `§1.2`\
+      \ semantic zero-hardcoding check across `crates/cito-native/src/core/` and `src/macos/`\
+      \ (keeping `state_tests.rs` fixtures vendor-neutral)\n- Preserve semantic release\
+      \ version `0.21.3` and push integrated `main` to `origin/main` with **NO release\
+      \ tag**.\n\nBoundary:\n- Owner: senior-engineer with `[REQUIRES_SKILL: contract-and-simplicity]`.\
+      \ Modifies repository and pushes `main` to `origin/main` at version `0.21.3`\
+      \ without creating a release tag.\n\nAdmit:\n- Depends on `v41.ui` completion\
+      \ (`v41.core` → `v41.ui`).\n- Verification: full §8.1 check suite, visual asset/screenshot\
+      \ read inspection, dual-Mac verification, and `git push origin main` pass cleanly.\n\
+      \nRecovery:\n- Repair any review, regression, or packaging finding in place\
+      \ and re-verify before pushing `main` to `origin/main`.\n"
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test --workspace && cargo build --release && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - src/macos/cito-ui.swift
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/core/daemon.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/lease.rs
+    - crates/cito-native/src/core/registration.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - plugins/codex/native.rs
+    - plugins/pi/native.rs
+    - plugins/claude/native.rs
+    - plugins/telegram/native.rs
+    - deploy/hub/Dockerfile
+    - packaging/release.py
+    - crates/cito-native/tests/support/ui.rs
+    - crates/cito-native/tests/support/daemon.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - crates/cito-native/tests/hub/cases.rs
+    - README.md
+    - site/index.html
+    depends_on:
+    - v41.ui
+    agent: senior-engineer
