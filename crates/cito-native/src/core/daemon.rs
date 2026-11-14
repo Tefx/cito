@@ -3164,7 +3164,6 @@ impl DaemonService {
                 result?;
                 self.last_app_action.insert(id.to_owned(), "setup".into());
                 self.refresh_available()?;
-                self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
             "setup_remove_app" => {
                 let id = action["harness"]
@@ -3204,8 +3203,6 @@ impl DaemonService {
                 if let Some(activity) = self.session_activity.as_mut() {
                     activity.remove_candidates(id);
                 }
-                self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
-                self.push_ui();
                 return Ok(
                     json!({"ok":true,"notice":notice,"detach_status":if detach_errors.is_empty(){"complete"}else{"pending"},"warnings":detach_errors}),
                 );
@@ -4141,7 +4138,6 @@ impl DaemonService {
                         activity.remove_candidates(&plugin.id);
                     }
                 }
-                self.emit(json!({"op":"settings","settings":self.settings()}));
             }
             "setup_uninstall_all" => {
                 for row in self.state.active()? {
@@ -4174,7 +4170,14 @@ impl DaemonService {
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;
-        self.push_ui_result(Some(action));
+        // Setup receipts require the refreshed inspection, which dispatch_action
+        // awaits without holding service. Passive cached projections remain usable.
+        if !matches!(
+            op,
+            "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
+        ) {
+            self.push_ui_result(Some(action));
+        }
         Ok(json!({"ok":true}))
     }
     fn sync_host_hub(&mut self) -> Result<(), String> {
@@ -5012,39 +5015,44 @@ fn interactive_login(action: &Value) -> bool {
             && matches!(action["action"].as_str(), Some("login" | "switch_account")))
 }
 fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Result<Value, String> {
-    let result = dispatch_action_inner(service, action);
-    if matches!(
+    let mut result = dispatch_action_inner(service, action);
+    let refresh_setup = matches!(
         string(action, "op"),
         "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
-    ) {
-        // Await this action's invalidated inspections without holding service.
-        // Other requests continue to use the previous cached projection.
-        loop {
-            let pending = {
-                let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
-                if s.closing || shutdown_requested() {
-                    break;
-                }
-                s.refresh_setup_inspections();
-                s.setup_inspections
-                    .values()
-                    .any(|entry| entry.worker.is_some())
-            };
-            if !pending {
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
+    );
+    // Await invalidated inspections without holding service. Retain the final
+    // guard so another mutation cannot invalidate them before receipt publication.
+    let mut s = loop {
+        let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        if !refresh_setup {
+            break s;
         }
+        if s.closing || shutdown_requested() {
+            result = Err("Shutting down".into());
+            break s;
+        }
+        s.refresh_setup_inspections();
+        if s.setup_inspections
+            .values()
+            .all(|entry| entry.worker.is_none())
+        {
+            break s;
+        }
+        drop(s);
+        thread::sleep(Duration::from_millis(5));
+    };
+    if interactive_login(action) {
+        s.record_hub_result(action, &result, None);
     }
-    if let Ok(mut s) = service.lock() {
-        if interactive_login(action) {
-            s.record_hub_result(action, &result, None);
-        }
-        if let Err(error) = &result {
-            s.emit(
-                json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
-            );
-        }
+    if let Err(error) = &result {
+        s.emit(
+            json!({"op":"error","error":error,"source_op":action["op"],"request_id":action["request_id"],"hub":action["hub"]}),
+        );
+    }
+    if refresh_setup && result.is_ok() {
+        s.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings()}));
+        s.push_ui_result(Some(action));
+    } else {
         s.push_ui();
     }
     result

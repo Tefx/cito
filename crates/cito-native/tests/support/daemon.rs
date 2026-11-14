@@ -546,6 +546,122 @@ fn setup_refresh_preserves_cached_settings_without_blocking_hub_or_mcp_and_fence
     );
 }
 #[test]
+fn setup_receipts_wait_for_post_mutation_inspections() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    f.provider("delivered");
+    let options_path = f.state.join("plugins/fixture/options.json");
+    let calls_path = f.state.join("plugins/fixture/calls.jsonl");
+    let mut options: Value =
+        serde_json::from_str(&fs::read_to_string(&options_path).unwrap()).unwrap();
+    options["configured"] = json!(false);
+    fs::write(&options_path, options.to_string()).unwrap();
+    let recorder = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", recorder.to_str().unwrap()),
+    ]);
+    let frames = || {
+        fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>()
+    };
+    let inspections = || {
+        fs::read_to_string(&calls_path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|row| row["op"] == "setup_inspect")
+            .count()
+    };
+    let configured = |frame: &Value| {
+        frame["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|app| app["id"] == "fixture")
+            .unwrap()["configured"]
+            .clone()
+    };
+    for (index, (op, expected)) in [
+        ("setup_apply", true),
+        ("setup_remove_app", false),
+        ("setup_apply", true),
+        ("setup_disconnect_all", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request_id = format!("setup-{index}");
+        let marker = format!("while-blocked-{index}");
+        let gate = f.dir.join(format!("release-setup-{index}"));
+        let before = inspections();
+        options["configured"] = json!(expected);
+        options["setup_gate"] = json!(gate);
+        options["setup_gate_timeout_ms"] = json!(5000);
+        fs::write(&options_path, options.to_string()).unwrap();
+        let action = json!({"op":op,"harness":"fixture","request_id":request_id});
+        let port = f.port;
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(move || http(port, "/ui", Some(&action)));
+            wait(|| inspections() > before);
+            let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+            // This unrelated correlated frame is an ordered mailbox barrier.
+            assert_eq!(
+                f.action(json!({"op":"set_user","user":"alice","request_id":marker}))
+                    .0,
+                200
+            );
+            wait(|| frames().iter().any(|frame| frame["request_id"] == marker));
+            let premature = frames()
+                .into_iter()
+                .filter(|frame| frame["request_id"] == request_id)
+                .map(|frame| json!({"op":frame["op"],"configured":configured(&frame)}))
+                .collect::<Vec<_>>();
+            fs::write(&gate, "").unwrap();
+            let response = pending.join().unwrap();
+            assert_eq!(response.0, 200, "{response:?}");
+            assert_eq!(
+                configured(&snapshot),
+                !expected,
+                "Cached projection must remain available while refreshing"
+            );
+            assert!(
+                premature.is_empty(),
+                "{op} acknowledged before inspection settled: {premature:?}"
+            );
+        });
+        wait(|| {
+            ["settings", "state"].into_iter().all(|op| {
+                frames()
+                    .iter()
+                    .any(|frame| frame["request_id"] == request_id && frame["op"] == op)
+            })
+        });
+        let receipts = frames()
+            .into_iter()
+            .filter(|frame| frame["request_id"] == request_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipts.len(),
+            2,
+            "One settings receipt and one state receipt per successful action"
+        );
+        for receipt in receipts {
+            assert_eq!(receipt["ok"], true);
+            assert_eq!(receipt["source_op"], op);
+            assert_eq!(
+                configured(&receipt),
+                expected,
+                "{op}: {} receipt",
+                receipt["op"]
+            );
+        }
+    }
+}
+#[test]
 fn pending_business_ack_requires_original_url_and_principal() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
