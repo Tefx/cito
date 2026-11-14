@@ -12588,7 +12588,7 @@ phases:
 - id: v44
   name: V44 In-Flight Codex Wake Attribution Coordination & Pathway Audit Closure
     (v0.21.3)
-  status: in_progress
+  status: done
   gate: In-flight Codex wake attribution in plugins/codex/native.rs is coordinated
     with discover_sessions qualification/checkpointing across both rollout and no-rollout
     fallback branches without recording failed wakes as cito_effect or blocking subsequent
@@ -12664,7 +12664,7 @@ phases:
   - id: v44.verify
     name: Pathway-Auditor Delta Closure (F6 & DaemonService::tool() Coverage), Release
       Staging Rebuild, Cito.app Restart & Push to main
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - bin/**\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Dispatch `pathway-auditor`\
@@ -12702,3 +12702,35 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-14T21:33:00.600524Z'
+    done_at: '2026-11-14T21:45:15.121791+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 6369a7a27b91936aedd19daf4bf2480a92b67813 (integrated v44.fix 2c74781
+      + restaged release binaries 6369a7a; version 0.21.3, zero release tag).
+
+
+      Verification:
+
+      - pathway-auditor Delta closure: ZERO_NEW_ISSUES (Uninspected gaps: NONE) —
+      F6 in-flight flock wake attribution coordination (2c74781) and core/daemon/mcp.rs:700-EOF
+      (DaemonService::tool()) coverage gap both closed.
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed
+
+      - Run: cargo clippy --workspace --all-targets -- -D warnings -> Passed (0 warnings)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test --workspace -> 373 passed, 0 failed (212 lib + 2 bin + 4 claude-hook
+      + 4 codex + 5 telegram + 146 native integration; 4 intentional subprocess workers
+      ignored)
+
+      - Run: cargo build --release -> Passed (0 compiler warnings; all 7 staged binaries
+      codesign --verify --strict OK)
+
+      - Local /Applications/Cito.app rebuilt, deep-signed, restarted, and main pushed
+      to origin/main.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§3.4, §4.2, §8.1) & v43.review Round 2 pathway-auditor closure'
