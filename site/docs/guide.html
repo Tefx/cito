@@ -92,17 +92,17 @@
             class="screenshot-img"
             style="--logical-w: 380; --logical-h: 256;"
             src="../assets/screenshots/menu-dark.png"
-            alt="Cito menu bar with listening session Stop action, Available Sessions, Directory, Activity, and Stop All"
+            alt="Cito menu bar with a pinned listening session, Stop, Auto-Listen, Available Sessions, Directory, Activity, and Stop All"
             width="760"
             height="512"
             loading="lazy"
           />
         </div>
         <figcaption class="docs-figcaption">
-          <strong>Step 1 — Menu Bar Enrollment &amp; Presence:</strong> Manage listening sessions with <code>Stop</code> / <code>Stop All</code>, click <code>+ Listen</code> on any open session under <code>AVAILABLE SESSIONS</code>, or open <code>Directory…</code> and <code>Activity…</code> directly.
+          <strong>Step 1 — Menu Bar Enrollment &amp; Presence:</strong> Manage listening sessions with <code>Pin</code>, <code>Stop</code> / <code>Stop All</code>, click <code>+ Listen</code> on any open session under <code>AVAILABLE SESSIONS</code>, or open <code>Directory…</code> and <code>Activity…</code> directly.
         </figcaption>
       </figure>
-      <p>The menu bar number counts unread signals only. <strong>Settings → Human Channels → Inbox Control Bar → Pause Inbox/Resume Inbox</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The control bar shows your identity, deduplicated delivery paths, and Self/Team visibility where applicable, even when this Mac is detached. The menu shows only a compact <strong>Inbox paused · Resume in Settings…</strong> notice while paused. <strong>Stop</strong> detaches one session and disables Auto-Listen on that Hub; <strong>Stop All</strong> stops only agent registrations on the selected Hub. Status colors adapt to macOS Light and Dark Mode.</p>
+      <p>The menu bar number counts unread signals only. <strong>Settings → Human Channels → Inbox Control Bar → Pause Inbox/Resume Inbox</strong> changes shared Human delivery on the selected Hub across all Macs and external channels, preserving descriptions, visibility, attachments, and unread Activity. The control bar shows your identity, deduplicated delivery paths, and Self/Team visibility where applicable, even when this Mac is detached. The menu shows only a compact <strong>Inbox paused · Resume in Settings…</strong> notice while paused. <strong>Stop</strong> detaches only that session and keeps it stopped without changing Hub Auto-Listen. <strong>Stop All</strong> stops all agent registrations on the selected Hub and disables Auto-Listen, preserving human delivery. Turning <strong>Auto-Listen</strong> off stops unpinned auto-listened sessions while keeping pinned sessions active. <code>+ Listen</code> attaches as pinned. The <strong>Pin</strong> control appears when Auto-Listen is on or the session is auto-listened: an outline pin follows Auto-Listen, and a filled blue pin keeps listening when Auto-Listen is turned off. Unpinned activity-timed sessions retire after their idle timeout; endpoint-bound sessions have no idle timeout. Pinning does not keep a closed or disconnected app listening. Status colors adapt to macOS Light and Dark Mode.</p>
 
       <h3>Discover and message a peer in Directory</h3>
       <p>Open <strong>Directory…</strong> to find a peer by user, repository, task, or readable address. Filter by <strong>Mine</strong> or app, then choose <strong>Message</strong> to send a direct signal or copy its address for an agent to use.</p>

@@ -181,8 +181,25 @@ func nodeDisplayTitle(_ title: String, harness: String, user: String, about: Str
     return title
 }
 func presentationError(_ raw: String) -> String {
-    if raw.hasPrefix("CONTROL_REVISION_CONFLICT:") { return "Inbox changed on another device. Review the current state and try again." }
-    var message = raw.replacingOccurrences(of: "^(?:[a-z][a-z0-9-]*: )?(?:[A-Z][A-Z0-9_]+:\\s*)+", with: "", options: .regularExpression)
+    var message = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Unwrap transport/plugin diagnostics before rendering their human message.
+    while !message.isEmpty {
+        if message.hasPrefix("CONTROL_REVISION_CONFLICT:") { return "Inbox changed on another device. Review the current state and try again." }
+        if message.range(of:"(?i:SQLITE_|sqlite3|\\(SQLite\\b|unable to open database|database is locked|database disk image is malformed|no such table:)",options:.regularExpression) != nil {
+            return "App database is unavailable. Check the app and its data location."
+        }
+        if message.hasPrefix("{") || message.hasPrefix("[") {
+            guard let data = message.data(using:.utf8), let object = try? JSONSerialization.jsonObject(with:data) as? [String:Any] else { return "The request failed. Try again." }
+            let error = object["error"] as? [String:Any]
+            let detail = object["message"] as? String ?? error?["message"] as? String ?? object["error"] as? String
+            guard let detail = detail, !detail.isEmpty, detail != message else { return "The request failed. Try again." }
+            message = detail; continue
+        }
+        let stripped = message.replacingOccurrences(of:"^(?:[a-z][a-z0-9_-]*|[A-Z][A-Z0-9_]+|[0-9]{3,}|(?i:Discovery rejected|Badge rejected|Error)):\\s*",with:"",options:.regularExpression)
+        if stripped == message { break }
+        message = stripped
+    }
+    message = message.replacingOccurrences(of:"\\b(?:[A-Z][A-Z0-9_]{2,}|[0-9]{3,}):\\s*",with:"",options:.regularExpression)
         .replacingOccurrences(of: "\\s*\\(os error [0-9]+\\)$", with: "", options: .regularExpression)
     if message.hasPrefix("Hub URL must use") { return "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment." }
     if message.hasPrefix("CITO_NATS_URL") { return "Enter a valid Hub URL (http://ip:4291 or https://host)." }
@@ -191,7 +208,11 @@ func presentationError(_ raw: String) -> String {
         let reason = String(message.dropFirst(bindPrefix.count))
         return "Cannot start sharing: " + reason
     }
-    for (token, copy) in [("DISCONNECTED_RETAINED", "Temporarily offline"), ("UNLISTENED", "Not listening"), ("EXPIRED", "Offline"), ("ACTIVE", "Active"), ("local://", "Built-in on this Mac"), ("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode"), (" (http://127.0.0.1 is allowed for tests)", "")] { message = message.replacingOccurrences(of: token, with: copy) }
+    for (token, copy) in [("DISCONNECTED_RETAINED", "Temporarily offline"), ("UNLISTENED", "Not listening"), ("EXPIRED", "Offline"), ("ACTIVE", "Active"), ("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode")] {
+        message = message.replacingOccurrences(of:"\\b" + token + "\\b",with:copy,options:.regularExpression)
+    }
+    message = message.replacingOccurrences(of:"local://",with:"Built-in on this Mac")
+        .replacingOccurrences(of:" (http://127.0.0.1 is allowed for tests)",with:"")
     return message
 }
 func distinctAbout(_ raw: String?, title: String, user: String, otherTitle: String? = nil) -> String? {

@@ -9,6 +9,7 @@ struct HarnessMeta: Decodable, Equatable {
     let order: Int
     let kind: String?
     let pid_bound: Bool?
+    let idle_timeout_ms: UInt64?
 }
 struct HarnessVisual {
     let id: String
@@ -76,6 +77,7 @@ struct Listener: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String, scope: String
     let about: String?, repo: String?, branch: String?
     let custom_title: Bool?
+    let listen_mode: String?
     let display_address: String
     let user: String?, owner_user: String?
     let host_name: String?

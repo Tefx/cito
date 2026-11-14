@@ -356,6 +356,19 @@ extension Companion: NSMenuDelegate {
             let path = textLabel(pathText,
                 NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
+            if hubs.first(where: { $0.name == listener.hub })?.auto_listen == true || listener.listen_mode == "auto" {
+                let pinned = listener.listen_mode != "auto"
+                let activityTimed = map[listener.harness]?.idle_timeout_ms != nil
+                let pin = MenuControl("Pin", frame:NSRect(x:0,y:cardHeight-28,width:22,height:22), symbol:pinned ? "pin.fill" : "pin")
+                pin.identifier = NSUserInterfaceItemIdentifier("pin:\(listener.scoped_id)")
+                pin.style = pinned ? .neutral : .subtleHeader
+                pin.normalColor = pinned ? CitoPalette.infoText : CitoPalette.secondaryText
+                let lifetime = activityTimed ? "Unpinned sessions auto-retire after the idle timeout." : "Unpinned sessions stay listening while their endpoint is available; no idle timeout applies."
+                pin.toolTip = (pinned ? "Pinned. Unpin to follow Auto-Listen. " : "Pin this session. ") + lifetime + " Pinned sessions stay listening when Auto-Listen is turned off."
+                pin.setAccessibilityLabel(pinned ? "Unpin session" : "Pin session")
+                pin.pressed = { [weak self] in self?.emit(["op":"set_listen_mode","hub":listener.hub,"listener_id":listener.listener_id,"listen_mode":pinned ? "auto" : "manual"]) }
+                card.addSubview(pin); sessionActions.append(pin)
+            }
             if let scopeBtn = scopeToggle(hub:listener.hub,user:user,scope:listener.scope,id:listener.scoped_id,y:cardHeight-28) {
                 var scope = listener.scope
                 scopeBtn.pressed = { [weak self, weak scopeBtn] in
@@ -367,13 +380,13 @@ extension Companion: NSMenuDelegate {
                 }
                 card.addSubview(scopeBtn); sessionActions.append(scopeBtn)
             }
-            let stop = MenuControl("Stop", frame: NSRect(x: 0, y: cardHeight - 28, width: 52, height: 22))
-            stop.toolTip = "Stop listening to this session and disable Auto-Listen on \(listener.hub)"
-            stop.style = .neutral
+            let stop = MenuControl("Stop", frame: NSRect(x: 0, y: cardHeight - 28, width: 48, height: 22))
+            stop.toolTip = "Stop only this session and keep it stopped. Auto-Listen on \(listener.hub) stays unchanged."
+            stop.style = .neutral; stop.maximumWidth = 48
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
-            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: CitoMetrics.gap, trailing: sessionActions)
+            layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: 4, trailing: sessionActions)
             let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
             if renamingSessionKey == sessionKey {
                 title.isHidden = true
@@ -392,9 +405,9 @@ extension Companion: NSMenuDelegate {
                     }
                 }
             } else {
-                let titleW = max(24, min(rightEdge - titleX - 24, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
+                let titleW = max(122, min(rightEdge - titleX - 28, ceil(measureTextWidth(displayTitle, font: .systemFont(ofSize: 13, weight: .semibold))) + 4))
                 title.frame = NSRect(x: titleX, y: cardHeight - 26, width: titleW, height: 18)
-                let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 2, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
+                let renameBtn = MenuControl("Rename session", frame: NSRect(x: titleX + titleW + 6, y: cardHeight - 26, width: 18, height: 18), symbol: "pencil")
                 renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")
                 renameBtn.style = .subtleHeader; renameBtn.toolTip = "Rename session"
                 renameBtn.pressed = { [weak self] in self?.renameField = nil; self?.renamingSessionKey = sessionKey; self?.rebuild() }
@@ -535,7 +548,7 @@ extension Companion: NSMenuDelegate {
             let auto = MenuControl(autoTitle, frame: NSRect(x: 368 - autoWidth, y: 2, width: autoWidth, height: 18), radius: 9)
             auto.identifier = NSUserInterfaceItemIdentifier("toggle_auto_listen")
             auto.style = autoListen ? .prominent : .neutral
-            auto.toolTip = "Automatically listen to newly discovered sessions on \(targetHub). Stop disables Auto-Listen for this Hub."
+            auto.toolTip = "Automatically listen to eligible sessions on \(targetHub). Turning Auto-Listen off stops unpinned auto-listened sessions and keeps pinned sessions listening."
             auto.isEnabled = !targetHub.isEmpty
             auto.pressed = { [weak self] in self?.emit(["op": "set_auto_listen", "hub": targetHub, "enabled": !autoListen]) }
             availHeader.addSubview(auto)
@@ -547,9 +560,10 @@ extension Companion: NSMenuDelegate {
             for item in discovery where item.status == "scanning" || item.status == "error" {
                 let visual = resolveHarnessVisual(item.harness,harnesses:map)
                 let text = item.status == "scanning" ? "\(visual.name) · Scanning sessions…" : "\(visual.name) · " + presentationError(item.error ?? "Session discovery failed. Try refreshing.")
-                let row = NSView(frame:NSRect(x:0,y:0,width:380,height:32))
-                let label = textLabel(text,NSRect(x:46,y:4,width:244,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
-                label.maximumNumberOfLines = 2; label.toolTip = text
+                let label = textLabel(text,NSRect(x:46,y:4,width:322,height:26),size:10.5,color:item.status == "error" ? CitoPalette.dangerText : CitoPalette.secondaryText)
+                label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true; label.toolTip = text
+                label.frame.size.height = max(26, ceil((text as NSString).boundingRect(with:NSSize(width:322,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:label.font!]).height) + 4)
+                let row = NSView(frame:NSRect(x:0,y:0,width:CitoMetrics.menuWidth,height:label.frame.height + 8))
                 row.addSubview(label); _ = host(row,id:"discovery:\(item.harness)")
             }
             if !discoveryBusy && visibleAvailable.isEmpty && listeners.contains(where: { $0.harness != "human" }) {

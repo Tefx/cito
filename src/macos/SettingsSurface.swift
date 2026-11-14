@@ -970,8 +970,10 @@ extension Companion {
 
         if addHubFormOpen {
             let editingLocalHub = editingExistingHub && editingOriginalHub == "local"
-            let localErrorHeight: CGFloat = editingLocalHub && addHubError != nil ? 20 : 0
-            let formHeight: CGFloat = editingLocalHub ? 124 + localErrorHeight : 252
+            let errorText = addHubError.map(presentationError)
+            let errorHeight: CGFloat = errorText.map { ceil(($0 as NSString).boundingRect(with:NSSize(width:452,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin],attributes:[.font:NSFont.systemFont(ofSize:10)]).height) + 4 } ?? 0
+            let errorSpace: CGFloat = errorText == nil ? 0 : errorHeight + 6
+            let formHeight: CGFloat = (editingLocalHub ? 124 : 252) + errorSpace
             let form = roundedView(NSRect(x: 20, y: 180 + hubOffset - formHeight, width: 480, height: formHeight), radius: 10,
                 color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
             form.identifier = NSUserInterfaceItemIdentifier("add_hub_form")
@@ -980,8 +982,8 @@ extension Companion {
                 form.addSubview(textLabel(title,frame,size:10,weight:.semibold,color:CitoPalette.secondaryText))
             }
             if editingLocalHub {
-                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94+localErrorHeight,width:452,height:18),size:12.5,weight:.semibold))
-                fieldLabel("Username (Optional)",NSRect(x:14,y:72+localErrorHeight,width:452,height:14))
+                form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94,width:452,height:18),size:12.5,weight:.semibold))
+                fieldLabel("Username (Optional)",NSRect(x:14,y:72,width:452,height:14))
                 form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser))
             } else {
                 fieldLabel("Hub URL",NSRect(x:14,y:179,width:298,height:13))
@@ -1033,10 +1035,13 @@ extension Companion {
                 visibility.cell?.wraps = true
                 form.addSubview(visibility)
             }
-            if let error=addHubError {
-                let label=textLabel(presentationError(error),NSRect(x:14,y:editingLocalHub ? 74 : 38,width:452,height:15),size:10,color:CitoPalette.dangerText)
-                label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=label.stringValue
-                label.lineBreakMode = .byTruncatingMiddle; form.addSubview(label)
+            // Keep the error between the fields/caption and the fixed action row.
+            for control in form.subviews { control.frame.origin.y += errorSpace }
+            if let error = errorText {
+                let label=textLabel(error,NSRect(x:14,y:40,width:452,height:errorHeight),size:10,color:CitoPalette.dangerText)
+                label.identifier=NSUserInterfaceItemIdentifier("add_hub_error"); label.toolTip=error
+                label.maximumNumberOfLines = 0; label.lineBreakMode = .byWordWrapping; label.cell?.wraps = true
+                form.addSubview(label)
             }
             let cancelBtn = MenuControl("Cancel", frame: NSRect(x: 306, y: 12, width: 72, height: 24), radius: 6)
             cancelBtn.identifier = NSUserInterfaceItemIdentifier("cancel_add_hub")

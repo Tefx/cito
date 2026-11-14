@@ -1,6 +1,140 @@
 use super::*;
 
 #[test]
+fn pin_stop_and_auto_listen_settle_through_the_real_daemon_with_semantic_a() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    let mut cycle = ClosedLoop::new(&f);
+    f.tool(
+        "cito_listen",
+        json!({"about":"Lifecycle check"}),
+        meta.clone(),
+    );
+    let s = cycle.until(|s| !node(s, "items", "stop_all").is_null());
+    let stop_id = nodes(&s["items"])
+        .into_iter()
+        .find_map(|n| {
+            n["id"]
+                .as_str()
+                .filter(|id| id.starts_with("stop:"))
+                .map(str::to_owned)
+        })
+        .unwrap();
+    let pin_id = stop_id.replacen("stop:", "pin:", 1);
+    let session_id = stop_id.replacen("stop:", "session:", 1);
+    assert!(
+        node(&s, "items", &pin_id).is_null(),
+        "Manual listening without Auto-Listen needs no pin control"
+    );
+
+    cycle.control("toggle_auto_listen");
+    let s = cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    assert!(node(&s, "items", "toggle_auto_listen")["tooltip"]
+        .as_str()
+        .unwrap()
+        .contains("keeps pinned sessions listening"));
+    cycle.control("toggle_auto_listen");
+    let s = cycle.until(|s| node(s, "items", "toggle_auto_listen")["text"] == "Auto-Listen");
+    assert!(
+        !node(&s, "items", &session_id).is_null(),
+        "Turning Auto-Listen off preserves pinned listeners"
+    );
+    assert!(node(&s, "items", &pin_id).is_null());
+
+    cycle.control("toggle_auto_listen");
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    cycle.control(&pin_id);
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin");
+    assert!(cycle
+        .results
+        .iter()
+        .any(|(a, status, _)| a["op"] == "set_listen_mode"
+            && a["listen_mode"] == "auto"
+            && *status == 200));
+    cycle.control(&pin_id);
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    cycle.control(&pin_id);
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin");
+    cycle.control("toggle_auto_listen");
+    cycle.until(|s| {
+        node(s, "items", &session_id).is_null()
+            && node(s, "items", "toggle_auto_listen")["text"] == "Auto-Listen"
+    });
+
+    f.tool("cito_listen", json!({"about":"Stop only me"}), meta.clone());
+    cycle.until(|s| !node(s, "items", &session_id).is_null());
+    cycle.control("toggle_auto_listen");
+    cycle.until(|s| node(s, "items", &pin_id)["symbol"] == "pin.fill");
+    cycle.control(&stop_id);
+    let s = cycle.until(|s| node(s, "items", &session_id).is_null());
+    assert_eq!(
+        node(&s, "items", "toggle_auto_listen")["text"],
+        "Auto-Listen: On"
+    );
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        true
+    );
+
+    f.tool("cito_listen", json!({"about":"Stop all agents"}), meta);
+    cycle.until(|s| !node(s, "items", "stop_all").is_null());
+    cycle.control("stop_all");
+    cycle.until(|s| {
+        node(s, "items", &session_id).is_null()
+            && node(s, "items", "toggle_auto_listen")["text"] == "Auto-Listen"
+    });
+    assert_eq!(
+        f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["auto_listen"],
+        false
+    );
+    let (status, _) = f.action(json!({"op":"unlisten_all","hub":"local"}));
+    assert_eq!(
+        status, 200,
+        "Bulk stop remains idempotent with no active agents"
+    );
+}
+
+#[test]
+fn add_hub_errors_wrap_below_fields_and_above_actions() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    f.send(p, json!({"op":"test_settings_input","id":"settings_hub_url","value":"https://hub.example.com"}));
+    control(&f, p, "submit_add_hub");
+    inspect(&f, p);
+    let submitted = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "setup_save_hub")
+        .unwrap();
+    let clean =
+        "The Hub is unavailable. Check its address and network connection before trying again. "
+            .repeat(3);
+    f.send(p, json!({"op":"error","source_op":"setup_save_hub","request_id":submitted["request_id"],"error":format!("10071: {clean}")}));
+    for appearance in ["light", "dark"] {
+        let s = inspect_as(&f, p, Some(appearance));
+        let error = node(&s, "settings_items", "add_hub_error");
+        assert_eq!(error["text"], clean.trim());
+        assert_eq!(error["tooltip"], clean.trim());
+        assert_eq!(error["width"], 452);
+        assert!(error["height"].as_f64().unwrap() > 15.0);
+        let submit = node(&s, "settings_items", "submit_add_hub");
+        assert!(
+            submit["y"].as_f64().unwrap() + submit["height"].as_f64().unwrap()
+                <= error["y"].as_f64().unwrap()
+        );
+    }
+}
+
+#[test]
 fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -21,6 +155,8 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     frame["listeners"][0]["harness"] = json!("pi");
     frame["listeners"][0]["display_address"] = json!("alice/pi#abcd");
     frame["listeners"][0]["title"] = json!("Release review");
+    frame["listeners"][0]["listen_mode"] = json!("manual");
+    frame["hubs"][0]["auto_listen"] = json!(true);
     frame["listeners"][0]["cwd"] = json!("~/work/service");
     frame["directory_online_count"] = json!(3);
     frame["hubs"][0]["human_listener_id"] = json!("human-node");
@@ -1629,6 +1765,15 @@ fn v29_oracle_detects_real_appkit_geometry_contrast_jargon_and_address_faults() 
             "UI action exceeds",
             "Passive",
             "[Passive]",
+            "Refresh failed: PLUGIN_EXEC_FAILED: retry",
+            "Discovery failed; 10071: retry",
+            "An embedded 10037: failure",
+            "Prefix EXPIRED: retry",
+            r#"Response {"error_code":"FAILED"}"#,
+            "Storage SQLITE_CANTOPEN",
+            "Call sqlite3 failed",
+            "Storage (SQLite 14)",
+            "unable to open database file",
         ] {
             f.send(
                 p,
@@ -2214,12 +2359,14 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     let error = node(&local_error, "settings_items", "add_hub_error");
     let user = node(&local_error, "settings_items", "settings_hub_user");
     assert_eq!(
-        node(&local_error, "settings_items", "add_hub_form")["height"],
-        144
+        node(&local_error, "settings_items", "add_hub_form")["height"]
+            .as_f64()
+            .unwrap(),
+        124.0 + error["height"].as_f64().unwrap() + 6.0
     );
     assert!(
-        error["y"].as_f64().unwrap()
-            >= user["y"].as_f64().unwrap() + user["height"].as_f64().unwrap() + 6.0
+        user["y"].as_f64().unwrap()
+            >= error["y"].as_f64().unwrap() + error["height"].as_f64().unwrap() + 6.0
     );
     assert_eq!(local_error["overlapping_siblings"], json!([]));
     assert_eq!(local_error["clipped_views"], json!([]));

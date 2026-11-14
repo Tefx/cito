@@ -309,7 +309,7 @@ extension Companion {
         var lowContrastLabels: [String] = []
         var jargonLeaks: [String] = []
         var addressMismatches: [String] = []
-        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\bPassive\\b|\\[Passive\\]|^[A-Z0-9_]{3,}:"
+        let jargonPattern = "(?i:\\bhandle\\b|human nodes?|every human|each human|\\breceive wakes\\b|\\bwake banners?\\b|\\bcito_listen\\b|\\bhub service:|\\bchannel inventory\\b|\\bui action exceeds\\b)" + (hubs.count <= 1 ? "|on 'local'" : "") + "|local://|Handle:|Human Node|Human listening|Human receiver|All Harnesses|\\bSession\\b|· (none|token|oidc|auth_required|disconnected)\\b|\\bPassive\\b|\\[Passive\\]|\\b(?:[A-Z][A-Z0-9_]{2,}|[0-9]{3,}):|\\b(?:ACTIVE|UNLISTENED|DISCONNECTED_RETAINED|EXPIRED)\\b|\"error_code\"|(?i:SQLITE_|sqlite3|\\(SQLite\\b|unable to open database|database is locked|database disk image is malformed|no such table:)"
         func name(_ view: NSView) -> String {
             view.identifier?.rawValue ?? (view as? NSTextField)?.stringValue ?? String(describing:type(of:view))
         }
