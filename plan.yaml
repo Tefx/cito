@@ -12331,7 +12331,7 @@ phases:
   - id: v43.ui
     name: 'V43 macOS Swift UI & Headless Oracle Closure: Conditional Pin Toggle, Semantic
       A Tooltips, Multi-Line Error Wrapping & Word-Boundary Jargon Sanitization'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - README.md\n    - site/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n\
@@ -12422,6 +12422,32 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-14T20:03:07.034477Z'
+    done_at: '2026-11-14T20:22:37.383563+00:00'
+    evidence: 'Artifact:
+
+      - Commit: f538f0f (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v43.ui
+      retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed
+
+      - Run: cargo test -p cito-native --test native ui::menu:: (PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH
+      RUST_TEST_THREADS=2) -> 10 passed
+
+      - Run: cargo test -p cito-native --test native ui::oracle_e2e:: -> 12 passed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - §1.2 lexical check on src/macos/ -> Only permitted geometry variable `slack`
+      matched; refreshed menu-dark.png visually inspected via read; bin/cito-ui-darwin-arm64
+      rebuilt and signed.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§3.2, §3.3, §5.1–§5.2, §7.2, §8.1–§8.2 @ 6f6a76d)'
   - id: v43.review
     name: 'V43 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Staged Binaries Rebuild & Push to main (No Release Tag) [REQUIRES_SKILL:
