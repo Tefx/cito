@@ -69,8 +69,8 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         );
         assert_eq!(probe["status"], "alive", "{probe}");
     }
-    // A live endpoint with a temporarily unavailable bridge must retain cached
-    // discovery rather than degrading to process-only or empty session results.
+    // One failed bridge cannot discard healthy endpoint discovery. Probes still
+    // report that individual endpoint's transport failure as transient.
     fs::create_dir_all(f.state.join("sockets")).unwrap();
     for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
         let live = f
@@ -78,8 +78,15 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
             .join(format!("sockets/{id}-pid-{}.sock", f.pid(first)));
         drop(UnixListener::bind(&live).unwrap());
         let failed = f.plugin(bin, json!({"op":"discover_sessions"}));
-        assert_eq!(failed["ok"], false, "{id}: {failed}");
-        assert!(failed["sessions"].is_null());
+        assert_eq!(failed["ok"], true, "{id}: {failed}");
+        assert!(failed["sessions"].is_array());
+        if id == "pi" {
+            assert!(failed["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["endpoint_pid"] == f.pid(second)));
+        }
         if id == "pi" {
             f.env.insert("CITO_PI_REQUIRE_BRIDGE".into(), "1".into());
             let probe = f.plugin(
@@ -124,12 +131,15 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         });
         let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
         server.join().unwrap();
-        assert_eq!(rejected["ok"], false, "{id}: {rejected}");
-        assert!(rejected["sessions"].is_null());
-        assert!(rejected["message"]
-            .as_str()
-            .unwrap()
-            .contains("Cannot persist bridge identity"));
+        assert_eq!(rejected["ok"], true, "{id}: {rejected}");
+        assert!(rejected["sessions"].is_array());
+        if id == "pi" {
+            assert!(rejected["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["endpoint_pid"] == f.pid(second)));
+        }
         fs::remove_file(live).unwrap();
         let dead = f.state.join(format!("sockets/{id}-pid-{}.sock", i32::MAX));
         drop(UnixListener::bind(&dead).unwrap());
@@ -551,7 +561,18 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     let prefix="model = \"default\"\nitems = [\n  \"one\", # comment\n  \"two\",\n]\nprompt = \"\"\"\n[mcp_servers.cito.fake]\nThis is a multiline string.\n\"\"\"\nliteral = '''\n[still.not.a.table]\n'''\n";
     fs::write(&p,format!("{prefix}[mcp_servers.cito]\ncommand = \"old\"\n[mcp_servers.cito.env]\nKEEP = \"old\"\n[mcp_servers.other]\ncommand = \"other\"\n")).unwrap();
-    assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
+    let original = fs::read(&p).unwrap();
+    let conflict = f.plugin(CODEX, json!({"op":"setup_apply"}));
+    assert_eq!(conflict["actions"][0]["status"], "conflict");
+    assert_eq!(fs::read(&p).unwrap(), original);
+    assert_eq!(
+        f.plugin(CODEX, json!({"op":"setup_apply","force":true}))["ok"],
+        true
+    );
+    assert_eq!(
+        f.plugin(CODEX, json!({"op":"setup_inspect"}))["configured"],
+        true
+    );
     assert!(fs::read_to_string(&p).unwrap().contains(prefix));
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_remove"}))["ok"], true);
     let text = fs::read_to_string(&p).unwrap();
@@ -698,6 +719,18 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         "A locked database must not look empty: {locked}"
     );
     assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    // One read-only connection observes a coherent committed WAL snapshot while
+    // a separate writer keeps an uncommitted transaction open.
+    db.execute("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE; UPDATE threads SET title='Uncommitted' WHERE id='active'",&[]).unwrap();
+    let started = std::time::Instant::now();
+    let wal = discover();
+    let elapsed = started.elapsed();
+    db.execute("ROLLBACK", &[]).unwrap();
+    assert_eq!(wal["sessions"][0]["title"], "Active work");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "{elapsed:?}"
+    );
     // Older schemas omit the optional source columns.
     assert_eq!(discover()["sessions"][0]["session_id"], "active");
     db.execute(
@@ -910,7 +943,19 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
         result["hookSpecificOutput"]["additionalContext"],
         "keep alias"
     );
-    assert!(!alias.exists());
+    assert!(
+        alias.exists(),
+        "Unconfirmed ACK continuation keeps the durable entry"
+    );
+    let row: Value = serde_json::from_str(fs::read_to_string(&alias).unwrap().trim()).unwrap();
+    assert_eq!(row["output_delivered"], true);
+    assert_eq!(
+        f.plugin(
+            HOOK,
+            json!({"hook_event_name":"UserPromptSubmit","session_id":sid,"cwd":"/repo"})
+        ),
+        json!({})
+    );
 }
 #[test]
 fn claude_setup_preserves_foreign_hooks_and_installs_absolute_paths() {
@@ -998,6 +1043,38 @@ fn claude_flock_torn_lines_concurrent_drain_and_passive_stop() {
         f.plugin(
             HOOK,
             json!({"hook_event_name":"Stop","session_id":"session-a"})
+        ),
+        json!({})
+    );
+}
+#[test]
+fn claude_offline_hook_retires_output_only_after_identity_bound_durable_ack() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
+    local.db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) VALUES('work','c_offline','none#alice','alice','host','laptop','claude','session-a','/repo','Work','','workspace','ACTIVE','https://hub.example.com'); INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state,batch_id,queue_written,queue_confirmed) VALUES('work','offline-signal','c_offline',1,1,'bob','desktop','','Delivered exactly once','now',9999999999999,'DISPATCHED','offline-batch',1,1)",&[]).unwrap();
+    f.plugin(CLAUDE,json!({"op":"wake","session_id":"session-a","batch_id":"offline-batch","text":"Delivered exactly once","wake":false}));
+    let output = f.plugin(
+        HOOK,
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"}),
+    );
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"],
+        "Delivered exactly once"
+    );
+    let acks = local
+        .db
+        .query("SELECT * FROM pending_hub_acks", &[])
+        .unwrap();
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0]["hub_url"], "https://hub.example.com");
+    assert_eq!(acks[0]["principal_id"], "none#alice");
+    assert_eq!(acks[0]["signal_id"], "offline-signal");
+    assert!(!f.state.join("claude/wakes/session-a.jsonl").exists());
+    assert_eq!(
+        f.plugin(
+            HOOK,
+            json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"})
         ),
         json!({})
     );

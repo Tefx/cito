@@ -220,15 +220,28 @@ impl HubClient {
         .map_err(|e| e.to_string())?;
         let host = url.host_str().ok_or("Invalid Hub URL")?;
         let port = url.port_or_known_default().ok_or("Invalid Hub port")?;
-        let address = url
-            .socket_addrs(|| None)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next()
-            .ok_or("Hub address unavailable")?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let addresses = url.socket_addrs(|| None).map_err(|e| e.to_string())?;
         let result = (|| -> Result<Value, String> {
-            let socket = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500))
-                .map_err(|e| format!("NATS_UNAVAILABLE: {e}"))?;
+            let mut connected = None;
+            let mut last_error = "Hub address unavailable".to_owned();
+            for address in addresses {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match std::net::TcpStream::connect_timeout(
+                    &address,
+                    remaining.min(Duration::from_millis(500)),
+                ) {
+                    Ok(socket) => {
+                        connected = Some(socket);
+                        break;
+                    }
+                    Err(error) => last_error = error.to_string(),
+                }
+            }
+            let socket = connected.ok_or_else(|| format!("NATS_UNAVAILABLE: {last_error}"))?;
             socket
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .map_err(|e| e.to_string())?;
@@ -238,7 +251,7 @@ impl HubClient {
             let mut stream = InterruptibleStream {
                 socket,
                 client: self,
-                deadline: Instant::now() + Duration::from_secs(10),
+                deadline,
             };
             let body = json!({"op":op,"params":params}).to_string();
             let bearer = self

@@ -14,7 +14,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/cito-native /usr/local/bin/cito
 COPY plugins/telegram/plugin.json /app/plugins/telegram/plugin.json
 COPY --from=builder /app/target/release/cito-plugin-telegram /app/plugins/telegram/bin/cito-plugin-telegram
-ENV CITO_PLUGIN_DIR=/app/plugins CITO_HUB_DATA_DIR=/data CITO_HUB_BIND=0.0.0.0 CITO_HUB_PORT=4291
+ENV CITO_BUILTIN_PLUGINS_DIR=/app/plugins CITO_HUB_DATA_DIR=/data CITO_HUB_BIND=0.0.0.0 CITO_HUB_PORT=4291
 USER cito
 EXPOSE 4291
 ENTRYPOINT ["cito", "hub"]

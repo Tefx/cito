@@ -205,7 +205,8 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
     if !path.try_exists().map_err(|e| e.to_string())? {
         return Ok(vec![]);
     }
-    let columns = sqlite_rows(&path, "PRAGMA table_info(threads)")?;
+    let connection = ReadOnlySqlite::open(&path, Duration::from_millis(1200))?;
+    let columns = connection.rows("PRAGMA table_info(threads)")?;
     let has = |name: &str| columns.iter().any(|c| c["name"] == name);
     if !has("id") || !has("cwd") {
         return Ok(vec![]);
@@ -248,9 +249,8 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         order.push("updated_at DESC");
     }
     order.push("rowid DESC");
-    Ok(sqlite_rows(
-        &path,
-        &format!(
+    Ok(connection
+        .rows(&format!(
             "SELECT {projection} FROM threads WHERE {} ORDER BY {}{}",
             predicates.join(" AND "),
             order.join(", "),
@@ -259,12 +259,11 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
             } else {
                 ""
             }
-        ),
-    )?
-    .into_iter()
-    // Preserve caller validation for whitespace-only IDs and working directories.
-    .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
-    .collect())
+        ))?
+        .into_iter()
+        // Preserve caller validation for whitespace-only IDs and working directories.
+        .filter(|row| str_at(row, "id").is_some() && str_at(row, "cwd").is_some())
+        .collect())
 }
 fn metadata_id(req: &Value) -> Result<Option<String>> {
     let mut ids = vec![];
@@ -456,6 +455,14 @@ pub fn handle(req: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"caller":remember_process(c)}))
         }
         "probe" => {
+            let inspection = setup(
+                &json!({"op":"setup_inspect","env":req["env"],"state_dir":req["state_dir"],"plugin_dir":req["plugin_dir"]}),
+            )?;
+            if inspection["configured"] != true {
+                return Ok(
+                    json!({"ok":true,"status":"closed_definitive","reason":"Integration is disconnected"}),
+                );
+            }
             let id = str_at(req, "session_id").unwrap_or("");
             let archived = sqlite_rows(
                 &db(req),

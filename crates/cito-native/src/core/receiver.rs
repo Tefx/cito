@@ -244,9 +244,25 @@ pub fn poll_listener(
     drop(registration_guard);
     // Business acknowledgments can arrive after transport cursor advancement. Reconcile
     // unread rows from durable stream metadata even when no new backlog item is emitted.
-    for row in local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL",&[json!(hub),json!(id)])?{
-        if let Ok(remote)=client.rpc("stream_get_message",&json!({"stream":"CITO_SIGNALS","seq":row["seq"]})){
-            if !remote["acked_at_ms"].is_null(){local.db.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND signal_id=?",&[remote["acked_at_ms"].clone(),json!(hub),row["signal_id"].clone()])?;}
+    let cursor = local
+        .listener(hub, id)?
+        .map(|r| r["ack_scan_seq"].as_u64().unwrap_or(0))
+        .unwrap_or(0);
+    let mut pending = local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL AND seq>? ORDER BY seq LIMIT 128",&[json!(hub),json!(id),json!(cursor)])?;
+    if pending.is_empty() && cursor > 0 {
+        pending = local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL ORDER BY seq LIMIT 128",&[json!(hub),json!(id)])?;
+    }
+    if !pending.is_empty() {
+        if let Ok(remote) = client.rpc("stream_get_message",&json!({"stream":"CITO_SIGNALS","seqs":pending.iter().map(|r|r["seq"].clone()).collect::<Vec<_>>()})) {
+            local.db.transaction(|db| {
+                for message in remote["messages"].as_array().into_iter().flatten() {
+                    if !message["acked_at_ms"].is_null() && pending.iter().any(|p|p["seq"] == message["seq"] && p["signal_id"] == message["signal_id"]) {
+                        db.execute("UPDATE local_signals SET acknowledged_at_ms=COALESCE(acknowledged_at_ms,?),state=CASE WHEN state='RECEIVED' THEN 'STORED_PASSIVE' ELSE state END WHERE hub=? AND listener_id=? AND signal_id=?",&[message["acked_at_ms"].clone(),json!(hub),json!(id),message["signal_id"].clone()])?;
+                    }
+                }
+                db.execute("UPDATE local_listeners SET ack_scan_seq=? WHERE hub=? AND listener_id=?",&[pending.last().map(|r|r["seq"].clone()).unwrap_or(json!(0)),json!(hub),json!(id)])?;
+                Ok(())
+            })?;
         }
     }
     let now = now_ms();

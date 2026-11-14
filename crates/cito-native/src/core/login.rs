@@ -134,8 +134,7 @@ impl<'a> Settings<'a> {
             .or_else(|| config.get("oidcIssuer"))
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .ok_or("INVALID_INPUT: issuer required")?
-            .trim_end_matches('/');
+            .ok_or("INVALID_INPUT: issuer required")?;
         crate::plugins::validate_https_issuer(issuer)
             .map_err(|error| format!("INVALID_INPUT: {error}"))?;
         let client = config
@@ -463,7 +462,7 @@ fn recover_inner(
         deadline
             .request(agent.get(&format!(
                 "{}/.well-known/openid-configuration",
-                settings.issuer
+                settings.issuer.trim_end_matches('/')
             )))?
             .call()
             .map_err(|e| deadline.network_error(e))?,

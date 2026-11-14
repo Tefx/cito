@@ -119,6 +119,410 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
 }
 
 #[test]
+fn cli_disable_stops_active_listeners_and_invalidates_cached_discovery() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    f.tool("cito_listen", json!({"about":"Disconnect me"}), meta);
+    assert!(!f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    let options = f.state.join("plugins/fixture/options.json");
+    let mut config: Value = serde_json::from_str(&fs::read_to_string(&options).unwrap()).unwrap();
+    config["configured"] = json!(false);
+    fs::write(&options, config.to_string()).unwrap();
+    let (ok, out, error) = f.command(NATIVE, &["setup", "--disable", "fixture", "--json"], "");
+    assert!(ok, "{out} {error}");
+    assert!(f
+        .rows("SELECT * FROM local_listeners WHERE harness='fixture' AND status='ACTIVE'")
+        .is_empty());
+    assert!(!f.action(json!({"op":"get_snapshot"})).1["available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["harness"] == "fixture"));
+    assert!(
+        fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl"))
+            .unwrap()
+            .lines()
+            .any(|l| serde_json::from_str::<Value>(l).unwrap()["op"] == "setup_remove")
+    );
+}
+#[test]
+fn daemon_plugins_strip_inherited_caller_identity_but_honor_explicit_request_environment() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    for key in [
+        "CODEX_THREAD_ID",
+        "CLAUDE_SESSION_ID",
+        "PI_CODING_AGENT_SESSION_FILE",
+        "CITO_ENDPOINT_PID",
+    ] {
+        f.env.insert(key.into(), "inherited".into());
+    }
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    f.tool("cito_listen", json!({"about":"Inspect environment"}), meta);
+    let calls_path = f.state.join("plugins/fixture/calls.jsonl");
+    let records = || {
+        fs::read_to_string(&calls_path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let calls = records();
+    let resolve = calls
+        .iter()
+        .filter(|r| r["op"] == "resolve_caller")
+        .collect::<Vec<_>>();
+    assert!(!resolve.is_empty());
+    assert!(
+        resolve.iter().all(|r| r["process_env"] == json!({})),
+        "{resolve:?}"
+    );
+    let dir = f.state.join("plugins/fixture");
+    let plugin = cito_native::plugins::parse_manifest_dir(&dir, false).unwrap();
+    let explicit = cito_native::plugins::plugin_request(&plugin,&json!({"op":"discover_sessions","state_dir":f.state,"env":{"HOME":f.home,"CITO_STATE_DIR":f.state,"CITO_CONFIG_PATH":f.config,"CODEX_THREAD_ID":"requested"}})).unwrap();
+    assert_eq!(explicit["ok"], true);
+    assert!(records()
+        .iter()
+        .any(|r| r["op"] == "discover_sessions"
+            && r["process_env"]["CODEX_THREAD_ID"] == "requested"));
+}
+#[test]
+fn long_lived_stdio_recovers_after_daemon_restart_and_configured_port_change() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    f.env.remove("CITO_DAEMON_PORT");
+    fs::write(&f.config, json!({"daemonPort":f.port}).to_string()).unwrap();
+    let first = f.daemon(&[]);
+    let stdio = f.spawn(NATIVE, &["mcp-stdio"], &[]);
+    f.send(
+        stdio,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+    );
+    wait(|| f.frames(stdio).iter().any(|r| r["id"] == 1));
+    assert!(f
+        .frames(stdio)
+        .iter()
+        .find(|r| r["id"] == 1)
+        .unwrap()
+        .get("result")
+        .is_some());
+    f.stop(first);
+    f.port = port();
+    let mut config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    config["daemonPort"] = json!(f.port);
+    fs::write(&f.config, config.to_string()).unwrap();
+    f.daemon(&[]);
+    f.send(
+        stdio,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    );
+    wait(|| f.frames(stdio).iter().any(|r| r["id"] == 2));
+    let response = f.frames(stdio).into_iter().find(|r| r["id"] == 2).unwrap();
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(
+        response["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "{response}"
+    );
+    f.eof(stdio);
+    wait(|| f.exited(stdio));
+}
+#[test]
+fn uninstall_requires_exclusive_owner_lock_even_when_health_is_unreachable() {
+    use std::os::fd::AsRawFd;
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let marker = f.state.join("retained-data");
+    fs::write(&marker, "preserve").unwrap();
+    let owner = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(f.state.join("daemon.lock"))
+        .unwrap();
+    // SAFETY: this test owns the descriptor until the explicit unlock below.
+    assert_eq!(
+        unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let (ok, _, error) = f.command(
+        NATIVE,
+        &["setup", "--uninstall", "--purge-data", "--json"],
+        "",
+    );
+    assert!(!ok && error.contains("owner lock is held"), "{error}");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "preserve");
+    assert!(f.config.exists());
+    // SAFETY: release the same owned file descriptor; the lock inode stays stable.
+    assert_eq!(unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_UN) }, 0);
+    let (ok, out, error) = f.command(
+        NATIVE,
+        &["setup", "--uninstall", "--purge-data", "--json"],
+        "",
+    );
+    assert!(ok, "{out} {error}");
+    assert!(!marker.exists());
+    assert!(!f.config.exists());
+    assert!(fs::read_dir(&f.state)
+        .unwrap()
+        .all(|entry| entry.unwrap().file_name() == "daemon.lock"));
+}
+#[test]
+fn background_oidc_recovery_does_not_block_health_or_a_healthy_hub() {
+    use std::{
+        io::Write,
+        net::TcpListener,
+        time::{Duration, Instant},
+    };
+    let _lock = serial();
+    let issuer = TcpListener::bind("127.0.0.1:0").unwrap();
+    let issuer_url = format!("http://{}", issuer.local_addr().unwrap());
+    let (accepted, ready) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let (finished, done) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = issuer.accept().unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        accepted.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(5));
+        let _ = stream.write_all(
+            b"HTTP/1.1 503 Unavailable\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        );
+        let _ = finished.send(());
+    });
+    let f = Fixture::new(json!({}));
+    f.daemon(&[]);
+    let saved = f.action(json!({"op":"setup_save_hub","name":"work","url":"http://127.0.0.1:1","authMode":"oidc","issuer":issuer_url,"clientId":"client"}));
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    let in_flight = done.try_recv().is_err();
+    let start = Instant::now();
+    let health = http(f.port, "/health", None);
+    let latency = start.elapsed();
+    let start = Instant::now();
+    let snapshot = f.action(json!({"op":"get_snapshot"}));
+    let snapshot_latency = start.elapsed();
+    let _ = release.send(());
+    worker.join().unwrap();
+    assert_eq!(saved.0, 200);
+    assert!(in_flight, "Probe runs during a blocked OIDC request");
+    assert_eq!(health.0, 200);
+    assert!(latency < Duration::from_millis(500), "{latency:?}");
+    assert_eq!(snapshot.0, 200);
+    assert!(
+        snapshot_latency < Duration::from_millis(500),
+        "{snapshot_latency:?}"
+    );
+    assert!(snapshot.1["hubs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h["name"] == "local" && h["status"] == "connected"));
+}
+#[test]
+fn gui_purge_removes_credentials_idempotency_hub_history_and_personal_profile_data() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    let human = f
+        .rows("SELECT * FROM local_listeners WHERE harness='human'")
+        .remove(0);
+    f.tool("cito_listen", json!({"about":"Delete this session"}), meta);
+    f.tool(
+        "cito_send",
+        json!({"to":human["public_id"],"message":"Delete this history"}),
+        json!({}),
+    );
+    assert!(!f.rows("SELECT * FROM local_sent_idempotency").is_empty());
+    let updated = f.action(json!({"op":"human_inbox_update","hub":"local","paused":true,"about":"Delete this profile"}));
+    assert_eq!(updated.0, 200);
+    fs::write(
+        f.state.join("oidc-token-work.json"),
+        "delete this credential",
+    )
+    .unwrap();
+    let result = f.action(json!({"op":"setup_disconnect_all","purge_data":true}));
+    assert_eq!(result.0, 200, "{}", result.1);
+    assert!(!f.state.join("oidc-token-work.json").exists());
+    for table in [
+        "local_signals",
+        "local_sent_idempotency",
+        "pending_hub_acks",
+        "pending_hub_detaches",
+        "session_custom_titles",
+    ] {
+        assert!(
+            f.rows(&format!("SELECT * FROM {table}")).is_empty(),
+            "{table}"
+        );
+    }
+    let hub = f.db("hub.sqlite");
+    assert!(hub
+        .query("SELECT * FROM hub_signals", &[])
+        .unwrap()
+        .is_empty());
+    let fresh = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(fresh["hubs"][0]["human_paused"], false);
+    assert_eq!(fresh["hubs"][0]["human_about"], "Human");
+    assert_eq!(fresh["hubs"][0]["human_control_revision"], 1);
+}
+#[test]
+fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
+    let _lock = serial();
+    let f = Fixture::new(
+        json!({"hubs":{"local":{"url":"local://"},"work":{"url":"https://hub.example.com","enabled":false}}}),
+    );
+    f.provider("delivered");
+    f.daemon(&[]);
+    let count = || {
+        fs::read_to_string(f.state.join("plugins/fixture/calls.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|r| r["op"] == "setup_inspect")
+            .count()
+    };
+    let initial = count();
+    assert_eq!(initial, 1);
+    for _ in 0..3 {
+        assert_eq!(f.action(json!({"op":"get_snapshot"})).0, 200);
+    }
+    assert_eq!(count(), initial, "Snapshots reuse setup inspection");
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
+        200
+    );
+    assert_eq!(count(), initial + 1);
+    assert_eq!(
+        f.action(json!({"op":"setup_remove_app","harness":"fixture"}))
+            .0,
+        200
+    );
+    assert_eq!(count(), initial + 2);
+    let db = f.db("state.sqlite");
+    db.execute("INSERT INTO local_listeners(hub,listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,status,hub_url) SELECT 'work',listener_id,principal_id,owner_user,host_id,host_name,harness,session_id,cwd,title,about,scope,'UNLISTENED','https://hub.example.com' FROM local_listeners WHERE hub='local' AND harness='human'",&[]).unwrap();
+    db.execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) SELECT 'work','pending',listener_id,1,0,'bob','laptop','','Keep','now',9999999999999,'STORED_PASSIVE' FROM local_listeners WHERE hub='work'; INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT hub,listener_id,'pending','device:human',1,hub_url,principal_id FROM local_listeners WHERE hub='work'; INSERT INTO pending_hub_detaches(hub,listener_id,hub_url) SELECT hub,listener_id,hub_url FROM local_listeners WHERE hub='work'",&[]).unwrap();
+    fs::write(f.state.join("oidc-token-work.json"), "retained credential").unwrap();
+    assert_eq!(f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"work","name":"cloud","url":"https://hub.example.com","enabled":false})).0,200);
+    for table in [
+        "local_listeners",
+        "local_signals",
+        "pending_hub_acks",
+        "pending_hub_detaches",
+    ] {
+        assert_eq!(
+            db.query(&format!("SELECT hub FROM {table} WHERE hub='cloud'"), &[])
+                .unwrap()
+                .len(),
+            1,
+            "{table}"
+        );
+        assert!(db
+            .query(&format!("SELECT hub FROM {table} WHERE hub='work'"), &[])
+            .unwrap()
+            .is_empty());
+    }
+    assert!(!f.state.join("oidc-token-work.json").exists());
+    assert_eq!(
+        fs::read_to_string(f.state.join("oidc-token-cloud.json")).unwrap(),
+        "retained credential"
+    );
+    db.execute("CREATE TRIGGER reject_rename BEFORE UPDATE ON local_listeners WHEN NEW.hub='blocked' BEGIN SELECT RAISE(ABORT,'injected rename failure'); END",&[]).unwrap();
+    let failed = f.action(json!({"op":"setup_save_hub","edit":true,"original_name":"cloud","name":"blocked","url":"https://hub.example.com","enabled":false}));
+    assert_eq!(failed.0, 400);
+    assert!(failed.1.to_string().contains("injected rename failure"));
+    let config: Value = serde_json::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+    assert!(config["hubs"]["cloud"].is_object());
+    assert!(config["hubs"].get("blocked").is_none());
+    assert!(f.state.join("oidc-token-cloud.json").exists());
+    assert!(!f.state.join("oidc-token-blocked.json").exists());
+    assert_eq!(
+        db.query("SELECT * FROM local_listeners WHERE hub='cloud'", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+}
+#[test]
+fn pending_business_ack_requires_original_url_and_principal() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    let human = f
+        .rows("SELECT * FROM local_listeners WHERE hub='local' AND harness='human'")
+        .remove(0);
+    let sent = f.tool(
+        "cito_send",
+        json!({"to":human["public_id"],"message":"Keep unread"}),
+        json!({}),
+    );
+    let id = sent["signal_id"].clone();
+    let state = f.db("state.sqlite");
+    let hub = f.db("hub.sqlite");
+    state.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES('local',?,?,'device:human',1,'https://other.example.com','none#bob')",&[human["listener_id"].clone(),id.clone()]).unwrap();
+    for (url, principal) in [
+        ("local://", "none#bob"),
+        (
+            "https://other.example.com",
+            human["principal_id"].as_str().unwrap(),
+        ),
+    ] {
+        state
+            .execute(
+                "UPDATE pending_hub_acks SET hub_url=?,principal_id=?",
+                &[json!(url), json!(principal)],
+            )
+            .unwrap();
+        f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
+        assert_eq!(
+            state
+                .query("SELECT * FROM pending_hub_acks", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(hub
+            .query(
+                "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+                std::slice::from_ref(&id)
+            )
+            .unwrap()[0]["acked_at_ms"]
+            .is_null());
+    }
+    state.transaction(|c| {
+        for i in 0..256 { c.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms) VALUES('local',?,?,'device:human',0)",&[human["listener_id"].clone(),json!(format!("unbound-{i}"))])?; }
+        c.execute("UPDATE pending_hub_acks SET hub_url='local://',principal_id=? WHERE signal_id=?",&[human["principal_id"].clone(),id.clone()])?;
+        Ok(())
+    }).unwrap();
+    f.tool("cito_inbox", json!({"ack_all":false}), meta);
+    let retained = state.query("SELECT * FROM pending_hub_acks", &[]).unwrap();
+    assert_eq!(
+        retained.len(),
+        256,
+        "Unbound history must not starve a valid later ACK"
+    );
+    assert!(retained
+        .iter()
+        .all(|r| r["hub_url"].is_null() && r["principal_id"].is_null()));
+    assert!(!hub
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+            &[id]
+        )
+        .unwrap()[0]["acked_at_ms"]
+        .is_null());
+}
+#[test]
 fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding() {
     let _lock = serial();
     let host = Fixture::new(json!({}));
@@ -149,9 +553,17 @@ fn u1_synthetic_sessions_follow_explicit_configuration_without_global_hardcoding
     let mut config: Value = serde_json::from_str(&fs::read_to_string(&options).unwrap()).unwrap();
     config["configured"] = json!(false);
     fs::write(&options, config.to_string()).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
+        200
+    );
     assert_eq!(snapshot()["available"], json!([]));
     config["configured"] = json!(true);
     fs::write(&options, config.to_string()).unwrap();
+    assert_eq!(
+        f.action(json!({"op":"setup_apply","harness":"fixture"})).0,
+        200
+    );
     assert!(snapshot()["available"]
         .as_array()
         .unwrap()
@@ -1679,7 +2091,14 @@ fn lifecycle_setup_repairs_shims_disconnects_listeners_and_keeps_daemon_ui_alive
     assert_eq!(config["default_hub"], "local");
     assert!(config.get("defaultHub").is_none());
     assert_eq!(config["hubs"], json!({}));
-    assert_eq!(service_config(), json!({}));
+    assert!(f
+        .db("hub.sqlite")
+        .query(
+            "SELECT * FROM hub_plugin_services WHERE plugin_id='channel'",
+            &[]
+        )
+        .unwrap()
+        .is_empty());
     assert!(f.rows("SELECT * FROM local_signals").is_empty());
     assert!(f
         .rows("SELECT * FROM local_listeners WHERE harness!='human'")
@@ -2154,7 +2573,7 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
     let daemon = f.daemon(&[]);
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        4
+        5
     );
     assert!(db
         .query(
@@ -2877,7 +3296,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .all(|v| v["message"].as_str().unwrap().chars().count() <= 512));
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        4
+        5
     );
     assert_eq!(
         db.query("SELECT COUNT(*) AS n FROM local_signals", &[])
@@ -3122,10 +3541,9 @@ fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
         .as_object()
         .unwrap()
         .contains_key(&format!("{}:human", human["host_id"].as_str().unwrap())));
-    remote["channels"]["remote-host:human"] =
-        json!({"state":"ACTIVE","host_name":"other-mac.local"});
+    remote["channels"]["remote-host:human"] = json!({"state":"ACTIVE","host_id":"remote-host","host_name":"other-mac.local","updated_at_ms":cito_native::plugins::now_ms()});
     remote["channels"]["hub:external"] =
-        json!({"state":"ACTIVE","display_name":"Telegram","host_name":"Hub"});
+        json!({"state":"ACTIVE","host_id":"hub","display_name":"Telegram","host_name":"Hub"});
     db.execute(
         "UPDATE hub_kv SET value=CAST(? AS BLOB),revision=revision+1 WHERE key=?",
         &[json!(remote.to_string()), human["listener_id"].clone()],
@@ -3271,13 +3689,7 @@ fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
         assert!(ok, "{args:?}: {out} {err}");
         serde_json::from_str::<Value>(&out).unwrap()
     };
-    run(&[
-        "listen",
-        "--harness",
-        "human",
-        "Device enrollment",
-        "--json",
-    ]);
+    run(&["listen", "--harness", "human", "--json"]);
     let paused = run(&[
         "inbox",
         "pause",
@@ -3326,20 +3738,28 @@ fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
         detached["hubs"][0]["human_control_revision"],
         resumed["record"]["human_control_revision"]
     );
-    let device = detached["hubs"][0]["attachments"]
+    assert!(!detached["hubs"][0]["attachments"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|a| a["is_local"] == true)
-        .unwrap();
-    assert_eq!(device["availability"], "UNLISTENED");
-    run(&[
-        "listen",
-        "--harness",
-        "human",
-        "Device enrollment",
-        "--json",
-    ]);
+        .any(|a| a["is_local"] == true));
+    for extra in [
+        vec!["--scope", "workspace"],
+        vec!["--team"],
+        vec!["Device enrollment"],
+    ] {
+        let args = [vec!["listen", "--harness", "human"], extra].concat();
+        let (ok, _, error) = f.command(NATIVE, &args, "");
+        assert!(
+            !ok && error.contains("INVALID_INPUT") && error.contains("cito inbox"),
+            "{error}"
+        );
+        assert!(!f
+            .rows("SELECT status FROM local_listeners WHERE harness='human'")
+            .iter()
+            .any(|r| r["status"] == "ACTIVE"));
+    }
+    run(&["listen", "--harness", "human", "--json"]);
     assert_eq!(
         run(&["unlisten", "--all", "--hub", "local", "--json"])["removed"],
         1
@@ -4035,7 +4455,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     assert_eq!(
         f.action(json!({"op":"unlisten_session","harness":"fixture","session_id":"session-1"}))
             .0,
-        200
+        400
     );
     assert!(f
         .rows("SELECT status FROM local_listeners WHERE harness='fixture'")

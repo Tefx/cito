@@ -295,16 +295,9 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
                 .and_then(|s| s.parse::<u32>().ok())
             {
                 let response = identify(req, p);
-                if req["op"] == "discover_sessions" && alive(p) {
-                    if let Err(error) = &response {
-                        return Err(error.clone());
-                    }
-                }
                 if let Ok(v) = response {
-                    if v["ok"] == false && alive(p) {
-                        return Err(str_at(&v, "message")
-                            .unwrap_or("Pi bridge identification failed")
-                            .to_string());
+                    if v["ok"] == false {
+                        continue;
                     }
                     if interactive_candidate(req, p)?
                         && v["ok"] == true

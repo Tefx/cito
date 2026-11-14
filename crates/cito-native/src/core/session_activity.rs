@@ -33,6 +33,9 @@ struct Discovery {
     started_at: u64,
     revision: Option<Arc<AtomicU64>>,
     started_revision: u64,
+    requested_generation: u64,
+    started_generation: u64,
+    error: Option<String>,
     seen_revision: u64,
     refreshed_revision: u64,
     due: Instant,
@@ -110,6 +113,9 @@ impl SessionActivity {
                     started_at: 0,
                     revision: None,
                     started_revision: 0,
+                    requested_generation: 0,
+                    started_generation: 0,
+                    error: None,
                     seen_revision: 0,
                     refreshed_revision: 0,
                     due: Instant::now(),
@@ -126,8 +132,18 @@ impl SessionActivity {
     /// Mark discovery due without spawning, waiting, or duplicating in-flight work.
     pub fn refresh_discovery(&mut self) {
         for provider in &mut self.discovery {
+            provider.requested_generation = provider.requested_generation.wrapping_add(1);
             provider.due = Instant::now();
         }
+    }
+    pub fn remove_candidates(&mut self, harness: &str) {
+        self.mark_stale(harness);
+        for provider in self.discovery.iter_mut().filter(|p| p.plugin.id == harness) {
+            provider.cached.clear();
+        }
+    }
+    pub fn discovery_status(&self) -> Vec<Value> {
+        self.discovery.iter().map(|p| json!({"harness":p.plugin.id,"status":if p.worker.is_some(){"scanning"}else if p.error.is_some(){"error"}else{"ready"},"error":p.error})).collect()
     }
 
     /// Revoke cached enrollment authority while preserving presentation and workers.
@@ -327,6 +343,7 @@ impl SessionActivity {
                 .map(|revision| revision.load(Ordering::SeqCst))
                 .unwrap_or(0);
             provider.started_at = now_ms();
+            provider.started_generation = provider.requested_generation;
             let plugin = provider.plugin.clone();
             let request = json!({"op":"discover_sessions","state_dir":self.state_dir,"env":self.env,
                 "plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
@@ -371,14 +388,18 @@ impl SessionActivity {
                 continue;
             }
             if let Some(worker) = provider.worker.take() {
+                provider.error = None;
+                changed = true;
                 let rows = match worker.join() {
                     Ok(Ok(rows)) => Some(rows),
                     Ok(Err(error)) => {
                         eprintln!("cito discovery {}: {error}", provider.plugin.id);
+                        provider.error = Some(error);
                         None
                     }
                     Err(_) => {
                         eprintln!("cito discovery {}: worker panicked", provider.plugin.id);
+                        provider.error = Some("Discovery worker panicked".into());
                         None
                     }
                 };
@@ -386,14 +407,19 @@ impl SessionActivity {
                     || provider.revision.as_ref().is_some_and(|revision| {
                         revision.load(Ordering::SeqCst) != provider.started_revision
                     });
-                let invalidated = provider.stale && rows.is_some();
+                let invalidated = provider.requested_generation != provider.started_generation
+                    || (provider.stale && rows.is_some());
+                if rows.is_none() {
+                    provider.cached.clear();
+                }
                 if let Some(rows) = rows {
                     // A refresh already in flight at revocation is not newer evidence,
                     // even if its result is joined after the revocation transaction.
                     provider.refreshed_at = provider.started_at;
                     provider.refreshed_revision = provider.started_revision;
-                    changed |= rows != provider.cached;
-                    provider.cached = rows;
+                    if !provider.stale {
+                        provider.cached = rows;
+                    }
                 }
                 provider.due = Instant::now()
                     + if invalidated {
@@ -774,6 +800,7 @@ print(json.dumps(response), flush=True)
                 sf_symbol: "bolt".into(),
                 tint: "blue".into(),
                 cli_flag: false,
+                pid_bound: true,
                 plugin_dir: path.clone(),
                 is_builtin: false,
                 channel_env: None,
@@ -929,7 +956,34 @@ print(json.dumps(response), flush=True)
     }
 
     #[test]
-    fn discovery_errors_and_panics_retain_last_confirmed_candidates() -> Result<(), String> {
+    fn refresh_during_inflight_discovery_runs_the_new_generation_without_reap_delay(
+    ) -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider(
+            "agent",
+            json!({"discovery_delay":0.08,"sessions":[{"harness":"agent","session_id":"old","cwd":"/repo"}]}),
+        )?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        pump(&mut activity, &f, &[], |_| {
+            !f.calls("agent", "discover_sessions").is_empty()
+        })?;
+        fs::write(
+            f.dir.join("agent/options.json"),
+            json!({"sessions":[{"harness":"agent","session_id":"new","cwd":"/repo"}]}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        activity.refresh_discovery();
+        pump(&mut activity, &f, &[], |a| {
+            a.candidates().any(|r| r["session_id"] == "new")
+        })?;
+        assert_eq!(f.calls("agent", "discover_sessions").len(), 2);
+        assert!(!activity.candidates().any(|r| r["session_id"] == "old"));
+        assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        activity.shutdown()?;
+        Ok(())
+    }
+    #[test]
+    fn discovery_errors_and_panics_clear_stale_candidates() -> Result<(), String> {
         let mut f = Fixture::new()?;
         f.provider("agent", json!({}))?;
         let mut activity = SessionActivity::new(&f.config, &f.plugins);
@@ -949,12 +1003,9 @@ print(json.dumps(response), flush=True)
                 "Do not enroll an identity while its refresh is unconfirmed"
             );
             pump(&mut activity, &f, &[], |a| a.discovery[0].worker.is_none())?;
-            assert_eq!(activity.discovery[0].cached, confirmed);
-            assert_eq!(
-                activity.available(&[], 1),
-                confirmed,
-                "Retained sessions stay visible"
-            );
+            assert!(activity.discovery[0].cached.is_empty());
+            assert!(activity.available(&[], 1).is_empty());
+            assert_eq!(activity.discovery_status()[0]["status"], "error");
             assert_eq!(
                 activity.candidates().count(),
                 0,

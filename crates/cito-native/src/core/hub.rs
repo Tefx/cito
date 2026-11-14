@@ -318,6 +318,42 @@ pub struct HubEngine {
     inner: Arc<Inner>,
 }
 impl HubEngine {
+    pub fn reset_data(&self) -> Result<(), String> {
+        let _lifecycle = self
+            .inner
+            .lifecycle
+            .lock()
+            .map_err(|_| "Channel lifecycle lock poisoned")?;
+        let ids = self
+            .inner
+            .processes
+            .lock()
+            .map_err(|_| "Channel process lock poisoned")?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.stop_process(&id)?;
+        }
+        self.inner.db.transaction(|db| {
+            for table in [
+                "hub_channel_delivery_msgs",
+                "hub_channel_deliveries",
+                "hub_consumer_acks",
+                "hub_consumers",
+                "hub_signals",
+                "hub_processed_replies",
+                "hub_audit_log",
+                "hub_pairing_codes",
+                "hub_human_channels",
+                "hub_plugin_services",
+                "hub_kv",
+            ] {
+                db.execute(&format!("DELETE FROM {table}"), &[])?;
+            }
+            Ok(())
+        })
+    }
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         Self::open_with_auth_mode(data_dir, "none")
     }
@@ -541,6 +577,28 @@ impl HubEngine {
             "stream_get_message" => {
                 if s(p, "stream") != SIGNALS {
                     return Err("10037: no message found".into());
+                }
+                if let Some(seqs) = p.get("seqs") {
+                    let seqs = seqs
+                        .as_array()
+                        .filter(|s| {
+                            !s.is_empty()
+                                && s.len() <= 128
+                                && s.iter().all(|s| s.as_u64().is_some())
+                        })
+                        .ok_or("INVALID_INPUT: seqs must contain 1..128 sequence numbers")?;
+                    let placeholders = vec!["?"; seqs.len()].join(",");
+                    let mut messages = Vec::new();
+                    for row in c.query(
+                        &format!("{SIGNAL_SELECT} WHERE seq IN ({placeholders})"),
+                        seqs,
+                    )? {
+                        if !signal_readable(c, &row, caller)? {
+                            return Err("FORBIDDEN: signal is private".into());
+                        }
+                        messages.push(json!({"seq":row["seq"],"signal_id":row["signal_id"],"acked_at_ms":row["acked_at_ms"]}));
+                    }
+                    return Ok((json!({"messages":messages}), None));
                 }
                 let row = one(
                     c,
@@ -1277,14 +1335,7 @@ impl HubEngine {
         first_error.map_or(Ok(()), Err)
     }
     fn replay(&self, plugin: &ChannelPlugin, process: &ChannelProcess) -> Result<(), String> {
-        // A live process owns its entire queue, including multipart network delivery.
-        // Renew queued reservations together; process replacement releases them above.
-        if process.alive() {
-            self.inner.db.execute(
-                "UPDATE hub_channel_deliveries SET delivered_ms=? WHERE plugin_id=? AND status='in_flight'",
-                &[json!(now_ms()), json!(plugin.id)],
-            )?;
-        }
+        // Reservation expiry measures delivery progress, independently of process liveness.
         let reservations = self.reserve_deliveries(plugin)?;
         let mut send_error = None;
         for send in reservations {
@@ -1300,7 +1351,15 @@ impl HubEngine {
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
-        "cursor_save"=>self.inner.db.transaction(|c|{let(_,mut state)=service(c,id)?;state["cursor"]=frame["cursor"].clone();c.execute("UPDATE hub_plugin_services SET service_state_json=?,updated_ms=? WHERE plugin_id=?",&[json!(state.to_string()),json!(now_ms()),json!(id)])?;Ok(Value::Null)}),
+        "cursor_save"=>self.inner.db.transaction(|c|{
+            let(_,mut state)=service(c,id)?;
+            let numeric = |v:&Value| v.as_u64().or_else(||v.as_str().and_then(|s|s.parse::<u64>().ok()));
+            if let Some(cursor) = numeric(&frame["cursor"]).filter(|n|*n <= i64::MAX as u64) {
+                let floor = cursor.max(numeric(&state["reply_floor"]).unwrap_or(0));
+                state["cursor"]=json!(floor); state["reply_floor"]=json!(floor);
+                c.execute("DELETE FROM hub_processed_replies WHERE plugin_id=? AND update_id!='' AND update_id NOT GLOB '*[^0-9]*' AND CAST(update_id AS INTEGER)<?",&[json!(id),json!(floor)])?;
+            } else { state["cursor"]=frame["cursor"].clone(); }
+            c.execute("UPDATE hub_plugin_services SET service_state_json=?,updated_ms=? WHERE plugin_id=?",&[json!(state.to_string()),json!(now_ms()),json!(id)])?;Ok(Value::Null)}),
         "health"=>self.inner.db.transaction(|c|{let(_,mut state)=service(c,id)?;state["poll_error"]=frame["error"].clone();c.execute("UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",&[json!(state.to_string()),json!(id)])?;Ok(Value::Null)}),
         "delivered"=>self.delivery_result(id,frame),
         "pair_redeem"=>self.redeem(id,frame),
@@ -1437,7 +1496,10 @@ impl HubEngine {
         let mut events = Vec::new();
         let mut ack_frames = Vec::new();
         let result=self.inner.db.transaction(|c|{
-        let update=required(f,"update_id")?;if one(c,"SELECT 1 AS n FROM hub_processed_replies WHERE plugin_id=? AND update_id=?",&[json!(id),json!(update)])?.is_some(){return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null}))}
+        let update=required(f,"update_id")?;
+        let (_,state) = service(c,id)?;
+        if update.parse::<u64>().ok().is_some_and(|n|n < state["reply_floor"].as_u64().unwrap_or(0)) { return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null})); }
+        if one(c,"SELECT 1 AS n FROM hub_processed_replies WHERE plugin_id=? AND update_id=?",&[json!(id),json!(update)])?.is_some(){return Ok(json!({"op":"reply_ack","update_id":update,"ok":true,"duplicate":true,"error":null}))}
         let chat=required(f,"external_chat_id")?;let user=required(f,"external_user_id")?;
         let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=?",&[json!(id)])?;
         let matches: Vec<_> = bindings.into_iter().filter(|b|{let cfg=parse(b,"user_config_json");s(&cfg,"_external_chat_id")==chat&&s(&cfg,"_external_user_id")==user}).collect();
@@ -1785,10 +1847,11 @@ fn backlog_from(
     min_seq: i64,
 ) -> Result<Value, String> {
     prune(c)?;
-    let rows=c.query(&format!("{SIGNAL_SELECT} WHERE seq>=? AND seq NOT IN(SELECT seq FROM hub_consumer_acks WHERE name=?) ORDER BY seq"),&[json!(min_seq),row["name"].clone()])?;
     let mut items = Vec::new();
     let mut page_bytes = 0;
-    for item in rows {
+    let filter = s(row, "filter_subject");
+    let wildcard = filter.is_empty() || filter.contains('*') || filter.contains('>');
+    c.query_while(&format!("{SIGNAL_SELECT} WHERE seq>=? AND (? OR subject=?) AND seq NOT IN(SELECT seq FROM hub_consumer_acks WHERE name=?) ORDER BY seq"),&[json!(min_seq),json!(wildcard),json!(filter),row["name"].clone()],|item| {
         if matches(s(&item, "subject"), s(row, "filter_subject"))
             && can_consume(c, subject_target(s(&item, "subject")).unwrap_or(""), p)?
         {
@@ -1796,13 +1859,12 @@ fn backlog_from(
             let size = wire.to_string().len() + 1;
             // Apply the caller's sequence floor before byte pagination so unread pages
             // cannot hide later items from sequential consumers.
-            if !items.is_empty() && page_bytes + size > 4 * 1024 * 1024 {
-                break;
-            }
+            if !items.is_empty() && page_bytes + size > 4 * 1024 * 1024 { return Ok(false); }
             page_bytes += size;
             items.push(wire);
         }
-    }
+        Ok(true)
+    })?;
     Ok(json!({"filterSubject":row["filter_subject"],"startSeq":row["start_seq"],"backlog":items}))
 }
 fn ids(p: &Value) -> Result<Vec<String>, String> {
@@ -2179,9 +2241,13 @@ fn human_operation(
             if host == "hub" || channel != format!("{host}:human") {
                 return Err("INVALID_INPUT: Device channel must match host_id".into());
             }
-            if !existing.is_null()
-                && !same
-                && generation <= existing["binding_generation"].as_u64().unwrap_or(0)
+            if generation
+                <= reg["device_generation_fences"][channel]
+                    .as_u64()
+                    .unwrap_or(0)
+                || (!existing.is_null()
+                    && !same
+                    && generation <= existing["binding_generation"].as_u64().unwrap_or(0))
             {
                 return Err("STALE_GENERATION: Human device attachment superseded".into());
             }
@@ -2472,9 +2538,13 @@ fn handle_http(
         }
         let principal = auth.authenticate(&headers)?;
         if path == "/v1/events" && method == "GET" {
+            let expires_at = principal["token_expires_at"].as_f64();
             let events = engine.subscribe(Some(principal))?;
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n\r\n:ok\n\n").map_err(|e|e.to_string())?;
-            while !stop.load(Ordering::SeqCst) && !engine.inner.closed.load(Ordering::SeqCst) {
+            while !stop.load(Ordering::SeqCst)
+                && !engine.inner.closed.load(Ordering::SeqCst)
+                && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
+            {
                 match events.recv_timeout(Duration::from_secs(1)) {
                     Ok(frame) => {
                         write!(stream, "data: {frame}\n\n").map_err(|e| e.to_string())?;

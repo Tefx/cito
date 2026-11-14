@@ -5,7 +5,7 @@ pub use core::{daemon, hub, plugins, setup};
 use plugins::{ensure_daemon, http_post_mcp, load_native_config, CITO_VERSION};
 use serde_json::{json, Value};
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -54,14 +54,41 @@ static STDIO_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 extern "C" fn stdio_signal(_: libc::c_int) {
     STDIO_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
+fn pop_stdio_line(pending: &mut Vec<u8>) -> Result<Option<String>, String> {
+    if let Some(end) = pending.iter().position(|b| *b == b'\n') {
+        if end > 1_048_576 {
+            return Err("MCP line exceeds 1 MiB".into());
+        }
+        let bytes = pending.drain(..=end).collect();
+        return String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| e.to_string());
+    }
+    if pending.len() > 1_048_576 {
+        return Err("MCP line exceeds 1 MiB".into());
+    }
+    Ok(None)
+}
+fn read_sidecar_line(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    let n = reader.take(1_048_577).read_line(&mut line)?;
+    if n > 1_048_576 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Sidecar line exceeds 1 MiB",
+        ));
+    }
+    Ok((n > 0).then_some(line))
+}
 fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
     loop {
         if STDIO_STOP.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
-        if let Some(end) = pending.iter().position(|b| *b == b'\n') {
-            let bytes: Vec<_> = pending.drain(..=end).collect();
-            return String::from_utf8(bytes).ok();
+        match pop_stdio_line(pending) {
+            Ok(Some(line)) => return Some(line),
+            Ok(None) => {}
+            Err(_) => return None,
         }
         let mut fd = libc::pollfd {
             fd: libc::STDIN_FILENO,
@@ -86,9 +113,6 @@ fn read_stdio_line(pending: &mut Vec<u8>) -> Option<String> {
             return None;
         }
         pending.extend_from_slice(&bytes[..count as usize]);
-        if pending.len() > 1_048_576 {
-            return None;
-        }
     }
 }
 fn run_mcp_stdio() {
@@ -166,19 +190,14 @@ fn run_mcp_stdio() {
             let out = lock.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stdout);
-                let mut first = String::new();
-                let ready = reader
-                    .read_line(&mut first)
+                let ready = read_sidecar_line(&mut reader)
                     .map_err(|e| e.to_string())
-                    .and_then(|n| {
-                        if n == 0 {
-                            Err("Plugin exited before ready".into())
-                        } else {
-                            serde_json::from_str::<Value>(&first).map_err(|e| e.to_string())
-                        }
+                    .and_then(|line| line.ok_or_else(|| "Plugin exited before ready".to_owned()))
+                    .and_then(|line| {
+                        serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())
                     });
                 let _ = tx.send(ready);
-                for line in reader.lines().map_while(Result::ok) {
+                while let Ok(Some(line)) = read_sidecar_line(&mut reader) {
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
                         if v["jsonrpc"] == "2.0" && v.get("method").is_some() {
                             output(&out, &v)
@@ -217,15 +236,24 @@ fn run_mcp_stdio() {
             }
             req["params"]["_meta"]["_stdio"] = json!({"endpoint_pid":endpoint});
         }
-        let result = http_post_mcp(
-            config.daemon_port,
-            &req.to_string(),
-            Duration::from_secs(60),
-        )
-        .and_then(|r| {
-            extract_jsonrpc_from_http_body(&r.body)
-                .ok_or_else(|| format!("Invalid daemon response (HTTP {})", r.status))
-        });
+        // Probe each subsequent request before forwarding. A failed mutating
+        // request is reported once and is never replayed after uncertain delivery.
+        let result = load_native_config()
+            .and_then(|(current, _)| {
+                if current.state_dir != config.state_dir {
+                    return Err("MCP state directory changed; restart the client".into());
+                }
+                ensure_daemon(&current)?;
+                http_post_mcp(
+                    current.daemon_port,
+                    &req.to_string(),
+                    Duration::from_secs(60),
+                )
+            })
+            .and_then(|r| {
+                extract_jsonrpc_from_http_body(&r.body)
+                    .ok_or_else(|| format!("Invalid daemon response (HTTP {})", r.status))
+            });
         if let Some(id) = id {
             match result {
                 Ok(mut rpc) => {
@@ -245,6 +273,44 @@ fn run_mcp_stdio() {
         }
     }
     drop(sidecars);
+}
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    #[test]
+    fn adjacent_valid_lines_do_not_share_the_line_budget() {
+        let mut pending = vec![b' '; 1_048_576];
+        pending.push(b'\n');
+        pending.extend_from_slice(b"{}\n");
+        assert_eq!(
+            pop_stdio_line(&mut pending).unwrap().unwrap().len(),
+            1_048_577
+        );
+        assert_eq!(
+            pop_stdio_line(&mut pending).unwrap().as_deref(),
+            Some("{}\n")
+        );
+        assert!(pop_stdio_line(&mut pending).unwrap().is_none());
+        let mut oversized = vec![b'x'; 1_048_577];
+        oversized.push(b'\n');
+        assert!(pop_stdio_line(&mut oversized).is_err());
+        let mut no_newline = vec![b'x'; 1_048_577];
+        assert!(pop_stdio_line(&mut no_newline).is_err());
+    }
+    #[test]
+    fn sidecar_lines_stop_at_the_budget() {
+        let mut reader = std::io::Cursor::new(b"{}\n{}\n");
+        assert_eq!(
+            read_sidecar_line(&mut reader).unwrap().as_deref(),
+            Some("{}\n")
+        );
+        assert_eq!(
+            read_sidecar_line(&mut reader).unwrap().as_deref(),
+            Some("{}\n")
+        );
+        assert!(read_sidecar_line(&mut reader).unwrap().is_none());
+        assert!(read_sidecar_line(&mut std::io::Cursor::new(vec![b'x'; 1_048_577])).is_err());
+    }
 }
 fn main() {
     let args: Vec<String> = env::args().collect();

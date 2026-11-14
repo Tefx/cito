@@ -191,6 +191,18 @@ impl Connection {
         values: &[Value],
         mut visit: impl FnMut(Value),
     ) -> Result<(), String> {
+        self.query_while(sql, values, |row| {
+            visit(row);
+            Ok(true)
+        })
+    }
+    /// Stop stepping as soon as a bounded consumer has filled its page.
+    pub fn query_while(
+        &self,
+        sql: &str,
+        values: &[Value],
+        mut visit: impl FnMut(Value) -> Result<bool, String>,
+    ) -> Result<(), String> {
         let mut stmt = self.prepare(sql)?;
         self.bound(&mut stmt, values)?;
         loop {
@@ -231,7 +243,9 @@ impl Connection {
                     row.insert(name, value);
                 }
             }
-            visit(Value::Object(row));
+            if !visit(Value::Object(row))? {
+                break;
+            }
         }
         drop(stmt);
         Ok(())

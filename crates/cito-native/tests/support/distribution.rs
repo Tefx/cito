@@ -239,6 +239,68 @@ fn distribution_versions_native_manifests_cask_and_signed_ui() {
     );
 }
 #[test]
+fn repository_wrappers_dispatch_relocatably_and_test_runner_isolates_environment() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let bin = f.dir.join("wrappers/bin");
+    fs::create_dir_all(&bin).unwrap();
+    for name in ["cito", "cito-daemon", "cito-hub", "cito-mcp"] {
+        fs::copy(root().join("bin").join(name), bin.join(name)).unwrap();
+    }
+    script(
+        &bin.join("cito-native-darwin-arm64"),
+        "#!/bin/sh\nprintf '%s\\n' \"$CITO_BUILTIN_PLUGINS_DIR\" \"$CITO_ENDPOINT_PID\" \"$@\"\n",
+    );
+    f.env.remove("CITO_BUILTIN_PLUGINS_DIR");
+    f.env.remove("CITO_ENDPOINT_PID");
+    for (name, args, expected) in [
+        ("cito", vec!["--version"], vec!["--version"]),
+        ("cito-daemon", vec!["argument"], vec!["daemon", "argument"]),
+        ("cito-hub", vec!["argument"], vec!["hub", "argument"]),
+        ("cito-mcp", vec![], vec!["mcp-stdio"]),
+        ("cito-mcp", vec!["--version"], vec!["--version"]),
+    ] {
+        let alias = f.dir.join("entry");
+        std::os::unix::fs::symlink(bin.join(name), &alias).unwrap();
+        let (ok, out, err) = f.command(alias.to_str().unwrap(), &args, "");
+        assert!(ok, "{err}");
+        let lines = out.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[0],
+            bin.canonicalize()
+                .unwrap()
+                .join("../plugins")
+                .to_str()
+                .unwrap()
+        );
+        assert!(lines[1].parse::<u32>().unwrap() > 0);
+        assert_eq!(&lines[2..], expected.as_slice());
+        fs::remove_file(alias).unwrap();
+    }
+    fs::remove_file(bin.join("cito-native-darwin-arm64")).unwrap();
+    let (ok, _, err) = f.command(bin.join("cito").to_str().unwrap(), &[], "");
+    assert!(!ok && err.contains("native binary is missing"));
+    f.env
+        .insert("CITO_WRAPPER_SENTINEL".into(), "must-not-leak".into());
+    let (ok, out, err) = f.command(
+        root().join("bin/cito-test-runner").to_str().unwrap(),
+        &["/usr/bin/env"],
+        "",
+    );
+    assert!(ok, "{err}");
+    let env = out
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(env["RUST_TEST_THREADS"], "2");
+    assert!(!env.contains_key("CITO_WRAPPER_SENTINEL"));
+    assert!(
+        !std::path::Path::new(env["HOME"]).exists(),
+        "Runner removes its isolated sandbox"
+    );
+    assert_eq!(env["CITO_UI_HEADLESS"], "1");
+}
+#[test]
 fn relocatable_signed_app_and_installed_shims_work_without_node() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -267,6 +329,22 @@ fn relocatable_signed_app_and_installed_shims_work_without_node() {
     fs::create_dir_all(moved.parent().unwrap()).unwrap();
     fs::rename(original, &moved).unwrap();
     let app = moved.as_path();
+    let obsolete = app.join("Contents/Resources/plugins/pi/obsolete");
+    fs::write(&obsolete, "retired staged file").unwrap();
+    let (ok, out, err) = f.command(
+        app.join("Contents/Helpers/cito-native").to_str().unwrap(),
+        &["setup", "--build-app", app.to_str().unwrap(), "--json"],
+        "",
+    );
+    assert!(ok, "In-place app rebuild failed: {out} {err}");
+    assert!(!obsolete.exists());
+    assert!(!fs::read_dir(app.parent().unwrap())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".Cito-")));
     // Keep stdin open until the relocated helper processes its main-run-loop frames.
     let helper = f.spawn(
         app.join("Contents/Helpers/cito-ui").to_str().unwrap(),

@@ -16,7 +16,7 @@ for key in ["HOME", "CITO_STATE_DIR", "CITO_CONFIG_PATH"]:
     if key in request.get("env", {}):
         assert request["env"][key] == os.environ[key]
 with (root / "calls.jsonl").open("a") as output:
-    output.write(json.dumps(request) + "\n")
+    output.write(json.dumps(dict(request, process_env={key: os.environ[key] for key in ["CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "PI_CODING_AGENT_SESSION_FILE", "CITO_ENDPOINT_PID"] if key in os.environ})) + "\n")
 caller = dict(harness="fixture", session_id=options["session_id"], cwd=options.get("cwd", str(root)), title=options.get("title", "Native fixture"), endpoint_pid=os.getppid())
 op = request["op"]
 result = dict(ok=True)

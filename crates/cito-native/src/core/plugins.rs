@@ -25,6 +25,7 @@ pub struct PluginDescriptor {
     pub sf_symbol: String,
     pub tint: String,
     pub cli_flag: bool,
+    pub pid_bound: bool,
     pub plugin_dir: PathBuf,
     pub is_builtin: bool,
     pub command: Vec<String>,
@@ -215,34 +216,19 @@ pub fn validate_nats_url(raw: &str) -> Result<String, String> {
     if trimmed == "local" || trimmed == "local://" {
         return Ok("local://".to_string());
     }
-    let Some((scheme, rest)) = trimmed.split_once("://") else {
-        return Err("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string());
-    };
-    if !matches!(scheme, "http" | "https" | "nats" | "ws" | "wss") {
-        return Err(
-            "CITO_NATS_URL must use local://, http://, https://, nats://, ws:// or wss:// without credentials"
-                .to_string(),
-        );
-    }
-    if rest.is_empty() || rest.contains('@') || rest.contains('?') || rest.contains('#') {
-        return Err(
-            "CITO_NATS_URL must use local://, http://, https://, nats://, ws:// or wss:// without credentials"
-                .to_string(),
-        );
-    }
-    let host_port = rest.split('/').next().unwrap_or("");
-    if host_port.is_empty() {
-        return Err("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string());
-    }
-    if let Some((_, port_str)) = host_port.rsplit_once(':') {
-        if !port_str.is_empty() && !port_str.ends_with(']') {
-            let p = port_str.parse::<u32>().map_err(|_| {
-                "CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string()
-            })?;
-            if !(1..=65535).contains(&p) {
-                return Err("CITO_NATS_URL must be a valid Hub, NATS, or WebSocket URL".to_string());
-            }
-        }
+    let invalid = "INVALID_INPUT: Hub URL must use local://, http:// or https:// without credentials, query or fragment";
+    let url = url::Url::parse(trimmed).map_err(|_| invalid.to_owned())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port() == Some(0)
+        || trimmed.chars().any(char::is_whitespace)
+        || trimmed.contains('\\')
+    {
+        return Err(invalid.into());
     }
     Ok(trimmed.trim_end_matches('/').to_string())
 }
@@ -274,7 +260,7 @@ pub fn validate_https_issuer(raw: &str) -> Result<String, String> {
                 .to_string(),
         );
     }
-    Ok(trimmed.trim_end_matches('/').to_string())
+    Ok(trimmed.to_string())
 }
 
 fn is_checked_cito_env_key(key: &str) -> bool {
@@ -466,6 +452,7 @@ pub(super) fn parse_manifest(
         sf_symbol,
         tint,
         cli_flag,
+        pid_bound: map.get("pidBound").and_then(Value::as_bool).unwrap_or(true),
         plugin_dir: dir.to_path_buf(),
         is_builtin,
         command,
@@ -919,6 +906,18 @@ pub fn plugin_command(plugin: &PluginDescriptor) -> Result<Command, String> {
     };
     let mut command = Command::new(executable);
     command.args(&plugin.command[1..]).current_dir(plugin_dir);
+    // Session identity belongs to each request, never to the daemon's launcher.
+    for (key, _) in env::vars_os() {
+        let name = key.to_string_lossy();
+        if name.ends_with("_SESSION_ID")
+            || name.ends_with("_SESSION_FILE")
+            || name.ends_with("_SESSION_PATH")
+            || name.ends_with("_THREAD_ID")
+            || name == "CITO_ENDPOINT_PID"
+        {
+            command.env_remove(key);
+        }
+    }
     Ok(command)
 }
 
@@ -957,6 +956,13 @@ pub fn plugin_request_with_progress(
             request["plugin_dir"] = json!(plugin_dir);
         }
         let mut command = plugin_command(plugin)?;
+        if let Some(env) = request["env"].as_object() {
+            for (key, value) in env {
+                if let Some(value) = value.as_str() {
+                    command.env(key, value);
+                }
+            }
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

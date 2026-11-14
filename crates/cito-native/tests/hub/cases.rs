@@ -6,6 +6,110 @@ fn temp() -> PathBuf {
     dir
 }
 #[test]
+fn processed_reply_pruning_uses_a_monotonic_replay_floor_and_resets_with_credentials() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    e.inner
+        .db
+        .transaction(|c| {
+            save_service(c, "messenger", &json!({"credential":"first"}))?;
+            for id in ["1", "2", "3", "4", "opaque"] {
+                c.execute(
+                    "INSERT INTO hub_processed_replies VALUES('messenger',?,1)",
+                    &[json!(id)],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    e.plugin_frame("messenger", &json!({"op":"cursor_save","cursor":"3"}));
+    e.plugin_frame("messenger", &json!({"op":"cursor_save","cursor":"2"}));
+    let (_, state) = e.inner.db.transaction(|c| service(c, "messenger")).unwrap();
+    assert_eq!(state["reply_floor"], 3);
+    assert_eq!(state["cursor"], 3);
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT update_id FROM hub_processed_replies ORDER BY update_id",
+                &[]
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r["update_id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("3"), json!("4"), json!("opaque")]
+    );
+    let ack = e
+        .inbound_reply("messenger", &json!({"update_id":"2"}))
+        .unwrap();
+    assert_eq!(ack["duplicate"], true);
+    e.plugin_frame("messenger", &json!({"op":"cursor_save","cursor":"5"}));
+    assert_eq!(
+        e.inbound_reply("messenger", &json!({"update_id":"4"}))
+            .unwrap()["duplicate"],
+        true
+    );
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_signals", &[])
+        .unwrap()
+        .is_empty());
+    e.inner
+        .db
+        .transaction(|c| {
+            save_service(c, "messenger", &json!({"credential":"second"}))?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_processed_replies", &[])
+        .unwrap()
+        .is_empty());
+    assert!(e
+        .inner
+        .db
+        .transaction(|c| service(c, "messenger"))
+        .unwrap()
+        .1["reply_floor"]
+        .is_null());
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn pruned_device_cannot_reattach_a_superseded_generation() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let mut old = json!({"channel_id":"old:human","host_id":"old","host_name":"Laptop","binding_generation":5,"owner_token":"old-owner"});
+    let attached = e.rpc("human_device_attach", &old, Some(&owner)).unwrap();
+    old["node_id"] = attached["record"]["listener_id"].clone();
+    e.rpc("human_device_detach", &old, Some(&owner)).unwrap();
+    let sibling = json!({"channel_id":"new:human","host_id":"new","host_name":"Laptop","binding_generation":1,"owner_token":"new-owner"});
+    let fresh = e
+        .rpc("human_device_attach", &sibling, Some(&owner))
+        .unwrap();
+    assert!(fresh["record"]["channels"].get("old:human").is_none());
+    assert!(e
+        .rpc("human_device_attach", &old, Some(&owner))
+        .unwrap_err()
+        .starts_with("STALE_GENERATION:"));
+    old["binding_generation"] = json!(6);
+    let replaced = e.rpc("human_device_attach", &old, Some(&owner)).unwrap();
+    assert_eq!(
+        replaced["record"]["channels"]["new:human"]["owner_token"],
+        "new-owner"
+    );
+    assert_eq!(replaced["record"]["human_control_revision"], 1);
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
 fn human_device_fencing_inbox_cas_and_publish_pause_are_atomic() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();
@@ -2741,7 +2845,7 @@ fn delivered_unread_history_does_not_starve_later_notifications() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn reservations_renew_while_process_is_live_and_quarantine_after_exit() {
+fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
     let dir = temp();
     let root = fixture(&dir);
     let e = HubEngine::open(&dir).unwrap();
@@ -2781,9 +2885,19 @@ fn reservations_renew_while_process_is_live_and_quarantine_after_exit() {
         )
         .unwrap()
         .remove(0);
-    assert_eq!(row["reservation_id"], "abandoned");
-    assert_eq!(row["status"], "in_flight");
+    assert_ne!(row["reservation_id"], "abandoned");
     assert!(n(&row, "delivered_ms") > now_ms() - 1000);
+    wait_for(|| {
+        e.inner
+            .db
+            .query(
+                "SELECT status FROM hub_channel_deliveries WHERE signal_id=\'concurrent\'",
+                &[],
+            )
+            .unwrap()[0]["status"]
+            == "delivered"
+    });
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status=\'in_flight\',reservation_id=\'crashed\' WHERE signal_id=\'concurrent\'",&[]).unwrap();
     // Stop periodic supervision so Send Test is deterministically the first
     // replacement caller after the crash, rather than racing the supervisor.
     e.inner.closed.store(true, Ordering::SeqCst);
@@ -2821,7 +2935,7 @@ fn reservations_renew_while_process_is_live_and_quarantine_after_exit() {
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|f| f["op"] == "deliver" && f["signal"]["signal_id"] == "concurrent")
             .count(),
-        1
+        2
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
