@@ -12075,3 +12075,405 @@ phases:
       \ and src/macos/ + visual inspection of AppIcon.icns, og-card.png, architecture-topology.svg,\
       \ and all 6 site screenshots -> Passed.\n\nSpec link:\n- docs/DESIGN.md (§1.2,\
       \ §2.1–§2.2, §5.1–§5.2, §8.1) & /tmp/v42-design-blueprint.md"
+- id: v43
+  name: 'V43 Unified Pin & Activity-Driven Auto-Listen Lifecycle (Semantic A) + Read-Only
+    SQLite WAL/SHM & Structured Diagnostic Pipeline (M-A & M-B) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: pending
+  gate: 'All binding V43 requirements in docs/DESIGN.md (§1–§8 @ 6f6a76d) for the
+    Unified Pin + Activity-Driven Auto-Listen Lifecycle (Semantic A) and Mechanisms
+    M-A & M-B pass; cargo fmt --all -- --check, cargo clippy --workspace --all-targets
+    -- -D warnings, cargo test --workspace, cargo build --release (0 warnings), node
+    crates/cito-native/tests/support/site-clipboard.mjs, python3 packaging/release.py
+    check, and python3 -m unittest discover -s packaging pass; visual read inspection
+    of refreshed screenshots/assets, §1.2 semantic zero-hardcoding check across crates/cito-native/src/core/
+    and src/macos/, staged release binaries rebuild, and [REQUIRES_SKILL: contract-and-simplicity]
+    full review & consolidation complete cleanly; main is pushed to origin/main at
+    version 0.21.3 with NO release tag.'
+  context: 'Implement docs/DESIGN.md (1..EOF, §1–§8 @ 6f6a76d) and close the pre-reviewed
+    Unified Pin + Activity-Driven Auto-Listen Lifecycle (Semantic A) and Admitted
+    Mechanisms M-A & M-B without repeating Stage 1 discovery: (1) Unified Pin + Activity-Driven
+    Auto-Listen Lifecycle (Semantic A, symmetric across all agent harnesses with §1.2
+    zero-hardcoding: optional autoListen: { mode: "endpoint" | "activity", recentWindowMs?,
+    idleTimeoutMs? } in plugin.json [plugins/codex: mode: "activity", recentWindowMs:
+    900000, idleTimeoutMs: 3600000; plugins/{pi,claude}: mode: "endpoint", idleTimeoutMs:
+    null]; expose listen_mode: "auto" | "manual" on listener projections and idle_timeout_ms:
+    u64? on daemon harnesses[*] + Swift HarnessMeta distinct from pid_bound; plugins/codex
+    discover_sessions emits durable monotonic u64 activity: { revision, at_ms, kind
+    } ["user_turn" | "cito_effect" | "unknown"], separating recentWindowMs active-window
+    scan from the 8-item Menu display slice and preventing self-renewing cito_effect
+    loops on wake/update retries; idempotent non-destructive state.sqlite additive
+    migration user_version = 4 | 5 | 6 -> 7 checking missing columns rather than skipping
+    existing user_version = 6, adding listen_mode, user_stopped, retirement_reason,
+    retired_activity_revision, last_activity_at_ms and backfilling pre-existing rows
+    to listen_mode = ''manual'', user_stopped = 0; symmetric entrypoint lifecycle
+    across + Listen / cito listen / cito_listen [clears user_stopped = false, promotes
+    to manual, clears retirement metadata], single-card Stop / unlisten_session /
+    unlisten / cito unlisten / cito_unlisten [detaches only that session, persists
+    user_stopped = true scoped to (hub, harness, session_id), never disables Hub Auto-Listen],
+    footer Stop All / unlisten_all / cito unlisten --all [stops all active non-human
+    sessions on targeted Hub(s), sets per-session user_stopped = true, disables Hub
+    Auto-Listen even with 0 active listeners], set_listen_mode ["auto" | "manual"
+    rejecting "auto" with INVALID_INPUT when Hub autoListen == false and seeding last_activity_at_ms
+    on manual -> auto], Semantic A set_auto_listen(false) retiring auto listeners
+    while preserving manual listeners and set_auto_listen(true) clearing non-human
+    user_stopped + triggering fresh discovery, and 60m idle retirement for unpinned
+    auto listeners with idleTimeoutMs != null guarded by active dispatch / pending
+    wake / 5m post-delivery grace, signal_id deduplication, hard-exit retirement without
+    user_stopped = true, transient probe recoverability, and provider reopen restoration
+    without resetting idle clocks; Menu Popover conditional 22x22 Pin toggle when
+    hub.auto_listen == true || listener.listen_mode == "auto" with pin .subtleHeader
+    vs pin.fill .neutral + CitoPalette.infoText, capability-aware tooltips via harnesses[harness].idle_timeout_ms,
+    >= 122pt title label width / >= 146pt title + rename span alongside 68pt scopeToggle
+    + ~48pt Stop, and Semantic A stop.toolTip & toggle_auto_listen.toolTip); (2) Mechanism
+    A & B Read-Only SQLite WAL/SHM & Structured Error/Diagnostic Pipeline (ReadOnlySqlite
+    unified open-time & first-query WAL readiness for checkpointed WAL DBs without
+    -shm and committed WAL frames without immutable=1 on active/non-empty-WAL DBs,
+    SQLITE_OPEN_URI percent-encoding #/?/%, distinct absent DB/table vs I/O error,
+    sanitized SQLite errors; plugins/codex probe propagating archived query errors
+    and single-connection row_for_id; session_activity tick/send_badge requiring response["ok"]
+    == true with bounded error_code + message/error and remove_candidates clearing
+    provider.error; daemon/projection.rs omitting discovery for unconfigured harnesses
+    and emitting settings_for_hub "inventory" channel errors without a local slot;
+    setup.rs, receiver.rs, transport.rs, and plugins.rs canonical error_code/message
+    extraction, HTTPS HubClient::rpc !response["error"].is_null() alignment, and bounded
+    subprocess stderr diagnostics preserving MCP Ok(Value) routing; plugins/{claude,pi}/native.rs
+    separating "no response" from negative bridge rejection diagnostics; word-boundary
+    \b presentationError & cli::presentation_error sanitization, clean non---json
+    CLI MCP errors, single-wrapped NATS_UNAVAILABLE in wait_send_receipt, multi-line
+    322pt discovery: & add_hub_error wrapping, and expanded HeadlessOracle jargonPattern).'
+  depends_on:
+  - v42
+  steps:
+  - id: v43.core
+    name: 'V43 Rust Core, Daemon, SQLite v7 Migration, Plugins & CLI/MCP Closure:
+      Unified Pin/Auto-Listen (Semantic A) & M-A/M-B Diagnostic Pipeline'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/plugins.rs\n\
+      \    - crates/cito-native/tests/support/daemon/**\n    - plugins/codex/**\n\
+      \    - plugins/pi/**\n    - plugins/claude/**\n  blocked_paths:\n    - plan.yaml\n\
+      \nDeliver:\n- Implement all Rust core, daemon, SQLite schema migration, subprocess\
+      \ plugin (`codex`, `pi`, `claude`), CLI/MCP, and backend test requirements in\
+      \ `docs/DESIGN.md` (`1..EOF`, `§1`–`§8` @ `6f6a76d`) covering the Unified `Pin`\
+      \ + Activity-Driven `Auto-Listen` Lifecycle (`Semantic A`) and Mechanisms `M-A`\
+      \ & `M-B`:\n  1. Unified `Pin` + Activity-Driven `Auto-Listen` Backend Lifecycle\
+      \ (`Semantic A`, all agents symmetric, `§1.2` zero-hardcoding — `§3.2`–`§3.4`,\
+      \ `§4.1`–`§4.2`, `§5.1`, `§6.1`):\n     - Manifest schema & projections (`crates/cito-native/src/core/plugins.rs`,\
+      \ `crates/cito-native/src/core/daemon/projection.rs`, `plugins/{codex,pi,claude}/plugin.json`):\
+      \ parse optional `autoListen: { mode: \"endpoint\" | \"activity\", recentWindowMs?:\
+      \ u64, idleTimeoutMs?: u64 | null }` in `plugin.json` (default `mode: \"endpoint\"\
+      , idleTimeoutMs: null`; `plugins/codex/plugin.json`: `mode: \"activity\", recentWindowMs:\
+      \ 900000, idleTimeoutMs: 3600000`; `plugins/{pi,claude}/plugin.json`: `mode:\
+      \ \"endpoint\", idleTimeoutMs: null`). Project `listen_mode: \"auto\" | \"manual\"\
+      ` on listener DTOs and `idle_timeout_ms: Option<u64>` on daemon `harnesses[*]`\
+      \ (distinct from `pid_bound`).\n     - `plugins/codex/native.rs`: `discover_sessions`\
+      \ emits durable monotonic `u64` `activity: { revision, at_ms, kind }` (`\"user_turn\"\
+      \ | \"cito_effect\" | \"unknown\"`), where `revision` is a durable source integer\
+      \ stable across refreshes and provider restarts (never a daemon scan counter),\
+      \ separating the `recentWindowMs` active-window scan from the 8-item Menu display\
+      \ slice without truncating active sessions; `wake` / `update` distinguish and\
+      \ avoid self-renewing `cito_effect` loops on retries.\n     - `state.sqlite`\
+      \ migration (`crates/cito-native/src/core/state.rs`, `state_tests.rs`, `§6.1`):\
+      \ idempotent, non-destructive additive upgrade from `user_version = 4 | 5 |\
+      \ 6 -> 7` (checking missing `local_listeners` columns rather than skipping existing\
+      \ `user_version = 6` databases), adding `listen_mode` (`'manual' | 'auto'`),\
+      \ `user_stopped`, `retirement_reason`, `retired_activity_revision`, and `last_activity_at_ms`,\
+      \ and backfilling pre-existing rows to `listen_mode = 'manual', user_stopped\
+      \ = 0, retirement_reason = NULL, retired_activity_revision = NULL, last_activity_at_ms\
+      \ = NULL`.\n     - Entrypoint Lifecycle Matrix (`crates/cito-native/src/core/daemon/{mod,ui_ipc,http_actions,mcp,projection}.rs`,\
+      \ `receiver.rs`, `registration.rs`, `state.rs`, `cli.rs`, `§3.2`, `§3.4`, `§5.1`):\n\
+      \       - `+ Listen` / `listen_session` / `cito listen` (non-human) / `cito_listen`:\
+      \ clears `user_stopped = false`, creates or promotes the listener to `listen_mode\
+      \ = \"manual\"`, and clears `retirement_reason` / `retired_activity_revision`.\n\
+      \       - Single-card `Stop` / `unlisten_session` / `unlisten` / `cito unlisten`\
+      \ (non-`--all`) / `cito_unlisten`: detaches only that session, persists `user_stopped\
+      \ = true` scoped to `(hub, harness, session_id)` (idempotent on repeated calls),\
+      \ and **never disables Hub `Auto-Listen`**.\n       - Footer `Stop All` / `unlisten_all`\
+      \ / `cito unlisten --all [--hub <name>]`: stops all active non-human sessions\
+      \ on the targeted Hub(s), persists per-session `user_stopped = true`, and disables\
+      \ Hub `Auto-Listen` even when zero listeners are currently active.\n       -\
+      \ `set_listen_mode` (`\"auto\" | \"manual\"`): toggles uniformly across all\
+      \ agent harnesses; rejects `set_listen_mode(\"auto\")` with `INVALID_INPUT`\
+      \ when Hub `autoListen == false` (leaving existing listeners untouched); when\
+      \ Hub `autoListen == true`, `manual -> auto` seeds `last_activity_at_ms` from\
+      \ latest qualifying activity (or current timestamp if absent).\n       - `set_auto_listen(false)`\
+      \ (`Semantic A`): retires all `listen_mode == \"auto\"` agent listeners on that\
+      \ Hub while preserving `listen_mode == \"manual\"` listeners. `set_auto_listen(true)`\
+      \ clears non-human `user_stopped` on that Hub and triggers fresh discovery.\n\
+      \       - Idle retirement (`idleTimeoutMs != null && listen_mode == \"auto\"\
+      `): retires an unpinned `auto` listener (`retirement_reason = \"idle\"`, persisting\
+      \ `retired_activity_revision`) only when `now - last_activity_at_ms > idleTimeoutMs`\
+      \ (60m) and no protected in-flight work is active (active dispatch lease, pending\
+      \ wake effect, or one-time `300_000 ms` / 5m post-delivery grace; discovery\
+      \ refreshes, Hub heartbeats, `probe` `\"alive\"`, `\"cito_effect\"` updates,\
+      \ and same-signal `wake` retries never extend idle TTL; inbound Hub signals\
+      \ credit activity at most once per unique `signal_id`). `manual` listeners and\
+      \ `idleTimeoutMs == null` harnesses never expire on idle TTL.\n       - Hard\
+      \ exit & transient probe isolation: `archived` threads, `closed_definitive`\
+      \ exits, and disconnected integrations retire both `auto` and `manual` listeners\
+      \ cleanly without setting `user_stopped = true`; transient probe failures preserve\
+      \ recoverability without converting into `user_stopped = true`; provider reopen\
+      \ restores valid `manual` listeners and unexpired `auto` listeners without resetting\
+      \ idle clocks or reviving idle-retired threads without a strictly advancing\
+      \ qualifying `activity.revision`.\n  2. Mechanism A & B — Read-Only SQLite WAL/SHM\
+      \ & Structured Error/Diagnostic Pipeline (`§3.3`–`§3.4`, `§4.2`, `§8.1`–`§8.2`):\n\
+      \     - `crates/cito-native/src/plugin_support.rs` (`ReadOnlySqlite`): unify\
+      \ open-time and first-query WAL readiness for checkpointed WAL DBs without `-shm`\
+      \ and DBs with committed WAL frames (never using lock-free `immutable=1` on\
+      \ active or non-empty-WAL DBs; percent-encode `#`, `?`, and `%` when opening\
+      \ with `SQLITE_OPEN_URI`; keep absent DB/table distinct from I/O errors; sanitize\
+      \ SQLite diagnostics instead of exposing raw `sqlite3_errmsg` or `(SQLite N)`).\n\
+      \     - `plugins/codex/native.rs`: `probe` propagates DB query errors instead\
+      \ of swallowing `archived` failures via `.ok()` into `\"alive\"`; `row_for_id`\
+      \ reuses a single `ReadOnlySqlite` connection and deadline for schema guard\
+      \ + lookup.\n     - `crates/cito-native/src/core/session_activity.rs`: `tick`\
+      \ and `send_badge` require `response[\"ok\"] == true` and extract bounded `error_code`\
+      \ + `message`/`error` diagnostics instead of stringifying raw `{response}` JSON\
+      \ (`Discovery rejected:` / `Badge rejected:`); `remove_candidates` clears `provider.error`.\n\
+      \     - `crates/cito-native/src/core/daemon/projection.rs`: `snapshot()` omits\
+      \ `discovery` status/errors for unconfigured harnesses; `settings_for_hub` emits\
+      \ `\"inventory\"` channel error rows consistently even when no `local` slot\
+      \ is active.\n     - `crates/cito-native/src/core/{setup,receiver,transport,plugins}.rs`:\
+      \ `try_inspect_plugin_setup`, `plugin_setup_actions`, `probe_listener`, and\
+      \ `dispatch_listener` extract canonical `error_code`/`message`; `HubClient::rpc`\
+      \ HTTPS branch aligns with `rpc_http` (`!response[\"error\"].is_null()` -> `hub_error`,\
+      \ no raw `response.to_string()`); `plugin_request_with_progress` bounds non-zero-exit\
+      \ subprocess `stderr` diagnostics while preserving envelope `Ok(Value)` routing\
+      \ for MCP.\n     - `plugins/{claude,pi}/native.rs`: separate `\"no response\"\
+      ` from negative bridge rejection diagnostics so Claude's `endpoint_responded`\
+      \ guard is reachable and `wake` preserves `driver_unavailable` reasons, while\
+      \ Pi preserves live responder rejection diagnostics and `SESSION_MISMATCH` no-op\
+      \ semantics.\n     - `crates/cito-native/src/core/cli.rs` & `crates/cito-native/src/core/daemon/http_actions.rs`:\
+      \ word-boundary `\\b` replacements in `cli::presentation_error` (preventing\
+      \ `INACTIVE`/`EXPIRED_UNSENT` corruption), stripping numeric NATS codes (`10071:`,\
+      \ etc.), optional `<plugin_id>:`, secondary `; CODE:`, wrappers, JSON fallback,\
+      \ and SQLite strings; `cli::run_cli_command` formats non-`--json` MCP tool errors\
+      \ cleanly; `wait_send_receipt` avoids double-wrapping `NATS_UNAVAILABLE`.\n\
+      \     - Backend & plugin regression tests (`§8.1`): add discriminating tests\
+      \ in `plugin_support.rs`, `state_tests.rs`, `daemon/tests.rs`, `tests/support/plugins.rs`,\
+      \ and `tests/support/daemon/**` covering WAL-without-SHM, non-empty WAL frames,\
+      \ `#`/`?`/`%` URI paths, `codex::probe` DB error on `archived = 1`, real subprocess\
+      \ JSON discovery/badge/setup-inspect/HTTPS-RPC/CLI error extraction, unconfigured/disconnected\
+      \ `discovery` omission, Claude/Pi bridge rejections, `user_version = 4|5|6 ->\
+      \ 7` backfill, and the full backend `Pin`/`Auto-Listen` Semantic A lifecycle\
+      \ (updating prior `daemon/tests.rs` assertions where per-session `Stop` disabled\
+      \ Hub `Auto-Listen`).\n\nImplementation Notes (Non-Binding):\n- Follow `docs/DESIGN.md`\
+      \ `§8.2` hazard map. Keep inner-loop verification fast with targeted affected-module\
+      \ filters (`cargo test -p cito-native --lib`, `plugins::`, `daemon::`); reserve\
+      \ full-workspace clippy, release builds, and UI/packaging suites for `v43.review`.\n\
+      \nBoundary:\n- Owner: `rust-senior`. Isolated worktree transaction modifying\
+      \ `crates/cito-native/src/**`, `plugins/{codex,pi,claude}/**`, and `crates/cito-native/tests/support/{plugins.rs,daemon/**}`.\n\
+      \nAdmit:\n- Depends on Phase `v42` completion. Witnessed inputs: `docs/DESIGN.md`\
+      \ (`1..EOF`, `§1`–`§8` @ `6f6a76d`) and Admitted Ledger (`Semantic A` + `M-A`\
+      \ + `M-B`).\n- Verification: targeted `cargo test -p cito-native --lib`, `plugins::`,\
+      \ and `daemon::` filters pass with 0 compiler warnings. Consumed by `v43.ui`\
+      \ and `v43.review`.\n\nRecovery:\n- Reconcile SQLite migration, lifecycle transitions,\
+      \ and test assertions in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native plugins:: && cargo test -p cito-native --test native daemon::'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/codex/plugin.json
+    - plugins/codex/native.rs
+    - plugins/pi/plugin.json
+    - plugins/pi/native.rs
+    - plugins/claude/plugin.json
+    - plugins/claude/native.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/daemon/mod.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - crates/cito-native/tests/support/daemon/config_and_hubs.rs
+    - crates/cito-native/tests/support/daemon/human_and_channels.rs
+    agent: rust-senior
+  - id: v43.ui
+    name: 'V43 macOS Swift UI & Headless Oracle Closure: Conditional Pin Toggle, Semantic
+      A Tooltips, Multi-Line Error Wrapping & Word-Boundary Jargon Sanitization'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \    - README.md\n    - site/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n\
+      - Implement all macOS AppKit companion (`src/macos/**`), headless UI oracle\
+      \ (`crates/cito-native/tests/support/ui/**`), and docs/site sync requirements\
+      \ in `docs/DESIGN.md` (`§3.2`, `§3.3`, `§5.1`–`§5.2`, `§7.2`, `§8.1`–`§8.2`\
+      \ @ `6f6a76d`):\n  1. Menu Popover Conditional `Pin` Toggle, `HarnessMeta.idle_timeout_ms`\
+      \ & Semantic A Tooltips (`src/macos/{Models,MenuSurface,PaletteAndMetrics,UIPrimitives}.swift`,\
+      \ `§3.2`, `§3.3`, `§5.2.3`, `§8.2`):\n     - Decode optional `idle_timeout_ms:\
+      \ UInt64?` on Swift `HarnessMeta` (distinct from `pid_bound`) and `listen_mode`\
+      \ (`\"auto\" | \"manual\"`) on listener models.\n     - Mount the conditional\
+      \ `22x22` **`Pin`** toggle (`set_listen_mode`) on `LISTENING SESSIONS` agent\
+      \ cards whenever `hub.auto_listen == true || listener.listen_mode == \"auto\"\
+      `:\n       - Render `pin` with `.subtleHeader` styling when `listen_mode ==\
+      \ \"auto\"` (unpinned) and `pin.fill` with `.neutral` + `CitoPalette.infoText`\
+      \ tint when `listen_mode == \"manual\"` (pinned).\n       - Supply capability-aware\
+      \ tooltips derived from `harnesses[harness].idle_timeout_ms != nil` (distinguishing\
+      \ activity-timed harnesses that auto-retire after idle timeout from endpoint-bound\
+      \ harnesses while stating that pinned sessions stay listening when `Auto-Listen`\
+      \ is turned off).\n       - Preserve `>= 122pt` session title label width and\
+      \ `>= 146pt` `title + rename` span alongside `22x22` `Pin`, `68pt` `scopeToggle`,\
+      \ and `~48pt` `Stop`.\n     - Update `stop.toolTip` (per-session `Stop` detaches\
+      \ only that session and marks it stopped without disabling Hub `Auto-Listen`)\
+      \ and `toggle_auto_listen.toolTip` (Semantic A: turning `Auto-Listen` off stops\
+      \ unpinned auto-listened sessions while keeping pinned sessions active).\n \
+      \ 2. Word-Boundary `presentationError`, Multi-Line Error Layout & `HeadlessOracle`\
+      \ Jargon Detection (`src/macos/{PaletteAndMetrics,MenuSurface,SettingsSurface,HeadlessOracle}.swift`,\
+      \ `§5.2.1`–`§5.2.5`, `§8.1`–`§8.2`):\n     - Upgrade `presentationError` in\
+      \ `src/macos/PaletteAndMetrics.swift` to use regex word-boundary `\\b...\\b`\
+      \ replacements for raw availability/status tokens (`ACTIVE`, `UNLISTENED`, `DISCONNECTED_RETAINED`,\
+      \ `EXPIRED`) so substrings like `INACTIVE` or `EXPIRED_UNSENT` are never corrupted;\
+      \ strip numeric NATS codes (`10071:`, etc.), optional `<plugin_id>:` prefixes,\
+      \ secondary `; CODE:` segments, `Discovery rejected:` / `Badge rejected:` wrappers,\
+      \ raw JSON error fallbacks, and raw SQLite error strings.\n     - Wrap and dynamically\
+      \ expand Menu `discovery:` error rows across `322pt` width (matching `hub_error:`)\
+      \ in `src/macos/MenuSurface.swift` and wrap multi-line `add_hub_error` cleanly\
+      \ in `src/macos/SettingsSurface.swift`.\n     - Extend `HeadlessOracle.swift`\
+      \ `jargonPattern` to catch mid-string/embedded error codes, raw JSON `\"error_code\"\
+      ` payloads, and raw SQLite error strings (`SQLITE_`, `sqlite3`, `(SQLite`).\n\
+      \  3. UI Oracle Regression Tests & Docs/Screenshots Sync (`crates/cito-native/tests/support/ui/**`,\
+      \ `README.md`, `site/**`, `§7.2`, `§8.1`):\n     - Update `crates/cito-native/tests/support/ui/menu.rs`\
+      \ and `oracle_e2e.rs` (and sibling `tests/support/ui/**` modules as needed)\
+      \ for Semantic A `Stop` / `Stop All` / `Auto-Listen` behavior, conditional `22x22`\
+      \ `Pin` toggle states (`auto` vs `manual`, capability-aware tooltips via `idle_timeout_ms`,\
+      \ `>= 122pt` title width / `>= 146pt` `title + rename` span), `322pt` multi-line\
+      \ `discovery:` error wrapping, word-boundary `presentationError` (`INACTIVE`\
+      \ / `EXPIRED_UNSENT` preservation + `10071:` / `Discovery rejected:` / SQLite\
+      \ sanitization), and expanded `HeadlessOracle` jargon assertions.\n     - Update\
+      \ `README.md` / `site/docs/**` (and refresh `site/assets/screenshots/menu-dark.png`\
+      \ if visible Menu card controls changed) to stay synchronized with `docs/DESIGN.md`\
+      \ `§5.2.3`.\n\nImplementation Notes (Non-Binding):\n- Follow `docs/DESIGN.md`\
+      \ `§8.2` hazard map. Keep inner-loop verification fast with `cargo build -p\
+      \ cito-native` and targeted `cargo test -p cito-native --test native ui::` filters;\
+      \ reserve full-workspace clippy/test/release sweeps for `v43.review`.\n\nBoundary:\n\
+      - Owner: `senior-engineer`. Isolated worktree transaction modifying `src/macos/**`,\
+      \ `crates/cito-native/tests/support/ui/**`, and user-facing docs/screenshots\
+      \ if affected.\n\nAdmit:\n- Depends on `v43.core` completion.\n- Verification:\
+      \ targeted `cargo test -p cito-native --test native ui::menu::`, `ui::oracle_e2e::`,\
+      \ and `site-clipboard.mjs` checks pass cleanly. Consumed by `v43.review`.\n\n\
+      Recovery:\n- Repair any AppKit geometry, tooltip/accessibility label, `HeadlessOracle`,\
+      \ or `ui::menu` assertion discrepancy in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::menu:: && cargo test
+      -p cito-native --test native ui::oracle_e2e:: && node crates/cito-native/tests/support/site-clipboard.mjs'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/Models.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/UIPrimitives.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/ui/mod.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/settings_hubs.rs
+    - crates/cito-native/tests/support/ui/directory.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - README.md
+    - site/index.html
+    - site/docs/architecture.html
+    - site/docs/guide.html
+    - site/docs/plugins.html
+    - site/assets/screenshots/menu-dark.png
+    depends_on:
+    - v43.core
+    agent: senior-engineer
+  - id: v43.review
+    name: 'V43 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
+      Suite, Staged Binaries Rebuild & Push to main (No Release Tag) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Execute a full `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` review and consolidation pass across all `v43.core`\
+      \ and `v43.ui` changes (`docs/DESIGN.md` `1..EOF`, `§1`–`§8` @ `6f6a76d`), verifying\
+      \ complete end-to-end wiring, single-authority `Pin` + `Auto-Listen` Semantic\
+      \ A state transitions, `state.sqlite` `user_version = 7` migration idempotency,\
+      \ `ReadOnlySqlite` WAL/SHM readiness, structured error extraction + word-boundary\
+      \ `presentationError` parity across daemon/CLI/UI, Menu `Pin` geometry (`>=\
+      \ 122pt` title / `>= 146pt` span), and Gate 1–3 test calibration, fixing any\
+      \ identified issues in place.\n- Run and verify the complete `docs/DESIGN.md`\
+      \ `§8.1` verification suite and release staging checks:\n  1. `cargo fmt --all\
+      \ -- --check`\n  2. `cargo clippy --workspace --all-targets -- -D warnings`\n\
+      \  3. `cargo test --workspace`\n  4. `cargo build --release` (0 compiler warnings)\
+      \ and rebuild/verify codesigned staged binaries (`bin/cito-ui-darwin-arm64`,\
+      \ `bin/cito-native-darwin-arm64`, and bundled plugin binaries)\n  5. `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \  6. `python3 packaging/release.py check && python3 -m unittest discover -s\
+      \ packaging`\n  7. `§1.2` semantic zero-hardcoding check across `crates/cito-native/src/core/`\
+      \ and `src/macos/` (keeping `state_tests.rs` fixtures vendor-neutral) and visual\
+      \ `read` inspection of refreshed screenshots/assets\n- Preserve semantic release\
+      \ version `0.21.3` and push integrated `main` to `origin/main` with **NO release\
+      \ tag**.\n\nBoundary:\n- Owner: `senior-engineer` with `[REQUIRES_SKILL: contract-and-simplicity]`.\
+      \ Modifies repository, updates staged release binaries if needed, and pushes\
+      \ `main` to `origin/main` at version `0.21.3` without creating a release tag.\n\
+      \nAdmit:\n- Depends on `v43.ui` completion (`v43.core` -> `v43.ui`).\n- Verification:\
+      \ full `§8.1` check suite, `§1.2` zero-hardcoding check, staged binary codesign\
+      \ verification, visual screenshot/asset read inspection, and `git push origin\
+      \ main` pass cleanly.\n\nRecovery:\n- Repair any review, regression, clippy/compiler\
+      \ warning, or packaging discrepancy in place and re-verify before pushing `main`\
+      \ to `origin/main`.\n"
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test --workspace && cargo build --release && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/plugin_support.rs
+    - plugins/codex/plugin.json
+    - plugins/codex/native.rs
+    - plugins/pi/plugin.json
+    - plugins/pi/native.rs
+    - plugins/claude/plugin.json
+    - plugins/claude/native.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/daemon/tests.rs
+    - src/macos/Models.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/UIPrimitives.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/HeadlessOracle.swift
+    - src/macos/Companion.swift
+    - crates/cito-native/tests/support/plugins.rs
+    - crates/cito-native/tests/support/daemon/mod.rs
+    - crates/cito-native/tests/support/daemon/discovery_and_setup.rs
+    - crates/cito-native/tests/support/daemon/mcp_and_inbox.rs
+    - crates/cito-native/tests/support/ui/mod.rs
+    - crates/cito-native/tests/support/ui/menu.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    - crates/cito-native/tests/support/distribution.rs
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    - packaging/release.py
+    - README.md
+    - site/index.html
+    depends_on:
+    - v43.ui
+    agent: senior-engineer
