@@ -1339,10 +1339,10 @@ struct ChannelUiState {
     var savedUntil: [String: Date] = [:]
     var testResult: (ok: Bool, detail: String)?
 
-    mutating func resetPersonal() {
+    mutating func resetPersonal(preservePendingPair: Bool = false) {
         editingPersonal = false
         manualEntry = false
-        pendingPairRequest = nil
+        if !preservePendingPair { pendingPairRequest = nil }
         pairingInstruction = ""
         pairingCommand = nil
         pairingURL = nil
@@ -1633,7 +1633,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
         for channel in value.channels ?? [] {
             let key=target + "|" + channel.id
             var ui = channelUiStates[key] ?? ChannelUiState()
-            if channel.configured && (previousChannels.contains(where: { $0.id == channel.id && !$0.configured }) || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) { ui.resetPersonal() }
+            if channel.configured && (previousChannels.contains(where: { $0.id == channel.id && !$0.configured }) || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) { ui.resetPersonal(preservePendingPair: true) }
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
             var acknowledged: (scope: String, values: [String: String], unchanged: Bool)?
@@ -1647,7 +1647,8 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
                 }
                 acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
                 if unchanged {
-                    if entry.scope == "user" && channel.configured { ui.resetPersonal() }
+                    // Settings results retire save UI, not a newer pairing intent.
+                    if entry.scope == "user" && channel.configured { ui.resetPersonal(preservePendingPair: true) }
                     ui.savedUntil[entry.scope] = Date().addingTimeInterval(1.5)
                 } else { ui.savedUntil.removeValue(forKey: entry.scope) }
                 DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in

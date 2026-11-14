@@ -1319,6 +1319,11 @@ server.serve_forever()
     config["hubs"]["shared"]["token"] = json!("next-credential");
     fs::write(&f.config, config.to_string()).unwrap();
     wait(|| seen("save-inventory"));
+    assert_eq!(
+        f.action(json!({"op":"settings_select_hub","hub":"local"}))
+            .0,
+        200
+    );
     std::thread::scope(|scope| {
         let saved = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -1326,10 +1331,27 @@ server.serve_forever()
                 .send_json(json!({"op":"channel_save","hub":"shared","channel_id":"remote-channel","enabled":true,"values":{"address":"bob-room"}}))
                 .and_then(|response| response.into_json::<Value>().map_err(Into::into))
         });
+        // The mutation selects shared before waiting for the held inventory owner.
+        // Observe that dispatch, then select local while inventory is still held.
+        // This stops new periodic remote reads; any already queued read shares
+        // save-inventory's generation instead of consuming the schema gate.
+        wait(|| f.action(json!({"op":"get_snapshot"})).1["settings"]["settings_hub"] == "shared");
+        assert_eq!(
+            f.action(json!({"op":"settings_select_hub","hub":"local"}))
+                .0,
+            200
+        );
         assert_eq!(local("/health")["ok"], true);
         assert!(!seen("save-schema"));
         release("save-inventory");
         wait(|| seen("save-schema"));
+        // Only the dispatched mutation can now own this RPC. Restore the remote
+        // selection while its schema is held, before checking the remaining flow.
+        assert_eq!(
+            f.action(json!({"op":"settings_select_hub","hub":"shared"}))
+                .0,
+            200
+        );
         assert_eq!(
             local("/health")["ok"],
             true,

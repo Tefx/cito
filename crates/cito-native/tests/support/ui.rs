@@ -450,6 +450,91 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
 }
 
 #[test]
+fn v39_settings_resets_preserve_newer_pairing_request_and_auto_copy() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    for transition in ["save_ack", "configured", "instruction_removed"] {
+        let mut cfg = settings();
+        let paired = transition != "configured";
+        cfg["channels"][0]["configured"] = json!(paired);
+        cfg["channels"][0]["status"] = json!(if paired { "ready" } else { "hub_ready" });
+        cfg["channels"][0]["fields"][1]["configured"] = json!(paired);
+        cfg["channels"][0]["fields"][1]["value"] = json!(if paired { "42" } else { "" });
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        if paired {
+            control(&f, p, "edit_user_channel:channel");
+        }
+        // Save S is unchanged and remains pending when Re-pair P is submitted.
+        let save = if transition == "save_ack" {
+            control(&f, p, "save_channel:channel");
+            inspect(&f, p);
+            Some(
+                f.frames(p)
+                    .into_iter()
+                    .rev()
+                    .find(|v| v["op"] == "channel_save")
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        control(&f, p, "pair_channel:channel");
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == "channel_pair")
+            .unwrap();
+        f.send(p, json!({"op":"test_clipboard","text":"keep clipboard"}));
+        if let Some(save) = save {
+            assert_eq!(save["values"]["account"], "42");
+            assert_ne!(save["request_id"], request["request_id"]);
+            f.send(p, json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
+            assert_eq!(
+                node(&inspect(&f, p), "settings_items", "channel_summary:channel")["text"],
+                "✓ Saved"
+            );
+        } else {
+            // Both a configured transition and disappearing instructions can
+            // reset the view before P's correlated receipt reaches the UI.
+            if transition == "instruction_removed" {
+                cfg["channels"][0]["pairing_instruction"] = json!("Send /start cito-pending");
+                cfg["channels"][0]["pairing_command"] = json!("/start cito-pending");
+                f.send(p, json!({"op":"settings","settings":cfg}));
+                inspect(&f, p);
+            }
+            cfg["channels"][0]["configured"] = json!(true);
+            cfg["channels"][0]["status"] = json!("ready");
+            cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+            cfg["channels"][0]["fields"][1]["value"] = json!("42");
+            cfg["channels"][0]["pairing_instruction"] = Value::Null;
+            cfg["channels"][0]["pairing_command"] = Value::Null;
+            f.send(p, json!({"op":"settings","settings":cfg}));
+        }
+        assert_eq!(
+            inspect(&f, p)["clipboard"],
+            "keep clipboard",
+            "{transition}"
+        );
+        f.send(p, json!({"op":"pair_code","hub":request["hub"],"channel_id":"channel","request_id":request["request_id"],"instruction":"Send /start cito-new","pairing_command":"/start cito-new"}));
+        let s = inspect(&f, p);
+        assert_eq!(s["clipboard"], "/start cito-new", "{transition}");
+        assert_eq!(
+            node(&s, "settings_items", "copy_pair_command:channel")["text"],
+            "✓ Copied",
+            "{transition}"
+        );
+    }
+}
+
+#[test]
 fn v39_pairing_invalidation_rejects_late_receipts_without_clipboard_or_instruction_effects() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -463,32 +548,28 @@ fn v39_pairing_invalidation_rejects_late_receipts_without_clipboard_or_instructi
         "cancel_pair_channel",
         "unpair_channel",
         "clear_channel_service",
-        "external_pair",
     ] {
         let mut cfg = settings();
-        let paired = transition != "external_pair";
-        cfg["channels"][0]["configured"] = json!(paired);
-        cfg["channels"][0]["status"] = json!(if paired { "ready" } else { "hub_ready" });
-        cfg["channels"][0]["fields"][1]["configured"] = json!(paired);
-        cfg["channels"][0]["fields"][1]["value"] = json!(if paired { "42" } else { "" });
+        cfg["channels"][0]["configured"] = json!(true);
+        cfg["channels"][0]["status"] = json!("ready");
+        cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+        cfg["channels"][0]["fields"][1]["value"] = json!("42");
         f.send(p, json!({"op":"settings","settings":cfg}));
-        if paired {
-            control(&f, p, "edit_user_channel:channel");
-            control(&f, p, "save_channel:channel");
-            inspect(&f, p);
-            let save = f
-                .frames(p)
-                .into_iter()
-                .rev()
-                .find(|v| v["op"] == "channel_save")
-                .unwrap();
-            f.send(p,json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
-            assert_eq!(
-                node(&inspect(&f, p), "settings_items", "channel_summary:channel")["text"],
-                "✓ Saved"
-            );
-            control(&f, p, "edit_user_channel:channel");
-        }
+        control(&f, p, "edit_user_channel:channel");
+        control(&f, p, "save_channel:channel");
+        inspect(&f, p);
+        let save = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|v| v["op"] == "channel_save")
+            .unwrap();
+        f.send(p,json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "channel_summary:channel")["text"],
+            "✓ Saved"
+        );
+        control(&f, p, "edit_user_channel:channel");
         control(&f, p, "pair_channel:channel");
         inspect(&f, p);
         let request = f
@@ -508,15 +589,7 @@ fn v39_pairing_invalidation_rejects_late_receipts_without_clipboard_or_instructi
         )
         .is_null());
         f.send(p, json!({"op":"test_clipboard","text":"keep clipboard"}));
-        if transition == "external_pair" {
-            cfg["channels"][0]["configured"] = json!(true);
-            cfg["channels"][0]["status"] = json!("ready");
-            cfg["channels"][0]["pairing_instruction"] = Value::Null;
-            cfg["channels"][0]["pairing_command"] = Value::Null;
-            f.send(p, json!({"op":"settings","settings":cfg}));
-        } else {
-            control(&f, p, &format!("{transition}:channel"));
-        }
+        control(&f, p, &format!("{transition}:channel"));
         // Check before any cancellation/unpair acknowledgement: local invalidation is immediate.
         let s = inspect(&f, p);
         assert!(
