@@ -11439,7 +11439,7 @@ phases:
   - id: v41.ui
     name: V41 Option A Menu Slimming, Settings Human Channels Inbox Control Bar, Four-Surface
       AppKit UI Hygiene & Docs/Site/Screenshot Sync (M2 UI & M7)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Implement all macOS AppKit companion (`src/macos/cito-ui.swift`),\
       \ UI test oracle (`crates/cito-native/tests/support/ui.rs`), documentation/site\
@@ -11565,6 +11565,34 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-14T14:30:39.043445Z'
+    done_at: '2026-11-14T15:28:03.340892+00:00'
+    evidence: 'Artifact:
+
+      - Commit: c8abecbc7f2b99a588eea7778c8227e8f256d5ad (rebased from ef30436d69114c646992f00fe4b4de09422b5ea7
+      and merged cleanly to main; candidate ref refs/vectl/candidates/v41.ui retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed
+
+      - Run: cargo test -p cito-native --test native ui:: (PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH
+      RUST_TEST_THREADS=2) -> 46 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native distribution:: -> 7 passed, 0
+      failed
+
+      - Run: node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - Visual read inspection of refreshed menu-dark.png, settings-channels-dark.png,
+      and og-card.png completed by owner; full workspace clippy/tests/release/UI-bundle
+      verification deferred to v41.review.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1.2–§1.3, §5.1–§5.2, §7.1–§7.2, §8.1–§8.2 @ efa491d; M2 UI
+      & M7)'
   - id: v41.review
     name: 'V41 Contract-and-Simplicity Review & Consolidation, Full §8.1 Verification
       Suite, Dual-Mac & Bundle Verification, and Push to main (No Release Tag) [REQUIRES_SKILL:
