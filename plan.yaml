@@ -11891,7 +11891,7 @@ phases:
   - id: v42.tests
     name: 'V42 Integration Test Suite Decoupling (tests/support/ui.rs & daemon.rs)
       [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\n\n\
       Deliver:\n- Decouple `crates/cito-native/tests/support/ui.rs` (7,513L) and `crates/cito-native/tests/support/daemon.rs`\
       \ (5,431L) into cohesive domain-organized test submodules under `crates/cito-native/tests/`\
@@ -11928,6 +11928,29 @@ phases:
     agent: rust-engineer
     claimed_by: rust-engineer
     claimed_at: '2026-11-14T16:55:56.129432Z'
+    done_at: '2026-11-14T17:00:54.959650+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 31dfe95 (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v42.tests
+      retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed
+
+      - Run: cargo test -p cito-native --test native -- --list -> 136 tests (all 48
+      ui:: and 59 daemon:: tests preserved across domain submodules)
+
+      - Run: cargo test -p cito-native --test native daemon::discovery_and_setup::
+      -> 16 passed (including all 4 self-re-exec --exact tests)
+
+      - Run: cargo test -p cito-native --test native ui::menu::hub_drawer -> 1 passed
+
+
+      Spec link:
+
+      - /tmp/v42-design-blueprint.md (§2.C, §3)'
   - id: v42.gate
     name: 'V42 Terminal Acceptance Gate: Contract-and-Simplicity Audit & Full §8.1
       Verification Suite [REQUIRES_SKILL: contract-and-simplicity]'
