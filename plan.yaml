@@ -11717,7 +11717,7 @@ phases:
 - id: v42
   name: 'V42 Decoupling & Structural Remediation of Oversized Core, Swift UI, and
     Test Modules [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: All v42 decoupling steps (v42.design, v42.rust-core, v42.swift-ui, v42.tests)
     and terminal gate v42.gate pass with zero behavioral regression, KEEP_TOGETHER
     fidelity on cohesive engines, §1.2 semantic zero-hardcoding across crates/cito-native/src/core/
@@ -12004,7 +12004,7 @@ phases:
   - id: v42.gate
     name: 'V42 Terminal Acceptance Gate: Contract-and-Simplicity Audit & Full §8.1
       Verification Suite [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: gate\nrepo_change_policy: no_repo_change\n\nDeliver:\n\
       - Execute the independent terminal acceptance gate for Phase `v42` under `[REQUIRES_SKILL:\
       \ contract-and-simplicity]`, certifying that the integrated decoupling of `crates/cito-native/src/core/{daemon,hub,setup}.rs`,\
@@ -12054,3 +12054,24 @@ phases:
     agent: gate-reviewer
     claimed_by: gate-reviewer
     claimed_at: '2026-11-14T17:08:44.252859Z'
+    done_at: '2026-11-14T17:51:49.662958+00:00'
+    evidence: "Artifact:\n- Commit: 8c7120a440d782200f8e5c3be6459260948db470 (integrated\
+      \ main with v42.tests 31dfe95 -> e03ee4e, v42.swift-ui d169049 -> ed5944a, v42.rust-core\
+      \ fe23abe -> a26a135, and main-staged release binaries 525f509; version 0.21.3,\
+      \ zero release tag created).\n\nGate Verification (gate.report.v2 / FULL):\n\
+      - Validator: review_report_validator.py --kind gate --binding /tmp/v42-gate-binding.json\
+      \ /tmp/v42-gate-report.json -> valid:true, binding_checked:true, evidence_disposition:POSITIVE_GATE_EVIDENCE,\
+      \ status:PASS, findings:0, 33/33 assigned files covered.\n- Requirements: V42-KEEP-TOGETHER-FIDELITY\
+      \ (PROVEN), V42-DOMAIN-DECOUPLING (PROVEN), V42-ZERO-HARDCODING-1.2 (PROVEN),\
+      \ V42-FULL-8.1-SUITE (PROVEN), V42-VERSION-0.21.3-NO-TAG (PROVEN).\n- Full §8.1\
+      \ suite on git:8c7120a440d782200f8e5c3be6459260948db470:\n  - cargo fmt --all\
+      \ -- --check && git diff --check -> Passed\n  - cargo clippy --workspace --all-targets\
+      \ -- -D warnings -> Passed (0 warnings)\n  - cargo test --workspace -> Passed\
+      \ (0 failed; all 201 lib + 12 bin/plugin + 136 native integration tests preserved)\n\
+      \  - cargo build --release -> Passed (0 warnings; codesign --verify --strict\
+      \ OK on all 7 staged binaries)\n  - node crates/cito-native/tests/support/site-clipboard.mjs\
+      \ -> Passed\n  - python3 packaging/release.py check (0.21.3) & python3 -m unittest\
+      \ discover -s packaging -> Passed\n  - §1.2 zero-hardcoding check across crates/cito-native/src/core/\
+      \ and src/macos/ + visual inspection of AppIcon.icns, og-card.png, architecture-topology.svg,\
+      \ and all 6 site screenshots -> Passed.\n\nSpec link:\n- docs/DESIGN.md (§1.2,\
+      \ §2.1–§2.2, §5.1–§5.2, §8.1) & /tmp/v42-design-blueprint.md"
