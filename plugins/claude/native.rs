@@ -62,8 +62,8 @@ fn setup(req: &Value) -> Result<Value> {
         .unwrap_or_else(|| state(req).join("runtime/plugins/claude"))
         .join("bin/cito-claude-hook");
     let desired = json!({"command":command,"args":[],"env":{"CITO_CLAUDE_CHANNEL":"1"}});
-    let v = read_json(&path)?;
     if op == "setup_inspect" {
+        let v = read_json(&path)?;
         let hooks_ok = EVENTS.iter().all(|e| {
             v["hooks"][e]
                 .as_array()
@@ -86,24 +86,13 @@ fn setup(req: &Value) -> Result<Value> {
             json!({"ok":true,"installed":dir.exists(),"configured":v["mcpServers"]["cito"]==desired&&hooks_ok,"paths":[path]}),
         );
     }
-    if op == "setup_apply" {
-        if let Some(cmd) = str_at(&v["mcpServers"]["cito"], "command") {
-            if cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") && req["force"] != true {
-                return Ok(
-                    json!({"ok":true,"actions":[{"target":"claude","path":path,"status":"conflict","backupPath":null,"detail":"Conflicting MCP command; pass --force to replace"}]}),
-                );
-            }
-        }
-    }
     let remove = op == "setup_remove";
     let action = json_mutate(req, "claude", &path, |v| {
-        if !remove && req["force"] != true {
-            if let Some(cmd) = str_at(&v["mcpServers"]["cito"], "command") {
-                if cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") {
-                    return Err("Conflicting MCP command; pass --force to replace".into());
-                }
-            }
-        }
+        check_mcp_command(
+            req,
+            str_at(&v["mcpServers"]["cito"], "command"),
+            command.to_str().unwrap_or(""),
+        )?;
         clean_hooks(v);
         if let Some(servers) = v.get_mut("mcpServers").and_then(Value::as_object_mut) {
             servers.remove("cito");

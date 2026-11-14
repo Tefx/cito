@@ -2874,6 +2874,50 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
     wait_for(|| {
         e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
     });
+    // Control reservation time explicitly; only genuine progress may renew it.
+    e.inner.closed.store(true, Ordering::SeqCst);
+    if let Some(worker) = e.inner.worker.lock().unwrap().take() {
+        worker.join().unwrap();
+    }
+    e.inner.closed.store(false, Ordering::SeqCst);
+    let old = now_ms() - 180_001;
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='in_flight',delivered_ms=?,reservation_id='multipart' WHERE signal_id='concurrent'", &[json!(old)]).unwrap();
+    e.delivery_result(
+        "fixture",
+        &json!({"delivery_id":"stale","progress":true,"external_msg_id":"ignored"}),
+    )
+    .unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT delivered_ms FROM hub_channel_deliveries WHERE signal_id='concurrent'",
+                &[]
+            )
+            .unwrap()[0]["delivered_ms"],
+        old
+    );
+    for part in ["part-1", "part-2"] {
+        e.delivery_result(
+            "fixture",
+            &json!({"delivery_id":"multipart","progress":true,"external_msg_id":part}),
+        )
+        .unwrap();
+        e.replay(&plugin, &process).unwrap();
+        let row = e
+            .inner
+            .db
+            .query(
+                "SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent'",
+                &[],
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(row["reservation_id"], "multipart");
+        assert_eq!(row["status"], "in_flight");
+        assert!(n(&row, "delivered_ms") > old);
+    }
+    assert_eq!(e.inner.db.query("SELECT * FROM hub_channel_delivery_msgs WHERE external_msg_id IN ('part-1','part-2')", &[]).unwrap().len(), 2);
     e.inner.db.execute("UPDATE hub_channel_deliveries SET status='in_flight',delivered_ms=?,reservation_id='abandoned' WHERE signal_id='concurrent'",&[json!(now_ms()-180_001)]).unwrap();
     e.replay(&plugin, &process).unwrap();
     let row = e

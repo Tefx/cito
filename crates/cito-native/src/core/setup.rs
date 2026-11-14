@@ -438,7 +438,6 @@ fn setup_request(
         &json!({
             "op": op, "force": force, "dry_run": dry_run,
             "state_dir": state_dir, "plugin_dir": plugin_dir,
-            "env": env::vars().collect::<std::collections::BTreeMap<_, _>>(),
         }),
     )
 }

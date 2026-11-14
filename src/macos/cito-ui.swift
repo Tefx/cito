@@ -2534,11 +2534,21 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             else if hub.status == "connecting" { statusText = "Connecting to hub…" }
             else if hub.status == "auth_required" { statusText = "Authentication required" }
             else { statusText = "Offline · Disconnected" }
-            let detail = textLabel(hub.error == nil ? statusText : "Check Hub settings", NSRect(x: 12, y: 8, width: 40, height: 16),
+            let detail = textLabel(statusText, NSRect(x: 12, y: 8, width: 40, height: 16),
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = statusText; drawer.addSubview(detail)
-            layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
+            if hub.error != nil {
+                detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
+                detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
+                let width = CitoMetrics.menuWidth - 24
+                let height = ceil((statusText as NSString).boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: detail.font ?? NSFont.systemFont(ofSize: 11)]).height) + 4
+                detail.frame = NSRect(x: 12, y: 32, width: width, height: height)
+                drawer.frame.size.height = height + 40
+                layoutBar(in: drawer, y: 5, height: 22, spacing: 4, trailing: drawerControls)
+            } else {
+                layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
+            }
             let item = host(drawer, id: "drawer:\(hub.name)")
             let autoExpand = hub.status != "connected" || hub.error != nil
             item.isHidden = !(hubDrawerVisibility[hub.name] ?? autoExpand)

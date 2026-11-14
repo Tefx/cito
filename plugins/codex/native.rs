@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use toml_edit::{value, DocumentMut, Item, Table};
 fn matches_process(command: &str) -> bool {
     let Some((program, script)) = process_entrypoint(command) else {
@@ -114,40 +114,16 @@ fn setup(req: &Value) -> Result<Value> {
         );
     }
     let remove = op == "setup_remove";
-    let old = read_optional(&path)?;
-    let doc = parse(old.as_deref())?;
-    if !remove {
-        if let Some(cmd) = doc
-            .get("mcp_servers")
-            .and_then(|v| v.get("cito"))
-            .and_then(|v| v.get("command"))
-            .and_then(Item::as_str)
-        {
-            if cmd != command
-                && cmd != "cito-mcp"
-                && !cmd.ends_with("/cito-mcp")
-                && req["force"] != true
-            {
-                return Ok(
-                    json!({"ok":true,"actions":[{"target":"codex","path":path,"status":"conflict","backupPath":null,"detail":"Conflicting MCP command; pass --force to replace"}]}),
-                );
-            }
-        }
-    }
     let action = mutate(req, "codex", &path, |old| {
         let mut d = parse(old)?;
-        if !remove && req["force"] != true {
-            if let Some(cmd) = d
-                .get("mcp_servers")
+        check_mcp_command(
+            req,
+            d.get("mcp_servers")
                 .and_then(|v| v.get("cito"))
                 .and_then(|v| v.get("command"))
-                .and_then(Item::as_str)
-            {
-                if cmd != command && cmd != "cito-mcp" && !cmd.ends_with("/cito-mcp") {
-                    return Err("Conflicting MCP command; pass --force to replace".into());
-                }
-            }
-        }
+                .and_then(Item::as_str),
+            &command,
+        )?;
         if remove {
             if let Some(t) = d.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
                 t.remove("cito");
@@ -329,26 +305,6 @@ fn row_caller(req: &Value, r: &Value) -> Value {
     }
     caller("codex", str_at(r, "id").unwrap_or(""), cwd, pid(req), title)
 }
-fn command_exit(mut command: Command, deadline: Instant) -> Result<Option<bool>> {
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(Some(status.success())),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e.to_string());
-            }
-            Ok(None) => {}
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-}
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");
     if op.starts_with("setup_") {
@@ -507,7 +463,8 @@ pub fn handle(req: &Value) -> Result<Value> {
                         }
                     }
                 }
-                command_exit(command, Instant::now() + timeout)
+                run_command_with_timeout(command, timeout)
+                    .map(|output| output.map(|o| o.status.success()))
             };
             let already_queued = req["queue_written"] == true;
             let queue_confirmed = if already_queued {

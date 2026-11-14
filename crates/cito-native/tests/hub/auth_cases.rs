@@ -501,6 +501,91 @@ fn sse_closes_when_verified_token_reaches_expiry_even_with_validation_leeway() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
+fn sse_valid_token_stops_before_an_event_arrives_after_expiry() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let (verifier, key) = verifier(Algorithm::RS256);
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        + 0.4;
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-key".into());
+    let token = encode(
+        &header,
+        &json!({"iss":"https://id.example.com","aud":"client","sub":"subject","exp":expires}),
+        &key,
+    )
+    .unwrap();
+    let principal = verifier.verify(&token).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "cito-sse-transition-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    let engine = crate::core::hub::HubEngine::open(&dir).unwrap();
+    let server = engine
+        .start_server(
+            "127.0.0.1",
+            0,
+            HubAuth {
+                mode: "oidc".into(),
+                token: None,
+                verifier: Some(verifier),
+            },
+        )
+        .unwrap();
+    let mut stream = std::net::TcpStream::connect(server.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /v1/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == ":ok\n" {
+            break;
+        }
+    }
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let publish = |key: &str| {
+        engine.rpc("kv_create", &json!({"key":key,"data":{"principal_id":principal["principal_id"],"harness":"fixture","session_id":key,"scope":"workspace","state":"ACTIVE","channels":{}}}), None).unwrap()
+    };
+    publish("before-expiry");
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        line.starts_with("data: ") && line.contains("before-expiry"),
+        "{line}"
+    );
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    // The fractional token lifetime is the test's short, explicit timing input.
+    let remaining = (expires
+        - std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64())
+    .max(0.0);
+    std::thread::sleep(Duration::from_secs_f64(remaining) + Duration::from_millis(20));
+    publish("after-expiry");
+    let mut trailing = String::new();
+    reader.read_to_string(&mut trailing).unwrap();
+    server.shutdown();
+    engine.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(
+        trailing.is_empty(),
+        "No event or keepalive may cross token expiry: {trailing}"
+    );
+}
+#[test]
 fn caller_deadline_bounds_cache_wait_and_cached_verification() {
     let (v, key) = verifier(Algorithm::RS256);
     let now = std::time::SystemTime::now()

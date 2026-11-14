@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -89,25 +89,33 @@ pub fn one_shot(handler: fn(&Value) -> Result<Value>) {
     emit(&result.unwrap_or_else(|e| error("PLUGIN_EXEC_FAILED", e)));
 }
 
-// Each file mutation locks a stable sibling inode before reading; rename never replaces the lock.
+// Unlink only while holding the lock. Waiters retry if the path no longer names
+// their locked inode, so cleanup cannot split concurrent read/modify/write owners.
 pub struct FileLock(File);
 impl FileLock {
     pub fn acquire(path: &Path) -> Result<Self> {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
-        let f = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| e.to_string())?; // SAFETY: flock only borrows this live file descriptor; Drop releases it.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
+        loop {
+            let f = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| e.to_string())?;
+            // SAFETY: flock borrows this live descriptor; Drop releases it.
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            let lock = Self(f);
+            let held = lock.0.metadata().map_err(|e| e.to_string())?;
+            if fs::metadata(path).is_ok_and(|m| m.dev() == held.dev() && m.ino() == held.ino()) {
+                return Ok(lock);
+            }
         }
-        Ok(Self(f))
     }
 }
 use std::os::unix::fs::OpenOptionsExt;
@@ -180,6 +188,36 @@ pub fn read_json(path: &Path) -> Result<Value> {
     }
     Ok(v)
 }
+fn mutation_path(path: &Path, remaining: u8) -> Result<PathBuf> {
+    if remaining == 0 {
+        return Err("Too many symbolic links in configuration path".into());
+    }
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        let target = fs::read_link(path).map_err(|e| e.to_string())?;
+        return mutation_path(
+            &path.parent().unwrap_or(Path::new(".")).join(target),
+            remaining - 1,
+        );
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    match (parent, path.file_name()) {
+        (Some(parent), Some(name)) => Ok(mutation_path(parent, remaining)?.join(name)),
+        _ => Ok(path.to_owned()),
+    }
+}
+const MCP_CONFLICT: &str = "Conflicting MCP command; pass --force to replace";
+pub fn check_mcp_command(req: &Value, command: Option<&str>, expected: &str) -> Result<()> {
+    if req["op"] != "setup_remove"
+        && req["force"] != true
+        && command.is_some_and(|c| c != expected && c != "cito-mcp" && !c.ends_with("/cito-mcp"))
+    {
+        return Err(MCP_CONFLICT.into());
+    }
+    Ok(())
+}
 pub fn mutate(
     req: &Value,
     id: &str,
@@ -188,28 +226,8 @@ pub fn mutate(
 ) -> Result<Value> {
     let dry = req["dry_run"] == true;
     let remove = req["op"] == "setup_remove";
-    let canonical = if path.exists() {
-        fs::canonicalize(path).map_err(|e| e.to_string())?
-    } else {
-        path.to_owned()
-    };
+    let canonical = mutation_path(path, 40)?;
     let path = canonical.as_path();
-    // An absent file needs neither a backup nor a persistent lock sidecar.
-    if !path.exists() {
-        let next = transform(None)?;
-        if !dry {
-            if let Some(content) = &next {
-                atomic_write(path, content.as_bytes())?;
-            }
-            if remove {
-                clean_sidecars(path);
-                let _ = fs::remove_file(format!("{}.cito.lock", path.display()));
-            }
-        }
-        return Ok(
-            json!({"target":id,"path":path,"status":if next.is_some(){"created"}else{"unchanged"},"backupPath":null,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
-        );
-    }
     let lock_path = {
         let mut s = path.as_os_str().to_os_string();
         s.push(".cito.lock");
@@ -222,7 +240,14 @@ pub fn mutate(
             Some(FileLock::acquire(&lock_path)?)
         };
         let old = read_optional(path)?;
-        let next = transform(old.as_deref())?;
+        let next = match transform(old.as_deref()) {
+            Err(error) if error == MCP_CONFLICT => {
+                return Ok(
+                    json!({"target":id,"path":path,"status":"conflict","backupPath":null,"detail":error}),
+                )
+            }
+            result => result?,
+        };
         let changed = next.as_deref() != old.as_deref();
         let status = if !changed {
             "unchanged"
@@ -253,14 +278,14 @@ pub fn mutate(
                 }
             }
         }
-        if !dry && remove {
-            clean_sidecars(path);
+        if !dry && (remove || old.is_none() && !changed) {
+            if remove {
+                clean_sidecars(path);
+            }
+            let _ = fs::remove_file(&lock_path);
         }
         (status, backup)
     };
-    if !dry && remove {
-        let _ = fs::remove_file(&lock_path);
-    }
     Ok(
         json!({"target":id,"path":path,"status":old.0,"backupPath":old.1,"detail":if dry{"Planned configuration update"}else{"Configuration checked"}}),
     )
@@ -591,6 +616,35 @@ pub fn normalize_repo(origin: &str) -> Option<String> {
         Some(path.to_string())
     }
 }
+pub fn run_command_with_timeout(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Result<Option<std::process::Output>> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+            Ok(None) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
 fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     use std::process::{Command, Stdio};
     let mut command = Command::new("git");
@@ -608,26 +662,7 @@ fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     ] {
         command.env_remove(key);
     }
-    let mut child = command.spawn().ok()?;
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-        if start.elapsed() > Duration::from_secs(1) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let output = child.wait_with_output().ok()?;
+    let output = run_command_with_timeout(command, Duration::from_secs(1)).ok()??;
     if !output.status.success() {
         return None;
     }
@@ -879,6 +914,51 @@ mod tests {
         .unwrap();
         assert!(!root.join("missing.cito.lock").exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let dangling = root.join("dangling");
+        std::os::unix::fs::symlink("new/parent/settings", &dangling).unwrap();
+        mutate(&json!({"op":"setup_apply"}), "fixture", &dangling, |old| {
+            assert_eq!(old, None);
+            Ok(Some("created through link".into()))
+        })
+        .unwrap();
+        assert!(fs::symlink_metadata(&dangling)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(root.join("new/parent/settings")).unwrap(),
+            "created through link"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn remove_sidecar_and_absent_file_creation_share_one_mutation_owner() {
+        let root =
+            std::env::temp_dir().join(format!("cito-lock-{}-{}", std::process::id(), now_ms()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let workers: Vec<_> = (0..12)
+            .map(|_| {
+                let (path, barrier) = (path.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..8 {
+                        mutate(&json!({"op":"setup_remove"}), "fixture", &path, |old| {
+                            let n: usize = old.unwrap_or("0").parse().unwrap();
+                            std::thread::sleep(Duration::from_millis(1));
+                            Ok(Some((n + 1).to_string()))
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "96");
+        assert!(!root.join("settings.cito.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

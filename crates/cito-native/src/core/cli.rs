@@ -252,15 +252,66 @@ pub fn parse_cli(
     Ok((Value::Object(input), Value::Object(meta)))
 }
 fn presentation_error(raw: &str) -> String {
-    let raw = raw.split(" (os error ").next().unwrap_or(raw);
-    raw.split(": ")
-        .filter(|part| {
-            !part
+    if raw.starts_with("CONTROL_REVISION_CONFLICT:") {
+        return "Inbox changed on another device. Review the current state and try again.".into();
+    }
+    let mut message = raw;
+    let mut candidate = raw;
+    if let Some((hub, rest)) = raw.split_once(": ") {
+        if hub.starts_with(|c: char| c.is_ascii_lowercase())
+            && hub
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            candidate = rest;
+        }
+    }
+    while let Some((code, rest)) = candidate.split_once(':') {
+        if code.len() < 2
+            || !code.starts_with(|c: char| c.is_ascii_uppercase())
+            || !code
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-        })
-        .collect::<Vec<_>>()
-        .join(": ")
+        {
+            break;
+        }
+        candidate = rest.trim_start();
+        message = candidate;
+    }
+    if let Some((prefix, suffix)) = message.rsplit_once("(os error ") {
+        if suffix
+            .strip_suffix(')')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+        {
+            message = prefix.trim_end();
+        }
+    }
+    if message.starts_with("Hub URL must use") {
+        return "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
+            .into();
+    }
+    if message.starts_with("CITO_NATS_URL") {
+        return "Enter a valid Hub URL (http://ip:4291 or https://host).".into();
+    }
+    if let Some(reason) = message.strip_prefix("Cannot bind host hub listener: ") {
+        return format!("Cannot start sharing: {reason}");
+    }
+    let mut message = message.to_owned();
+    for (token, copy) in [
+        ("DISCONNECTED_RETAINED", "Temporarily offline"),
+        ("UNLISTENED", "Not listening"),
+        ("EXPIRED", "Offline"),
+        ("ACTIVE", "Active"),
+        ("local://", "Built-in on this Mac"),
+        ("CITO_OIDC_ISSUER", "OIDC issuer URL"),
+        ("CITO_OIDC_CLIENT_ID", "OIDC client ID"),
+        ("CITO_HUB_TOKEN", "shared access token"),
+        ("CITO_AUTH_MODE", "access mode"),
+        (" (http://127.0.0.1 is allowed for tests)", ""),
+    ] {
+        message = message.replace(token, copy);
+    }
+    message
 }
 pub fn format_status(payload: &Value) -> String {
     use std::fmt::Write;
@@ -478,7 +529,20 @@ mod tests {
         assert!(formatted.contains("Editor · Review"));
         assert!(formatted.contains("Reload the app integration"));
         assert!(formatted.contains("Paused · This device attached"));
-        assert!(formatted.contains("work: Sign in required"));
+        assert!(formatted.contains("Sign in required"));
+        assert!(!formatted.contains("UNAUTHORIZED"));
+        assert_eq!(
+            presentation_error("work: FAILED: Detail: ACTIVE on local://"),
+            "Detail: Active on Built-in on this Mac"
+        );
+        assert_eq!(
+            presentation_error("Cannot bind host hub listener: Address in use (os error 48)"),
+            "Cannot start sharing: Address in use"
+        );
+        assert_eq!(
+            presentation_error("CONTROL_REVISION_CONFLICT: stale"),
+            "Inbox changed on another device. Review the current state and try again."
+        );
         assert!(
             !formatted.contains("UNAUTHORIZED")
                 && !formatted.contains("os error")

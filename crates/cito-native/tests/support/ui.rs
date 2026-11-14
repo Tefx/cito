@@ -81,6 +81,67 @@ impl<'a> ClosedLoop<'a> {
 }
 
 #[test]
+fn hub_drawer_renders_the_presented_error_as_visible_text() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let ui = start(&f);
+    let mut frame = state();
+    frame["hubs"][0]["error"] = json!("personal: FAILED: Port already in use (os error 48)");
+    f.send(ui, frame);
+    let snapshot = inspect(&f, ui);
+    let drawer = node(&snapshot, "items", "drawer:personal");
+    assert_eq!(drawer["hidden"], false);
+    assert!(nodes(&drawer["children"])
+        .iter()
+        .any(|n| n["text"] == "Port already in use" && n["hidden"] != true));
+    let mut frame = state();
+    frame["hubs"][0]["error"] = json!("INVALID_INPUT: Hub URL must use HTTP or HTTPS");
+    f.send(ui, frame);
+    let snapshot = inspect(&f, ui);
+    assert_eq!(
+        node(&snapshot, "items", "hub_error:personal")["text"],
+        "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
+    );
+}
+#[test]
+fn stop_all_real_daemon_receipts_settle_mutation_and_idempotent_success() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    let mut cycle = ClosedLoop::new(&f);
+    f.tool("cito_listen", json!({"about":"Stop this session"}), meta);
+    cycle.until(|s| !node(s, "items", "stop_all").is_null());
+    cycle.control("stop_all");
+    wait(|| {
+        cycle.pump();
+        cycle.frames.iter().any(|v| {
+            v["source_op"] == "unlisten_all" && v["ok"] == true && v["request_id"].is_string()
+        })
+    });
+    let action = cycle
+        .results
+        .iter()
+        .find(|(a, _, _)| a["op"] == "unlisten_all")
+        .unwrap();
+    assert_eq!(action.1, 200);
+    assert_eq!(action.2["removed"], 1);
+    assert!(cycle
+        .frames
+        .iter()
+        .any(|frame| frame["source_op"] == "unlisten_all"
+            && frame["request_id"] == action.0["request_id"]));
+    let (status, result) =
+        f.action(json!({"op":"unlisten_all","hub":"local","request_id":"stop-noop"}));
+    assert_eq!(status, 200);
+    assert_eq!(result["removed"], 0);
+    wait(|| {
+        cycle.pump();
+        cycle.frames.iter().any(|v| {
+            v["source_op"] == "unlisten_all" && v["ok"] == true && v["request_id"] == "stop-noop"
+        })
+    });
+}
+#[test]
 fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

@@ -32,6 +32,10 @@ elif op == "probe":
 elif op == "wake":
     result["outcome"] = options["outcome"]
 elif op == "setup_inspect":
+    if options.get("setup_gate"):
+        deadline = time.monotonic() + options.get("setup_gate_timeout_ms", 2000) / 1000
+        while not pathlib.Path(options["setup_gate"]).exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
     delay_ms = options.get("setup_delay_ms", 0)
     if delay_ms:
         time.sleep(delay_ms / 1000)

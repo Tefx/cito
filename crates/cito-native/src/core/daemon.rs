@@ -67,7 +67,7 @@ fn cap_text(s: &str, limit: usize) -> String {
     }
     format!("{}…", &s[..end])
 }
-fn bound_fields(v: &mut Value, key: &str) {
+fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
     match v {
         Value::String(s) => {
             if key == "request_id" {
@@ -93,14 +93,16 @@ fn bound_fields(v: &mut Value, key: &str) {
                 "available" => 32,
                 _ => 128,
             };
-            a.truncate(cap);
+            if !preserve_collections {
+                a.truncate(cap);
+            }
             for item in a {
-                bound_fields(item, "");
+                bound_fields(item, "", preserve_collections);
             }
         }
         Value::Object(m) => {
             for (k, v) in m {
-                bound_fields(v, k)
+                bound_fields(v, k, preserve_collections)
             }
         }
         _ => {}
@@ -109,12 +111,22 @@ fn bound_fields(v: &mut Value, key: &str) {
 pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
     // Full-message copy uses correlated bounded chunks rather than preview caps.
     if frame["op"] != "activity_message" {
-        bound_fields(&mut frame, "");
+        let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
+        bound_fields(&mut frame, "", correlated);
     }
     loop {
         let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
         if bytes.len() + 1 < FRAME_LIMIT {
             return Ok(bytes);
+        }
+        // A correlated projection is a receipt: dropping rows can strand the
+        // consumer's pending save. Send an explicit correlated failure instead.
+        if frame.get("request_id").is_some_and(|id| !id.is_null()) {
+            if frame["op"] == "error" {
+                return Err("UI receipt exceeds frame budget".into());
+            }
+            frame = json!({"op":"error","ok":false,"request_id":frame["request_id"],"hub":frame["hub"],"channel":frame["channel"],"channel_id":frame["channel_id"],"action":frame["action"],"source_op":frame.get("source_op").unwrap_or(&frame["op"]),"error":"Response exceeds the UI frame budget; retry with a smaller selection"});
+            continue;
         }
         let mut removed = false;
         for key in [
@@ -147,10 +159,6 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
             }
         }
         if !removed {
-            if frame.get("request_id").is_some_and(|id| !id.is_null()) && frame["op"] != "error" {
-                frame = json!({"op":"error","ok":false,"request_id":frame["request_id"],"hub":frame["hub"],"channel":frame["channel"],"channel_id":frame["channel_id"],"action":frame["action"],"source_op":frame.get("source_op").unwrap_or(&frame["op"]),"error":"Response exceeds the UI frame budget; retry with a smaller selection"});
-                continue;
-            }
             return Err("UI frame exceeds 256 KiB after collection shedding".into());
         }
         frame["truncated"] = json!(true);
@@ -441,6 +449,12 @@ fn remote_channels_identity(slot: &HubClient) -> Value {
     ])
 }
 
+type SetupResult = Result<(bool, bool, Vec<String>), String>;
+struct SetupInspection {
+    generation: u64,
+    value: SetupResult,
+    worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
+}
 pub struct DaemonService {
     pub config: NativeConfig,
     pub plugins: LoadedPlugins,
@@ -465,7 +479,7 @@ pub struct DaemonService {
     oidc_recoveries: HashMap<String, OidcRecovery>,
     retired_auth: Vec<OidcRecovery>,
     last_app_action: HashMap<String, String>,
-    setup_inspections: Mutex<HashMap<String, Result<(bool, bool, Vec<String>), String>>>,
+    setup_inspections: HashMap<String, SetupInspection>,
     last_host_hub_error: Option<String>,
     last_hub_errors: HashMap<String, (String, bool)>,
     channel_inventories: HashMap<String, Arc<ChannelInventory>>,
@@ -530,7 +544,7 @@ impl DaemonService {
             oidc_recoveries: HashMap::new(),
             retired_auth: Vec::new(),
             last_app_action: HashMap::new(),
-            setup_inspections: Mutex::new(HashMap::new()),
+            setup_inspections: HashMap::new(),
             last_host_hub_error: None,
             last_hub_errors: HashMap::new(),
             channel_inventories: HashMap::new(),
@@ -539,7 +553,14 @@ impl DaemonService {
         };
         // Inspect before the service is published to HTTP/UI workers.
         for plugin in service.plugins.agent_plugins() {
-            let _ = service.inspect_setup(plugin);
+            service.setup_inspections.insert(
+                plugin.id.clone(),
+                SetupInspection {
+                    generation: 0,
+                    value: super::setup::try_inspect_plugin_setup(plugin),
+                    worker: None,
+                },
+            );
         }
         service.reload_slots()?;
         Ok(service)
@@ -548,18 +569,65 @@ impl DaemonService {
         &self,
         plugin: &crate::plugins::PluginDescriptor,
     ) -> Result<(bool, bool, Vec<String>), String> {
-        let mut cache = self
-            .setup_inspections
-            .lock()
-            .map_err(|_| "Setup cache poisoned")?;
-        cache
-            .entry(plugin.id.clone())
-            .or_insert_with(|| super::setup::try_inspect_plugin_setup(plugin))
-            .clone()
+        self.setup_inspections
+            .get(&plugin.id)
+            .map(|entry| entry.value.clone())
+            .unwrap_or_else(|| Err("Setup inspection pending".into()))
     }
-    fn invalidate_setup(&self, id: &str) {
-        if let Ok(mut cache) = self.setup_inspections.lock() {
-            cache.remove(id);
+    fn invalidate_setup(&mut self, id: &str) {
+        if self.plugins.find_by_id(id).is_none() {
+            return;
+        }
+        let entry = self
+            .setup_inspections
+            .entry(id.to_owned())
+            .or_insert_with(|| SetupInspection {
+                generation: 0,
+                value: Err("Setup inspection pending".into()),
+                worker: None,
+            });
+        entry.generation = entry.generation.wrapping_add(1);
+        if entry.worker.is_none() {
+            if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+                entry.worker = Some((
+                    entry.generation,
+                    thread::spawn(move || super::setup::try_inspect_plugin_setup(&plugin)),
+                ));
+            }
+        }
+        self.refresh_setup_inspections();
+    }
+    fn refresh_setup_inspections(&mut self) {
+        let mut changed = false;
+        for (id, entry) in &mut self.setup_inspections {
+            if entry
+                .worker
+                .as_ref()
+                .is_some_and(|(_, worker)| worker.is_finished())
+            {
+                let (generation, worker) = entry.worker.take().unwrap();
+                let value = worker
+                    .join()
+                    .unwrap_or_else(|_| Err("Setup inspection worker panicked".into()));
+                if generation == entry.generation {
+                    entry.value = value;
+                    changed = true;
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            // A superseded completion is discarded and refreshed at the latest generation.
+            if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+                let generation = entry.generation;
+                entry.worker = Some((
+                    generation,
+                    thread::spawn(move || super::setup::try_inspect_plugin_setup(&plugin)),
+                ));
+            }
+        }
+        if changed {
+            self.emit(json!({"op":"settings","settings":self.settings()}));
         }
     }
     fn raw_config(&self) -> Result<Value, String> {
@@ -1519,7 +1587,8 @@ impl DaemonService {
                 } else {
                     json!(0)
                 };
-                let hubs: Vec<_> = self.settings()["hubs"].as_array().into_iter().flatten().map(|h|json!({"name":h["name"],"status":h["status"],"is_default":h["name"] == self.config.default_hub})).collect();
+                let mut hubs: Vec<_> = self.slots.iter().map(|(name, slot)|json!({"name":name,"status":wire_status(&slot.connection_status()),"is_default":name == &self.config.default_hub})).collect();
+                hubs.sort_by(|a, b| string(a, "name").cmp(string(b, "name")));
                 Ok(
                     json!({"ok":true,"registered":row.is_some(),"display_address":row.as_ref().map(|r| self.display_address(&hub,r)),"title":row.as_ref().map(|r|r["title"].clone()),"about":row.as_ref().map(|r|r["about"].clone()),"scope":row.as_ref().map(|r|r["scope"].clone()),"unread_count":unread,"hubs":hubs}),
                 )
@@ -2017,6 +2086,7 @@ impl DaemonService {
         }
     }
     pub fn poll(&mut self) -> Result<(), String> {
+        self.refresh_setup_inspections();
         self.reload_slots()?;
         self.flush_acks();
         // Successful background RPCs or event reconnection supersede transport
@@ -2253,8 +2323,12 @@ impl DaemonService {
                     .plugins
                     .find_by_id(string(candidate, "harness"))
                     .is_some_and(|plugin| {
-                        self.inspect_setup(plugin)
-                            .is_ok_and(|(_, configured, _)| configured)
+                        self.setup_inspections
+                            .get(&plugin.id)
+                            .is_some_and(|entry| entry.worker.is_none())
+                            && self
+                                .inspect_setup(plugin)
+                                .is_ok_and(|(_, configured, _)| configured)
                     })
         }) {
             let key = (
@@ -2427,7 +2501,8 @@ impl DaemonService {
                 .cloned()
                 .unwrap_or_default();
         }
-        if let Some(inbox_paused) = self.human_projection(channel_hub)["human_paused"].as_bool() {
+        let channel_human = self.human_projection(channel_hub);
+        if let Some(inbox_paused) = channel_human["human_paused"].as_bool() {
             for channel in &mut channels {
                 channel["inbox_paused"] = json!(inbox_paused);
                 channel["delivery_enabled"] = json!(
@@ -2477,7 +2552,11 @@ impl DaemonService {
                     .cloned()
                     .unwrap_or(Value::Null);
             }
-            let projection = self.human_projection(string(item, "name"));
+            let projection = if item["name"] == channel_hub {
+                channel_human.clone()
+            } else {
+                self.human_projection(string(item, "name"))
+            };
             if let (Some(item), Some(fields)) = (item.as_object_mut(), projection.as_object()) {
                 item.extend(fields.clone());
             }
@@ -2663,7 +2742,11 @@ impl DaemonService {
                     if let Some(channels) = peer["channels"].as_object_mut() {
                         channels.remove(&format!("{}:human", self.host_id));
                     }
-                    row["channels"] = self.peer_dto(string(row, "hub"), &peer)["channels"].clone();
+                    row["channels"] =
+                        json!(super::lease::attachments(&peer, &self.host_id, now_ms())
+                            .iter()
+                            .filter_map(|a| a["display_name"].as_str())
+                            .collect::<Vec<_>>());
                 }
             }
             row["custom_title"] = json!(self
@@ -2761,15 +2844,19 @@ impl DaemonService {
                     && super::auth::principal_matches(string(row, "principal_id"), &slot.identity)
             })
         });
-        let current =
-            slot.is_some_and(|slot| slot.status.lock().is_ok_and(|s| s.as_str() == "connected"));
-        self.project_human(record.as_ref(), current)
+        let current = slot.is_some_and(|slot| slot.connection_status() == "connected");
+        let mut projection = self.project_human(record.as_ref(), current);
+        projection["attachments"] = json!(record
+            .as_ref()
+            .map(|row| super::lease::attachments(row, &self.host_id, now_ms()))
+            .unwrap_or_default());
+        projection
     }
     fn project_human(&self, record: Option<&Value>, current: bool) -> Value {
         let Some(record) = record else {
-            return json!({"human_listener_id":null,"human_paused":null,"human_about":null,"human_control_revision":null,"human_availability":"UNLISTENED","human_scope":null,"human_state_status":"unknown","attachments":[]});
+            return json!({"human_listener_id":null,"human_paused":null,"human_about":null,"human_control_revision":null,"human_availability":"UNLISTENED","human_scope":null,"human_state_status":"unknown"});
         };
-        json!({"human_listener_id":record["listener_id"],"human_paused":record["human_paused"].as_bool().unwrap_or(false),"human_about":record["about"],"human_control_revision":record["human_control_revision"],"human_availability":super::lease::evaluate_node_lease(&record,now_ms()),"human_scope":record["scope"],"human_state_status":if current{"current"}else{"stale"},"attachments":super::lease::attachments(&record,&self.host_id,now_ms())})
+        json!({"human_listener_id":record["listener_id"],"human_paused":record["human_paused"].as_bool().unwrap_or(false),"human_about":record["about"],"human_control_revision":record["human_control_revision"],"human_availability":super::lease::evaluate_node_lease(record,now_ms()),"human_scope":record["scope"],"human_state_status":if current{"current"}else{"stale"}})
     }
     fn emit(&self, frame: Value) {
         if let Some(ui) = &self.ui {
@@ -2844,6 +2931,7 @@ impl DaemonService {
             && matches!(
                 string(action, "op"),
                 "clear_activity_history"
+                    | "unlisten_all"
                     | "ack_signals"
                     | "mark_activity_read"
                     | "mark_all_activity_read"
@@ -3088,12 +3176,12 @@ impl DaemonService {
                     .find_by_id(id)
                     .ok_or("UNSUPPORTED_HARNESS: Unknown harness")?;
                 let result = remove_plugin_setup(p);
-                self.invalidate_setup(id);
-                result?;
                 let notice = p
                     .post_disconnect_hint
                     .clone()
                     .unwrap_or("Disconnected · Active listeners stopped".into());
+                self.invalidate_setup(id);
+                result?;
                 let mut detach_errors = Vec::new();
                 for row in self
                     .state
@@ -3659,7 +3747,7 @@ impl DaemonService {
                     let filter=action["filter"].as_str().unwrap_or(&self.activity_filter);
                     c.query_while("SELECT s.*,l.harness AS target_harness,l.owner_user AS target_user,l.title AS target_title FROM local_signals s LEFT JOIN local_listeners l ON l.hub=s.hub AND l.listener_id=s.listener_id WHERE s.activity_hidden=0 AND (?='' OR s.hub=?) AND (?='' OR signal_id=?) AND (?!='me' OR l.harness='human') AND (?!='unread' OR s.acknowledged_at_ms IS NULL)", &[json!(selected),json!(selected),json!(signal_id),json!(signal_id),json!(filter),json!(filter)],|row| {
                         if !super::state::matches_activity(&row,action["query"].as_str().unwrap_or("")) { return Ok(true); }
-                        if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) SELECT ?,?,?,?,?,hub_url,principal_id FROM local_listeners WHERE hub=? AND listener_id=?", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms()),row["hub"].clone(),row["listener_id"].clone()])?; }
+                        if row["target_harness"] == "human" && row["acknowledged_at_ms"].is_null() { c.execute("INSERT OR REPLACE INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES(?,?,?,?,?,?,?)", &[row["hub"].clone(),row["listener_id"].clone(),row["signal_id"].clone(),json!(format!("{}:human",self.host_id)),json!(now_ms()),row["hub_url"].clone(),row["principal_id"].clone()])?; }
                         c.execute("UPDATE local_signals SET activity_hidden=1,acknowledged_at_ms=CASE WHEN ?='human' THEN COALESCE(acknowledged_at_ms,?) ELSE acknowledged_at_ms END WHERE hub=? AND signal_id=?", &[row["target_harness"].clone(),json!(now_ms()),row["hub"].clone(),row["signal_id"].clone()])?;
                         Ok(true)
                     })?;
@@ -3934,8 +4022,14 @@ impl DaemonService {
                 {
                     self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"))?;
                 }
-                for p in self.plugins.agent_plugins() {
-                    remove_plugin_setup(p)?;
+                for p in self
+                    .plugins
+                    .agent_plugins()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    remove_plugin_setup(&p)?;
                     self.invalidate_setup(&p.id);
                     self.last_app_action
                         .insert(p.id.clone(), "disconnect".into());
@@ -4119,6 +4213,11 @@ impl DaemonService {
     fn shutdown(&mut self) {
         // The caller sets closing while holding the service mutex after all calls drain.
         self.closing = true;
+        for entry in self.setup_inspections.values_mut() {
+            if let Some((_, worker)) = entry.worker.take() {
+                let _ = worker.join();
+            }
+        }
         for pending in self
             .oidc_recoveries
             .values()
@@ -4914,6 +5013,29 @@ fn interactive_login(action: &Value) -> bool {
 }
 fn dispatch_action(service: &Arc<Mutex<DaemonService>>, action: &Value) -> Result<Value, String> {
     let result = dispatch_action_inner(service, action);
+    if matches!(
+        string(action, "op"),
+        "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
+    ) {
+        // Await this action's invalidated inspections without holding service.
+        // Other requests continue to use the previous cached projection.
+        loop {
+            let pending = {
+                let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+                if s.closing || shutdown_requested() {
+                    break;
+                }
+                s.refresh_setup_inspections();
+                s.setup_inspections
+                    .values()
+                    .any(|entry| entry.worker.is_some())
+            };
+            if !pending {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
     if let Ok(mut s) = service.lock() {
         if interactive_login(action) {
             s.record_hub_result(action, &result, None);
@@ -5565,6 +5687,19 @@ pub use super::cli::run_cli_command;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settle_setup_inspections(service: &mut DaemonService) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service
+            .setup_inspections
+            .values()
+            .any(|entry| entry.worker.is_some())
+        {
+            assert!(Instant::now() < deadline, "Setup inspection did not settle");
+            service.refresh_setup_inspections();
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
 
     #[test]
     fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
@@ -6300,6 +6435,8 @@ print(json.dumps(result), flush=True)
                         post_setup_hint: None,
                         post_disconnect_hint: None,
                     });
+                service.invalidate_setup("fixture");
+                settle_setup_inspections(&mut service);
                 service.session_activity = Some(
                     crate::core::session_activity::SessionActivity::new(&config, &service.plugins),
                 );
@@ -6330,6 +6467,7 @@ print(json.dumps(result), flush=True)
                         slot.config["autoListen"] = json!(true);
                     }
                     service.invalidate_setup("fixture");
+                    settle_setup_inspections(&mut service);
                     service.auto_listen()?;
                     let rows=service.state.db.query("SELECT hub,status FROM local_listeners WHERE harness='fixture' AND session_id=?",&[json!(session)])?;
                     if rows.len() != 1
@@ -6724,6 +6862,7 @@ print(json.dumps(result), flush=True)
                     }
                     if mode == "preflight" {
                         service.invalidate_setup("fixture");
+                        settle_setup_inspections(&mut service);
                     }
                     service.auto_listen()?;
                     if mode == "preflight" {
@@ -7468,6 +7607,23 @@ print(json.dumps(result), flush=True)
         assert_eq!(peer["human_availability"], hub["human_availability"]);
         assert_eq!(peer["human_state_status"], hub["human_state_status"]);
         assert_eq!(peer["attachments"], hub["attachments"]);
+        *client.status.lock().map_err(|e| e.to_string())? = "connected".into();
+        *client.rejected_bearer.lock().map_err(|e| e.to_string())? = Some("rejected".into());
+        let snapshot = service.snapshot()?;
+        let hub = snapshot["hubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "work")
+            .unwrap();
+        let peer = snapshot["my_remote_listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hub"] == "work")
+            .unwrap();
+        assert_eq!(hub["human_state_status"], "stale");
+        assert_eq!(hub["human_state_status"], peer["human_state_status"]);
         client.closed.store(true, Ordering::SeqCst);
         service.shutdown();
         fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
@@ -7481,6 +7637,20 @@ print(json.dumps(result), flush=True)
         );
         assert!(mailbox.closed.load(Ordering::SeqCst));
         assert!(mailbox.next().is_none());
+    }
+    #[test]
+    fn correlated_hub_save_never_sheds_the_row_needed_for_settlement() -> Result<(), String> {
+        let hubs = (0..150)
+            .map(|i| json!({"name":format!("hub-{i}"),"url":"https://id.example.com"}))
+            .collect::<Vec<_>>();
+        let frame: Value = serde_json::from_slice(&bounded_frame(json!({"op":"settings","request_id":"save","source_op":"save_hub","settings":{"hubs":hubs}}))?).map_err(|e| e.to_string())?;
+        assert_eq!(frame["settings"]["hubs"][149]["name"], "hub-149");
+        let hubs = (0..150).map(|i| json!({"name":format!("hub-{i}"),"attachments":(0..30).map(|_|json!({"display_name":"long".repeat(100)})).collect::<Vec<_>>()})).collect::<Vec<_>>();
+        let frame: Value = serde_json::from_slice(&bounded_frame(json!({"op":"settings","request_id":"save","source_op":"save_hub","settings":{"hubs":hubs}}))?).map_err(|e| e.to_string())?;
+        assert_eq!(frame["op"], "error");
+        assert_eq!(frame["request_id"], "save");
+        assert_eq!(frame["source_op"], "save_hub");
+        Ok(())
     }
     #[test]
     fn root_hub_shedding_retains_correlated_receipt_and_terminates() -> Result<(), String> {

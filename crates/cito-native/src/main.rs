@@ -274,44 +274,6 @@ fn run_mcp_stdio() {
     }
     drop(sidecars);
 }
-#[cfg(test)]
-mod framing_tests {
-    use super::*;
-    #[test]
-    fn adjacent_valid_lines_do_not_share_the_line_budget() {
-        let mut pending = vec![b' '; 1_048_576];
-        pending.push(b'\n');
-        pending.extend_from_slice(b"{}\n");
-        assert_eq!(
-            pop_stdio_line(&mut pending).unwrap().unwrap().len(),
-            1_048_577
-        );
-        assert_eq!(
-            pop_stdio_line(&mut pending).unwrap().as_deref(),
-            Some("{}\n")
-        );
-        assert!(pop_stdio_line(&mut pending).unwrap().is_none());
-        let mut oversized = vec![b'x'; 1_048_577];
-        oversized.push(b'\n');
-        assert!(pop_stdio_line(&mut oversized).is_err());
-        let mut no_newline = vec![b'x'; 1_048_577];
-        assert!(pop_stdio_line(&mut no_newline).is_err());
-    }
-    #[test]
-    fn sidecar_lines_stop_at_the_budget() {
-        let mut reader = std::io::Cursor::new(b"{}\n{}\n");
-        assert_eq!(
-            read_sidecar_line(&mut reader).unwrap().as_deref(),
-            Some("{}\n")
-        );
-        assert_eq!(
-            read_sidecar_line(&mut reader).unwrap().as_deref(),
-            Some("{}\n")
-        );
-        assert!(read_sidecar_line(&mut reader).unwrap().is_none());
-        assert!(read_sidecar_line(&mut std::io::Cursor::new(vec![b'x'; 1_048_577])).is_err());
-    }
-}
 fn main() {
     let args: Vec<String> = env::args().collect();
     let argv0 = args
@@ -352,5 +314,44 @@ fn main() {
             eprintln!("cito-native: unknown subcommand '{other}'");
             std::process::exit(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    #[test]
+    fn adjacent_valid_lines_do_not_share_the_line_budget() {
+        let mut pending = vec![b' '; 1_048_576];
+        pending.push(b'\n');
+        pending.extend_from_slice(b"{}\n");
+        assert_eq!(
+            pop_stdio_line(&mut pending).unwrap().unwrap().len(),
+            1_048_577
+        );
+        assert_eq!(
+            pop_stdio_line(&mut pending).unwrap().as_deref(),
+            Some("{}\n")
+        );
+        assert!(pop_stdio_line(&mut pending).unwrap().is_none());
+        let mut oversized = vec![b'x'; 1_048_577];
+        oversized.push(b'\n');
+        assert!(pop_stdio_line(&mut oversized).is_err());
+        let mut no_newline = vec![b'x'; 1_048_577];
+        assert!(pop_stdio_line(&mut no_newline).is_err());
+    }
+    #[test]
+    fn sidecar_lines_stop_at_the_budget() {
+        let mut reader = std::io::Cursor::new(b"{}\n{}\n");
+        assert_eq!(
+            read_sidecar_line(&mut reader).unwrap().as_deref(),
+            Some("{}\n")
+        );
+        assert_eq!(
+            read_sidecar_line(&mut reader).unwrap().as_deref(),
+            Some("{}\n")
+        );
+        assert!(read_sidecar_line(&mut reader).unwrap().is_none());
+        assert!(read_sidecar_line(&mut std::io::Cursor::new(vec![b'x'; 1_048_577])).is_err());
     }
 }

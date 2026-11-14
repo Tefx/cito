@@ -371,38 +371,6 @@ impl Runtime {
         true
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn configure_retains_monotonic_cursor_and_ack_without_keyboard_is_noop() {
-        let mut runtime = Runtime {
-            config: json!({"botToken":"first"}),
-            cursor: 20,
-            pending: VecDeque::new(),
-            reply_chats: HashMap::new(),
-            pair_chats: HashMap::new(),
-        };
-        runtime.request(json!({"op":"configure","hub_config":{"botToken":"first"},"cursor":"10"}));
-        assert_eq!(runtime.cursor, 20);
-        runtime.pending.push_back(Pending {
-            cursor: 21,
-            key: Some("pending".into()),
-            done: false,
-        });
-        runtime.request(json!({"op":"configure","hub_config":{"botToken":"first"},"cursor":"30"}));
-        assert_eq!(runtime.cursor, 30);
-        assert_eq!(runtime.pending.len(), 1);
-        runtime
-            .request(json!({"op":"configure","hub_config":{"botToken":"second"},"cursor":"999"}));
-        assert_eq!(runtime.cursor, 0);
-        assert!(runtime.pending.is_empty());
-        assert!(runtime.request(
-            json!({"op":"on_acked","user_config":{"chatId":"1"},"external_msg_ids":["7"]})
-        ));
-        assert_eq!(runtime.cursor, 0);
-    }
-}
 pub fn main() {
     let input = stdin_watchdog();
     let (tx, rx) = mpsc::channel::<(Value, std::result::Result<Value, ApiFailure>)>();
@@ -466,5 +434,38 @@ pub fn main() {
             next_poll = std::time::Instant::now() + Duration::from_millis(100);
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn configure_retains_monotonic_cursor_and_ack_without_keyboard_is_noop() {
+        let mut runtime = Runtime {
+            config: json!({"botToken":"first"}),
+            cursor: 20,
+            pending: VecDeque::new(),
+            reply_chats: HashMap::new(),
+            pair_chats: HashMap::new(),
+        };
+        runtime.request(json!({"op":"configure","hub_config":{"botToken":"first"},"cursor":"10"}));
+        assert_eq!(runtime.cursor, 20);
+        runtime.pending.push_back(Pending {
+            cursor: 21,
+            key: Some("pending".into()),
+            done: false,
+        });
+        runtime.request(json!({"op":"configure","hub_config":{"botToken":"first"},"cursor":"30"}));
+        assert_eq!(runtime.cursor, 30);
+        assert_eq!(runtime.pending.len(), 1);
+        runtime
+            .request(json!({"op":"configure","hub_config":{"botToken":"second"},"cursor":"999"}));
+        assert_eq!(runtime.cursor, 0);
+        assert!(runtime.pending.is_empty());
+        assert!(runtime.request(
+            json!({"op":"on_acked","user_config":{"chatId":"1"},"external_msg_ids":["7"]})
+        ));
+        assert_eq!(runtime.cursor, 0);
     }
 }

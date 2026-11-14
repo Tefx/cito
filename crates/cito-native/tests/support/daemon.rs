@@ -172,7 +172,18 @@ fn daemon_plugins_strip_inherited_caller_identity_but_honor_explicit_request_env
             .map(|l| serde_json::from_str::<Value>(l).unwrap())
             .collect::<Vec<_>>()
     };
+    for op in ["setup_apply", "setup_remove_app"] {
+        assert_eq!(f.action(json!({"op":op,"harness":"fixture"})).0, 200);
+    }
     let calls = records();
+    for op in ["setup_inspect", "setup_apply", "setup_remove"] {
+        let setup: Vec<_> = calls.iter().filter(|r| r["op"] == op).collect();
+        assert!(!setup.is_empty(), "Missing {op}");
+        assert!(
+            setup.iter().all(|r| r["process_env"] == json!({})),
+            "{setup:?}"
+        );
+    }
     let resolve = calls
         .iter()
         .filter(|r| r["op"] == "resolve_caller")
@@ -453,6 +464,88 @@ fn setup_inspection_cache_and_hub_rename_migrate_persistent_state() {
     );
 }
 #[test]
+fn setup_refresh_preserves_cached_settings_without_blocking_hub_or_mcp_and_fences_stale_generations(
+) {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let meta = f.provider("delivered");
+    f.daemon(&[]);
+    let options_path = f.state.join("plugins/fixture/options.json");
+    let calls_path = f.state.join("plugins/fixture/calls.jsonl");
+    let gate = f.dir.join("release-setup");
+    let mut options: Value =
+        serde_json::from_str(&fs::read_to_string(&options_path).unwrap()).unwrap();
+    options["configured"] = json!(false);
+    options["setup_gate"] = json!(gate);
+    fs::write(&options_path, options.to_string()).unwrap();
+    let count = |op: &str| {
+        fs::read_to_string(&calls_path)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|r| r["op"] == op)
+            .count()
+    };
+    let port = f.port;
+    std::thread::scope(|scope| {
+        let first = scope.spawn(move || {
+            http(
+                port,
+                "/ui",
+                Some(&json!({"op":"setup_apply","harness":"fixture"})),
+            )
+        });
+        wait(|| count("setup_inspect") >= 2);
+        let start = std::time::Instant::now();
+        let snapshot = f.action(json!({"op":"get_snapshot"}));
+        let peers = f.tool("cito_find", json!({}), meta);
+        let elapsed = start.elapsed();
+        let cached = snapshot.1["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "fixture")
+            .unwrap()["configured"]
+            .clone();
+        options["configured"] = json!(true);
+        fs::write(&options_path, options.to_string()).unwrap();
+        let second = scope.spawn(move || {
+            http(
+                port,
+                "/ui",
+                Some(&json!({"op":"setup_apply","harness":"fixture"})),
+            )
+        });
+        wait(|| count("setup_apply") >= 2);
+        fs::write(&gate, "").unwrap();
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert_eq!(snapshot.0, 200);
+        assert_eq!(peers["ok"], true);
+        assert_eq!(cached, true, "Refresh must retain the previous projection");
+        assert!(
+            elapsed < std::time::Duration::from_millis(800),
+            "Blocked setup held service: {elapsed:?}"
+        );
+        assert_eq!(first.0, 200);
+        assert_eq!(second.0, 200);
+    });
+    assert!(
+        count("setup_inspect") >= 3,
+        "A superseded inspection must refresh at the current generation"
+    );
+    let snapshot = f.action(json!({"op":"get_snapshot"})).1;
+    assert_eq!(
+        snapshot["settings"]["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "fixture")
+            .unwrap()["configured"],
+        true
+    );
+}
+#[test]
 fn pending_business_ack_requires_original_url_and_principal() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -467,8 +560,66 @@ fn pending_business_ack_requires_original_url_and_principal() {
         json!({}),
     );
     let id = sent["signal_id"].clone();
+    let delivered = f.tool(
+        "cito_send",
+        json!({"to":human["public_id"],"message":"Admitted before replacement"}),
+        json!({}),
+    )["signal_id"]
+        .clone();
     let state = f.db("state.sqlite");
     let hub = f.db("hub.sqlite");
+    wait(|| {
+        !state
+            .query(
+                "SELECT 1 FROM local_signals WHERE signal_id=?",
+                std::slice::from_ref(&id),
+            )
+            .unwrap()
+            .is_empty()
+    });
+    wait(|| {
+        !state
+            .query(
+                "SELECT 1 FROM local_signals WHERE signal_id=?",
+                std::slice::from_ref(&delivered),
+            )
+            .unwrap()
+            .is_empty()
+    });
+    state.execute("UPDATE local_listeners SET hub_url=\'https://replacement.example.com\',principal_id=\'none#bob\' WHERE listener_id=?", std::slice::from_ref(&human["listener_id"])).unwrap();
+    let local = cito_native::core::state::LocalState::open(&f.state).unwrap();
+    local
+        .acknowledge(
+            "local",
+            human["listener_id"].as_str().unwrap(),
+            std::slice::from_ref(&delivered),
+            "device:human",
+        )
+        .unwrap();
+    let ack = state
+        .query(
+            "SELECT * FROM pending_hub_acks WHERE signal_id=?",
+            std::slice::from_ref(&delivered),
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(ack["hub_url"], "local://");
+    assert_eq!(ack["principal_id"], human["principal_id"]);
+    f.tool("cito_inbox", json!({"ack_all":false}), meta.clone());
+    assert!(state
+        .query(
+            "SELECT * FROM pending_hub_acks WHERE signal_id=?",
+            std::slice::from_ref(&delivered)
+        )
+        .unwrap()
+        .is_empty());
+    assert!(!hub
+        .query(
+            "SELECT acked_at_ms FROM hub_signals WHERE signal_id=?",
+            std::slice::from_ref(&delivered)
+        )
+        .unwrap()[0]["acked_at_ms"]
+        .is_null());
     state.execute("INSERT INTO pending_hub_acks(hub,node_id,signal_id,channel_id,acked_at_ms,hub_url,principal_id) VALUES('local',?,?,'device:human',1,'https://other.example.com','none#bob')",&[human["listener_id"].clone(),id.clone()]).unwrap();
     for (url, principal) in [
         ("local://", "none#bob"),
@@ -2573,7 +2724,7 @@ fn sqlite_pre_v4_upgrade_and_v4_reopen_preserve_outbound_recovery_rows() {
     let daemon = f.daemon(&[]);
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        5
+        6
     );
     assert!(db
         .query(
@@ -3296,7 +3447,7 @@ fn snapshot_unread_count_precedes_activity_limit_and_utf8_frame_bounding() {
         .all(|v| v["message"].as_str().unwrap().chars().count() <= 512));
     assert_eq!(
         db.query("PRAGMA user_version", &[]).unwrap()[0]["user_version"],
-        5
+        6
     );
     assert_eq!(
         db.query("SELECT COUNT(*) AS n FROM local_signals", &[])

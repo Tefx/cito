@@ -1396,7 +1396,10 @@ impl HubEngine {
                 c.execute("INSERT INTO hub_channel_delivery_msgs(plugin_id,principal_id,external_msg_id,signal_id,from_listener_id) VALUES(?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,external_msg_id) DO UPDATE SET signal_id=excluded.signal_id,from_listener_id=excluded.from_listener_id",
                     &[json!(id),row["principal_id"].clone(),json!(ext),row["signal_id"].clone(),json!(s(&row,"from_listener_id"))])?;
             }
-            if f["progress"] == true { return Ok(Value::Null); }
+            if f["progress"] == true {
+                c.execute("UPDATE hub_channel_deliveries SET delivered_ms=? WHERE plugin_id=? AND reservation_id=? AND status=\'in_flight\'", &[json!(now_ms()),json!(id),json!(token)])?;
+                return Ok(Value::Null);
+            }
             let attempts = n(&row, "attempts").max(0);
             let (status, retry_at) = delivery_transition(f, attempts, now_ms());
             c.execute("UPDATE hub_channel_deliveries SET status=?,external_msg_id=?,delivered_ms=?,attempts=attempts+1,next_retry_ms=?,last_error=? WHERE plugin_id=? AND reservation_id=?",
@@ -2545,7 +2548,18 @@ fn handle_http(
                 && !engine.inner.closed.load(Ordering::SeqCst)
                 && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
             {
-                match events.recv_timeout(Duration::from_secs(1)) {
+                let remaining = expires_at.map(|exp| {
+                    Duration::from_secs_f64((exp - now_ms().max(0) as f64 / 1000.0).max(0.0))
+                });
+                let event = events.recv_timeout(
+                    remaining
+                        .unwrap_or(Duration::from_secs(1))
+                        .min(Duration::from_secs(1)),
+                );
+                if expires_at.is_some_and(|exp| now_ms().max(0) as f64 / 1000.0 >= exp) {
+                    break;
+                }
+                match event {
                     Ok(frame) => {
                         write!(stream, "data: {frame}\n\n").map_err(|e| e.to_string())?;
                     }
