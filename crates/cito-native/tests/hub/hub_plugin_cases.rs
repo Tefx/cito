@@ -39,6 +39,52 @@ fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {
 }
 
 #[test]
+fn user_root_aliases_retire_staged_copies_without_retiring_builtin_roots() {
+    let dir = std::env::temp_dir().join(format!(
+        "cito-hub-root-alias-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    let user = dir.join("state/plugins");
+    let alias = dir.join("alias");
+    fs::create_dir_all(&user).unwrap();
+    std::os::unix::fs::symlink(&user, &alias).unwrap();
+    let staged = user.join("telegram");
+    let write_staged = || {
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(staged.join("plugin.json"), json!({"id":"telegram","kind":"human-channel","displayName":"Legacy staged channel","version":"0.0.0","command":["./bin/cito-plugin-telegram"]}).to_string()).unwrap();
+    };
+    for root in [alias.clone(), user.join("../plugins")] {
+        write_staged();
+        assert!(discover(&[(root, false)], Some(&user)).unwrap().is_empty());
+        assert!(!staged.exists());
+    }
+    write_staged();
+    let builtin = discover(&[(alias, true)], Some(&user)).unwrap();
+    assert_eq!(builtin.len(), 1);
+    assert_eq!(builtin[0].id, "telegram");
+    assert!(
+        staged.exists(),
+        "A builtin fallback is never a user-staged copy"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn hub_root_subdirectories_have_deterministic_validation_order() {
+    let dir = std::env::temp_dir().join(format!(
+        "cito-hub-discovery-order-{}",
+        crate::plugins::random_uuid_v4()
+    ));
+    for name in ["z-invalid", "a-invalid"] {
+        fs::create_dir_all(dir.join(name)).unwrap();
+        fs::write(dir.join(name).join("plugin.json"), "{malformed").unwrap();
+    }
+    let error = discover(&[(dir.clone(), false)], None).err().unwrap();
+    assert!(error.contains("a-invalid/plugin.json"), "{error}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn packaged_channel_plugin_roots_resolve_and_preserve_override_order() {
     let dir = std::env::temp_dir().join(format!(
         "cito-plugin-roots-{}",

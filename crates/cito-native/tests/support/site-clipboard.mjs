@@ -50,7 +50,7 @@ assert.equal(missing.button.disabled, false);
 
 for (const page of ['styles/main.css', 'index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)]) {
   const content = readFileSync(new URL(page, site), 'utf8');
-  for (const retired of ['docs-figure-stage--compact', '245, 158, 11', 'Paste Invite Code', '$1']) {
+  for (const retired of ['docs-figure-stage--compact', '245, 158, 11', 'Paste Invite Code', '$1', 'My Macs', 'BannerWindow', 'Desktop Banner', 'plugins/human']) {
     assert.ok(!content.includes(retired), `${page} contains retired UI markup: ${retired}`);
   }
 }

@@ -3157,6 +3157,105 @@ fn scoped_pause_all_preserves_sibling_hubs_and_human_attachment_projection() {
 }
 
 #[test]
+fn remote_human_scope_updates_admit_cross_principal_activity() {
+    let _lock = serial();
+    let host = Fixture::new(json!({}));
+    let port = port();
+    let hub = host.spawn(
+        NATIVE,
+        &[
+            "hub",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--data-dir",
+            host.state.join("hub").to_str().unwrap(),
+            "--auth",
+            "token",
+            "--token",
+            "test-only",
+        ],
+        &[],
+    );
+    wait(|| {
+        assert!(!host.exited(hub), "{}", host.output(hub, true));
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let f = Fixture::new(
+        json!({"user":"alice","defaultHub":"work","hubs":{"work":{"url":url,"authMode":"token","token":"test-only"}}}),
+    );
+    let daemon = f.daemon(&[]);
+    let human = || {
+        f.rows("SELECT * FROM local_listeners WHERE hub='work' AND harness='human' AND status='ACTIVE'").into_iter().next()
+    };
+    wait(|| human().is_some());
+    let id = human().unwrap()["listener_id"].clone();
+    assert_eq!(human().unwrap()["scope"], "self");
+    let rpc = |user: &str, op: &str, params: Value| {
+        let response: Value = ureq::post(&format!("{url}/v1/rpc"))
+            .set("Authorization", "Bearer test-only")
+            .set("X-Cito-User", user)
+            .send_json(json!({"op":op,"params":params}))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response["result"].clone()
+    };
+    let run = |args: &[&str]| {
+        let (ok, out, err) = f.command(NATIVE, args, "");
+        assert!(ok, "{args:?}: {out} {err}");
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let send_bob = |signal_id: &str| {
+        rpc(
+            "bob",
+            "js_publish",
+            json!({"subject":format!("cito.signal.{}", id.as_str().unwrap()),"data":{"to":id,"signal_id":signal_id,"from":{"principal_id":"none#bob","user":"bob","host_name":"other-mac","harness":"human","listener_id":"bob","title":"Bob"},"message":"Cross-principal review"}}),
+        );
+        let started = std::time::Instant::now();
+        wait(|| {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(11),
+                "{}; listener: {:?}",
+                f.output(daemon, true),
+                human()
+            );
+            !f.rows(&format!("SELECT signal_id FROM local_signals WHERE signal_id='{signal_id}' AND activity_hidden=0")).is_empty()
+        });
+        let activity = f.action(json!({"op":"get_snapshot"})).1["activity"].clone();
+        assert!(
+            activity
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["signal_id"] == signal_id),
+            "{activity}"
+        );
+    };
+    let resumed = run(&["inbox", "resume", "--hub", "work", "--team", "--json"]);
+    assert_eq!(resumed["record"]["scope"], "workspace");
+    assert_eq!(human().unwrap()["scope"], "workspace");
+    send_bob("cli-scope");
+    // A separate client changes policy without touching the daemon's directory cache.
+    let private = rpc(
+        "alice",
+        "human_inbox_update",
+        json!({"node_id":id,"expected_control_revision":resumed["record"]["human_control_revision"],"scope":"self"}),
+    );
+    wait(|| human().unwrap()["scope"] == "self");
+    rpc(
+        "alice",
+        "human_inbox_update",
+        json!({"node_id":id,"expected_control_revision":private["record"]["human_control_revision"],"scope":"workspace"}),
+    );
+    send_bob("other-mac-scope");
+    assert_eq!(human().unwrap()["scope"], "workspace");
+}
+
+#[test]
 fn cli_human_devices_inbox_policy_and_mcp_authority_are_distinct() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

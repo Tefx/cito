@@ -336,7 +336,7 @@ impl HubEngine {
         db.execute("PRAGMA busy_timeout=5000", &[])?;
         db.transaction(|c|{
             for stmt in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()){c.execute(stmt,&[])?;}
-            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_pairing_codes","pairing_url","TEXT"),("hub_pairing_codes","bot_username","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
+            for(table,column,ty)in [("hub_signals","signal_id","TEXT"),("hub_signals","claimed_by_channel","TEXT"),("hub_signals","claim_until_ms","INTEGER"),("hub_signals","acked_at_ms","INTEGER"),("hub_pairing_codes","initial_human_scope","TEXT NOT NULL DEFAULT 'self'"),("hub_pairing_codes","instruction","TEXT"),("hub_pairing_codes","pairing_command","TEXT"),("hub_pairing_codes","pairing_url","TEXT"),("hub_pairing_codes","bot_username","TEXT"),("hub_channel_deliveries","reservation_id","TEXT"),("hub_channel_deliveries","attempts","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","next_retry_ms","INTEGER NOT NULL DEFAULT 0"),("hub_channel_deliveries","last_error","TEXT")]{let columns=c.query(&format!("PRAGMA table_info({table})"),&[])?;if !columns.iter().any(|v|s(v,"name")==column){c.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"),&[])?;}}
             for sql in ["CREATE INDEX IF NOT EXISTS idx_hub_signals_subject_seq ON hub_signals(subject,seq)","CREATE INDEX IF NOT EXISTS idx_hub_signals_signal_id ON hub_signals(signal_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_ext_msg ON hub_channel_deliveries(plugin_id,principal_id,external_msg_id)","CREATE INDEX IF NOT EXISTS idx_hub_channel_deliveries_recent ON hub_channel_deliveries(plugin_id,principal_id,delivered_ms DESC)"]{c.execute(sql,&[])?;}
             c.execute("INSERT OR IGNORE INTO hub_meta(key,int_val) VALUES('kv_seq',0)",&[])?;
             // Existing single-message deliveries retain reply and acknowledgment mappings.
@@ -499,6 +499,7 @@ impl HubEngine {
         caller: Option<&Value>,
         events: &mut Vec<Value>,
     ) -> Result<(Value, Option<Value>), String> {
+        maintain(c)?;
         let result = match op {
             "human_device_attach"
             | "human_device_heartbeat"
@@ -1152,8 +1153,8 @@ impl HubEngine {
         let instruction = required(&result, "instruction")?;
         self.inner.db.transaction(|c| {
             cancel_pair(c,id,caller)?;
-            c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone()])?;
+            c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username,initial_human_scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(initial_human_scope(caller, self.inner.default_human_scope))])?;
             Ok(())
         })?;
         Ok(
@@ -1244,6 +1245,7 @@ impl HubEngine {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
+        self.inner.db.transaction(maintain)?;
         let plugins = self
             .inner
             .plugins
@@ -1372,7 +1374,7 @@ impl HubEngine {
             c.execute("UPDATE hub_pairing_codes SET consumed_ms=? WHERE code=?", &[json!(now_ms()), json!(code)])?;
             let binding = one(c, "SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?",
                 &[row["principal_id"].clone(), json!(id)])?.ok_or("Binding missing")?;
-            attach(c, &binding, active, self.inner.default_human_scope, Some(&plugin))?;
+            attach(c, &binding, active, s(&row, "initial_human_scope"), Some(&plugin))?;
             Ok(json!({"op":"pair_ack","code":code,"ok":true,"owner_user":row["owner_user"],"error":null}))
         })?;
         // The callback runs on the child's reader thread; configure is a one-way write.
@@ -1605,6 +1607,24 @@ fn stream_info(c: &Connection, name: &str) -> Result<Value, String> {
         one(c,"SELECT COUNT(*) AS messages,COALESCE(MAX(seq),0) AS last_seq,COALESCE(MIN(seq),0) AS first_seq,0 AS bytes,(SELECT COUNT(*) FROM hub_consumers) AS consumer_count FROM hub_signals",&[])?.unwrap_or(Value::Null)
     };
     Ok(json!({"config":config,"state":state,"ts":super::identity::iso(now_ms() as u64)}))
+}
+// Policy-only and idle Hubs still bound retained history. The database clock
+// also amortizes maintenance across RPCs and the channel-independent worker.
+fn maintain(c: &Connection) -> Result<(), String> {
+    let now = now_ms();
+    let last = one(
+        c,
+        "SELECT int_val FROM hub_meta WHERE key='last_maintenance_ms'",
+        &[],
+    )?
+    .map(|row| n(&row, "int_val"))
+    .unwrap_or(0);
+    if now >= last && now - last < 60_000 {
+        return Ok(());
+    }
+    prune(c)?;
+    c.execute("INSERT INTO hub_meta(key,int_val) VALUES('last_maintenance_ms',?) ON CONFLICT(key) DO UPDATE SET int_val=excluded.int_val", &[json!(now)])?;
+    Ok(())
 }
 fn prune(c: &Connection) -> Result<(), String> {
     let cfg = stream_info(c, SIGNALS)?["config"].clone();

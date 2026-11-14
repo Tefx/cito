@@ -190,6 +190,179 @@ fn human_creation_scope_uses_hub_trust_on_both_entrypaths() {
 }
 
 #[test]
+fn token_boundary_on_trusted_embedded_hub_preserves_creation_scope_through_pairing_restart() {
+    use super::super::transport::HubClient;
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = Arc::new(HubEngine::open(&dir).unwrap());
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    let server = e
+        .start_server(
+            "127.0.0.1",
+            0,
+            HubAuth::new("token", Some("test-only".into()), None, None).unwrap(),
+        )
+        .unwrap();
+    let client = |user: &str| {
+        HubClient::new(
+            "work".into(),
+            json!({"url":format!("http://127.0.0.1:{}", server.port()),"authMode":"token","token":"test-only"}),
+            user,
+            None,
+        )
+    };
+    let device = json!({"host_id":"mac","channel_id":"mac:human","binding_generation":1,"owner_token":"owner"});
+    let trusted = json!({"principal_id":"none#local","owner_user":"local"});
+    let local = e
+        .rpc("human_device_attach", &device, Some(&trusted))
+        .unwrap();
+    assert_eq!(local["record"]["scope"], "workspace");
+    let device_first = client("device");
+    assert_eq!(
+        device_first
+            .human_request("human_device_attach", &device)
+            .unwrap()["record"]["scope"],
+        "self"
+    );
+    let manual_first = client("manual");
+    manual_first.rpc("human_channels_configure", &json!({"plugin_id":"fixture","hub_config":{"credential":"test-only"},"user_config":{"address":"room"}})).unwrap();
+    assert_eq!(
+        manual_first
+            .kv_get(&listener_id("none#manual", "human", "default"))
+            .unwrap()
+            .unwrap()
+            .0["scope"],
+        "self"
+    );
+    let pairing_first = client("paired");
+    let pair = pairing_first
+        .rpc("human_channel_pair_start", &json!({"plugin_id":"fixture"}))
+        .unwrap();
+    assert!(pairing_first
+        .kv_get(&listener_id("none#paired", "human", "default"))
+        .unwrap()
+        .is_none());
+    server.shutdown();
+    e.shutdown();
+    // Pending codes retain the requesting boundary even when restored by a trusted engine.
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(e.redeem("fixture", &json!({"code":pair["code"],"is_private_chat":true,"external_chat_id":"paired-chat","external_user_id":"paired-user","user_config_patch":{"address":"paired-room"}})).unwrap()["ok"], true);
+    let owner = json!({"principal_id":"none#paired","owner_user":"paired","auth_mode":"token"});
+    let id = listener_id("none#paired", "human", "default");
+    let record = e
+        .inner
+        .db
+        .transaction(|c| Ok(parse(&kv_row(c, &id)?.unwrap(), "value")))
+        .unwrap();
+    assert_eq!(record["scope"], "self");
+    e.rpc(
+        "human_inbox_update",
+        &json!({"node_id":id,"expected_control_revision":1,"scope":"workspace"}),
+        Some(&owner),
+    )
+    .unwrap();
+    // A second pairing must preserve explicitly changed policy.
+    let pair = e
+        .rpc(
+            "human_channel_pair_start",
+            &json!({"plugin_id":"fixture"}),
+            Some(&owner),
+        )
+        .unwrap();
+    e.redeem("fixture", &json!({"code":pair["code"],"is_private_chat":true,"external_chat_id":"paired-chat","external_user_id":"paired-user","user_config_patch":{"address":"paired-room"}})).unwrap();
+    e.shutdown();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[root]).unwrap();
+    e.restore_attachments().unwrap();
+    for (user, scope) in [
+        ("device", "self"),
+        ("manual", "self"),
+        ("paired", "workspace"),
+        ("local", "workspace"),
+    ] {
+        let record = e
+            .inner
+            .db
+            .transaction(|c| {
+                Ok(parse(
+                    &kv_row(c, &listener_id(&format!("none#{user}"), "human", "default"))?.unwrap(),
+                    "value",
+                ))
+            })
+            .unwrap();
+        assert_eq!(record["scope"], scope, "{user}");
+    }
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn idle_and_policy_only_hubs_prune_expired_audit_rows_without_channels() {
+    let dir = temp();
+    let e = HubEngine::open(&dir).unwrap();
+    e.set_plugin_roots(&[]).unwrap();
+    let owner = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let device = json!({"host_id":"mac","channel_id":"mac:human","binding_generation":1,"owner_token":"owner"});
+    e.rpc("human_device_attach", &device, Some(&owner)).unwrap();
+    e.rpc("human_device_detach", &device, Some(&owner)).unwrap();
+    assert!(e
+        .inner
+        .db
+        .query("SELECT * FROM hub_human_channels", &[])
+        .unwrap()
+        .is_empty());
+    for (op, params) in [
+        (
+            "human_inbox_update",
+            json!({"expected_control_revision":1,"paused":true}),
+        ),
+        (
+            "human_inbox_update",
+            json!({"expected_control_revision":2,"paused":false}),
+        ),
+        ("kv_snapshot", json!({})),
+    ] {
+        // Advance the maintenance deadline through persisted clock state, without sleeps.
+        e.inner.db.transaction(|c| {
+            c.execute("INSERT INTO hub_audit_log(ts_ms,principal_id,action,target_id) VALUES(?,'alice','expired','node'),(?,'alice','recent','node')", &[json!(now_ms()-604_801_000),json!(now_ms())])?;
+            c.execute("UPDATE hub_meta SET int_val=0 WHERE key='last_maintenance_ms'", &[])?;
+            Ok(())
+        }).unwrap();
+        e.rpc(op, &params, Some(&owner)).unwrap();
+        assert!(
+            e.inner
+                .db
+                .query("SELECT id FROM hub_audit_log WHERE action='expired'", &[])
+                .unwrap()
+                .is_empty(),
+            "{op}"
+        );
+    }
+    assert_eq!(
+        e.inner
+            .db
+            .query("SELECT id FROM hub_audit_log WHERE action='recent'", &[])
+            .unwrap()
+            .len(),
+        3
+    );
+    let record = e
+        .inner
+        .db
+        .transaction(|c| {
+            Ok(parse(
+                &kv_row(c, &listener_id("none#alice", "human", "default"))?.unwrap(),
+                "value",
+            ))
+        })
+        .unwrap();
+    assert_eq!(record["channels"]["mac:human"]["state"], "UNLISTENED");
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn hub_stamps_changed_agent_leases_and_prunes_audit_history() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

@@ -34,11 +34,15 @@ pub fn discover(
             continue;
         }
         // A bundled fallback may share the user root's target without being a user copy.
-        let is_user_root = user_root.is_some_and(|user| root == user);
-        for entry in std::fs::read_dir(root)
+        let is_user_root = !*is_builtin
+            && user_root.is_some_and(|user| super::plugins::same_plugin_root(root, user));
+        let mut subdirs = std::fs::read_dir(root)
             .map_err(|e| format!("PLUGIN_LOAD_ERROR: {}: {e}", root.display()))?
-        {
-            let dir = entry.map_err(|e| e.to_string())?.path();
+            .map(|entry| entry.map(|entry| entry.path()).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        subdirs.retain(|dir| dir.is_dir());
+        subdirs.sort();
+        for dir in subdirs {
             let path = dir.join("plugin.json");
             if !path.exists() {
                 continue;

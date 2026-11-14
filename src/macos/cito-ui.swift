@@ -1362,7 +1362,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
     var directoryActionError: String?
     var directoryActionErrorSourceOp: String?
     var latestDirectoryActionRequestId: String?
-    let directoryActionOps = ["delete_activity", "clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"]
+    let directoryActionOps = ["clear_activity_history", "ack_signals", "mark_all_activity_read", "copy_activity_message"]
     var directoryError: String? { directoryActionError ?? directoryQueryError }
     func clearDirectoryActionError() {
         let oldCopyError = directoryActionErrorSourceOp == "copy_activity_message" ? directoryActionError.map(presentationError) : nil
@@ -2140,7 +2140,7 @@ final class Companion: NSObject, NSMenuDelegate, NSSearchFieldDelegate, NSTextFi
             if hubInvitePending && frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? "") {
                 hubInvitePending=false; hubInvitePastedUntil=Date().addingTimeInterval(1.2)
             }
-            let saved = frame.ok == true && ["channel_save","save_hub_service","configure_human_channel"].contains(frame.source_op ?? "") ? frame.channel_id : nil
+            let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil
             acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? ""))
             if settingsPanel != nil { rebuildSettingsPanel() }
             return

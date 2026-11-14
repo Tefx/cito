@@ -4887,7 +4887,6 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
     );
     control(&f, p, "open_settings");
     for op in [
-        "delete_activity",
         "clear_activity_history",
         "ack_signals",
         "mark_all_activity_read",

@@ -179,6 +179,31 @@ pub fn poll_listener(
     let backlog = client
         .rpc("consumer_backlog", &json!({"name":name}))
         .unwrap_or(added);
+    let registration = local.registration_lock(hub)?;
+    let registration_guard = if row["harness"] == "human" {
+        let guard = registration
+            .lock()
+            .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+        // Read policy after the backlog: a remote scope promotion may have enabled
+        // these very signals. A pre-backlog snapshot can silently drop and ack them.
+        let (remote, _) = client
+            .kv_get(id)?
+            .ok_or("LISTENER_NOT_FOUND: Human inbox missing")?;
+        let channel = format!("{}:human", string(row, "host_id"));
+        if !remote_matches_listener(&remote, row, &channel) {
+            local.fence_listener_for(row, "fenced_before_dispatch")?;
+            return Err("STALE_GENERATION: Human attachment superseded".into());
+        }
+        super::daemon::DaemonService::reconcile_human_scope(
+            local,
+            client,
+            string(row, "host_id"),
+            &remote,
+        )?;
+        Some(guard)
+    } else {
+        None
+    };
     for item in backlog["backlog"].as_array().into_iter().flatten() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let bytes = STANDARD
@@ -216,6 +241,7 @@ pub fn poll_listener(
             &json!({"stream":"CITO_SIGNALS","name":name,"seq":item["seq"]}),
         )?;
     }
+    drop(registration_guard);
     // Business acknowledgments can arrive after transport cursor advancement. Reconcile
     // unread rows from durable stream metadata even when no new backlog item is emitted.
     for row in local.db.query("SELECT signal_id,seq FROM local_signals WHERE hub=? AND listener_id=? AND acknowledged_at_ms IS NULL",&[json!(hub),json!(id)])?{

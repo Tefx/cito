@@ -793,6 +793,32 @@ impl DaemonService {
         }
         Ok(())
     }
+    // Callers hold the Hub registration lock across the authoritative read/write
+    // and projection, so an older snapshot cannot overwrite a newer policy result.
+    pub(super) fn reconcile_human_scope(
+        state: &LocalState,
+        client: &HubClient,
+        host_id: &str,
+        remote: &Value,
+    ) -> Result<(), String> {
+        if remote["harness"] != "human" || client.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(row) = state.listener(&client.name, string(remote, "listener_id"))? else {
+            return Ok(());
+        };
+        let channel = format!("{host_id}:human");
+        if row["status"] == "ACTIVE"
+            && super::auth::principal_ids_equal(
+                string(&row, "principal_id"),
+                string(&client.identity, "principal_id"),
+            )
+            && super::registration::remote_matches_listener(remote, &row, &channel)
+        {
+            state.db.execute("UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=? AND status='ACTIVE' AND binding_generation=? AND owner_token=?", &[remote["scope"].clone(),row["hub"].clone(),row["listener_id"].clone(),row["binding_generation"].clone(),row["owner_token"].clone()])?;
+        }
+        Ok(())
+    }
     fn ensure_human_nodes(&mut self) -> Result<(), String> {
         for (slot_name, client) in self.slots.clone() {
             if client.local.is_some() {
@@ -1870,7 +1896,17 @@ impl DaemonService {
                 self.receivers.insert(
                     key,
                     thread::spawn(move || {
-                        if slot.directory().is_ok() && slot.local.is_none() {
+                        let refreshed = (|| -> Result<(), String> {
+                            let registration = state.registration_lock(&slot.name)?;
+                            let _registration = registration
+                                .lock()
+                                .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
+                            for remote in slot.directory()? {
+                                Self::reconcile_human_scope(&state, &slot, &host_id, &remote)?;
+                            }
+                            Ok(())
+                        })();
+                        if refreshed.is_ok() && slot.local.is_none() {
                             let _ = Self::reconcile_unlistened(&state, &slot, &host_id);
                         }
                     }),
@@ -2613,8 +2649,7 @@ impl DaemonService {
         if result.is_ok()
             && matches!(
                 string(action, "op"),
-                "delete_activity"
-                    | "clear_activity_history"
+                "clear_activity_history"
                     | "ack_signals"
                     | "mark_activity_read"
                     | "mark_all_activity_read"
@@ -2724,6 +2759,10 @@ impl DaemonService {
             }
             "human_inbox_update" => {
                 let slot = self.slot(&hub)?;
+                let registration = self.state.registration_lock(&hub)?;
+                let _registration = registration
+                    .lock()
+                    .map_err(|_| "STATE_ERROR: Registration lock poisoned")?;
                 let id = slot
                     .cached_directory()
                     .into_iter()
@@ -2748,6 +2787,7 @@ impl DaemonService {
                         .unwrap_or(json!(1));
                 }
                 let result = slot.human_request("human_inbox_update", &params)?;
+                Self::reconcile_human_scope(&self.state, slot, &self.host_id, &result["record"])?;
                 self.push_ui();
                 return Ok(result);
             }
@@ -2818,7 +2858,7 @@ impl DaemonService {
                     Ok(())
                 })?;
             }
-            "setup_apply" | "enable_app" => {
+            "setup_apply" => {
                 let id = action["harness"]
                     .as_str()
                     .or_else(|| action["app"].as_str())
@@ -2833,7 +2873,7 @@ impl DaemonService {
                 self.refresh_available()?;
                 self.emit(json!({"op":"settings","ok":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
             }
-            "setup_remove_app" | "disable_app" => {
+            "setup_remove_app" => {
                 let id = action["harness"]
                     .as_str()
                     .or_else(|| action["app"].as_str())
@@ -3373,8 +3413,14 @@ impl DaemonService {
                         return Err("INVALID_INPUT: Listener must be an object".into());
                     }
                     if row["harness"] == "human" {
-                        slot.human_request("human_inbox_update",&json!({"node_id":id,"expected_control_revision":row["human_control_revision"],"scope":scope}))?;
-                        break;
+                        let result = slot.human_request("human_inbox_update",&json!({"node_id":id,"expected_control_revision":row["human_control_revision"],"scope":scope}))?;
+                        Self::reconcile_human_scope(
+                            &self.state,
+                            slot,
+                            &self.host_id,
+                            &result["record"],
+                        )?;
+                        return Ok(result);
                     }
                     row["scope"] = json!(scope);
                     match slot.kv_save(id, &row, Some(rev)) {
@@ -3602,14 +3648,14 @@ impl DaemonService {
                 }
                 self.emit(json!({"op":"settings","settings":self.settings()}));
             }
-            "setup_uninstall_all" | "uninstall_cito" => {
+            "setup_uninstall_all" => {
                 for row in self.state.active()? {
                     let _ = self.unlisten_id(string(&row, "hub"), string(&row, "listener_id"));
                 }
                 self.uninstall = Some(action["purge_data"].as_bool().unwrap_or(false));
                 request_shutdown();
             }
-            "quit" | "quit_daemon" => request_shutdown(),
+            "quit" => request_shutdown(),
             "set_auto_listen" => {
                 if !self.slots.contains_key(&hub) {
                     return Err("INVALID_INPUT: Enabled hub required".into());
@@ -3629,7 +3675,7 @@ impl DaemonService {
             "close_settings" => {
                 self.active_settings_hub = None;
             }
-            "close_directory" | "copy_id" => {}
+            "close_directory" => {}
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;
@@ -4270,7 +4316,6 @@ fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
         "open_settings" | "settings_select_hub" => Some(ChannelActionKind::Read),
         "channel_save"
         | "save_hub_service"
-        | "configure_human_channel"
         | "disconnect_human_channel"
         | "channel_toggle"
         | "channel_unpair"
@@ -4278,8 +4323,7 @@ fn channel_action_kind(action: &Value) -> Option<ChannelActionKind> {
         | "clear_channel_service"
         | "channel_test"
         | "test_human_channel"
-        | "channel_pair"
-        | "pair_human_channel" => Some(ChannelActionKind::Mutation),
+        | "channel_pair" => Some(ChannelActionKind::Mutation),
         _ => None,
     }
 }
@@ -4294,7 +4338,7 @@ fn channel_rpc(action: &Value) -> &'static str {
         "human_channels_configure"
     } else {
         match string(action, "op") {
-            "channel_pair" | "pair_human_channel" => "human_channel_pair_start",
+            "channel_pair" => "human_channel_pair_start",
             "channel_test" | "test_human_channel" => "human_channels_test",
             _ => "human_channels_configure",
         }
