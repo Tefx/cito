@@ -2985,7 +2985,7 @@ impl DaemonService {
                 }
                 let result = slot.human_request("human_inbox_update", &params)?;
                 Self::reconcile_human_scope(&self.state, slot, &self.host_id, &result["record"])?;
-                self.push_ui();
+                self.push_ui_result(Some(action));
                 return Ok(result);
             }
             "cli_rename" => {
@@ -3523,6 +3523,7 @@ impl DaemonService {
                     }
                     invite["name"] = json!(name);
                 }
+                invite["request_id"] = action["request_id"].clone();
                 return self.action(&invite);
             }
             "generate_hub_invite" => {
@@ -4079,7 +4080,7 @@ impl DaemonService {
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;
-        self.push_ui();
+        self.push_ui_result(Some(action));
         Ok(json!({"ok":true}))
     }
     fn sync_host_hub(&mut self) -> Result<(), String> {

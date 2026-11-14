@@ -17,18 +17,18 @@ Cito uses a clean cobalt identity and real AppKit screenshots. Assets must descr
 
 Capture real headless AppKit views at 2× Retina resolution with the integration test `v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility` and `CITO_TEST_SNAPSHOT_DIR`. Inspect every image before copying it into `site/assets/screenshots/`:
 
-- `menu-dark.png`: Shared YOUR INBOX, attached channels, agent sessions, and unread navigation.
+- `menu-dark.png`: Slim menu starting with LISTENING SESSIONS, Stop actions, AVAILABLE SESSIONS, unread navigation, and Stop All. No dedicated inbox card; paused inboxes show one compact notice opening Human Channels.
 - `directory-dark.png`: Unified Nodes, readable addresses, All Nodes/Mine filters, and Message actions.
 - `activity-dark.png`: Unread messages and an inline one-line reply composer.
 - `settings-apps-dark.png`: App setup states, status dots, and Check & Repair.
-- `settings-channels-dark.png`: Shared gateway and personal account pairing.
+- `settings-channels-dark.png`: Compact Inbox Control Bar (identity, active delivery paths, Pause/Resume Inbox, and Self/Team on multi-user Hubs), shared gateway, and personal account pairing. Default active and paused single-channel states fit without scrolling.
 - `settings-hubs-dark.png`: Sharing controls, connected Hubs, and the Default badge.
 
 Do not generate mock UI artwork or modify labels in an image editor. Screenshot geometry, tooltips, accessibility, and contrast are checked against the rendered native view tree.
 
 ## Social preview
 
-`site/assets/og-card.png` is 1200 × 630. Use a neutral slate dot-grid, cobalt Cito lockup, the headline “Where your agents talk—with you, and each other.”, and `brew install --cask tefx/tap/cito`. Composite the current menu and Activity captures at their original aspect ratios. Keep the install command readable at social-preview scale.
+`site/assets/og-card.png` is 1200 × 630. Use a neutral slate dot-grid, cobalt Cito lockup, the headline “Signals that wake the right session.”, and `brew install --cask tefx/tap/cito`. Composite the current menu and Activity captures at their original aspect ratios. Keep the install command readable at social-preview scale.
 
 ## Architecture diagram
 

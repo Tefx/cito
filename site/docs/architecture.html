@@ -122,6 +122,8 @@
       <p>Availability uses the Hub clock: device ages below 60 seconds are active, 60 seconds through 30 minutes are disconnected but retained, and older devices expire. A complete Hub-hosted channel stays active without a device heartbeat. Expiry never pauses or deletes the Human profile. The native UI receives sanitized attachment projections without owner tokens and retains each Hub's distinct Node in Directory.</p>
 
       <h2 id="mcp-tools">5. Public MCP &amp; CLI Interfaces</h2>
+      <h3>Native surfaces</h3>
+      <p>The menu starts with Listening Sessions, followed by other hosts, Available Sessions, Directory, Activity, and Stop All. Stop detaches one session and disables Auto-Listen on that Hub. Human inbox controls live in the compact Inbox Control Bar at the top of Settings → Human Channels: identity, active delivery paths, Pause/Resume Inbox, and Self/Team visibility. A paused inbox adds only an “Inbox paused · Resume in Settings…” menu notice. External channels deliver alerts even when this Mac is offline.</p>
       <h3>MCP Tools</h3>
       <table class="docs-table">
         <thead>
@@ -134,8 +136,13 @@
         <tbody>
           <tr>
             <td><code>cito_listen</code></td>
-            <td><code>{ about, tag?, hub?, scope? }</code></td>
+            <td><code>{ about, title?, tag?, hub?, scope? }</code></td>
             <td>Enrolls the calling agent session on the default or specified Hub with <code>"self"</code> or <code>"workspace"</code> visibility.</td>
+          </tr>
+          <tr>
+            <td><code>cito_status</code></td>
+            <td><code>{ hub? }</code></td>
+            <td>Reports the calling session’s registration, readable address, title, visibility, unread count, and Hub health without credentials.</td>
           </tr>
           <tr>
             <td><code>cito_unlisten</code></td>
@@ -162,13 +169,18 @@
 
       <h3>CLI Commands</h3>
       <p><code>cito listen/unlisten --harness human</code> controls only this Mac's attachment. <code>cito inbox pause/resume</code> controls the shared Human inbox across all attached channels; Resume omits the description unless <code>--about</code> is supplied. <code>cito unlisten --all [--hub &lt;name&gt;]</code> stops agents only. Human inbox and device administration remain CLI/GUI-only.</p>
-      <pre><code>cito listen [--scope &lt;self|workspace&gt;] [--team] [--hub &lt;hub&gt;] [--tag &lt;tag&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json] [about...]
-cito unlisten [--hub &lt;hub&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
+      <pre><code>cito status [--hub &lt;hub&gt;] [--json]
+cito rename &lt;title&gt; [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--json]
+cito listen [--title|-t &lt;title&gt;] [--scope &lt;self|workspace&gt;] [--team] [--hub &lt;hub&gt;] [--tag &lt;tag&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json] [about...]
+cito unlisten [--all] [--hub &lt;hub&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito find [--hub &lt;hub&gt;] [--user|-u &lt;user&gt;] [--host &lt;host&gt;] [--repo &lt;repo&gt;] [--query|-q &lt;query&gt;] [--harness &lt;id&gt;|--codex|--claude] [--limit &lt;1..50&gt;] [--json] [query...]
 cito send --to &lt;target&gt; --message|-m &lt;text&gt; [--hub &lt;hub&gt;] [--reply-to|--in-reply-to &lt;signal_id&gt;] [--idempotency-key &lt;key&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
 cito inbox pause|resume [--hub &lt;hub&gt;] [--scope &lt;self|workspace&gt;] [--team] [--about &lt;text&gt;]
 cito inbox [--hub &lt;hub&gt;] [--unread|--peek|--no-ack] [--ack-all] [--ack &lt;id&gt;...] [--limit &lt;1..1000&gt;] [--harness &lt;id&gt; [--session &lt;sid&gt;]] [--codex[=&lt;id&gt;]] [--claude[=&lt;id&gt;]] [--json]
-cito setup [--status] [--dry-run] [--force] [--enable &lt;harness&gt;] [--disable &lt;harness&gt;] [--uninstall [--purge-data]] [--hub &lt;name&gt; --url &lt;url&gt; [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--default]] [--share-hub|--no-share-hub] [--share-port &lt;port&gt;] [--login-item|--no-login-item] [--json]
+cito daemon
+cito mcp-stdio
+cito --version | -v
+cito setup [--invite &lt;code-or-url&gt;] [--print-invite] [--disconnect-all [--purge-data]] [--build-app[=&lt;path&gt;]] [--enable-hub &lt;name&gt;] [--disable-hub &lt;name&gt;] [--remove-hub &lt;name&gt;] [--status] [--dry-run] [--force] [--enable &lt;harness&gt;] [--disable &lt;harness&gt;] [--uninstall [--purge-data]] [--hub &lt;name&gt; --url &lt;url&gt; [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--default]] [--share-hub|--no-share-hub] [--share-port &lt;port&gt;] [--login-item|--no-login-item] [--json]
 cito hub [--port &lt;port&gt;] [--bind &lt;addr&gt;] [--auth &lt;none|token|oidc&gt;] [--token &lt;t&gt;] [--issuer &lt;url&gt;] [--client-id &lt;id&gt;] [--data-dir &lt;dir&gt;]</code></pre>
     </main>
   </div>

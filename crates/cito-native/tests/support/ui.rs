@@ -81,6 +81,420 @@ impl<'a> ClosedLoop<'a> {
 }
 
 #[test]
+fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    frame["hubs"][0]["human_state_status"] = json!("current");
+    frame["hubs"][0]["human_listener_id"] = json!("inbox");
+    frame["hubs"][0]["human_control_revision"] = json!(4);
+    frame["hubs"][0]["auth_mode"] = json!("oidc");
+    let device = json!({"channel_id":"here:human","location":"device","display_name":"MacBook Pro.local","availability":"ACTIVE","is_local":true});
+    let external = json!({"channel_id":"hub:telegram","location":"hub","display_name":"Telegram","availability":"ACTIVE","is_local":false});
+    for remote_only in [false, true] {
+        for paused in [false, true] {
+            let mut retained = device.clone();
+            retained["availability"] = json!("DISCONNECTED_RETAINED");
+            retained["is_local"] = json!(false);
+            let mut expired = device.clone();
+            expired["display_name"] = json!("Old Mac");
+            expired["availability"] = json!("EXPIRED");
+            let mut detached = external.clone();
+            detached["display_name"] = json!("Retired Channel");
+            detached["availability"] = json!("UNLISTENED");
+            frame["hubs"][0]["attachments"] = if remote_only {
+                json!([external.clone(), expired, detached])
+            } else {
+                json!([
+                    device.clone(),
+                    retained,
+                    external.clone(),
+                    expired,
+                    detached
+                ])
+            };
+            frame["hubs"][0]["human_paused"] = json!(paused);
+            cfg["hubs"][0]["human_paused"] = json!(paused);
+            cfg["channels"][0]["inbox_paused"] = json!(paused);
+            frame["settings"] = cfg.clone();
+            f.send(p, frame.clone());
+            control(&f, p, "open_settings");
+            control(&f, p, "settings_tab:channels");
+            for appearance in ["light", "dark"] {
+                let s = inspect_as(&f, p, Some(appearance));
+                assert!(node(&s, "items", "human_inbox_card").is_null());
+                assert!(node(&s, "items", "inbox_header").is_null());
+                assert_eq!(node(&s, "items", "inbox_paused_notice").is_null(), !paused);
+                assert_eq!(
+                    node(&s, "settings_items", "inbox_control_bar")["height"],
+                    44
+                );
+                let scroll = node(&s, "settings_items", "settings_channels_tab");
+                assert_eq!(scroll["height"], 368);
+                assert_eq!(
+                    s["clipped_views"],
+                    json!([]),
+                    "Every resting active/paused default must fit without scrolling"
+                );
+                assert_eq!(s["overlapping_siblings"], json!([]));
+                let summary = node(&s, "settings_items", "inbox_control_summary");
+                assert_eq!(
+                    summary["text"],
+                    if paused {
+                        "Inbox paused · Activity & Telegram paused"
+                    } else if remote_only {
+                        "Telegram · Activity"
+                    } else {
+                        "Telegram · Activity · MacBook Pro"
+                    }
+                );
+                let tip = summary["tooltip"].as_str().unwrap();
+                assert!(
+                    tip.contains("External channels deliver alerts even when this Mac is offline.")
+                );
+                for excluded in [
+                    "ACTIVE",
+                    "UNLISTENED",
+                    "EXPIRED",
+                    "Old Mac",
+                    "Retired Channel",
+                ] {
+                    assert!(!tip.contains(excluded));
+                }
+                assert_eq!(
+                    node(&s, "settings_items", "toggle_inbox")["text"],
+                    if paused {
+                        "Resume Inbox"
+                    } else {
+                        "Pause Inbox"
+                    }
+                );
+                assert_eq!(node(&s, "settings_items", "scope:inbox")["text"], "Self");
+                render_png_as(
+                    &f,
+                    p,
+                    "settings",
+                    &format!("v41_inbox_{}_{}_{appearance}.png", remote_only, paused),
+                    Some(appearance),
+                );
+            }
+        }
+    }
+    control(&f, p, "toggle_inbox");
+    let pending = inspect(&f, p);
+    assert_eq!(
+        node(&pending, "settings_items", "toggle_inbox")["enabled"],
+        false
+    );
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "human_inbox_update")
+        .unwrap();
+    frame["source_op"] = json!("human_inbox_update");
+    frame["request_id"] = json!("older-request");
+    f.send(p, frame.clone());
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "toggle_inbox")["enabled"],
+        false
+    );
+    frame["request_id"] = action["request_id"].clone();
+    f.send(p, frame);
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "toggle_inbox")["enabled"],
+        true
+    );
+}
+
+#[test]
+fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["hubs"][0]["auto_listen"] = json!(true);
+    frame["harnesses"][0]["pid_bound"] = json!(false);
+    frame["available"] =
+        json!([{"harness":"fixture","session_id":"recent","title":"Recent session","cwd":"/tmp"}]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "items", "toggle_group:fixture")["text"],
+        "Fixture · 1 recent"
+    );
+    assert!(!node(&s, "items", "candidate:fixture:recent").is_null());
+    control(&f, p, "toggle_group:fixture");
+    control(&f, p, "target_hub:work");
+    assert!(!node(&inspect(&f, p), "items", "candidate:fixture:recent").is_null());
+    control(&f, p, "target_hub:personal");
+    assert!(node(&inspect(&f, p), "items", "candidate:fixture:recent").is_null());
+    frame["harnesses"][0]["pid_bound"] = json!(true);
+    frame["available"][0]["endpoint_pid"] = json!(123);
+    frame["available"].as_array_mut().unwrap().push(
+        json!({"harness":"fixture","session_id":"older","title":"Older session","cwd":"/tmp"}),
+    );
+    frame["discovery"] = json!([{"harness":"fixture","status":"scanning"}]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert_eq!(
+        node(&s, "items", "toggle_group:fixture")["text"],
+        "Fixture · 2 sessions"
+    );
+    assert!(nodes(&node(&s, "items", "discovery:fixture")["children"])
+        .iter()
+        .any(|n| n["text"] == "Fixture · Scanning sessions…"));
+    frame["available"] = json!([]);
+    frame["discovery"] = json!([{"harness":"fixture","status":"error","error":"personal: PLUGIN_EXEC_FAILED: Cannot scan (os error 13)"}]);
+    f.send(p, frame.clone());
+    let s = inspect(&f, p);
+    assert!(node(&s, "items", "available_empty_target").is_null());
+    assert!(nodes(&node(&s, "items", "discovery:fixture")["children"])
+        .iter()
+        .any(|n| n["text"] == "Fixture · Cannot scan"));
+    control(&f, p, "stop_all");
+    let s = inspect(&f, p);
+    assert_eq!(node(&s, "items", "stop_all")["text"], "Stopping…");
+    assert_eq!(node(&s, "items", "stop_all")["enabled"], false);
+    let action = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "unlisten_all")
+        .unwrap();
+    assert_eq!(action["hub"], "personal");
+    frame["source_op"] = json!("unlisten_all");
+    frame["request_id"] = action["request_id"].clone();
+    f.send(p, frame);
+    assert_eq!(node(&inspect(&f, p), "items", "stop_all")["enabled"], true);
+}
+
+#[test]
+fn v41_directory_copy_drafts_and_activity_confirmation_survive_only_valid_transitions() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    f.send(p, frame.clone());
+    control(&f, p, "open_directory");
+    f.send(
+        p,
+        json!({"op":"test_directory_query","query":"missing-person"}),
+    );
+    let filtered = inspect(&f, p);
+    assert_eq!(filtered["directory_matched_count"], 0);
+    frame["unread_count"] = json!(1);
+    f.send(p, frame.clone());
+    assert_eq!(inspect(&f, p)["directory_matched_count"], 0);
+    f.send(p, json!({"op":"test_directory_query","query":""}));
+    inspect(&f, p);
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[peer("one"),peer("two")],"matched_count":2,"online_count":2}),
+    );
+    control(&f, p, "copy_dir:personal:one");
+    inspect(&f, p);
+    frame["harnesses"][0]["tint"] = json!("teal");
+    f.send(p, frame);
+    assert_eq!(
+        node(&inspect(&f, p), "directory_items", "copy_dir:personal:one")["text"],
+        "✓ Copied"
+    );
+    control(&f, p, "msg_dir:personal:one");
+    f.send(
+        p,
+        json!({"op":"test_composer_input","value":"Keep this draft"}),
+    );
+    f.send(p, json!({"op":"test_directory_key","key":"down"}));
+    f.send(p, json!({"op":"test_directory_key","key":"shift-return"}));
+    let draft = inspect(&f, p);
+    assert_eq!(draft["composer_target"], peer("one")["display_address"]);
+    assert_eq!(
+        node(&draft, "directory_items", "composer_input")["text"],
+        "Keep this draft"
+    );
+    control(&f, p, "composer_cancel");
+    control(&f, p, "dir_mode:activity");
+    control(&f, p, "act_filter:all");
+    send_fixture(
+        &f,
+        p,
+        json!({"op":"directory","peers":[],"activity":[{"hub":"personal","signal_id":"observed","listener_id":"agent","from_user":"bob","from_host_name":"desktop","from_title":"Build","target_harness":"fixture","target_title":"Session","target_scoped_id":"personal:agent","message":"Build ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":false}]}),
+    );
+    control(&f, p, "activity_clear");
+    assert!(!node(
+        &inspect(&f, p),
+        "directory_items",
+        "activity_clear_confirm_commit"
+    )
+    .is_null());
+    f.send(p, json!({"op":"test_directory_query","query":"Build"}));
+    assert!(node(
+        &inspect(&f, p),
+        "directory_items",
+        "activity_clear_confirm_commit"
+    )
+    .is_null());
+    f.send(p, json!({"op":"test_directory_key","key":"return"}));
+    inspect(&f, p);
+    assert!(!f.frames(p).iter().any(|a| a["op"] == "ack_signals"));
+}
+
+#[test]
+fn v41_start_sharing_and_auth_validate_ports_without_blocking_stop() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    for bad in ["0", "65536", "not-a-port"] {
+        cfg["host_hub"]["enabled"] = json!(true);
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        inspect(&f, p);
+        f.send(
+            p,
+            json!({"op":"test_settings_input","id":"host_hub_port","value":bad}),
+        );
+        control(&f, p, "toggle_host_hub_auth");
+        assert!(
+            node(&inspect(&f, p), "settings_items", "host_hub_error")["text"]
+                .as_str()
+                .unwrap()
+                .contains("1 to 65535")
+        );
+        cfg["host_hub"]["enabled"] = json!(false);
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        inspect(&f, p);
+        control(&f, p, "toggle_host_hub");
+        inspect(&f, p);
+        assert!(!f.frames(p).iter().any(|a| a["op"] == "set_host_hub"));
+    }
+    cfg["host_hub"]["enabled"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    inspect(&f, p);
+    control(&f, p, "toggle_host_hub");
+    inspect(&f, p);
+    let stopped = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "set_host_hub")
+        .unwrap();
+    assert_eq!(stopped["enabled"], false);
+    assert_eq!(stopped["port"], 4291);
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"host_hub_port","value":"65535"}),
+    );
+    control(&f, p, "toggle_host_hub_auth");
+    inspect(&f, p);
+    assert_eq!(
+        f.frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "set_host_hub")
+            .unwrap()["port"],
+        65535
+    );
+}
+
+#[test]
+fn v41_hub_save_settles_by_name_and_request_not_url_spelling() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    for (id, value) in [
+        ("settings_hub_name", "shared"),
+        ("settings_hub_url", "https://EXAMPLE.COM:443/"),
+    ] {
+        f.send(p, json!({"op":"test_settings_input","id":id,"value":value}));
+    }
+    control(&f, p, "submit_add_hub");
+    inspect(&f, p);
+    let request = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "setup_save_hub")
+        .unwrap();
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":request["request_id"],"settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "submit_add_hub")["enabled"],
+        false,
+        "A matching request without the saved Hub cannot settle"
+    );
+    cfg["hubs"].as_array_mut().unwrap().push(json!({"name":"shared","url":"https://example.com/","auth_mode":"none","enabled":true,"is_default":false,"status":"connected"}));
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":request["request_id"],"settings":cfg}));
+    assert!(node(&inspect(&f, p), "settings_items", "add_hub_form").is_null());
+}
+
+#[test]
+fn v41_new_test_receipts_override_health_until_the_next_settings_frame() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["status"] = json!("error");
+    cfg["channels"][0]["detail"] = json!("Credentials rejected. Update your token.");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    f.send(p,json!({"op":"channel_test_result","channel_id":"channel","ok":true,"detail":"Test accepted"}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        "Test accepted"
+    );
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        "Credentials rejected. Update your token."
+    );
+    cfg["channels"][0]["status"] = json!("ready");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        "Test accepted"
+    );
+    control(&f, p, "settings_tab:hubs");
+    control(&f, p, "open_add_hub");
+    control(&f, p, "settings_tab:channels");
+    f.send(p, json!({"op":"test_settings_key","key":"return"}));
+    inspect(&f, p);
+    assert!(!f.frames(p).iter().any(|a| a["op"] == "setup_save_hub"));
+    f.send(p, json!({"op":"test_settings_key","key":"escape"}));
+    assert_eq!(inspect(&f, p)["settings_open"], false);
+}
+
+#[test]
 fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -239,6 +653,7 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut frame = state();
+    frame["settings"] = settings();
     frame["hubs"][0]["human_listener_id"] = json!("inbox");
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_scope"] = json!("workspace");
@@ -271,8 +686,10 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
             p,
             json!({"op":"directory","peers":if mode=="token"{vec![peer("other")]}else{vec![]},"matched_count":if mode=="token"{1}else{0},"online_count":1}),
         );
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:channels");
         let s = inspect(&f, p);
-        let inbox = node(&s, "items", "scope:inbox");
+        let inbox = node(&s, "settings_items", "scope:inbox");
         let agent = node(&s, "items", &format!("scope:{agent_id}"));
         assert_eq!(inbox["text"], "Team", "{mode}");
         assert_eq!(inbox["symbol"], "person.2.fill");
@@ -331,9 +748,9 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     control(&f, p, "open_settings");
     control(&f, p, "settings_tab:channels");
     let paused = inspect(&f, p);
-    assert!(node(&paused, "settings_items", "human_paused_banner").is_object());
+    assert!(node(&paused, "settings_items", "inbox_control_bar").is_object());
     assert_eq!(
-        node(&paused, "settings_items", "resume_human_channels")["enabled"],
+        node(&paused, "settings_items", "toggle_inbox")["enabled"],
         false
     );
     control(&f, p, "open_uninstall_confirm");
@@ -433,6 +850,9 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut cfg = settings();
+    f.send(p, state());
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
     let mut frame = state();
     let mut human = listener();
     human["harness"] = json!("human");
@@ -449,29 +869,35 @@ fn inbox_attachments_pause_agents_and_unavailable_details_follow_live_state() {
     let other = json!({"channel_id":"other:human","location":"device","host_id":"other","display_name":"desktop.local","availability":"ACTIVE","is_local":false});
     let external = json!({"channel_id":"hub:channel","location":"hub","plugin_id":"channel","display_name":"Messenger","availability":"ACTIVE","is_local":false});
     for (attachments, summary) in [
-        (json!([]), "Activity inbox"),
-        (json!([local.clone()]), "Activity"),
-        (json!([local.clone(), other.clone()]), "Activity · +1 Mac"),
+        (json!([]), "Activity"),
+        (json!([local.clone()]), "Activity · laptop"),
+        (
+            json!([local.clone(), other.clone()]),
+            "Activity · desktop · laptop",
+        ),
         (
             json!([external.clone(), other.clone()]),
-            "Messenger · +1 Mac",
+            "Messenger · Activity · desktop",
         ),
-        (json!([external, local]), "Messenger · Activity"),
+        (json!([external, local]), "Messenger · Activity · laptop"),
     ] {
         frame["hubs"][0]["attachments"] = attachments;
         frame["settings"] = cfg.clone();
         f.send(p, frame.clone());
         let snapshot = inspect(&f, p);
         assert!(
-            nodes(&snapshot["items"])
+            nodes(&snapshot["settings_items"])
                 .iter()
                 .any(|n| n["text"] == summary),
             "{summary}"
         );
-        assert_eq!(node(&snapshot, "items", "stop_all")["text"], "Pause Agents");
-        assert_eq!(node(&snapshot, "items", "pause_inbox")["enabled"], true);
+        assert_eq!(node(&snapshot, "items", "stop_all")["text"], "Stop All");
+        assert_eq!(
+            node(&snapshot, "settings_items", "toggle_inbox")["enabled"],
+            true
+        );
     }
-    control(&f, p, "pause_inbox");
+    control(&f, p, "toggle_inbox");
     inspect(&f, p);
     let update = f
         .frames(p)
@@ -1384,7 +1810,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
     l.control("submit_add_hub");
     l.until(|s| {
         node(s, "settings_items", "add_hub_error")["text"]
-            == "Enter a valid Hub URL (http://ip:4291 or https://host)."
+            == "Enter a Hub URL using HTTP or HTTPS, without credentials, query, or fragment."
     });
     l.snapshot("settings", "r3_add_hub_daemon_error.png");
     for (name, url, canonical) in [
@@ -1444,7 +1870,7 @@ fn r1_r5_real_daemon_ui_closed_loop_gateway_personal_errors_and_retina_states() 
         node(&failed_port, "settings_items", "host_hub_error")["tooltip"]
             .as_str()
             .unwrap()
-            .contains("Cannot bind host hub listener:")
+            .contains("Cannot start sharing:")
     );
     l.snapshot("settings", "r3_settings_error_banner.png");
     l.control("settings_tab:apps");
@@ -2151,7 +2577,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let s = l.until(|s| {
         nodes(&s["items"])
             .iter()
-            .any(|n| n["text"] == "You (@alice)")
+            .any(|n| n["text"] == "Personal inbox active")
     });
     assert_eq!(s["count"], 0);
     assert_eq!(s["button_title"], "");
@@ -2176,22 +2602,25 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
         .as_str()
         .unwrap()
         .to_string();
-    let row_id = "human_inbox_card";
-    assert_eq!(node(&s, "items", row_id)["height"], 64);
-    let ready = l.until(|s| node(s, "items", "pause_inbox")["enabled"] == true);
-    let pause = node(&ready, "items", "pause_inbox");
+    l.control("open_settings");
+    l.control("settings_tab:channels");
+    let s = inspect(&f, l.ui);
+    let row_id = "inbox_control_bar";
+    assert_eq!(node(&s, "settings_items", row_id)["height"], 44);
+    let ready = l.until(|s| node(s, "settings_items", "toggle_inbox")["enabled"] == true);
+    let pause = node(&ready, "settings_items", "toggle_inbox");
     assert_eq!(pause["text"], "Pause Inbox");
     assert_eq!(
         pause["tooltip"],
-        "Pause your shared inbox on this Hub across every device and external channel"
+        "Pause inbox alerts on local across all devices and external channels"
     );
     assert!(node(&s, "items", &format!("switch_hub:{id}")).is_null());
-    l.control("pause_inbox");
-    l.until(|s| node(s, "items", "listen_human")["enabled"] == true);
-    l.control("listen_human");
-    let s = l.until(|s| node(s, "items", row_id)["height"] == 64);
-    assert_eq!(node(&s, "items", row_id)["height"], 64);
-    assert!(nodes(&s["items"])
+    l.control("toggle_inbox");
+    l.until(|s| node(s, "settings_items", "toggle_inbox")["enabled"] == true);
+    l.control("toggle_inbox");
+    let s = l.until(|s| node(s, "settings_items", "toggle_inbox")["text"] == "Pause Inbox");
+    assert_eq!(node(&s, "settings_items", row_id)["height"], 44);
+    assert!(nodes(&s["settings_items"])
         .iter()
         .any(|n| n["text"] == "You (@alice)"));
     assert_eq!(
@@ -2268,18 +2697,23 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
             .find(|frame| frame["op"] == "state")
             .is_some_and(|frame| frame["hubs"][0]["human_control_revision"] == revision)
     });
-    l.control("pause_inbox");
-    let paused = l.until(|s| !node(s, "items", "listen_human").is_null());
-    assert_eq!(node(&paused, "items", "human_paused_card")["height"], 64);
+    l.control("open_settings");
+    l.control("settings_tab:channels");
+    l.control("toggle_inbox");
+    let paused = l.until(|s| node(s, "settings_items", "toggle_inbox")["text"] == "Resume Inbox");
+    assert_eq!(
+        node(&paused, "items", "inbox_paused_notice")["text"],
+        "Inbox paused · Resume in Settings…"
+    );
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["hubs"][0]["human_paused"], true);
     assert_eq!(snapshot["hubs"][0]["human_about"], "Release approvals");
     l.control("open_settings");
     l.control("settings_tab:channels");
-    let paused_settings = l.until(|s| !node(s, "settings_items", "human_paused_banner").is_null());
+    let paused_settings = l.until(|s| !node(s, "settings_items", "inbox_control_bar").is_null());
     assert_eq!(paused_settings["low_contrast_labels"], json!([]));
-    l.control("resume_human_channels");
-    l.until(|s| node(s, "items", row_id)["height"] == 64);
+    l.control("toggle_inbox");
+    l.until(|s| node(s, "settings_items", row_id)["height"] == 44);
     l.control("close_settings");
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_about"],
@@ -2370,7 +2804,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         .into_iter()
         .find(|n| n["text"] == "laptop · Release audit")
         .unwrap();
-    assert_eq!(remote_info["tooltip"], "personal:home");
+    assert_eq!(remote_info["tooltip"], agent["display_address"]);
     let mut shadow = agent.clone();
     shadow["hub"] = json!("local");
     shadow["scoped_id"] = json!("local:home");
@@ -2600,8 +3034,12 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         let s = inspect(&f, p);
         assert_eq!(s["count"], 0);
         assert_eq!(s["button_title"], "");
-        let row = node(&s, "items", "human_inbox_card");
-        assert_eq!(row["height"], 64);
+        assert!(node(&s, "items", "human_inbox_card").is_null());
+        control(&f, p, "open_settings");
+        control(&f, p, "settings_tab:channels");
+        let s = inspect(&f, p);
+        let row = node(&s, "settings_items", "inbox_control_bar");
+        assert_eq!(row["height"], 44);
         let title = nodes(&row["children"])
             .into_iter()
             .find(|n| n["text"] == format!("You (@{user})"))
@@ -2772,6 +3210,7 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     ]);
     cfg["hubs"][0]["name"] = json!("local");
     let mut frame = state();
+    frame["hubs"][0]["name"] = json!("local");
     frame["settings"] = cfg.clone();
     frame["listeners"] = json!([]);
     for hub in frame["hubs"].as_array_mut().unwrap() {
@@ -2783,10 +3222,17 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s1","title":"Work session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
+    control(&f, p, "inbox_paused_notice");
     let s = inspect(&f, p);
-    assert_eq!(node(&s, "items", "human_paused_card")["height"], 64);
-    assert_eq!(node(&s, "items", "listen_human")["text"], "Resume Inbox");
-    assert_eq!(node(&s, "items", "listen_human")["enabled"], true);
+    assert_eq!(
+        node(&s, "settings_items", "inbox_control_bar")["height"],
+        44
+    );
+    assert_eq!(
+        node(&s, "settings_items", "toggle_inbox")["text"],
+        "Resume Inbox"
+    );
+    assert_eq!(node(&s, "settings_items", "toggle_inbox")["enabled"], true);
     render_png(&f, p, "menu", "menu_human_paused.png");
     let rendered = inspect(&f, p);
     for item in nodes(&s["items"]) {
@@ -2809,14 +3255,20 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         let mut unavailable = frame.clone();
         unavailable["hubs"][0]["status"] = json!(status);
         f.send(p, unavailable);
-        control(&f, p, "target_hub:personal");
+        control(&f, p, "target_hub:local");
         let snapshot = inspect(&f, p);
         assert_eq!(
             node(&snapshot, "items", "header_subtitle")["text"],
             expected
         );
-        assert_eq!(node(&snapshot, "items", "listen_human")["enabled"], false);
-        assert_eq!(node(&snapshot, "items", "human_paused_card")["height"], 64);
+        assert_eq!(
+            node(&snapshot, "settings_items", "toggle_inbox")["enabled"],
+            false
+        );
+        assert_eq!(
+            node(&snapshot, "items", "inbox_paused_notice")["height"],
+            24
+        );
         render_png(&f, p, "menu", &format!("inbox_{status}.png"));
     }
     // Resume uses shared policy CAS and never sends a replacement description.
@@ -2831,10 +3283,10 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         paused["hubs"][0]["human_about"] = about;
         f.send(p, paused.clone());
         assert_eq!(
-            node(&inspect(&f, p), "items", "human_paused_card")["height"],
-            64
+            node(&inspect(&f, p), "items", "inbox_paused_notice")["height"],
+            24
         );
-        control(&f, p, "listen_human");
+        control(&f, p, "toggle_inbox");
         inspect(&f, p);
         let resume = f
             .frames(p)
@@ -2842,28 +3294,33 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
             .rev()
             .find(|a| a["op"] == "human_inbox_update")
             .unwrap();
-        assert_eq!(resume["hub"], "personal");
+        assert_eq!(resume["hub"], "local");
         assert_eq!(resume["paused"], false);
         assert_eq!(resume["expected_control_revision"], 7);
         assert!(resume.get("about").is_none());
         paused["hubs"][0]["human_paused"] = json!(false);
         paused["hubs"][0]["human_control_revision"] = json!(8);
         paused["hubs"][0]["human_availability"] = json!("ACTIVE");
+        paused["source_op"] = json!("human_inbox_update");
+        paused["request_id"] = resume["request_id"].clone();
         f.send(p, paused);
         assert_eq!(
-            node(&inspect(&f, p), "items", "human_inbox_card")["height"],
-            64
+            node(&inspect(&f, p), "settings_items", "inbox_control_bar")["height"],
+            44
         );
     }
     f.send(p, frame.clone());
     control(&f, p, "target_hub:work");
-    control(&f, p, "listen_human");
+    control(&f, p, "inbox_paused_notice");
+    control(&f, p, "toggle_inbox");
     inspect(&f, p);
     assert!(f.frames(p).iter().any(|a| a["op"] == "human_inbox_update"
         && a["hub"] == "work"
         && a["paused"] == false
         && a["expected_control_revision"] == 7));
     control(&f, p, "open_settings");
+    control(&f, p, "channel_hub_selector:local");
+    control(&f, p, "settings_tab:apps");
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "onboarding_banner").is_null());
     assert!(node(&s, "settings_items", "apps_next_step_callout").is_null());
@@ -3619,8 +4076,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
                 "Missing full text/tooltip on {surface}: {text}"
             );
         };
-        let s = stress_inspect();
-        tooltip(&s, "items", &format!("You (@{handle})"));
+        stress_inspect();
         let mut active = listener();
         active["hub"] = json!(hub);
         frame["listeners"] = json!([active]);
@@ -3640,6 +4096,7 @@ fn dynamic_identity_and_error_labels_keep_full_tooltips_without_layout_overflow(
         assert_eq!(app_status["text"], format!("Connected · {clean_error}"));
         control(&f, p, "settings_tab:channels");
         let s = stress_inspect();
+        tooltip(&s, "settings_items", &format!("You (@{handle})"));
         tooltip(&s, "settings_items", &display_name);
         assert_eq!(
             node(&s, "settings_items", "channel_summary:channel")["text"],
@@ -3699,84 +4156,62 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut frame = state();
-    let mut human = listener();
-    human["harness"] = json!("human");
-    human["session_id"] = json!("default");
-    human["display_address"] = json!("@alice");
-    frame["listeners"] = json!([human]);
-    frame["hubs"][0]["human_paused"] = json!(false);
-    frame["hubs"][0]["human_availability"] = json!("ACTIVE");
+    frame["listeners"] = json!([]);
+    frame["settings"] = settings();
     for hub in frame["hubs"].as_array_mut().unwrap() {
         hub["human_state_status"] = json!("current");
         hub["human_control_revision"] = json!(3);
     }
+    frame["hubs"][0]["human_paused"] = json!(false);
+    frame["hubs"][0]["human_availability"] = json!("ACTIVE");
     frame["hubs"][1]["human_paused"] = json!(true);
     frame["available"] =
         json!([{"harness":"fixture","session_id":"s2","title":"Session","cwd":"/tmp"}]);
     f.send(p, frame.clone());
-    assert!(!node(&inspect(&f, p), "items", "human_inbox_card").is_null());
+    let active = inspect(&f, p);
+    assert!(node(&active, "items", "human_inbox_card").is_null());
+    assert!(node(&active, "items", "inbox_paused_notice").is_null());
     control(&f, p, "target_hub:work");
     let remote = inspect(&f, p);
-    assert_eq!(node(&remote, "items", "human_paused_card")["height"], 64);
     assert_eq!(
         node(&remote, "items", "header_subtitle")["text"],
         "Inbox paused"
     );
-    assert_eq!(node(&remote, "items", "listen_human")["enabled"], true);
-    assert_eq!(remote["count"], 0);
-    assert!(node(&remote, "items", "session:personal:repo-abcdefghijkl").is_null());
-    let mut empty = frame.clone();
-    empty["available"] = json!([]);
-    f.send(p, empty.clone());
-    assert!(node(&inspect(&f, p), "items", "available_empty_target").is_null());
-    empty["hubs"][1]["auto_listen"] = json!(true);
-    f.send(p, empty);
     assert_eq!(
-        node(&inspect(&f, p), "items", "toggle_auto_listen")["text"],
-        "Auto-Listen: On"
+        node(&remote, "items", "inbox_paused_notice")["text"],
+        "Inbox paused · Resume in Settings…"
+    );
+    assert_eq!(remote["count"], 0);
+    assert!(node(&remote, "items", "stop_all").is_null());
+    control(&f, p, "inbox_paused_notice");
+    let selected = inspect(&f, p);
+    assert_eq!(selected["settings_tab"], "channels");
+    assert!(f
+        .frames(p)
+        .iter()
+        .any(|a| a["op"] == "open_settings" && a["hub"] == "work"));
+    assert_eq!(
+        node(&selected, "settings_items", "toggle_inbox")["text"],
+        "Resume Inbox"
     );
     frame["hubs"][1]["status"] = json!("disconnected");
+    frame["settings"]["hubs"][1]["status"] = json!("disconnected");
     f.send(p, frame.clone());
     let offline = inspect(&f, p);
-    assert_eq!(node(&offline, "items", "human_paused_card")["height"], 64);
-    assert_eq!(node(&offline, "items", "listen_human")["enabled"], false);
+    assert_eq!(
+        node(&offline, "settings_items", "toggle_inbox")["enabled"],
+        false
+    );
     assert_eq!(
         node(&offline, "items", "header_subtitle")["text"],
         "Hub unavailable"
-    );
-    control(&f, p, "hub:work");
-    assert_eq!(
-        node(&inspect(&f, p), "items", "drawer:work")["hidden"],
-        true
-    );
-    control(&f, p, "hub:work");
-    assert_eq!(
-        node(&inspect(&f, p), "items", "drawer:work")["hidden"],
-        false
-    );
-    frame["listeners"] = json!([]);
-    f.send(p, frame.clone());
-    assert_eq!(
-        node(&inspect(&f, p), "items", "human_paused_card")["height"],
-        64
-    );
-    control(&f, p, "hub:personal");
-    assert_eq!(
-        node(&inspect(&f, p), "items", "human_inbox_card")["height"],
-        64
-    );
-    frame["hubs"][0]["status"] = json!("disconnected");
-    f.send(p, frame);
-    assert_eq!(
-        node(&inspect(&f, p), "items", "pause_inbox")["enabled"],
-        false
     );
     let before = f
         .frames(p)
         .iter()
         .filter(|a| a["op"] == "human_inbox_update")
         .count();
-    control(&f, p, "pause_inbox");
+    control(&f, p, "toggle_inbox");
     inspect(&f, p);
     assert_eq!(
         f.frames(p)
@@ -3785,6 +4220,29 @@ fn shared_human_inbox_survives_local_detach_and_disables_mutations_while_offline
             .count(),
         before
     );
+    frame["hubs"][1]["status"] = json!("connected");
+    frame["settings"]["hubs"][1]["status"] = json!("connected");
+    f.send(p, frame);
+    control(&f, p, "toggle_inbox");
+    let pending = inspect(&f, p);
+    assert_eq!(
+        node(&pending, "settings_items", "toggle_inbox")["text"],
+        "Resuming…"
+    );
+    assert_eq!(
+        node(&pending, "settings_items", "toggle_inbox")["enabled"],
+        false
+    );
+    let update = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|a| a["op"] == "human_inbox_update")
+        .unwrap();
+    assert_eq!(update["hub"], "work");
+    assert_eq!(update["paused"], false);
+    assert_eq!(update["expected_control_revision"], 3);
+    assert!(update.get("about").is_none());
 }
 
 #[test]
@@ -4107,8 +4565,12 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
         inspect(&f, p);
         assert_eq!(
             latest("save_hub_service")["values"],
-            json!({}),
-            "Escape discards gateway drafts on {hub}"
+            if hub == "work" {
+                json!({})
+            } else {
+                json!({"secret":"escape-discard"})
+            },
+            "Escape only discards gateway drafts on the selected Hub: {hub}"
         );
         control(&f, p, "save_channel:channel");
         inspect(&f, p);
@@ -5421,8 +5883,11 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
         "Personal networks hide redundant visibility controls"
     );
     let pause = node(&inspect(&f, p), "items", "stop:work:repo-workabcdefgh");
-    assert_eq!(pause["text"], "Pause");
-    assert_eq!(pause["tooltip"], "Pause listening for this session");
+    assert_eq!(pause["text"], "Stop");
+    assert_eq!(
+        pause["tooltip"],
+        "Stop listening to this session and disable Auto-Listen on work"
+    );
     assert_eq!(pause["border_width"], 1);
     assert!(pause["symbol"].is_null());
     next["hubs"][1]["auth_mode"] = json!("token");
@@ -5488,8 +5953,14 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     .is_null());
     control(&f, p, "rename:work:repo-workabcdefgh");
     f.send(p, json!({"op":"test_settings_input","id":"rename_field:work:repo-workabcdefgh","value":"Backend API"}));
+    let rename_identity = inspect(&f, p)["rename_field_identity"].clone();
     next["unread_count"] = json!(1);
     f.send(p, next);
+    assert_eq!(
+        inspect(&f, p)["rename_field_identity"],
+        rename_identity,
+        "A background refresh must retain the native rename field and its editor"
+    );
     assert_eq!(
         node(
             &inspect(&f, p),
@@ -6390,10 +6861,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
     assert!(nodes(&copy["children"])
         .iter()
         .any(|n| n["x"] == 0 && n["width"] == 12));
-    assert_eq!(
-        node(&s, "items", "plugin_symbol:human")["tint"],
-        json!([1, 1, 1, 1])
-    );
+    assert!(node(&s, "items", "human_inbox_card").is_null());
     for appearance in ["light", "dark"] {
         let snapshot = inspect_as(&f, p, Some(appearance));
         let title = nodes(&snapshot["items"])
@@ -6412,7 +6880,7 @@ fn v29_canonical_four_surface_retina_states_in_both_appearances() {
             .collect();
         assert_eq!(pauses.len(), 1);
         for pause in &pauses {
-            assert_eq!(pause["text"], "Pause");
+            assert_eq!(pause["text"], "Stop");
             assert!(pause["symbol"].is_null());
             assert_eq!(pause["border_width"], 1);
             assert_eq!(pause["width"], pauses[0]["width"]);
@@ -7031,8 +7499,8 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     }
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "setup_app:pi")["text"],
-        "Check & Repair",
-        "A click alone cannot confirm a check"
+        "Setting Up…",
+        "A click remains pending until its correlated receipt"
     );
     let checked = f
         .frames(p)
@@ -7265,8 +7733,12 @@ fn hosted_lan_invite_round_trips_through_desktop_paste_to_authenticated_hub() {
         .find(|v| v["op"] == "paste_hub_invite")
         .unwrap();
     assert_eq!(action["invite"], hosted["invite_command"]);
-    let (status, result) = client.action(action);
+    let (status, result) = client.action(action.clone());
     assert_eq!(status, 200, "{result}");
+    let snapshot = client.action(json!({"op":"get_snapshot"})).1;
+    client.send(ui, snapshot.clone());
+    client.send(ui,json!({"op":"settings","ok":true,"source_op":"setup_save_hub","request_id":action["request_id"],"settings":snapshot["settings"]}));
+    inspect(&client, ui);
     let (status, result) = client.action(json!({"op":"test_hub","hub":"remote"}));
     assert_eq!(status, 200, "{result}");
     assert!(result["streams"].is_number());
