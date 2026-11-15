@@ -11,6 +11,175 @@ fn open_settings(f: &Fixture, p: usize, cfg: &Value, tab: &str) {
 }
 
 #[test]
+fn authority_fenced_pair_receipts_retire_pending_without_replacement_instructions() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    open_settings(&f, p, &cfg, "channels");
+    // Exercise both the daemon's receipt-only settlement and defensive handling
+    // of a stale pair payload carrying the authority fence.
+    for op in ["settings", "pair_code"] {
+        control(&f, p, "pair_channel:channel");
+        let pending = inspect(&f, p);
+        assert_eq!(
+            node(&pending, "settings_items", "pair_channel:channel")["enabled"],
+            false
+        );
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "channel_pair")
+            .unwrap();
+        cfg["hubs"][0]["url"] = json!("https://hub.example.com");
+        cfg["channels"][0]["detail"] = json!("Replacement ready");
+        f.send(p, json!({"op":"settings","settings":cfg}));
+        let receipt = json!({"op":op,"request_id":request["request_id"],"hub":"personal","channel":"channel","action":"channel_pair","committed":true,"authority_changed":true,"warning":"Hub changed; refresh failed.","instruction":"Obsolete pairing instruction","code":"obsolete-code","pairing_command":"obsolete-command"});
+        let mut unrelated = receipt.clone();
+        unrelated["hub"] = json!("work");
+        f.send(p, unrelated);
+        assert_eq!(
+            node(&inspect(&f, p), "settings_items", "pair_channel:channel")["enabled"],
+            false
+        );
+        f.send(p, receipt);
+        let settled = inspect(&f, p);
+        assert_eq!(
+            node(&settled, "settings_items", "pair_channel:channel")["enabled"],
+            true
+        );
+        assert!(node(&settled, "settings_items", "pairing_instruction:channel").is_null());
+        assert!(!settled["pending_controls"]
+            .as_array()
+            .unwrap()
+            .contains(&request["request_id"]));
+        assert_eq!(
+            node(&settled, "settings_items", "settings_error_label")["text"],
+            "Hub changed; refresh failed."
+        );
+        assert_ne!(settled["clipboard"], "obsolete-command");
+    }
+}
+
+#[test]
+fn payload_free_committed_save_settles_exact_request_and_preserves_newer_drafts() {
+    let _lock = serial();
+    for authority_changed in [false, true] {
+        for newer_draft in [false, true] {
+            let f = Fixture::new(json!({}));
+            let p = start(&f);
+            let mut cfg = settings();
+            cfg["settings_hub"] = json!("personal");
+            open_settings(&f, p, &cfg, "channels");
+            f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"submitted"}));
+            control(&f, p, "save_channel:channel");
+            inspect(&f, p);
+            let request = f
+                .frames(p)
+                .into_iter()
+                .rev()
+                .find(|a| a["op"] == "channel_save")
+                .unwrap();
+            if newer_draft {
+                f.send(p, json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"newer draft"}));
+            }
+            let receipt = json!({"op":"settings","request_id":request["request_id"],"hub":"personal","channel":"channel","action":"channel_save","committed":true,"authority_changed":authority_changed,"warning":"Saved; settings refresh failed."});
+            for (key, wrong) in [
+                ("request_id", "unrelated"),
+                ("hub", "work"),
+                ("channel", "other-channel"),
+                ("action", "channel_pair"),
+            ] {
+                let mut unrelated = receipt.clone();
+                unrelated[key] = json!(wrong);
+                f.send(p, unrelated);
+                let pending = inspect(&f, p);
+                assert!(pending["pending_channel_saves"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&request["request_id"]));
+                assert!(node(&pending, "settings_items", "settings_error_banner").is_null());
+            }
+            f.send(p, receipt);
+            let settled = inspect(&f, p);
+            assert!(!settled["pending_channel_saves"]
+                .as_array()
+                .unwrap()
+                .contains(&request["request_id"]));
+            assert!(!settled["pending_controls"]
+                .as_array()
+                .unwrap()
+                .contains(&request["request_id"]));
+            assert_eq!(
+                node(&settled, "settings_items", "settings_error_label")["text"],
+                "Saved; settings refresh failed."
+            );
+            if newer_draft || authority_changed {
+                let expected = if newer_draft {
+                    "newer draft"
+                } else {
+                    "submitted"
+                };
+                assert_eq!(
+                    node(&settled, "settings_items", "channel_field:channel:account")["text"],
+                    expected
+                );
+                control(&f, p, "save_channel:channel");
+                inspect(&f, p);
+                assert_eq!(
+                    f.frames(p)
+                        .into_iter()
+                        .rev()
+                        .find(|a| a["op"] == "channel_save")
+                        .unwrap()["values"]["account"],
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn authority_fenced_test_receipts_retire_pending_without_replacement_results() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["warning"] = json!(true);
+    cfg["channels"][0]["detail"] = json!("Replacement ready");
+    open_settings(&f, p, &cfg, "channels");
+    for op in ["settings", "channel_test_result"] {
+        control(&f, p, "test_channel:channel");
+        inspect(&f, p);
+        let request = f
+            .frames(p)
+            .into_iter()
+            .rev()
+            .find(|a| a["op"] == "channel_test")
+            .unwrap();
+        f.send(p, json!({"op":op,"request_id":request["request_id"],"hub":"personal","channel_id":"channel","source_op":"channel_test","committed":true,"authority_changed":true,"warning":"Hub changed; refresh failed.","ok":true,"detail":"Obsolete test result"}));
+        let settled = inspect(&f, p);
+        assert!(!settled["pending_controls"]
+            .as_array()
+            .unwrap()
+            .contains(&request["request_id"]));
+        assert_eq!(
+            node(
+                &settled,
+                "settings_items",
+                "settings_channel_detail:channel"
+            )["text"],
+            "Replacement ready"
+        );
+    }
+}
+
+#[test]
 fn channel_pair_without_prior_test_result_disables_immediately() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

@@ -369,9 +369,17 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             settingsFieldControls.removeAll(); rebuildSettingsPanel(); return
         }
         guard let frame = try? JSONDecoder().decode(Frame.self, from: data) else { diagnostic("invalid frame"); return }
+        // Receipt-only settlements never project settings or results from an
+        // obsolete authority. They still own the matching request's pending UI.
+        if (frame.op == "settings" && frame.settings == nil && (frame.committed == true || frame.warning != nil)) ||
+           (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
+            if settleChannelReceipt(frame) && settingsVisible { rebuildSettingsPanel(preservingEditor: true) }
+            return
+        }
         var settledControl = false
         if let request = frame.request_id, let pending = pendingControls[request],
-           frame.source_op == pending.op || frame.op == "error" || frame.op == "pair_code" || frame.op == "channel_test_result" {
+           frame.op != "pair_code" && frame.op != "channel_test_result",
+           frame.source_op == pending.op || frame.op == "error" {
             pendingControls.removeValue(forKey: request); settledControl = true
         }
         if frame.ok == false || frame.op == "error", let requestId = frame.request_id {
@@ -492,10 +500,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             }
             let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil
             let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? ""))
+            if let warning = frame.warning { settingsBannerError = warning }
             if changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
-        if frame.op == "pair_code", let id = frame.channel_id {
+        if frame.op == "pair_code", frame.authority_changed != true, let id = frame.channel_id {
             let hub = frame.hub ?? effectiveChannelHub
             let key="\(hub)|\(id)"
             guard let request = frame.request_id, var ui = channelUiStates[key], ui.pendingPairRequest == request else { return }
@@ -508,7 +517,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
-        if frame.op == "channel_test_result", let id = frame.channel_id {
+        if frame.op == "channel_test_result", frame.authority_changed != true, let id = frame.channel_id {
             let key = "\(frame.hub ?? effectiveChannelHub)|\(id)"
             channelUiStates[key, default: ChannelUiState()].testResult = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
             channelUiStates[key, default: ChannelUiState()].testResultIsLatest = true
@@ -672,6 +681,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             // Preserve native field editors and undo history when a submission
             // changes no presentation; cancellation must redraw immediately.
             if needsRebuild && settingsPanel != nil { rebuildSettingsPanel() }
+        }
+        if ["channel_test", "channel_pair", "channel_save", "save_hub_service", "channel_toggle", "channel_unpair", "channel_cancel_pair", "disconnect_human_channel", "clear_channel_service"].contains(operation),
+           let id = outgoing["channel_id"] as? String {
+            let request = outgoing["request_id"] as? String ?? UUID().uuidString
+            outgoing["request_id"] = request
+            pendingControls[request] = PendingControl(op: operation, hub: outgoing["hub"] as? String ?? effectiveChannelHub, target: id)
         }
         if ["human_inbox_update", "unlisten_all", "setup_apply", "setup_remove_app"].contains(operation) {
             let request = outgoing["request_id"] as? String ?? UUID().uuidString

@@ -110,6 +110,32 @@ extension Companion {
         return channelUiStates != previousUi
     }
 
+    @discardableResult
+    func settleChannelReceipt(_ frame: Frame) -> Bool {
+        let operation = frame.source_op ?? frame.action ?? (frame.op == "pair_code" ? "channel_pair" : frame.op == "channel_test_result" ? "channel_test" : "")
+        guard let request = frame.request_id, let hub = frame.hub,
+              let pending = pendingControls[request], pending.op == operation,
+              pending.hub == hub, pending.target == (frame.channel_id ?? frame.channel ?? "") else { return false }
+        pendingControls.removeValue(forKey: request)
+        let key = "\(hub)|\(pending.target)"
+        if let entry = pendingChannelValues[request], entry.hub == hub, entry.channelId == pending.target,
+           ["channel_save", "save_hub_service"].contains(operation) {
+            pendingChannelValues.removeValue(forKey: request)
+            // A committed receipt acknowledges submitted values only. Preserve
+            // subsequent edits and all drafts on a replacement authority.
+            if frame.committed == true && frame.authority_changed != true {
+                for (field, sent) in entry.values where channelUiStates[key]?.drafts[field] == sent {
+                    channelUiStates[key]?.drafts.removeValue(forKey: field)
+                }
+            }
+        }
+        if operation == "channel_pair", channelUiStates[key]?.pendingPairRequest == request {
+            channelUiStates[key]?.pendingPairRequest = nil
+        }
+        if let warning = frame.warning { settingsBannerError = warning }
+        return true
+    }
+
     func updateInbox(paused: Bool? = nil, hub: String, scope: String? = nil) {
         let current=hubs.first { $0.name==hub }
         var action: [String:Any]=["op":"human_inbox_update","hub":hub,"expected_control_revision":current?.human_control_revision ?? 1,"request_id":UUID().uuidString]

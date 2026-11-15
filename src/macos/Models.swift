@@ -244,6 +244,11 @@ struct Frame: Decodable {
     let error: String?
     let warnings: [String]?
     let source_op: String?
+    let action: String?
+    let channel: String?
+    let committed: Bool?
+    let warning: String?
+    let authority_changed: Bool?
     let request_id: String?
     let composer_error: String?
     let channel_id: String?

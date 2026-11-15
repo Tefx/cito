@@ -252,7 +252,7 @@ pub(super) fn dispatch_channel_action(
                     return Ok(json!({"ok":true}));
                 }
                 let result = Err(error);
-                s.finish_channel_action(&hub, action, &result, true);
+                s.finish_channel_action(&hub, action, &result, true, false);
                 return result;
             }
         };
@@ -291,35 +291,29 @@ pub(super) fn dispatch_channel_action(
     if s.closing || shutdown_requested() {
         return after_channel_action(result, kind, "Shutting down after channel request".into());
     }
-    if let Err(error) = s.reload_slots() {
-        let result = after_channel_action(result, kind, error);
-        if kind == ChannelActionKind::Mutation {
-            // Reload can partially replace slots before failing. Settle the
-            // original request without projecting possibly different authority.
-            s.finish_channel_action(&slot.name, action, &result, false);
-        }
-        return result;
-    }
-    if slot.closed.load(Ordering::SeqCst)
+    let reload = s.reload_slots();
+    // Reload may replace authority even when it fails later. Check the live
+    // slot before emitting any pairing/test payload from the original owner.
+    let authority_changed = slot.closed.load(Ordering::SeqCst)
         || !s
             .slots
             .get(&slot.name)
-            .is_some_and(|current| remote_channels_identity(current) == inventory.identity)
-    {
-        // Return the original authority\'s receipt only to this caller. Never
-        // publish its settings or completion frames against the replacement Hub.
-        return after_channel_action(
-            result,
-            kind,
-            "Hub authority changed after channel request committed".into(),
-        )
-        .map(|mut value| {
-            value["authority_changed"] = json!(true);
+            .is_some_and(|current| remote_channels_identity(current) == inventory.identity);
+    if reload.is_err() || authority_changed {
+        let warning = reload
+            .err()
+            .unwrap_or_else(|| "Hub authority changed after channel request committed".into());
+        let result = after_channel_action(result, kind, warning).map(|mut value| {
+            value["authority_changed"] = json!(authority_changed);
             value
         });
+        if kind == ChannelActionKind::Mutation {
+            s.finish_channel_action(&slot.name, action, &result, false, authority_changed);
+        }
+        return result;
     }
     if kind == ChannelActionKind::Mutation {
-        s.finish_channel_action(&slot.name, action, &result, true);
+        s.finish_channel_action(&slot.name, action, &result, true, false);
     } else {
         s.emit(json!({"op":"settings","hub":slot.name,"settings":s.settings_for_hub(&slot.name)}));
     }
@@ -364,10 +358,12 @@ impl DaemonService {
         action: &Value,
         result: &Result<Value, String>,
         project_state: bool,
+        authority_changed: bool,
     ) {
         let id = channel_id(action).unwrap_or_default();
         let rpc = channel_rpc(action).unwrap_or_default();
         match result {
+            _ if authority_changed => {}
             Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
                 let mut frame = result.clone();
                 frame["op"] = json!(if rpc == "human_channel_pair_start" { "pair_code" } else { "channel_test_result" });
@@ -379,13 +375,22 @@ impl DaemonService {
             Err(error) => self.emit(json!({"op":if rpc == "human_channels_test" {"channel_test_result"} else {"error"},"channel_id":id,"channel":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
             _ => {}
         }
-        let mut settlement = json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"]});
+        let mut settlement = json!({"op":"settings","hub":hub,"channel_id":id,"channel":id,"action":action["op"],"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"authority_changed":authority_changed});
         if let Ok(value) = result {
             for key in ["committed", "maintenance_warning", "receipt_authority"] {
                 if let Some(value) = value.get(key) {
                     settlement[key] = value.clone();
                 }
             }
+        }
+        if let Some(warning) = settlement.get("maintenance_warning").cloned() {
+            settlement["warning"] = warning;
+        } else if authority_changed {
+            settlement["warning"] = json!(result
+                .as_ref()
+                .err()
+                .map(String::as_str)
+                .unwrap_or("Hub authority changed after channel request"));
         }
         if project_state {
             settlement["settings"] = self.settings_for_hub(hub);
@@ -428,15 +433,36 @@ mod remediation_tests {
     }
     #[test]
     fn dispatcher_preserves_committed_receipt_when_hub_is_disabled() -> Result<(), String> {
-        dispatcher_committed_receipt(false)
+        dispatcher_committed_receipt("channel_toggle", false, true)
     }
 
     #[test]
     fn dispatcher_emits_pairing_receipt_when_post_commit_reload_fails() -> Result<(), String> {
-        dispatcher_committed_receipt(true)
+        dispatcher_committed_receipt("channel_pair", true, false)
     }
 
-    fn dispatcher_committed_receipt(reload_failure: bool) -> Result<(), String> {
+    #[test]
+    fn dispatcher_fences_pairing_receipt_when_authority_changes_and_reload_fails(
+    ) -> Result<(), String> {
+        dispatcher_committed_receipt("channel_pair", true, true)
+    }
+
+    #[test]
+    fn dispatcher_fences_test_receipt_when_authority_changes_and_reload_fails() -> Result<(), String>
+    {
+        dispatcher_committed_receipt("channel_test", true, true)
+    }
+
+    #[test]
+    fn dispatcher_settles_save_without_settings_when_reload_fails() -> Result<(), String> {
+        dispatcher_committed_receipt("channel_save", true, false)
+    }
+
+    fn dispatcher_committed_receipt(
+        op: &'static str,
+        reload_failure: bool,
+        replace_authority: bool,
+    ) -> Result<(), String> {
         use crate::plugins::{random_uuid_v4, NativeConfig};
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
@@ -488,14 +514,7 @@ mod remediation_tests {
             } else if request["op"] == "kv_snapshot" || request["op"] == "human_device_attach" {
                 json!({"entries":[]})
             } else {
-                assert_eq!(
-                    request["op"],
-                    if reload_failure {
-                        "human_channel_pair_start"
-                    } else {
-                        "human_channels_configure"
-                    }
-                );
+                assert_eq!(request["op"], channel_rpc(&json!({"op":op})).unwrap());
                 json!({"ok":true,"committed":true,"receipt":"original","code":"original-code","instruction":"Pair with original authority"})
             };
             let body = if request["op"] == "human_device_attach" {
@@ -532,7 +551,7 @@ mod remediation_tests {
             std::thread::spawn(move || {
                 dispatch_channel_action(
                     &service,
-                    &json!({"op":if reload_failure { "channel_pair" } else { "channel_toggle" },"hub":"work","channel_id":"messenger","enabled":true,"request_id":"original-request"}),
+                    &json!({"op":op,"hub":"work","channel_id":"messenger","enabled":true,"request_id":"original-request"}),
                     ChannelActionKind::Mutation,
                     None,
                 )
@@ -544,14 +563,15 @@ mod remediation_tests {
         {
             let mut s = service.lock().unwrap();
             if reload_failure {
-                // Replace the original authority while its committed receipt is
-                // gated, then emulate an incomplete external config edit. The
-                // completion-time reload must fail without projecting this Hub.
-                s.mutate_config(|raw| {
-                    raw["hubs"]["work"]["url"] = json!("local://");
-                    Ok(())
-                })?;
-                s.reload_slots()?;
+                // Gate the committed receipt until a concurrent config change
+                // and an incomplete external edit have reached the daemon.
+                if replace_authority {
+                    s.mutate_config(|raw| {
+                        raw["hubs"]["work"]["url"] = json!("local://");
+                        Ok(())
+                    })?;
+                    s.reload_slots()?;
+                }
                 std::fs::write(&config.config_path, "{").map_err(|e| e.to_string())?;
             } else {
                 s.mutate_config(|raw| {
@@ -567,9 +587,7 @@ mod remediation_tests {
         server.join().map_err(|_| "Authority server panicked")?;
         assert_eq!(result["receipt"], "original");
         assert_eq!(result["committed"], true);
-        if !reload_failure {
-            assert_eq!(result["authority_changed"], true);
-        }
+        assert_eq!(result["authority_changed"], replace_authority);
         assert_eq!(
             result["receipt_authority"],
             json!({"hub":"work","url":url,"principal_id":"none#alice"})
@@ -577,28 +595,32 @@ mod remediation_tests {
         assert!(result["maintenance_warning"].is_string());
         {
             let mut s = service.lock().unwrap();
-            if reload_failure {
+            if replace_authority && reload_failure {
                 assert_eq!(s.slots["work"].config["url"], "local://");
-                assert_eq!(mailbox.pending.lock().unwrap().len(), 2);
-                for op in ["pair_code", "settings"] {
-                    let frame: Value = serde_json::from_slice(&mailbox.next().unwrap())
-                        .map_err(|e| e.to_string())?;
-                    assert_eq!(frame["op"], op);
-                    assert_eq!(frame["request_id"], "original-request");
-                    assert_eq!(frame["hub"], "work");
-                    assert_eq!(frame["committed"], true);
-                    assert_eq!(frame["receipt_authority"], result["receipt_authority"]);
-                    assert!(frame["maintenance_warning"].is_string());
-                    assert!(frame.get("settings").is_none());
-                    if op == "pair_code" {
-                        assert_eq!(frame["code"], "original-code");
-                        assert_eq!(frame["instruction"], "Pair with original authority");
-                    }
-                }
-            } else {
-                assert!(!s.channel_inventories.contains_key("work"));
-                assert!(mailbox.pending.lock().unwrap().is_empty());
             }
+            if !replace_authority && op == "channel_pair" {
+                let frame: Value =
+                    serde_json::from_slice(&mailbox.next().unwrap()).map_err(|e| e.to_string())?;
+                assert_eq!(frame["op"], "pair_code");
+                assert_eq!(frame["code"], "original-code");
+                assert_eq!(frame["request_id"], "original-request");
+            }
+            assert_eq!(mailbox.pending.lock().unwrap().len(), 1);
+            let frame: Value =
+                serde_json::from_slice(&mailbox.next().unwrap()).map_err(|e| e.to_string())?;
+            assert_eq!(frame["op"], "settings");
+            assert_eq!(frame["request_id"], "original-request");
+            assert_eq!(frame["hub"], "work");
+            assert_eq!(frame["channel"], "messenger");
+            assert_eq!(frame["action"], op);
+            assert_eq!(frame["committed"], true);
+            assert_eq!(frame["authority_changed"], replace_authority);
+            assert_eq!(frame["receipt_authority"], result["receipt_authority"]);
+            assert!(frame["warning"].is_string());
+            for field in ["settings", "code", "instruction", "detail"] {
+                assert!(frame.get(field).is_none());
+            }
+            assert!(mailbox.pending.lock().unwrap().is_empty());
             s.shutdown();
         }
         std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
