@@ -141,10 +141,23 @@ impl SessionActivity {
         for provider in self.discovery.iter_mut().filter(|p| p.plugin.id == harness) {
             provider.cached.clear();
             provider.error = None;
+            provider.refreshed_at = 0;
         }
     }
     pub fn discovery_status(&self) -> Vec<Value> {
-        self.discovery.iter().map(|p| json!({"harness":p.plugin.id,"status":if p.worker.is_some(){"scanning"}else if p.error.is_some(){"error"}else{"ready"},"error":p.error})).collect()
+        self.discovery
+            .iter()
+            .map(|p| {
+                let status = if p.error.is_some() {
+                    "error"
+                } else if p.worker.is_some() && p.refreshed_at == 0 {
+                    "scanning"
+                } else {
+                    "ready"
+                };
+                json!({"harness":p.plugin.id,"status":status,"error":p.error})
+            })
+            .collect()
     }
 
     /// Revoke cached enrollment authority while preserving presentation and workers.
@@ -973,6 +986,72 @@ print(json.dumps(response), flush=True)
         assert!(other_start < fast_end, "Providers ran sequentially");
         activity.shutdown()?;
         assert_reaped(&f);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_status_only_scans_on_cold_start_and_preserves_errors_during_retry(
+    ) -> Result<(), String> {
+        let mut f = Fixture::new()?;
+        f.provider(
+            "agent",
+            json!({"response":{"ok":false,"message":"Provider unavailable"}}),
+        )?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        activity.tick(&f.state, &[])?;
+        assert_eq!(activity.discovery[0].refreshed_at, 0);
+        assert!(activity.discovery[0].worker.is_some());
+        assert_eq!(activity.discovery_status()[0]["status"], "scanning");
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert_eq!(activity.discovery[0].refreshed_at, 0);
+        assert_eq!(activity.discovery_status()[0]["status"], "error");
+        let error = activity.discovery_status()[0]["error"].clone();
+        assert_eq!(error, "Provider unavailable");
+
+        let sessions = vec![json!({"harness":"agent","session_id":"one"})];
+        fs::write(
+            f.dir.join("agent/options.json"),
+            json!({"sessions":sessions}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        activity.refresh_discovery();
+        activity.tick(&f.state, &[])?;
+        assert!(activity.discovery[0].worker.is_some());
+        assert_eq!(activity.discovery_status()[0]["status"], "error");
+        assert_eq!(activity.discovery_status()[0]["error"], error);
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert!(activity.discovery[0].refreshed_at > 0);
+        assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        assert!(activity.discovery_status()[0]["error"].is_null());
+        assert_eq!(activity.available(&[], 1), sessions);
+
+        // Exercise both explicit refresh and the periodic deadline without a 5s sleep.
+        for explicit in [true, false] {
+            if explicit {
+                activity.refresh_discovery();
+            } else {
+                activity.discovery[0].due = Instant::now();
+            }
+            activity.tick(&f.state, &[])?;
+            assert!(activity.discovery[0].worker.is_some());
+            assert_eq!(activity.discovery_status()[0]["status"], "ready");
+            assert_eq!(activity.discovery[0].cached, sessions);
+            assert_eq!(activity.available(&[], 1), sessions);
+            pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+            assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        }
+
+        activity.remove_candidates("agent");
+        assert_eq!(activity.discovery[0].refreshed_at, 0);
+        assert!(activity.discovery[0].cached.is_empty());
+        assert!(activity.discovery[0].error.is_none());
+        activity.tick(&f.state, &[])?;
+        assert!(activity.discovery[0].worker.is_some());
+        assert_eq!(activity.discovery_status()[0]["status"], "scanning");
+        pump(&mut activity, &f, &[], |a| !a.discovery_pending())?;
+        assert_eq!(activity.discovery_status()[0]["status"], "ready");
+        assert_eq!(activity.available(&[], 1), sessions);
+        activity.shutdown()?;
         Ok(())
     }
 
