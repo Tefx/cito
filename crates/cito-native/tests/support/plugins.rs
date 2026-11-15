@@ -260,7 +260,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
 
     // A real parent hook must wait for the same lock as channel and discovery writers.
     let lock = FileLock::acquire(&lock_path).unwrap();
-    fs::write(&request, json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo"}}).to_string()).unwrap();
+    fs::write(&request, json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"canonical-session","cwd":"/repo-b"}}).to_string()).unwrap();
     wait(|| !request.exists());
     std::thread::sleep(Duration::from_millis(100));
     assert!(!result.exists(), "Hook bypassed the endpoint lock");
@@ -278,7 +278,7 @@ fn claude_endpoint_writers_reread_under_the_shared_lock() {
     let lock = FileLock::acquire(&lock_path).unwrap();
     fs::remove_file(&binding).unwrap();
     let sidecar = f.spawn(CLAUDE, &[], &[]);
-    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo"}));
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo-a"}));
     wait(|| f.frames(sidecar).iter().any(|v| v["op"] == "ready"));
     let socket_path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
     let client = f.spawn("python3", &["-c", r#"import socket,sys,json
@@ -296,13 +296,32 @@ s.settimeout(2);print(s.recv(4096).decode(),flush=True)
     );
     atomic_write(&binding, &canonical).unwrap();
     drop(lock);
+    wait(|| f.frames(client).len() >= 2);
     wait(|| f.exited(client));
     assert_eq!(fs::read(&binding).unwrap(), canonical);
     assert_eq!(
+        f.frames(client).last().unwrap()["session_id"],
+        "canonical-session"
+    );
+    assert_eq!(
         socket(&socket_path, json!({"op":"identify"}))["session_id"],
-        format!("claude-{pid}")
+        "canonical-session"
     );
     assert_eq!(fs::read(&binding).unwrap(), canonical);
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
+
+    // A channel starting after the hook must also adopt the canonical identity,
+    // without inventing a fallback alias because its working directory differs.
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo-a"}));
+    wait(|| f.frames(sidecar).iter().any(|v| v["op"] == "ready"));
+    assert_eq!(
+        socket(&socket_path, json!({"op":"identify"}))["session_id"],
+        "canonical-session"
+    );
+    assert_eq!(fs::read(&binding).unwrap(), canonical);
+    assert!(!f.state.join("claude/aliases/canonical-session").exists());
     f.eof(sidecar);
     wait(|| f.exited(sidecar));
 
@@ -352,6 +371,120 @@ c,_=s.accept();c.settimeout(2);c.recv(4096);c.sendall((sys.argv[2]+'\n').encode(
     assert_eq!(refreshed["session_name"], "Stale title");
     assert_eq!(refreshed["updated_at_ms"], 1);
     wait(|| f.exited(server));
+}
+
+#[test]
+fn claude_rejection_preserves_a_hook_committed_during_bridge_io() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let _serial = serial();
+    for op in ["discover_sessions", "probe"] {
+        let f = Fixture::new(json!({}));
+        let parent = spawn_hook_parent(&f, &[]);
+        let pid = f.pid(parent);
+        parent_hook(
+            &f,
+            parent,
+            json!({"hook_event_name":"SessionStart","session_id":"old-session","cwd":"/repo"}),
+        );
+        let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+        let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+        let (received_tx, received_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut stream).read_line(&mut line).unwrap();
+            received_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            stream
+                .write_all(b"{\"ok\":false,\"error\":\"SESSION_MISMATCH\"}\n")
+                .unwrap();
+        });
+        let client = f.spawn(CLAUDE, &[], &[]);
+        f.send(client, json!({"op":op,"state_dir":f.state,"env":f.env,"endpoint_pid":pid,"session_id":"old-session","cwd":"/repo"}));
+        f.eof(client);
+        received_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        parent_hook(
+            &f,
+            parent,
+            json!({"hook_event_name":"SessionStart","session_id":"new-session","cwd":"/repo-b"}),
+        );
+        let canonical = fs::read(&binding).unwrap();
+        release_tx.send(()).unwrap();
+        wait(|| f.exited(client));
+        server.join().unwrap();
+        let reply = &f.frames(client)[0];
+        if op == "probe" {
+            assert_eq!(reply["status"], "transient_error", "{reply}");
+            assert!(reply["reason"]
+                .as_str()
+                .unwrap()
+                .contains("SESSION_MISMATCH"));
+        } else {
+            assert_eq!(reply["sessions"], json!([]), "{reply}");
+        }
+        assert_eq!(fs::read(&binding).unwrap(), canonical, "{op}");
+        let canonical: Value = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(canonical["session_id"], "new-session");
+        assert_eq!(canonical["source"], "hook");
+    }
+}
+
+#[test]
+fn cross_harness_ancestor_rejects_hook_before_the_endpoint_lock() {
+    use cito_native::support::FileLock;
+    let _serial = serial();
+    let f = Fixture::new(json!({}));
+    // Prepare the normal hook-parent fixture, then launch it below another harness.
+    let prepared = spawn_hook_parent(&f, &[]);
+    f.stop(prepared);
+    let app = f.dir.join("pi.mjs");
+    fs::write(
+        &app,
+        r#"import {spawn} from 'node:child_process';
+const child=spawn(process.execPath,[process.argv[2]],{stdio:['inherit','inherit','inherit']});
+console.log(JSON.stringify({child:child.pid}));
+process.on('SIGTERM',()=>{child.kill();process.exit()});
+setInterval(()=>{},1000);
+"#,
+    )
+    .unwrap();
+    let parent = spawn_interactive(
+        &f,
+        "node",
+        &[
+            app.to_str().unwrap(),
+            f.dir.join("claude.mjs").to_str().unwrap(),
+        ],
+        &[("TEST_HOOK", HOOK)],
+    );
+    wait(|| f.output(parent, false).contains("ready"));
+    let pid = f
+        .frames(parent)
+        .into_iter()
+        .find_map(|v| v["child"].as_u64())
+        .unwrap();
+    let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+    let lock = FileLock::acquire(&binding.with_extension("lock")).unwrap();
+    fs::write(f.state.join(format!("hook-request-{pid}")), json!({"mode":"direct","input":{"hook_event_name":"SessionStart","session_id":"descendant-session","cwd":"/repo"}}).to_string()).unwrap();
+    let result = f.state.join(format!("hook-result-{pid}"));
+    wait(|| result.exists());
+    let result: Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();
+    assert!(
+        result["err"].as_str().unwrap().contains("SESSION_MISMATCH"),
+        "{result}"
+    );
+    assert!(!binding.exists());
+    assert!(!f.state.join("claude/aliases").exists());
+    drop(lock);
+    f.stop(parent);
 }
 
 #[test]

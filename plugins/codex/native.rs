@@ -509,7 +509,9 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
     }
-    if caller_supplied_pid(req)?.is_none() {
+    if caller_supplied_pid(req)?.is_none()
+        && str_at(&req["meta"], "expected_harness").is_none_or(|id| id == "codex")
+    {
         if let Some(s) = str_at(req, "explicit_session_id") {
             ids.push(s.into())
         }
@@ -657,6 +659,15 @@ pub fn handle(req: &Value) -> Result<Value> {
                 ));
             };
             let c = row_caller(req, &row);
+            // A generic session fence cannot turn an inferred thread into an
+            // authoritative cross-provider conflict. Let other providers resolve it.
+            if explicit.is_none()
+                && req["meta"]["expected_harness"] != "codex"
+                && str_at(&req["meta"], "expected_session_id")
+                    .is_some_and(|id| c["session_id"] != id)
+            {
+                return Ok(error("BINDING_REQUIRED", "Caller session mismatch"));
+            }
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }

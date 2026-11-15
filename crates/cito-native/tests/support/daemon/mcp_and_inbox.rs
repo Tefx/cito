@@ -82,6 +82,13 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
         json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":claude_meta}),
     );
     assert_eq!(direct["caller"]["harness"], "claude", "{direct}");
+    // Incompatible harness metadata cannot seed the thread provider directly.
+    let direct = f.plugin(CODEX, json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":{"expected_harness":"claude"}}));
+    assert_ne!(direct["caller"]["session_id"], "claude-session", "{direct}");
+    for meta in [json!({}), json!({"expected_session_id":"thread-a"})] {
+        let direct = f.plugin(CLAUDE, json!({"op":"resolve_caller","endpoint_pid":std::process::id(),"explicit_session_id":"thread-a","meta":meta}));
+        assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    }
     f.daemon(&[]);
     let rejected = f.tool_result("cito_status", json!({}), expected);
     assert_eq!(rejected["isError"], true, "{rejected}");
@@ -101,6 +108,22 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
     let routed: Value =
         serde_json::from_str(routed["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(routed["ok"], true, "{routed}");
+    let routed = f.tool("cito_listen", json!({"about":"Unharnessed transport session routing"}),
+        json!({"_stdio":{"endpoint_pid":claude_pid},"expected_session_id":"claude-session","cwd":"/repo"}));
+    assert_eq!(routed["ok"], true, "{routed}");
+    let rejected = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"endpoint_pid":std::process::id(),"expected_session_id":"thread-a"}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("BINDING_REQUIRED"),
+        "{rejected}"
+    );
     let rows = f.rows("SELECT * FROM local_listeners WHERE harness='claude'");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["session_id"], "claude-session");

@@ -26,7 +26,7 @@ fn interactive_candidate(req: &Value, p: u32) -> bool {
         return false;
     };
     if has_harness_ancestor(p, |ancestor, command| {
-        matches_process(command) || live_bridge(req, ancestor)
+        is_agent_harness(command) || live_bridge(req, ancestor)
     }) {
         return false;
     }
@@ -383,28 +383,46 @@ fn hook_parent_matches(p: u32) -> bool {
                 })
             }))
 }
+fn binding_snapshot(path: &Path) -> Option<Value> {
+    read_json(path)
+        .ok()
+        .map(|v| json!([v["session_id"], v["start"], v["source"]]))
+}
+fn remove_rejected_binding(path: &Path, snapshot: Option<Value>) -> Result<()> {
+    let _lock = FileLock::acquire(&path.with_extension("lock"))?;
+    if snapshot.is_some() && binding_snapshot(path) == snapshot {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
 fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<Option<Value>> {
+    let channel = str_at(req, "_binding_source") == Some("channel");
+    // Endpoint file locks are leaves: ancestry and bridge I/O must finish first.
+    if !channel
+        && (!hook_parent_matches(p)
+            || hook_endpoint(req) != p
+            || has_harness_ancestor(p, |ancestor, command| {
+                is_agent_harness(command) || live_bridge(req, ancestor)
+            }))
+    {
+        return Err("SESSION_MISMATCH: A descendant hook cannot claim a parent endpoint".into());
+    }
+    let identity = process_identity(p).ok();
+    let start = identity.as_ref().and_then(|v| str_at(v, "started_at"));
     let path = binding_path(req, p);
     let _lock = FileLock::acquire(&path.with_extension("lock"))?;
-    let identity = process_identity(p).ok();
     let previous = read_json(&path).ok();
-    if str_at(req, "_binding_source") == Some("channel") {
+    if channel {
         if let Some(previous) = &previous {
-            // Preserve canonical hooks and avoid rewriting an unchanged channel binding.
-            if previous["cwd"] == cwd
-                && str_at(previous, "start").map(str::to_owned) == process_start(p)
-                && (previous["source"] != "channel" || previous["session_id"] == sid)
+            // Canonical hooks own the identity across workspace changes.
+            if start.is_some()
+                && str_at(previous, "start") == start
+                && (previous["source"] != "channel"
+                    || (previous["cwd"] == cwd && previous["session_id"] == sid))
             {
                 return Ok(Some(previous.clone()));
             }
         }
-    } else if !hook_parent_matches(p)
-        || hook_endpoint(req) != p
-        || has_harness_ancestor(p, |ancestor, command| {
-            matches_process(command) || live_bridge(req, ancestor)
-        })
-    {
-        return Err("SESSION_MISMATCH: A descendant hook cannot claim a parent endpoint".into());
     }
     let v = json!({"session_id":validate_session(sid)?,"cwd":cwd,"start":identity.as_ref().and_then(|v|str_at(v,"started_at")),"process_identity":identity,"source":str_at(req,"_binding_source").unwrap_or("hook")});
     atomic_write(&path, v.to_string().as_bytes())?;
@@ -469,6 +487,11 @@ fn resolve(req: &Value) -> Result<String> {
         }
     }
     if let Some(s) = explicit {
+        if let Some(p) = pid(req) {
+            if !process_command(p).is_ok_and(|command| matches_process(&command)) {
+                return Err("A verified endpoint process is required for caller metadata".into());
+            }
+        }
         return Ok(s);
     }
     let mut transcripts = vec![];
@@ -577,11 +600,10 @@ pub fn handle(req: &Value) -> Result<Value> {
                 }
                 let mut r = request.clone();
                 r["endpoint_pid"] = json!(p);
+                let binding_before = binding_snapshot(&binding_path(&r, p));
                 let response = match socket_call(path, &json!({"op":"identify"})) {
                     Ok(v) if v["ok"] != true => {
-                        let path = binding_path(&r, p);
-                        let _lock = FileLock::acquire(&path.with_extension("lock")).ok()?;
-                        let _ = fs::remove_file(path);
+                        remove_rejected_binding(&binding_path(&r, p), binding_before).ok()?;
                         return None;
                     }
                     response => response,
@@ -734,15 +756,14 @@ pub fn handle(req: &Value) -> Result<Value> {
                     }
                 }
             }
+            let binding_before = pid(req).and_then(|p| binding_snapshot(&binding_path(req, p)));
             match bridge(req) {
                 Ok(v) if v["ok"] == true => Ok(
                     json!({"ok":true,"status":if v["session_id"]==req["session_id"]{"alive"}else{"switched"},"current_session_id":v["session_id"],"reason":null}),
                 ),
                 Ok(v) => {
                     if let Some(p) = pid(req) {
-                        let path = binding_path(req, p);
-                        let _lock = FileLock::acquire(&path.with_extension("lock"))?;
-                        let _ = fs::remove_file(path);
+                        remove_rejected_binding(&binding_path(req, p), binding_before)?;
                     }
                     Ok(
                         json!({"ok":true,"status":"transient_error","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
@@ -1235,10 +1256,13 @@ fn sidecar(req: Value) -> Result<()> {
             if next.is_none() {
                 if let Ok(binding) = read_json(&binding_path(&req, p)) {
                     if binding["source"] != "channel"
-                        && binding["cwd"] == cwd
+                        && str_at(&binding, "start").is_some()
                         && str_at(&binding, "start").map(str::to_string) == process_start(p)
                     {
                         next = str_at(&binding, "session_id").map(str::to_string);
+                        alias_active = next.as_deref().is_some_and(|sid| {
+                            alias_for_fallback(&req, &fallback).as_deref() == Some(sid)
+                        });
                     }
                 }
             }
@@ -1316,7 +1340,23 @@ fn sidecar(req: Value) -> Result<()> {
             }
             let mut channel_req = req.clone();
             channel_req["_binding_source"] = json!("channel");
-            record_binding(&channel_req, p, &current, cwd)?;
+            if let Some(binding) = record_binding(&channel_req, p, &current, cwd)? {
+                if binding["source"] != "channel"
+                    && str_at(&binding, "start").is_some()
+                    && str_at(&binding, "start").map(str::to_owned) == process_start(p)
+                {
+                    if let Some(sid) = str_at(&binding, "session_id") {
+                        // A hook can commit while this request waits for the leaf lock.
+                        // Keep an established fallback alias, otherwise adopt its identity.
+                        alias_active = alias_for_fallback(&req, &fallback).as_deref() == Some(sid);
+                        let selected = if alias_active { &fallback } else { sid };
+                        if current != selected {
+                            current = selected.to_string();
+                            last_active = now_ms();
+                        }
+                    }
+                }
+            }
             let transcript = if alias_active {
                 first_transcript.as_deref().unwrap_or(&current)
             } else {

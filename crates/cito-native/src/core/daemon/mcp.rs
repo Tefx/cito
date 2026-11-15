@@ -252,7 +252,7 @@ impl DaemonService {
             if Instant::now() >= deadline {
                 return Err("TOOL_TIMEOUT: Caller resolution exceeded 1500ms budget".into());
             }
-            let mut request = json!({"op":"resolve_caller","meta":meta,"headers":meta["headers"],"cwd":meta["cwd"],"http_transport":true,"http_client_pid":requested_pid,"require_open":required,"explicit_session_id":meta["expected_session_id"],"cli_cmd":meta["cli_cmd"],"state_dir":self.config.state_dir,"env":{}});
+            let mut request = json!({"op":"resolve_caller","meta":meta,"headers":meta["headers"],"cwd":meta["cwd"],"http_transport":true,"http_client_pid":requested_pid,"require_open":required,"explicit_session_id":if expected == plugin.id { meta["expected_session_id"].clone() } else { Value::Null },"cli_cmd":meta["cli_cmd"],"state_dir":self.config.state_dir,"env":{}});
             if !required {
                 if let Some(cached) = requested_pid.and_then(|pid| {
                     self.caller_cache.lock().ok().and_then(|cache| {
