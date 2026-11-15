@@ -13124,3 +13124,262 @@ phases:
       Spec link:
 
       - docs/DESIGN.md (§1–§8 @ 6ba91cd)'
+- id: v46
+  name: V46 Low-Power & Event-Driven Runtime, Lazy UI Rendering & Native OS Discovery
+    (v0.21.3)
+  status: pending
+  gate: 'All binding v46 Low-Power & Event-Driven Runtime requirements in docs/DESIGN.md
+    (§2.2, §3.3, §4.2, §4.3, §5.1, §5.2, §8.1, §8.2 @ 7007410) pass; [REQUIRES_SKILL:
+    contract-and-simplicity] convergence audit across v46 deltas completes cleanly;
+    cargo fmt --all -- --check, git diff --check, cargo clippy --workspace --all-targets
+    -- -D warnings, cargo test --workspace, cargo build --release (0 warnings updating
+    all 7 staged arm64 binaries with codesign --verify --strict), node crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check (version 0.21.3, NO release tag), python3 -m
+    unittest discover -s packaging, visual asset checks, §1.2 zero-hardcoding check,
+    empirical idle CPU / context-switch / wakeup check (ps & top -l 2), and local
+    /Applications/Cito.app rebuild, verification (codesign --verify --deep --strict),
+    and restart pass cleanly.'
+  context: 'Implement docs/DESIGN.md (§2.2, §3.3, §4.2, §4.3, §5.1, §5.2, §8.1, §8.2
+    @ 7007410), pre-reviewed by uiux-auditor (CLEAN) and spec-readiness-auditor (READY),
+    without repeating Stage 1 discovery: (1) v46.core (rust-senior): Event-driven
+    sleep & zero idle spin (§2.2: eliminate fixed 2–50 ms idle polling across crates/cito-native/src/main.rs,
+    core/hub.rs, core/hub_plugins.rs, core/plugins.rs, plugin_support.rs, core/daemon/mod.rs,
+    plugins/claude/native.rs, plugins/telegram/native.rs, and plugins/pi/cito-bridge.ts);
+    Mutation-driven wakeup, throttled pruning & error backoff (§3.3: keep HubEngine::prune()
+    strictly inside the 60 s-throttled maintenance path, never in backlog_from/reserve_deliveries;
+    extend /v1/events SSE keepalive to 25–30 s; wire both local:// embedded Hub subscriptions
+    without starting HTTP and HTTP/SSE events in core/transport.rs / core/receiver.rs
+    to wake inbox draining & directory invalidation immediately on committed mutations
+    with >= 30 s fallback reconciliation; add exponential/jittered backoff to SSE
+    reconnect, pending_hub_acks, OIDC failed recovery, and UI crash restarts); Demand-gated
+    discovery/projection, adaptive probing & native OS queries (§3.3, §4.2, §4.3:
+    emit lightweight status updates when closed instead of unconditional 1 s full
+    SQLite history scans/serialization; pause background discovery when all Hubs have
+    Auto-Listen off and no UI is open while running bounded <= 1500 ms on-demand discovery
+    for cito status / get_snapshot / menu open / settings open / refresh_available
+    / set_auto_listen(true) / setup_apply; share cross-Hub endpoint probe observations
+    with calm adaptive idle backoff; replace recurring /bin/ps, /usr/sbin/lsof, full-file
+    JSONL parsing, O(N^2) Claude sibling socket connects, and uncached git spawns
+    with in-process macOS sysctl / proc_pidinfo / kill(..., 0) + (dev, ino, size,
+    mtime) caches; gate Codex <hash>.source.json writes strictly on changed state;
+    skip LocalState::open DDL checks when user_version == 7 and update core/state_tests.rs
+    legacy fixture; bound HTTP MCP caller discovery cleanly); (2) v46.ui (senior-engineer,
+    depends_on v46.core): Swift lazy rendering & idle silence (§5.1, §5.2, src/macos/*.swift:
+    track menuOpen/menuDirty and directoryVisible/settingsVisible in Companion.swift
+    / MenuSurface.swift / DirectorySurface.swift / SettingsSurface.swift, keeping
+    StatusItem, first-launch onboarding, and in-memory settings/directory model state
+    immediately updated while deferring heavy NSMenu / Directory / Settings AppKit
+    view/table rebuilds until visible or headless inspectMenu/renderPNG/HeadlessOracle
+    hooks; statically cache StatusItem NSImage icons and skip unchanged (iconState,
+    unreadCount, tooltip) button reassignments; switch panel NSVisualEffectView to
+    .followsWindowActiveState; remove 12.5 Hz hoverWatchTimer polling from background
+    panels in UIPrimitives.swift; cache ISO8601DateFormatter and use attribute-based
+    measureTextWidth preserving cell inset parity in PaletteAndMetrics.swift/UIPrimitives.swift);
+    (3) v46.review (senior-engineer, depends_on v46.ui, [REQUIRES_SKILL: contract-and-simplicity]):
+    Full contract-and-simplicity convergence audit across v46 deltas, all §8.1 full-workspace
+    verification gates, empirical idle CPU / context-switch / wakeup check (ps & top
+    -l 2) verifying dramatic reduction vs pre-v46 baseline, and local /Applications/Cito.app
+    rebuild & restart at version 0.21.3 with NO release tag.'
+  depends_on:
+  - v45
+  steps:
+  - id: v46.core
+    name: V46 Rust Event-Driven Sleep, Mutation Wakeups, Throttled Pruning, Demand-Gated
+      Discovery/Projections & Native OS Queries
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/**\n\
+      \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
+      \   - plugins/codex/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement\
+      \ all Rust and plugin Low-Power & Event-Driven Runtime requirements in `docs/DESIGN.md`\
+      \ (`§2.2`, `§3.3`, `§4.2`, `§4.3`, `§8.1`, `§8.2` @ `7007410`):\n  1. Event-Driven\
+      \ Sleep & Zero Idle Spin (`§2.2`):\n     - Eliminate fixed `2–50 ms` idle polling\
+      \ across `crates/cito-native/src/main.rs` (`cito-mcp` self-pipe `libc::poll`),\
+      \ `crates/cito-native/src/core/hub.rs` (`start_server` `libc::poll` over `[listener_fd,\
+      \ stop_pipe_rd]`, `HubEngine` worker `Condvar::wait_timeout` on mutation/retry/maintenance\
+      \ deadlines, `hub_cli` self-pipe `libc::poll(..., -1)`), `crates/cito-native/src/core/hub_plugins.rs`,\
+      \ `crates/cito-native/src/core/plugins.rs` (OS pipe `poll` + `wait` instead\
+      \ of `5 ms` `waitid` spin), `crates/cito-native/src/plugin_support.rs` (event-driven\
+      \ `run_command_with_timeout` & single `sqlite3_busy_timeout`), `crates/cito-native/src/core/daemon/mod.rs`\
+      \ (OS socket/pipe readiness + next deadline instead of `20 ms` spin), `plugins/claude/native.rs`\
+      \ (self-pipe `sidecar_watchdog` instead of `2 ms` spin), `plugins/telegram/native.rs`\
+      \ (single unified `mpsc` channel `recv`/`recv_timeout` instead of `5 ms` `try_recv`\
+      \ + exponential/jittered error backoff + `401`/`409` pause), and `plugins/pi/cito-bridge.ts`\
+      \ (stop `2 s` `setInterval` polling while socket is healthy/owned).\n  2. Mutation-Driven\
+      \ Wakeup, Throttled Pruning & Error Backoff (`§3.3`):\n     - Keep `HubEngine::prune()`\
+      \ strictly inside the `60 s`-throttled maintenance path (never in `backlog_from`/`reserve_deliveries`).\n\
+      \     - Extend `/v1/events` SSE keepalive to `25–30 s` (clamped by JWT expiry).\n\
+      \     - Wire BOTH `local://` embedded Hub subscriptions (without starting HTTP)\
+      \ AND HTTP/SSE events in `crates/cito-native/src/core/transport.rs` / `crates/cito-native/src/core/receiver.rs`\
+      \ to wake inbox draining & directory invalidation immediately on committed mutations\
+      \ with slow `>= 30 s` fallback reconciliation.\n     - Add bounded exponential/jittered\
+      \ backoff to SSE reconnect, `pending_hub_acks`, OIDC failed recovery, and UI\
+      \ crash restarts.\n  3. Demand-Gated Discovery/Projection, Adaptive Probing\
+      \ & Native OS Queries (`§3.3`, `§4.2`, `§4.3`):\n     - Emit lightweight status\
+      \ updates when UI surfaces are closed instead of unconditional `1 s` full SQLite\
+      \ history scans/serialization.\n     - Pause background discovery when all Hubs\
+      \ have `Auto-Listen` off and no UI is open (skipping unconfigured providers,\
+      \ while running bounded `<= 1500 ms` on-demand discovery for `cito status` /\
+      \ `get_snapshot` / menu open / settings open / `refresh_available` / `set_auto_listen(true)`\
+      \ / `setup_apply`).\n     - Share cross-Hub endpoint `probe` observations with\
+      \ calm adaptive idle backoff while preserving session-specific probe outcomes\
+      \ and process-identity fencing.\n     - Replace recurring `/bin/ps`, `/usr/sbin/lsof`,\
+      \ full-file JSONL parsing, $O(N^2)$ Claude sibling socket connects, and uncached\
+      \ `git` spawns with in-process macOS `sysctl` / `proc_pidinfo` / `kill(...,\
+      \ 0)` + `(dev, ino, size, mtime)` caches.\n     - Gate Codex `<hash>.source.json`\
+      \ writes strictly on changed state.\n     - Skip `LocalState::open` DDL checks\
+      \ when `user_version == 7` (updating `crates/cito-native/src/core/state_tests.rs`\
+      \ legacy fixture so it restores a legacy `user_version` rather than altering\
+      \ a `user_version = 7` DB).\n     - Bound HTTP MCP caller discovery cleanly\
+      \ (`crates/cito-native/src/core/daemon/mcp.rs`).\n  4. Fast Targeted Affected-Module\
+      \ Tests (`§8.1`):\n     - Add/update discriminating unit and integration tests\
+      \ for event-driven wakeup and clean shutdown (`daemon`, `cito hub`, `cito-mcp`,\
+      \ Claude sidecar, Telegram channel, subprocess/SQLite waits), `HubEngine` throttled-maintenance-only\
+      \ pruning (zero SQLite WAL deletes on idle backlog/delivery checks), immediate\
+      \ mutation wakeups for both `local://` (without HTTP) and HTTP/SSE Hubs (`25–30\
+      \ s` keepalives + exponential/jittered backoff), demand-gated discovery (paused\
+      \ when `Auto-Listen` is off and UI closed, yet refreshing within `DISCOVERY_TIMEOUT`\
+      \ on `cito status` / `get_snapshot` / menu open / explicit refresh), cross-Hub\
+      \ shared endpoint adaptive probing, in-process OS process/CWD queries, `user_version\
+      \ == 7` schema open fast path, and Codex no-op `source.json` mtime invariance.\n\
+      \nImplementation Notes (Non-Binding):\n- Follow `docs/DESIGN.md` `§8.2` hazard\
+      \ map. Keep inner-loop verification strictly to fast targeted affected-module\
+      \ unit/integration tests (`cargo test -p cito-native <filter>`); reserve full-workspace\
+      \ regression, release builds, and packaging for `v46.review`.\n\nBoundary:\n\
+      - Owner: `rust-senior`. Isolated worktree transaction modifying `crates/cito-native/src/**`,\
+      \ `plugins/{telegram,pi,claude,codex}/**`, and `crates/cito-native/tests/support/**`.\n\
+      \nAdmit:\n- Depends on Phase `v45` completion. Witnessed input: finalized `docs/DESIGN.md`\
+      \ (`7007410`).\n- Verification: fast targeted `cargo test -p cito-native <filter>`\
+      \ checks pass with 0 compiler warnings. Consumed by `v46.ui` and `v46.review`.\n\
+      \nRecovery:\n- Reconcile any readiness wakeup, timeout, SQLite, discovery, or\
+      \ test discrepancy in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native plugins:: && cargo test -p cito-native --test native daemon::'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/plugin_support.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/hub_plugins.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/receiver.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/state.rs
+    - crates/cito-native/src/core/state_tests.rs
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/channels.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - plugins/claude/native.rs
+    - plugins/telegram/native.rs
+    - plugins/pi/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/codex/native.rs
+    agent: rust-senior
+  - id: v46.ui
+    name: V46 macOS Swift Lazy UI Rendering, StatusItem Icon Caching, Window-Active
+      Vibrancy & Idle Hover Silence
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all Swift lazy rendering\
+      \ & idle silence requirements in `docs/DESIGN.md` (`§5.1`, `§5.2`, `§8.1`, `§8.2`\
+      \ @ `7007410`, `src/macos/*.swift`):\n  1. Visibility-Gated Lazy Rendering (`§5.1`,\
+      \ `§5.2`):\n     - Track `menuOpen`/`menuDirty` and `directoryVisible`/`settingsVisible`\
+      \ in `src/macos/Companion.swift`, `src/macos/MenuSurface.swift`, `src/macos/DirectorySurface.swift`,\
+      \ and `src/macos/SettingsSurface.swift`.\n     - Keep `StatusItem`, first-launch\
+      \ onboarding, pending settlement receipts, and in-memory `settings`/`directory`\
+      \ model state immediately updated while deferring heavy `NSMenu` / `Directory`\
+      \ / `Settings` AppKit view/table rebuilds until visible (`menuWillOpen` without\
+      \ recursive `menu.update()`, `openDirectoryPanel`, `openSettingsPanel`, or headless\
+      \ `inspectMenu`/`renderPNG`/`HeadlessOracle` test hooks).\n  2. StatusItem Caching\
+      \ & No-Op Skip (`§5.2.2`):\n     - Statically cache the three `StatusItem` `NSImage`\
+      \ icons and skip unchanged `(iconState, unreadCount, tooltip)` button reassignments.\n\
+      \  3. App-Nap-Friendly Chrome, Event-Driven Hover & Cached Measurement (`§5.2.1`):\n\
+      \     - Switch panel `NSVisualEffectView` to `.followsWindowActiveState`.\n\
+      \     - Remove `12.5 Hz` `hoverWatchTimer` polling from background panels in\
+      \ `src/macos/UIPrimitives.swift` (scoping any modal tracking fallback strictly\
+      \ to open `NSMenu`).\n     - Cache `ISO8601DateFormatter` and use attribute-based\
+      \ `measureTextWidth` preserving `NSTextField` cell inset parity in `src/macos/PaletteAndMetrics.swift`\
+      \ and `src/macos/UIPrimitives.swift`.\n  4. Targeted Swift Build & UI Integration\
+      \ Tests (`§8.1`):\n     - Add discriminating tests in `crates/cito-native/tests/support/ui/**`\
+      \ for deferred menu rebuild while closed + flush on open/`inspectMenu`/`renderPNG`,\
+      \ unchanged `StatusItem` reassignment skip, hidden `Directory`/`Settings` panel\
+      \ rebuild gating, and zero background hover timer polling (`cargo test -p cito-native\
+      \ --test native ui::`).\n\nImplementation Notes (Non-Binding):\n- Follow `docs/DESIGN.md`\
+      \ `§8.2` hazard map. Keep inner-loop verification fast with targeted Swift build\
+      \ + `cargo test -p cito-native --test native ui::`; reserve full-workspace regression,\
+      \ release packaging, and live idle CPU measurement for `v46.review`.\n\nBoundary:\n\
+      - Owner: `senior-engineer`. Isolated worktree transaction modifying `src/macos/**`\
+      \ and `crates/cito-native/tests/support/ui/**`.\n\nAdmit:\n- Depends on `v46.core`\
+      \ completion.\n- Verification: targeted Swift build + `cargo test -p cito-native\
+      \ --test native ui::` pass cleanly. Consumed by `v46.review`.\n\nRecovery:\n\
+      - Repair any AppKit lazy-rebuild, headless flush, geometry, or `ui::` test discrepancy\
+      \ in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/Companion.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/UIPrimitives.swift
+    - src/macos/Models.swift
+    - src/macos/HeadlessOracle.swift
+    depends_on:
+    - v46.core
+    agent: senior-engineer
+  - id: v46.review
+    name: 'V46 Full Contract-and-Simplicity Audit, §8.1 Full-Workspace Verification,
+      Empirical Idle CPU/Wakeup Check & Cito.app Rebuild/Restart [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Execute a full `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` convergence audit across `v46` deltas (`v46.core`\
+      \ and `v46.ui` against `docs/DESIGN.md` `§2.2`, `§3.3`, `§4.2`, `§4.3`, `§5.1`,\
+      \ `§5.2`, `§8.1`, `§8.2` @ `7007410`, without repeating Stage 1 discovery on\
+      \ untouched areas), resolving any identified wiring, state-transition, resource-lifetime,\
+      \ or test-calibration issues in place.\n- Run and verify all `docs/DESIGN.md`\
+      \ `§8.1` full-workspace verification gates:\n  1. `cargo fmt --all -- --check`\
+      \ and `git diff --check`\n  2. `cargo clippy --workspace --all-targets -- -D\
+      \ warnings`\n  3. Full `cargo test --workspace`\n  4. `cargo build --release`\
+      \ (0 warnings) updating all 7 staged arm64 binaries (`bin/cito-ui-darwin-arm64`,\
+      \ `bin/cito-native-darwin-arm64`, and bundled plugin binaries) & `codesign --verify\
+      \ --strict`\n  5. `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \  6. `python3 packaging/release.py check` for version `0.21.3` with NO release\
+      \ tag, and `python3 -m unittest discover -s packaging`\n  7. Visual asset inspection\
+      \ (`AppIcon.icns`, `og-card.png`, `architecture-topology.svg`, `site/assets/screenshots/*.png`)\
+      \ and `§1.2` semantic zero-hardcoding check across `crates/cito-native/src/core/`\
+      \ and `src/macos/`\n- Rebuild and restart local `/Applications/Cito.app` and\
+      \ verify bundle signature (`codesign --verify --deep --strict /Applications/Cito.app`).\n\
+      - Execute empirical idle CPU / context-switch / wakeup check (`ps` & `top -l\
+      \ 2`) under closed UI verifying dramatic reduction vs pre-v46 baseline.\n\n\
+      Boundary:\n- Owner: `senior-engineer` with `[REQUIRES_SKILL: contract-and-simplicity]`.\
+      \ Modifies repository, updates all 7 staged arm64 binaries, rebuilds/restarts\
+      \ local `/Applications/Cito.app`, and verifies empirical idle CPU/wakeup reduction\
+      \ at version `0.21.3` with NO release tag.\n\nAdmit:\n- Depends on `v46.ui`\
+      \ completion (`v46.core` -> `v46.ui`).\n- Verification: full `§8.1` verification\
+      \ gates, `§1.2` zero-hardcoding check, 7 staged arm64 binaries + `/Applications/Cito.app`\
+      \ codesign verification, and empirical `ps` / `top -l 2` idle CPU/wakeup check\
+      \ pass cleanly.\n\nRecovery:\n- Repair any audit finding, regression, compiler/clippy\
+      \ warning, idle wakeup regression, or packaging/app bundle discrepancy in place\
+      \ and re-verify before completion.\n"
+    verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
+      --all-targets -- -D warnings && cargo test --workspace && cargo build --release
+      && node crates/cito-native/tests/support/site-clipboard.mjs && python3 packaging/release.py
+      check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - packaging/release.py
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v46.ui
+    agent: senior-engineer
