@@ -13316,7 +13316,7 @@ phases:
   - id: v46.ui
     name: V46 macOS Swift Lazy UI Rendering, StatusItem Icon Caching, Window-Active
       Vibrancy & Idle Hover Silence
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all Swift lazy rendering\
@@ -13370,6 +13370,30 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-15T12:17:29.825776Z'
+    done_at: '2026-11-15T12:37:37.027730+00:00'
+    evidence: 'Artifact:
+
+      - Commit: cdc414ae61ecd62a3c12b0e87b34ade391cf85b8 (rebased and merged cleanly
+      to main; candidate ref refs/v46/candidates/v46.ui -> refs/vectl/candidates/v46.ui
+      retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed (0 compiler
+      warnings)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test -p cito-native --test native ui:: -> 66 passed, 0 failed (including
+      5 new lazy_rendering tests)
+
+      - §1.2 lexical check on src/macos/ -> Only permitted geometry variable `slack`
+      matched; bin/cito-ui-darwin-arm64 rebuilt and signed.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§5.1, §5.2, §8.1–§8.2 @ 7007410)'
   - id: v46.review
     name: 'V46 Full Contract-and-Simplicity Audit, §8.1 Full-Workspace Verification,
       Empirical Idle CPU/Wakeup Check & Cito.app Rebuild/Restart [REQUIRES_SKILL:
