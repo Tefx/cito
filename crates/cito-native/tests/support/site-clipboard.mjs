@@ -3,7 +3,7 @@
 // effects: none outside VM contexts.
 // requires: Node.js standard library only.
 import assert from 'node:assert/strict';
-import {readFileSync, readdirSync} from 'node:fs';
+import {existsSync, readFileSync, readdirSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 const site = new URL('../../../../site/', import.meta.url);
 const source = readFileSync(new URL('scripts/hero-preview.js', site), 'utf8');
@@ -48,22 +48,39 @@ await missing.click();
 assert.equal(missing.badge.textContent, 'Copy failed');
 assert.equal(missing.button.disabled, false);
 
-for (const page of ['styles/main.css', 'index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)]) {
-  const content = readFileSync(new URL(page, site), 'utf8');
-  for (const retired of ['docs-figure-stage--compact', '245, 158, 11', 'Paste Invite Code', '$1', 'My Macs', 'BannerWindow', 'Desktop Banner', 'plugins/human']) {
-    assert.ok(!content.includes(retired), `${page} contains retired UI markup: ${retired}`);
-  }
-}
-const homepage = readFileSync(new URL('index.html', site), 'utf8');
+const pages = ['index.html', ...readdirSync(new URL('docs/', site)).filter(name => name.endsWith('.html')).map(name => 'docs/' + name)];
+const documents = new Map(pages.map(page => [new URL(page, site).href, readFileSync(new URL(page, site), 'utf8')]));
+const homepage = documents.get(new URL('index.html', site).href);
 const download = 'https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip';
-for (const page of ['index.html', 'docs/guide.html', 'docs/plugins.html', 'docs/architecture.html']) {
-  const html = readFileSync(new URL(page, site), 'utf8');
-  for (const anchor of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)) {
-    const attrs = Object.fromEntries([...anchor[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
-    if (!attrs.href?.startsWith('https://github.com/Tefx/cito')) continue;
-    assert.equal(attrs.target, '_blank', page);
-    assert.ok(attrs.rel.split(' ').includes('noopener') && attrs.rel.split(' ').includes('noreferrer'), page);
-    if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(anchor[2])) assert.equal(attrs.href, download, page);
+for (const [page, html] of documents) {
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(new Set(ids).size, ids.length, `${page}: duplicate IDs`);
+  assert.doesNotMatch(html, /class="[^"]*\bdocs-figure-stage--compact\b/, page);
+  for (const control of html.matchAll(/<(?:button|input)\b([^>]*)(?:>([\s\S]*?)<\/button>|\s*\/?>)/g)) {
+    assert.doesNotMatch(`${control[1]} ${control[2] || ''}`, /Paste Invite Code|My Macs|Desktop Banner|BannerWindow/, page);
+  }
+  for (const link of html.matchAll(/<(a|link)\b([^>]*)>(?:([\s\S]*?)<\/a>)?/g)) {
+    const attrs = Object.fromEntries([...link[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]));
+    assert.ok(attrs.href, `${page}: ${link[1]} missing href`);
+    const target = new URL(attrs.href.replaceAll('&amp;', '&'), page);
+    if (target.protocol === 'file:') {
+      const fragment = decodeURIComponent(target.hash.slice(1));
+      target.hash = '';
+      target.search = '';
+      assert.ok(existsSync(target), `${page}: broken link ${attrs.href}`);
+      if (fragment) {
+        const destination = documents.get(target.href);
+        assert.ok(destination, `${page}: fragment points outside site pages: ${attrs.href}`);
+        assert.ok([...destination.matchAll(/\bid="([^"]+)"/g)].some(match => match[1] === fragment), `${page}: missing anchor ${attrs.href}`);
+      }
+    } else {
+      assert.ok(['https:', 'http:', 'mailto:'].includes(target.protocol), `${page}: unsupported link ${attrs.href}`);
+    }
+    if (link[1] === 'a' && attrs.href.startsWith('https://github.com/Tefx/cito')) {
+      assert.equal(attrs.target, '_blank', page);
+      assert.ok(attrs.rel?.split(/\s+/).includes('noopener') && attrs.rel?.split(/\s+/).includes('noreferrer'), page);
+      if (/Download Cito\.app|Cito-macos-arm64\.zip/.test(link[3] || '')) assert.equal(attrs.href, download, page);
+    }
   }
 }
 const diagram = readFileSync(new URL('assets/art/architecture-topology.svg', site), 'utf8');

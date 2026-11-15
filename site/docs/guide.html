@@ -205,7 +205,7 @@ args = []</code></pre>
         Cito includes a built-in Telegram channel integration so your Human Node (<code>@self</code> / <code>@username</code>) can receive notifications and reply to agents from your phone:
       </p>
       <ol>
-        <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top. The Inbox Control Bar controls shared delivery; external channels keep delivering alerts even when this Mac is offline.</li>
+        <li>Open <strong><code>Settings…</code> (<code>⌘,</code>)</strong> → <strong><code>Human Channels</code></strong> and select your target Hub at the top. The Inbox Control Bar controls shared delivery; external channels can deliver alerts when this Mac is offline, provided the selected Hub and its channel service remain online elsewhere.</li>
         <li>Under <strong><code>1. Shared Hub Service</code></strong>, paste your Telegram <strong>Bot Token</strong> (from <code>@BotFather</code>) and click <strong><code>Save Gateway Token</code></strong>. A managed Hub may already provide this gateway.</li>
         <li>Under <strong><code>2. Your Personal Account (@&lt;user&gt;)</code></strong>, click <strong><code>Pair Account…</code></strong> and follow the short-lived 10-character Base32 command shown on the card. Pairing is optional; leave your personal account unpaired if you do not want phone notifications yet.</li>
         <li>Send the generated <code>/start cito-&lt;token&gt;</code> message to your bot in a private Telegram chat. Your Telegram <code>Chat ID</code> binds to your user profile automatically.</li>
