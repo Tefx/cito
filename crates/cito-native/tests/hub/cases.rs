@@ -3099,10 +3099,16 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .unwrap()[0],
         json!({"status":"effect_unknown","last_error":"Response lost"})
     );
+    // Keep transport unconfigured while exercising configuration-only ledger resets.
+    // The public configure path also performs a synchronous channel tick.
+    e.pause_worker();
+    let mut plugin = plugin.clone();
+    plugin.manifest["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"transport","scope":"hub","type":"secret","required":true}));
     send(&e, &node, "after-binding");
-    e.inner.plugins.lock().unwrap().push(plugin.clone());
-    // Freeze background execution; configuration and ledger reconciliation need no child.
-    e.inner.closed.store(true, Ordering::SeqCst);
+    e.inner.plugins.lock().unwrap().push(plugin);
     e.human_rpc(
         "human_channels_configure",
         &json!({"plugin_id":"fixture","hub_config":{"credential":"new"}}),
@@ -3175,7 +3181,7 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .is_empty(),
         "first identity assignment retires legacy destination mappings"
     );
-    e.inner.closed.store(false, Ordering::SeqCst);
+    assert!(e.inner.processes.lock().unwrap().is_empty());
     e.inner.plugins.lock().unwrap().clear();
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();

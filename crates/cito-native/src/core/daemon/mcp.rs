@@ -281,13 +281,22 @@ impl DaemonService {
         {
             return Ok(None);
         }
+        if !expected.is_empty()
+            && !self
+                .plugins
+                .agent_plugins()
+                .iter()
+                .any(|plugin| plugin.id == expected)
+        {
+            return Err("UNSUPPORTED_HARNESS: Unknown harness".into());
+        }
         let mut failures = Vec::new();
         for plugin in self.plugins.agent_plugins() {
-            if Instant::now() >= deadline {
-                break;
-            }
             if !expected.is_empty() && plugin.id != expected {
                 continue;
+            }
+            if Instant::now() >= deadline {
+                return Err("TOOL_TIMEOUT: Caller resolution exceeded 1500ms budget".into());
             }
             let mut request = json!({"op":"resolve_caller","meta":meta,"headers":meta["headers"],"cwd":meta["cwd"],"http_transport":true,"http_client_pid":requested_pid,"require_open":required,"explicit_session_id":meta["expected_session_id"],"cli_cmd":meta["cli_cmd"],"state_dir":self.config.state_dir,"env":{}});
             if !required {
@@ -360,6 +369,9 @@ impl DaemonService {
                 }
             }
         }
+        if Instant::now() >= deadline {
+            return Err("TOOL_TIMEOUT: Caller resolution exceeded 1500ms budget".into());
+        }
         if !expected.is_empty() || explicit_pid || !string(meta, "expected_session_id").is_empty() {
             return Err(failures
                 .first()
@@ -370,7 +382,7 @@ impl DaemonService {
                         string(reply, "message")
                     )
                 })
-                .unwrap_or_else(|| "UNSUPPORTED_HARNESS: Unknown harness".into()));
+                .unwrap_or_else(|| "BINDING_REQUIRED: No caller socket bridge found".into()));
         }
         if required {
             return Err("BINDING_REQUIRED: No caller socket bridge found".into());

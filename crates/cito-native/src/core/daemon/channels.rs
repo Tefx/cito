@@ -206,9 +206,11 @@ pub(super) fn dispatch_channel_action(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
     kind: ChannelActionKind,
+    ui_generation: Option<u64>,
 ) -> Result<Value, String> {
     let (slot, inventory, plugins, observed_gen) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
             return Err("Shutting down".into());
         }

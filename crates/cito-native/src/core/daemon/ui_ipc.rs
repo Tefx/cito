@@ -253,17 +253,16 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
             }
         }
     });
-    if let Ok(mut s) = service.lock() {
-        s.disconnect_ui();
-        s.ui = Some(mailbox.clone());
-        if let Ok(mut previous) = s.last_ui_revision.lock() {
-            *previous = None;
-        }
-        if let Ok(mut previous) = s.last_ui_frame.lock() {
-            *previous = None;
-        }
-        s.push_ui();
-    }
+    let ui_generation = if let Ok(mut s) = service.lock() {
+        s.set_ui(mailbox.clone());
+        s.ui_generation
+    } else {
+        mailbox.close();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = writer.join();
+        return None;
+    };
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(output);
         let mut logins: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -298,7 +297,7 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 let run = move || {
                     // Both UI stdout actions and HTTP control callers share the
                     // same closed-loop error frame and refreshed state emission.
-                    let _ = dispatch_action(&service, &action);
+                    let _ = dispatch_action(&service, &action, Some(ui_generation));
                 };
                 if is_login {
                     logins.push(thread::spawn(run));

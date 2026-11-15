@@ -250,6 +250,60 @@ fn disconnected_ui_revokes_all_visibility_demand_before_replacement() -> Result<
 }
 
 #[test]
+fn replaced_ui_reader_cannot_restore_visibility_demand() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.shutdown();
+    let service = Arc::new(Mutex::new(DaemonService::open(
+        &f.service.config,
+        &f.service.plugins,
+    )?));
+    let result = (|| {
+        let (old_generation, current_generation) = {
+            let mut s = service.lock().unwrap();
+            s.set_ui(Arc::new(UiMailbox::default()));
+            let old_generation = s.ui_generation;
+            s.set_ui(Arc::new(UiMailbox::default()));
+            assert!(s.ui_generation > old_generation);
+            (old_generation, s.ui_generation)
+        };
+        // The old reader resumes only after the replacement mailbox is installed.
+        for action in [
+            json!({"op":"open_menu"}),
+            json!({"op":"open_directory"}),
+            json!({"op":"open_settings"}),
+        ] {
+            assert!(
+                http_actions::dispatch_action(&service, &action, Some(old_generation)).is_err()
+            );
+            let s = service.lock().unwrap();
+            assert!(!s.menu_open);
+            assert!(!s.directory_open);
+            assert!(s.active_settings_hub.is_none());
+        }
+        http_actions::dispatch_action(
+            &service,
+            &json!({"op":"open_menu"}),
+            Some(current_generation),
+        )?;
+        assert!(service.lock().unwrap().menu_open);
+        service.lock().unwrap().disconnect_ui();
+        assert!(http_actions::dispatch_action(
+            &service,
+            &json!({"op":"open_menu"}),
+            Some(current_generation),
+        )
+        .is_err());
+        assert!(!service.lock().unwrap().menu_open);
+        // HTTP control remains independent of the companion connection.
+        http_actions::dispatch_action(&service, &json!({"op":"open_menu"}), None)?;
+        assert!(service.lock().unwrap().menu_open);
+        Ok(())
+    })();
+    service.lock().unwrap().shutdown();
+    result
+}
+
+#[test]
 fn visibility_close_actions_emit_no_full_snapshot() -> Result<(), String> {
     let mut f = Fixture::new()?;
     f.service.ui = Some(Arc::new(UiMailbox::default()));

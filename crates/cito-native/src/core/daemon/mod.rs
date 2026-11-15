@@ -115,6 +115,7 @@ pub struct DaemonService {
     observations: HashMap<String, (u64, Instant)>,
     session_activity: Option<super::session_activity::SessionActivity>,
     ui: Option<Arc<UiMailbox>>,
+    ui_generation: u64,
     logins: HashMap<String, Arc<InteractiveLogin>>,
     last_ui: Instant,
     closing: bool,
@@ -437,6 +438,7 @@ impl DaemonService {
                 config, plugins,
             )),
             ui: None,
+            ui_generation: 0,
             logins: HashMap::new(),
             last_ui: Instant::now() - Duration::from_secs(1),
             closing: false,
@@ -1625,7 +1627,28 @@ impl DaemonService {
         }
     }
 
+    fn set_ui(&mut self, mailbox: Arc<UiMailbox>) {
+        self.disconnect_ui();
+        self.ui_generation += 1;
+        self.ui = Some(mailbox);
+        if let Ok(mut previous) = self.last_ui_revision.lock() {
+            *previous = None;
+        }
+        if let Ok(mut previous) = self.last_ui_frame.lock() {
+            *previous = None;
+        }
+        self.push_ui();
+    }
+
+    fn validate_ui_generation(&self, generation: Option<u64>) -> Result<(), String> {
+        if generation.is_some_and(|generation| generation != self.ui_generation) {
+            return Err("UI connection replaced".into());
+        }
+        Ok(())
+    }
+
     fn disconnect_ui(&mut self) {
+        self.ui_generation += 1;
         if let Some(mailbox) = self.ui.take() {
             mailbox.close();
         }

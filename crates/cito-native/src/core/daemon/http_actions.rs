@@ -106,8 +106,9 @@ pub(super) fn interactive_login(action: &Value) -> bool {
 pub(super) fn dispatch_action(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
+    ui_generation: Option<u64>,
 ) -> Result<Value, String> {
-    let mut result = dispatch_action_inner(service, action);
+    let mut result = dispatch_action_inner(service, action, ui_generation);
     let refresh_setup = matches!(
         string(action, "op"),
         "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
@@ -123,6 +124,7 @@ pub(super) fn dispatch_action(
     let mut s = loop {
         let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
         if !refresh_setup {
             break s;
         }
@@ -174,12 +176,14 @@ pub(super) fn dispatch_action(
 fn dispatch_action_inner(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
+    ui_generation: Option<u64>,
 ) -> Result<Value, String> {
     if let Some(kind) = channel_action_kind(action) {
-        return dispatch_channel_action(service, action, kind);
+        return dispatch_channel_action(service, action, kind, ui_generation);
     }
     let (hub, config, state_dir, attempt, snapshot) = {
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
+        s.validate_ui_generation(ui_generation)?;
         if s.closing || shutdown_requested() {
             return Err("Shutting down".into());
         }
@@ -370,7 +374,7 @@ pub(super) fn handle_http(
         return;
     };
     if matches!(path, "/ui" | "/action" | "/control") {
-        match dispatch_action(&service, &parsed) {
+        match dispatch_action(&service, &parsed, None) {
             Ok(v) => match bounded_frame(v) {
                 Ok(bytes) => respond_bytes(&mut stream, 200, &bytes),
                 Err(error) => respond(&mut stream, 500, &json!({"ok":false,"error":error})),

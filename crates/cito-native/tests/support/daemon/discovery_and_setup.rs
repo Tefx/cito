@@ -42,6 +42,38 @@ fn paused_cli_and_mcp_status_discover_sessions_started_after_idle() {
     assert_eq!(snapshot["registered"], false);
     assert_eq!(calls(),before+1,"MCP status must request fresh discovery even though its session-scoped DTO omits the available-session list");
     assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+
+    let options_path = provider.join("options.json");
+    let mut options: Value = serde_json::from_slice(&fs::read(&options_path).unwrap()).unwrap();
+    options["discover_delay_ms"] = json!(2000);
+    fs::write(options_path, options.to_string()).unwrap();
+    let resolve_calls = || {
+        fs::read_to_string(provider.join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|request| request["op"] == "resolve_caller")
+            .count()
+    };
+    let before_resolve = resolve_calls();
+    let before_discovery = calls();
+    let started = std::time::Instant::now();
+    let error = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"fixture","expected_session_id":"after-cli"}),
+    );
+    assert_eq!(error["isError"], true, "{error}");
+    let message = error.to_string();
+    assert!(!message.contains("UNSUPPORTED_HARNESS"), "{error}");
+    assert!(message.contains("TOOL_TIMEOUT"), "{error}");
+    assert_eq!(calls(), before_discovery + 1);
+    assert_eq!(
+        resolve_calls(),
+        before_resolve,
+        "Discovery consumed the caller budget"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(1900));
 }
 
 #[test]
