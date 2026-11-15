@@ -13983,7 +13983,7 @@ phases:
   - id: v48.core
     name: V48 Rust Core, Hub, Daemon, CLI, Build & Plugin Remediation (C1, C4, C6–C10,
       P1–P6, D3–D4, D6–D7)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/build.rs\n    - crates/cito-native/src/**\n\
       \    - crates/cito-native/tests/support/plugins.rs\n    - crates/cito-native/tests/support/daemon/**\n\
@@ -14130,6 +14130,68 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-15T19:08:53.257030Z'
+    done_at: '2026-11-15T20:08:33.032187+00:00'
+    evidence: 'Artifact:
+
+      - Candidate commits: 64f3bbec6d752fb38629ea3e736bf41050ccde9a -> 745700878c06c1f29238f012183196cadb9531b3
+      (rebased cleanly onto main as a0478f50393c20efb7a5a0836a84a4c1512bfd50; refs/vectl/candidates/v48.core
+      retained; version 0.21.3, zero release tag).
+
+
+      Deliverables (Clusters 2, 3, 4 — C1, C4, C6–C10, P1–P6, D3–D4, D6–D7):
+
+      - C1: Caller-scoped channel capability & error_origin projections + role/inbox-pause-accurate
+      detail strings in core/hub.rs and core/daemon/channels.rs.
+
+      - C4: Hub affordance flags (is_builtin, supports_workspace_scope, can_login)
+      + session/peer capabilities (is_self_principal, can_set_scope, can_pin, can_rename,
+      can_stop) + activity[*].can_reply in core/daemon/projection.rs.
+
+      - C6: MCP Human impersonation FORBIDDEN across all tools + nested _stdio.endpoint_pid
+      explicit provenance & unbound fallback protection in core/daemon/mcp.rs.
+
+      - C7: Non-destructive canonical editable fields in core/daemon/ui_ipc.rs.
+
+      - C8: Delivery reservation expiry preflight & bounded getUpdates (limit <= 25
+      + limit = 1 fallback/skip) in hub.rs + plugins/telegram/native.rs; paginated
+      kv_snapshot (<= 2 MiB pages) across hub.rs + transport.rs + daemon/.
+
+      - C9/C10/D4: Unified OIDC URL validator preserving query parameters on endpoints
+      & strict http://127.0.0.1 loopback exception; CITO_OIDC_REDIRECT_PORT & CITO_HUB_URL/CITO_NATS_URL
+      wiring; HTTP 5xx -> NATS_UNAVAILABLE; skipped-harness inspection warning preservation.
+
+      - P1–P6: fd0/fd1 character terminal vnode check + has_harness_ancestor + CITO_ENDPOINT_PID
+      ancestor boundary + Pi/Claude/Codex interactive & hook fencing + SessionActivity::available()
+      deduplication + PTY-parent/headless-child tests.
+
+      - D3/D6/D7: Authenticated HubServer reverse-proxy Host acceptance + build.rs
+      TARGET guard before reading src/macos + plugin.json ./ relative paths.
+
+
+      Verification:
+
+      - cargo fmt --all -- --check && git diff --check -> Passed
+
+      - cargo test -p cito-native --lib -> 270 passed, 0 failed, 4 ignored
+
+      - cargo test -p cito-native --test native daemon:: -> 62 passed, 0 failed
+
+      - cargo test -p cito-native --test native plugins:: -> 37 passed, 1 failed solely
+      in out-of-scope fixture crates/cito-native/tests/support/pi-bridge.mjs:40-42
+      (old pre-session_start CWD latest.jsonl hijack check; queued for calibration
+      in v48.review which owns crates/cito-native/**)
+
+      - python3 -m unittest discover -s packaging -> 17 passed
+
+      - Linux TARGET=x86_64-unknown-linux-gnu build.rs probe without src/macos ->
+      Passed
+
+      - §1.2 core hardcoding scan -> 0 matches
+
+
+      Spec link:
+
+      - /tmp/cito-v48-arch-spec.md & docs/DESIGN.md (@ 2f1c179)'
   - id: v48.ui
     name: V48 macOS AppKit Swift UI Geometry, HeadlessOracle, Capability Gating, Screenshot
       Refresh & UI Test Matrix (U1–U5, C1–C5, C11, P6)
