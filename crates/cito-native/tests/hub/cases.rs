@@ -2745,6 +2745,71 @@ fn verified_oidc_identity_keeps_legacy_private_data_and_bindings() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
+fn kv_snapshot_reconciles_expired_humans_after_collecting_each_bounded_page() {
+    for limit in [2, 1024] {
+        let dir = temp();
+        let e = HubEngine::open(&dir).unwrap();
+        for index in 0..7 {
+            let id = format!("human-{index}");
+            let reg = json!({"listener_id":id,"harness":"human","scope":"workspace",
+                "state":"ACTIVE","about":"x".repeat(600_000),
+                "channels":{"device:human":{"host_id":"device","state":"ACTIVE",
+                    "updated_at_ms":1,"binding_generation":3}}});
+            // Seed expired, unreconciled storage directly so snapshot must write.
+            e.inner.db.execute(
+                "INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,1,CAST(? AS BLOB),'','workspace')",
+                &[json!(id), json!(reg.to_string())],
+            ).unwrap();
+        }
+        let mut cursor = Value::Null;
+        let mut keys = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = e
+                .rpc(
+                    "kv_snapshot",
+                    &json!({"after_key":cursor,"limit":limit}),
+                    None,
+                )
+                .unwrap();
+            assert!(serde_json::to_vec(&page).unwrap().len() <= 2 * 1024 * 1024);
+            let entries = page["entries"].as_array().unwrap();
+            assert!(!entries.is_empty() && entries.len() <= limit as usize);
+            for entry in entries {
+                let reg: Value = serde_json::from_slice(
+                    &B64.decode(entry["value_b64"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reg["state"], "UNLISTENED");
+                assert_eq!(reg["channels"], json!({}));
+                assert_eq!(reg["device_generation_fences"]["device:human"], 3);
+                assert_eq!(reg["human_control_revision"], 1);
+                let stored = e.rpc("kv_get", &json!({"key":entry["key"]}), None).unwrap();
+                assert_eq!(stored["revision"], entry["revision"]);
+                assert_eq!(stored["value_b64"], entry["value_b64"]);
+                keys.push(entry["key"].clone());
+            }
+            pages += 1;
+            cursor = page["next_cursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+            assert_eq!(Some(&cursor), keys.last());
+            assert!(pages < 7);
+        }
+        assert!(pages > 1);
+        assert_eq!(
+            keys,
+            (0..7)
+                .map(|i| json!(format!("human-{i}")))
+                .collect::<Vec<_>>()
+        );
+        e.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn binary_payloads_survive_kv_stream_consumers_and_restart() {
     let dir = temp();
     let e = HubEngine::open(&dir).unwrap();

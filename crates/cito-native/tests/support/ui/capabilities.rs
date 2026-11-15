@@ -395,6 +395,28 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
         let badge = node(&s, "settings_items", "settings_channel_badge:channel");
         let status = node(&s, "settings_items", "settings_channel_status:channel");
         assert!((mid_y(&badge) - mid_y(&status)).abs() <= 1.0);
+        let summary = node(&s, "settings_items", "channel_summary:channel");
+        let trailing_x = [
+            "test_channel:channel",
+            "toggle_channel:channel",
+            "edit_user_channel:channel",
+            "unpair_channel:channel",
+        ]
+        .into_iter()
+        .map(|id| node(&s, "settings_items", id))
+        .filter(|n| !n.is_null() && n["hidden"] != true)
+        .map(|n| n["x"].as_f64().unwrap())
+        .fold(f64::INFINITY, f64::min);
+        assert!(trailing_x.is_finite());
+        assert!(
+            summary["x"].as_f64().unwrap() + summary["width"].as_f64().unwrap() <= trailing_x - 8.0
+        );
+        assert!(
+            node(&s, "settings_items", "stratum_user:channel")["height"]
+                .as_f64()
+                .unwrap()
+                < 368.0
+        );
     }
     control(&f, ui, "scope:inbox");
     inspect(&f, ui);

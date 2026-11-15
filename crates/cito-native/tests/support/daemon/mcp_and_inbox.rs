@@ -14,6 +14,39 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
             .unwrap();
     manifest["command"] = json!([CODEX]);
     fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    // Pin both real providers. Fixture::new sets the builtin directory but does
+    // not substitute a provider; do not rely on staged binaries for this seam.
+    let pi = f.state.join("plugins/pi");
+    fs::create_dir_all(&pi).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/pi/plugin.json")).unwrap()).unwrap();
+    manifest["command"] = json!([PI]);
+    fs::write(pi.join("plugin.json"), manifest.to_string()).unwrap();
+    let request = json!({"op":"resolve_caller","meta":{"endpoint_pid":std::process::id(),"threadId":"thread-a"}});
+    let pi_rejection = f.plugin(PI, request.clone());
+    assert_eq!(
+        pi_rejection["error_code"], "BINDING_REQUIRED",
+        "{pi_rejection}"
+    );
+    let codex_rejection = f.plugin(CODEX, request);
+    assert_eq!(
+        codex_rejection["error_code"], "INVALID_INPUT",
+        "{codex_rejection}"
+    );
+    for (meta, code) in [
+        (json!({"threadId":"thread-a"}), "INVALID_INPUT"),
+        (
+            json!({"expected_harness":"codex","expected_session_id":"thread-a"}),
+            "BINDING_REQUIRED",
+        ),
+    ] {
+        let reply = f.plugin(
+            CODEX,
+            json!({"op":"resolve_caller","endpoint_pid":std::process::id(),"meta":meta}),
+        );
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["error_code"], code, "{reply}");
+    }
     f.daemon(&[]);
     for thread in [false, true] {
         let mut meta = json!({"_stdio":{"endpoint_pid":std::process::id()},"cwd":"/repo"});
@@ -48,7 +81,7 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
         rejected["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("PI_BRIDGE_UNAVAILABLE"),
+            .contains("INVALID_INPUT"),
         "{rejected}"
     );
     let rejected = f.tool_result(

@@ -512,8 +512,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
     if let Some(s) = str_at(req, "explicit_session_id") {
         ids.push(s.into())
     }
-    let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
-    if caller_supplied_pid(&public)?.is_none() && req["meta"]["expected_harness"] == "codex" {
+    if caller_supplied_pid(req)?.is_none() && req["meta"]["expected_harness"] == "codex" {
         if let Some(s) = str_at(&req["meta"], "expected_session_id") {
             ids.push(s.into())
         }
@@ -590,8 +589,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 Ok(v) => v,
                 Err(e) => return Ok(error("INVALID_INPUT", e)),
             };
-            let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
-            if caller_supplied_pid(&public)?.is_some() {
+            if caller_supplied_pid(req)?.is_some() {
                 return Ok(error(
                     if explicit.is_some() {
                         "INVALID_INPUT"
@@ -601,7 +599,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     "Conflicting caller metadata: explicit bridge PID cannot claim a Codex thread",
                 ));
             }
-            let transport_pid = explicit_pid(&public)?.is_some();
+            let transport_pid = explicit_pid(req)?.is_some();
             let all = try_rows(req)?;
             let known_row = explicit
                 .as_deref()

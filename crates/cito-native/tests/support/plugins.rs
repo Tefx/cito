@@ -99,15 +99,22 @@ print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
     let app = f.dir.join("claude.mjs");
     fs::write(&app,r#"import fs from 'node:fs';import {spawnSync} from 'node:child_process';import {join} from 'node:path';
 const dir=process.env.CITO_STATE_DIR;
+if(process.argv[2]==='child') {
+ const result=spawnSync(process.env.TEST_HOOK,[],{input:process.argv[3],env:process.env,encoding:'utf8'});
+ process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.exit(result.status);
+}
 console.log('ready');
 setInterval(()=>{
  const path=join(dir,'hook-request');if(!fs.existsSync(path))return;
  const req=JSON.parse(fs.readFileSync(path));fs.unlinkSync(path);
  const input=JSON.stringify({hook_event_name:'SessionStart',session_id:req.sid,cwd:'/repo'});
  const env={...process.env,CITO_ENDPOINT_PID:String(process.pid)};
- const result=req.deep
-   ? spawnSync('python3',['-c',"import subprocess,sys; p=subprocess.run([sys.argv[1]],input=sys.argv[2],text=True,capture_output=True); print(p.stdout,end=''); print(p.stderr,end='',file=sys.stderr)",process.env.TEST_HOOK,input],{env,encoding:'utf8'})
-   : spawnSync(process.env.TEST_HOOK,[],{input,env,encoding:'utf8'});
+ const options={input,env,encoding:'utf8'};
+ const result=req.mode==='deep'
+   ? spawnSync(process.execPath,[process.argv[1],'child',input],options)
+   : req.mode==='shell'
+     ? spawnSync('/bin/sh',['-c','"$TEST_HOOK"; status=$?; exit "$status"'],options)
+     : spawnSync(process.env.TEST_HOOK,[],options);
  fs.writeFileSync(join(dir,'hook-result'),JSON.stringify({out:result.stdout,err:result.stderr}));
 },10);
 "#).unwrap();
@@ -135,18 +142,35 @@ setInterval(()=>{
         )["ok"],
         true
     );
-    let hook = |sid: &str, deep: bool| {
+    let hook = |sid: &str, mode: &str| {
         let result = f.state.join("hook-result");
         let _ = fs::remove_file(&result);
         fs::write(
             f.state.join("hook-request"),
-            json!({"sid":sid,"deep":deep}).to_string(),
+            json!({"sid":sid,"mode":mode}).to_string(),
         )
         .unwrap();
         wait(|| result.exists());
         serde_json::from_slice::<Value>(&fs::read(result).unwrap()).unwrap()
     };
-    let first = hook("real-session", false);
+    let rejected = hook("early-descendant-session", "deep");
+    assert!(
+        rejected["err"]
+            .as_str()
+            .unwrap()
+            .contains("SESSION_MISMATCH"),
+        "{rejected}"
+    );
+    let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+    let session = || {
+        serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap()["session_id"].clone()
+    };
+    assert_eq!(session(), fallback);
+    assert!(!f
+        .state
+        .join("claude/aliases/early-descendant-session")
+        .exists());
+    let first = hook("real-session", "direct");
     assert!(
         first["out"]
             .as_str()
@@ -162,16 +186,22 @@ setInterval(()=>{
             |row| row["ack"]["params"]["_meta"]["claudeSessionId"] == fallback
                 && row["ack"]["params"]["arguments"]["ack_ids"] == json!(["handoff"])
         ));
-    let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
-    let session = || {
-        serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap()["session_id"].clone()
-    };
+    assert_eq!(session(), "real-session");
+    assert_eq!(
+        socket(&path, json!({"op":"identify"}))["session_id"],
+        fallback
+    );
+    let probe = f.plugin(
+        CLAUDE,
+        json!({"op":"probe","endpoint_pid":pid,"session_id":fallback,"cwd":"/repo"}),
+    );
+    assert_eq!(probe["status"], "alive", "{probe}");
     assert_eq!(session(), "real-session");
     assert!(!f
         .state
         .join(format!("claude/wakes/{fallback}.jsonl"))
         .exists());
-    let descendant = hook("descendant-session", true);
+    let descendant = hook("descendant-session", "deep");
     assert!(
         descendant["err"]
             .as_str()
@@ -180,7 +210,10 @@ setInterval(()=>{
         "{descendant}"
     );
     assert_eq!(session(), "real-session");
-    let resumed = hook("resumed-session", false);
+    let cleared = hook("cleared-session", "shell");
+    assert_eq!(cleared["err"], "");
+    assert_eq!(session(), "cleared-session");
+    let resumed = hook("resumed-session", "direct");
     assert_eq!(resumed["err"], "");
     assert_eq!(session(), "resumed-session");
     f.eof(sidecar);
@@ -947,6 +980,8 @@ fn cached_fingerprint_does_not_authorize_an_unrelated_process_command() {
         }
         let mut request = json!({"op":"resolve_caller","endpoint_pid":f.pid(p),"cwd":"/repo","require_open":true});
         if id == "codex" {
+            request["_stdio"] = json!({"endpoint_pid":request["endpoint_pid"]});
+            request.as_object_mut().unwrap().remove("endpoint_pid");
             request["meta"] = json!({"threadId":"session-a"});
         }
         let response = f.plugin(bin, request.clone());
@@ -3060,6 +3095,8 @@ fn cached_pid_identity_requires_same_live_invocation_and_plugin_process_command(
         }
         let mut request = json!({"op":"resolve_caller","endpoint_pid":endpoint,"cwd":"/repo","require_open":true});
         if id == "codex" {
+            request["_stdio"] = json!({"endpoint_pid":request["endpoint_pid"]});
+            request.as_object_mut().unwrap().remove("endpoint_pid");
             request["meta"] = json!({"threadId":"session-a"});
         }
         let resolved = f.plugin(bin, request.clone());

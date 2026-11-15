@@ -715,29 +715,49 @@ impl HubEngine {
                 } else {
                     const PAGE_BYTES: usize = 2 * 1024 * 1024;
                     let limit = p["limit"].as_u64().unwrap_or(256).clamp(1, 1024) as usize;
-                    let mut entries = Vec::new();
+                    let mut rows = Vec::new();
                     let mut bytes = 128;
-                    let mut next_cursor = None;
+                    let mut more = false;
                     c.query_while(&sql, &params, |row| {
                         if !visible(&row, caller) || !matches(s(&row, "key"), s(p, "key")) {
                             return Ok(true);
                         }
-                        let wire = kv_wire(&reconcile_human_row(c, row)?)?;
-                        let size = serde_json::to_vec(&wire).map_err(|e| e.to_string())?.len() + 1;
-                        if entries.len() >= limit || bytes + size > PAGE_BYTES {
-                            if entries.is_empty() {
-                                return Err(
-                                    "INVALID_INPUT: Registration exceeds snapshot page budget"
-                                        .into(),
-                                );
-                            }
-                            next_cursor = entries.last().map(|entry: &Value| entry["key"].clone());
+                        let size = serde_json::to_vec(&kv_wire(&row)?)
+                            .map_err(|e| e.to_string())?
+                            .len()
+                            + 1;
+                        if rows.len() >= limit || bytes + size > PAGE_BYTES {
+                            more = true;
                             return Ok(false);
                         }
                         bytes += size;
-                        entries.push(wire);
+                        rows.push(row);
                         Ok(true)
                     })?;
+                    // Reconciliation may write hub_kv. The SELECT cursor must be
+                    // dropped before any connection re-entry or mutation.
+                    let mut entries = Vec::new();
+                    bytes = 128;
+                    for row in rows {
+                        let wire = kv_wire(&reconcile_human_row(c, row)?)?;
+                        let size = serde_json::to_vec(&wire).map_err(|e| e.to_string())?.len() + 1;
+                        if bytes + size > PAGE_BYTES {
+                            more = true;
+                            break;
+                        }
+                        bytes += size;
+                        entries.push(wire);
+                    }
+                    if more && entries.is_empty() {
+                        return Err(
+                            "INVALID_INPUT: Registration exceeds snapshot page budget".into()
+                        );
+                    }
+                    let next_cursor = if more {
+                        entries.last().map(|entry: &Value| entry["key"].clone())
+                    } else {
+                        None
+                    };
                     Ok(
                         json!({"entries":entries,"next_cursor":next_cursor,"server_now_ms":now_ms()}),
                     )

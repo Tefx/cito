@@ -380,14 +380,7 @@ pub fn handle(input: &Value) -> Result<Value> {
     }
     if matches!(op, "resolve_caller" | "verify") {
         if let Err(e) = explicit_pid(req) {
-            return Ok(error(
-                if e.starts_with("Invalid") {
-                    "PI_BRIDGE_UNAVAILABLE"
-                } else {
-                    "INVALID_INPUT"
-                },
-                e,
-            ));
+            return Ok(error("INVALID_INPUT", e));
         }
     }
     let (cs, endpoint_responded, rejection) = if matches!(

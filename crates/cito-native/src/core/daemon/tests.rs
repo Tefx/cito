@@ -2622,6 +2622,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         .all(|row| row["hub"] != "work"));
     assert_eq!(peer["human_availability"], hub["human_availability"]);
     assert_eq!(peer["human_state_status"], hub["human_state_status"]);
+    assert_eq!(peer["human_can_set_scope"], hub["human_can_set_scope"]);
     assert_eq!(peer["attachments"], hub["attachments"]);
     assert_eq!(peer["last_seen_at"], crate::core::identity::iso(1000));
     let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&client)));

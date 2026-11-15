@@ -369,21 +369,22 @@ fn binding_path(req: &Value, p: u32) -> PathBuf {
 }
 fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<()> {
     let identity = process_identity(p).ok();
-    if str_at(req, "_binding_source") != Some("channel") {
+    if str_at(req, "_binding_source") == Some("channel") {
         if let Ok(previous) = read_json(&binding_path(req, p)) {
-            if previous["session_id"] != sid
-                && previous["session_id"] != format!("claude-{p}")
-                // SAFETY: getppid only reads the hook's direct parent.
-                && unsafe { libc::getppid() as u32 } != p
-                && alive(p)
+            // Delivery aliases must never replace the canonical hook identity.
+            if previous["source"] != "channel"
+                && previous["cwd"] == cwd
                 && str_at(&previous, "start").map(str::to_owned) == process_start(p)
-                && live_bridge(req, p)
             {
-                return Err(
-                    "SESSION_MISMATCH: A live parent endpoint already owns another session".into(),
-                );
+                return Ok(());
             }
         }
+    } else if hook_endpoint(req) != p
+        || has_harness_ancestor(p, |ancestor, command| {
+            matches_process(command) || live_bridge(req, ancestor)
+        })
+    {
+        return Err("SESSION_MISMATCH: A descendant hook cannot claim a parent endpoint".into());
     }
     let v = json!({"session_id":validate_session(sid)?,"cwd":cwd,"start":identity.as_ref().and_then(|v|str_at(v,"started_at")),"process_identity":identity,"source":str_at(req,"_binding_source").unwrap_or("hook")});
     atomic_write(&binding_path(req, p), v.to_string().as_bytes())
@@ -823,9 +824,11 @@ pub fn hook_main() {
             },
         };
         req["endpoint_pid"] = json!(p);
+        let previous = read_json(&binding_path(&req, p));
+        record_binding(&req, p, &sid, str_at(&req, "cwd").unwrap_or(""))?;
         let fallback = format!("claude-{p}");
         if sid != fallback {
-            if let Ok(previous) = read_json(&binding_path(&req, p)) {
+            if let Ok(previous) = previous {
                 if previous["session_id"] == fallback
                     && str_at(&previous, "start").map(str::to_string) == process_start(p)
                     && UnixStream::connect(state(&req).join(format!("sockets/claude-pid-{p}.sock")))
@@ -841,7 +844,6 @@ pub fn hook_main() {
                 }
             }
         }
-        record_binding(&req, p, &sid, str_at(&req, "cwd").unwrap_or(""))?;
         let alias = read_optional(&state(&req).join("claude/aliases").join(&sid))?
             .and_then(|s| validate_session(&s).ok())
             .filter(|s| s.starts_with("claude-") && s != &sid);

@@ -888,7 +888,7 @@ extension Companion {
                 }
                 let toggle = personalActions.first { $0.identifier?.rawValue == "toggle_channel:\(ch.id)" }
                 let unpair = personalActions.first { $0.identifier?.rawValue == "unpair_channel:\(ch.id)" }
-                layoutBar(in:userStratum,y:7,height:24,spacing:4,flexible:summary,trailing:[testBtn] + [toggle].compactMap { $0 } + [edit] + [unpair].compactMap { $0 })
+                layoutBar(in:userStratum,y:7,height:24,spacing:8,flexible:summary,trailing:[testBtn] + [toggle].compactMap { $0 } + [edit] + [unpair].compactMap { $0 })
             } else if gatewayActive {
                 var topActions: [NSView] = []
                 if ch.configured {

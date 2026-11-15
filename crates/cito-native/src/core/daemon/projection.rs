@@ -589,10 +589,8 @@ impl DaemonService {
                 .slots
                 .get(hub)
                 .is_some_and(|slot| slot.observation_current());
-            if let (Some(out), Some(fields)) = (
-                result.as_object_mut(),
-                self.project_human(Some(row), current, false).as_object(),
-            ) {
+            let human = self.project_human(Some(row), current, result["can_set_scope"] == true);
+            if let (Some(out), Some(fields)) = (result.as_object_mut(), human.as_object()) {
                 out.extend(fields.clone());
             }
         }
