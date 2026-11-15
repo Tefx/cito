@@ -13509,7 +13509,7 @@ phases:
 - id: v47
   name: V47 Residual Security, Correctness, UI & Docs Remediation + Zero-New-Issues
     Convergence (v0.21.3)
-  status: in_progress
+  status: done
   gate: 'All binding v47 requirements in docs/DESIGN.md (§2.2, §3.2, §3.3, §3.4, §3.5,
     §4.1, §4.2, §4.3, §5.1, §5.2, §7.2, §8.1, §8.2 @ e1ec40f) pass; iterative multi-slice
     [REQUIRES_SKILL: contract-and-simplicity] review (pathway-auditor, structural-auditor,
@@ -13832,7 +13832,7 @@ phases:
   - id: v47.review
     name: 'V47 Iterative 4-Slice Zero-New-Issues Convergence Audit, §8.1 Full Verification
       & Cito.app Rebuild [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
@@ -13876,3 +13876,33 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-15T15:11:18.974006Z'
+    done_at: '2026-11-15T17:10:04.357681+00:00'
+    evidence: "Artifact:\n- Commit: f352828 (rebased and merged cleanly to main; candidate\
+      \ ref refs/vectl/candidates/v47.review retained; version 0.21.3, zero release\
+      \ tag).\n\nIterative 4-Slice Contract-and-Simplicity Convergence (ALL 4 SLICES\
+      \ ZERO_NEW_ISSUES):\n- Round 1: uiux-auditor ZERO_NEW_ISSUES; structural-auditor\
+      \ 1 Tier 1; spec-readiness-auditor 2 Tier 1; pathway-auditor 6 Tier 1 -> F1–F7\
+      \ closed in bdae1ad.\n- Round 2: structural-auditor ZERO_NEW_ISSUES; pathway-auditor\
+      \ 2 Tier 1 (R2-1, R2-2); spec-readiness-auditor 2 Tier 1 (R2-2, R2-3) -> R2-1..R2-3\
+      \ closed in 3fc8305.\n- Round 3: pathway-auditor ZERO_NEW_ISSUES; spec-readiness-auditor\
+      \ 2 Tier 1 (R3-1, R3-2) -> R3-1..R3-2 closed in 3994170.\n- Round 4: uiux-auditor\
+      \ & spec-readiness-auditor converged on single finding R4-1 (SettingsSurface.swift:settleChannelReceipt\
+      \ clearing non-secret drafts without SettingsPayload + settlement.rs false/false\
+      \ oracle) -> closed in f352828.\n- Round 5: uiux-auditor ZERO_NEW_ISSUES & spec-readiness-auditor\
+      \ ZERO_NEW_ISSUES (4/4 slices converged to ZERO_NEW_ISSUES).\n\nFull §8.1 Verification\
+      \ (on f352828):\n- cargo fmt --all -- --check && git diff --check -> Passed\n\
+      - cargo clippy --workspace --all-targets -- -D warnings (temporary 1.95.0 preview\
+      \ cleaned up) -> Passed (0 warnings)\n- PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH\
+      \ RUST_TEST_THREADS=2 cargo test --workspace -> 478 passed, 0 failed, 4 ignored\n\
+      - cargo build --release -> Passed (0 compiler warnings; all 7 staged binaries\
+      \ codesign --verify --strict OK)\n- node crates/cito-native/tests/support/site-clipboard.mjs\
+      \ -> Passed\n- python3 packaging/release.py check -> Passed (0.21.3)\n- python3\
+      \ -m unittest discover -s packaging -> 17 passed\n- §1.2 lexical check on core/\
+      \ and src/macos/ -> Only permitted geometry variable `slack` matched\n- Visual\
+      \ assets inspected in v47.review (AppIcon, topology, OG card, 6 screenshots)\
+      \ -> Passed\n\nLive /Applications/Cito.app & Closed-UI Idle Verification (Tefx-MBP-Personal):\n\
+      - Built /Applications/Cito.app (12,457,837 bytes, codesign --verify --strict\
+      \ --deep OK), restarted daemon (PID 53923) & cito-ui (PID 53934):\n  - cito-native\
+      \ daemon: 0.0% CPU (0:00.07 TIME), 1,266 CSW / 10s, 0 IDLEW.\n  - cito-ui: 0.0%\
+      \ CPU (0:00.10 TIME), 28 CSW / 10s (2.8/s), 0 IDLEW.\n\nSpec link:\n- docs/DESIGN.md\
+      \ (§2.2, §3.2–§3.5, §4.1–§4.3, §5.1–§5.2, §7.2, §8.1–§8.2 @ f352828)"
