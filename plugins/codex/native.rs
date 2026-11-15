@@ -32,17 +32,38 @@ fn desktop_command(command: &str) -> bool {
         }
     })
 }
+fn interactive_process(p: u32, command: &str) -> bool {
+    if has_harness_ancestor(p, |_, command| is_agent_harness(command)) {
+        return false;
+    }
+    if desktop_command(command) {
+        return true;
+    }
+    matches_process(command)
+        && process_has_tty(p)
+        && !command.split_whitespace().any(|arg| {
+            matches!(
+                arg,
+                "exec"
+                    | "exec-server"
+                    | "app-server"
+                    | "mcp-server"
+                    | "cloud"
+                    | "--help"
+                    | "--version"
+            )
+        })
+}
 fn desktop_running(req: &Value) -> Result<bool> {
     if let Some(p) = pid(req) {
         let identity = process_identity(p)?;
         let command =
             str_at(&identity, "command").ok_or("Desktop process command is unavailable")?;
-        return Ok(desktop_command(command) || matches_process(command));
+        return Ok(interactive_process(p, command));
     }
-    Ok(user_processes()?.into_iter().any(|pid| {
-        process_command(pid)
-            .is_ok_and(|command| desktop_command(&command) || matches_process(&command))
-    }))
+    Ok(user_processes()?
+        .into_iter()
+        .any(|pid| process_command(pid).is_ok_and(|command| interactive_process(pid, &command))))
 }
 fn db(req: &Value) -> PathBuf {
     config_home(req, "CITO_CODEX_HOME", "~/.codex").join("state_5.sqlite")
@@ -415,7 +436,7 @@ fn try_rows(req: &Value) -> Result<Vec<Value>> {
         predicates.push("(thread_source IS NULL OR thread_source = '' OR thread_source = 'user')");
     }
     if has("source") {
-        predicates.push("(source IS NULL OR source NOT LIKE '{\"subagent\"%')");
+        predicates.push("(source IS NULL OR (source NOT IN ('exec','subagent') AND source NOT LIKE '%\"subagent\"%'))");
     }
     let mut order = vec![];
     if has("archived") && req["cli_cmd"] == "unlisten" {

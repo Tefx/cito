@@ -597,6 +597,7 @@ impl DaemonService {
             .unwrap_or(default);
         let mut keep = Vec::new();
         for (name, mut hub) in hubs {
+            crate::plugins::apply_hub_url_override(&name, &self.config.default_hub, &mut hub)?;
             if hub["enabled"] == false {
                 continue;
             }

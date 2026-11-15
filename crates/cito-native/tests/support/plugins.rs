@@ -1,6 +1,87 @@
 use super::support::*;
 use std::os::unix::net::UnixListener;
 
+// Keep endpoint PIDs stable while giving their stdin a real terminal vnode.
+fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str)]) -> usize {
+    let mut command = vec!["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp(sys.argv[1],sys.argv[1:])", bin];
+    command.extend_from_slice(args);
+    f.spawn("python3", &command, extra)
+}
+
+#[test]
+fn inherited_controlling_terminal_does_not_enroll_headless_descendants() {
+    let _lock = serial();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE), ("codex", CODEX)] {
+        let mut f = Fixture::new(json!({}));
+        f.env.remove("CITO_PI_ALLOW_HEADLESS_DISCOVERY");
+        f.env.insert("CITO_PI_PROCESS_DISCOVERY".into(), "1".into());
+        let app = f.dir.join(format!("{id}.mjs"));
+        fs::write(
+            &app,
+            r#"import {spawn} from 'node:child_process';
+if(process.argv[2]==='child') { setInterval(()=>{},1000); }
+else {
+ const child=spawn(process.execPath,[process.argv[1],'child'],{stdio:['ignore','ignore','ignore']});
+ console.log(JSON.stringify({parent_pid:process.pid,child_pid:child.pid}));
+ process.on('SIGTERM',()=>{child.kill();process.exit()});
+ setInterval(()=>{},1000);
+}"#,
+        )
+        .unwrap();
+        let launcher = r#"import os,sys,signal,subprocess,fcntl,termios
+master,slave=os.openpty()
+def attach(): fcntl.ioctl(0,termios.TIOCSCTTY,0)
+p=subprocess.Popen(['node',sys.argv[1]],stdin=slave,stdout=sys.stdout,stderr=sys.stderr,start_new_session=True,preexec_fn=attach)
+os.close(slave)
+def stop(*args): raise SystemExit
+signal.signal(signal.SIGTERM,stop)
+try: sys.stdin.buffer.read()
+finally:
+ try: os.killpg(p.pid,signal.SIGTERM)
+ except ProcessLookupError: pass
+ p.wait()
+ os.close(master)
+"#;
+        let owner = f.spawn("python3", &["-c", launcher, app.to_str().unwrap()], &[]);
+        wait(|| f.frames(owner).iter().any(|row| row["child_pid"].is_u64()));
+        let frame = f.frames(owner)[0].clone();
+        let parent = frame["parent_pid"].as_u64().unwrap() as u32;
+        let child = frame["child_pid"].as_u64().unwrap() as u32;
+        assert!(cito_native::support::process_has_tty(parent));
+        assert!(!cito_native::support::process_has_tty(child));
+        assert!(cito_native::support::has_harness_ancestor(
+            child,
+            |pid, _| pid == parent
+        ));
+        assert_eq!(
+            cito_native::support::enclosing_endpoint_pid(Some(parent), child),
+            child
+        );
+        if id == "pi" {
+            assert_eq!(f.plugin(bin, json!({"op":"setup_apply"}))["ok"], true);
+        }
+        let discovered = f.plugin(bin, json!({"op":"discover_sessions","endpoint_pid":child}));
+        assert_eq!(discovered["ok"], true, "{discovered}");
+        assert!(discovered["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["endpoint_pid"] != child));
+        if id == "claude" {
+            let sidecar = f.spawn(CLAUDE, &[], &[]);
+            f.send(sidecar,json!({"op":"stdio_sidecar","endpoint_pid":child,"state_dir":f.state,"env":f.env,"cwd":f.dir}));
+            wait(|| f.exited(sidecar));
+            assert!(!f
+                .state
+                .join(format!("sockets/claude-pid-{child}.sock"))
+                .exists());
+        }
+        f.eof(owner);
+        wait(|| f.exited(owner));
+        f.stop(owner);
+    }
+}
+
 #[test]
 fn live_bridge_rejections_survive_identification_and_wake() {
     use std::io::{BufRead, BufReader, Write};
@@ -104,7 +185,7 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
         // Nine endpoints used to put the first two stalled bridges in one
         // static chunk, exceeding the 1500 ms provider deadline.
         for index in 0..9 {
-            let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+            let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
             wait(|| f.output(process, false).contains("ready"));
             let pid = f.pid(process);
             if id == "claude" {
@@ -150,7 +231,7 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
                             Ok((mut stream, _)) => {
                                 stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
                                 let mut line = String::new();
-                                BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                                if BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).is_err() || line.is_empty() { continue; }
                                 if turn > 0 && index < 3 {
                                     held.push(stream);
                                 } else {
@@ -215,7 +296,7 @@ fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
     let mut f = Fixture::new(json!({}));
     let script = f.dir.join("claude.mjs");
     fs::write(&script, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     let pid = f.pid(process);
     f.env.insert("CITO_ENDPOINT_PID".into(), pid.to_string());
@@ -275,7 +356,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
     for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
         let script = f.dir.join(format!("{id}.mjs"));
         fs::write(&script, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-        let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+        let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
         wait(|| f.output(process, false).contains("ready"));
         let pid = f.pid(process);
         if id == "claude" {
@@ -359,8 +440,8 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         "console.log('ready'); setInterval(() => {}, 1000);",
     )
     .unwrap();
-    let first = f.spawn("node", &[script.to_str().unwrap()], &[]);
-    let second = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    let first = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
+    let second = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
     wait(|| f.output(first, false).contains("ready") && f.output(second, false).contains("ready"));
     let cwd = fs::canonicalize(&f.dir).unwrap();
     let encoded = format!(
@@ -397,12 +478,13 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         .collect();
     assert_eq!(own.len(), 2, "{found}");
     assert_ne!(own[0]["session_id"], own[1]["session_id"]);
+    assert!(
+        own.iter().all(|v| v["session_id"] != "live-session"),
+        "A shared CWD does not establish transcript ownership"
+    );
     assert!(own
         .iter()
-        .any(|v| v["session_id"] == "live-session" && v["title"] == "Live work"));
-    assert!(own
-        .iter()
-        .any(|v| v["session_id"] == format!("pid-{}", v["endpoint_pid"])));
+        .all(|v| v["session_id"] == format!("pid-{}", v["endpoint_pid"])));
     for row in own {
         let resolved = f.plugin(
             PI,
@@ -526,7 +608,7 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
     for flags in flags {
         let mut args = vec![script.to_str().unwrap()];
         args.extend_from_slice(flags);
-        let index = f.spawn("node", &args, &[]);
+        let index = spawn_interactive(&f, "node", &args, &[]);
         wait(|| f.output(index, false).contains("ready"));
         background.push(index);
     }
@@ -546,12 +628,14 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
         true
     );
     f.env.remove("CITO_PI_ALLOW_HEADLESS_DISCOVERY");
+    let headless = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(headless, false).contains("ready"));
     let no_tty = discover(&f);
     assert!(no_tty["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|r| r["endpoint_pid"] != f.pid(first) && r["endpoint_pid"] != f.pid(second)));
+        .all(|r| r["endpoint_pid"] != f.pid(headless)));
     assert_eq!(
         f.plugin(
             PI,
@@ -617,7 +701,8 @@ fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
     // Socket-backed identities take precedence, including when resolving a process-only PID.
     let endpoint_script = f.dir.join("endpoint.cjs");
     fs::write(&endpoint_script, include_str!("endpoint.cjs")).unwrap();
-    let socket_owner = f.spawn(
+    let socket_owner = spawn_interactive(
+        &f,
         "node",
         &[endpoint_script.to_str().unwrap()],
         &[("FIXTURE_HARNESS", "pi")],
@@ -951,7 +1036,8 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
 fn pi_probe_rejects_reused_pid_behind_stale_socket() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let process = f.spawn(
+    let process = spawn_interactive(
+        &f,
         "node",
         &["-e", "console.log('ready'); setInterval(()=>{},1000)"],
         &[],
@@ -977,7 +1063,7 @@ fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
     let mut f = Fixture::new(json!({}));
     let script = f.dir.join("pi.mjs");
     fs::write(&script, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    let process = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     f.env.insert("CITO_PI_PROCESS_DISCOVERY".into(), "1".into());
     assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
@@ -1020,7 +1106,7 @@ fn codex_rollout_errors_are_isolated_and_non_utf8_lines_are_lossy() {
     let f = Fixture::new(json!({}));
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
-    let process = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     fs::create_dir_all(f.home.join(".codex")).unwrap();
     let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
@@ -1070,7 +1156,7 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let process = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    let process = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     let source = f.dir.join("source.sqlite");
     let db = cito_native::database::Database::open(&source).unwrap();
@@ -1229,7 +1315,7 @@ fn codex_no_rollout_effect_is_delivery_bound_and_new_user_revision_recovers() {
     // A live, fixture-owned process stands in for the provider.
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let app = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    let app = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
     wait(|| f.output(app, false).contains("ready"));
     let activity = |f: &Fixture| {
         f.plugin(
@@ -1329,7 +1415,7 @@ fn codex_inflight_wake_defers_source_checkpoint_until_delivery_settles() {
             .unwrap();
         let app = f.dir.join("codex.mjs");
         fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-        let app = f.spawn("node", &[app.to_str().unwrap()], &[]);
+        let app = spawn_interactive(&f, "node", &[app.to_str().unwrap()], &[]);
         wait(|| f.output(app, false).contains("ready"));
         // Seed an older fallback attribution so the race covers both unknown
         // fallback activity and a previously recovered user_turn.
@@ -1558,7 +1644,7 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         "console.log(JSON.stringify({op:'ready'})); setInterval(()=>{},1000);",
     )
     .unwrap();
-    let process = f.spawn("node", &[cli.to_str().unwrap(), "app-server"], &[]);
+    let process = spawn_interactive(&f, "node", &[cli.to_str().unwrap()], &[]);
     wait(|| f.frames(process).iter().any(|v| v["op"] == "ready"));
     let git = f.dir.join("tools/git");
     script(&git, "#!/bin/sh\necho git >> \"$HOME/git-calls\"\nexit 1\n");
@@ -1785,7 +1871,7 @@ fn claude_probe_resolves_hook_only_sessions_and_drain_read_failure_preserves_ali
         "console.log('ready'); setInterval(() => {}, 1000);",
     )
     .unwrap();
-    let endpoint = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    let endpoint = spawn_interactive(&f, "node", &[script.to_str().unwrap()], &[]);
     wait(|| f.output(endpoint, false).contains("ready"));
     f.env
         .insert("CITO_ENDPOINT_PID".into(), f.pid(endpoint).to_string());
@@ -2131,7 +2217,15 @@ fn claude_hook_ack_prefers_environment_daemon_port_over_config() {
 fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
-    let endpoint = std::process::id();
+    let endpoint_script = f.dir.join("claude.mjs");
+    fs::write(
+        &endpoint_script,
+        "console.log('ready'); setInterval(()=>{},1000)",
+    )
+    .unwrap();
+    let endpoint_process = spawn_interactive(&f, "node", &[endpoint_script.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint_process, false).contains("ready"));
+    let endpoint = f.pid(endpoint_process);
     let p = f.spawn(CLAUDE, &[], &[]);
     let mut env = f.env.clone();
     env.insert("CLAUDE_SESSION_ID".into(), "session-a".into());
@@ -2419,6 +2513,101 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
         "EOF must interrupt an outstanding network poll"
     );
 }
+#[test]
+fn telegram_oversized_poll_retries_one_update_then_advances_cursor() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let server_code = r#"# purpose: exercise bounded Telegram polling against oversized API responses.
+# usage: python3 -c CODE
+# effects: sandbox-owned loopback HTTP server and JSON request receipts on stdout.
+# requires: Python standard library.
+import http.server,json,threading
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def do_POST(self):
+  payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  print(json.dumps({'method':self.path.rsplit('/',1)[-1],'payload':payload}),flush=True)
+  if self.path.endswith('/getUpdates'):
+   if payload.get('offset',0)<42:
+    count=1 if payload.get('limit')==1 else 2
+    result=[{'update_id':41+i,'message':{'chat':{'id':1},'text':'x'*(1100000 if count==1 else 600000)}} for i in range(count)]
+   else:
+    threading.Event().wait(.02)
+    result=[]
+  else: result={'id':1,'username':'sample_bot'}
+  raw=json.dumps({'ok':True,'result':result}).encode()
+  self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers()
+  try: self.wfile.write(raw)
+  except OSError: pass
+server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+print(json.dumps({'port':server.server_port}),flush=True)
+server.serve_forever()
+"#;
+    let server = f.spawn("python3", &["-c", server_code], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap();
+    let plugin = f.spawn(TELEGRAM, &[], &[]);
+    f.send(plugin,json!({"op":"configure","hub_config":{"botToken":"test","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+    wait(|| {
+        f.frames(server).iter().any(|row| {
+            row["payload"]["offset"]
+                .as_u64()
+                .is_some_and(|offset| offset >= 42)
+        })
+    });
+    let polls: Vec<_> = f
+        .frames(server)
+        .into_iter()
+        .filter(|row| row["method"] == "getUpdates")
+        .collect();
+    assert_eq!(polls[0]["payload"]["limit"], 25);
+    assert_eq!(polls[1]["payload"]["limit"], 1);
+    assert!(polls.iter().all(|row| row["payload"]["limit"]
+        .as_u64()
+        .is_some_and(|limit| limit <= 25)));
+    assert!(f
+        .output(plugin, true)
+        .contains("skipping oversized or malformed single update"));
+    f.eof(plugin);
+    wait(|| f.exited(plugin));
+}
+
+#[test]
+fn telegram_expired_queue_items_skip_http_and_bound_live_request_time() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let api = root().join("crates/cito-native/tests/support/telegram-api.py");
+    let server = f.spawn("python3", &[api.to_str().unwrap()], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap();
+    let p = f.spawn(TELEGRAM, &[], &[]);
+    f.send(p,json!({"op":"configure","hub_config":{"botToken":"test","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"expired","claim_until_ms":1,"config":{"chatId":"stall"},"signal":{"message":"Must not send"}}));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|row| row["delivery_id"] == "expired" && row["progress"] != true)
+    });
+    let methods = || fs::read_to_string(f.home.join("api-methods.jsonl")).unwrap_or_default();
+    assert!(!methods().contains("sendMessage"));
+    let start = std::time::Instant::now();
+    f.send(p,json!({"op":"deliver","delivery_id":"bounded","claim_until_ms":cito_native::plugins::now_ms()+700,"config":{"chatId":"stall"},"signal":{"message":"Bounded request"}}));
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|row| row["delivery_id"] == "bounded" && row["progress"] != true)
+    });
+    assert!(start.elapsed() < std::time::Duration::from_millis(650));
+    assert_eq!(methods().matches("sendMessage").count(), 1);
+    assert!(f
+        .frames(p)
+        .iter()
+        .filter(|row| row["delivery_id"] == "bounded")
+        .all(|row| row["ok"] != true));
+    f.eof(p);
+    wait(|| f.exited(p));
+}
+
 #[test]
 fn telegram_control_and_eof_stay_responsive_during_outbound_http() {
     let _lock = serial();

@@ -21,6 +21,27 @@ fn matches_process(command: &str) -> bool {
     matches!(name, "claude" | "claude.js" | "claude.mjs")
         || (entry.contains("/claude-code/") && matches!(name, "cli.js" | "cli.mjs"))
 }
+fn interactive_candidate(req: &Value, p: u32) -> bool {
+    let Ok(command) = process_command(p) else {
+        return false;
+    };
+    if has_harness_ancestor(p, |ancestor, command| {
+        matches_process(command)
+            || state(req)
+                .join(format!("sockets/claude-pid-{ancestor}.sock"))
+                .exists()
+    }) {
+        return false;
+    }
+    let args: Vec<_> = command.split_whitespace().collect();
+    !args
+        .iter()
+        .any(|arg| matches!(*arg, "-p" | "--print" | "--output-format=stream-json"))
+        && !args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"])
+        && process_has_tty(p)
+}
 use std::time::Duration;
 const EVENTS: [&str; 3] = ["Stop", "SessionStart", "UserPromptSubmit"];
 fn hook_cmd(v: &Value) -> bool {
@@ -322,28 +343,17 @@ fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
 }
 fn hook_endpoint(req: &Value) -> u32 {
     if let Some(p) = env_value(req, "CITO_ENDPOINT_PID").and_then(|s| s.parse().ok()) {
-        return p;
+        return enclosing_endpoint_pid(Some(p), unsafe { libc::getppid() as u32 });
     }
     // SAFETY: getppid has no pointer arguments or ownership effects.
     let first = unsafe { libc::getppid() as u32 };
-    if !fs::read_dir(state(req).join("sockets"))
-        .ok()
-        .is_some_and(|entries| {
-            entries.flatten().any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("claude-pid-")
-            })
-        })
-    {
-        return first;
-    }
+
     let mut p = first;
     for _ in 0..16 {
-        if state(req)
-            .join(format!("sockets/claude-pid-{p}.sock"))
-            .exists()
+        if process_command(p).is_ok_and(|command| matches_process(&command))
+            || state(req)
+                .join(format!("sockets/claude-pid-{p}.sock"))
+                .exists()
         {
             return p;
         }
@@ -360,6 +370,21 @@ fn binding_path(req: &Value, p: u32) -> PathBuf {
 }
 fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<()> {
     let identity = process_identity(p).ok();
+    if str_at(req, "_binding_source") != Some("channel") {
+        if let Ok(previous) = read_json(&binding_path(req, p)) {
+            if previous["session_id"] != sid
+                && alive(p)
+                && str_at(&previous, "start").map(str::to_owned) == process_start(p)
+                && state(req)
+                    .join(format!("sockets/claude-pid-{p}.sock"))
+                    .exists()
+            {
+                return Err(
+                    "SESSION_MISMATCH: A live parent endpoint already owns another session".into(),
+                );
+            }
+        }
+    }
     let v = json!({"session_id":validate_session(sid)?,"cwd":cwd,"start":identity.as_ref().and_then(|v|str_at(v,"started_at")),"process_identity":identity,"source":str_at(req,"_binding_source").unwrap_or("hook")});
     atomic_write(&binding_path(req, p), v.to_string().as_bytes())
 }
@@ -494,7 +519,12 @@ fn bridge(req: &Value) -> Result<Value> {
             &json!({"op":"identify"}),
         ) {
             // A live responder's rejection is authoritative, unlike no response.
+            let mut response = response;
+            response["endpoint_pid"] = json!(p);
             return Ok(response);
+        }
+        if process_command(p).is_ok_and(|command| matches_process(&command)) {
+            break;
         }
         if !matches!(str_at(req, "op"), Some("resolve_caller" | "verify")) {
             break;
@@ -520,6 +550,9 @@ pub fn handle(req: &Value) -> Result<Value> {
         "discover_sessions" => {
             let request = req.clone();
             let sessions = inspect_socket_endpoints(req, "claude-pid-", move |p, path| {
+                if !interactive_candidate(&request, p) {
+                    return None;
+                }
                 let mut r = request.clone();
                 r["endpoint_pid"] = json!(p);
                 let response = match socket_call(path, &json!({"op":"identify"})) {
@@ -644,7 +677,12 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .or_else(|| str_at(req, "cwd"))
                 .unwrap_or("");
             let t = title(req, &sid, cwd);
-            let c = caller(req, "claude", &sid, cwd, pid(req), t.as_deref());
+            let endpoint = live
+                .as_ref()
+                .and_then(|v| v["endpoint_pid"].as_u64())
+                .and_then(|p| u32::try_from(p).ok())
+                .or_else(|| pid(req));
+            let c = caller(req, "claude", &sid, cwd, endpoint, t.as_deref());
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }
@@ -1087,6 +1125,9 @@ fn sidecar(req: Value) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     use std::sync::{Arc, Mutex};
     let p = pid(&req).ok_or("Endpoint PID is required")?;
+    if !interactive_candidate(&req, p) {
+        return Ok(());
+    }
     let cwd = str_at(&req, "cwd").unwrap_or("");
     let path = state(&req).join(format!("sockets/claude-pid-{p}.sock"));
     let parent = path.parent().ok_or("Invalid socket path")?;

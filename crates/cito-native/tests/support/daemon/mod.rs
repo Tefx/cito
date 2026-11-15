@@ -18,6 +18,18 @@ fn enroll(f: &Fixture, meta: Value) -> Value {
         meta,
     )
 }
+// Human sends cross the real UI authority boundary, never MCP caller metadata.
+fn send_human_result(f: &Fixture, mut args: Value) -> Value {
+    args["op"] = json!("send_signal");
+    let (status, mut result) = f.action(args);
+    result["http_status"] = json!(status);
+    result
+}
+fn send_human(f: &Fixture, args: Value) -> Value {
+    let result = send_human_result(f, args);
+    assert_eq!(result["http_status"], 200, "{result}");
+    result
+}
 fn rpc(p: u16, op: &str, params: Value) -> Value {
     let mut v = params;
     v["op"] = json!(op);

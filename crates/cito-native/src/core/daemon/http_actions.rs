@@ -843,6 +843,9 @@ impl DaemonService {
                         string(&cfg, "url").trim()
                     )
                     .map_err(|error| format!("INVALID_INPUT: {error}"))?);
+                    if cfg["authMode"] == "oidc" {
+                        super::super::login::Settings::new(&cfg)?;
+                    }
                     let base_name = if requested_name.is_empty() {
                         hub_name_from_url(string(&cfg, "url"))
                     } else {
@@ -1192,7 +1195,8 @@ impl DaemonService {
                 return Ok(json!({"ok":true,"invite":invite}));
             }
             "send_signal" | "send_reply_from_human" => {
-                let meta = json!({"expected_harness":"human","expected_session_id":"default"});
+                let caller =
+                    json!({"harness":"human","session_id":"default","cwd":"","title":"Human"});
                 let mut send_args = action.clone();
                 if let Some(args) = send_args.as_object_mut() {
                     args.remove("op");
@@ -1226,7 +1230,7 @@ impl DaemonService {
                     }
                 }
                 let result = validate_tool_input("cito_send", &send_args)
-                    .and_then(|()| self.send(&hub, &send_args, &meta));
+                    .and_then(|()| self.send_from(&hub, &send_args, Some(caller)));
                 self.emit(match &result {
                     Ok(_) => json!({"op":"composer_result","ok":true,"error":null,"request_id":action["request_id"]}),
                     Err(e) => json!({"op":"composer_result","ok":false,"error":e,"request_id":action["request_id"]}),

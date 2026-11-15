@@ -2376,7 +2376,23 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
                 assert!(row.get("owner_token").is_none());
                 assert!(row.get("dispatcher_token").is_none());
                 assert!(row.get("hub_url").is_none());
+                assert_eq!(row["is_self_principal"], true);
+                assert_eq!(row["can_set_scope"], false);
+                for control in ["can_pin", "can_rename", "can_stop"] {
+                    assert_eq!(row[control], row["harness"] != "human", "{row}");
+                }
             }
+        }
+        for hubs in [&snapshot["hubs"], &snapshot["settings"]["hubs"]] {
+            let hub = hubs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hub| hub["name"] == "local")
+                .unwrap();
+            assert_eq!(hub["is_builtin"], true);
+            assert_eq!(hub["supports_workspace_scope"], false);
+            assert_eq!(hub["can_login"], false);
         }
         let row = &active[0];
         let signal = json!({"signal_id":"dto-signal","target_generation":row["binding_generation"],"from":{"principal_id":row["principal_id"],"user":"alice","host_name":"desktop"},"message":"hello"});
@@ -2398,6 +2414,10 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
         assert!(!activity.to_string().contains("secret-dispatcher"));
         assert!(activity[0].get("dispatcher_token").is_none());
         assert_eq!(activity[0]["message"], "hello");
+        assert!(
+            activity[0]["can_reply"].is_boolean(),
+            "Activity DTOs retain reply authority"
+        );
         service.state.db.execute("DROP TABLE wake_retries", &[])?;
         let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;
         assert_eq!(sent["ok"], true);
@@ -2684,6 +2704,135 @@ fn channel_inventory_diagnostic_survives_collection_shedding() -> Result<(), Str
 }
 
 #[test]
+fn explicit_nested_pids_preserve_endpoint_errors_and_provider_fallback() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-explicit-{}", random_uuid_v4()));
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    let mut plugins = vec![];
+    for id in ["a-bound", "z-fallback"] {
+        let path = config.state_dir.join("plugins").join(id);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("plugin.json"),json!({"id":id,"kind":"agent","displayName":id,"pidBound":id=="a-bound","command":["python3","./driver.py"]}).to_string()).unwrap();
+        fs::write(path.join("driver.py"),r#"import json,sys,pathlib,os
+req=json.loads(sys.stdin.readline());root=pathlib.Path(__file__).parent
+op=req['op'];result={'ok':True}
+if op=='resolve_caller':
+ if root.name=='a-bound':
+  code='BINDING_REQUIRED' if (root/'unmatched').exists() else 'ENDPOINT_UNAVAILABLE'
+  result={'ok':False,'error_code':code,'message':'Matching endpoint is unavailable'}
+ else: result={'ok':True,'caller':{'harness':root.name,'session_id':'live','cwd':'/workspace','title':'Fallback','endpoint_pid':os.getppid()}}
+elif op=='discover_sessions': result['sessions']=[]
+elif op=='setup_inspect': result.update(installed=True,configured=True,paths=[])
+print(json.dumps(result))
+"#).unwrap();
+        plugins.push(crate::plugins::parse_manifest_dir(&path, false)?);
+    }
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins,
+            rejected_ids: Default::default(),
+        },
+    )?;
+    let pid = std::process::id();
+    for meta in [
+        json!({"endpoint_pid":pid}),
+        json!({"_stdio":{"endpoint_pid":pid}}),
+        json!({"_meta":{"endpoint_pid":pid}}),
+    ] {
+        let error = service
+            .tool(
+                "cito_send",
+                &json!({"to":"@self","message":"Must not downgrade"}),
+                &meta,
+            )
+            .unwrap_err();
+        assert!(error.starts_with("ENDPOINT_UNAVAILABLE:"), "{error}");
+    }
+    assert!(service
+        .state
+        .db
+        .query("SELECT * FROM local_sent_idempotency", &[])?
+        .is_empty());
+    fs::write(config.state_dir.join("plugins/a-bound/unmatched"), "").unwrap();
+    let status = service.tool(
+        "cito_status",
+        &json!({}),
+        &json!({"_stdio":{"endpoint_pid":pid}}),
+    )?;
+    assert_eq!(status["registered"], false, "{status}");
+    let caller = service
+        .caller(&json!({"_stdio":{"endpoint_pid":pid}}), true)?
+        .unwrap();
+    assert_eq!(caller["harness"], "z-fallback");
+    service.shutdown();
+    drop(service);
+    fs::remove_dir_all(dir).unwrap();
+    Ok(())
+}
+
+#[test]
+fn canonical_editable_values_survive_ui_projection() -> Result<(), String> {
+    let title = "\u{4e2d}".repeat(64);
+    let long = "x".repeat(6000);
+    let frame = json!({"op":"state","listeners":[{"title":title}],
+        "settings":{"hubs":[{"url":format!("https://id.example.com/{long}"),"issuer":long,"client_id":long}],
+        "channels":[{"fields":[{"value":long}]}]}});
+    let projected: Value = serde_json::from_slice(&bounded_frame(frame.clone())?).unwrap();
+    assert_eq!(projected, frame);
+    let invite = json!({"op":"hub_invite","url":long,"token":long,"issuer":long,"client_id":long});
+    let projected: Value = serde_json::from_slice(&bounded_frame(invite.clone())?).unwrap();
+    assert_eq!(projected, invite);
+    Ok(())
+}
+
+#[test]
+fn mcp_metadata_never_grants_human_authority() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-authority-{}", random_uuid_v4()));
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    for tool in [
+        "cito_listen",
+        "cito_unlisten",
+        "cito_send",
+        "cito_inbox",
+        "cito_status",
+    ] {
+        assert!(service
+            .tool(tool, &json!({}), &json!({"expected_harness":"human"}))
+            .unwrap_err()
+            .starts_with("FORBIDDEN:"));
+        assert!(service
+            .tool(tool, &json!({"harness":"human"}), &json!({}))
+            .unwrap_err()
+            .starts_with("FORBIDDEN:"));
+    }
+    service.shutdown();
+    drop(service);
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn bounded_empty_activity_with_multibyte_listeners() -> Result<(), String> {
     let f = json!({"op":"state","activity":[],"listeners":(0..150).map(|_|json!({"title":"🦀".repeat(10000),"about":"🦀".repeat(10000)})).collect::<Vec<_>>(),"unread_count":200});
     let bytes = bounded_frame(f)?;
@@ -2694,9 +2843,9 @@ fn bounded_empty_activity_with_multibyte_listeners() -> Result<(), String> {
     let title = "é".repeat(128);
     let frame: Value = serde_json::from_slice(&bounded_frame(json!({"title":title}))?)
         .map_err(|e| e.to_string())?;
-    // The IPC budget caps UTF-8 bytes, rather than Unicode scalar count.
+    // Valid editable titles preserve their canonical UTF-8 bytes.
     let projected = frame["title"].as_str().ok_or("Missing title")?;
-    assert_eq!(projected, format!("{}…", "é".repeat(62)));
-    assert!(projected.len() <= 128);
+    assert_eq!(projected, title);
+    assert!(projected.len() <= 512);
     Ok(())
 }

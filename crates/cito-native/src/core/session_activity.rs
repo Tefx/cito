@@ -267,6 +267,7 @@ impl SessionActivity {
                 if !seen.insert((
                     provider.plugin.id.clone(),
                     string(candidate, "session_id").to_string(),
+                    endpoint_pid(candidate),
                 )) {
                     continue;
                 }

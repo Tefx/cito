@@ -248,34 +248,41 @@ pub fn validate_nats_url(raw: &str) -> Result<String, String> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
-pub fn validate_https_issuer(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("CITO_OIDC_ISSUER is required in oidc mode".to_string());
-    }
-    let is_https = trimmed.starts_with("https://");
-    let is_loopback_http = trimmed.starts_with("http://127.0.0.1:")
-        || trimmed == "http://127.0.0.1"
-        || trimmed.starts_with("http://127.0.0.1/");
-    if (!is_https && !is_loopback_http)
-        || trimmed.contains('?')
-        || trimmed.contains('#')
-        || trimmed.contains('@')
+/// Validate OIDC issuer or resource URLs without changing their canonical bytes.
+pub fn validate_oidc_url(raw: &str, issuer: bool) -> Result<url::Url, String> {
+    let url = url::Url::parse(raw).map_err(|_| "Invalid OIDC URL")?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if raw != raw.trim()
+        || url.host().is_none()
+        || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || issuer && url.query().is_some()
     {
-        return Err(
-            "CITO_OIDC_ISSUER must use HTTPS (http://127.0.0.1 is allowed for tests), without credentials, query or fragment"
-                .to_string(),
-        );
+        return Err("OIDC URL must use HTTPS (HTTP loopback is allowed for tests), without credentials or fragment; issuers cannot contain a query".into());
     }
-    let after_scheme = trimmed.split_once("://").map(|(_, r)| r).unwrap_or("");
-    let host_part = after_scheme.split('/').next().unwrap_or("");
-    if host_part.is_empty() || (!is_loopback_http && !host_part.contains('.')) {
-        return Err(
-            "CITO_OIDC_ISSUER must use HTTPS (http://127.0.0.1 is allowed for tests), without credentials, query or fragment"
-                .to_string(),
-        );
+    Ok(url)
+}
+
+pub fn validate_https_issuer(raw: &str) -> Result<String, String> {
+    validate_oidc_url(raw, true)?;
+    Ok(raw.to_owned())
+}
+
+/// Apply a process-local endpoint override only to the selected Hub.
+pub fn apply_hub_url_override(name: &str, selected: &str, hub: &mut Value) -> Result<(), String> {
+    if name == selected {
+        if let Ok(raw) = env::var("CITO_HUB_URL").or_else(|_| env::var("CITO_NATS_URL")) {
+            hub["url"] = json!(validate_nats_url(&raw)?);
+        }
     }
-    Ok(trimmed.to_string())
+    Ok(())
 }
 
 fn is_checked_cito_env_key(key: &str) -> bool {
@@ -1508,6 +1515,32 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn oidc_urls_preserve_queries_and_issuer_identity() {
+        for issuer in [
+            "https://identity",
+            "https://[::1]/tenant",
+            "https://id.example.com/tenant@team/",
+            "http://localhost:8400",
+        ] {
+            assert_eq!(validate_https_issuer(issuer).unwrap(), issuer);
+        }
+        for endpoint in [
+            "https://id.example.com/authorize?tenant=work&prompt=login",
+            "https://identity/keys?version=2",
+        ] {
+            assert!(validate_oidc_url(endpoint, false).is_ok());
+            assert!(validate_oidc_url(endpoint, true).is_err());
+        }
+        for bad in [
+            "https://alice@id.example.com",
+            "https://id.example.com/#keys",
+            "http://id.example.com",
+        ] {
+            assert!(validate_oidc_url(bad, false).is_err());
+        }
+    }
 
     fn fixture(script: &str) -> (PathBuf, PluginDescriptor) {
         let root = PathBuf::from(env::var("HOME").expect("isolated HOME"))

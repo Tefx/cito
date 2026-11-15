@@ -108,7 +108,7 @@ fn lifecycle_remote_only_channel_schema_and_selected_settings_hub() {
     let found = f.tool(
         "cito_find",
         json!({"hub":"shared","harness":"human"}),
-        human(),
+        json!({}),
     );
     let peer = &found["listeners"][0];
     assert_eq!(found["matched_count"], 1);
@@ -657,12 +657,10 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
             .is_null());
     };
     let untouched = source();
-    for op in ["send_signal", "send_reply_from_human", "cito_send"] {
+    for op in ["send_signal", "send_reply_from_human"] {
         let id = source();
         let results_before = ui_results().len();
-        let result = if op == "cito_send" {
-            f.tool("cito_send", json!({"hub":"work","to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")}), human())
-        } else {
+        let result = {
             let action = if op == "send_signal" {
                 json!({"op":op,"request_id":format!("{op}-{id}"),"to":target["listener_id"],"message":"Approved","in_reply_to":format!("work:{id}")})
             } else {
@@ -747,13 +745,9 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let before = hub
         .query("SELECT COUNT(*) AS n FROM hub_signals", &[])
         .unwrap();
-    for op in ["send_signal", "send_reply_from_human", "cito_send"] {
+    for op in ["send_signal", "send_reply_from_human"] {
         let args = json!({"to":target["listener_id"],"message":"Retry reply","in_reply_to":format!("work:{retried}"),"idempotency_key":format!("retry-{op}")});
-        if op == "cito_send" {
-            let result = f.tool_result(op, args, human());
-            assert_eq!(result["isError"], true);
-            assert!(result.to_string().contains("injected ack failure"));
-        } else {
+        {
             let mut action = args;
             action["op"] = json!(op);
             let count = ui_results().len();
@@ -813,8 +807,8 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     let local = f.db("state.sqlite");
     local.execute("CREATE TRIGGER reject_sent_commit BEFORE UPDATE ON local_sent_idempotency BEGIN SELECT RAISE(ABORT,'injected local commit failure'); END", &[]).unwrap();
     let args = json!({"hub":"work","to":target["listener_id"],"message":"Recover local commit","in_reply_to":format!("work:{recovered}"),"idempotency_key":"local-commit"});
-    let result = f.tool_result("cito_send", args.clone(), human());
-    assert_eq!(result["isError"], true);
+    let result = send_human_result(&f, args.clone());
+    assert_eq!(result["http_status"], 400);
     assert!(result.to_string().contains("injected local commit failure"));
     let committed = hub.query("SELECT seq,signal_id FROM hub_signals WHERE json_extract(CAST(data AS TEXT),'$.in_reply_to')=?", &[json!(recovered)]).unwrap();
     assert_eq!(committed.len(), 1);
@@ -828,7 +822,7 @@ fn human_desktop_replies_commit_publication_and_ack_atomically_then_reconcile_lo
     local
         .execute("DROP TRIGGER reject_sent_commit", &[])
         .unwrap();
-    let reply = f.tool("cito_send", args, human());
+    let reply = send_human(&f, args);
     assert_eq!(
         reply["signal_id"],
         format!("work:{}", committed[0]["signal_id"].as_str().unwrap())

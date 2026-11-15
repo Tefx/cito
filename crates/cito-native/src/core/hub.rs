@@ -701,7 +701,10 @@ impl HubEngine {
                 Ok(wire)
             }
             "kv_keys" | "kv_snapshot" => {
-                let rows = c.query(&format!("{KV_SELECT} ORDER BY revision"), &[])?;
+                let rows = c.query(
+                    &format!("{KV_SELECT} WHERE key>? ORDER BY key"),
+                    &[json!(s(p, "after_key"))],
+                )?;
                 let rows: Vec<_> = rows
                     .into_iter()
                     .filter(|r| visible(r, caller) && matches(s(r, "key"), s(p, "key")))
@@ -709,12 +712,29 @@ impl HubEngine {
                 if op == "kv_keys" {
                     Ok(json!({"keys":rows.iter().map(|r|r["key"].clone()).collect::<Vec<_>>()}))
                 } else {
-                    let rows = rows
-                        .into_iter()
-                        .map(|row| reconcile_human_row(c, row))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    const PAGE_BYTES: usize = 2 * 1024 * 1024;
+                    let limit = p["limit"].as_u64().unwrap_or(256).clamp(1, 1024) as usize;
+                    let mut entries = Vec::new();
+                    let mut bytes = 128;
+                    let mut next_cursor = None;
+                    for row in rows {
+                        let wire = kv_wire(&reconcile_human_row(c, row)?)?;
+                        let size = serde_json::to_vec(&wire).map_err(|e| e.to_string())?.len() + 1;
+                        if entries.len() >= limit || bytes + size > PAGE_BYTES {
+                            if entries.is_empty() {
+                                return Err(
+                                    "INVALID_INPUT: Registration exceeds snapshot page budget"
+                                        .into(),
+                                );
+                            }
+                            next_cursor = entries.last().map(|entry: &Value| entry["key"].clone());
+                            break;
+                        }
+                        bytes += size;
+                        entries.push(wire);
+                    }
                     Ok(
-                        json!({"entries":rows.iter().map(kv_wire).collect::<Result<Vec<_>,_>>()?,"server_now_ms":now_ms()}),
+                        json!({"entries":entries,"next_cursor":next_cursor,"server_now_ms":now_ms()}),
                     )
                 }
             }
@@ -1349,6 +1369,11 @@ impl HubEngine {
                 let (cfg,health) = service(c,&plugin.id)?;
                 let binding=one(c,"SELECT * FROM hub_human_channels WHERE principal_id=? AND plugin_id=?", &[caller["principal_id"].clone(),json!(plugin.id)])?.unwrap_or(Value::Null);
                 let user=parse(&binding,"user_config_json");
+                let has_hub_service=fields(&plugin).iter().any(|f|s(f,"scope")=="hub");
+                let can_configure_hub=has_hub_service && is_admin;
+                let hub_configured_any=fields(&plugin).iter().any(|f|s(f,"scope")=="hub" && configured(&cfg[s(f,"key")]));
+                let can_edit_personal=fields(&plugin).iter().any(|f|s(f,"scope")=="user");
+                let pairing_supported=plugin.manifest["pairing"]["supported"]==true;
                 let hub_ready=ready(&plugin,&cfg,"hub");
                 let user_ready=ready(&plugin,&user,"user");
                 let enabled=!binding.is_null() && n(&binding,"enabled")==1 && user_ready;
@@ -1359,17 +1384,21 @@ impl HubEngine {
                     else if hub_ready { "hub_ready" } else { "not_configured" };
                 let label=binding["display_label"].as_str().filter(|s| !s.is_empty());
                 let mut detail=match status {
+                    "ready" | "paused" if inbox_paused=>"Delivery is paused while the Human Inbox is paused".into(),
                     "ready"=>label.map(|l|format!("Connected as {l} · Ready for notifications")).unwrap_or("Connected and ready for notifications".into()),
                     "paused"=>label.map(|l|format!("Paused ({l}) · Enable to resume notifications")).unwrap_or("Paused · Enable to resume notifications".into()),
                     "pairing_pending"=>"Pairing in progress · Send the pairing command below to finish linking".into(),
-                    "hub_ready"=>"Service ready · Pair your account or enter your destination below".into(),
+                    "hub_ready" if pairing_supported=>"Service ready · Pair your account with one click".into(),
+                    "hub_ready"=>"Service ready · Enter your personal destination fields below".into(),
+                    _ if !can_configure_hub=>"Shared service credentials must be configured by the Hub administrator".into(),
                     _=>"Configure service credentials and pair your account".into(),
                 };
                 let mut warning = false;
+                let mut error_origin: Option<&str> = None;
                 if let Some(failed) = one(c,"SELECT status,attempts,last_error FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND (delivered_ms>=? OR status='effect_unknown') ORDER BY (status='effect_unknown') DESC,delivered_ms DESC,rowid DESC LIMIT 1",&[json!(plugin.id),caller["principal_id"].clone(),json!(n(&binding,"updated_ms"))])? {
-                    if (matches!(s(&failed,"status"),"failed"|"failed_permanent"|"effect_unknown") || (failed["status"] == "in_flight" && n(&failed,"attempts") > 0)) && !s(&failed,"last_error").is_empty() { warning = true; detail = if failed["status"] == "effect_unknown" { format!("Delivery outcome unknown; automatic replay stopped to avoid duplicates. {}", s(&failed,"last_error")) } else { s(&failed,"last_error").into() };  }
+                    if (matches!(s(&failed,"status"),"failed"|"failed_permanent"|"effect_unknown") || (failed["status"] == "in_flight" && n(&failed,"attempts") > 0)) && !s(&failed,"last_error").is_empty() { warning = true; error_origin = Some("user"); detail = if failed["status"] == "effect_unknown" { format!("Delivery outcome unknown; automatic replay stopped to avoid duplicates. {}", s(&failed,"last_error")) } else { s(&failed,"last_error").into() };  }
                 }
-                if let Some(error) = health["poll_error"].as_str() { warning = true; detail = error.into(); }
+                if let Some(error) = health["poll_error"].as_str() { warning = true; error_origin = Some("hub"); detail = error.into(); }
                 let fs=fields(&plugin).iter().map(|f| {
                     let hub=s(f,"scope")=="hub";
                     let val=if hub { &cfg[s(f,"key")] } else { &user[s(f,"key")] };
@@ -1383,6 +1412,11 @@ impl HubEngine {
                 }).collect::<Vec<_>>();
                 channels.push(json!({"id":plugin.id,"display_name":plugin.manifest["displayName"],
                     "sf_symbol":plugin.manifest["sfSymbol"].as_str().unwrap_or("paperplane.fill"),"tint":plugin.manifest["tint"].as_str().unwrap_or("blue"),
+                    "has_hub_service":has_hub_service,"hub_ready":hub_ready,"can_configure_hub":can_configure_hub,
+                    "can_clear_hub":can_configure_hub&&hub_configured_any,"can_edit_personal":can_edit_personal,
+                    "can_pair":pairing_supported&&(hub_ready||can_configure_hub),
+                    "can_test":((hub_ready&&user_ready)||can_edit_personal)&&(hub_ready||can_configure_hub),
+                    "can_unpair":(hub_ready&&user_ready)||!pair.is_null(),"error_origin":error_origin,
                     "enabled":enabled,"configured":hub_ready&&user_ready,"inbox_paused":inbox_paused,"delivery_enabled":enabled&&hub_ready&&user_ready&&!inbox_paused,"status":status,"detail":detail,"display_label":binding["display_label"],
                     "hub_provided":hub_ready&&fields(&plugin).iter().any(|f|s(f,"scope")=="hub"),
                     "setup_guide":plugin.manifest.get("setupGuide").cloned().unwrap_or(Value::Null),
@@ -1442,7 +1476,7 @@ impl HubEngine {
         send_error.map_or(Ok(()), Err)
     }
     fn reserve_deliveries(&self, plugin: &ChannelPlugin) -> Result<Vec<Value>, String> {
-        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
+        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;let reserved_ms=now_ms();c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(reserved_ms),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","claim_until_ms":reserved_ms+60_000,"already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
@@ -2263,6 +2297,72 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
 mod resilience_tests {
     use super::*;
     #[test]
+    fn channel_inventory_projects_caller_authority_and_error_origin() {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-channel-authority-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir).unwrap();
+        hub.pause_worker();
+        let plugin = ChannelPlugin {
+            id: "sample".into(),
+            dir: dir.clone(),
+            command: vec![],
+            manifest: json!({"fields":[{"key":"credential","scope":"hub","required":true},
+                {"key":"destination","scope":"user","required":true}],"pairing":{"supported":true}}),
+        };
+        *hub.inner.plugins.lock().unwrap() = vec![plugin.clone()];
+        let caller = json!({"principal_id":"oidc:alice","owner_user":"alice","oidc":true});
+        let channel = hub.channel_list(&caller).unwrap()["channels"][0].clone();
+        assert_eq!(channel["can_configure_hub"], false);
+        assert_eq!(channel["can_pair"], false);
+        assert_eq!(channel["error_origin"], Value::Null);
+        assert_eq!(
+            channel["detail"],
+            "Shared service credentials must be configured by the Hub administrator"
+        );
+        let admin = json!({"principal_id":"none#alice","owner_user":"alice"});
+        assert_eq!(
+            hub.channel_list(&admin).unwrap()["channels"][0]["can_configure_hub"],
+            true
+        );
+        hub.inner
+            .db
+            .transaction(|c| save_service(c, "sample", &json!({"credential":"saved"})))
+            .unwrap();
+        let channel = hub.channel_list(&caller).unwrap()["channels"][0].clone();
+        assert_eq!(channel["hub_ready"], true);
+        assert_eq!(channel["can_pair"], true);
+        assert!(s(&channel, "detail").contains("one click"));
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_plugin_services SET service_state_json=?",
+                &[json!(
+                    json!({"poll_error":"Service unavailable"}).to_string()
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            hub.channel_list(&caller).unwrap()["channels"][0]["error_origin"],
+            "hub"
+        );
+        hub.inner
+            .db
+            .execute(
+                "UPDATE hub_plugin_services SET service_state_json='{}'",
+                &[],
+            )
+            .unwrap();
+        hub.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms,attempts,last_error) VALUES('sample','oidc:alice','signal',1,'in_flight',?,1,'Retry pending')",&[json!(now_ms())]).unwrap();
+        let channel = hub.channel_list(&caller).unwrap()["channels"][0].clone();
+        assert_eq!(channel["warning"], true);
+        assert_eq!(channel["error_origin"], "user");
+        hub.shutdown();
+        drop(hub);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn delivery_retry_honors_channel_retry_after() {
         let frame = json!({"ok":false,"retryable":true,"retry_after":120});
         assert_eq!(delivery_transition(&frame, 0, 1000), ("failed", 121_000));
@@ -2914,12 +3014,13 @@ fn handle_http(
                 return Err("INVALID_INPUT: duplicate header".into());
             }
         }
-        if let Err((status, message)) = crate::core::http_boundary::validate(
+        if let Err((status, message)) = crate::core::http_boundary::validate_hub(
             bound,
             &method,
             headers.get("host").map(String::as_str),
             headers.get("origin").map(String::as_str),
             headers.get("content-type").map(String::as_str),
+            matches!(auth.mode.as_str(), "token" | "oidc"),
         ) {
             http_json(
                 &mut stream,

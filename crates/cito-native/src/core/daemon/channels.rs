@@ -96,6 +96,18 @@ impl ChannelInventory {
     }
 }
 
+pub(super) fn overlay_inbox_state(channel: &mut Value, paused: bool) {
+    channel["inbox_paused"] = json!(paused);
+    channel["delivery_enabled"] =
+        json!(channel["enabled"] == true && channel["configured"] == true && !paused);
+    if paused
+        && channel["warning"] != true
+        && matches!(string(channel, "status"), "ready" | "paused")
+    {
+        channel["detail"] = json!("Delivery is paused while the Human Inbox is paused");
+    }
+}
+
 pub(super) fn remote_channels_identity(slot: &HubClient) -> Value {
     json!([slot.config["url"], slot.identity["principal_id"]])
 }

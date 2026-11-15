@@ -161,14 +161,13 @@ fn run_mcp_stdio() {
         eprintln!("cito-mcp: {e}");
         std::process::exit(1)
     }
-    let endpoint = env::var("CITO_ENDPOINT_PID")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|p| *p > 0)
-        .unwrap_or_else(|| {
-            // SAFETY: getppid has no pointer arguments or ownership effects.
-            unsafe { libc::getppid() as u32 }
-        });
+    let endpoint = cito_native::support::enclosing_endpoint_pid(
+        env::var("CITO_ENDPOINT_PID")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        // SAFETY: getppid only reads the process parent.
+        unsafe { libc::getppid() as u32 },
+    );
     let lock = Arc::new(Mutex::new(()));
     let mut capabilities = json!({});
     let mut sidecars = vec![];

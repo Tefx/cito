@@ -269,17 +269,10 @@ impl DaemonService {
         deadline: Instant,
     ) -> Result<Option<Value>, String> {
         let requested_pid = caller_pid_hint(meta)?.or_else(|| meta["_http_client"].as_u64());
-        let explicit_pid = meta
-            .as_object()
-            .is_some_and(|m| m.keys().any(|k| k.ends_with("_pid") || k.ends_with("Pid")));
+        let explicit_pid = caller_pid_hint(meta)?.is_some();
         let expected = string(meta, "expected_harness");
         if expected == "human" {
-            if !matches!(string(meta, "expected_session_id"), "" | "default") {
-                return Err("INVALID_INPUT: Human node session_id must be 'default'".into());
-            }
-            return Ok(Some(
-                json!({"harness":"human","session_id":"default","cwd":"","title":"Human"}),
-            ));
+            return Err("FORBIDDEN: MCP callers must be agent sessions".into());
         }
         if !required
             && requested_pid.is_none()
@@ -768,8 +761,8 @@ impl DaemonService {
     }
 
     pub fn tool(&mut self, name: &str, args: &Value, meta: &Value) -> Result<Value, String> {
-        if matches!(name, "cito_listen" | "cito_unlisten")
-            && (args["harness"] == "human" || meta["expected_harness"] == "human")
+        if (name != "cito_find" && args["harness"] == "human")
+            || meta["expected_harness"] == "human"
         {
             return Err("FORBIDDEN: Agent tools cannot change Human device or inbox state".into());
         }
@@ -881,7 +874,7 @@ impl DaemonService {
                 )
             }
             "cito_find" => {
-                let _ = self.caller(meta, false)?;
+                let _ = caller_pid_hint(meta)?;
                 self.find_listeners(args, |_| true)
             }
             "cito_send" => {
@@ -909,6 +902,17 @@ impl DaemonService {
     }
 
     pub(super) fn send(&self, default: &str, args: &Value, meta: &Value) -> Result<Value, String> {
+        let caller = self.caller(meta, false)?;
+        self.send_from(default, args, caller)
+    }
+
+    /// The UI action boundary supplies Human authority directly, never through MCP metadata.
+    pub(super) fn send_from(
+        &self,
+        default: &str,
+        args: &Value,
+        caller: Option<Value>,
+    ) -> Result<Value, String> {
         let message = sanitize_message(
             args["message"]
                 .as_str()
@@ -923,7 +927,6 @@ impl DaemonService {
             return Err("INVALID_INPUT: Conflicting hub prefixes".into());
         }
         let slot = self.slot(hub)?;
-        let caller = self.caller(meta, false)?;
         let mut directory = slot.directory()?;
         let alias = crate::core::identity::readable_alias(to);
         let canonical_target = if to.starts_with('@') || alias.is_some() {

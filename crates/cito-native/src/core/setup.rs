@@ -1687,8 +1687,11 @@ pub fn run_setup_cli(args: &[String]) {
             }
             let should_cfg = should_setup_harness(plugin, &enabled_set, bare_setup);
             if !should_cfg {
-                let (_, _, paths) = inspect_plugin_setup(plugin);
-                if paths.is_empty() && !plugin.is_builtin {
+                let (paths, inspection_error) = match try_inspect_plugin_setup(plugin) {
+                    Ok((_, _, paths)) => (paths, None),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
+                if paths.is_empty() && !plugin.is_builtin && inspection_error.is_none() {
                     continue;
                 }
                 actions.push(SetupAction {
@@ -1696,10 +1699,14 @@ pub fn run_setup_cli(args: &[String]) {
                     path: paths.first().cloned().unwrap_or_else(|| plugin.id.clone()),
                     status: "skipped".to_string(),
                     backup_path: None,
-                    detail: format!(
-                        "Skipped {} harness '{}' (pass --enable {} to configure)",
-                        plugin.tier, plugin.id, plugin.id
-                    ),
+                    detail: inspection_error
+                        .map(|error| format!("Plugin inspection failed: {error}"))
+                        .unwrap_or_else(|| {
+                            format!(
+                                "Skipped {} harness '{}' (pass --enable {} to configure)",
+                                plugin.tier, plugin.id, plugin.id
+                            )
+                        }),
                 });
                 continue;
             }

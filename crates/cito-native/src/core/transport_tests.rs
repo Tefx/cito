@@ -451,7 +451,7 @@ fn http_rpc_response_status_and_error_envelopes() {
         (
             500,
             json!({"message":"Retry"}),
-            Err("INVALID_INPUT: Retry"),
+            Err("NATS_UNAVAILABLE: Retry"),
             "connected",
         ),
     ] {
@@ -498,6 +498,24 @@ fn http_rpc_response_status_and_error_envelopes() {
         assert_eq!(client.connection_status(), state);
     }
 }
+#[test]
+fn directory_snapshot_pages_exceed_transport_total_budget() {
+    for https in [false, true] {
+        let (fixture, client) = fixture("127.0.0.1", https);
+        for index in 0..90 {
+            let value = json!({"listener_id":format!("node-{index:03}"),"harness":"agent","scope":"workspace","about":"x".repeat(100_000)});
+            fixture.engine.rpc("kv_put",&json!({"key":value["listener_id"],"data_b64":STANDARD.encode(value.to_string())}),Some(&client.identity)).unwrap();
+        }
+        let page = client.rpc("kv_snapshot", &json!({})).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 2 * 1024 * 1024);
+        assert!(page["next_cursor"].is_string());
+        let rows = client.directory().unwrap();
+        assert_eq!(rows.len(), 90);
+        assert!(serde_json::to_vec(&rows).unwrap().len() > 8 * 1024 * 1024);
+        assert_eq!(client.cached_directory().len(), 90);
+    }
+}
+
 #[test]
 fn ipv6_loopback_hub_rpc_round_trip() {
     let (f, client) = fixture("::1", false);

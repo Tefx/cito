@@ -29,10 +29,17 @@ fn cap_text(s: &str, limit: usize) -> String {
 fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
     match v {
         Value::String(s) => {
-            if key == "request_id" {
+            if matches!(
+                key,
+                "request_id" | "url" | "issuer" | "client_id" | "clientId" | "value"
+            ) {
                 return;
             }
-            if matches!(key, "title" | "from_title") {
+            if key == "title" {
+                *s = cap_text(s, 512);
+                return;
+            }
+            if key == "from_title" {
                 *s = cap_text(s, 128);
                 return;
             }
@@ -60,6 +67,9 @@ fn bound_fields(v: &mut Value, key: &str, preserve_collections: bool) {
             }
         }
         Value::Object(m) => {
+            if m.get("op").is_some_and(|op| op == "hub_invite") {
+                return;
+            }
             for (k, v) in m {
                 bound_fields(v, k, preserve_collections)
             }

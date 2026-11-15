@@ -46,27 +46,11 @@ pub fn principal_matches(stored: &str, principal: &Value) -> bool {
 }
 
 fn validate_oidc_endpoint(value: &str, setting: &str, issuer: bool) -> Result<(), String> {
-    let valid = url::Url::parse(value).ok().is_some_and(|url| {
-        (url.scheme() == "https" || url.scheme() == "http" && url.host_str() == Some("127.0.0.1"))
-            && url.host_str().is_some()
-            && (!issuer
-                || url.username().is_empty()
-                    && url.password().is_none()
-                    && url.query().is_none()
-                    && url.fragment().is_none())
-    });
-    if valid {
-        Ok(())
-    } else {
-        let suffix = if issuer {
-            ", without credentials, query or fragment"
-        } else {
-            ""
-        };
-        Err(format!(
-            "{setting} must use HTTPS (http://127.0.0.1 is allowed for local tests){suffix}"
-        ))
-    }
+    crate::plugins::validate_oidc_url(value, issuer)
+        .map(|_| ())
+        .map_err(|error| {
+            format!("{setting} must use HTTPS with valid OIDC URL components: {error}")
+        })
 }
 
 #[derive(Default)]
@@ -162,7 +146,7 @@ impl OidcVerifier {
         let uri = discovery["jwks_uri"]
             .as_str()
             .ok_or("AUTH_UNAVAILABLE: missing OIDC jwks_uri")?;
-        validate_oidc_endpoint(uri, "OIDC jwks_uri", true)
+        validate_oidc_endpoint(uri, "OIDC jwks_uri", false)
             .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
         let response = self
             .agent
@@ -173,7 +157,7 @@ impl OidcVerifier {
         if response.status() != 200 {
             return Err("AUTH_UNAVAILABLE: JWKS did not return HTTP 200".into());
         }
-        validate_oidc_endpoint(response.get_url(), "OIDC JWKS response URL", true)
+        validate_oidc_endpoint(response.get_url(), "OIDC JWKS response URL", false)
             .map_err(|e| format!("AUTH_UNAVAILABLE: {e}"))?;
         let keys: JwkSet = serde_json::from_reader(response.into_reader().take(1_048_576))
             .map_err(|e| format!("AUTH_UNAVAILABLE: JWKS JSON: {e}"))?;

@@ -68,6 +68,7 @@ const ACTIVITY_FIELDS: &[&str] = &[
     "from_display_address",
     "message_truncated",
     "for_me",
+    "can_reply",
 ];
 fn project_fields(row: &Value, fields: &[&str]) -> Value {
     Value::Object(
@@ -268,10 +269,7 @@ impl DaemonService {
             .unwrap_or_else(|| self.human_projection(channel_hub));
         if let Some(inbox_paused) = channel_human["human_paused"].as_bool() {
             for channel in &mut channels {
-                channel["inbox_paused"] = json!(inbox_paused);
-                channel["delivery_enabled"] = json!(
-                    channel["enabled"] == true && channel["configured"] == true && !inbox_paused
-                );
+                super::channels::overlay_inbox_state(channel, inbox_paused);
             }
         }
         let raw = self.raw_config().unwrap_or_else(|_| json!({}));
@@ -322,6 +320,13 @@ impl DaemonService {
                     item.extend(fields.clone());
                 }
             }
+            item["is_builtin"] = json!(item["url"] == "local://");
+            item["supports_workspace_scope"] = json!(item["url"] != "local://");
+            item["can_login"] = json!(
+                item["enabled"] != false
+                    && item["auth_mode"] == "oidc"
+                    && item["status"] != "connected"
+            );
             item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
         }
         let token = string(host, "token");
@@ -417,6 +422,13 @@ impl DaemonService {
                 ));
                 row["message_truncated"] = json!(string(&row, "message").len() > 512);
                 row["for_me"] = json!(target["harness"] == "human");
+                row["can_reply"] = json!(
+                    self.slots
+                        .get(string(&row, "hub"))
+                        .is_some_and(|slot| slot.capabilities()["auth_valid"] == true)
+                        && (row["from_scoped_id"].is_string()
+                            || row["from_display_address"].is_string())
+                );
                 project_fields(&row, ACTIVITY_FIELDS)
             })
             .collect()
@@ -461,6 +473,7 @@ impl DaemonService {
             .collect();
         for row in &mut sessions {
             *row = project_fields(row, SESSION_FIELDS);
+            self.project_session_controls(row);
             if row["harness"] == "human" {
                 let directory = self
                     .slots
@@ -567,6 +580,7 @@ impl DaemonService {
             .filter_map(|a| a["display_name"].as_str())
             .collect::<Vec<_>>());
         result["attachments"] = json!(attachments);
+        self.project_session_controls(&mut result);
         if row["harness"] == "human" {
             let current = self
                 .slots
@@ -580,6 +594,27 @@ impl DaemonService {
             }
         }
         result
+    }
+
+    fn project_session_controls(&self, row: &mut Value) {
+        let slot = self.slots.get(string(row, "hub"));
+        let own = slot.is_some_and(|slot| {
+            crate::core::auth::principal_matches(string(row, "principal_id"), &slot.identity)
+        }) || row["is_self_principal"] == true;
+        let local = self
+            .state
+            .listener(string(row, "hub"), string(row, "listener_id"))
+            .ok()
+            .flatten()
+            .is_some_and(|listener| listener["status"] == "ACTIVE");
+        let agent = row["harness"] != "human";
+        let mutable = own && slot.is_some_and(|slot| slot.capabilities()["auth_valid"] == true);
+        row["is_self_principal"] = json!(own);
+        row["can_set_scope"] =
+            json!(mutable && slot.is_some_and(|slot| slot.config["url"] != "local://"));
+        row["can_pin"] = json!(mutable && local && agent);
+        row["can_rename"] = json!(mutable && local && agent);
+        row["can_stop"] = json!(mutable && local && agent);
     }
 
     pub(super) fn human_projection(&self, hub: &str) -> Value {
@@ -674,6 +709,7 @@ impl DaemonService {
                 .custom_title(string(row, "harness"), string(row, "session_id"))?
                 .is_some());
             *row = project_fields(row, SESSION_FIELDS);
+            self.project_session_controls(row);
         }
         let counts = self.state.db.query("SELECT COUNT(*) AS total,COUNT(CASE WHEN acknowledged_at_ms IS NULL THEN 1 END) AS unread FROM local_signals WHERE activity_hidden=0", &[])?;
         frame["unread_count"] = counts[0]["unread"].clone();
@@ -691,6 +727,8 @@ impl DaemonService {
             let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
                 "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),
                 "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,
+                "is_builtin":slot.config["url"] == "local://","supports_workspace_scope":slot.config["url"] != "local://",
+                "can_login":slot.config["authMode"] == "oidc" && capabilities["status"] != "connected",
                 "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
             if let (Some(out),Some(projection)) = (hub.as_object_mut(),self.human_projection(name).as_object()) { out.extend(projection.clone()); }
             hub

@@ -232,16 +232,13 @@ fn pending_publish_constraint_failure_recovers_exact_id_and_dedup_sequence() {
     let db = f.db("hub.sqlite");
     db.execute("CREATE TRIGGER reject_publish BEFORE INSERT ON hub_signals BEGIN SELECT RAISE(ABORT,'injected failure'); END",&[]).unwrap();
     let args = json!({"to":target["listener_id"],"message":"Recovery","idempotency_key":"same"});
-    assert_eq!(
-        f.tool_result("cito_send", args.clone(), human())["isError"],
-        true
-    );
+    assert_eq!(send_human_result(&f, args.clone())["http_status"], 400);
     let row = f.rows("SELECT * FROM local_sent_idempotency")[0].clone();
     assert_eq!(row["status"], "PENDING_PUBLISH");
     db.execute("DROP TRIGGER reject_publish", &[]).unwrap();
-    let recovered = f.tool("cito_send", args.clone(), human());
+    let recovered = send_human(&f, args.clone());
     assert_eq!(recovered["signal_id"], row["signal_id"]);
-    assert_eq!(f.tool("cito_send", args, human())["seq"], recovered["seq"]);
+    assert_eq!(send_human(&f, args)["seq"], recovered["seq"]);
     assert_eq!(
         db.query("SELECT COUNT(*) AS n FROM hub_signals", &[])
             .unwrap()[0]["n"],
@@ -268,25 +265,20 @@ fn shared_hub_private_scope_is_invisible_and_workspace_scope_is_deliverable() {
     b.env.insert("CITO_USER".into(), "bob".into());
     b.daemon(&[]);
     assert_eq!(
-        b.tool("cito_find", json!({"harness":"fixture"}), human())["listeners"],
+        b.tool("cito_find", json!({"harness":"fixture"}), json!({}))["listeners"],
         json!([])
     );
-    let denied = b.tool_result(
-        "cito_send",
-        json!({"to":target["listener_id"],"message":"Private"}),
-        human(),
-    );
-    assert_eq!(denied["isError"], true);
+    let denied = send_human_result(&b, json!({"to":target["listener_id"],"message":"Private"}));
+    assert_eq!(denied["http_status"], 400);
     assert!(denied.to_string().contains("FORBIDDEN_TARGET_SCOPE"));
     let public = a.tool(
         "cito_listen",
         json!({"about":"Workspace target","scope":"workspace"}),
         meta,
     );
-    b.tool(
-        "cito_send",
+    send_human(
+        &b,
         json!({"to":public["listener_id"],"message":"Workspace"}),
-        human(),
     );
     wait(|| {
         a.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
@@ -391,11 +383,7 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
         a.rows("SELECT status FROM local_listeners WHERE harness='fixture'")[0]["status"]
             == "FENCED_INACTIVE"
     });
-    let sent = b.tool(
-        "cito_send",
-        json!({"to":winner["listener_id"],"message":"Winner"}),
-        human(),
-    );
+    let sent = send_human(&b, json!({"to":winner["listener_id"],"message":"Winner"}));
     wait(|| {
         b.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
             .len()
@@ -480,10 +468,9 @@ fn same_channel_takeover_fences_old_owner_and_preserves_winner() {
             assert_eq!(snapshot["settings"]["hubs"][0]["url"], url);
         }
         assert_channels_active();
-        sent_signals.push(b.tool(
-            "cito_send",
+        sent_signals.push(send_human(
+            &b,
             json!({"to":winner["listener_id"],"message":format!("Winner after {operation}")}),
-            human(),
         ));
         wait(|| {
             b.rows("SELECT * FROM local_signals WHERE state='DISPATCHED'")
@@ -544,10 +531,19 @@ fn http_origin_guard_strict_tool_schemas_and_singleton_port_ownership() {
 fn cli_formats_real_mcp_error_envelopes_without_json_or_internal_codes() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
+    f.provider("delivered_unconfirmed");
     let _daemon = f.daemon(&[]);
     let (ok, _, error) = f.command(
         NATIVE,
-        &["send", "--to", "c_0000000000000000", "--message", "hello"],
+        &[
+            "send",
+            "--harness",
+            "fixture",
+            "--to",
+            "c_0000000000000000",
+            "--message",
+            "hello",
+        ],
         "",
     );
     assert!(!ok, "Unknown targets must fail");
@@ -738,7 +734,7 @@ fn mcp_http_initialize_tool_schemas_and_malformed_boundaries() {
         "^[a-z0-9][a-z0-9_-]{0,31}$"
     );
     assert_eq!(
-        f.tool("cito_find", json!({"harness":"1agent"}), human())["listeners"],
+        f.tool("cito_find", json!({"harness":"1agent"}), json!({}))["listeners"],
         json!([])
     );
     for v in [
@@ -767,7 +763,7 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
     let prefix = &canonical[2..6];
     for length in [8, 12, 16] {
         let query = format!("alice/fixture#{}", &canonical[2..2 + length]);
-        let found = f.tool("cito_find", json!({"query":query}), human());
+        let found = f.tool("cito_find", json!({"query":query}), json!({}));
         assert_eq!(found["matched_count"], 1, "{found}");
         assert_eq!(found["listeners"][0]["listener_id"], canonical);
     }
@@ -778,11 +774,7 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
         format!("local:alice/fixture#{prefix}"),
     ] {
         assert_eq!(
-            f.tool(
-                "cito_send",
-                json!({"to":to,"message":"Alias routing"}),
-                human()
-            )["to"],
+            send_human(&f, json!({"to":to,"message":"Alias routing"}))["to"],
             target["listener_id"]
         );
     }
@@ -790,7 +782,7 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
     let row = json!({"listener_id":duplicate,"public_id":format!("alice-{}",&duplicate[2..]),"owner_user":"alice","principal_id":"none#alice","harness":"fixture","state":"ACTIVE","scope":"workspace","updated_at_ms":cito_native::core::plugins::now_ms(),"binding_generation":1});
     f.db("hub.sqlite").execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES(?,1,?,CAST(? AS BLOB),'none#alice','workspace')",&[json!(duplicate),json!(cito_native::core::plugins::now_ms()),json!(row.to_string())]).unwrap();
     wait(|| {
-        f.tool("cito_find", json!({"harness":"fixture"}), human())["listeners"]
+        f.tool("cito_find", json!({"harness":"fixture"}), json!({}))["listeners"]
             .as_array()
             .unwrap()
             .len()
@@ -801,18 +793,11 @@ fn v29_readable_aliases_reject_ambiguous_live_prefixes_even_for_one_principal() 
         format!("fixture#{prefix}"),
         format!("alice#{prefix}"),
     ] {
-        let result = f.tool_result(
-            "cito_send",
-            json!({"to":to,"message":"Must disambiguate"}),
-            human(),
-        );
-        assert_eq!(result["isError"], true, "{result}");
-        let error: Value =
-            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(error["error"]["code"], "INVALID_INPUT");
+        let result = send_human_result(&f, json!({"to":to,"message":"Must disambiguate"}));
+        assert_eq!(result["http_status"], 400, "{result}");
         assert_eq!(
-            error["error"]["message"],
-            "Ambiguous target; use full listener_id"
+            result["error"],
+            "INVALID_INPUT: Ambiguous target; use full listener_id"
         );
     }
 }
@@ -883,10 +868,9 @@ fn activity_filter_clear_and_read_preserve_hidden_unconfirmed_agent_obligations(
     let meta = f.provider("delivered_unconfirmed");
     f.daemon(&[]);
     let agent = f.tool("cito_listen", json!({"about":"Pending work"}), meta.clone());
-    f.tool(
-        "cito_send",
+    send_human(
+        &f,
         json!({"to":agent["listener_id"],"message":"Pending agent work"}),
-        human(),
     );
     f.tool(
         "cito_send",
@@ -978,7 +962,10 @@ fn v29_sender_auto_enrollment_readable_reply_and_clear_close_the_pathway() {
         .as_str()
         .unwrap()
         .contains("/fixture#"));
-    let reply = f.tool("cito_send",json!({"to":activity["from_display_address"],"message":"Human reply","in_reply_to":activity["signal_id"]}),human());
+    let reply = send_human(
+        &f,
+        json!({"to":activity["from_display_address"],"message":"Human reply","in_reply_to":activity["signal_id"]}),
+    );
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(reply["to"], sender["public_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 2);
@@ -1121,7 +1108,7 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
         .command(NATIVE, &["status"], "")
         .1
         .contains("AVAILABLE SESSIONS"));
-    let find = f.tool("cito_find", json!({"query":"Native receiver"}), human());
+    let find = f.tool("cito_find", json!({"query":"Native receiver"}), json!({}));
     assert!(find["listeners"]
         .as_array()
         .unwrap()
@@ -1130,9 +1117,9 @@ fn local_mcp_listen_find_send_inbox_ack_idempotency_and_channel_detach() {
             && v["listener_id"] == target["canonical_listener_id"]));
     let long = "Context payload segment ".repeat(100).trim().to_string();
     let args = json!({"to":target["listener_id"],"message":long,"idempotency_key":"stable"});
-    let sent = f.tool("cito_send", args.clone(), human());
+    let sent = send_human(&f, args.clone());
     assert_eq!(sent["status"], "wake_accepted");
-    let again = f.tool("cito_send", args, human());
+    let again = send_human(&f, args);
     assert_eq!(sent["signal_id"], again["signal_id"]);
     wait(|| f.rows("SELECT * FROM local_signals").len() == 1);
     assert!(
@@ -1220,10 +1207,9 @@ fn confirmed_delivery_business_ack_and_pending_hub_ack_reconciliation() {
     let meta = f.provider("delivered");
     f.daemon(&[]);
     let target = enroll(&f, meta);
-    f.tool(
-        "cito_send",
+    send_human(
+        &f,
         json!({"to":target["listener_id"],"message":"confirmed"}),
-        human(),
     );
     wait(|| {
         f.rows("SELECT * FROM local_signals WHERE acknowledged_at_ms IS NOT NULL")
@@ -1332,11 +1318,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             json!({"hub":hub,"about":"Multi hub","scope":"workspace"}),
             meta.clone(),
         );
-        let sent = f.tool(
-            "cito_send",
-            json!({"to":target["listener_id"],"message":hub}),
-            human(),
-        );
+        let sent = send_human(&f, json!({"to":target["listener_id"],"message":hub}));
         assert!(sent["signal_id"]
             .as_str()
             .unwrap()
@@ -1394,7 +1376,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
             &[binding["endpoint_pid"].clone()],
         )
         .unwrap();
-    let all = f.tool("cito_find", json!({"harness":"fixture"}), human());
+    let all = f.tool("cito_find", json!({"harness":"fixture"}), json!({}));
     assert_eq!(all["listeners"].as_array().unwrap().len(), 3);
     assert_eq!(all["matched_count"], all["online_count"]);
     assert_eq!(all["matched_count"], 3);
@@ -1413,7 +1395,7 @@ fn two_remote_hubs_isolate_identifiers_and_offline_inbox_remains_readable() {
     let local = f.tool(
         "cito_find",
         json!({"hub":"local","harness":"fixture"}),
-        human(),
+        json!({}),
     );
     assert_eq!(local["listeners"].as_array().unwrap().len(), 1);
     assert_eq!(local["listeners"][0]["title"], "alice");

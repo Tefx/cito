@@ -38,6 +38,19 @@ fn agent(poll: bool) -> &'static ureq::Agent {
     })
 }
 fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, ApiFailure> {
+    api_with_timeout(
+        config,
+        method,
+        body,
+        Duration::from_secs(if method == "getUpdates" { 35 } else { 25 }),
+    )
+}
+fn api_with_timeout(
+    config: &Value,
+    method: &str,
+    body: Value,
+    timeout: Duration,
+) -> std::result::Result<Value, ApiFailure> {
     use std::io::Read;
     let token = str_at(config, "botToken").ok_or_else(|| ApiFailure {
         message: "Bot Token is required".into(),
@@ -50,7 +63,8 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
         .trim_end_matches('/');
     let response = match agent(method == "getUpdates")
         .post(&format!("{base}/bot{token}/{method}"))
-        .send_json(body)
+        .timeout(timeout)
+        .send_json(body.clone())
     {
         Ok(r) => r,
         Err(ureq::Error::Status(status, response)) => {
@@ -91,15 +105,51 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
             });
         }
     };
-    let v: Value =
-        serde_json::from_reader(response.into_reader().take(1_048_576)).map_err(|_| {
-            ApiFailure {
+    let mut bytes = Vec::new();
+    let read = response
+        .into_reader()
+        .take(1_048_577)
+        .read_to_end(&mut bytes);
+    let parsed = if read.is_ok() && bytes.len() <= 1_048_576 {
+        serde_json::from_slice::<Value>(&bytes).ok()
+    } else {
+        None
+    };
+    let v = match parsed {
+        Some(value) => value,
+        None if method == "getUpdates" => {
+            if body["limit"].as_u64().unwrap_or(25) > 1 {
+                let mut single = body;
+                single["limit"] = json!(1);
+                return api(config, method, single);
+            }
+            // The bounded prefix normally contains update_id before the large message.
+            let prefix = String::from_utf8_lossy(&bytes);
+            let update = prefix
+                .split_once("\"update_id\"")
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .map(|(_, rest)| {
+                    rest.trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                })
+                .and_then(|id| id.parse::<u64>().ok())
+                .unwrap_or_else(|| body["offset"].as_u64().unwrap_or(0));
+            eprintln!(
+                "Telegram getUpdates: skipping oversized or malformed single update {update}"
+            );
+            return Ok(json!([{"update_id":update}]));
+        }
+        None => {
+            return Err(ApiFailure {
                 message: format!("Telegram {method} response was incomplete"),
                 retryable: false,
                 effect_unknown: method == "sendMessage",
                 retry_after: None,
-            }
-        })?;
+            })
+        }
+    };
     if v["ok"] != true {
         let status = v["error_code"].as_u64().unwrap_or(400);
         return Err(ApiFailure {
@@ -159,8 +209,25 @@ fn delivery(config: &Value, req: &Value) -> Value {
             .or_else(|| str_at(&s["from"], "listener_id"))
             .unwrap_or("sender");
         let text = format!("Cito · {from}\n\n{}", s["message"].as_str().unwrap_or(""));
+        let claim_until = req["claim_until_ms"]
+            .as_u64()
+            .unwrap_or_else(|| now_ms() + 60_000);
         for text in chunks(&text).into_iter().skip(ids.len()) {
-            let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
+            let budget = claim_until.saturating_sub(now_ms()).saturating_sub(500);
+            if budget == 0 {
+                return Err(ApiFailure {
+                    message: "Delivery reservation expired before send".into(),
+                    retryable: true,
+                    effect_unknown: false,
+                    retry_after: None,
+                });
+            }
+            let r = api_with_timeout(
+                config,
+                "sendMessage",
+                json!({"chat_id":chat,"text":text}),
+                Duration::from_millis(budget.min(25_000)),
+            )?;
             ids.push(id(&r["message_id"]).ok_or_else(|| ApiFailure {
                 message: "Telegram message_id is missing".into(),
                 retryable: false,
@@ -585,7 +652,7 @@ pub fn main() {
                 let r = api(
                     &config,
                     "getUpdates",
-                    json!({"offset":cursor,"timeout":25,"allowed_updates":["message"]}),
+                    json!({"offset":cursor,"timeout":25,"limit":25,"allowed_updates":["message"]}),
                 );
                 let _ = tx.send(Event::Poll(config, r));
             });

@@ -11,6 +11,10 @@ fn run(program: &str, args: &[&str]) {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    if env::var("TARGET").as_deref() != Ok("aarch64-apple-darwin") {
+        return;
+    }
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
     let root = Path::new(&manifest).join("../..");
     let source_dir = root.join("src/macos");
@@ -24,11 +28,7 @@ fn main() {
     for source in &sources {
         println!("cargo:rerun-if-changed={}", source.display());
     }
-    println!("cargo:rerun-if-changed=build.rs");
     // Tests execute the same UI source as release packages, always in headless mode.
-    if env::var("TARGET").as_deref() != Ok("aarch64-apple-darwin") {
-        return;
-    }
     let output = root.join("bin/cito-ui-darwin-arm64");
     let temporary = output.with_extension("tmp");
     let mut args = vec!["-O", "-target", "arm64-apple-macos13.0"];

@@ -231,7 +231,7 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
     assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     let app = f.dir.join("codex.mjs");
     fs::write(&app, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
-    let process = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    let process = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
     wait(|| f.output(process, false).contains("ready"));
     // Use this build's real provider, independently of checked-in release staging.
     let plugin_dir = f.state.join("plugins/codex");
@@ -282,7 +282,7 @@ fn codex_reopen_restores_retained_sessions_outside_recent_and_menu_slices() {
             )
             .unwrap();
     }
-    let reopened = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    let reopened = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
     wait(|| f.output(reopened, false).contains("ready"));
     let sliced = f.plugin(
         CODEX,

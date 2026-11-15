@@ -245,10 +245,10 @@ pub fn parse_cli(
     }
     meta.insert(
         "_stdio".into(),
-        json!({"endpoint_pid":std::env::var("CITO_ENDPOINT_PID")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or_else(|| unsafe { libc::getppid() as u32 })}),
+        json!({"endpoint_pid":crate::support::enclosing_endpoint_pid(
+            std::env::var("CITO_ENDPOINT_PID").ok().and_then(|s|s.parse().ok()),
+            // SAFETY: getppid only reads the process parent.
+            unsafe { libc::getppid() as u32 })}),
     );
     meta.insert("cli_cmd".into(), json!(cmd));
     meta.insert(
@@ -435,7 +435,18 @@ pub fn format_status(payload: &Value) -> String {
         );
     }
     let _ = writeln!(text, "AVAILABLE SESSIONS");
-    for row in payload["available"].as_array().into_iter().flatten() {
+    for row in payload["available"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|candidate| {
+            !candidate["listening_hubs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|hub| hub == &payload["hub"])
+        })
+    {
         let _ = writeln!(
             text,
             "  {} · {} · {}{}",

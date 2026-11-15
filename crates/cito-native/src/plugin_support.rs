@@ -432,7 +432,13 @@ pub fn explicit_pid(req: &Value) -> Result<Option<u32>> {
     if !req["endpoint_pid"].is_null() {
         claims.push(&req["endpoint_pid"]);
     }
-    for meta in [&req["meta"], &req["_meta"]] {
+    for meta in [
+        &req["meta"],
+        &req["_meta"],
+        &req["_stdio"],
+        &req["meta"]["_stdio"],
+        &req["_meta"]["_stdio"],
+    ] {
         if let Some(object) = meta.as_object() {
             claims.extend(
                 object
@@ -594,16 +600,155 @@ fn process_info(pid: u32) -> Result<libc::proc_bsdinfo> {
     }
     Ok(info)
 }
+#[cfg(target_os = "macos")]
+fn descriptor_path(pid: u32, fd: i32) -> Option<(PathBuf, libc::mode_t)> {
+    // Darwin's vnode_fdinfowithpath is proc_fileinfo followed by vnode_info_path.
+    #[repr(C)]
+    struct VnodeFdPath {
+        open_flags: u32,
+        status: u32,
+        offset: i64,
+        kind: i32,
+        guard_flags: u32,
+        vnode: libc::vnode_info_path,
+    }
+    // SAFETY: the initialized repr(C) buffer exactly matches sys/proc_info.h.
+    let mut info: VnodeFdPath = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as i32;
+    // PROC_PIDFDVNODEPATHINFO = 2; libc exposes the function but not this flavor.
+    if unsafe {
+        libc::proc_pidfdinfo(
+            pid as i32,
+            fd,
+            2,
+            (&mut info as *mut VnodeFdPath).cast(),
+            size,
+        )
+    } != size
+    {
+        return None;
+    }
+    let bytes: Vec<u8> = info
+        .vnode
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|c| *c as u8)
+        .take_while(|c| *c != 0)
+        .collect();
+    use std::os::unix::ffi::OsStringExt;
+    Some((
+        std::ffi::OsString::from_vec(bytes).into(),
+        info.vnode.vip_vi.vi_stat.vst_mode,
+    ))
+}
+#[cfg(not(target_os = "macos"))]
+fn descriptor_path(pid: u32, fd: i32) -> Option<(PathBuf, libc::mode_t)> {
+    use std::os::unix::fs::MetadataExt;
+    let link = format!("/proc/{pid}/fd/{fd}");
+    Some((
+        std::fs::read_link(&link).ok()?,
+        std::fs::metadata(link).ok()?.mode() as libc::mode_t,
+    ))
+}
 pub fn process_has_tty(pid: u32) -> bool {
+    let terminal = |(path, mode): &(PathBuf, libc::mode_t)| {
+        let path = path.to_string_lossy();
+        *mode & libc::S_IFMT == libc::S_IFCHR
+            && (path.starts_with("/dev/tty") || path.starts_with("/dev/pts/"))
+    };
+    let Some(stdin) = descriptor_path(pid, 0) else {
+        return false;
+    };
+    if terminal(&stdin) {
+        return true;
+    }
+    // Null, pipes and sockets cannot borrow the inherited stdout terminal.
+    if stdin.0 == Path::new("/dev/null")
+        || !stdin.0.is_absolute()
+        || matches!(stdin.1 & libc::S_IFMT, libc::S_IFIFO | libc::S_IFSOCK)
+    {
+        return false;
+    }
+    descriptor_path(pid, 1).as_ref().is_some_and(terminal)
+}
+
+fn same_user_process(pid: u32) -> bool {
     #[cfg(target_os = "macos")]
     {
-        process_info(pid).is_ok_and(|info| info.e_tdev != u32::MAX)
+        // SAFETY: geteuid only reads process credentials.
+        process_info(pid).is_ok_and(|info| info.pbi_uid == unsafe { libc::geteuid() })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        std::fs::read_link(format!("/proc/{pid}/fd/0"))
-            .is_ok_and(|path| path.starts_with("/dev/pts") || path.starts_with("/dev/tty"))
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(format!("/proc/{pid}"))
+            .is_ok_and(|meta| meta.uid() == unsafe { libc::geteuid() })
     }
+}
+
+/// Same-user ancestry is bounded and stops when process inspection is unavailable.
+pub fn has_harness_ancestor(pid: u32, matches: impl Fn(u32, &str) -> bool) -> bool {
+    let mut current = pid;
+    for _ in 0..16 {
+        let Some(parent) = process_parent(current).filter(|p| *p > 1) else {
+            break;
+        };
+        if !same_user_process(parent) {
+            break;
+        }
+        if process_command(parent).is_ok_and(|command| matches(parent, &command)) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+pub fn is_agent_harness(command: &str) -> bool {
+    let Some((program, script)) = process_entrypoint(command) else {
+        return false;
+    };
+    let entry = script.unwrap_or(program);
+    let name = Path::new(entry)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    matches!(
+        name,
+        "pi" | "pi-coding-agent"
+            | "pi.js"
+            | "pi.mjs"
+            | "claude"
+            | "claude.js"
+            | "claude.mjs"
+            | "codex"
+            | "codex.js"
+            | "codex.mjs"
+    ) || (entry.contains("/pi-coding-agent/") || entry.contains("/claude-code/"))
+        && matches!(name, "cli.js" | "cli.mjs")
+}
+
+/// Ignore inherited endpoint hints that cross a nearer harness boundary.
+pub fn enclosing_endpoint_pid(hint: Option<u32>, parent: u32) -> u32 {
+    let hint = hint.filter(|p| alive(*p) && same_user_process(*p));
+    let mut current = parent;
+    for _ in 0..16 {
+        if Some(current) == hint {
+            return current;
+        }
+        if !same_user_process(current) {
+            break;
+        }
+        if process_command(current).is_ok_and(|command| is_agent_harness(&command)) {
+            return current;
+        }
+        let Some(next) = process_parent(current).filter(|p| *p > 1) else {
+            break;
+        };
+        current = next;
+    }
+    hint.unwrap_or(parent)
 }
 pub fn process_cwd(pid: u32) -> Result<String> {
     #[cfg(target_os = "macos")]

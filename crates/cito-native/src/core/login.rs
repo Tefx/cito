@@ -144,7 +144,7 @@ impl<'a> Settings<'a> {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or("INVALID_INPUT: clientId required")?;
-        let port = config
+        let mut port = config
             .get("redirectPort")
             .or_else(|| config.get("oidcRedirectPort"))
             .map(|value| {
@@ -155,6 +155,13 @@ impl<'a> Settings<'a> {
             })
             .transpose()?
             .unwrap_or(0);
+        if port == 0 {
+            if let Ok(raw) = std::env::var("CITO_OIDC_REDIRECT_PORT") {
+                port = raw.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or(
+                    "INVALID_INPUT: CITO_OIDC_REDIRECT_PORT must be an integer in 1..65535",
+                )?;
+            }
+        }
         let scopes = config
             .get("scopes")
             .or_else(|| config.get("oidcScopes"))
@@ -312,18 +319,8 @@ fn endpoint(value: &Value, key: &str) -> Result<String, String> {
     let raw = value[key]
         .as_str()
         .ok_or_else(|| format!("AUTH_UNAVAILABLE: Missing {key}"))?;
-    let url = url::Url::parse(raw).map_err(|_| format!("AUTH_UNAVAILABLE: Invalid {key}"))?;
-    if !(url.scheme() == "https" || (url.scheme() == "http" && url.host_str() == Some("127.0.0.1")))
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(format!(
-            "AUTH_UNAVAILABLE: {key} must use HTTPS without credentials, query or fragment"
-        ));
-    }
+    crate::plugins::validate_oidc_url(raw, false)
+        .map_err(|error| format!("AUTH_UNAVAILABLE: {key}: {error}"))?;
     Ok(raw.into())
 }
 fn payload(token: &str) -> Result<Value, String> {

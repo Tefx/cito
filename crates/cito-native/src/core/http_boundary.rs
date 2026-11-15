@@ -20,6 +20,17 @@ pub(super) fn validate(
     origin: Option<&str>,
     content_type: Option<&str>,
 ) -> Result<(), (u16, &'static str)> {
+    validate_hub(bound, method, host, origin, content_type, false)
+}
+
+pub(super) fn validate_hub(
+    bound: SocketAddr,
+    method: &str,
+    host: Option<&str>,
+    origin: Option<&str>,
+    content_type: Option<&str>,
+    authenticated: bool,
+) -> Result<(), (u16, &'static str)> {
     let host = host.and_then(authority).ok_or((403, "Forbidden Host"))?;
     let destination_allowed = if bound.ip().is_unspecified() {
         true
@@ -31,7 +42,9 @@ pub(super) fn validate(
             None => false,
         }
     };
-    if !destination_allowed || host.port_or_known_default() != Some(bound.port()) {
+    if !authenticated
+        && (!destination_allowed || host.port_or_known_default() != Some(bound.port()))
+    {
         return Err((403, "Forbidden Host"));
     }
     if let Some(origin) = origin {
@@ -67,6 +80,38 @@ pub(super) fn validate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authenticated_proxy_authorities_preserve_the_browser_boundary() {
+        for bound in ["127.0.0.1:4291", "0.0.0.0:4291", "[::]:4291"] {
+            let bound = bound.parse().unwrap();
+            for host in ["cito.example.com", "cito.example.com:8443", "[::1]"] {
+                assert!(validate_hub(bound, "GET", Some(host), None, None, true).is_ok());
+                assert_eq!(
+                    validate_hub(
+                        bound,
+                        "GET",
+                        Some(host),
+                        Some("http://other.example.com"),
+                        None,
+                        true
+                    )
+                    .unwrap_err()
+                    .0,
+                    403
+                );
+                assert!(validate_hub(bound, "GET", Some(host), None, None, false).is_err());
+            }
+            for bad in [
+                "alice@cito.example.com",
+                "cito.example.com/path",
+                "cito.example.com#x",
+                "",
+            ] {
+                assert!(validate_hub(bound, "GET", Some(bad), None, None, true).is_err());
+            }
+        }
+    }
+
     #[test]
     fn browser_boundary_checks_authority_origin_and_media_type() {
         let bound = "127.0.0.1:4291".parse().unwrap();

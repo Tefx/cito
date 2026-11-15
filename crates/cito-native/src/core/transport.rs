@@ -219,7 +219,7 @@ impl HubClient {
             let fallback = match status {
                 401 => "UNAUTHORIZED",
                 403 => "FORBIDDEN",
-                200 => "NATS_UNAVAILABLE",
+                200 | 500..=599 => "NATS_UNAVAILABLE",
                 _ => "INVALID_INPUT",
             };
             return Err(hub_error(
@@ -663,31 +663,42 @@ impl HubClient {
             .directory_updates
             .lock()
             .map_err(|_| "STATE_ERROR: Directory update lock poisoned")?;
-        let raw = self.rpc("kv_snapshot", &json!({}))?;
-        self.observe_server_clock(&raw);
-        if let Ok(mut observed) = self.observed_at.lock() {
-            *observed = Some(Instant::now());
-        }
-        let items = raw
-            .as_array()
-            .or_else(|| raw["entries"].as_array())
-            .cloned()
-            .unwrap_or_default();
+        let mut cursor: Option<String> = None;
         let mut rows = Vec::new();
-        for item in items {
-            if item.get("listener_id").is_some() {
-                rows.push(item);
-                continue;
-            }
-            if let Ok(data) = STANDARD.decode(string(&item, "value_b64")) {
-                if let Ok(mut row) = serde_json::from_slice::<Value>(&data) {
-                    row["server_now_ms"] = raw["server_now_ms"].clone();
-                    rows.push(row);
+        loop {
+            let raw = self.rpc("kv_snapshot", &json!({"after_key":cursor}))?;
+            self.observe_server_clock(&raw);
+            let items = raw
+                .as_array()
+                .or_else(|| raw["entries"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            for item in items {
+                if item.get("listener_id").is_some() {
+                    rows.push(item);
+                    continue;
                 }
+                let data = STANDARD
+                    .decode(string(&item, "value_b64"))
+                    .map_err(|e| e.to_string())?;
+                let mut row: Value = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                row["server_now_ms"] = raw["server_now_ms"].clone();
+                rows.push(row);
+            }
+            let next = raw["next_cursor"].as_str().map(str::to_owned);
+            if next.is_some() && next <= cursor {
+                return Err("NATS_UNAVAILABLE: Snapshot cursor did not advance".into());
+            }
+            cursor = next;
+            if cursor.is_none() {
+                break;
             }
         }
         if let Ok(mut cache) = self.directory_cache.lock() {
             *cache = rows.clone();
+        }
+        if let Ok(mut observed) = self.observed_at.lock() {
+            *observed = Some(Instant::now());
         }
         Ok(rows)
     }

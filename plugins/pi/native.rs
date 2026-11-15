@@ -123,6 +123,14 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
         return Ok(true);
     }
     let command = process_command(pid)?;
+    if has_harness_ancestor(pid, |ancestor, command| {
+        matches_process(command)
+            || state(req)
+                .join(format!("sockets/pi-pid-{ancestor}.sock"))
+                .exists()
+    }) {
+        return Ok(false);
+    }
     if !process_has_tty(pid)
         && env_value(req, "CITO_PI_ALLOW_HEADLESS_DISCOVERY").as_deref() != Some("1")
     {
@@ -149,7 +157,10 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     if inspection["configured"] != true {
         return Ok(());
     }
-    let mut processes: Vec<u32> = user_processes()?
+    let all_processes = user_processes()?;
+    let mut processes: Vec<u32> = all_processes
+        .iter()
+        .copied()
         .into_iter()
         .filter(|p| {
             !out.iter().any(|(pid, _)| pid == p)
@@ -191,7 +202,13 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .max_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         let mut v = json!({"session_id":format!("pid-{p}"),"session_name":basename,"cwd":cwd});
-        if let Some((modified, path)) = latest {
+        // CWD alone cannot attribute a transcript when another live process shares it.
+        let shared_cwd = all_processes.iter().any(|other| {
+            *other != p
+                && process_command(*other).is_ok_and(|cmd| matches_process(&cmd))
+                && process_cwd(*other).is_ok_and(|path| path == cwd)
+        });
+        if let Some((modified, path)) = latest.filter(|_| !shared_cwd) {
             use std::io::BufRead;
             let projection = cached_file_projection(req, "pi/transcript-cache", &path, || {
                 let mut value =
@@ -318,6 +335,9 @@ fn candidates(req: &Value) -> Result<Candidates> {
                         return Ok((vec![(p, v)], true, None));
                     }
                 }
+                if process_command(p).is_ok_and(|command| matches_process(&command)) {
+                    break;
+                }
                 let Some(parent) = process_parent(p) else {
                     break;
                 };
@@ -431,7 +451,9 @@ pub fn handle(input: &Value) -> Result<Value> {
                 return Ok(error(
                     if had_live && matches.is_empty() {
                         "INVALID_INPUT"
-                    } else if explicit_pid(req).ok().flatten().is_some() {
+                    } else if pid(req)
+                        .is_some_and(|p| process_command(p).is_ok_and(|cmd| matches_process(&cmd)))
+                    {
                         "PI_BRIDGE_UNAVAILABLE"
                     } else {
                         "BINDING_REQUIRED"
