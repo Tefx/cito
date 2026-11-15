@@ -15,9 +15,10 @@
 
 <p align="center">
   <a href="https://tefx.github.io/cito/">Website</a> ·
-  <a href="https://tefx.github.io/cito/docs/guide.html">Getting Started Guide</a> ·
-  <a href="https://tefx.github.io/cito/docs/plugins.html">Subprocess Plugins</a> ·
-  <a href="https://tefx.github.io/cito/docs/architecture.html">Architecture &amp; Protocol</a> ·
+  <a href="https://tefx.github.io/cito/docs/guide.html">User Guide</a> ·
+  <a href="https://tefx.github.io/cito/docs/hosting.html">Host a Hub</a> ·
+  <a href="https://tefx.github.io/cito/docs/plugins.html">Plugins</a> ·
+  <a href="https://tefx.github.io/cito/docs/architecture.html">Reference</a> ·
   <a href="https://github.com/Tefx/cito/releases/latest/download/Cito-macos-arm64.zip">Download Cito.app</a>
 </p>
 
@@ -86,17 +87,17 @@ Out of the box (without `~/.cito/config.json`), Cito runs an in-process **`local
 Open **`Settings…` (`⌘,`)** from the Cito menu bar dropdown to configure:
 
 - **Tab 1 — `Agent Apps`**: One-click **`Set Up`**, **`Check & Repair`**, and **`Disconnect`** for installed coding harnesses (`Pi Coding Agent`, `Codex`, and experimental `Claude Code`).
-- **Tab 2 — `Human Channels`**: Select the target Hub. The compact **Inbox Control Bar** shows **`You (@<user>)`**, active delivery paths, **`Pause Inbox`** / **`Resume Inbox`**, and **`Self`** / **`Team`** visibility on multi-user Hubs. Pause applies across attached Macs and external channels while retaining their bindings. External channels can deliver alerts when this Mac is offline, provided the selected Hub and its channel service remain online elsewhere. Channel cards below it have two strata:
-  1. **`1. Shared Hub Service`**: Enter the shared credential (such as a Telegram Bot Token) and click **`Save Gateway Token`**. The active gateway collapses; when the personal account is paired too, its header becomes **`Hub Service`** without a duplicate readiness badge. **`Change Token…`** reopens it and **`Clear Token`** removes only the service credential and preserves personal bindings. A managed Hub can provide the gateway for you.
-  2. **`2. Your Personal Account (@<user>)`**: Once the gateway is ready, click **`Pair Account…`** and follow the displayed instruction, or enter your personal address, then use **`Send Test`** and **`Save`**. Paired accounts collapse to a summary; **`Edit…`** reveals the Chat ID and **`Save`** controls.
+- **Tab 2 — `Human Channels`**: Select the target Hub. The compact **Inbox Control Bar** shows **`You (@<user>)`**, active delivery paths, **`Pause Inbox`** / **`Resume Inbox`**, and **`Self`** / **`Team`** visibility on multi-user Hubs. Pause applies across attached Macs and external channels while retaining their bindings. External channels can deliver alerts when this Mac is offline, provided the selected Hub and its channel service remain online elsewhere. Channel controls below it depend on your Hub role and service readiness:
+  1. **`Shared Hub Service`** (administrators only): Enter the shared credential (such as a Telegram Bot Token) and click **`Save Gateway Token`**. The active gateway collapses; when the personal account is paired too, its header becomes **`Hub Service`** without a duplicate readiness badge. **`Change Token…`** reopens it and **`Clear Token`** removes only the service credential and preserves personal bindings. A managed Hub provides the gateway for you; ask its administrator if no external channel is enabled.
+  2. **`Your Personal Account (@<user>)`**: Once the gateway is ready, click **`Pair Account…`** and follow the displayed instruction, or enter your personal address, then use **`Send Test`** and **`Save`**. Paired accounts collapse to a summary; **`Edit…`** reveals the Chat ID and **`Save`** controls.
 - **Tab 3 — `Hubs & Network`**: **`Share This Mac as a Hub`** starts with **`Start Sharing`** and a passive status indicator; enable it to reveal the endpoint, port (`:4291`), authentication controls, and **`Copy Invite Code`**. Use **`Join from Clipboard`** / **`Add Hub…`** to join a LAN, Tailscale, or Team OIDC hub.
 - **Window Footer**: Toggle **`Start Cito at Login`** or click **`Disconnect Agent Apps…`**, then confirm with **`Disconnect Apps`** or choose **`Cancel`**. Disconnecting stops agent listeners and removes app registrations while keeping Cito running and staged files available. Selecting **`Also delete local data and Hub settings`** additionally stops human listeners, clears local activity and agent listener records, and resets the configured Hubs to the default local Hub. CLI `cito setup --uninstall [--purge-data]` remains available.
 - **Guided setup and repair**: Follow the inline steps in Agent Apps and Human Channels, then use Hubs & Network when you want to share or join a Hub. App cards show reload/restart instructions; **`Repair`** restores missing CLI shims, staged plugins, and individual plugin assets. Cito rediscovers configured built-in integrations through the bundled distribution when staged files or manifests are missing, including after restarting from an installed shim. Daemon startup automatically restores bundled plugin files after an upgrade or reinstall. If staged files are deleted while Cito is running, **`Repair`** restores only the selected app and the shared CLI shims.
-- **Channel lifecycle**: Saved secret fields stay blank with a saved-value placeholder. Leave them blank to retain credentials; type a new value to replace them. **`Send Test`** uses unsaved candidate values without saving them. Schema lookup and connection failures also appear as test results. Test details survive recovery, while newer live health warnings and errors take precedence. A test result received during a warning or error stays visible until the next Settings health update. **`Pause <channel>`** retains that channel's account binding, **`Unpair`** removes it, and **`Clear Token`** removes only service credentials. Using **Pause Inbox** in **Settings → Human Channels** blocks delivery across all attached devices and channels without altering their bindings. Pairing commands expire after ten minutes; starting another pairing, cancelling, or unpairing invalidates earlier commands. Pairing preserves saved account fields and activates the channel only when all required service and account fields are configured.
+- **Channel lifecycle**: Saved secret fields stay blank with a saved-value placeholder. Leave them blank to retain credentials; type a new value to replace them. **`Send Test`** uses unsaved candidate values without saving them. Check the channel status for connection errors before retrying delivery. **`Pause <channel>`** retains that channel's account binding, **`Unpair`** removes it, and **`Clear Token`** removes only service credentials. Using **Pause Inbox** in **Settings → Human Channels** blocks delivery across all attached devices and channels without altering their bindings. Pairing commands expire after ten minutes; starting another pairing, cancelling, or unpairing invalidates earlier commands. Pairing preserves saved account fields and activates the channel only when all required service and account fields are configured.
 - **Hub names and invites**: Leave **`Hub Name (Optional)`** blank to derive a name from the URL, or enter a name such as `Office Mac` to save it as `office-mac`. Automatically derived names receive a numeric suffix when needed; an explicit name cannot replace a different Hub. Private IPv4 addresses derive `lan`, Tailscale addresses derive `tailscale`, and other IP literals derive `remote`; hostnames derive their first slug label. Shared endpoints prefer an online Tailscale MagicDNS name when enabled, then a Tailscale IPv4 address, then the LAN address. When both are available, use **`Tailscale`** / **`Local IP`** to choose the address displayed and copied. `CITO_TAILSCALE_HOST` overrides discovery; `CITO_DISABLE_TAILSCALE_PROBE=1` disables the Tailscale CLI probe.
-- **Network-scoped menu**: Select a Hub in the top header to manage that network's agent listeners, remote hosts, and available sessions. The menu starts with **LISTENING SESSIONS**; inbox controls live in Settings. A paused inbox adds only **`Inbox paused · Resume in Settings…`**, opening Human Channels for that Hub. The selection persists while the network is offline. **`Auto-Listen`** enrolls eligible, reload-ready sessions on that Hub using its default visibility; it defaults to off (`hubs.<name>.autoListen` in `config.json`). Turning it on clears previous per-session stops and connects eligible sessions after fresh discovery. Turning it off stops unpinned, auto-listened sessions while keeping pinned sessions active. **`+ Listen`** attaches a session as pinned. The **Pin** control appears when Auto-Listen is on or the session is auto-listened: an outline pin follows Auto-Listen, and a filled blue pin stays listening when Auto-Listen is turned off. Codex Auto-Listen enrolls sessions with qualifying `user_turn` or `unknown` activity within 15 minutes (`recentWindowMs: 900000`) and retires unpinned sessions after 60 minutes idle (`idleTimeoutMs: 3600000`). `pidBound` controls whether an OS PID is required independently of `idleTimeoutMs`; bundled Pi and Claude set the latter to `null`. Pinning does not keep a closed or disconnected app listening. **Stop** detaches only that session and keeps it stopped without changing Hub Auto-Listen. **Stop All** stops all agent sessions on the selected Hub and disables Auto-Listen, preserving human delivery. Reload blockers receive an inline `/reload` explanation; PID-bound recent-only groups start collapsed under Auto-Listen and remain expandable; desktop-backed plugins with `pidBound: false` remain expanded. Group labels distinguish open, recent, and mixed sessions, with collapse state kept separately per Hub. More than four active cards scroll in a bounded list. The menu bar number shows unread messages only.
+- **Network-scoped menu**: Select a Hub in the top header to manage that network's agent listeners, remote hosts, and available sessions. The menu starts with **LISTENING SESSIONS**; inbox controls live in Settings. A paused inbox adds only **`Inbox paused · Resume in Settings…`**, opening Human Channels for that Hub. The selection persists while the network is offline. **`Auto-Listen`** enrolls eligible, reload-ready sessions on that Hub using its default visibility; it defaults to off (`hubs.<name>.autoListen` in `config.json`). Turning it on clears previous per-session stops and connects eligible sessions after fresh discovery. Turning it off stops unpinned, auto-listened sessions while keeping pinned sessions active. **`+ Listen`** attaches a session as pinned. The **Pin** control appears when Auto-Listen is on or the session is auto-listened: an outline pin follows Auto-Listen, and a filled blue pin stays listening when Auto-Listen is turned off. Codex Auto-Listen enrolls sessions with qualifying `user_turn` or `unknown` activity within 15 minutes and retires unpinned sessions after 60 minutes idle. Pi and Claude remain enrolled while their interactive sessions stay open. Pinning does not keep a closed or disconnected app listening. **Stop** detaches only that session and keeps it stopped without changing Hub Auto-Listen. **Stop All** stops all agent sessions on the selected Hub and disables Auto-Listen, preserving human delivery. Open sessions and sessions needing `/reload` remain expanded for setup guidance. Closed transcript-only sessions appear as recent groups, collapsed by default under Auto-Listen and expandable per Hub. More than four active cards scroll in a bounded list. The menu bar number shows unread messages only.
 - **Visibility and personal notifications**: Trusted Hubs (`none`) default new registrations to Team visibility (`workspace`); token and Team Sign-In (OIDC) Hubs default to Self visibility (`self`). Self scope belongs to your principal across all your Macs, so your devices can communicate without exposing sessions to other users. Auto-Listen follows these defaults and preserves existing scope. The **`Self`** / **`Team`** control appears for OIDC or when other users share the Hub, with tooltips explaining who can discover and message the session. This Mac attaches automatically on enabled, authenticated Hubs unless its device attachment was explicitly stopped. **Settings → Human Channels → Pause Inbox/Resume Inbox** changes Hub-wide inbox policy; it preserves description, visibility, and attachments, including devices on other Macs. The Inbox Control Bar remains available when this Mac has no local attachment.
-- **Hub lifecycle**: Edit hub settings inline without re-entering saved secrets. **`Disable`** hides a Hub from operational views and Human Channels; it remains in Hubs & Network with **`Enable`**. Disconnected enabled hubs remain in the menu with **`Connect`**; OIDC **`Switch Account`** opens the account picker. LAN sharing supports port changes and token-auth controls, retaining the previous listener if a new port cannot bind. Message sends and port saves track their own acknowledgements, so delayed failures from an earlier attempt cannot settle a retry. Hub saves preserve newer form edits; after the matching acknowledgement, further changes to the same named Hub use explicit edit mode.
+- **Hub lifecycle**: Edit hub settings inline without re-entering saved secrets. **`Disable`** hides a Hub from operational views and Human Channels; it remains in Hubs & Network with **`Enable`**. Disconnected enabled hubs remain in the menu with **`Connect`**; OIDC **`Switch Account`** opens the account picker. LAN sharing supports port changes and token-auth controls, retaining the previous listener if a new port cannot bind. Failed sends and configuration saves show an error without discarding newer form edits.
 
 All editable controls in Settings, Directory search, and the composer support the native **Edit** menu: `⌘V` Paste, `⌘A` Select All, `⌘C` Copy, `⌘X` Cut, `⌘Z` Undo, and `⇧⌘Z` Redo. Password fields allow paste, selection, undo, and redo while blocking Copy and Cut. Active field editors remain attached during editing.
 
@@ -122,7 +123,7 @@ Or edit `~/.cito/config.json` directly:
     "port": 4291,
     "bind": "0.0.0.0",
     "auth_mode": "token",
-    "token": ""
+    "token": "<strong-secret-token>"
   },
   "hubs": {
     "work": {
@@ -130,7 +131,7 @@ Or edit `~/.cito/config.json` directly:
       "authMode": "oidc",
       "issuer": "https://id.example.com",
       "clientId": "<your-oidc-client-id>",
-      "redirectPort": 18768,
+      "redirectPort": 8400,
       "scopes": ["openid", "profile", "email"],
       "defaultScope": "self",
       "enabled": true
@@ -167,9 +168,10 @@ The installed Pi package registers `/Users/<you>/.cito/bin/cito-mcp`, live sessi
 [mcp_servers.cito]
 command = "/Users/<you>/.cito/bin/cito-mcp"
 args = []
+enabled = true
 ```
 
-Codex Auto-Listen enrolls sessions with `user_turn` or `unknown` activity in the last 15 minutes (`recentWindowMs: 900000`); unpinned sessions retire after 60 minutes idle (`idleTimeoutMs: 3600000`). Pinned sessions remain active until the app closes or disconnects.
+Codex Auto-Listen enrolls sessions active in the last 15 minutes; unpinned sessions retire after 60 minutes idle. Pinned sessions remain active until the app closes or disconnects.
 
 ### Claude Code (`~/.claude/settings.json`)
 
@@ -243,24 +245,71 @@ Codex Auto-Listen enrolls sessions with `user_turn` or `unknown` activity in the
 
 ## Environment Variables & Optional Auto-Start
 
-| Variable | Default / Purpose |
-| --- | --- |
-| `CITO_STATE_DIR` | `~/.cito` (SQLite state, local Hub database, OIDC token cache, Unix sockets, CLI shims, and installed plugins). |
-| `CITO_CONFIG_PATH` | `~/.cito/config.json` (multi-hub configuration path). |
-| `CITO_HUB` | Overrides `default_hub` from `config.json`. |
-| `CITO_USER` / `CITO_HOST_NAME` | Overrides the default local username or host display name. |
-| `CITO_DAEMON_PORT` | `4290` (loopback HTTP MCP & `/health` port). |
-| `CITO_CLAUDE_CHANNEL` | `0`; set to `1` in Claude Code's MCP server `env` to enable the Claude wake channel. |
-| `CITO_PI_HOME` / `CITO_CODEX_HOME` / `CITO_CLAUDE_HOME` | `~/.pi/agent` / `~/.codex` / `~/.claude` (local harness configuration directories). |
-| `CITO_PLUGIN_PATH` | Colon-separated plugin-root directories, searched left-to-right before user overrides and bundled defaults. |
+These are production environment controls read by the native runtime, macOS UI, or bundled plugins. CLI flags override their standalone Hub counterparts. Client settings normally live in `config.json`; variables must be present in the process that reads them (restarting an existing daemon is necessary to change its environment). The tables include local developer overrides; leave diagnostic controls unset for normal use.
 
-**Optional Login LaunchAgent**: Enable **`Start Cito at Login`** in **`Settings…` (`⌘,`)** (or run `cito setup --login-item`) so the menu bar transceiver icon runs immediately when you log into macOS.
+### Hub Server
+
+| Variable | Default / behavior |
+| --- | --- |
+| `CITO_HUB_PORT` | `4291`; standalone `--port` (`0` requests an ephemeral port). |
+| `CITO_HUB_BIND` | `127.0.0.1` with `none`, `0.0.0.0` with `token`/`oidc`; standalone `--bind`, an IP address. |
+| `CITO_HUB_DATA_DIR` | `~/.cito/hub`; standalone `--data-dir`. Docker uses `/data`. |
+| `CITO_AUTH_MODE` | `none`; standalone `--auth`: `none`, `token`, or `oidc`. Client config validation also recognizes this variable; configure per-Hub client authentication in `config.json`. |
+| `CITO_HUB_TOKEN` | Required shared bearer credential in token mode; standalone `--token`. |
+| `CITO_OIDC_ISSUER` | Required HTTPS issuer in OIDC mode; standalone `--issuer`. |
+| `CITO_OIDC_CLIENT_ID` | Required public client ID in OIDC mode; standalone `--client-id`. |
+| `CITO_OIDC_ADMIN_USERS` | Empty by default; comma-separated verified owner usernames or OIDC subjects allowed to administer shared channel fields. |
+| `CITO_JWKS_COOLDOWN_MS` | `60000`; minimum cooldown between forced JWKS refreshes for unknown signing keys. |
+| `CITO_PLUGIN_<ID>_<KEY>` | No default; seeds declared Hub-scoped channel fields at startup, including `CITO_PLUGIN_TELEGRAM_BOT_TOKEN`. |
+
+### Client & Daemon
+
+| Variable | Default / behavior |
+| --- | --- |
+| `CITO_STATE_DIR` | `~/.cito`; local state, sockets, staged runtime, and plugins. |
+| `CITO_CONFIG_PATH` | `<state-dir>/config.json`; explicit multi-Hub configuration path. |
+| `CITO_HUB` | Overrides the configured default Hub name (otherwise `local`). |
+| `CITO_HUB_URL` | Overrides the active Hub URL; use `local://`, `http://`, or `https://`. |
+| `CITO_NATS_URL` | Compatibility alias for `CITO_HUB_URL`, used only when the latter is absent; no NATS broker is involved. |
+| `CITO_USER` | Local username override; otherwise configured user or OS username. OIDC identity comes from verified tokens. |
+| `CITO_HOST_NAME` | Overrides the host display name; otherwise the system hostname. |
+| `CITO_DAEMON_PORT` | `4290`; loopback daemon HTTP port, overrides `daemonPort` in config. |
+| `CITO_OIDC_REDIRECT_PORT` | Loopback callback fallback when a Hub's `redirectPort` is unset/zero; integer `1..65535`. Otherwise a configured port wins, or an ephemeral port is chosen. |
+| `CITO_BROWSER_BIN` | Browser opener used for OIDC login; platform default (`open` on macOS). |
+| `CITO_TAILSCALE_HOST` | Overrides advertised Tailscale host discovery for Hub invitations. |
+| `CITO_DISABLE_TAILSCALE_PROBE` | Set `1` to skip the Tailscale CLI probe. |
+| `CITO_DISABLE_UI` | Set `1` to suppress automatic macOS companion launch. |
+| `CITO_UI_BINARY` | Overrides the discovered macOS companion executable path. |
+| `CITO_UI_HEADLESS` | Set `1` for headless UI diagnostics and a private pasteboard; also disables Tailscale probing. Leave unset for everyday use. |
+| `CITO_CODESIGN_IDENTITY` | Signing identity for `cito setup --build-app`; falls back to `APPLE_SIGNING_IDENTITY`, then ad-hoc signing for local development. |
+
+### Agent & Channel Plugins
+
+| Variable | Default / behavior |
+| --- | --- |
+| `CITO_PLUGIN_PATH` | Colon-separated plugin-root search directories, highest priority, left-to-right. |
+| `CITO_PLUGIN_DIR` | Legacy user plugin-root override, below `CITO_PLUGIN_PATH`. |
+| `CITO_BUILTIN_PLUGINS_DIR` | Overrides bundled plugin-root discovery; Docker sets `/app/plugins`. |
+| `CITO_PI_HOME` | `~/.pi/agent`; Pi configuration and session root. |
+| `CITO_CODEX_HOME` | `~/.codex`; Codex configuration and thread database root. |
+| `CITO_CLAUDE_HOME` | `~/.claude`; Claude configuration and transcript root. |
+| `CITO_CODEX_BIN` | Overrides Codex executable discovery for wake delivery. |
+| `CITO_OPEN_BIN` | Overrides `/usr/bin/open` for the Codex macOS open action. |
+| `CITO_CLAUDE_CHANNEL` | Set `1` in Claude's MCP environment to enable its streaming wake sidecar; setup writes this automatically. |
+| `CITO_ENDPOINT_PID` | Endpoint attribution hint set by MCP launch shims; live ancestry checks determine the enclosing harness. Do not set a global unrelated PID. |
+| `CITO_PI_PROCESS_DISCOVERY` | `0` disables process-only hints; `1` permits process-only resolution when the bridge is not required. Normal discovery still prefers live bridges. |
+| `CITO_PI_REQUIRE_BRIDGE` | Set `1` to require a live Pi bridge even with process-only resolution enabled. |
+| `CITO_PI_ALLOW_HEADLESS_DISCOVERY` | Set `1` only in controlled synthetic fixtures to bypass the interactive-TTY discovery gate; leave unset for normal sessions. |
+
+For plugin protocol fields and operation budgets, see [Plugin Authoring](https://tefx.github.io/cito/docs/plugins.html). For Node identity, signaling, and CLI/MCP interfaces, see [Architecture & Reference](https://tefx.github.io/cito/docs/architecture.html).
+
+**Optional Login LaunchAgent**: Enable **Start Cito at Login** in **Settings…** (`⌘,`) or run `cito setup --login-item`.
 
 ---
 
 ## Custom Agent & Human Channel Plugins (`~/.cito/plugins/`)
 
-Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and external Human Channel plugins (`telegram` [Telegram Bot API]). The native macOS companion is a built-in app helper, separate from plugins. To integrate another coding agent (`kind: "agent-harness"`) or external human messaging channel (`kind: "human-channel"`), create `~/.cito/plugins/<id>/plugin.json` and provide an executable that exchanges NDJSON requests and responses over `stdin`/`stdout`. Pairing manifests may set `openUrlLabel` for the returned `pairing_url` link and `manualDisclosure: true` to tuck manual account fields behind a disclosure. The UI auto-copies the correlated pairing command; **Cancel** invalidates the pending code. See the **[Subprocess Plugin Guide](https://tefx.github.io/cito/docs/plugins.html)** for protocol details and examples:
+Cito ships built-in Agent App plugins (`pi` [Stable], `codex` [Stable], `claude` [Experimental]) and external Human Channel plugins (`telegram` [Telegram Bot API]). The native macOS companion is a built-in app helper, separate from plugins. To integrate another coding agent (`kind: "agent-harness"`) or external human messaging channel (`kind: "human-channel"`), create `~/.cito/plugins/<id>/plugin.json` and provide an executable that exchanges NDJSON requests and responses over `stdin`/`stdout`. The pairing card provides a link to the service and can collapse manual account fields. The UI auto-copies the correlated pairing command; **Cancel** invalidates the pending code. See the **[Subprocess Plugin Guide](https://tefx.github.io/cito/docs/plugins.html)** for protocol details and examples:
 
 Discovery chooses one plugin per ID in this order, highest priority first:
 
@@ -287,10 +336,22 @@ Both Homebrew command links resolve through the App launcher. Invoking `cito-mcp
 
 ---
 
-## Documentation, Server Deployment & Architecture
+## Documentation by Audience
 
-- **Product Website & Guides**: **[https://tefx.github.io/cito/](https://tefx.github.io/cito/)** (**[Getting Started](https://tefx.github.io/cito/docs/guide.html)** · **[Subprocess Plugins](https://tefx.github.io/cito/docs/plugins.html)** · **[Architecture](https://tefx.github.io/cito/docs/architecture.html)**)
-- **Hub Server Deployment (`cito hub`)**: See **[`deploy/hub/README.md`](deploy/hub/README.md)** for standalone CLI and single-container Docker Compose deployment across `none`, `token`, and `oidc` authentication modes.
+- **For Users**: [User Guide](https://tefx.github.io/cito/docs/guide.html) — installation, one-click Agent Apps setup, daily Menu Bar / Directory / Activity workflows, personal pairing, and joining a Hub.
+- **For Hub Operators**: [Host a Hub](https://tefx.github.io/cito/docs/hosting.html) — standalone server, Docker, Linux services, authentication, channels, and backups.
+- **For Developers**: [Plugin Authoring](https://tefx.github.io/cito/docs/plugins.html) and [Architecture & Reference](https://tefx.github.io/cito/docs/architecture.html).
+
+### Host a Hub
+
+Run `cito hub --bind 127.0.0.1 --auth token --token '<strong-secret-token>' --data-dir /var/lib/cito-hub` for an authenticated standalone service, or use `docker compose -f deploy/hub/docker-compose.yml up -d --build` with `CITO_AUTH_MODE=token` and `CITO_HUB_TOKEN` set. The [deployment guide](deploy/hub/README.md) includes a Linux `systemd` unit and optional Caddy (`flush_interval -1`) and Nginx (`proxy_buffering off`) examples. Every proxy must stream SSE without buffering and preserve `Authorization`, `Content-Type`, and the public `Host`; publish the Hub on `:4291`, never the loopback daemon on `:4290`.
+
+For OIDC PKCE, register a public client and a loopback callback such as `http://127.0.0.1:8400/callback`, configure `redirectPort: 8400` on clients, and set `CITO_OIDC_ADMIN_USERS` on the server for shared channel administration. Create a Telegram bot with `@BotFather`, seed its shared credential with `CITO_PLUGIN_TELEGRAM_BOT_TOKEN` (the `CITO_PLUGIN_<ID>_<KEY>` startup mechanism), then let each user pair a private chat. One Bot Token permits one poller; a duplicate produces `409 Conflict`. Back up SQLite WAL databases with SQLite's backup API, or stop the Hub before snapshotting the whole data directory/volume; restore only while stopped and never mix a snapshot with stale WAL files. See the [operator guide](https://tefx.github.io/cito/docs/hosting.html) for complete procedures.
+
+### Repository References
+
+- **Product Website & Guides**: **[https://tefx.github.io/cito/](https://tefx.github.io/cito/)** (**[User Guide](https://tefx.github.io/cito/docs/guide.html)** · **[Host a Hub](https://tefx.github.io/cito/docs/hosting.html)** · **[Plugins](https://tefx.github.io/cito/docs/plugins.html)** · **[Reference](https://tefx.github.io/cito/docs/architecture.html)**)
+- **Hub Server Deployment (`cito hub`)**: See **[`deploy/hub/README.md`](deploy/hub/README.md)** for standalone CLI, Docker Compose, Linux systemd, reverse-proxy SSE/Host requirements, OIDC PKCE, Telegram service setup, SQLite WAL backup/restore, and the full environment reference.
 - **Architecture & Protocol Specification**: See **[`docs/DESIGN.md`](docs/DESIGN.md)**.
 - **CI, Signing & Releases**: See **[`docs/RELEASING.md`](docs/RELEASING.md)** for main-based development, Developer ID credentials, version tags, and automatic Homebrew updates.
 

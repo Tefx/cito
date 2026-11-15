@@ -597,6 +597,44 @@ code, pre {
   color: var(--text-primary);
 }
 
+/* Keyboard entry point stays visible above the sticky header when focused. */
+.skip-link {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 100;
+  transform: translateY(-200%);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 2px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 1rem;
+}
+.skip-link:focus { transform: translateY(0); }
+#main-content, .docs-content [id] { scroll-margin-top: 6rem; }
+.docs-table-wrap { overflow-x: auto; max-width: 100%; }
+.docs-table-wrap .docs-table { min-width: 32rem; }
+.docs-table td:first-child code { white-space: nowrap; }
+.docs-table-wrap:focus-visible { outline: 2px solid var(--accent-primary); }
+.code-block { min-width: 0; max-width: 100%; }
+.code-copy {
+  display: block;
+  margin-left: auto;
+  margin-bottom: 0.35rem;
+  min-height: 2.75rem;
+  padding: 0.45rem 0.85rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.code-copy:hover { border-color: var(--accent-primary); }
+.code-copy:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.code-copy:disabled { cursor: wait; }
+
 /* Technical Documentation Pages Layout (site/docs/*.html) */
 .docs-shell {
   max-width: var(--docs-max);
@@ -748,6 +786,7 @@ code, pre {
 }
 
 @media (max-width: 640px) {
+  #main-content, .docs-content [id] { scroll-margin-top: 12rem; }
   .nav-inner { flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 1rem; }
   .nav-links { width: 100%; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: 0.85rem; }
   .nav-links a { min-height: 2.75rem; display: inline-flex; align-items: center; }
@@ -760,6 +799,14 @@ code, pre {
   .screenshot-stage-viewport { padding: calc(0.85rem * 460 / 560) 0.85rem; }
   .step-tab,
   .preview-tabs button { min-height: 2.75rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @media (max-width: 52rem) {
