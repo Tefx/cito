@@ -13696,7 +13696,7 @@ phases:
   - id: v47.ui
     name: V47 macOS Swift UI Settlement, Menu Rename/Tracking, Accessibility & Keyboard
       Polish
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all Swift UI settlement,\
@@ -13741,6 +13741,8 @@ phases:
     depends_on:
     - v47.core
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-15T14:55:34.002243Z'
   - id: v47.docs
     name: V47 README, Website Copy Alignment & Structural Site Test Calibration
     status: done
