@@ -13398,7 +13398,7 @@ phases:
     name: 'V46 Full Contract-and-Simplicity Audit, §8.1 Full-Workspace Verification,
       Empirical Idle CPU/Wakeup Check & Cito.app Rebuild/Restart [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
@@ -13443,3 +13443,5 @@ phases:
     depends_on:
     - v46.ui
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-15T12:37:42.856738Z'
