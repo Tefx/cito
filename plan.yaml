@@ -13186,7 +13186,7 @@ phases:
   - id: v46.core
     name: V46 Rust Event-Driven Sleep, Mutation Wakeups, Throttled Pruning, Demand-Gated
       Discovery/Projections & Native OS Queries
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/**\n\
       \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
@@ -13281,6 +13281,38 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-15T10:42:11.597395Z'
+    done_at: '2026-11-15T12:17:24.132427+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 45450ea41808414627d99e87585598120986a969 (rebased and merged cleanly
+      to main; candidate ref refs/vectl/candidates/v46.core retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed (0 compiler
+      warnings)
+
+      - Run: cargo test -p cito-native --test native plugins:: -> 30 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native daemon:: -> 61 passed, 0 failed
+
+      - Run: cargo test -p cito-native --lib -> 233 passed, 1 failed (out-of-scope
+      crates/cito-native/tests/hub/cases.rs:3213 asserting physical deletion after
+      ~80 ms vs required 60s maintenance throttle — queued for v46.review), 4 ignored
+
+      - §1.2 lexical check on crates/cito-native/src/core/ -> 0 matches
+
+
+      UI Seam Note for v46.ui:
+
+      - Companion.swift / MenuSurface.swift must send `open_menu` / `close_menu` to
+      activate menu-driven discovery and full projections.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§2.2, §3.3, §4.2, §4.3, §8.1–§8.2 @ 7007410)'
   - id: v46.ui
     name: V46 macOS Swift Lazy UI Rendering, StatusItem Icon Caching, Window-Active
       Vibrancy & Idle Hover Silence
