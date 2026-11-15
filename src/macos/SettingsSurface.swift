@@ -121,11 +121,15 @@ extension Companion {
         if let entry = pendingChannelValues[request], entry.hub == hub, entry.channelId == pending.target,
            ["channel_save", "save_hub_service"].contains(operation) {
             pendingChannelValues.removeValue(forKey: request)
-            // A committed receipt acknowledges submitted values only. Preserve
-            // subsequent edits and all drafts on a replacement authority.
+            // Retire only submitted secrets, which settings never echo. Keep
+            // non-secret drafts until fresh settings reconcile their values,
+            // and preserve all drafts on a replacement authority.
             if frame.committed == true && frame.authority_changed != true {
-                for (field, sent) in entry.values where channelUiStates[key]?.drafts[field] == sent {
-                    channelUiStates[key]?.drafts.removeValue(forKey: field)
+                let fields = channelSettingsByHub[hub]?.first { $0.id == pending.target }?.fields ?? []
+                for field in fields where field.type == "secret" {
+                    if let sent = entry.values[field.key], channelUiStates[key]?.drafts[field.key] == sent {
+                        channelUiStates[key]?.drafts.removeValue(forKey: field.key)
+                    }
                 }
             }
         }

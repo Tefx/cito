@@ -116,27 +116,25 @@ fn payload_free_committed_save_settles_exact_request_and_preserves_newer_drafts(
                 node(&settled, "settings_items", "settings_error_label")["text"],
                 "Saved; settings refresh failed."
             );
-            if newer_draft || authority_changed {
-                let expected = if newer_draft {
-                    "newer draft"
-                } else {
-                    "submitted"
-                };
-                assert_eq!(
-                    node(&settled, "settings_items", "channel_field:channel:account")["text"],
-                    expected
-                );
-                control(&f, p, "save_channel:channel");
-                inspect(&f, p);
-                assert_eq!(
-                    f.frames(p)
-                        .into_iter()
-                        .rev()
-                        .find(|a| a["op"] == "channel_save")
-                        .unwrap()["values"]["account"],
-                    expected
-                );
-            }
+            let expected = if newer_draft {
+                "newer draft"
+            } else {
+                "submitted"
+            };
+            assert_eq!(
+                node(&settled, "settings_items", "channel_field:channel:account")["text"],
+                expected
+            );
+            control(&f, p, "save_channel:channel");
+            inspect(&f, p);
+            assert_eq!(
+                f.frames(p)
+                    .into_iter()
+                    .rev()
+                    .find(|a| a["op"] == "channel_save")
+                    .unwrap()["values"]["account"],
+                expected
+            );
         }
     }
 }
