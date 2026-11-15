@@ -13316,7 +13316,7 @@ phases:
   - id: v46.ui
     name: V46 macOS Swift Lazy UI Rendering, StatusItem Icon Caching, Window-Active
       Vibrancy & Idle Hover Silence
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all Swift lazy rendering\
@@ -13368,6 +13368,8 @@ phases:
     depends_on:
     - v46.core
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-15T12:17:29.825776Z'
   - id: v46.review
     name: 'V46 Full Contract-and-Simplicity Audit, §8.1 Full-Workspace Verification,
       Empirical Idle CPU/Wakeup Check & Cito.app Rebuild/Restart [REQUIRES_SKILL:
