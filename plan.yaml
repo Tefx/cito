@@ -13509,7 +13509,7 @@ phases:
 - id: v47
   name: V47 Residual Security, Correctness, UI & Docs Remediation + Zero-New-Issues
     Convergence (v0.21.3)
-  status: pending
+  status: in_progress
   gate: 'All binding v47 requirements in docs/DESIGN.md (§2.2, §3.2, §3.3, §3.4, §3.5,
     §4.1, §4.2, §4.3, §5.1, §5.2, §7.2, §8.1, §8.2 @ e1ec40f) pass; iterative multi-slice
     [REQUIRES_SKILL: contract-and-simplicity] review (pathway-auditor, structural-auditor,
@@ -13576,7 +13576,7 @@ phases:
   steps:
   - id: v47.core
     name: V47 Rust Core, Hub, Daemon, Plugin & Packaging Security/Correctness Remediation
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
       \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
@@ -13666,6 +13666,8 @@ phases:
     refs:
     - docs/DESIGN.md
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-15T13:56:15.645885Z'
   - id: v47.ui
     name: V47 macOS Swift UI Settlement, Menu Rename/Tracking, Accessibility & Keyboard
       Polish
@@ -13716,7 +13718,7 @@ phases:
     agent: senior-engineer
   - id: v47.docs
     name: V47 README, Website Copy Alignment & Structural Site Test Calibration
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - site/**\n    - crates/cito-native/tests/support/site-clipboard.mjs\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all documentation,\
@@ -13747,6 +13749,8 @@ phases:
     - site/index.html
     - crates/cito-native/tests/support/site-clipboard.mjs
     agent: executor
+    claimed_by: executor
+    claimed_at: '2026-11-15T13:56:15.646024Z'
   - id: v47.review
     name: 'V47 Iterative 4-Slice Zero-New-Issues Convergence Audit, §8.1 Full Verification
       & Cito.app Rebuild [REQUIRES_SKILL: contract-and-simplicity]'
