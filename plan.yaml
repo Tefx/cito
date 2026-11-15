@@ -13506,3 +13506,289 @@ phases:
       Spec link:
 
       - docs/DESIGN.md (§2.2, §3.3, §4.2, §4.3, §5.1, §5.2, §8.1–§8.2 @ 7007410)'
+- id: v47
+  name: V47 Residual Security, Correctness, UI & Docs Remediation + Zero-New-Issues
+    Convergence (v0.21.3)
+  status: pending
+  gate: 'All binding v47 requirements in docs/DESIGN.md (§2.2, §3.2, §3.3, §3.4, §3.5,
+    §4.1, §4.2, §4.3, §5.1, §5.2, §7.2, §8.1, §8.2 @ e1ec40f) pass; iterative multi-slice
+    [REQUIRES_SKILL: contract-and-simplicity] review (pathway-auditor, structural-auditor,
+    uiux-auditor, spec-readiness-auditor) converges with ZERO_NEW_ISSUES across all
+    4 slices; cargo fmt --all -- --check, git diff --check, cargo clippy --workspace
+    --all-targets -- -D warnings, full cargo test --workspace, cargo build --release
+    (0 warnings updating all 7 staged arm64 binaries with codesign --verify --strict),
+    node crates/cito-native/tests/support/site-clipboard.mjs, python3 packaging/release.py
+    check (version 0.21.3, NO release tag), python3 -m unittest discover -s packaging,
+    visual asset checks, §1.2 zero-hardcoding check, and live /Applications/Cito.app
+    rebuild, signature verification, restart, and closed-UI idle power verification
+    pass cleanly.'
+  context: 'Implement finalized docs/DESIGN.md (§2.2, §3.2, §3.3, §3.4, §3.5, §4.1,
+    §4.2, §4.3, §5.1, §5.2, §7.2, §8.1, §8.2 @ e1ec40f, pre-reviewed by spec-readiness-auditor
+    READY / CLEAN) and the converged Round 1 residual ledger without duplicating Stage
+    1 discovery: (1) v47.core (rust-senior, depends_on: []): HTTP CSRF / Origin /
+    Host / Content-Type enforcement on both daemon HTTP (http_actions.rs) and HubServer
+    (hub.rs POST /v1/rpc) + < 200 ms HubServer::shutdown() with active idle /v1/events
+    subscribers; cito-claude-hook dual [alias, sid] ACK tracking + persist_hook_acks
+    fallback before wake JSONL deletion; lease.rs explicit empty channels: {} vs absent
+    legacy channels distinction; committed-effect preservation in daemon/{mcp,channels,http_actions}.rs;
+    projection.rs explicit DTO allowlists stripping owner_token and dispatcher_token;
+    ui_ipc.rs chronological passive-frame coalescing relative to request_id receipts;
+    channels.rs operation-first routing rejecting incompatible scope hijacks; symlink-preserving
+    canonical config.json publication and finished events handle reaping in daemon/mod.rs
+    / config.rs; atomic candidate-generation plugin/shim staging + setup --status
+    plugin inspection error propagation & sanitized setup CLI errors in setup.rs;
+    Hub-clock signal expiry alignment in receiver.rs / state.rs / session_activity.rs;
+    symmetric CLI harness selector validation & --harness human --session rejection
+    in cli.rs; hub_plugins.rs reaped flag avoiding post-reap SIGKILL + broken external
+    plugin.json isolation & hub.rs last_delivered_seq = max_seq(c) advancement on
+    re-pairing/re-enabling disabled channels; plugins/pi/native.rs process_identity
+    check on stale .sock + reused PID in probe (closed_definitive) & skipping redundant
+    process scans on socket-backed PIDs + plugins/pi/cito-bridge.ts AbortSignal.timeout(15_000)
+    on /cito fetch; plugins/codex/native.rs per-thread non-UTF-8/unreadable rollout
+    isolation & step-2 wake confirmation (queue_confirmed && opened); plugins/telegram/native.rs
+    worker-channel outbound HTTP delivery/control off the control loop, <= 4096 UTF-16
+    code-unit chunking & 429 retry_after; structural consolidation (plugin_support::atomic_write
+    with AtomicU64 suffix, plugins::pid_alive, plugins::expand_home_dir in hub_cli,
+    removing dead sqlite_rows, narrowing clean_sidecars/verify_expected_identity,
+    cleaning pub mod claude if possible) and packaging/release.py:verify_bundle verifying
+    every manifest command[0] exists, is os.X_OK, and is arm64; (2) v47.ui (senior-engineer,
+    depends_on: ["v47.core"]): Companion.swift immediate channel_pair pending rebuild
+    (testResult == nil), port string trim, and exact .command modifier mask on settingsKeyMonitor;
+    MenuSurface.swift menuDidClose stale rename_field flush when hadRename is true,
+    cardMenu.cancelTracking() on open_hub_settings / empty_open_setup / empty_open_channels,
+    and "Settings… (⌘,)" tooltip; SettingsSurface.swift unconditional hostHubPortPending
+    clear on savedRequest == submittedHostHubRequestId, port input trim, and "Checking…"
+    label when Check & Repair is pending; UIPrimitives.swift / DirectorySurface.swift
+    / SettingsSurface.swift KeyPanel autorecalculatesKeyViewLoop = true and VoiceOver
+    accessibilityLabels + .checkBox role/value on settings_launch_at_login and uninstall_purge_data;
+    (3) v47.docs (executor, depends_on: []): qualify offline-Mac alert delivery in
+    README.md and site/docs/{architecture,guide,plugins}.html, remove/align unimplemented
+    broad anti-loop claim on site/index.html with actual self-send & idempotency guards,
+    and replace broad prose substring blacklists in site-clipboard.mjs with targeted
+    DOM/control structural assertions; (4) v47.review (senior-engineer, depends_on:
+    ["v47.ui", "v47.docs"], [REQUIRES_SKILL: contract-and-simplicity]): mandatory
+    iterative multi-slice contract-and-simplicity convergence loop (pathway-auditor,
+    structural-auditor, uiux-auditor, spec-readiness-auditor) until all 4 slices report
+    ZERO_NEW_ISSUES, full §8.1 verification gates at version 0.21.3 with NO release
+    tag, and live /Applications/Cito.app rebuild/restart & closed-UI idle power verification.'
+  depends_on:
+  - v46
+  steps:
+  - id: v47.core
+    name: V47 Rust Core, Hub, Daemon, Plugin & Packaging Security/Correctness Remediation
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
+      \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
+      \   - plugins/codex/**\n    - packaging/**\n  blocked_paths:\n    - plan.yaml\n\
+      \nDeliver:\n- Implement all Rust core, daemon, Hub, plugin, and packaging closures\
+      \ in `docs/DESIGN.md` (`§2.2`, `§3.2`, `§3.3`, `§3.4`, `§3.5`, `§4.1`, `§4.2`,\
+      \ `§4.3`, `§5.1`, `§7.2`, `§8.1`, `§8.2` @ `e1ec40f`):\n  1. HTTP CSRF / Origin\
+      \ / Host / Content-Type Enforcement & Fast Hub Shutdown (`§2.2`):\n     - Enforce\
+      \ browser `Origin` rejection (`403`, comparing scheme, host, and effective port\
+      \ including cross-port loopback origins while preserving native `Origin`-omitting\
+      \ callers), `Host` header validation (`403` against bound loopback host/port\
+      \ on loopback endpoints, while allowing valid LAN/Tailscale/loopback destination\
+      \ authorities matching the listening port on wildcard `0.0.0.0:<port>` / `[::]:<port>`\
+      \ shared `HubServer` bindings), and `application/json` `Content-Type` enforcement\
+      \ (`415` on JSON `POST` routes, excluding SSE `GET`s) on BOTH daemon HTTP (`crates/cito-native/src/core/daemon/http_actions.rs`)\
+      \ and `HubServer` (`crates/cito-native/src/core/hub.rs` `POST /v1/rpc`, `/v1/events`).\n\
+      \     - Verify `< 200 ms` `HubServer::shutdown()` even when active idle `/v1/events`\
+      \ SSE subscribers are connected.\n  2. Claude Hook Dual-Session ACK Routing\
+      \ & Durable Wake Queue Retirement (`§4.2`):\n     - Track `[alias, sid]` per\
+      \ wake in `cito-claude-hook` (`plugins/claude/native.rs` `drain_wakes` / `hook_main`),\
+      \ verify `acknowledged_count >= expected`, and fall back to `persist_hook_acks`\
+      \ before deleting wake JSONL files.\n  3. Lease Empty-Map Semantics, DTO Allowlists\
+      \ & UI IPC Coalescing (`§3.3`, `§5.1`):\n     - Distinguish explicit empty `channels:\
+      \ {}` from absent legacy `channels` in `crates/cito-native/src/core/lease.rs`\
+      \ (`reconcile_registration_state`) so modern Human nodes exit `\"ACTIVE\"` when\
+      \ their sole `<host_id>:human` attachment expires.\n     - Use explicit listener/session/activity\
+      \ DTO allowlists in `crates/cito-native/src/core/daemon/projection.rs` stripping\
+      \ `owner_token` and `dispatcher_token`.\n     - Preserve chronological order\
+      \ during passive-frame coalescing relative to intervening `request_id` receipts\
+      \ in `crates/cito-native/src/core/daemon/ui_ipc.rs` (removing superseded passive\
+      \ frames and appending replacements after earlier receipts rather than overwriting\
+      \ in place).\n  4. Committed-Effect Preservation, Operation-First Channel Routing\
+      \ & Hub-Clock Expiry (`§3.5`):\n     - Preserve committed Hub mutation results\
+      \ in `crates/cito-native/src/core/daemon/{mcp,channels,http_actions}.rs` (`cito_send`,\
+      \ `ChannelInventory::mutate`, receipt queries) when post-commit background poll,\
+      \ refresh, or receipt queries fail.\n     - Dispatch `channel_rpc` strictly\
+      \ by operation (`op`) before checking `scope` in `crates/cito-native/src/core/daemon/channels.rs`,\
+      \ rejecting incompatible `scope` hijacks.\n     - Align signal expiry evaluation\
+      \ to observed Hub clock at admission in `crates/cito-native/src/core/receiver.rs`,\
+      \ `crates/cito-native/src/core/state.rs`, and `crates/cito-native/src/core/session_activity.rs`.\n\
+      \  5. Symlink-Preserving Config, Atomic Plugin/Shim Staging, Setup Diagnostics\
+      \ & CLI Validation (`§2.2`, `§3.4`, `§4.1`):\n     - Canonicalize and lock `config.json`\
+      \ publication target in `crates/cito-native/src/core/daemon/mod.rs` and `crates/cito-native/src/core/config.rs`\
+      \ so symlinked `config.json` files stay intact across edits, and reap finished\
+      \ `events` handles (`self.events.retain`).\n     - Stage plugins and shims via\
+      \ validated candidate directories under lock before atomic replacement in `crates/cito-native/src/core/setup.rs`,\
+      \ propagate `setup --status` plugin inspection errors/timeouts explicitly, and\
+      \ sanitize setup CLI errors through `cli::presentation_error`.\n     - Enforce\
+      \ symmetric CLI harness selector validation regardless of flag order and reject\
+      \ `--harness human --session` (`INVALID_INPUT`) in `crates/cito-native/src/core/cli.rs`.\n\
+      \  6. Hub & Channel Process Lifecycle, Pi, Codex & Telegram Hardening (`§4.1`,\
+      \ `§4.2`, `§4.3`):\n     - Track `reaped` in `ChannelProcess::shutdown` (`crates/cito-native/src/core/hub_plugins.rs`)\
+      \ to avoid post-reap `SIGKILL`, delegate/isolate broken external `plugin.json`\
+      \ manifests, and advance `last_delivered_seq = max_seq(c)` in `crates/cito-native/src/core/hub.rs`\
+      \ when re-pairing or re-enabling disabled channels (`enabled == 0`).\n     -\
+      \ Check `process_identity` on stale `.sock` + reused PID in `plugins/pi/native.rs`\
+      \ `probe` (`closed_definitive`), skip redundant process scans for socket-backed\
+      \ PIDs, and add `AbortSignal.timeout(15_000)` to `/cito` `fetch` in `plugins/pi/cito-bridge.ts`.\n\
+      \     - Isolate non-UTF-8 / unreadable rollout files per thread (`read_until`\
+      \ lossy line reading) and fix step-2 `wake` confirmation (`queue_confirmed &&\
+      \ opened`) in `plugins/codex/native.rs`.\n     - Move outbound HTTP delivery/control\
+      \ off the control loop onto a worker channel in `plugins/telegram/native.rs`,\
+      \ chunk messages by `<= 4096` UTF-16 code units, and honor HTTP `429` `parameters.retry_after`.\n\
+      \  7. Structural Consolidation & Packaging Bundle Verification (`§4.1`, `§7.2`,\
+      \ `§8.2`):\n     - Consolidate `codex::save_activity` onto `plugin_support::atomic_write`\
+      \ (adding an `AtomicU64` counter suffix), share `plugins::pid_alive` and `plugins::expand_home_dir`\
+      \ in `hub_cli`, remove dead `sqlite_rows`, narrow `clean_sidecars` / `verify_expected_identity`\
+      \ visibility, and clean `pub mod claude` if possible.\n     - Update `packaging/release.py:verify_bundle`\
+      \ to verify every bundled manifest `command[0]` exists, is `os.X_OK`, and is\
+      \ `arm64`, with unit tests in `packaging/`.\n  8. Fast Targeted Affected-Module\
+      \ Tests (`§8.1`):\n     - Add discriminating unit/integration tests for every\
+      \ `v47.core` closure in `crates/cito-native` and `packaging/`.\n\nImplementation\
+      \ Notes (Non-Binding):\n- Follow `docs/DESIGN.md` `§8.2` hazard map without\
+      \ duplicating Stage 1 discovery. Keep inner-loop verification fast (`cargo test\
+      \ -p cito-native <filter>` + `python3 -m unittest discover -s packaging`); reserve\
+      \ full-workspace regression and release builds for `v47.review`.\n\nBoundary:\n\
+      - Owner: `rust-senior`. Isolated worktree transaction modifying `crates/cito-native/**`,\
+      \ `plugins/{telegram,pi,claude,codex}/**`, and `packaging/**`.\n\nAdmit:\n-\
+      \ Depends on Phase `v46` completion. Witnessed input: finalized `docs/DESIGN.md`\
+      \ (`e1ec40f`).\n- Verification: targeted `cargo test -p cito-native <filter>`\
+      \ and `python3 -m unittest discover -s packaging` pass with 0 warnings. Consumed\
+      \ by `v47.ui` and `v47.review`.\n\nRecovery:\n- Repair any Rust, plugin, or\
+      \ packaging test discrepancy in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native plugins:: && cargo test -p cito-native --test native daemon:: && python3
+      -m unittest discover -s packaging'
+    refs:
+    - docs/DESIGN.md
+    agent: rust-senior
+  - id: v47.ui
+    name: V47 macOS Swift UI Settlement, Menu Rename/Tracking, Accessibility & Keyboard
+      Polish
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all Swift UI settlement,\
+      \ menu tracking, keyboard, and accessibility closures in `docs/DESIGN.md` (`§5.1`,\
+      \ `§5.2`, `§8.1`, `§8.2` @ `e1ec40f`):\n  1. `src/macos/Companion.swift`:\n\
+      \     - Add `case \"channel_pair\": needsRebuild = true` so `Pair Account…`\
+      \ enters pending/disabled state immediately on click even when `testResult ==\
+      \ nil`.\n     - Trim port strings before numeric parsing.\n     - Mask `settingsKeyMonitor`\
+      \ modifier flags strictly to `[.command, .shift, .option, .control] == [.command]`.\n\
+      \  2. `src/macos/MenuSurface.swift`:\n     - Flush stale `rename_field` in `menuDidClose`\
+      \ whenever `hadRename` is true (even when no background state frame arrived\
+      \ while the menu was open).\n     - Call `cardMenu.cancelTracking()` on `open_hub_settings`,\
+      \ `empty_open_setup`, and `empty_open_channels`.\n     - Set `open_settings`\
+      \ tooltip to `\"Settings… (⌘,)\"`.\n  3. `src/macos/SettingsSurface.swift`:\n\
+      \     - Clear `hostHubPortPending = false` unconditionally on matching `savedRequest\
+      \ == submittedHostHubRequestId` (including when the normalized port is unchanged).\n\
+      \     - Trim port input strings before validation/submission.\n     - Show `\"\
+      Checking…\"` when `Check & Repair` (`app.isConfigured`) is pending.\n  4. `src/macos/UIPrimitives.swift`,\
+      \ `src/macos/DirectorySurface.swift`, `src/macos/SettingsSurface.swift`:\n \
+      \    - Enable `autorecalculatesKeyViewLoop = true` on `KeyPanel` (`Tab` key-view\
+      \ loop across editable controls).\n     - Add VoiceOver `accessibilityLabel`s\
+      \ on editable text fields and `.checkBox` accessibility role/value on `settings_launch_at_login`\
+      \ and `uninstall_purge_data`.\n  5. Targeted UI Regression Tests (`§8.1`):\n\
+      \     - Add discriminating UI integration tests in `crates/cito-native/tests/support/ui/**`\
+      \ covering `channel_pair` immediate pending state (`testResult == nil`), `menuDidClose`\
+      \ stale `rename_field` cleanup, `hostHubPortPending` settlement + whitespace\
+      \ trim, `cancelTracking()` on all Settings-opening menu items, exact `.command`\
+      \ shortcut mask, `KeyPanel` `Tab` key-view loop, checkbox/field VoiceOver labels,\
+      \ and `\"Checking…\"` / `\"Settings… (⌘,)\"` polish.\n\nImplementation Notes\
+      \ (Non-Binding):\n- Follow `docs/DESIGN.md` `§8.2` hazard map. Keep inner-loop\
+      \ verification fast with `cargo test -p cito-native --test native ui::`; reserve\
+      \ full-workspace regression and app bundle packaging for `v47.review`.\n\nBoundary:\n\
+      - Owner: `senior-engineer`. Isolated worktree transaction modifying `src/macos/**`\
+      \ and `crates/cito-native/tests/support/ui/**`.\n\nAdmit:\n- Depends on `v47.core`\
+      \ completion. Witnessed input: finalized `docs/DESIGN.md` (`e1ec40f`).\n- Verification:\
+      \ `cargo test -p cito-native --test native ui::` passes cleanly. Consumed by\
+      \ `v47.review`.\n\nRecovery:\n- Repair any AppKit, accessibility, or `ui::`\
+      \ test discrepancy in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    depends_on:
+    - v47.core
+    agent: senior-engineer
+  - id: v47.docs
+    name: V47 README, Website Copy Alignment & Structural Site Test Calibration
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - README.md\n    - site/**\n    - crates/cito-native/tests/support/site-clipboard.mjs\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all documentation,\
+      \ website copy, and site test closures in `docs/DESIGN.md` (`§5.2.5`, `§7.2`,\
+      \ `§8.1`, `§8.2` @ `e1ec40f`):\n  1. Offline-Mac Alert Qualification:\n    \
+      \ - Qualify offline-Mac alert delivery in `README.md` and `site/docs/{architecture,guide,plugins}.html`\
+      \ (\"when the selected Hub and its channel service remain online elsewhere\"\
+      ).\n  2. Landing Page Anti-Loop Copy Alignment:\n     - Update `site/index.html`\
+      \ to remove/align the unimplemented broad \"Automatic anti-loop protection\"\
+      \ claim with actual self-send and idempotency guards (do NOT invent new rate/hop\
+      \ code).\n  3. Structural Site Verification (`crates/cito-native/tests/support/site-clipboard.mjs`):\n\
+      \     - Update `crates/cito-native/tests/support/site-clipboard.mjs` to replace\
+      \ the broad unscoped prose substring blacklist (`$1`, `My Macs`, `plugins/human`,\
+      \ `245, 158, 11`) with targeted DOM/control structural assertions, and verify\
+      \ all site/doc anchors and links.\n\nImplementation Notes (Non-Binding):\n-\
+      \ Follow `docs/DESIGN.md` `§7.2` and `§8.2`. Verify via `node crates/cito-native/tests/support/site-clipboard.mjs`.\n\
+      \nBoundary:\n- Owner: `executor`. Isolated worktree transaction modifying `README.md`,\
+      \ `site/**`, and `crates/cito-native/tests/support/site-clipboard.mjs`.\n\n\
+      Admit:\n- Depends on Phase `v46` completion (parallel with `v47.core`). Witnessed\
+      \ input: finalized `docs/DESIGN.md` (`e1ec40f`).\n- Verification: `node crates/cito-native/tests/support/site-clipboard.mjs`\
+      \ passes cleanly. Consumed by `v47.review`.\n\nRecovery:\n- Fix any HTML/Markdown\
+      \ copy, anchor, or `site-clipboard.mjs` assertion discrepancy in place within\
+      \ the worktree before completion.\n"
+    verification: node crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - site/index.html
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    agent: executor
+  - id: v47.review
+    name: 'V47 Iterative 4-Slice Zero-New-Issues Convergence Audit, §8.1 Full Verification
+      & Cito.app Rebuild [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Execute the **Mandatory Iterative\
+      \ Zero-New-Issues Convergence Loop** (`[REQUIRES_SKILL: contract-and-simplicity]`):\n\
+      \  - Run multi-slice `contract-and-simplicity` review (`pathway-auditor`, `structural-auditor`,\
+      \ `uiux-auditor`, `spec-readiness-auditor`) across the full repo / `v47` closures\
+      \ and iterate targeted repairs + Delta verification until **ALL 4 slices report\
+      \ `ZERO_NEW_ISSUES`**.\n- Run and verify all `docs/DESIGN.md` `§8.1` full-workspace\
+      \ verification gates:\n  1. `cargo fmt --all -- --check` and `git diff --check`\n\
+      \  2. `cargo clippy --workspace --all-targets -- -D warnings`\n  3. Full `cargo\
+      \ test --workspace`\n  4. `cargo build --release` (0 warnings) updating all\
+      \ 7 staged arm64 binaries (`bin/cito-ui-darwin-arm64`, `bin/cito-native-darwin-arm64`,\
+      \ and bundled plugin binaries) with `codesign --verify --strict`\n  5. `node\
+      \ crates/cito-native/tests/support/site-clipboard.mjs`\n  6. `python3 packaging/release.py\
+      \ check` for version `0.21.3` with NO release tag, and `python3 -m unittest\
+      \ discover -s packaging`\n  7. Visual asset checks (`AppIcon.icns`, `og-card.png`,\
+      \ `architecture-topology.svg`, `site/assets/screenshots/*.png`) and `§1.2` zero-hardcoding\
+      \ check across `crates/cito-native/src/core/` and `src/macos/`\n- Rebuild and\
+      \ restart live `/Applications/Cito.app` (`codesign --verify --deep --strict\
+      \ /Applications/Cito.app`) and verify closed-UI idle power (`ps` & `top -l 2`).\n\
+      \nBoundary:\n- Owner: `senior-engineer` with `[REQUIRES_SKILL: contract-and-simplicity]`.\
+      \ Modifies repository, updates all 7 staged arm64 binaries, rebuilds/restarts\
+      \ live `/Applications/Cito.app`, and verifies closed-UI idle power at version\
+      \ `0.21.3` with NO release tag.\n\nAdmit:\n- Depends on `v47.ui` and `v47.docs`\
+      \ completion. Witnessed input: finalized `docs/DESIGN.md` (`e1ec40f`).\n- Verification:\
+      \ all 4 review slices report `ZERO_NEW_ISSUES`, and all `§8.1` verification\
+      \ gates + live `/Applications/Cito.app` rebuild/restart & closed-UI idle power\
+      \ check pass cleanly.\n\nRecovery:\n- Repair any audit finding, regression,\
+      \ compiler/clippy warning, packaging/signature issue, or idle power discrepancy\
+      \ in place and re-verify before completion.\n"
+    verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
+      --all-targets -- -D warnings && cargo test --workspace && cargo build --release
+      && node crates/cito-native/tests/support/site-clipboard.mjs && python3 packaging/release.py
+      check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    depends_on:
+    - v47.ui
+    - v47.docs
+    agent: senior-engineer
