@@ -25,7 +25,7 @@ fn report(f: &Fixture, p: usize, command: Value, prefix: &str) -> Value {
     .unwrap()
 }
 
-fn render_state(f: &Fixture, p: usize) -> Value {
+pub(super) fn render_state(f: &Fixture, p: usize) -> Value {
     report(
         f,
         p,

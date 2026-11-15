@@ -238,6 +238,10 @@ func panelShortcutKey(_ event: NSEvent) -> String? {
 
 final class KeyPanel: NSPanel {
     var onKey: ((String) -> Void)?
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        autorecalculatesKeyViewLoop = true
+    }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func resignKey() {

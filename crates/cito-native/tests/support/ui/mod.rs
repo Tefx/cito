@@ -245,3 +245,4 @@ mod oracle_e2e;
 mod render_stability;
 mod settings_channels;
 mod settings_hubs;
+mod settlement;

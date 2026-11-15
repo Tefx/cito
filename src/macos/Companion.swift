@@ -6,7 +6,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var status: NSStatusItem?
     var headlessStatusButton: NSButton?
     var hoverEventMonitor: Any?
-    let cardMenu = NSMenu()
+    let cardMenu: NSMenu = ProcessInfo.processInfo.environment["CITO_UI_HEADLESS"] == "1" ? HeadlessMenu() : NSMenu()
     var hubDrawerVisibility: [String: Bool] = [:]
     var menuScrollOffsets: [String: NSPoint] = [:]
     var menuScrollKeys: [String: String] = [:]
@@ -280,7 +280,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if let key = panelShortcutKey(event), self.handleTextEditShortcut(key, in: window) { return nil }
             // Text Services must see navigation and commit keys before our shortcuts.
             if window?.firstResponder is NSTextView && [126,125,36,76,53,51,117].contains(Int(event.keyCode)) { return event }
-            let command = event.modifierFlags.contains(.command)
+            let command = event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
             if command && event.charactersIgnoringModifiers == "," { self.openSettingsShortcut(); return nil }
             if command && event.charactersIgnoringModifiers == "k" { self.openDirectoryShortcut(); return nil }
             let key: String?
@@ -655,6 +655,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let key = "\(action["hub"] as? String ?? effectiveChannelHub)|\(id)"
             var needsRebuild = channelUiStates[key]?.testResult != nil
             switch op {
+            case "channel_pair": needsRebuild = true
             case "channel_unpair", "channel_cancel_pair":
                 channelUiStates[key, default: ChannelUiState()].resetPersonal()
                 needsRebuild = true
@@ -704,7 +705,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         if let field = obj.object as? NSTextField, field === composerInputField { composerDraftIdempotencyKey = UUID().uuidString }
-        if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostHubPortDraft=field.stringValue; hostHubPortSaved=false; hostHubPortError=nil; if let root=settingsPanel?.contentView { findControl(in:root,id:"apply_host_hub_port")?.isEnabled = !hostHubPortPending && Int(field.stringValue) != settings?.host_hub.port } }
+        if let field=obj.object as? NSTextField, field.identifier?.rawValue == "host_hub_port" { hostHubPortDraft=field.stringValue; hostHubPortSaved=false; hostHubPortError=nil; if let root=settingsPanel?.contentView { findControl(in:root,id:"apply_host_hub_port")?.isEnabled = !hostHubPortPending && Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) != settings?.host_hub.port } }
         if let field = obj.object as? NSTextField, let id = field.identifier?.rawValue {
             if id.hasPrefix("channel_field:"),
                let ch=(channelSettingsByHub[effectiveChannelHub] ?? []).first(where:{id.hasPrefix("channel_field:\($0.id):")}),

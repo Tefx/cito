@@ -321,9 +321,9 @@ fn native_edit_shortcuts_use_real_field_editors_for_secure_text_search_and_compo
     assert_eq!(
         s["key_panels"],
         json!([{
-            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true,"automatic_key_view_loop":true
         }, {
-            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true
+            "titled":true,"full_size_content":true,"hidden_title":true,"transparent_titlebar":true,"hidden_window_buttons":true,"automatic_key_view_loop":true
         }])
     );
     assert_eq!(

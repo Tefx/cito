@@ -50,8 +50,15 @@ extension Companion: NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) {
         menuOpen = false
         MenuControl.menuTracking = false
-        if renamingSessionKey != nil { menuDirty = true }
+        let hadRename = renamingSessionKey != nil
         renamingSessionKey = nil
+        if hadRename {
+            renameField?.window?.makeFirstResponder(nil)
+            renameField?.removeFromSuperview()
+            renameField = nil
+            menuRebuildDeferred = false
+            menuDirty = true
+        }
         emit(["op": "close_menu"], userInitiated: false)
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
     }
@@ -183,7 +190,7 @@ extension Companion: NSMenuDelegate {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 32))
             let loginRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": hub.status == "connected" ? "switch_account" : "login"]) }
             let reconnectRun = { self.emit(["op": "hub_action", "hub": hub.name, "action": "reconnect"]) }
-            let disconnectRun = { self.settingsActiveTab="hubs"; self.openSettingsPanel() }
+            let disconnectRun = { self.cardMenu.cancelTracking(); self.settingsActiveTab="hubs"; self.openSettingsPanel() }
             let buttons: [(String, String, Bool, () -> Void)]
             switch hub.status {
             case "connected" where hub.error != nil:
@@ -427,6 +434,7 @@ extension Companion: NSMenuDelegate {
                 let field = existingRenameField ?? NSTextField(string: renameDraft ?? listener.title)
                 field.frame = NSRect(x: titleX, y: cardHeight - 27, width: max(80, rightEdge - titleX - 6), height: 20)
                 field.identifier = NSUserInterfaceItemIdentifier("rename_field:\(listener.scoped_id)")
+                field.setAccessibilityLabel("Session title")
                 field.delegate = self; field.font = .systemFont(ofSize: 13)
                 if let draft = renameDraft, field.stringValue != draft { field.stringValue = draft }
                 card.addSubview(field); renameField = field
@@ -478,11 +486,11 @@ extension Companion: NSMenuDelegate {
                 card.addSubview(emptyHint)
                 let apps=MenuControl("Set Up Agent Apps…",frame:NSRect(x:44,y:8,width:148,height:22),radius:6)
                 apps.identifier=NSUserInterfaceItemIdentifier("empty_open_setup")
-                apps.pressed={ [weak self] in self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
+                apps.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.settingsActiveTab="apps"; self?.openSettingsPanel() }
                 card.addSubview(apps)
                 let channels=MenuControl("Human Channels…",frame:NSRect(x:198,y:8,width:148,height:22),radius:6)
                 channels.identifier=NSUserInterfaceItemIdentifier("empty_open_channels")
-                channels.pressed={ [weak self] in self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
+                channels.pressed={ [weak self] in self?.cardMenu.cancelTracking(); self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
                 card.addSubview(channels)
                 row.addSubview(card); _ = host(row, id: "empty")
         }
@@ -781,6 +789,7 @@ extension Companion: NSMenuDelegate {
         let openSettings = MenuControl("Settings…", frame: NSRect(x: 168, y: 6, width: MenuControl.intrinsicWidth("Settings…", leadingSymbol: "gearshape", paddingX: 6), height: 24), leadingSymbol: "gearshape")
         openSettings.identifier = NSUserInterfaceItemIdentifier("open_settings")
         openSettings.style = .subtleHeader
+        openSettings.toolTip = "Settings… (⌘,)"
         openSettings.pressed = { [weak self, weak menu] in
             guard let self = self else { return }
             menu?.cancelTracking()

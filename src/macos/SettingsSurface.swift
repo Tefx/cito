@@ -32,8 +32,7 @@ extension Companion {
             selectedChannelHub = value.hubs.first(where: { $0.enabled })?.name ?? ""
             if settingsVisible && !selectedChannelHub.isEmpty { emit(["op": "open_settings", "hub": selectedChannelHub], userInitiated:false) }
         }
-        if hostHubPortPending && savedRequest == submittedHostHubRequestId &&
-           (value.host_hub.port == submittedHostHubPort || value.host_hub.error != nil) {
+        if hostHubPortPending && savedRequest == submittedHostHubRequestId {
             hostHubPortPending = false
             hostHubPortSaved = value.host_hub.port == submittedHostHubPort && value.host_hub.error == nil && (hostHubPortDraft == nil || Int((hostHubPortDraft ?? "").trimmingCharacters(in:.whitespacesAndNewlines)) == submittedHostHubPort)
             if hostHubPortSaved { hostHubPortSavedUntil = Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2) }
@@ -204,9 +203,10 @@ extension Companion {
         if let clientField = settingsFieldControls["settings_hub_client_id"] { addHubClientId = clientField.stringValue }
     }
 
-    func makeEditableField(_ id: String, frame: NSRect, placeholder: String, value: String, secret: Bool = false) -> NSTextField {
+    func makeEditableField(_ id: String, frame: NSRect, placeholder: String, value: String, secret: Bool = false, accessibilityLabel: String) -> NSTextField {
         let field: NSTextField = secret ? NSSecureTextField(frame: frame) : NSTextField(frame: frame)
         field.identifier = NSUserInterfaceItemIdentifier(id)
+        field.setAccessibilityLabel(accessibilityLabel)
         field.placeholderString = placeholder
         field.stringValue = value
         field.isEditable = true
@@ -415,7 +415,7 @@ extension Companion {
             if Date() < (appCheckedUntil[app.id] ?? .distantPast) { btn.copied("✓ Checked") }
             let appPending = isPending("setup_apply",target:app.id) || isPending("setup_remove_app",target:app.id)
             btn.isEnabled = !appPending
-            pendingLabel(btn,isPending("setup_apply",target:app.id),"Setting Up…")
+            pendingLabel(btn,isPending("setup_apply",target:app.id),actionTitle == "Check & Repair" ? "Checking…" : "Setting Up…")
             btn.pressed = { [weak self] in
                 let request = UUID().uuidString
                 if app.isConfigured, let self = self {
@@ -664,7 +664,7 @@ extension Companion {
                     let labelView=textLabel(f.label,NSRect(x:12,y:fieldY+3,width:labelW,height:15),size:11,weight:.medium)
                     labelView.toolTip=f.label; container.addSubview(labelView)
                     let initialVal=channelUi.drafts[f.key] ?? (f.value ?? "")
-                    let inputField=makeEditableField(fieldId,frame:NSRect(x:inputX,y:fieldY,width:inputW,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret")
+                    let inputField=makeEditableField(fieldId,frame:NSRect(x:inputX,y:fieldY,width:inputW,height:22),placeholder:f.type=="secret" && f.configured ? (f.configured_placeholder ?? "•••••••• (Saved — enter new value to replace)") : f.placeholder,value:initialVal,secret:f.type=="secret",accessibilityLabel:f.label)
                     inputField.toolTip=f.help_text; container.addSubview(inputField)
                     fieldY-=26
                 }
@@ -933,7 +933,7 @@ extension Companion {
         }
         hostCard.addSubview(copyInvite); inviteActions.append(copyInvite)
         let portLabel = textLabel("Port:",NSRect(x:0,y:12,width:ceil(measureTextWidth("Port:", font:.systemFont(ofSize:11))) + 4,height:15),size:11)
-        let portField = makeEditableField("host_hub_port",frame:NSRect(x:0,y:12,width:58,height:24),placeholder:"Port",value:hostHubPortDraft ?? "\(hostHub.port)")
+        let portField = makeEditableField("host_hub_port",frame:NSRect(x:0,y:12,width:58,height:24),placeholder:"Port",value:hostHubPortDraft ?? "\(hostHub.port)",accessibilityLabel:"Host Hub port")
         hostCard.addSubview(portLabel); hostCard.addSubview(portField)
         let auth=MenuControl(authMode=="none" ? "Access: Trusted" : "Access: Token",frame:NSRect(x:286,y:12,width:112,height:24),radius:6)
         auth.style = .neutral
@@ -946,7 +946,7 @@ extension Companion {
         hostCard.addSubview(auth)
         let apply=MenuControl("Apply",frame:NSRect(x:394,y:12,width:72,height:24),radius:6)
         apply.identifier=NSUserInterfaceItemIdentifier("apply_host_hub_port")
-        apply.isEnabled = !hostHubPortPending && Int(hostHubPortDraft ?? "\(hostHub.port)") != hostHub.port
+        apply.isEnabled = !hostHubPortPending && Int((hostHubPortDraft ?? "\(hostHub.port)").trimmingCharacters(in: .whitespacesAndNewlines)) != hostHub.port
         if hostHubPortSaved && Date() < hostHubPortSavedUntil { apply.copied("✓ Saved") }
         apply.pressed={ [weak self] in
             guard let self=self else{return}
@@ -1017,12 +1017,12 @@ extension Companion {
             if editingLocalHub {
                 form.addSubview(textLabel("This Mac (Local Hub)",NSRect(x:14,y:94,width:452,height:18),size:12.5,weight:.semibold))
                 fieldLabel("Username (Optional)",NSRect(x:14,y:72,width:452,height:14))
-                form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser))
+                form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:44,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser,accessibilityLabel:"Hub username"))
             } else {
                 fieldLabel("Hub URL",NSRect(x:14,y:179,width:298,height:13))
                 fieldLabel("Hub Name (Optional)",NSRect(x:320,y:179,width:146,height:13))
-                form.addSubview(makeEditableField("settings_hub_url",frame:NSRect(x:14,y:153,width:298,height:24),placeholder:"http://192.168.1.10:4291",value:addHubUrl))
-                form.addSubview(makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:addHubName))
+                form.addSubview(makeEditableField("settings_hub_url",frame:NSRect(x:14,y:153,width:298,height:24),placeholder:"http://192.168.1.10:4291",value:addHubUrl,accessibilityLabel:"Hub URL"))
+                form.addSubview(makeEditableField("settings_hub_name",frame:NSRect(x:320,y:153,width:146,height:24),placeholder:hubNamePlaceholder,value:addHubName,accessibilityLabel:"Hub name"))
                 fieldLabel("Access",NSRect(x:14,y:125,width:48,height:14))
                 let authOptions = [("none","Trusted Network"),("token","Shared Token"),("oidc","Team Sign-In")]
                 let authTrack = roundedView(NSRect(x:68,y:118,width:398,height:26),radius:13,
@@ -1046,17 +1046,17 @@ extension Companion {
                 form.addSubview(authTrack)
                 if addHubAuth == "none" {
                     fieldLabel("Username (Optional)",NSRect(x:14,y:97,width:452,height:14))
-                    form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:71,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser))
+                    form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:14,y:71,width:452,height:24),placeholder:"Defaults to your Mac username",value:addHubUser,accessibilityLabel:"Hub username"))
                 } else if addHubAuth == "token" {
                     fieldLabel("Shared Access Token",NSRect(x:14,y:97,width:274,height:14))
                     fieldLabel("Username (Optional)",NSRect(x:296,y:97,width:170,height:14))
-                    form.addSubview(makeEditableField("settings_hub_token",frame:NSRect(x:14,y:71,width:274,height:24),placeholder:editingExistingHub ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac",value:addHubToken,secret:true))
-                    form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:296,y:71,width:170,height:24),placeholder:"e.g. alice",value:addHubUser))
+                    form.addSubview(makeEditableField("settings_hub_token",frame:NSRect(x:14,y:71,width:274,height:24),placeholder:editingExistingHub ? "•••••• (Saved — enter new token to replace)" : "Paste token from host Mac",value:addHubToken,secret:true,accessibilityLabel:"Hub token"))
+                    form.addSubview(makeEditableField("settings_hub_user",frame:NSRect(x:296,y:71,width:170,height:24),placeholder:"e.g. alice",value:addHubUser,accessibilityLabel:"Hub username"))
                 } else if addHubAuth == "oidc" {
                     fieldLabel("OIDC Issuer URL",NSRect(x:14,y:97,width:260,height:14))
                     fieldLabel("OIDC Client ID",NSRect(x:282,y:97,width:184,height:14))
-                    form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:71,width:260,height:24),placeholder:"https://id.example.com",value:addHubIssuer))
-                    form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:282,y:71,width:184,height:24),placeholder:"cito",value:addHubClientId))
+                    form.addSubview(makeEditableField("settings_hub_issuer",frame:NSRect(x:14,y:71,width:260,height:24),placeholder:"https://id.example.com",value:addHubIssuer,accessibilityLabel:"OIDC issuer URL"))
+                    form.addSubview(makeEditableField("settings_hub_client_id",frame:NSRect(x:282,y:71,width:184,height:24),placeholder:"cito",value:addHubClientId,accessibilityLabel:"OIDC client ID"))
                 }
             }
 
@@ -1231,6 +1231,8 @@ extension Companion {
             leadingSymbol: launchAtLogin ? "checkmark.square.fill" : "square", radius: 6)
         loginBtn.identifier = NSUserInterfaceItemIdentifier("settings_launch_at_login")
         loginBtn.style = .subtleHeader
+        loginBtn.setAccessibilityRole(.checkBox)
+        loginBtn.setAccessibilityValue(launchAtLogin ? 1 : 0)
         loginBtn.label.alignment = .left
         loginBtn.layoutContents()
         loginBtn.pressed = { [weak self] in
@@ -1264,6 +1266,8 @@ extension Companion {
                 leadingSymbol: uninstallPurgeData ? "checkmark.square.fill" : "square", radius: 6)
             purgeCheckbox.identifier = NSUserInterfaceItemIdentifier("uninstall_purge_data")
             purgeCheckbox.style = .subtleHeader
+            purgeCheckbox.setAccessibilityRole(.checkBox)
+            purgeCheckbox.setAccessibilityValue(uninstallPurgeData ? 1 : 0)
             purgeCheckbox.label.alignment = .left
             purgeCheckbox.layoutContents()
             purgeCheckbox.pressed = { [weak self] in

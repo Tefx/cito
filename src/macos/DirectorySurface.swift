@@ -134,6 +134,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
         let searchField = NSSearchField(frame: NSRect(x: 192, y: 9, width: 324, height: 28))
         searchField.identifier = NSUserInterfaceItemIdentifier("directory_search")
+        searchField.setAccessibilityLabel("Search directory and activity")
         searchField.placeholderString = "Search by user, repo, title, host, or #id…"
         searchField.delegate = self
         searchBar.addSubview(searchField)
@@ -309,6 +310,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
 
         let inputField = NSTextField(frame: NSRect(x: 138, y: 10, width: 274, height: 24))
         inputField.identifier = NSUserInterfaceItemIdentifier("composer_input")
+        inputField.setAccessibilityLabel("Message")
         inputField.placeholderString = "Write a message…"
         inputField.isEditable = true
         inputField.isSelectable = true

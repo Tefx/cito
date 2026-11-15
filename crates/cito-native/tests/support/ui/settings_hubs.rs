@@ -716,7 +716,7 @@ fn appkit_settings_three_tabs_secure_fields_dirty_only_drafts_and_uninstall_over
     }
     assert_eq!(
         node(&inspect(&f, p), "settings_items", "setup_app:pi")["text"],
-        "Setting Up…",
+        "Checking…",
         "A click remains pending until its correlated receipt"
     );
     let checked = f

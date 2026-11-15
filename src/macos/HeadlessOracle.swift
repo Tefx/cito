@@ -1,5 +1,14 @@
 import AppKit
 
+// Record real tracking cancellation without opening a native menu in tests.
+final class HeadlessMenu: NSMenu {
+    var trackingCancellations = 0
+    override func cancelTracking() {
+        trackingCancellations += 1
+        super.cancelTracking()
+    }
+}
+
 extension Companion {
     func flushDirtyViews() {
         guard headless else { return }
@@ -23,14 +32,35 @@ extension Companion {
                     window.contentView?.appearance = testAppearance
                 }
             }
+            if op == "test_key_event", let character = object["character"] as? String {
+                let modifiers = object["modifiers"] as? [String] ?? []
+                var flags: NSEvent.ModifierFlags = []
+                for (name, flag) in [("command", NSEvent.ModifierFlags.command), ("shift", .shift), ("option", .option), ("control", .control), ("capsLock", .capsLock)] where modifiers.contains(name) { flags.insert(flag) }
+                if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 0) {
+                    NSApp.sendEvent(event)
+                }
+                return true
+            }
+            if op == "test_tab" {
+                let window = object["surface"] as? String == "directory" ? directoryPanel : settingsPanel
+                if let editor = window?.firstResponder as? NSTextView {
+                    if object["backward"] as? Bool == true { editor.insertBacktab(nil) }
+                    else { editor.insertTab(nil) }
+                }
+                return true
+            }
             if op == "test_open_panel" {
                 if object["surface"] as? String == "settings" { openSettingsPanel() }
                 else { openDirectoryPanel(mode: object["mode"] as? String ?? "directory") }
                 return true
             }
             if op == "test_render_state" {
+                func containsRename(_ view: NSView) -> Bool {
+                    view.identifier?.rawValue.hasPrefix("rename_field:") == true || view.subviews.contains(where: containsRename)
+                }
                 let snapshot: [String: Any] = [
                     "menu_open": menuOpen, "menu_dirty": menuDirty, "menu_rebuilds": rebuildCount,
+                    "mounted_rename": cardMenu.items.compactMap { $0.view }.contains(where: containsRename),
                     "directory_open": directoryVisible, "directory_dirty": directoryDirty, "directory_reloads": directoryReloadCount,
                     "settings_open": settingsVisible, "settings_dirty": settingsDirty, "settings_rebuilds": settingsRebuildCount,
                     "status_updates": statusUpdateCount, "unread_count": unreadCount,
@@ -212,6 +242,8 @@ extension Companion {
                 if id == "directory_table" { directoryPanel?.makeFirstResponder(directoryTableView); return true }
                 for window in [settingsPanel, directoryPanel].compactMap({ $0 }) {
                     if let root = window.contentView, let field = findTextField(in: root, id: id), field.isEditable, field.isEnabled {
+                        // Hidden panels never receive AppKit's order-front key-loop pass.
+                        window.recalculateKeyViewLoop()
                         window.makeFirstResponder(field)
                         field.selectText(nil)
                         return true
@@ -638,7 +670,12 @@ extension Companion {
                 result["label_width"] = label.cell?.drawingRect(forBounds: label.bounds).width ?? label.bounds.width
                 result["label_measured_width"] = label.cell?.cellSize.width ?? label.attributedStringValue.size().width
             }
-            if let control = view as? NSControl { result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue }
+            if let control = view as? NSControl {
+                result["enabled"] = control.isEnabled; result["alpha"] = control.alphaValue
+                result["accessibility_label"] = control.accessibilityLabel() ?? ""
+                result["accessibility_role"] = control.accessibilityRole()?.rawValue ?? ""
+                if let value = control.accessibilityValue() as? NSNumber { result["accessibility_value"] = value }
+            }
             if let control = view as? MenuControl {
                 result["text"] = control.label.stringValue; result["tooltip"] = control.toolTip ?? ""
                 result["accessibility_label"] = control.accessibilityLabel() ?? ""
@@ -726,11 +763,13 @@ extension Companion {
         let snapshot: [String: Any] = ["items": items, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "rename_field_identity": renameField.map { String(describing:ObjectIdentifier($0)) } ?? "",
+            "tracking_cancellations": (cardMenu as? HeadlessMenu)?.trackingCancellations ?? 0,
             "low_contrast_labels": lowContrastLabels, "jargon_leaks":jargonLeaks, "address_mismatches":addressMismatches,
             "edit_menu": NSApp.mainMenu?.items.first(where: { $0.submenu?.title == "Edit" })?.submenu?.items.map { ["title": $0.title, "key": $0.keyEquivalent, "action": $0.action.map(NSStringFromSelector) ?? "", "shift": $0.keyEquivalentModifierMask.contains(.shift)] as [String: Any] } ?? [],
             "key_panels": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in
                 guard let window = window else { return nil }
                 return ["titled": window.styleMask.contains(.titled), "full_size_content": window.styleMask.contains(.fullSizeContentView),
+                    "automatic_key_view_loop": window.autorecalculatesKeyViewLoop,
                     "hidden_title": window.titleVisibility == .hidden, "transparent_titlebar": window.titlebarAppearsTransparent,
                     "hidden_window_buttons": [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].allSatisfy { window.standardWindowButton($0)?.isHidden != false }]
             },
