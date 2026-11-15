@@ -503,10 +503,18 @@ pub fn handle(req: &Value) -> Result<Value> {
     }
     match op {
         "discover_sessions" => {
-            let sessions = inspect_socket_endpoints(req, "claude-pid-", |p, path| {
-                let mut r = req.clone();
+            let request = req.clone();
+            let sessions = inspect_socket_endpoints(req, "claude-pid-", move |p, path| {
+                let mut r = request.clone();
                 r["endpoint_pid"] = json!(p);
-                let response = socket_call(path, &json!({"op":"identify"})).or_else(|error| {
+                let response = match socket_call(path, &json!({"op":"identify"})) {
+                    Ok(v) if v["ok"] != true => {
+                        let _ = fs::remove_file(binding_path(&r, p));
+                        return None;
+                    }
+                    response => response,
+                }
+                .or_else(|error| {
                     if error != "Socket request timed out" || !alive(p) {
                         return Err(error);
                     }
@@ -650,10 +658,18 @@ pub fn handle(req: &Value) -> Result<Value> {
                 Ok(v) if v["ok"] == true => Ok(
                     json!({"ok":true,"status":if v["session_id"]==req["session_id"]{"alive"}else{"switched"},"current_session_id":v["session_id"],"reason":null}),
                 ),
-                _ if pid(req).is_some_and(|p| !alive(p)) => Ok(
+                Ok(v) => {
+                    if let Some(p) = pid(req) {
+                        let _ = fs::remove_file(binding_path(req, p));
+                    }
+                    Ok(
+                        json!({"ok":true,"status":"transient_error","reason":response_diagnostic(&v,"Claude bridge rejected the request")}),
+                    )
+                }
+                Err(_) if pid(req).is_some_and(|p| !alive(p)) => Ok(
                     json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process is closed"}),
                 ),
-                _ => match resolve(req) {
+                Err(_) => match resolve(req) {
                     Ok(current) => Ok(
                         json!({"ok":true,"status":if Some(current.as_str()) == str_at(req,"session_id") {"alive"} else {"switched"},"current_session_id":current,"reason":null}),
                     ),

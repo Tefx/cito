@@ -101,7 +101,9 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
         let script = f.dir.join(format!("{id}.mjs"));
         fs::write(&script, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
         let mut endpoints = Vec::new();
-        for index in 0..4 {
+        // Nine endpoints used to put the first two stalled bridges in one
+        // static chunk, exceeding the 1500 ms provider deadline.
+        for index in 0..9 {
             let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
             wait(|| f.output(process, false).contains("ready"));
             let pid = f.pid(process);
@@ -166,7 +168,7 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
                 });
             }
             let warm = f.plugin(bin, json!({"op":"discover_sessions"}));
-            assert_eq!(warm["sessions"].as_array().unwrap().len(), 4, "{warm}");
+            assert_eq!(warm["sessions"].as_array().unwrap().len(), 9, "{warm}");
             let mut activity = SessionActivity::new(&config, &plugins);
             let started = Instant::now();
             activity.tick(&state, &[]).unwrap();
@@ -183,22 +185,85 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
                 elapsed < Duration::from_millis(1500),
                 "{id}: {elapsed:?}, {status:?}"
             );
-            assert_eq!(sessions.len(), 4, "{id}: {sessions:?}, {status:?}");
-            for index in 0..4 {
+            // Stalled callbacks may exhaust the budget while checking process
+            // identity. All six healthy siblings must survive regardless.
+            for index in 3..9 {
                 assert!(
                     sessions.iter().any(|session| session["session_id"]
                         == format!("session-{index}")
-                        && session["title"]
-                            == if index == 3 {
-                                "Healthy refreshed"
-                            } else {
-                                "Cached"
-                            }),
-                    "{id}: {sessions:?}"
+                        && session["title"] == "Healthy refreshed"),
+                    "{id}: {sessions:?}, {status:?}"
                 );
+            }
+            for session in &sessions {
+                assert!(warm["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|cached| cached["session_id"] == session["session_id"]));
+                if session["title"] != "Healthy refreshed" {
+                    assert_eq!(session["title"], "Cached", "{id}: {session}");
+                }
             }
         });
     }
+}
+
+#[test]
+fn claude_probe_rejection_supersedes_a_valid_cached_binding() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let script = f.dir.join("claude.mjs");
+    fs::write(&script, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+    let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    let pid = f.pid(process);
+    f.env.insert("CITO_ENDPOINT_PID".into(), pid.to_string());
+    f.plugin(
+        HOOK,
+        json!({"hook_event_name":"SessionStart","session_id":"live-session","cwd":"/repo"}),
+    );
+    f.env.remove("CITO_ENDPOINT_PID");
+    let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+    assert!(binding.exists());
+    let request =
+        json!({"op":"probe","endpoint_pid":pid,"session_id":"live-session","cwd":"/repo"});
+    // No bridge: prove the binding really is sufficient for the old fallback.
+    assert_eq!(f.plugin(CLAUDE, request.clone())["status"], "alive");
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    let listener =
+        UnixListener::bind(f.state.join(format!("sockets/claude-pid-{pid}.sock"))).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                        .unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    writeln!(stream, "{}", json!({"ok":false,"message":"Session closed"})).unwrap();
+                    break;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < until =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(2))
+                }
+                Err(error) => panic!("Socket fixture: {error}"),
+            }
+        }
+    });
+    let rejected = f.plugin(CLAUDE, request);
+    server.join().unwrap();
+    assert_eq!(rejected["status"], "transient_error", "{rejected}");
+    assert_eq!(rejected["reason"], "Session closed", "{rejected}");
+    assert!(!binding.exists());
 }
 
 #[test]
@@ -226,7 +291,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         listener.set_nonblocking(true).unwrap();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            for turn in 0..if id == "pi" { 4 } else { 3 } {
+            for turn in 0..4 {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -274,12 +339,10 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
             json!([]),
             "A responding rejection must supersede cached identity: {rejected}"
         );
-        if id == "pi" {
-            assert!(!f.state.join(format!("pi/endpoints/{pid}.json")).exists());
-            let after_rejection = f.plugin(bin, json!({"op":"discover_sessions"}));
-            release_tx.send(()).unwrap();
-            assert_eq!(after_rejection["sessions"], json!([]), "{after_rejection}");
-        }
+        assert!(!f.state.join(format!("{id}/endpoints/{pid}.json")).exists());
+        let after_rejection = f.plugin(bin, json!({"op":"discover_sessions"}));
+        release_tx.send(()).unwrap();
+        assert_eq!(after_rejection["sessions"], json!([]), "{after_rejection}");
         server.join().unwrap();
         fs::remove_file(path).unwrap();
         f.stop(process);

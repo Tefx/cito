@@ -344,13 +344,16 @@ pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
     }
     serde_json::from_str(&line).map_err(|e| e.to_string())
 }
-// Inspect sibling bridges independently, with at most eight owned workers.
-// PID ordering keeps discovery deterministic regardless of response latency.
+// Inspect sibling bridges with at most eight workers sharing a dynamic queue.
+// Return completed results in PID order within the provider's discovery budget;
+// unfinished socket calls may finish independently, but cannot hold up siblings.
 pub fn inspect_socket_endpoints(
     req: &Value,
     prefix: &str,
-    inspect: impl Fn(u32, &Path) -> Option<Value> + Sync,
+    inspect: impl Fn(u32, &Path) -> Option<Value> + Send + Sync + 'static,
 ) -> Result<Vec<(u32, Value)>> {
+    use std::sync::{atomic::AtomicUsize, atomic::Ordering, mpsc, Arc};
+    let deadline = std::time::Instant::now() + Duration::from_millis(1100);
     let entries = match fs::read_dir(state(req).join("sockets")) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -370,29 +373,44 @@ pub fn inspect_socket_endpoints(
         }
     }
     endpoints.sort_by_key(|(pid, _)| *pid);
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = endpoints
-            .chunks(endpoints.len().div_ceil(8).max(1))
-            .map(|chunk| {
-                let inspect = &inspect;
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .filter_map(|(pid, path)| inspect(*pid, path).map(|value| (*pid, value)))
-                        .collect::<Vec<_>>()
-                })
+    let endpoints = Arc::new(endpoints);
+    let next = Arc::new(AtomicUsize::new(0));
+    let inspect = Arc::new(inspect);
+    let (tx, rx) = mpsc::channel();
+    for _ in 0..endpoints.len().min(8) {
+        let endpoints = endpoints.clone();
+        let next = next.clone();
+        let inspect = inspect.clone();
+        let tx = tx.clone();
+        std::thread::Builder::new()
+            .name("endpoint-inspection".into())
+            .spawn(move || {
+                while std::time::Instant::now() < deadline {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((pid, path)) = endpoints.get(index) else {
+                        break;
+                    };
+                    if tx.send((*pid, inspect(*pid, path))).is_err() {
+                        break;
+                    }
+                }
             })
-            .collect();
-        let mut results = Vec::new();
-        for worker in workers {
-            results.extend(
-                worker
-                    .join()
-                    .map_err(|_| "Endpoint inspection worker panicked")?,
-            );
+            .map_err(|e| format!("Cannot start endpoint inspection worker: {e}"))?;
+    }
+    drop(tx);
+    let mut results = Vec::new();
+    while let Ok((pid, value)) =
+        rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+    {
+        if let Some(value) = value {
+            results.push((pid, value));
         }
-        Ok(results)
-    })
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    results.sort_by_key(|(pid, _)| *pid);
+    Ok(results)
 }
 fn pid_key(key: &str) -> bool {
     key.ends_with("_pid") || key.ends_with("Pid")
@@ -1105,6 +1123,58 @@ mod tests {
             "Failed"
         );
         assert_eq!(bounded_diagnostic(&"x".repeat(10000), "Failed").len(), 512);
+    }
+    #[test]
+    fn endpoint_inspection_budget_preserves_healthy_siblings_in_pid_order() {
+        use std::sync::{mpsc, Arc, Condvar, Mutex};
+        use std::time::Instant;
+        let root = std::env::temp_dir().join(format!(
+            "cito-endpoints-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("sockets")).unwrap();
+        for pid in (1..=9).rev() {
+            fs::write(root.join(format!("sockets/fixture-{pid}.sock")), "").unwrap();
+        }
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let blocked = gate.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let started = Instant::now();
+        let result = inspect_socket_endpoints(
+            &json!({"env":{"CITO_STATE_DIR":root}}),
+            "fixture-",
+            move |pid, _| {
+                if pid <= 3 {
+                    let (lock, wake) = &*blocked;
+                    let _guard = wake
+                        .wait_timeout_while(
+                            lock.lock().unwrap(),
+                            Duration::from_secs(2),
+                            |released| !*released,
+                        )
+                        .unwrap();
+                    finished_tx.send(()).unwrap();
+                }
+                Some(json!(pid))
+            },
+        );
+        let elapsed = started.elapsed();
+        // Release and observe every pending callback before assertions or cleanup.
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        for _ in 0..3 {
+            finished_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+        assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+        assert_eq!(
+            result.unwrap(),
+            (4..=9).map(|pid| (pid, json!(pid))).collect::<Vec<_>>()
+        );
     }
     #[test]
     fn mutation_preserves_symlink_target_mode_and_absent_file_cleanliness() {

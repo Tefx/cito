@@ -280,7 +280,9 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     Ok(())
 }
 fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
-    inspect_socket_endpoints(req, "pi-pid-", |p, _| {
+    let request = req.clone();
+    inspect_socket_endpoints(req, "pi-pid-", move |p, _| {
+        let req = &request;
         let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
         let response = match identify(req, p) {
             Ok(v) => {

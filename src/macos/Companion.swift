@@ -475,9 +475,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if let request = frame.request_id, let app = pendingAppChecks.removeValue(forKey: request),
                frame.ok == true && frame.source_op == "setup_apply" {
                 appCheckedUntil[app] = Date().addingTimeInterval(1.5)
-                DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
-                    if self?.settingsVisible == true { self?.rebuildSettingsPanel(preservingEditor: true) }
-                }
+                rebuildFeedbackAfter(1.5)
             }
             if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? "") {
                 hubInvitePending=false; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
