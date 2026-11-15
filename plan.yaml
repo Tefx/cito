@@ -13127,7 +13127,7 @@ phases:
 - id: v46
   name: V46 Low-Power & Event-Driven Runtime, Lazy UI Rendering & Native OS Discovery
     (v0.21.3)
-  status: pending
+  status: in_progress
   gate: 'All binding v46 Low-Power & Event-Driven Runtime requirements in docs/DESIGN.md
     (§2.2, §3.3, §4.2, §4.3, §5.1, §5.2, §8.1, §8.2 @ 7007410) pass; [REQUIRES_SKILL:
     contract-and-simplicity] convergence audit across v46 deltas completes cleanly;
@@ -13186,7 +13186,7 @@ phases:
   - id: v46.core
     name: V46 Rust Event-Driven Sleep, Mutation Wakeups, Throttled Pruning, Demand-Gated
       Discovery/Projections & Native OS Queries
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/**\n\
       \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
@@ -13279,6 +13279,8 @@ phases:
     - plugins/pi/cito-bridge.ts
     - plugins/codex/native.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-15T10:42:11.597395Z'
   - id: v46.ui
     name: V46 macOS Swift Lazy UI Rendering, StatusItem Icon Caching, Window-Active
       Vibrancy & Idle Hover Silence
