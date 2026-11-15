@@ -85,6 +85,85 @@ fn live_bridge_rejections_survive_identification_and_wake() {
     }
 }
 #[test]
+fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
+    use std::io::{BufRead, BufReader, Write};
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let script = f.dir.join(format!("{id}.mjs"));
+        fs::write(&script, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+        let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+        wait(|| f.output(process, false).contains("ready"));
+        let pid = f.pid(process);
+        if id == "claude" {
+            f.env.insert("CITO_ENDPOINT_PID".into(), pid.to_string());
+            f.plugin(
+                HOOK,
+                json!({"hook_event_name":"SessionStart","session_id":"live-session","cwd":"/repo"}),
+            );
+            f.env.remove("CITO_ENDPOINT_PID");
+        }
+        let path = f.state.join(format!("sockets/{id}-pid-{pid}.sock"));
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for turn in 0..3 {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(pair) => break pair,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(2))
+                        }
+                        Err(e) => panic!("Socket fixture: {e}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                match turn {
+                    0 => writeln!(stream,"{}",json!({"ok":true,"session_id":"live-session","cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
+                    1 => { release_rx.recv_timeout(std::time::Duration::from_secs(4)).unwrap(); },
+                    _ => writeln!(stream,"{}",json!({"ok":false,"message":"Session closed"})).unwrap(),
+                }
+            }
+        });
+        let first = f.plugin(bin, json!({"op":"discover_sessions"}));
+        assert_eq!(
+            first["sessions"][0]["session_id"], "live-session",
+            "{id}: {first}"
+        );
+        let slow = f.plugin(bin, json!({"op":"discover_sessions"}));
+        release_tx.send(()).unwrap();
+        assert_eq!(slow["ok"], true, "{id}: {slow}");
+        assert_eq!(
+            slow["sessions"][0]["session_id"], "live-session",
+            "{id}: {slow}"
+        );
+        assert_eq!(slow["sessions"][0]["updated_at_ms"], 1000);
+        assert_ne!(slow["sessions"][0]["needs_reload"], true);
+        let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
+        server.join().unwrap();
+        assert_eq!(
+            rejected["sessions"],
+            json!([]),
+            "A responding rejection must supersede cached identity: {rejected}"
+        );
+        fs::remove_file(path).unwrap();
+        f.stop(process);
+    }
+}
+
+#[test]
 fn u2_live_process_discovery_is_configured_owned_and_collision_safe() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -1180,10 +1259,14 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
     );
     assert!(failed_process["sessions"].is_null());
     let discover = || f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    assert_eq!(f.plugin(CODEX, json!({"op":"setup_apply"}))["ok"], true);
     db.execute("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE", &[])
         .unwrap();
     let started = std::time::Instant::now();
     let locked = discover();
+    let probe = f.plugin(CODEX, json!({"op":"probe","session_id":"active"}));
+    assert_eq!(probe["ok"], true, "{probe}");
+    assert_eq!(probe["status"], "transient_error", "{probe}");
     for request in [
         json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"}),
         json!({"op":"resolve_caller","meta":{"threadId":"active"},"cwd":"/repo"}),
@@ -1275,6 +1358,12 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         )["caller"]["session_id"],
         "active"
     );
+    db.execute("UPDATE threads SET archived=1 WHERE id='active'", &[])
+        .unwrap();
+    assert_eq!(
+        f.plugin(CODEX, json!({"op":"probe","session_id":"active"}))["status"],
+        "closed_definitive"
+    );
     drop(db);
     fs::remove_file(f.home.join(".codex/state_5.sqlite")).unwrap();
     assert_eq!(discover()["sessions"], json!([]));
@@ -1283,6 +1372,11 @@ fn codex_metadata_validation_and_sqlite_thread_projection() {
         discover()["ok"],
         false,
         "Real IO/format errors must reach the discovery cache owner"
+    );
+    assert_eq!(
+        f.plugin(CODEX, json!({"op":"probe","session_id":"active"}))["ok"],
+        false,
+        "Structural database errors cannot fabricate liveness"
     );
     for request in [
         json!({"op":"resolve_caller","cli_cmd":"listen","cwd":"/repo"}),
@@ -1805,12 +1899,22 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
     let port = f.frames(server)[0]["port"].as_u64().unwrap();
     let p = f.spawn(TELEGRAM, &[], &[]);
     for (token, expected) in [("poll409", "webhook"), ("poll401", "replace the Bot Token")] {
+        let before = fs::read_to_string(f.home.join("api-methods.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .count();
         f.send(p,json!({"op":"configure","hub_config":{"botToken":token,"apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
         wait(|| {
             f.frames(p).iter().any(|v| {
                 v["op"] == "health" && v["error"].as_str().is_some_and(|e| e.contains(expected))
             })
         });
+        let calls = fs::read_to_string(f.home.join("api-methods.jsonl"))
+            .unwrap()
+            .lines()
+            .count()
+            - before;
+        assert_eq!(calls,if token=="poll409" {3} else {1},"Transient poll failures need three consecutive failures; auth errors surface immediately");
     }
     f.send(p,json!({"op":"configure","hub_config":{"botToken":"healthy","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
     wait(|| {

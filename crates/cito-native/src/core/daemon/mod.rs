@@ -544,7 +544,11 @@ impl DaemonService {
                     }));
                 } else {
                     self.oidc_recoveries.insert(name.clone(), pending);
-                    if self.slots.get(&name).is_some_and(|old| old.config == hub) {
+                    if self.slots.get(&name).is_some_and(|old| {
+                        old.config == hub
+                            && rejected_hash.is_none()
+                            && old.expires_at > now_ms() / 1000
+                    }) {
                         continue;
                     }
                 }
@@ -554,16 +558,18 @@ impl DaemonService {
                     old.config == hub
                         && (auth == "oidc" || string(&old.identity, "owner_user") == user)
                         && (auth != "oidc"
-                            || old.auth_retry_at > now_ms()
+                            || (old.auth_retry_at > now_ms()
+                                && (old.expires_at == 0
+                                    || (rejected_hash.is_none()
+                                        && old.expires_at > now_ms() / 1000)))
                             || (rejected_hash.is_none() && old.expires_at > now_ms() / 1000 + 30))
                 })
             {
                 continue;
             }
-            self.channel_inventories.remove(&name);
             let registration = self.state.registration_lock(&name)?;
-            let previous = self.slots.remove(&name);
-            if let Some(old) = previous {
+            let mut previous = self.slots.remove(&name);
+            if let Some(old) = &previous {
                 let changed = old.config["url"] != hub["url"]
                     || (auth != "oidc"
                         && !super::auth::principal_ids_equal(
@@ -586,7 +592,6 @@ impl DaemonService {
                         );
                     }
                 }
-                old.closed.store(true, Ordering::SeqCst);
                 if changed {
                     for row in self
                         .state
@@ -638,6 +643,21 @@ impl DaemonService {
                         },
                     );
                 }
+                // A background refresh cannot revoke an unexpired, accepted credential.
+                if recovered.as_ref().is_none_or(|result| result.is_err())
+                    && rejected_hash.is_none()
+                    && previous.as_ref().is_some_and(|old| {
+                        old.config == hub
+                            && old.expires_at > now_ms() / 1000
+                            && old.bearer.is_some()
+                    })
+                {
+                    if let Some(mut old) = previous.take() {
+                        old.auth_retry_at = now_ms() + 5000;
+                        self.slots.insert(name.clone(), old);
+                    }
+                    continue;
+                }
                 match recovered.unwrap_or_else(|| Err("AUTH_UNAVAILABLE: recovery pending".into()))
                 {
                     Ok((token, identity)) => {
@@ -659,7 +679,7 @@ impl DaemonService {
                         client.bearer = None;
                         client.expires_at = 0;
                         client.auth_retry_at = now_ms() + 5000;
-                        client.auth_rejected_hash = rejected_hash;
+                        client.auth_rejected_hash = rejected_hash.clone();
                         if let Some(identity) =
                             super::login::offline_identity(&self.config.state_dir, &name, &hub)
                         {
@@ -670,6 +690,26 @@ impl DaemonService {
                         }
                     }
                 }
+            }
+            let retained = previous.as_ref().is_some_and(|old| {
+                old.config["url"] == client.config["url"]
+                    && rejected_hash.is_none()
+                    && old.expires_at > now_ms() / 1000
+                    && client.expires_at > now_ms() / 1000
+                    && super::auth::principal_ids_equal(
+                        string(&old.identity, "principal_id"),
+                        string(&client.identity, "principal_id"),
+                    )
+            });
+            if let Some(old) = &previous {
+                if retained {
+                    client.inherit_authority(old);
+                } else {
+                    old.closed.store(true, Ordering::SeqCst);
+                }
+            }
+            if !retained {
+                self.channel_inventories.remove(&name);
             }
             // Disabled profiles have no previous slot. Durable binding identity must
             // still be checked before any receiver can use the replacement client.
@@ -691,7 +731,7 @@ impl DaemonService {
                     self.state.db.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=? AND hub_url IS NULL", &[hub["url"].clone(),row["hub"].clone(),row["listener_id"].clone()])?;
                 }
             }
-            if auth != "oidc" || client.bearer.is_some() {
+            if !retained && (auth != "oidc" || client.bearer.is_some()) {
                 if let Some(events) = client.start_events() {
                     self.events.push(events);
                 }

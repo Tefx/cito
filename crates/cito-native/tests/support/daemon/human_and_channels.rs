@@ -441,9 +441,8 @@ server.serve_forever()
         .unwrap();
     assert_eq!(snapshot["settings"]["settings_hub"], "shared");
     assert_eq!(
-        snapshot["settings"]["channels"],
-        json!([]),
-        "Invalidated inventory must be loading"
+        snapshot["settings"]["channels"][0]["configured"], true,
+        "Same-principal credential renewal retains the confirmed personal inventory"
     );
     // Replace the slot again while Alice's response is in flight. Bob must never
     // receive Alice's configured personal binding, including after its late reply.
@@ -541,7 +540,7 @@ server.serve_forever()
     // A replaced slot cannot acknowledge an in-flight mutation against the new
     // identity, even when its remote mutation already committed before replacement.
     gate("unpair-post", "bob", "next-credential", false);
-    gate("replacement", "bob", "replacement-credential", false);
+    gate("replacement", "charlie", "replacement-credential", false);
     std::thread::scope(|scope| {
         let changed = scope.spawn(move || {
             ureq::post(&format!("http://127.0.0.1:{daemon_port}/ui"))
@@ -553,6 +552,7 @@ server.serve_forever()
         });
         wait(|| seen("unpair-post"));
         config["hubs"]["shared"]["token"] = json!("replacement-credential");
+        config["hubs"]["shared"]["user"] = json!("charlie");
         fs::write(&f.config, config.to_string()).unwrap();
         wait(|| seen("replacement"));
         let failure = changed.join().unwrap().unwrap_err();

@@ -520,12 +520,46 @@ pub fn handle(req: &Value) -> Result<Value> {
                     {
                         let mut r = req.clone();
                         r["endpoint_pid"] = json!(p);
-                        let response = bridge(&r);
+                        let response =
+                            socket_call(&e.path(), &json!({"op":"identify"})).or_else(|error| {
+                                if error != "Socket request timed out" || !alive(p) {
+                                    return Err(error);
+                                }
+                                let binding = read_json(&binding_path(&r, p))?;
+                                let identity = process_identity(p)?;
+                                if str_at(&binding, "start").is_none()
+                                    || str_at(&binding, "start").map(str::to_owned)
+                                        != process_start(p)
+                                    || !matches_process(str_at(&identity, "command").unwrap_or(""))
+                                    || (binding["process_identity"].is_object()
+                                        && binding["process_identity"] != identity)
+                                    || str_at(&binding, "session_id").is_none()
+                                    || str_at(&binding, "cwd").is_none()
+                                {
+                                    return Err(error);
+                                }
+                                let mut session = binding;
+                                session["ok"] = json!(true);
+                                Ok(session)
+                            });
                         if let Ok(v) = response {
                             if v["ok"] == false {
                                 continue;
                             }
                             if v["ok"] == true {
+                                if let Ok(mut binding) = read_json(&binding_path(&r, p)) {
+                                    if binding["session_id"] == v["session_id"]
+                                        && (binding["updated_at_ms"] != v["updated_at_ms"]
+                                            || binding["session_name"] != v["session_name"])
+                                    {
+                                        binding["updated_at_ms"] = v["updated_at_ms"].clone();
+                                        binding["session_name"] = v["session_name"].clone();
+                                        let _ = atomic_write(
+                                            &binding_path(&r, p),
+                                            binding.to_string().as_bytes(),
+                                        );
+                                    }
+                                }
                                 let mut session = caller(
                                     "claude",
                                     str_at(&v, "session_id").unwrap_or(""),

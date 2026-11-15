@@ -131,8 +131,31 @@ impl DaemonService {
         }).collect();
         let mut hubs = Vec::new();
         let mut channels = Vec::new();
+        let mut channel_inventory_error: Option<String> = None;
         for (name, slot) in &self.slots {
-            hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(&slot.connection_status()),"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
+            let capabilities = slot.capabilities();
+            hubs.push(json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,"auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),"capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,"error":null}));
+            if let Some(item) = hubs.last_mut().and_then(Value::as_object_mut) {
+                let record = slot.cached_directory().into_iter().find(|row| {
+                    row["harness"] == "human"
+                        && crate::core::auth::principal_matches(
+                            string(row, "principal_id"),
+                            &slot.identity,
+                        )
+                });
+                let projection = self
+                    .project_human(record.as_ref(), capabilities["observation_current"] == true);
+                if let Some(fields) = projection.as_object() {
+                    item.extend(fields.clone());
+                }
+                item.insert(
+                    "attachments".into(),
+                    json!(record
+                        .as_ref()
+                        .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
+                        .unwrap_or_default()),
+                );
+            }
             if name == channel_hub {
                 let inventory = if slot.local.is_some() {
                     slot.rpc("human_channels_list", &json!({}))
@@ -151,7 +174,7 @@ impl DaemonService {
                     .cloned()
                     .unwrap_or_default();
                 if inventory["status"] == "error" {
-                    channels.push(json!({"id":"inventory","display_name":"Human Channels","sf_symbol":"exclamationmark.triangle","tint":"red","enabled":false,"configured":false,"hub_provided":false,"pairing_supported":false,"fields":[],"status":"error","detail":inventory["detail"]}));
+                    channel_inventory_error = Some(string(&inventory, "detail").to_owned());
                 }
             }
         }
@@ -174,10 +197,14 @@ impl DaemonService {
                 .cloned()
                 .unwrap_or_default();
             if inventory["status"] == "error" {
-                channels.push(json!({"id":"inventory","display_name":"Human Channels","sf_symbol":"exclamationmark.triangle","tint":"red","enabled":false,"configured":false,"hub_provided":false,"pairing_supported":false,"fields":[],"status":"error","detail":inventory["detail"]}));
+                channel_inventory_error = Some(string(&inventory, "detail").to_owned());
             }
         }
-        let channel_human = self.human_projection(channel_hub);
+        let channel_human = hubs
+            .iter()
+            .find(|hub| hub["name"] == channel_hub)
+            .cloned()
+            .unwrap_or_else(|| self.human_projection(channel_hub));
         if let Some(inbox_paused) = channel_human["human_paused"].as_bool() {
             for channel in &mut channels {
                 channel["inbox_paused"] = json!(inbox_paused);
@@ -228,13 +255,11 @@ impl DaemonService {
                     .cloned()
                     .unwrap_or(Value::Null);
             }
-            let projection = if item["name"] == channel_hub {
-                channel_human.clone()
-            } else {
-                self.human_projection(string(item, "name"))
-            };
-            if let (Some(item), Some(fields)) = (item.as_object_mut(), projection.as_object()) {
-                item.extend(fields.clone());
+            if item.get("human_state_status").is_none() {
+                let projection = self.human_projection(string(item, "name"));
+                if let (Some(item), Some(fields)) = (item.as_object_mut(), projection.as_object()) {
+                    item.extend(fields.clone());
+                }
             }
             item["connected"] = json!(item["enabled"] != false && item["status"] == "connected");
         }
@@ -268,7 +293,7 @@ impl DaemonService {
         let lan_url = endpoint(&lan_advertised_host(string(host, "bind")));
         let tailscale_invite_command = tailscale_url.as_deref().map(invite);
         let lan_invite_command = invite(&lan_url);
-        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
+        json!({"apps":apps,"channel_hub":channel_hub,"settings_hub":channel_hub,"channels":channels,"channel_inventory_error":channel_inventory_error,"hubs":hubs,"host_hub":{"enabled":host["enabled"].as_bool().unwrap_or(false),"running":self.host_server.is_some(),"port":port,"endpoint_url":endpoint_url,"tailscale_url":tailscale_url,"tailscale_invite_command":tailscale_invite_command,"lan_url":lan_url,"lan_invite_command":lan_invite_command,"token":token,"invite_command":invite_command,"auth_mode":host_hub_auth_mode(host),"error":self.last_host_hub_error},"launch_at_login":inspect_launch_at_login(&self.config.home_dir)})
     }
 
     pub(super) fn display_address(&self, hub: &str, row: &Value) -> String {
@@ -450,7 +475,16 @@ impl DaemonService {
                         .iter()
                         .any(|s| s["hub"] == *hub && s["listener_id"] == row["listener_id"])
                 {
-                    remote.push(self.peer_dto(hub, &row));
+                    let mut peer = self.peer_dto(hub, &row);
+                    if row["harness"] == "human" {
+                        if let Some(sample) = settings["hubs"]
+                            .as_array()
+                            .and_then(|hubs| hubs.iter().find(|item| item["name"] == *hub))
+                        {
+                            peer["human_state_status"] = sample["human_state_status"].clone();
+                        }
+                    }
+                    remote.push(peer);
                 }
             }
         }
@@ -469,7 +503,7 @@ impl DaemonService {
     }
 
     pub(super) fn peer_dto(&self, hub: &str, row: &Value) -> Value {
-        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"listen_mode":row["listen_mode"].as_str().unwrap_or("manual"),"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":iso(now_ms()),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|crate::core::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id")))});
+        let mut result = json!({"hub":hub,"listener_id":row["listener_id"],"public_id":row["public_id"],"scoped_id":self.scoped(hub,string(row,"public_id")),"display_address":self.display_address(hub,row),"user":row["owner_user"],"host_id":string(row,"host_id"),"host_name":string(row,"host_name"),"harness":row["harness"],"session_id":row["session_id"],"listen_mode":row["listen_mode"].as_str().unwrap_or("manual"),"custom_title":row["custom_title"],"title":row["title"],"about":row["about"],"scope":row["scope"],"last_seen_at":row["updated_at_ms"].as_u64().into_iter().chain(row["channels"].as_object().into_iter().flat_map(|channels| channels.values()).filter_map(|channel| channel["updated_at_ms"].as_u64())).max().map(iso),"cwd":row["cwd"],"repo":row["repo"],"branch":row["branch"],"is_self_principal":self.slots.get(hub).is_some_and(|s|crate::core::auth::principal_ids_equal(string(row,"principal_id"),string(&s.identity,"principal_id")))});
         let attachments = crate::core::lease::attachments(row, &self.host_id, now_ms());
         result["channels"] = json!(attachments
             .iter()
@@ -480,7 +514,7 @@ impl DaemonService {
             let current = self
                 .slots
                 .get(hub)
-                .is_some_and(|slot| slot.connection_status() == "connected");
+                .is_some_and(|slot| slot.observation_current());
             if let (Some(out), Some(fields)) = (
                 result.as_object_mut(),
                 self.project_human(Some(row), current).as_object(),
@@ -502,7 +536,7 @@ impl DaemonService {
                     )
             })
         });
-        let current = slot.is_some_and(|slot| slot.connection_status() == "connected");
+        let current = slot.is_some_and(|slot| slot.observation_current());
         let mut projection = self.project_human(record.as_ref(), current);
         projection["attachments"] = json!(record
             .as_ref()

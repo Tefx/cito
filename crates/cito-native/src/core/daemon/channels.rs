@@ -91,13 +91,7 @@ impl ChannelInventory {
 }
 
 pub(super) fn remote_channels_identity(slot: &HubClient) -> Value {
-    json!([
-        slot.config["url"],
-        slot.config["authMode"],
-        slot.bearer,
-        slot.identity["owner_user"],
-        slot.identity["principal_id"]
-    ])
+    json!([slot.config["url"], slot.identity["principal_id"]])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

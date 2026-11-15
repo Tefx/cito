@@ -658,8 +658,18 @@ pub fn handle(req: &Value) -> Result<Value> {
                 );
             }
             let id = str_at(req, "session_id").unwrap_or("");
-            let archived =
-                row_for_id(req, id)?.and_then(|r| r["archived"].as_str().map(|s| s != "0"));
+            let archived = match row_for_id(req, id) {
+                Ok(row) => row.and_then(|r| r["archived"].as_str().map(|s| s != "0")),
+                Err(error)
+                    if matches!(
+                        error.as_str(),
+                        "Session database is busy" | "Session database deadline exceeded"
+                    ) =>
+                {
+                    return Ok(json!({"ok":true,"status":"transient_error","reason":error}));
+                }
+                Err(error) => return Err(error),
+            };
             let status = if archived == Some(true) {
                 "closed_definitive"
             } else {

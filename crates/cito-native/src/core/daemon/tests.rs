@@ -376,6 +376,128 @@ print(json.dumps(v))
 }
 
 #[test]
+fn oidc_pre_expiry_recovery_preserves_slot_and_inventory_until_verified_replacement(
+) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-renewal-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        },
+    )?;
+    let raw = json!({"hubs":{"local":{"url":"local://"},"work":{"url":"http://127.0.0.1:1","authMode":"oidc","issuer":"https://id.example.com","clientId":"client","token":"old"}}});
+    fs::write(&config.config_path, raw.to_string()).map_err(|e| e.to_string())?;
+    let (_, hubs, _) = crate::plugins::try_normalize_existing_config(Some(&raw.to_string()))?;
+    let hub = hubs["work"].clone();
+    let mut old = HubClient::new(
+        "work".into(),
+        hub.clone(),
+        "alice",
+        Some(service.local.clone()),
+    );
+    old.directory()?;
+    old.local = None;
+    old.expires_at = now_ms() / 1000 + 20;
+    let identity = old.identity.clone();
+    let closed = old.closed.clone();
+    let rows = old.cached_directory();
+    let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&old)));
+    inventory.cached.lock().map_err(|e| e.to_string())?.value =
+        json!({"channels":[{"id":"messenger","status":"ready"}]});
+    service
+        .channel_inventories
+        .insert("work".into(), inventory.clone());
+    service.slots.insert("work".into(), old);
+    service
+        .receivers
+        .insert("auto:work".into(), thread::spawn(|| {}));
+    let (tx, rx) = std::sync::mpsc::channel();
+    service.oidc_recoveries.insert(
+        "work".into(),
+        OidcRecovery {
+            config: hub.clone(),
+            rejected: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            worker: thread::spawn(move || rx.recv().unwrap()),
+        },
+    );
+    service.reload_slots()?;
+    assert!(!closed.load(Ordering::SeqCst));
+    assert_eq!(service.slots["work"].bearer.as_deref(), Some("old"));
+    assert!(Arc::ptr_eq(
+        &inventory,
+        &service.channel_inventories["work"]
+    ));
+    assert_eq!(service.slots["work"].cached_directory().len(), rows.len());
+    let token = format!(
+        "header.{}.signature",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"exp":now_ms()/1000+300}).to_string())
+    );
+    tx.send(Ok((token.clone(), identity)))
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !service.oidc_recoveries["work"].worker.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    service.reload_slots()?;
+    assert_eq!(
+        service.slots["work"].bearer.as_deref(),
+        Some(token.as_str())
+    );
+    assert!(!closed.load(Ordering::SeqCst));
+    assert!(Arc::ptr_eq(&closed, &service.slots["work"].closed));
+    assert!(Arc::ptr_eq(
+        &inventory,
+        &service.channel_inventories["work"]
+    ));
+    assert_eq!(service.slots["work"].cached_directory().len(), rows.len());
+    let expired = service
+        .slots
+        .get_mut("work")
+        .ok_or("Missing renewed slot")?;
+    expired.expires_at = now_ms() / 1000 - 1;
+    expired.auth_retry_at = now_ms() + 5000;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = cancelled.clone();
+    service.oidc_recoveries.insert(
+        "work".into(),
+        OidcRecovery {
+            config: hub,
+            rejected: None,
+            cancelled,
+            worker: thread::spawn(move || {
+                while !cancel.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err("Recovery cancelled".into())
+            }),
+        },
+    );
+    service.reload_slots()?;
+    assert!(
+        closed.load(Ordering::SeqCst),
+        "Expiry must retire the stream even while renewal is pending"
+    );
+    assert!(service.slots["work"].cached_directory().is_empty());
+    assert!(!service.channel_inventories.contains_key("work"));
+    service.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn channel_inventory_preserves_channels_on_transport_failure() -> Result<(), String> {
     let slot = HubClient::new(
         "work".into(),
@@ -2269,7 +2391,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         respond(
             &mut stream,
             200,
-            &json!({"ok":true,"result":{"server_now_ms":1000,"record":{"listener_id":"c_fixture","public_id":"alice-fixture","principal_id":"none#alice","owner_user":"alice","harness":"human","session_id":"default","state":"UNLISTENED","scope":"workspace","about":"Keep","human_control_revision":3,"channels":{"remote:human":{"host_id":"remote","host_name":"Laptop","state":"ACTIVE","updated_at_ms":1000}}}}}),
+            &json!({"ok":true,"result":{"server_now_ms":1000,"record":{"listener_id":"c_fixture","public_id":"alice-fixture","principal_id":"none#alice","owner_user":"alice","harness":"human","session_id":"default","state":"UNLISTENED","scope":"workspace","about":"Keep","human_control_revision":3,"updated_at_ms":1000,"channels":{"remote:human":{"host_id":"remote","host_name":"Laptop","state":"ACTIVE","updated_at_ms":1000}}}}}),
         );
     });
     let client = HubClient::new(
@@ -2301,6 +2423,25 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
     assert_eq!(peer["human_availability"], hub["human_availability"]);
     assert_eq!(peer["human_state_status"], hub["human_state_status"]);
     assert_eq!(peer["attachments"], hub["attachments"]);
+    assert_eq!(peer["last_seen_at"], crate::core::identity::iso(1000));
+    let inventory = Arc::new(ChannelInventory::new(remote_channels_identity(&client)));
+    inventory.cached.lock().map_err(|e| e.to_string())?.value = json!({"status":"error","detail":"Temporary inventory failure","channels":[{"id":"messenger","status":"ready"}]});
+    service
+        .channel_inventories
+        .insert("work".into(), inventory.clone());
+    let settings = service.settings_for_hub("work");
+    assert_eq!(
+        settings["channel_inventory_error"],
+        "Temporary inventory failure"
+    );
+    assert_eq!(settings["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(settings["channels"][0]["id"], "messenger");
+    inventory.cached.lock().map_err(|e| e.to_string())?.value =
+        json!({"status":"error","detail":"Initial failure"});
+    let settings = service.settings_for_hub("work");
+    assert_eq!(settings["channels"], json!([]));
+    assert_eq!(settings["channel_inventory_error"], "Initial failure");
+    assert!(service.settings_for_hub("local")["channel_inventory_error"].is_null());
     *client.status.lock().map_err(|e| e.to_string())? = "connected".into();
     *client.rejected_bearer.lock().map_err(|e| e.to_string())? = Some("rejected".into());
     let snapshot = service.snapshot()?;
@@ -2354,6 +2495,20 @@ fn root_hub_shedding_retains_correlated_receipt_and_terminates() -> Result<(), S
     assert_eq!(frame["hub"], "work");
     Ok(())
 }
+#[test]
+fn channel_inventory_diagnostic_survives_collection_shedding() -> Result<(), String> {
+    let frame = json!({"op":"state","settings":{"channel_inventory_error":"Inventory unavailable","channels":(0..16).map(|i| json!({"id":format!("channel-{i}"),"fields":(0..12).map(|_|json!({"detail":"x".repeat(4096)})).collect::<Vec<_>>()})).collect::<Vec<_>>()}});
+    let bytes = bounded_frame(frame)?;
+    assert!(bytes.len() < FRAME_LIMIT);
+    let frame: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    assert_eq!(frame["truncated"], true);
+    assert_eq!(
+        frame["settings"]["channel_inventory_error"],
+        "Inventory unavailable"
+    );
+    Ok(())
+}
+
 #[test]
 fn bounded_empty_activity_with_multibyte_listeners() -> Result<(), String> {
     let f = json!({"op":"state","activity":[],"listeners":(0..150).map(|_|json!({"title":"🦀".repeat(10000),"about":"🦀".repeat(10000)})).collect::<Vec<_>>(),"unread_count":200});

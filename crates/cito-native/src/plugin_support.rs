@@ -316,18 +316,29 @@ pub fn json_mutate(
         )))
     })
 }
+fn socket_io_error(error: std::io::Error) -> String {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        "Socket request timed out".into()
+    } else {
+        error.to_string()
+    }
+}
+
 pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
     let mut s = UnixStream::connect(path).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_millis(750)))
         .map_err(|e| e.to_string())?;
     s.set_write_timeout(Some(Duration::from_millis(750)))
         .map_err(|e| e.to_string())?;
-    writeln!(s, "{req}").map_err(|e| e.to_string())?;
+    writeln!(s, "{req}").map_err(socket_io_error)?;
     let mut line = String::new();
     BufReader::new(s)
         .take(4 * 1024 * 1024)
         .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
+        .map_err(socket_io_error)?;
     if !line.ends_with('\n') {
         return Err("Socket closed before newline".into());
     }

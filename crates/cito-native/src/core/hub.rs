@@ -1229,7 +1229,19 @@ impl HubEngine {
         if let Some(process) = old {
             process.shutdown();
         }
-        Ok(())
+        self.inner.db.transaction(|c| {
+            let (_, mut state) = service(c, id)?;
+            if state
+                .as_object_mut()
+                .is_some_and(|fields| fields.remove("poll_error").is_some())
+            {
+                c.execute(
+                    "UPDATE hub_plugin_services SET service_state_json=? WHERE plugin_id=?",
+                    &[json!(state.to_string()), json!(id)],
+                )?;
+            }
+            Ok(())
+        })
     }
     fn channel_list(&self, caller: &Value) -> Result<Value, String> {
         let plugins = self
@@ -1263,8 +1275,8 @@ impl HubEngine {
                     _=>"Configure service credentials and pair your account".into(),
                 };
                 let mut warning = false;
-                if let Some(failed) = one(c,"SELECT status,last_error FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND (delivered_ms>=? OR status='effect_unknown') ORDER BY (status='effect_unknown') DESC,delivered_ms DESC,rowid DESC LIMIT 1",&[json!(plugin.id),caller["principal_id"].clone(),json!(n(&binding,"updated_ms"))])? {
-                    if matches!(s(&failed,"status"),"failed"|"failed_permanent"|"effect_unknown") && !s(&failed,"last_error").is_empty() { warning = true; detail = if failed["status"] == "effect_unknown" { format!("Delivery outcome unknown; automatic replay stopped to avoid duplicates. {}", s(&failed,"last_error")) } else { s(&failed,"last_error").into() };  }
+                if let Some(failed) = one(c,"SELECT status,attempts,last_error FROM hub_channel_deliveries WHERE plugin_id=? AND principal_id=? AND (delivered_ms>=? OR status='effect_unknown') ORDER BY (status='effect_unknown') DESC,delivered_ms DESC,rowid DESC LIMIT 1",&[json!(plugin.id),caller["principal_id"].clone(),json!(n(&binding,"updated_ms"))])? {
+                    if (matches!(s(&failed,"status"),"failed"|"failed_permanent"|"effect_unknown") || (failed["status"] == "in_flight" && n(&failed,"attempts") > 0)) && !s(&failed,"last_error").is_empty() { warning = true; detail = if failed["status"] == "effect_unknown" { format!("Delivery outcome unknown; automatic replay stopped to avoid duplicates. {}", s(&failed,"last_error")) } else { s(&failed,"last_error").into() };  }
                 }
                 if let Some(error) = health["poll_error"].as_str() { warning = true; detail = error.into(); }
                 let fs=fields(&plugin).iter().map(|f| {
@@ -1314,15 +1326,7 @@ impl HubEngine {
         for plugin in plugins {
             let should_run=self.inner.db.transaction(|c|{let(cfg,_)=service(c,&plugin.id)?;let bound=one(c,"SELECT 1 AS n FROM hub_human_channels WHERE plugin_id=? AND enabled=1 LIMIT 1",&[json!(plugin.id)])?.is_some();let pairing=one(c,"SELECT 1 AS n FROM hub_pairing_codes WHERE plugin_id=? AND consumed_ms IS NULL AND expires_ms>? LIMIT 1",&[json!(plugin.id),json!(now_ms())])?.is_some();Ok(ready(&plugin,&cfg,"hub")&&(cfg.as_object().is_some_and(|m|m.values().any(configured))||bound||pairing))})?;
             if !should_run {
-                let process = self
-                    .inner
-                    .processes
-                    .lock()
-                    .map_err(|_| "Process lock poisoned")?
-                    .remove(&plugin.id);
-                if let Some(p) = process {
-                    p.shutdown()
-                }
+                self.stop_process(&plugin.id)?;
                 continue;
             }
             if let Err(error) = self
@@ -2121,6 +2125,50 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
             "failed",
             now + (2_000_i64 << attempts.clamp(0, 5)).min(60_000),
         )
+    }
+}
+
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+    #[test]
+    fn retry_reservation_keeps_warning_and_process_stop_clears_poll_health() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-channel-health-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir)?;
+        *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
+            id: "messenger".into(),
+            manifest: json!({"displayName":"Messenger","fields":[]}),
+            dir: dir.clone(),
+            command: vec![],
+        }];
+        hub.inner.db.execute("INSERT INTO hub_plugin_services(plugin_id,config_json,service_state_json,updated_ms) VALUES('messenger','{}','{}',0)",&[])?;
+        hub.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,attempts,delivered_ms,last_error) VALUES('messenger','none#alice','signal',1,'failed',1,1,'Retry pending')",&[])?;
+        let caller = json!({"principal_id":"none#alice","owner_user":"alice"});
+        assert_eq!(hub.channel_list(&caller)?["channels"][0]["warning"], true);
+        hub.inner
+            .db
+            .execute("UPDATE hub_channel_deliveries SET status='in_flight'", &[])?;
+        let channel = hub.channel_list(&caller)?["channels"][0].clone();
+        assert_eq!(channel["warning"], true);
+        assert_eq!(channel["detail"], "Retry pending");
+        hub.inner.db.execute(
+            "UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL",
+            &[],
+        )?;
+        assert_eq!(hub.channel_list(&caller)?["channels"][0]["warning"], false);
+        hub.plugin_frame(
+            "messenger",
+            &json!({"op":"health","error":"Temporary poll failure"}),
+        );
+        assert_eq!(hub.channel_list(&caller)?["channels"][0]["warning"], true);
+        hub.tick_channels()?;
+        assert_eq!(hub.channel_list(&caller)?["channels"][0]["warning"], false);
+        hub.shutdown();
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 

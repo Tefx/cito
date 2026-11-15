@@ -3,6 +3,90 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
 #[test]
+fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = json!({"url":format!("http://{}",listener.local_addr().unwrap()),"authMode":"oidc","token":"old"});
+    let mut old = HubClient::new("work".into(), config.clone(), "alice", None);
+    old.expires_at = crate::plugins::now_ms() / 1000 + 20;
+    old.cache_human(
+        &json!({"server_now_ms":1000,"record":{"listener_id":"human","human_paused":true}}),
+    );
+    old.stream_live.store(true, Ordering::SeqCst);
+    let mut renewed = HubClient::new("work".into(), config, "alice", None);
+    renewed.bearer = Some("verified-new".into());
+    renewed.expires_at = old.expires_at + 300;
+    renewed.inherit_authority(&old);
+    assert!(Arc::ptr_eq(&old.closed, &renewed.closed));
+    assert!(Arc::ptr_eq(&old.directory_cache, &renewed.directory_cache));
+    assert_eq!(renewed.cached_directory()[0]["human_paused"], true);
+    assert!(renewed.stream_live.load(Ordering::SeqCst));
+    old.reject_token(&Some("old".into()));
+    assert!(
+        renewed.auth_valid(),
+        "A delayed rejection cannot reject new credentials"
+    );
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            headers.push_str(&line);
+        }
+        assert!(
+            headers.contains("Authorization: Bearer verified-new"),
+            "{headers}"
+        );
+        let body = r#"{"ok":true,"result":{}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    old.rpc("fixture", &json!({})).unwrap();
+    server.join().unwrap();
+    renewed.reject_token(&Some("verified-new".into()));
+    assert_eq!(renewed.connection_status(), "auth_required");
+}
+
+#[test]
+fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
+    let client = HubClient::new(
+        "work".into(),
+        json!({"url":"http://127.0.0.1:1"}),
+        "alice",
+        None,
+    );
+    client.cache_human(&json!({"record":{"listener_id":"human"}}));
+    client
+        .parse_rpc_response(200, br#"{"ok":true}"#, &None)
+        .unwrap();
+    // A disconnected SSE stream cannot downgrade a successful RPC or observation.
+    client.stream_live.store(false, Ordering::SeqCst);
+    assert_eq!(client.connection_status(), "connected");
+    assert!(client.observation_current());
+    client.stream_live.store(true, Ordering::SeqCst);
+    assert!(client.rpc("fixture", &json!({})).is_err());
+    let state = client.capabilities();
+    assert_eq!(state["status"], "connected");
+    assert_eq!(state["rpc_status"], "disconnected");
+    assert_eq!(state["sse_live"], true);
+    assert_eq!(state["observation_current"], true);
+    *client.observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+    assert!(!client.observation_current());
+    assert_eq!(client.connection_status(), "connected");
+}
+
+#[test]
 fn human_cache_projection_uses_monotonic_hub_time_without_waiting_for_network_writers() {
     let client = HubClient::new(
         "work".into(),

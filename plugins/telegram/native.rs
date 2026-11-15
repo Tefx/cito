@@ -371,6 +371,27 @@ impl Runtime {
         true
     }
 }
+#[derive(Default)]
+struct PollBackoff {
+    failures: u32,
+}
+impl PollBackoff {
+    fn failed(&mut self, error: &ApiFailure, jitter_ms: u64) -> (bool, Duration) {
+        self.failures = self.failures.saturating_add(1);
+        let permanent = ["HTTP 401:", "HTTP 403:", "API 401:", "API 403:"]
+            .iter()
+            .any(|code| error.message.contains(code));
+        let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
+        (
+            permanent || self.failures >= 3,
+            Duration::from_millis(delay + jitter_ms.min(499)),
+        )
+    }
+    fn succeeded(&mut self) {
+        self.failures = 0;
+    }
+}
+
 pub fn main() {
     let input = stdin_watchdog();
     let (tx, rx) = mpsc::channel::<(Value, std::result::Result<Value, ApiFailure>)>();
@@ -382,6 +403,8 @@ pub fn main() {
         pair_chats: HashMap::new(),
     };
     let mut polling = false;
+    let mut backoff = PollBackoff::default();
+    let mut poll_config = runtime.config.clone();
     let mut next_poll = std::time::Instant::now();
     loop {
         while let Ok(req) = input.try_recv() {
@@ -389,11 +412,17 @@ pub fn main() {
                 return;
             }
         }
+        if poll_config != runtime.config {
+            poll_config = runtime.config.clone();
+            backoff.succeeded();
+            next_poll = std::time::Instant::now();
+        }
         if let Ok((config, result)) = rx.try_recv() {
             polling = false;
             if config == runtime.config {
                 match result {
                     Ok(updates) => {
+                        backoff.succeeded();
                         emit(&json!({"op":"health","error":null}));
                         runtime.updates(updates);
                     }
@@ -406,10 +435,18 @@ pub fn main() {
                         } else {
                             "Check the network, Bot Token, and bot permissions."
                         };
-                        emit(
-                            &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
-                        );
-                        next_poll = std::time::Instant::now() + Duration::from_secs(1);
+                        let jitter = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_millis() as u64
+                            % 500;
+                        let (report, delay) = backoff.failed(&e, jitter);
+                        if report {
+                            emit(
+                                &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
+                            );
+                        }
+                        next_poll = std::time::Instant::now() + delay;
                     }
                 }
             }
@@ -440,6 +477,43 @@ pub fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn polling_hysteresis_backoff_and_permanent_auth_errors() {
+        let failure = |message: &str| ApiFailure {
+            message: message.into(),
+            retryable: false,
+            effect_unknown: false,
+        };
+        for message in [
+            "Telegram getUpdates request failed",
+            "Telegram getUpdates HTTP 409: Conflict",
+        ] {
+            let mut backoff = PollBackoff::default();
+            assert_eq!(
+                backoff.failed(&failure(message), 0),
+                (false, Duration::from_millis(500))
+            );
+            assert_eq!(
+                backoff.failed(&failure(message), 100),
+                (false, Duration::from_millis(1100))
+            );
+            assert_eq!(
+                backoff.failed(&failure(message), 200),
+                (true, Duration::from_millis(2200))
+            );
+            for _ in 0..100 {
+                assert!(backoff.failed(&failure(message), 499).1 <= Duration::from_millis(32499));
+            }
+            backoff.succeeded();
+            assert!(!backoff.failed(&failure(message), 0).0);
+        }
+        for message in [
+            "Telegram getUpdates HTTP 401: Unauthorized",
+            "Telegram getUpdates API 403: Forbidden",
+        ] {
+            assert!(PollBackoff::default().failed(&failure(message), 0).0);
+        }
+    }
     #[test]
     fn configure_retains_monotonic_cursor_and_ack_without_keyboard_is_noop() {
         let mut runtime = Runtime {

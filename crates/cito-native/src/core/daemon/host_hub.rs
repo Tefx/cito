@@ -125,7 +125,10 @@ pub(super) fn tailscale_host_from_status(status: &Value) -> Option<String> {
         .map(|ip| ip.to_string())
 }
 
-fn probe_tailscale_status() -> Option<Value> {
+#[derive(Debug)]
+struct ProbeError;
+
+fn probe_tailscale_status() -> Result<Value, ProbeError> {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let executable = [
         "/opt/homebrew/bin/tailscale",
@@ -135,15 +138,15 @@ fn probe_tailscale_status() -> Option<Value> {
     .into_iter()
     .find(|path| std::path::Path::new(path).is_file())
     .unwrap_or("tailscale");
-    let (mut output, writer) = UnixStream::pair().ok()?;
-    output.set_nonblocking(true).ok()?;
+    let (mut output, writer) = UnixStream::pair().map_err(|_| ProbeError)?;
+    output.set_nonblocking(true).map_err(|_| ProbeError)?;
     let mut child = Command::new(executable)
         .args(["status", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::from(OwnedFd::from(writer)))
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+        .map_err(|_| ProbeError)?;
     let deadline = Instant::now() + Duration::from_millis(500);
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
@@ -169,13 +172,13 @@ fn probe_tailscale_status() -> Option<Value> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() || failed {
-                    return None;
+                    return Err(ProbeError);
                 }
                 output
                     .take((4 * 1024 * 1024 - bytes.len()) as u64)
                     .read_to_end(&mut bytes)
-                    .ok()?;
-                return serde_json::from_slice(&bytes).ok();
+                    .map_err(|_| ProbeError)?;
+                return serde_json::from_slice(&bytes).map_err(|_| ProbeError);
             }
             Ok(None) if !failed && Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(5))
@@ -184,9 +187,49 @@ fn probe_tailscale_status() -> Option<Value> {
                 // Every timeout/read/wait failure reaps the owned CLI process.
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(ProbeError);
             }
         }
+    }
+}
+
+fn retain_confirmed_host(
+    previous: Option<String>,
+    probe: Result<Value, ProbeError>,
+) -> Option<String> {
+    match probe {
+        Ok(status) if status["BackendState"].is_string() => tailscale_host_from_status(&status),
+        // An incomplete response carries no confirmed online/offline observation.
+        _ => previous,
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn probe_errors_retain_last_confirmed_host_until_confirmed_offline() {
+        let host = Some("device.tailnet.ts.net".to_owned());
+        assert_eq!(retain_confirmed_host(host.clone(), Err(ProbeError)), host);
+        assert_eq!(retain_confirmed_host(host.clone(), Ok(json!({}))), host);
+        assert_eq!(
+            retain_confirmed_host(host.clone(), Ok(json!({"BackendState":"Stopped"}))),
+            None
+        );
+        assert_eq!(
+            retain_confirmed_host(
+                host.clone(),
+                Ok(json!({"BackendState":"Running","Self":{"Online":false}}))
+            ),
+            None
+        );
+        assert_eq!(
+            retain_confirmed_host(
+                None,
+                Ok(json!({"BackendState":"Running","Self":{"DNSName":"device.tailnet.ts.net."}}))
+            ),
+            host
+        );
     }
 }
 
@@ -212,9 +255,10 @@ pub(super) fn tailscale_advertised_host() -> Option<String> {
     {
         return host.clone();
     }
-    let host = probe_tailscale_status()
-        .as_ref()
-        .and_then(tailscale_host_from_status);
+    let host = retain_confirmed_host(
+        cached.as_ref().and_then(|(_, host)| host.clone()),
+        probe_tailscale_status(),
+    );
     *cached = Some((Instant::now(), host.clone()));
     host
 }

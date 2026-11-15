@@ -187,13 +187,16 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     // Stable ordering makes the shared-cwd session assignment consistent across requests.
     processes.sort_unstable();
     for p in processes {
-        if !interactive_candidate(req, p)? {
+        // Socket endpoints own their discovery result; never replace a slow bridge
+        // with a process-only candidate that incorrectly asks the user to reload.
+        if state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
+            || !interactive_candidate(req, p).unwrap_or(false)
+        {
             continue;
         }
         let identity = match process_identity(p) {
             Ok(identity) => identity,
-            Err(_) if !alive(p) => continue,
-            Err(error) => return Err(error),
+            Err(_) => continue,
         };
         if !matches_process(str_at(&identity, "command").unwrap_or("")) {
             continue;
@@ -203,16 +206,11 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             .output()
         {
             Ok(output) if output.status.success() => output,
-            _ if !alive(p) => continue,
-            Ok(_) => return Err("Cannot inspect live Pi working directory".into()),
-            Err(error) => return Err(error.to_string()),
+            _ => continue,
         };
         let cwd_text = String::from_utf8_lossy(&cwd_output.stdout);
         let Some(cwd) = cwd_text.lines().find_map(|l| l.strip_prefix('n')) else {
-            if !alive(p) {
-                continue;
-            }
-            return Err("Missing live Pi working directory".into());
+            continue;
         };
         let basename = Path::new(cwd)
             .file_name()
@@ -272,8 +270,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         match process_identity(p) {
             Ok(current) if current == identity => out.push((p, v)),
             Ok(_) => {}
-            Err(_) if !alive(p) => {}
-            Err(error) => return Err(error),
+            Err(_) => {}
         }
     }
     Ok(())
@@ -294,12 +291,43 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
                 .and_then(|s| s.strip_suffix(".sock"))
                 .and_then(|s| s.parse::<u32>().ok())
             {
-                let response = identify(req, p);
+                let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
+                let response = match identify(req, p) {
+                    Ok(v) => {
+                        if v["ok"] == true {
+                            if let Ok(identity) = process_identity(p) {
+                                let _ = atomic_write(
+                                    &cache_path,
+                                    json!({"identity":identity,"session":v})
+                                        .to_string()
+                                        .as_bytes(),
+                                );
+                            }
+                        }
+                        Ok(v)
+                    }
+                    Err(error) if error == "Socket request timed out" => {
+                        let cached = read_json(&cache_path).ok();
+                        match (cached, process_identity(p)) {
+                            (Some(cached), Ok(identity))
+                                if alive(p)
+                                    && cached["identity"] == identity
+                                    && matches_process(
+                                        str_at(&identity, "command").unwrap_or(""),
+                                    ) =>
+                            {
+                                Ok(cached["session"].clone())
+                            }
+                            _ => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
                 if let Ok(v) = response {
                     if v["ok"] == false {
                         continue;
                     }
-                    if interactive_candidate(req, p)?
+                    if interactive_candidate(req, p).unwrap_or(false)
                         && v["ok"] == true
                         && str_at(&v, "session_id").is_some()
                         && str_at(&v, "cwd").is_some()
