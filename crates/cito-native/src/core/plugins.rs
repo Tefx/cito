@@ -251,12 +251,7 @@ pub fn validate_nats_url(raw: &str) -> Result<String, String> {
 /// Validate OIDC issuer or resource URLs without changing their canonical bytes.
 pub fn validate_oidc_url(raw: &str, issuer: bool) -> Result<url::Url, String> {
     let url = url::Url::parse(raw).map_err(|_| "Invalid OIDC URL")?;
-    let loopback = match url.host() {
-        Some(url::Host::Domain(host)) => host == "localhost",
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
+    let loopback = url.host_str() == Some("127.0.0.1");
     if raw != raw.trim()
         || url.host().is_none()
         || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
@@ -265,7 +260,7 @@ pub fn validate_oidc_url(raw: &str, issuer: bool) -> Result<url::Url, String> {
         || url.fragment().is_some()
         || issuer && url.query().is_some()
     {
-        return Err("OIDC URL must use HTTPS (HTTP loopback is allowed for tests), without credentials or fragment; issuers cannot contain a query".into());
+        return Err("OIDC URL must use HTTPS (HTTP 127.0.0.1 is allowed for tests), without credentials or fragment; issuers cannot contain a query".into());
     }
     Ok(url)
 }
@@ -1522,7 +1517,7 @@ mod tests {
             "https://identity",
             "https://[::1]/tenant",
             "https://id.example.com/tenant@team/",
-            "http://localhost:8400",
+            "http://127.0.0.1:8400",
         ] {
             assert_eq!(validate_https_issuer(issuer).unwrap(), issuer);
         }
@@ -1537,8 +1532,11 @@ mod tests {
             "https://alice@id.example.com",
             "https://id.example.com/#keys",
             "http://id.example.com",
+            "http://localhost:9000",
+            "http://127.0.0.2:9000",
         ] {
             assert!(validate_oidc_url(bad, false).is_err());
+            assert!(validate_oidc_url(bad, true).is_err());
         }
     }
 
