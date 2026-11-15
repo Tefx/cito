@@ -12737,7 +12737,7 @@ phases:
 - id: v45
   name: 'V45 Steady-State & Non-Flapping Projections, OIDC/Tailscale/Channel/Plugin
     Resilience & macOS UI Render Deduplication (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: in_progress
+  status: done
   gate: 'All binding V45 requirements in docs/DESIGN.md (§1–§8 @ 6ba91cd) for Rust
     Daemon/Hub/Identity/Plugin steady-state resilience and macOS Swift UI render deduplication
     & interaction preservation pass; [REQUIRES_SKILL: contract-and-simplicity] full
@@ -13036,7 +13036,7 @@ phases:
     name: 'V45 Full Contract-and-Simplicity Review, §8.1 Verification Suite, Staged
       Binaries & Cito.app Rebuild/Restart, and Push to main (No Release Tag) [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
@@ -13075,3 +13075,52 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-15T09:02:15.485336Z'
+    done_at: '2026-11-15T10:05:07.686831+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 9523d70 (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v45.review
+      retained; version 0.21.3, zero release tag).
+
+
+      Contract-and-Simplicity Convergence:
+
+      - Round 1 parallel discovery: uiux-auditor CLEAN; structural-auditor 3 Tier
+      1 + 3 Tier 2; pathway-auditor 3 Tier 1 -> synthesized into F1–F8 and closed
+      in fec10e8.
+
+      - Round 2 Delta re-review: structural-auditor ZERO blocking (1 Tier 2 R2-3);
+      pathway-auditor 2 Tier 1 (R2-1, R2-2) -> closed in 9523d70 (dynamic 8-worker
+      queue with 1100ms overall discovery budget + 9-endpoint SessionActivity test;
+      Claude negative bridge rejection invalidating stale bindings + success->timeout->rejection->timeout
+      & probe tests; Companion appCheckedUntil reusing rebuildFeedbackAfter(1.5)).
+
+      - Round 3 Delta re-review: pathway-auditor ZERO_NEW_ISSUES (Uninspected gaps:
+      none).
+
+
+      Full §8.1 Verification (on 9523d70):
+
+      - cargo fmt --all -- --check && git diff --check -> Passed
+
+      - cargo clippy --workspace --all-targets -- -D warnings (temporary 1.95.0 preview
+      cleaned up) -> Passed (0 warnings)
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2 cargo
+      test --workspace -> 398 passed, 0 failed, 4 ignored
+
+      - cargo build --release -> Passed (0 compiler warnings; all 7 staged binaries
+      codesign --verify --strict OK)
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - python3 packaging/release.py check -> Passed (0.21.3)
+
+      - python3 -m unittest discover -s packaging -> 15 passed
+
+      - §1.2 lexical check on core/ and src/macos/ -> Only permitted geometry variable
+      `slack` matched.
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8 @ 6ba91cd)'
