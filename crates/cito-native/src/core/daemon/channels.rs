@@ -296,6 +296,16 @@ pub(super) fn dispatch_channel_action(
     };
     if kind == ChannelActionKind::Mutation {
         if let Ok(value) = &mut result {
+            if value["ok"] != false {
+                value["ok"] = json!(true);
+                value["committed"] = json!(true);
+            }
+            value["hub"] = json!(slot.name);
+            value["channel"] = json!(channel_id(action)?);
+            value["channel_id"] = value["channel"].clone();
+            value["action"] = action["op"].clone();
+            value["request_id"] = action["request_id"].clone();
+            value["authority_changed"] = json!(false);
             value["receipt_authority"] = json!({"hub":slot.name,"url":slot.config["url"],"principal_id":slot.identity["principal_id"]});
         }
     }
@@ -389,6 +399,7 @@ impl DaemonService {
         }
         let mut settlement = json!({"op":"settings","hub":hub,"channel_id":id,"channel":id,"action":action["op"],"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"authority_changed":authority_changed});
         if let Ok(value) = result {
+            settlement["committed"] = json!(value["ok"] != false);
             for key in ["committed", "maintenance_warning", "receipt_authority"] {
                 if let Some(value) = value.get(key) {
                     settlement[key] = value.clone();

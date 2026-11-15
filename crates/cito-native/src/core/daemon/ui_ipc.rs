@@ -84,14 +84,28 @@ pub fn bounded_frame(mut frame: Value) -> Result<Vec<u8>, String> {
         let correlated = frame.get("request_id").is_some_and(|id| !id.is_null());
         bound_fields(&mut frame, "", correlated);
     }
+    let mut receipt_only = false;
     loop {
         let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
         if bytes.len() + 1 < FRAME_LIMIT {
             return Ok(bytes);
         }
-        // A correlated projection is a receipt: dropping rows can strand the
-        // consumer's pending save. Send an explicit correlated failure instead.
+        // Preserve a committed mutation even when its canonical projection
+        // cannot fit. A payload-free settlement releases the pending editor.
         if frame.get("request_id").is_some_and(|id| !id.is_null()) {
+            if frame["ok"] == true && frame["committed"] == true {
+                if receipt_only {
+                    return Err("UI receipt exceeds frame budget".into());
+                }
+                receipt_only = true;
+                frame = json!({"op":frame["op"],"ok":true,"committed":true,
+                    "request_id":frame["request_id"],"hub":frame["hub"],
+                    "channel":frame["channel"],"channel_id":frame["channel_id"],
+                    "action":frame["action"],"source_op":frame["source_op"],
+                    "authority_changed":frame["authority_changed"],
+                    "warning":"Saved successfully; canonical settings exceed the UI frame budget"});
+                continue;
+            }
             if frame["op"] == "error" {
                 return Err("UI receipt exceeds frame budget".into());
             }

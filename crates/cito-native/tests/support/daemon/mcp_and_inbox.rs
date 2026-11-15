@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_claims() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let source =
+        cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    source.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER); INSERT INTO threads VALUES('thread-a','/repo',0,1)", &[]).unwrap();
+    let plugin = f.state.join("plugins/codex");
+    fs::create_dir_all(&plugin).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/codex/plugin.json")).unwrap())
+            .unwrap();
+    manifest["command"] = json!([CODEX]);
+    fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
+    f.daemon(&[]);
+    for thread in [false, true] {
+        let mut meta = json!({"_stdio":{"endpoint_pid":std::process::id()},"cwd":"/repo"});
+        if thread {
+            meta["threadId"] = json!("thread-a");
+        }
+        let result = f.tool(
+            "cito_listen",
+            json!({"about":"Transport identity regression"}),
+            meta,
+        );
+        assert_eq!(result["ok"], true, "{result}");
+        let rows = f.rows("SELECT * FROM local_listeners WHERE harness='codex'");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["session_id"], "thread-a");
+    }
+    let explicit = f.tool("cito_listen", json!({"about":"New thread before database projection"}),
+        json!({"_stdio":{"endpoint_pid":std::process::id()},"threadId":"not-yet-indexed","cwd":"/repo"}));
+    assert_eq!(explicit["ok"], true);
+    assert_eq!(
+        f.rows("SELECT * FROM local_listeners WHERE session_id='not-yet-indexed'")
+            .len(),
+        1
+    );
+    let rejected = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"endpoint_pid":std::process::id(),"threadId":"thread-a"}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("PI_BRIDGE_UNAVAILABLE"),
+        "{rejected}"
+    );
+    let rejected = f.tool_result(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"codex","endpoint_pid":std::process::id(),"threadId":"thread-a"}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("INVALID_INPUT"),
+        "{rejected}"
+    );
+}
+
+#[test]
 fn long_lived_stdio_recovers_after_daemon_restart_and_configured_port_change() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));

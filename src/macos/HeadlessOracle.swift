@@ -131,6 +131,7 @@ extension Companion {
                 }
                 if kind == "bar_anchor", let c = control(object["id"] as? String ?? "quit") { c.frame.origin.x -= 24 }
                 if kind == "bar_midY", let c = control("toggle_inbox") { c.frame.origin.y -= 4 }
+                if kind == "footer_midY", let c = control("open_uninstall_confirm") { c.frame.origin.y -= 10 }
                 if let bar = control("toggle_inbox")?.superview {
                     if kind == "borderless_padding" { bar.subviews.first { $0.identifier?.rawValue == "inbox_control_title" }?.frame.origin.x = 2 }
                     if kind == "nested_overlap", let button = control("toggle_inbox") {
@@ -645,7 +646,11 @@ extension Companion {
                     if let top = barItems.map({ $0.frame.midY }).max() { rows.append(("top",top)) }
                     if stratum, let bottom = barItems.map({ $0.frame.midY }).min(), bottom != rows.first?.1 { rows.append(("bottom",bottom)) }
                     for (row,y) in rows {
-                        let items = barItems.filter { abs($0.frame.midY - y) <= 8 }
+                        // Cards contain authored title, field, and action rows.
+                        // Single-row bars/footers must retain every sibling,
+                        // including controls displaced beyond a row tolerance.
+                        let singleRow = ["inbox_control_bar","footer","settings_footer","directory_footer","directory_facet_bar"].contains(id)
+                        let items = singleRow ? barItems : barItems.filter { abs($0.frame.midY-y) <= 8 }
                         if (items.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 {
                             let issue = id + ": " + row + " row is not edge anchored"
                             nonAnchoredActionBars.append(issue); clippedViews.append(issue)

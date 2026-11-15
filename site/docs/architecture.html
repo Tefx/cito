@@ -184,7 +184,7 @@
           <thead><tr><th>Subcommand</th><th>Target</th><th>Purpose</th></tr></thead>
           <tbody>
             <tr><td><code>status</code></td><td>Local daemon</td><td>Inspect Hub health, listening sessions, and available sessions; use <code>--json</code> for structured output.</td></tr>
-            <tr><td><code>listen</code> / <code>unlisten</code></td><td>Calling session, or this Mac with <code>--harness human</code></td><td>Attach/detach an endpoint. <code>unlisten --all</code> stops agents and disables Auto-Listen on the selected Hub.</td></tr>
+            <tr><td><code>listen</code> / <code>unlisten</code></td><td>Calling session, or this Mac with <code>--harness human</code></td><td>Attach/detach an endpoint. <code>cito unlisten --all</code> stops agents and disables Auto-Listen across all configured Hubs unless <code>--hub &lt;name&gt;</code> selects one Hub.</td></tr>
             <tr><td><code>rename &lt;title&gt;</code></td><td>Calling agent session</td><td>Set its display title. Select another known session with <code>--harness &lt;id&gt; --session &lt;sid&gt;</code> or a plugin flag such as <code>--pi=&lt;sid&gt;</code>; <code>--json</code> returns the receipt.</td></tr>
             <tr><td><code>find</code> / <code>send</code></td><td>Visible Hub Nodes</td><td>Search by user, host, repository, or harness; send to a readable address or Human Node.</td></tr>
             <tr><td><code>inbox</code></td><td>Calling Node</td><td>Read or acknowledge signals; <code>pause</code> / <code>resume</code> administer the shared Human inbox.</td></tr>

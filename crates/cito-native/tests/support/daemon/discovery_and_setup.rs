@@ -133,11 +133,14 @@ fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     let snapshot = f.action(json!({"op":"get_snapshot"})).1;
     assert_eq!(snapshot["hubs"][0]["auto_listen"], true);
     assert_eq!(snapshot["settings"]["hubs"][0]["auto_listen"], true);
-    assert!(snapshot["listeners"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|v| v["harness"] == "pi" && v["scope"] == "workspace"));
+    assert!(
+        snapshot["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["harness"] == "pi" && v["scope"] == "workspace"),
+        "{snapshot}"
+    );
     db.execute(
         "DELETE FROM local_listeners WHERE principal_id=\'none#bob\'",
         &[],

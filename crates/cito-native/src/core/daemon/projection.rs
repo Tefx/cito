@@ -205,8 +205,11 @@ impl DaemonService {
                             &slot.identity,
                         )
                 });
-                let projection = self
-                    .project_human(record.as_ref(), capabilities["observation_current"] == true);
+                let projection = self.project_human(
+                    record.as_ref(),
+                    capabilities["observation_current"] == true,
+                    capabilities["auth_valid"] == true && slot.config["url"] != "local://",
+                );
                 if let Some(fields) = projection.as_object() {
                     item.extend(fields.clone());
                 }
@@ -588,7 +591,7 @@ impl DaemonService {
                 .is_some_and(|slot| slot.observation_current());
             if let (Some(out), Some(fields)) = (
                 result.as_object_mut(),
-                self.project_human(Some(row), current).as_object(),
+                self.project_human(Some(row), current, false).as_object(),
             ) {
                 out.extend(fields.clone());
             }
@@ -629,7 +632,13 @@ impl DaemonService {
             })
         });
         let current = slot.is_some_and(|slot| slot.observation_current());
-        let mut projection = self.project_human(record.as_ref(), current);
+        let mut projection = self.project_human(
+            record.as_ref(),
+            current,
+            slot.is_some_and(|slot| {
+                slot.config["url"] != "local://" && slot.capabilities()["auth_valid"] == true
+            }),
+        );
         projection["attachments"] = json!(record
             .as_ref()
             .map(|row| crate::core::lease::attachments(row, &self.host_id, now_ms()))
@@ -637,11 +646,11 @@ impl DaemonService {
         projection
     }
 
-    fn project_human(&self, record: Option<&Value>, current: bool) -> Value {
+    fn project_human(&self, record: Option<&Value>, current: bool, can_set_scope: bool) -> Value {
         let Some(record) = record else {
-            return json!({"human_listener_id":null,"human_paused":null,"human_about":null,"human_control_revision":null,"human_availability":"UNLISTENED","human_scope":null,"human_state_status":"unknown"});
+            return json!({"human_can_set_scope":false,"human_listener_id":null,"human_paused":null,"human_about":null,"human_control_revision":null,"human_availability":"UNLISTENED","human_scope":null,"human_state_status":"unknown"});
         };
-        json!({"human_listener_id":record["listener_id"],"human_paused":record["human_paused"].as_bool().unwrap_or(false),"human_about":record["about"],"human_control_revision":record["human_control_revision"],"human_availability":crate::core::lease::evaluate_node_lease(record,now_ms()),"human_scope":record["scope"],"human_state_status":if current{"current"}else{"stale"}})
+        json!({"human_can_set_scope":current && can_set_scope,"human_listener_id":record["listener_id"],"human_paused":record["human_paused"].as_bool().unwrap_or(false),"human_about":record["about"],"human_control_revision":record["human_control_revision"],"human_availability":crate::core::lease::evaluate_node_lease(record,now_ms()),"human_scope":record["scope"],"human_state_status":if current{"current"}else{"stale"}})
     }
 
     pub(super) fn emit(&self, frame: Value) {
@@ -779,6 +788,14 @@ impl DaemonService {
                 frame["ok"] = json!(true);
                 frame["request_id"] = action["request_id"].clone();
                 frame["source_op"] = action["op"].clone();
+                if super::channels::channel_action_kind(action)
+                    == Some(super::channels::ChannelActionKind::Mutation)
+                {
+                    // The settings settlement owns correlation. This full
+                    // state refresh is observational and may shed collections.
+                    frame.as_object_mut().unwrap().remove("request_id");
+                    frame.as_object_mut().unwrap().remove("source_op");
+                }
             }
             if let Ok(mut previous) = self.last_ui_revision.lock() {
                 *previous = Some(revision);

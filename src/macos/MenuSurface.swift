@@ -86,8 +86,12 @@ extension Companion: NSMenuDelegate {
         statusUpdateCount += 1
     }
     func scopeToggle(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl? {
-        guard hubs.first(where: { $0.name == hub })?.supports_workspace_scope == true,
-              listeners.first(where: { $0.hub == hub && ($0.scoped_id == id || $0.listener_id == id) })?.can_set_scope == true else { return nil }
+        guard let authority = hubs.first(where: { $0.name == hub }),
+              authority.supports_workspace_scope == true else { return nil }
+        let allowed = authority.human_listener_id == id
+            ? authority.human_can_set_scope == true
+            : listeners.first(where: { $0.hub == hub && ($0.scoped_id == id || $0.listener_id == id) })?.can_set_scope == true
+        guard allowed else { return nil }
         let team = scope == "workspace"
         let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill")
         control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")

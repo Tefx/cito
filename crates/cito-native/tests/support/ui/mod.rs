@@ -134,7 +134,7 @@ fn render_png_as(f: &Fixture, p: usize, surface: &str, name: &str, appearance: O
 }
 
 fn hubs() -> Value {
-    json!([{"name":"personal","status":"connected","user":"alice","auth_mode":"oidc","error":null,"is_builtin":false,"supports_workspace_scope":true,"can_login":false},{"name":"work","status":"connected","user":"alice","auth_mode":"none","error":null,"is_builtin":false,"supports_workspace_scope":true,"can_login":false}])
+    json!([{"name":"personal","status":"connected","user":"alice","auth_mode":"oidc","error":null,"is_builtin":false,"supports_workspace_scope":true,"human_can_set_scope":true,"can_login":false},{"name":"work","status":"connected","user":"alice","auth_mode":"none","error":null,"is_builtin":false,"supports_workspace_scope":true,"human_can_set_scope":true,"can_login":false}])
 }
 fn listener() -> Value {
     json!({"hub":"personal","listener_id":"c_abcdefghijkl","public_id":"repo-abcdefghijkl","scoped_id":"personal:repo-abcdefghijkl","display_address":"alice/fixture#abcd","harness":"fixture","session_id":"s1","title":"café conversation","cwd":"/tmp","repo":null,"scope":"self","is_self_principal":true,"can_set_scope":true,"can_pin":true,"can_rename":true,"can_stop":true})

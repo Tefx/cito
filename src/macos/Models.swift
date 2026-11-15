@@ -69,6 +69,7 @@ struct Hub: Decodable, Equatable {
     let enabled: Bool?, auto_listen: Bool?
     let human_paused: Bool?, human_about: String?
     var human_listener_id: String? = nil
+    var human_can_set_scope: Bool? = nil
     var human_control_revision: Int? = nil
     var human_availability: String? = nil
     var human_scope: String? = nil

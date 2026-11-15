@@ -38,53 +38,6 @@ pub(super) fn default_session_title(
         .to_owned()
 }
 
-fn caller_pid_hint(meta: &Value) -> Result<Option<u64>, String> {
-    let mut pending = vec![(meta, 0usize)];
-    let mut pid = None;
-    let mut visited = 0;
-    while let Some((value, depth)) = pending.pop() {
-        visited += 1;
-        if visited > 512 {
-            return Err("INVALID_INPUT: Caller metadata is too complex".into());
-        }
-        if depth > 8 {
-            continue;
-        }
-        match value {
-            Value::Object(fields) => {
-                for (key, value) in fields {
-                    if key != "http_client_pid"
-                        && (key == "pid"
-                            || key.ends_with("_pid")
-                            || key.ends_with("Pid")
-                            || key.ends_with("PID"))
-                        && !value.is_null()
-                    {
-                        let next = value
-                            .as_u64()
-                            .filter(|value| *value > 0 && *value <= i32::MAX as u64)
-                            .ok_or("INVALID_INPUT: Caller PID must be a positive process ID")?;
-                        if pid.is_some_and(|previous| previous != next) {
-                            return Err("INVALID_INPUT: Conflicting caller PID claims".into());
-                        }
-                        pid = Some(next);
-                    }
-                    if value.is_object() || value.is_array() {
-                        pending.push((value, depth + 1));
-                    }
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    pending.push((value, depth + 1));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(pid)
-}
-
 pub(super) fn validate_tool_input(name: &str, args: &Value) -> Result<(), String> {
     let map = args
         .as_object()
@@ -268,8 +221,9 @@ impl DaemonService {
         required: bool,
         deadline: Instant,
     ) -> Result<Option<Value>, String> {
-        let requested_pid = caller_pid_hint(meta)?.or_else(|| meta["_http_client"].as_u64());
-        let explicit_pid = caller_pid_hint(meta)?.is_some();
+        let pid_hint = crate::support::caller_pid_hint(meta, true)?.map(u64::from);
+        let requested_pid = pid_hint.or_else(|| meta["_http_client"].as_u64());
+        let explicit_pid = pid_hint.is_some();
         let expected = string(meta, "expected_harness");
         if expected == "human" {
             return Err("FORBIDDEN: MCP callers must be agent sessions".into());
@@ -874,7 +828,7 @@ impl DaemonService {
                 )
             }
             "cito_find" => {
-                let _ = caller_pid_hint(meta)?;
+                let _ = crate::support::caller_pid_hint(meta, true)?;
                 self.find_listeners(args, |_| true)
             }
             "cito_send" => {

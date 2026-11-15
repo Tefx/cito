@@ -124,10 +124,10 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     }
     let command = process_command(pid)?;
     if has_harness_ancestor(pid, |ancestor, command| {
+        let path = state(req).join(format!("sockets/pi-pid-{ancestor}.sock"));
         matches_process(command)
-            || state(req)
-                .join(format!("sockets/pi-pid-{ancestor}.sock"))
-                .exists()
+            || (path.exists()
+                && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true))
     }) {
         return Ok(false);
     }
@@ -161,7 +161,6 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     let mut processes: Vec<u32> = all_processes
         .iter()
         .copied()
-        .into_iter()
         .filter(|p| {
             !out.iter().any(|(pid, _)| pid == p)
                 && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()

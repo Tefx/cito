@@ -26,10 +26,7 @@ fn interactive_candidate(req: &Value, p: u32) -> bool {
         return false;
     };
     if has_harness_ancestor(p, |ancestor, command| {
-        matches_process(command)
-            || state(req)
-                .join(format!("sockets/claude-pid-{ancestor}.sock"))
-                .exists()
+        matches_process(command) || live_bridge(req, ancestor)
     }) {
         return false;
     }
@@ -341,6 +338,11 @@ fn transcript_dir(req: &Value, cwd: &str) -> PathBuf {
         .join("projects")
         .join(slug)
 }
+fn live_bridge(req: &Value, pid: u32) -> bool {
+    let path = state(req).join(format!("sockets/claude-pid-{pid}.sock"));
+    path.exists()
+        && socket_call(&path, &json!({"op":"ping"})).is_ok_and(|reply| reply["ok"] == true)
+}
 fn hook_endpoint(req: &Value) -> u32 {
     if let Some(p) = env_value(req, "CITO_ENDPOINT_PID").and_then(|s| s.parse().ok()) {
         return enclosing_endpoint_pid(Some(p), unsafe { libc::getppid() as u32 });
@@ -350,10 +352,7 @@ fn hook_endpoint(req: &Value) -> u32 {
 
     let mut p = first;
     for _ in 0..16 {
-        if process_command(p).is_ok_and(|command| matches_process(&command))
-            || state(req)
-                .join(format!("sockets/claude-pid-{p}.sock"))
-                .exists()
+        if process_command(p).is_ok_and(|command| matches_process(&command)) || live_bridge(req, p)
         {
             return p;
         }
@@ -373,11 +372,12 @@ fn record_binding(req: &Value, p: u32, sid: &str, cwd: &str) -> Result<()> {
     if str_at(req, "_binding_source") != Some("channel") {
         if let Ok(previous) = read_json(&binding_path(req, p)) {
             if previous["session_id"] != sid
+                && previous["session_id"] != format!("claude-{p}")
+                // SAFETY: getppid only reads the hook's direct parent.
+                && unsafe { libc::getppid() as u32 } != p
                 && alive(p)
                 && str_at(&previous, "start").map(str::to_owned) == process_start(p)
-                && state(req)
-                    .join(format!("sockets/claude-pid-{p}.sock"))
-                    .exists()
+                && live_bridge(req, p)
             {
                 return Err(
                     "SESSION_MISMATCH: A live parent endpoint already owns another session".into(),

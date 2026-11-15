@@ -9,6 +9,185 @@ fn spawn_interactive(f: &Fixture, bin: &str, args: &[&str], extra: &[(&str, &str
 }
 
 #[test]
+fn stale_ancestor_sockets_do_not_hide_interactive_harnesses_but_live_bridges_do() {
+    let _lock = serial();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let mut f = Fixture::new(json!({}));
+        f.env.remove("CITO_PI_ALLOW_HEADLESS_DISCOVERY");
+        f.env.insert("CITO_PI_PROCESS_DISCOVERY".into(), "1".into());
+        let app = f.dir.join(format!("{id}.mjs"));
+        fs::write(&app, "console.log('child ready'); setInterval(()=>{},1000)").unwrap();
+        let code = r#"import os,sys,subprocess,socket,threading,json,pathlib
+state=pathlib.Path(os.environ['CITO_STATE_DIR'])
+path=state/'sockets'/f'{sys.argv[2]}-pid-{os.getpid()}.sock'
+path.parent.mkdir(parents=True,exist_ok=True);path.write_text('stale')
+m,s=os.openpty()
+child=subprocess.Popen(['node',sys.argv[1]],stdin=s)
+os.close(s)
+print(json.dumps({'parent':os.getpid(),'child':child.pid}),flush=True)
+try:
+ while not (state/'activate').exists(): threading.Event().wait(.01)
+ path.unlink();server=socket.socket(socket.AF_UNIX);server.bind(str(path));server.listen()
+ print(json.dumps({'live':True}),flush=True)
+ while True:
+  conn,_=server.accept()
+  with conn:
+   conn.recv(4096);conn.sendall(b'{"ok":true}\n')
+finally:
+ child.terminate();child.wait();os.close(m)
+"#;
+        let owner = f.spawn("python3", &["-c", code, app.to_str().unwrap(), id], &[]);
+        wait(|| {
+            f.frames(owner).iter().any(|row| row["child"].is_u64())
+                && f.output(owner, false).contains("child ready")
+        });
+        let child = f
+            .frames(owner)
+            .into_iter()
+            .find(|row| row["child"].is_u64())
+            .unwrap()["child"]
+            .as_u64()
+            .unwrap();
+        if id == "pi" {
+            assert_eq!(f.plugin(bin, json!({"op":"setup_apply"}))["ok"], true);
+        } else {
+            let sidecar = f.spawn(CLAUDE, &[], &[]);
+            f.send(sidecar,json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":child,"cwd":"/repo"}));
+            wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+        }
+        let discovered = f.plugin(bin, json!({"op":"discover_sessions","endpoint_pid":child}));
+        assert!(
+            discovered["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["endpoint_pid"] == child),
+            "{discovered}"
+        );
+        fs::write(f.state.join("activate"), "").unwrap();
+        wait(|| f.frames(owner).iter().any(|row| row["live"] == true));
+        let discovered = f.plugin(bin, json!({"op":"discover_sessions","endpoint_pid":child}));
+        assert!(
+            discovered["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["endpoint_pid"] != child),
+            "{discovered}"
+        );
+    }
+}
+
+#[test]
+fn claude_fallback_hook_handoff_and_descendant_session_fence() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let ack_server = r#"import http.server,json
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def do_POST(self):
+  req=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  print(json.dumps({'ack':req}),flush=True)
+  raw=json.dumps({'result':{'content':[{'text':json.dumps({'ok':True,'acknowledged_count':1})}]}}).encode()
+  self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+s=http.server.HTTPServer(('127.0.0.1',0),Handler)
+print(json.dumps({'port':s.server_port}),flush=True);s.serve_forever()
+"#;
+    let server = f.spawn("python3", &["-c", ack_server], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap().to_string();
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app,r#"import fs from 'node:fs';import {spawnSync} from 'node:child_process';import {join} from 'node:path';
+const dir=process.env.CITO_STATE_DIR;
+console.log('ready');
+setInterval(()=>{
+ const path=join(dir,'hook-request');if(!fs.existsSync(path))return;
+ const req=JSON.parse(fs.readFileSync(path));fs.unlinkSync(path);
+ const input=JSON.stringify({hook_event_name:'SessionStart',session_id:req.sid,cwd:'/repo'});
+ const env={...process.env,CITO_ENDPOINT_PID:String(process.pid)};
+ const result=req.deep
+   ? spawnSync('python3',['-c',"import subprocess,sys; p=subprocess.run([sys.argv[1]],input=sys.argv[2],text=True,capture_output=True); print(p.stdout,end=''); print(p.stderr,end='',file=sys.stderr)",process.env.TEST_HOOK,input],{env,encoding:'utf8'})
+   : spawnSync(process.env.TEST_HOOK,[],{input,env,encoding:'utf8'});
+ fs.writeFileSync(join(dir,'hook-result'),JSON.stringify({out:result.stdout,err:result.stderr}));
+},10);
+"#).unwrap();
+    let owner = spawn_interactive(
+        &f,
+        "node",
+        &[app.to_str().unwrap()],
+        &[("TEST_HOOK", HOOK), ("CITO_DAEMON_PORT", &port)],
+    );
+    wait(|| f.output(owner, false).contains("ready"));
+    let pid = f.pid(owner);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    f.send(sidecar,json!({"op":"stdio_sidecar","state_dir":f.state,"env":f.env,"endpoint_pid":pid,"cwd":"/repo"}));
+    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
+    let path = f.state.join(format!("sockets/claude-pid-{pid}.sock"));
+    let fallback = format!("claude-{pid}");
+    assert_eq!(
+        socket(&path, json!({"op":"identify"}))["session_id"],
+        fallback
+    );
+    assert_eq!(
+        socket(
+            &path,
+            json!({"op":"deliver","session_id":fallback,"batch_id":"handoff","content":"Wake from fallback","wake":true})
+        )["ok"],
+        true
+    );
+    let hook = |sid: &str, deep: bool| {
+        let result = f.state.join("hook-result");
+        let _ = fs::remove_file(&result);
+        fs::write(
+            f.state.join("hook-request"),
+            json!({"sid":sid,"deep":deep}).to_string(),
+        )
+        .unwrap();
+        wait(|| result.exists());
+        serde_json::from_slice::<Value>(&fs::read(result).unwrap()).unwrap()
+    };
+    let first = hook("real-session", false);
+    assert!(
+        first["out"]
+            .as_str()
+            .unwrap()
+            .contains("Wake from fallback"),
+        "{first}"
+    );
+    assert_eq!(first["err"], "");
+    assert!(f
+        .frames(server)
+        .iter()
+        .any(
+            |row| row["ack"]["params"]["_meta"]["claudeSessionId"] == fallback
+                && row["ack"]["params"]["arguments"]["ack_ids"] == json!(["handoff"])
+        ));
+    let binding = f.state.join(format!("claude/endpoints/{pid}.json"));
+    let session = || {
+        serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap()["session_id"].clone()
+    };
+    assert_eq!(session(), "real-session");
+    assert!(!f
+        .state
+        .join(format!("claude/wakes/{fallback}.jsonl"))
+        .exists());
+    let descendant = hook("descendant-session", true);
+    assert!(
+        descendant["err"]
+            .as_str()
+            .unwrap()
+            .contains("SESSION_MISMATCH"),
+        "{descendant}"
+    );
+    assert_eq!(session(), "real-session");
+    let resumed = hook("resumed-session", false);
+    assert_eq!(resumed["err"], "");
+    assert_eq!(session(), "resumed-session");
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
+}
+
+#[test]
 fn inherited_controlling_terminal_does_not_enroll_headless_descendants() {
     let _lock = serial();
     for (id, bin) in [("pi", PI), ("claude", CLAUDE), ("codex", CODEX)] {
@@ -229,6 +408,9 @@ fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
                     while !done.load(Ordering::Acquire) && Instant::now() < until {
                         match listener.accept() {
                             Ok((mut stream, _)) => {
+                                // BSD accept inherits O_NONBLOCK; the framed
+                                // request must wait for bytes within its read deadline.
+                                stream.set_nonblocking(false).unwrap();
                                 stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
                                 let mut line = String::new();
                                 if BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).is_err() || line.is_empty() { continue; }
@@ -2522,13 +2704,23 @@ fn telegram_oversized_poll_retries_one_update_then_advances_cursor() {
 # effects: sandbox-owned loopback HTTP server and JSON request receipts on stdout.
 # requires: Python standard library.
 import http.server,json,threading
+interrupted=False
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_POST(self):
   payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
   print(json.dumps({'method':self.path.rsplit('/',1)[-1],'payload':payload}),flush=True)
   if self.path.endswith('/getUpdates'):
-   if payload.get('offset',0)<42:
+   global interrupted
+   if not interrupted:
+    interrupted=True
+    raw=b'{"ok":true,"result":[{"update_id":40,'
+    self.send_response(200);self.send_header('Content-Length',str(len(raw)+200));self.end_headers()
+    self.wfile.write(raw);self.wfile.flush();self.close_connection=True
+    return
+   if payload.get('offset',0)<41:
+    result=[{'update_id':40,'message':{'chat':{'id':1,'type':'private'},'from':{'id':1},'text':'Recovered intact'}}]
+   elif payload.get('offset',0)<42:
     count=1 if payload.get('limit')==1 else 2
     result=[{'update_id':41+i,'message':{'chat':{'id':1},'text':'x'*(1100000 if count==1 else 600000)}} for i in range(count)]
    else:
@@ -2549,6 +2741,18 @@ server.serve_forever()
     let plugin = f.spawn(TELEGRAM, &[], &[]);
     f.send(plugin,json!({"op":"configure","hub_config":{"botToken":"test","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
     wait(|| {
+        f.frames(plugin).iter().any(|row| {
+            row["op"] == "inbound_reply"
+                && row["update_id"] == "40"
+                && row["text"] == "Recovered intact"
+        })
+    });
+    assert!(!f
+        .frames(plugin)
+        .iter()
+        .any(|row| row["op"] == "cursor_save"));
+    f.send(plugin, json!({"op":"reply_ack","update_id":"40","ok":true}));
+    wait(|| {
         f.frames(server).iter().any(|row| {
             row["payload"]["offset"]
                 .as_u64()
@@ -2561,7 +2765,14 @@ server.serve_forever()
         .filter(|row| row["method"] == "getUpdates")
         .collect();
     assert_eq!(polls[0]["payload"]["limit"], 25);
-    assert_eq!(polls[1]["payload"]["limit"], 1);
+    assert_eq!(polls[1]["payload"]["limit"], 25);
+    assert_eq!(polls[1]["payload"]["offset"], polls[0]["payload"]["offset"]);
+    assert_eq!(polls[2]["payload"]["offset"], 41);
+    assert_eq!(polls[2]["payload"]["limit"], 25);
+    assert_eq!(polls[3]["payload"]["limit"], 1);
+    assert!(f
+        .output(plugin, true)
+        .contains("transport read was incomplete"));
     assert!(polls.iter().all(|row| row["payload"]["limit"]
         .as_u64()
         .is_some_and(|limit| limit <= 25)));
@@ -2582,6 +2793,14 @@ fn telegram_expired_queue_items_skip_http_and_bound_live_request_time() {
     let port = f.frames(server)[0]["port"].as_u64().unwrap();
     let p = f.spawn(TELEGRAM, &[], &[]);
     f.send(p,json!({"op":"configure","hub_config":{"botToken":"test","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"missing-deadline","config":{"chatId":"stall"},"signal":{"message":"Must not send"}}));
+    wait(|| {
+        f.frames(p).iter().any(|row| {
+            row["delivery_id"] == "missing-deadline"
+                && row["ok"] == false
+                && row["error"] == "Delivery reservation deadline is required"
+        })
+    });
     f.send(p,json!({"op":"deliver","delivery_id":"expired","claim_until_ms":1,"config":{"chatId":"stall"},"signal":{"message":"Must not send"}}));
     wait(|| {
         f.frames(p)
@@ -2619,7 +2838,7 @@ fn telegram_control_and_eof_stay_responsive_during_outbound_http() {
     let config = json!({"botToken":"test","apiBaseUrl":format!("http://127.0.0.1:{port}")});
     let p = f.spawn(TELEGRAM, &[], &[]);
     f.send(p, json!({"op":"configure","hub_config":config}));
-    f.send(p,json!({"op":"deliver","delivery_id":"slow","config":{"chatId":"stall"},"signal":{"message":"Slow HTTP"}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"slow","claim_until_ms":cito_native::plugins::now_ms()+60_000,"config":{"chatId":"stall"},"signal":{"message":"Slow HTTP"}}));
     wait(|| {
         fs::read_to_string(f.home.join("api-methods.jsonl"))
             .unwrap_or_default()
@@ -2716,7 +2935,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         "🚀".repeat(850)
     );
     let expected = format!("Cito · work\n\n{message}");
-    f.send(p,json!({"op":"deliver","delivery_id":"large","config":{"chatId":"large"},"signal":{"from":{"title":"work"},"message":message}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"large","claim_until_ms":cito_native::plugins::now_ms()+60_000,"config":{"chatId":"large"},"signal":{"from":{"title":"work"},"message":message}}));
     wait(|| {
         f.frames(p)
             .iter()
@@ -2756,7 +2975,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     };
     for status in [400, 401, 403, 404, 408, 429, 500, 503] {
         let delivery_id = format!("status-{status}");
-        f.send(p,json!({"op":"deliver","delivery_id":delivery_id,"config":{"chatId":format!("status:{status}")},"signal":{"message":"Review"}}));
+        f.send(p,json!({"op":"deliver","delivery_id":delivery_id,"claim_until_ms":cito_native::plugins::now_ms()+60_000,"config":{"chatId":format!("status:{status}")},"signal":{"message":"Review"}}));
         let frame = outcome(&delivery_id);
         assert_eq!(frame["ok"], false);
         assert_eq!(frame["retryable"], matches!(status, 408 | 429 | 500..=599));
@@ -2770,7 +2989,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
             format!("Telegram sendMessage HTTP {status}: Rejected by fixture")
         );
     }
-    f.send(p,json!({"op":"deliver","delivery_id":"uncertain","config":{"chatId":"uncertain"},"signal":{"message":"Review"}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"uncertain","claim_until_ms":cito_native::plugins::now_ms()+60_000,"config":{"chatId":"uncertain"},"signal":{"message":"Review"}}));
     let frame = outcome("uncertain");
     assert_eq!(frame["effect_unknown"], true);
     assert_eq!(frame["retryable"], false);
@@ -2780,13 +2999,13 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         "b".repeat(4800)
     );
     let expected = format!("Cito · sender\n\n{message}");
-    f.send(p,json!({"op":"deliver","delivery_id":"partial","config":{"chatId":"partial"},"signal":{"message":message}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"partial","claim_until_ms":cito_native::plugins::now_ms()+60_000,"config":{"chatId":"partial"},"signal":{"message":message}}));
     let partial = outcome("partial");
     assert_eq!(partial["ok"], false);
     assert_eq!(partial["retryable"], true);
     assert_eq!(partial["effect_unknown"], false);
     assert_eq!(partial["external_msg_ids"].as_array().unwrap().len(), 1);
-    f.send(p,json!({"op":"deliver","delivery_id":"resumed","already_sent_ids":partial["external_msg_ids"],"config":{"chatId":"partial"},"signal":{"message":message}}));
+    f.send(p,json!({"op":"deliver","delivery_id":"resumed","claim_until_ms":cito_native::plugins::now_ms()+60_000,"already_sent_ids":partial["external_msg_ids"],"config":{"chatId":"partial"},"signal":{"message":message}}));
     let resumed = outcome("resumed");
     assert_eq!(resumed["ok"], true);
     assert_eq!(resumed["external_msg_ids"].as_array().unwrap().len(), 3);

@@ -110,7 +110,15 @@ fn api_with_timeout(
         .into_reader()
         .take(1_048_577)
         .read_to_end(&mut bytes);
-    let parsed = if read.is_ok() && bytes.len() <= 1_048_576 {
+    if read.is_err() && bytes.len() <= 1_048_576 {
+        return Err(ApiFailure {
+            message: format!("Telegram {method} transport read was incomplete"),
+            retryable: method == "getUpdates",
+            effect_unknown: method == "sendMessage",
+            retry_after: None,
+        });
+    }
+    let parsed = if bytes.len() <= 1_048_576 {
         serde_json::from_slice::<Value>(&bytes).ok()
     } else {
         None
@@ -209,9 +217,12 @@ fn delivery(config: &Value, req: &Value) -> Value {
             .or_else(|| str_at(&s["from"], "listener_id"))
             .unwrap_or("sender");
         let text = format!("Cito · {from}\n\n{}", s["message"].as_str().unwrap_or(""));
-        let claim_until = req["claim_until_ms"]
-            .as_u64()
-            .unwrap_or_else(|| now_ms() + 60_000);
+        let claim_until = req["claim_until_ms"].as_u64().ok_or_else(|| ApiFailure {
+            message: "Delivery reservation deadline is required".into(),
+            retryable: false,
+            effect_unknown: false,
+            retry_after: None,
+        })?;
         for text in chunks(&text).into_iter().skip(ids.len()) {
             let budget = claim_until.saturating_sub(now_ms()).saturating_sub(500);
             if budget == 0 {

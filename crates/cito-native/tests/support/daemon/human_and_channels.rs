@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn oversized_committed_channel_values_get_payload_free_success_receipts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let plugin = f.state.join("plugins/channel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), json!({"id":"channel","kind":"human-channel","scope":"hub","displayName":"Fixture Channel",
+        "command":["python3",root().join("crates/cito-native/tests/hub/channel.py")],
+        "fields":[{"key":"credential","scope":"hub","type":"string","required":true},{"key":"address","scope":"user","type":"string","required":true}]}).to_string()).unwrap();
+    let ui = f.recording_ui();
+    f.daemon(&[
+        ("CITO_DISABLE_UI", "0"),
+        ("CITO_UI_BINARY", ui.to_str().unwrap()),
+    ]);
+    let large = "canonical-value".repeat(21_000);
+    assert!(large.len() > 260 * 1024);
+    for (op, request) in [
+        ("channel_save", "large-save"),
+        ("save_hub_service", "large-service"),
+        ("channel_toggle", "large-toggle"),
+    ] {
+        let action = json!({"op":op,"hub":"local","channel_id":"channel","enabled":true,
+            "request_id":request,"values":{"credential":large,"address":"room"}});
+        let (status, response) = f.action(action);
+        assert_eq!(status, 200, "{response}");
+        wait(|| {
+            fs::read_to_string(f.home.join("ui-frames"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|frame| frame["request_id"] == request && frame["op"] == "settings")
+        });
+        let frames = fs::read_to_string(f.home.join("ui-frames")).unwrap();
+        let receipt: Value = frames
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|frame| frame["request_id"] == request && frame["op"] == "settings")
+            .unwrap();
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        assert_eq!(receipt["committed"], true);
+        assert_eq!(receipt["hub"], "local");
+        assert_eq!(receipt["channel"], "channel");
+        assert_eq!(receipt["action"], op);
+        assert_eq!(receipt["authority_changed"], false);
+        assert!(receipt["warning"].is_string());
+        assert!(receipt.get("settings").is_none());
+        let rows = f
+            .db("hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        let saved: Value = serde_json::from_str(rows[0]["config_json"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["credential"], large);
+    }
+}
+
+#[test]
 fn lifecycle_channel_test_failures_emit_results_before_configured_refresh() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

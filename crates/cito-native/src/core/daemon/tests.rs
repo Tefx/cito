@@ -2614,6 +2614,12 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         .ok_or("Missing remote Human")?;
     assert_eq!(hub["human_availability"], "ACTIVE");
     assert_eq!(hub["human_state_status"], "current");
+    assert_eq!(hub["human_can_set_scope"], true);
+    assert!(snapshot["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["hub"] != "work"));
     assert_eq!(peer["human_availability"], hub["human_availability"]);
     assert_eq!(peer["human_state_status"], hub["human_state_status"]);
     assert_eq!(peer["attachments"], hub["attachments"]);
@@ -2652,6 +2658,7 @@ fn snapshot_and_remote_human_projection_share_the_hub_clock_and_freshness() -> R
         .find(|r| r["hub"] == "work")
         .unwrap();
     assert_eq!(hub["human_state_status"], "stale");
+    assert_eq!(hub["human_can_set_scope"], false);
     assert_eq!(hub["human_state_status"], peer["human_state_status"]);
     client.closed.store(true, Ordering::SeqCst);
     service.shutdown();

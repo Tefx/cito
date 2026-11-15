@@ -37,21 +37,23 @@ try {
  syncBuiltinESMExports();
  try {
   recovered=await request({op:'identify'});await request({op:'identify'});
-  assert.equal(reads,1,'Unchanged session JSONL must be parsed once across repeated identity probes');
+  assert.equal(reads,0,'An external session file must never steal the pre-start process identity');
  } finally {fs.readFileSync=originalRead;syncBuiltinESMExports();}
- assert.equal(recovered.ok,true);assert.equal(recovered.session_id,'pre-start');assert.equal(recovered.session_name,'Before start');
- // A reload can expose the socket before any hook supplies a context.
- const early={op:'deliver',session_id:recovered.session_id,batch_id:'before-start',content:'Wake before session_start',wake:true};
+ assert.equal(recovered.ok,true);assert.equal(recovered.session_id,`pid-${process.pid}`);
+ session='pre-start';await handlers.get('session_start')({},context);
+ recovered=await request({op:'identify'});assert.equal(recovered.session_id,'pre-start');
+ // The first session_start owns the transition; all later socket operations use that session.
+ const early={op:'deliver',session_id:recovered.session_id,batch_id:'before-start',content:'Wake after session_start',wake:true};
  assert.equal((await request({op:'status',session_id:recovered.session_id,badge:'listening before start'})).ok,true);
- assert.equal(badges.length,0,'No UI context exists yet');
+ assert.equal(badges.at(-1),'listening before start');
  assert.equal((await request({...early,session_id:'wrong'})).error,'SESSION_MISMATCH');
  assert.equal((await request({op:'status',session_id:'wrong',badge:'wrong'})).error,'SESSION_MISMATCH');
  assert.equal((await request(early)).deduplicated,false);assert.equal((await request(early)).deduplicated,true);
  assert.deepEqual(messages,[{m:{customType:'cito-notification',content:early.content,display:true},o:{triggerTurn:true,deliverAs:'followUp'}}]);
  session=recovered.session_id;
  await handlers.get('session_start')({},context);await handlers.get('session_start')({},context);
- assert.equal(badges.at(-1),'listening before start','The first context must apply the fallback session badge');
- assert.equal((await request(early)).deduplicated,true);assert.equal(messages.length,1,'Context arrival must retain batch deduplication');
+ assert.equal(badges.at(-1),'listening before start','Repeated session_start must retain the session badge');
+ assert.equal((await request(early)).deduplicated,true);assert.equal(messages.length,1,'Repeated session_start must retain batch deduplication');
  session='session-a';await handlers.get('session_tree')({},context);assert.equal(badges.at(-1),undefined);
  messages.length=0;
  assert.equal(attempts,2);assert.deepEqual(registrations,[{name:'cito',config:{command:join(state,'bin/cito-mcp'),args:[]}}]);assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(join(state,'sockets')).mode&0o777,0o700);

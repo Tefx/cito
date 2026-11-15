@@ -278,12 +278,20 @@ fn v48_oracle_detects_borderless_padding_mid_y_nested_overlap_and_data_labels() 
     for (kind, key) in [
         ("borderless_padding", "tight_padding"),
         ("bar_midY", "non_anchored_action_bars"),
+        ("footer_midY", "non_anchored_action_bars"),
         ("nested_overlap", "overlapping_views"),
         ("data_row_truncation", "truncated_labels"),
     ] {
         f.send(ui, json!({"op":"test_oracle_calibration","kind":kind}));
         let s = inspect_unchecked(&f, ui, None);
         assert!(!s[key].as_array().unwrap().is_empty(), "{kind}");
+        if kind == "footer_midY" {
+            assert_eq!(node(&s, "settings_items", "settings_footer")["height"], 44);
+            assert!(s[key].as_array().unwrap().iter().any(|issue| issue
+                .as_str()
+                .unwrap()
+                .contains("settings_footer: top row controls are not vertically centered")));
+        }
         if kind == "nested_overlap" {
             assert!(s[key]
                 .as_array()
@@ -345,13 +353,9 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
     let f = Fixture::new(json!({}));
     let ui = start(&f);
     let mut frame = state();
-    let mut human = listener();
-    human["harness"] = json!("human");
-    human["listener_id"] = json!("inbox");
-    human["scoped_id"] = json!("personal:inbox");
-    human["display_address"] = json!("@alice");
-    frame["listeners"].as_array_mut().unwrap().push(human);
+    // The inbox is hosted remotely; this Mac has no Human listener.
     frame["hubs"][0]["human_listener_id"] = json!("inbox");
+    frame["hubs"][0]["human_can_set_scope"] = json!(true);
     frame["hubs"][0]["attachments"] = json!([{"channel_id":"hub:channel","location":"hub","display_name":"Shared Messenger Channel","availability":"ACTIVE","is_local":false}]);
     frame["hubs"][0]["human_state_status"] = json!("current");
     let mut cfg = settings();
@@ -392,6 +396,14 @@ fn v48_centered_channel_bars_bound_long_summaries_and_expanded_controls() {
         let status = node(&s, "settings_items", "settings_channel_status:channel");
         assert!((mid_y(&badge) - mid_y(&status)).abs() <= 1.0);
     }
+    control(&f, ui, "scope:inbox");
+    inspect(&f, ui);
+    assert!(f
+        .frames(ui)
+        .iter()
+        .any(|action| action["op"] == "human_inbox_update"
+            && action["hub"] == "personal"
+            && action["scope"] == "workspace"));
     control(&f, ui, "edit_user_channel:channel");
     let s = inspect(&f, ui);
     let band = node(&s, "settings_items", "stratum_user:channel");

@@ -701,23 +701,27 @@ impl HubEngine {
                 Ok(wire)
             }
             "kv_keys" | "kv_snapshot" => {
-                let rows = c.query(
-                    &format!("{KV_SELECT} WHERE key>? ORDER BY key"),
-                    &[json!(s(p, "after_key"))],
-                )?;
-                let rows: Vec<_> = rows
-                    .into_iter()
-                    .filter(|r| visible(r, caller) && matches(s(r, "key"), s(p, "key")))
-                    .collect();
+                let sql = format!("{KV_SELECT} WHERE key>? ORDER BY key");
+                let params = [json!(s(p, "after_key"))];
                 if op == "kv_keys" {
-                    Ok(json!({"keys":rows.iter().map(|r|r["key"].clone()).collect::<Vec<_>>()}))
+                    let mut keys = Vec::new();
+                    c.query_while(&sql, &params, |row| {
+                        if visible(&row, caller) && matches(s(&row, "key"), s(p, "key")) {
+                            keys.push(row["key"].clone());
+                        }
+                        Ok(true)
+                    })?;
+                    Ok(json!({"keys":keys}))
                 } else {
                     const PAGE_BYTES: usize = 2 * 1024 * 1024;
                     let limit = p["limit"].as_u64().unwrap_or(256).clamp(1, 1024) as usize;
                     let mut entries = Vec::new();
                     let mut bytes = 128;
                     let mut next_cursor = None;
-                    for row in rows {
+                    c.query_while(&sql, &params, |row| {
+                        if !visible(&row, caller) || !matches(s(&row, "key"), s(p, "key")) {
+                            return Ok(true);
+                        }
                         let wire = kv_wire(&reconcile_human_row(c, row)?)?;
                         let size = serde_json::to_vec(&wire).map_err(|e| e.to_string())?.len() + 1;
                         if entries.len() >= limit || bytes + size > PAGE_BYTES {
@@ -728,11 +732,12 @@ impl HubEngine {
                                 );
                             }
                             next_cursor = entries.last().map(|entry: &Value| entry["key"].clone());
-                            break;
+                            return Ok(false);
                         }
                         bytes += size;
                         entries.push(wire);
-                    }
+                        Ok(true)
+                    })?;
                     Ok(
                         json!({"entries":entries,"next_cursor":next_cursor,"server_now_ms":now_ms()}),
                     )

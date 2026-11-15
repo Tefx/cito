@@ -513,7 +513,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
         ids.push(s.into())
     }
     let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
-    if explicit_pid(&public)?.is_none() && req["meta"]["expected_harness"] == "codex" {
+    if caller_supplied_pid(&public)?.is_none() && req["meta"]["expected_harness"] == "codex" {
         if let Some(s) = str_at(&req["meta"], "expected_session_id") {
             ids.push(s.into())
         }
@@ -591,7 +591,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 Err(e) => return Ok(error("INVALID_INPUT", e)),
             };
             let public = json!({"meta":req["meta"],"_meta":req["_meta"]});
-            if explicit_pid(&public)?.is_some() {
+            if caller_supplied_pid(&public)?.is_some() {
                 return Ok(error(
                     if explicit.is_some() {
                         "INVALID_INPUT"
@@ -601,6 +601,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     "Conflicting caller metadata: explicit bridge PID cannot claim a Codex thread",
                 ));
             }
+            let transport_pid = explicit_pid(&public)?.is_some();
             let all = try_rows(req)?;
             let known_row = explicit
                 .as_deref()
@@ -608,8 +609,9 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .transpose()?
                 .flatten();
             let needs_cached_pid = (explicit.is_some() && known_row.is_none())
-                || (explicit.is_none() && (str_at(req, "cli_cmd").is_none() || all.is_empty()));
-            if needs_cached_pid {
+                || (explicit.is_none()
+                    && ((!transport_pid && str_at(req, "cli_cmd").is_none()) || all.is_empty()));
+            if needs_cached_pid && (!transport_pid || req["cached_caller"].is_object()) {
                 match cached_caller(req, "codex", explicit.as_deref(), matches_process) {
                     Ok(Some(c)) => return Ok(json!({"ok":true,"caller":c})),
                     Err(e) => return Ok(e),
@@ -629,6 +631,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 }
                 row.unwrap_or_else(|| json!({"id":id,"cwd":req["cwd"]}))
             } else if str_at(req, "cli_cmd").is_some()
+                || transport_pid
                 || (pid(req).is_none()
                     && (req["meta"]["expected_harness"] == "codex"
                         || (req["http_transport"] != true

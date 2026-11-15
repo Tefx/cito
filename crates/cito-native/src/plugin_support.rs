@@ -419,7 +419,7 @@ pub fn inspect_socket_endpoints(
     Ok(results)
 }
 fn pid_key(key: &str) -> bool {
-    key.ends_with("_pid") || key.ends_with("Pid")
+    key == "pid" || key.ends_with("_pid") || key.ends_with("Pid") || key.ends_with("PID")
 }
 fn positive_pid(value: &Value) -> Option<u32> {
     value
@@ -427,80 +427,63 @@ fn positive_pid(value: &Value) -> Option<u32> {
         .filter(|p| *p > 0 && *p <= i32::MAX as u64)
         .and_then(|p| u32::try_from(p).ok())
 }
-pub fn explicit_pid(req: &Value) -> Result<Option<u32>> {
-    let mut claims = Vec::new();
-    if !req["endpoint_pid"].is_null() {
-        claims.push(&req["endpoint_pid"]);
-    }
-    for meta in [
-        &req["meta"],
-        &req["_meta"],
-        &req["_stdio"],
-        &req["meta"]["_stdio"],
-        &req["_meta"]["_stdio"],
-    ] {
-        if let Some(object) = meta.as_object() {
-            claims.extend(
-                object
-                    .iter()
-                    .filter(|(k, _)| {
-                        pid_key(k) && !matches!(k.as_str(), "parent_pid" | "http_client_pid")
-                    })
-                    .map(|(_, v)| v),
-            );
+
+/// Caller claims take precedence over stdio transport process provenance.
+pub fn caller_pid_hint(meta: &Value, include_transport: bool) -> Result<Option<u32>> {
+    let mut pending = vec![(meta, 0usize, false)];
+    let (mut caller, mut transport) = (None, None);
+    let mut visited = 0;
+    while let Some((value, depth, stdio)) = pending.pop() {
+        visited += 1;
+        if visited > 512 {
+            return Err("INVALID_INPUT: Caller metadata is too complex".into());
         }
-    }
-    let mut ids = Vec::new();
-    for value in claims {
-        ids.push(positive_pid(value).ok_or("Invalid endpoint PID")?);
-    }
-    ids.sort();
-    ids.dedup();
-    if ids.len() > 1 {
-        return Err("Conflicting caller metadata".into());
-    }
-    Ok(ids.pop())
-}
-pub fn caller_pid_roots(req: &Value) -> Result<Vec<u32>> {
-    if let Some(p) = explicit_pid(req)? {
-        return Ok(vec![p]);
-    }
-    fn walk(value: &Value, ids: &mut Vec<u32>) {
+        if depth > 8 {
+            continue;
+        }
         match value {
-            Value::Object(object) => {
-                for (k, v) in object {
-                    if pid_key(k) {
-                        if let Some(p) = positive_pid(v) {
-                            if !ids.contains(&p) {
-                                ids.push(p);
-                            }
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if pid_key(key)
+                        && !matches!(key.as_str(), "http_client_pid" | "parent_pid")
+                        && !value.is_null()
+                    {
+                        let next = positive_pid(value)
+                            .ok_or("INVALID_INPUT: Caller PID must be a positive process ID")?;
+                        let claim = if stdio { &mut transport } else { &mut caller };
+                        if claim.is_some_and(|previous| previous != next) {
+                            return Err("INVALID_INPUT: Conflicting caller PID claims".into());
                         }
+                        *claim = Some(next);
                     }
-                    if v.is_object() || v.is_array() {
-                        walk(v, ids);
+                    if value.is_object() || value.is_array() {
+                        pending.push((value, depth + 1, stdio || key == "_stdio"));
                     }
                 }
             }
             Value::Array(values) => {
-                for v in values {
-                    walk(v, ids);
+                for value in values {
+                    pending.push((value, depth + 1, stdio));
                 }
             }
             _ => {}
         }
     }
-    let mut ids = vec![];
-    for meta in [&req["meta"], &req["_meta"]] {
-        if let Some(o) = meta.as_object() {
-            for v in o.values() {
-                if v.is_object() || v.is_array() {
-                    walk(v, &mut ids);
-                }
-            }
-        }
-    }
-    if !ids.is_empty() {
-        return Ok(ids);
+    Ok(caller.or(if include_transport { transport } else { None }))
+}
+
+fn pid_metadata(req: &Value) -> Value {
+    json!({"endpoint_pid":req["endpoint_pid"],"meta":req["meta"],"_meta":req["_meta"],"_stdio":req["_stdio"]})
+}
+pub fn caller_supplied_pid(req: &Value) -> Result<Option<u32>> {
+    caller_pid_hint(&pid_metadata(req), false)
+}
+pub fn explicit_pid(req: &Value) -> Result<Option<u32>> {
+    caller_pid_hint(&pid_metadata(req), true)
+}
+pub fn caller_pid_roots(req: &Value) -> Result<Vec<u32>> {
+    if let Some(p) = explicit_pid(req)? {
+        return Ok(vec![p]);
     }
     if let Some(p) = positive_pid(&req["http_client_pid"])
         .or_else(|| positive_pid(&req["meta"]["http_client_pid"]))
@@ -1713,6 +1696,25 @@ mod tests {
         assert!(!alive(0));
         assert!(!alive(u32::MAX));
         assert!(alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_metadata_separates_transport_and_caller_claims() -> Result<()> {
+        let transport = json!({"_meta":{"_stdio":{"endpoint_pid":101}}});
+        assert_eq!(explicit_pid(&transport)?, Some(101));
+        assert_eq!(caller_supplied_pid(&transport)?, None);
+        assert_eq!(caller_pid_roots(&transport)?, vec![101]);
+        for key in ["pid", "endpoint_pid", "bridgePid", "bridgePID"] {
+            let mut request = transport.clone();
+            request["_meta"]["nested"] = json!([{key:202}]);
+            assert_eq!(caller_supplied_pid(&request)?, Some(202));
+            assert_eq!(caller_pid_roots(&request)?, vec![202]);
+        }
+        for value in [json!(0), json!(-1), json!("101"), json!(u64::MAX)] {
+            assert!(caller_pid_hint(&json!({"nested":[{"pid":value}]}), true).is_err());
+        }
+        assert!(caller_pid_hint(&json!({"pid":101,"nested":{"bridgePID":202}}), true).is_err());
+        Ok(())
     }
 
     #[test]
