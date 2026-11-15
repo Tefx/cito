@@ -14228,7 +14228,7 @@ phases:
   - id: v48.docs
     name: V48 Audience-Segmented Documentation, Host-a-Hub Guide, Topology SVG, Site
       UX & Clipboard Tests (D1–D5)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - site/index.html\n    - site/docs/**\n    - site/styles/**\n\
       \    - site/scripts/**\n    - site/assets/art/architecture-topology.svg\n  \
@@ -14307,6 +14307,47 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-15T19:08:53.257192Z'
+    done_at: '2026-11-15T19:27:05.928021+00:00'
+    evidence: 'Artifact:
+
+      - Commit: dba7577852547d31aaedb993c58968be20c1ea67 (rebased and merged cleanly
+      to main; candidate ref refs/vectl/candidates/v48.docs retained; version 0.21.3,
+      zero release tag).
+
+
+      Deliverables:
+
+      - Audience-segmented navigation and sidebars (User Guide, Host a Hub, Plugins,
+      Reference, GitHub), guide.html #pi/#codex/#claude anchors, stripped internal
+      manifest keys.
+
+      - New site/docs/hosting.html + updated deploy/hub/README.md & README.md (standalone
+      cito hub, Docker Compose, systemd, generic reverse-proxy SSE/Host guidance +
+      Caddy/Nginx examples, OIDC PKCE/CITO_OIDC_ADMIN_USERS/redirectPort 8400, Telegram
+      409/env seeding, WAL backup, all 38 CITO_* vars).
+
+      - Updated 960x420 site/assets/art/architecture-topology.svg & IMAGEGEN_PROMPTS.md.
+
+      - .docs-table-wrap horizontal scroll, 21 code-block copy buttons (2000ms reset),
+      index.html h2 heading, skip-to-content links, prefers-reduced-motion, extended
+      site-clipboard.mjs.
+
+
+      Verification:
+
+      - git diff --check -> Passed
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - Privacy scan across site/, README.md, deploy/ -> 0 matches
+
+      - Headless Chrome (390px & 1280px) across all 5 pages + visual topology PNG
+      -> Passed
+
+
+      Spec link:
+
+      - /tmp/cito-v48-arch-spec.md Cluster 4 (D1–D5) & docs/DESIGN.md §7.2 (@ 2f1c179)'
   - id: v48.review
     name: 'V48 Iterative 4-Slice Zero-New-Issues Convergence Audit, §8.1 Full Verification
       & Cito.app Rebuild [REQUIRES_SKILL: contract-and-simplicity]'
