@@ -1,6 +1,6 @@
 use super::{
     http_actions::{dispatch_action, interactive_login},
-    DaemonService,
+    wake_daemon, DaemonService,
 };
 use crate::core::identity::string;
 use crate::setup::resolve_package_root;
@@ -254,7 +254,8 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
         }
     });
     if let Ok(mut s) = service.lock() {
-        s.ui = Some(mailbox);
+        s.disconnect_ui();
+        s.ui = Some(mailbox.clone());
         if let Ok(mut previous) = s.last_ui_revision.lock() {
             *previous = None;
         }
@@ -315,6 +316,16 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
                 logins = pending;
             }
         }
+        if let Ok(mut s) = service.lock() {
+            // An old reader must never clear demand belonging to its replacement.
+            if s.ui
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &mailbox))
+            {
+                s.disconnect_ui();
+            }
+        }
+        wake_daemon();
         for login in logins {
             let _ = login.join();
         }

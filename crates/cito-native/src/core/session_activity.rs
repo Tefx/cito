@@ -92,7 +92,7 @@ pub struct SessionActivity {
     env: Value,
     discovery: Vec<Discovery>,
     badges: BTreeMap<Target, Badge>,
-    history_loaded: bool,
+    badge_inputs: Option<(i32, Vec<Value>, Instant)>,
     stopping: Arc<AtomicBool>,
     closed: bool,
     background_discovery: bool,
@@ -142,7 +142,7 @@ impl SessionActivity {
                 })
                 .collect(),
             badges: BTreeMap::new(),
-            history_loaded: false,
+            badge_inputs: None,
             stopping: Arc::new(AtomicBool::new(false)),
             closed: false,
             background_discovery: true,
@@ -319,59 +319,72 @@ impl SessionActivity {
             }
         }
         let changed = self.reap_discovery();
-        for provider in &mut self.discovery {
-            for candidate in &mut provider.cached {
-                if let Some(title) =
-                    state.custom_title(&provider.plugin.id, string(candidate, "session_id"))?
-                {
-                    candidate["title"] = json!(title);
-                    candidate["custom_title"] = json!(true);
+        self.reap_badges();
+        // Retain expiry reconciliation even without local writes; otherwise an
+        // idle, closed UI must not rescan listener history every second.
+        let revision = state.db.mutation_revision()?;
+        let reconcile = changed
+            || self.background_discovery
+            || self
+                .badge_inputs
+                .as_ref()
+                .is_none_or(|(previous, live, at)| {
+                    *previous != revision || live != live_active || at.elapsed() >= REFRESH_INTERVAL
+                });
+        if reconcile {
+            for provider in &mut self.discovery {
+                for candidate in &mut provider.cached {
+                    if let Some(title) =
+                        state.custom_title(&provider.plugin.id, string(candidate, "session_id"))?
+                    {
+                        candidate["title"] = json!(title);
+                        candidate["custom_title"] = json!(true);
+                    }
                 }
             }
-        }
-        self.reap_badges();
-        // One short transaction captures both rows and counts. Persisted ACTIVE
-        // rows alone never establish liveness and never add unread to a badge.
-        let mut desired = desired_badges(state, live_active)?;
-        // Historical endpoints need one bounded clear after startup, not a fresh
-        // retry lifecycle on every DB scan once their badge entry has retired.
-        if self.history_loaded {
-            desired.retain(|target, intent| {
-                intent.badge.is_some() || self.badges.contains_key(target)
-            });
-        }
-        self.history_loaded = true;
-        for (target, badge) in &mut self.badges {
-            if !desired.contains_key(target) && badge.desired.badge.is_some() {
-                badge.desired.badge = None;
-                badge.failures = 0;
-                badge.retry_at = Instant::now();
+            // One short transaction captures both rows and counts. Persisted ACTIVE
+            // rows alone never establish liveness and never add unread to a badge.
+            let mut desired = desired_badges(state, live_active)?;
+            // Historical endpoints need one bounded clear after startup, not a fresh
+            // retry lifecycle on every DB scan once their badge entry has retired.
+            if self.badge_inputs.is_some() {
+                desired.retain(|target, intent| {
+                    intent.badge.is_some() || self.badges.contains_key(target)
+                });
             }
-        }
-        for (target, intent) in desired {
-            if let Some(badge) = self.badges.get_mut(&target) {
-                if badge.desired != intent {
-                    badge.desired = intent;
+            self.badge_inputs = Some((revision, live_active.to_vec(), Instant::now()));
+            for (target, badge) in &mut self.badges {
+                if !desired.contains_key(target) && badge.desired.badge.is_some() {
+                    badge.desired.badge = None;
                     badge.failures = 0;
                     badge.retry_at = Instant::now();
                 }
-            } else if let Some(provider) = self
-                .discovery
-                .iter()
-                .find(|p| p.plugin.id == target.harness)
-            {
-                self.badges.insert(
-                    target,
-                    Badge {
-                        plugin: provider.plugin.clone(),
-                        desired: intent,
-                        sent: None,
-                        retry_at: Instant::now(),
-                        worker: None,
-                        attempted: None,
-                        failures: 0,
-                    },
-                );
+            }
+            for (target, intent) in desired {
+                if let Some(badge) = self.badges.get_mut(&target) {
+                    if badge.desired != intent {
+                        badge.desired = intent;
+                        badge.failures = 0;
+                        badge.retry_at = Instant::now();
+                    }
+                } else if let Some(provider) = self
+                    .discovery
+                    .iter()
+                    .find(|p| p.plugin.id == target.harness)
+                {
+                    self.badges.insert(
+                        target,
+                        Badge {
+                            plugin: provider.plugin.clone(),
+                            desired: intent,
+                            sent: None,
+                            retry_at: Instant::now(),
+                            worker: None,
+                            attempted: None,
+                            failures: 0,
+                        },
+                    );
+                }
             }
         }
         self.badges.retain(|_, badge| {
@@ -991,6 +1004,58 @@ print(json.dumps(response), flush=True)
             pids.iter().all(|pid| !alive(*pid)),
             "Fixture process survived shutdown: {pids:?}"
         );
+    }
+
+    #[test]
+    fn paused_badges_skip_idle_sql_but_reconcile_mutations_liveness_and_expiry(
+    ) -> Result<(), String> {
+        let f = Fixture::new()?;
+        let mut activity = SessionActivity::new(&f.config, &f.plugins);
+        activity.discovery_demand(false, HashSet::new());
+        activity.tick(&f.state, &[])?;
+        // DDL does not change SQLite's row-mutation counter. A scan now would
+        // fail, making this sensitive to accidental unconditional reconciliation.
+        f.state.db.execute(
+            "ALTER TABLE local_listeners RENAME TO hidden_listeners",
+            &[],
+        )?;
+        for _ in 0..5 {
+            activity.tick(&f.state, &[])?;
+        }
+        f.state
+            .db
+            .execute("INSERT INTO daemon_owner VALUES(1,42,1234)", &[])?;
+        assert!(
+            activity.tick(&f.state, &[]).is_err(),
+            "A local mutation must request reconciliation"
+        );
+        f.state.db.execute(
+            "ALTER TABLE hidden_listeners RENAME TO local_listeners",
+            &[],
+        )?;
+        activity.tick(&f.state, &[])?;
+        f.state.db.execute(
+            "ALTER TABLE local_listeners RENAME TO hidden_listeners",
+            &[],
+        )?;
+        assert!(
+            activity
+                .tick(&f.state, &[json!({"listener_id":"new"})])
+                .is_err(),
+            "Liveness changes must request reconciliation"
+        );
+        activity.badge_inputs.as_mut().unwrap().2 = Instant::now() - REFRESH_INTERVAL;
+        assert!(
+            activity.tick(&f.state, &[]).is_err(),
+            "Expiry requires slow fallback reconciliation"
+        );
+        f.state.db.execute(
+            "ALTER TABLE hidden_listeners RENAME TO local_listeners",
+            &[],
+        )?;
+        activity.tick(&f.state, &[])?;
+        activity.shutdown()?;
+        Ok(())
     }
 
     #[test]

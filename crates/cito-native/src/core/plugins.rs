@@ -1034,6 +1034,7 @@ pub fn plugin_request_with_progress(
             let mut errors = Vec::new();
             let mut out_eof = false;
             let mut err_eof = false;
+            let mut child_exited = None;
             let started = Instant::now();
             let deadline = started + timeout;
             loop {
@@ -1091,7 +1092,10 @@ pub fn plugin_request_with_progress(
                         }
                     }
                 }
-                if let Some((success, code)) = peek_plugin_exit(child.id())? {
+                if child_exited.is_none() {
+                    child_exited = peek_plugin_exit(child.id())?;
+                }
+                if let Some((success, code)) = child_exited {
                     if out_eof && err_eof {
                         if !success {
                             return Err(format!(
@@ -1133,7 +1137,11 @@ pub fn plugin_request_with_progress(
                         revents: 0,
                     },
                     libc::pollfd {
-                        fd: exited.as_raw_fd(),
+                        fd: if child_exited.is_some() {
+                            -1
+                        } else {
+                            exited.as_raw_fd()
+                        },
                         events: libc::POLLIN,
                         revents: 0,
                     },

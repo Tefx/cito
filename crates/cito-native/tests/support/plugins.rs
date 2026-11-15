@@ -2092,6 +2092,41 @@ fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
             .is_none()
     );
     assert!(started.elapsed() < Duration::from_millis(500));
+    // The parent exits successfully but a descendant retains both inherited
+    // pipes. EOF must share the command deadline, with no unbounded reader join.
+    let inherited =
+        "import subprocess; subprocess.Popen(['python3','-c','import time; time.sleep(10)'])";
+    let command = f.command_builder("python3", &["-c", inherited]);
+    let started = Instant::now();
+    assert!(
+        cito_native::support::run_command_with_timeout(command, Duration::from_millis(200))
+            .unwrap()
+            .is_none()
+    );
+    assert!(started.elapsed() < Duration::from_millis(700));
+
+    let dir = f.state.join("plugins/inherited");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("plugin.json"), json!({"id":"inherited","kind":"agent","displayName":"Inherited pipes","command":["python3","-c",format!("{inherited}; print('{{}}', flush=True)")]}).to_string()).unwrap();
+    let plugin = cito_native::plugins::parse_manifest_dir(&dir, false).unwrap();
+    let mut iterations = 0;
+    let started = Instant::now();
+    let error = cito_native::plugins::plugin_request_with_progress(
+        &plugin,
+        &json!({}),
+        Duration::from_millis(600),
+        |_| {
+            iterations += 1;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(started.elapsed() < Duration::from_millis(1100));
+    assert!(
+        iterations <= 12,
+        "Consumed exit readiness caused {iterations} drain iterations"
+    );
     for _ in 0..8 {
         let command = f.command_builder("python3", &["-c", "pass"]);
         assert!(

@@ -30,7 +30,7 @@ extension Companion {
         settings = value
         if !selectedChannelHub.isEmpty && !value.hubs.contains(where: { $0.name == selectedChannelHub && $0.enabled }) {
             selectedChannelHub = value.hubs.first(where: { $0.enabled })?.name ?? ""
-            if !selectedChannelHub.isEmpty { emit(["op": "open_settings", "hub": selectedChannelHub], userInitiated:false) }
+            if settingsVisible && !selectedChannelHub.isEmpty { emit(["op": "open_settings", "hub": selectedChannelHub], userInitiated:false) }
         }
         if hostHubPortPending && savedRequest == submittedHostHubRequestId &&
            (value.host_hub.port == submittedHostHubPort || value.host_hub.error != nil) {

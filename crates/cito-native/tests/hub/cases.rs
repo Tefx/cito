@@ -681,7 +681,7 @@ fn manual_private_identity_and_pair_redemption_share_ownership_policy() {
     let e = HubEngine::open(&dir).unwrap();
     e.set_plugin_roots(&[]).unwrap();
     e.inner.plugins.lock().unwrap().push(ChannelPlugin{id:"fixture".into(),dir:dir.clone(),command:vec![],manifest:json!({"displayName":"Fixture Channel","fields":[{"key":"destination","scope":"user","type":"string","required":true}],"pairing":{"supported":true,"privateIdentityField":"destination"}})});
-    e.inner.closed.store(true, Ordering::SeqCst);
+    e.pause_worker();
     let alice = json!({"principal_id":"oidc:https://id.example.com|alice","owner_user":"alice"});
     let bob = json!({"principal_id":"none#bob","owner_user":"bob"});
     e.human_rpc(
@@ -1521,10 +1521,7 @@ fn tick_services_healthy_sibling_after_plugin_spawn_failure() {
     let e = HubEngine::open(&dir).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Drive exactly one tick; a background retry must not satisfy this test.
-        e.inner.closed.store(true, Ordering::SeqCst);
-        let worker = e.inner.worker.lock().unwrap().take().unwrap();
-        worker.join().unwrap();
-        e.inner.closed.store(false, Ordering::SeqCst);
+        e.pause_worker();
 
         let healthy = root.join("b");
         std::fs::rename(root.join("fixture"), &healthy).unwrap();
@@ -2875,11 +2872,7 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
         e.inner.db.query("SELECT * FROM hub_channel_deliveries WHERE signal_id='concurrent' AND status='delivered'",&[]).unwrap().len()==1
     });
     // Control reservation time explicitly; only genuine progress may renew it.
-    e.inner.closed.store(true, Ordering::SeqCst);
-    if let Some(worker) = e.inner.worker.lock().unwrap().take() {
-        worker.join().unwrap();
-    }
-    e.inner.closed.store(false, Ordering::SeqCst);
+    e.pause_worker();
     let old = now_ms() - 180_001;
     e.inner.db.execute("UPDATE hub_channel_deliveries SET status='in_flight',delivered_ms=?,reservation_id='multipart' WHERE signal_id='concurrent'", &[json!(old)]).unwrap();
     e.delivery_result(
@@ -2944,11 +2937,7 @@ fn reservations_expire_without_delivery_progress_and_quarantine_after_exit() {
     e.inner.db.execute("UPDATE hub_channel_deliveries SET status=\'in_flight\',reservation_id=\'crashed\' WHERE signal_id=\'concurrent\'",&[]).unwrap();
     // Stop periodic supervision so Send Test is deterministically the first
     // replacement caller after the crash, rather than racing the supervisor.
-    e.inner.closed.store(true, Ordering::SeqCst);
-    if let Some(worker) = e.inner.worker.lock().unwrap().take() {
-        worker.join().unwrap();
-    }
-    e.inner.closed.store(false, Ordering::SeqCst);
+    e.pause_worker();
     process.shutdown();
     assert_eq!(
         e.rpc(
@@ -3203,7 +3192,20 @@ fn retention_and_dedup_expire() {
     )
     .unwrap();
     send(&e, "target", "s1");
-    thread::sleep(Duration::from_millis(80));
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_signals SET created_ms=?",
+            &[json!(now_ms() - 1000)],
+        )
+        .unwrap();
+    e.inner
+        .db
+        .execute(
+            "UPDATE hub_meta SET int_val=0 WHERE key='last_maintenance_ms'",
+            &[],
+        )
+        .unwrap();
     send(&e, "target", "s1");
     let rows = e
         .inner

@@ -254,12 +254,10 @@ fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
             Ok(v) => {
                 if v["ok"] == true {
                     if let Ok(identity) = process_identity(p) {
-                        let _ = atomic_write(
-                            &cache_path,
-                            json!({"identity":identity,"session":v})
-                                .to_string()
-                                .as_bytes(),
-                        );
+                        let entry = json!({"identity":identity,"session":v});
+                        if read_json(&cache_path).ok().as_ref() != Some(&entry) {
+                            let _ = atomic_write(&cache_path, entry.to_string().as_bytes());
+                        }
                     }
                 }
                 Ok(v)

@@ -134,6 +134,36 @@ fn menu_visibility_defers_views_but_status_updates_and_visibility_ipc_are_immedi
 }
 
 #[test]
+fn closed_settings_reselects_disabled_hub_without_reopening_discovery() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["settings"] = settings();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "channel_hub_selector:work");
+    control(&f, p, "close_settings");
+    assert_eq!(render_state(&f, p)["settings_open"], false);
+    let before = f.frames(p).len();
+    let mut cfg = settings();
+    cfg["hubs"][1]["enabled"] = json!(false);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(render_state(&f, p)["settings_open"], false);
+    assert!(f.frames(p)[before..]
+        .iter()
+        .all(|v| v["op"] != "open_settings"));
+    control(&f, p, "open_settings");
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .skip(before)
+            .any(|v| v["op"] == "open_settings" && v["hub"] == "personal")
+    });
+}
+
+#[test]
 fn closing_inline_rename_dirties_the_cached_menu_without_a_hidden_rebuild() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

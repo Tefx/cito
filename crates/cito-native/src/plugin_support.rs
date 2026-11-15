@@ -985,48 +985,86 @@ pub fn run_command_with_timeout(
     mut command: std::process::Command,
     timeout: Duration,
 ) -> Result<Option<std::process::Output>> {
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    // Drain pipes concurrently: a child may fill stdout before it exits.
-    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
-        pipe.map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                pipe.read_to_end(&mut bytes).map(|_| bytes)
-            })
-        })
-    };
-    let out = drain(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-    );
-    let err = drain(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-    );
-    let ready = wait_child_exit(&child, timeout);
-    if !matches!(ready, Ok(true)) {
-        let _ = child.kill();
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut child = command
+        .process_group(0)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let result = (|| -> Result<Option<[Vec<u8>; 2]>> {
+        let mut pipes = [
+            child.stdout.take().map(|p| File::from(OwnedFd::from(p))),
+            child.stderr.take().map(|p| File::from(OwnedFd::from(p))),
+        ];
+        for pipe in pipes.iter().flatten() {
+            // SAFETY: each pipe remains owned until the drain completes or times out.
+            unsafe {
+                let flags = libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL);
+                if flags < 0
+                    || libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
+                {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+        }
+        let exited = child_exit_fd(child.id())?;
+        let mut child_exited = false;
+        let mut output = [Vec::new(), Vec::new()];
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            for (pipe, buffer) in pipes.iter_mut().zip(&mut output) {
+                if let Some(reader) = pipe {
+                    let mut bytes = [0u8; 8192];
+                    match reader.read(&mut bytes) {
+                        Ok(0) => *pipe = None,
+                        Ok(n) => buffer.extend_from_slice(&bytes[..n]),
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+            }
+            if child_exited && pipes.iter().all(Option::is_none) {
+                return Ok(Some(output));
+            }
+            let mut fds = [
+                libc::pollfd {
+                    fd: pipes[0].as_ref().map_or(-1, AsRawFd::as_raw_fd),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: pipes[1].as_ref().map_or(-1, AsRawFd::as_raw_fd),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: if child_exited { -1 } else { exited.as_raw_fd() },
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            poll_until(&mut fds, Some(deadline))?;
+            child_exited |= fds[2].revents != 0;
+        }
+    })();
+    if !matches!(result, Ok(Some(_))) {
+        // SAFETY: the unreaped child reserves this owned process-group ID until wait.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
     }
     let status = child.wait().map_err(|e| e.to_string());
-    let collect =
-        |worker: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>| -> Result<Vec<u8>> {
-            worker
-                .map(|w| {
-                    w.join()
-                        .map_err(|_| "Command reader failed".to_string())?
-                        .map_err(|e| e.to_string())
-                })
-                .unwrap_or_else(|| Ok(Vec::new()))
-        };
-    let stdout = collect(out)?;
-    let stderr = collect(err)?;
-    if !ready? {
+    let Some([stdout, stderr]) = result? else {
         return Ok(None);
-    }
+    };
     Ok(Some(std::process::Output {
         status: status?,
         stdout,
@@ -1543,8 +1581,9 @@ mod tests {
     #[test]
     fn file_projection_cache_tracks_metadata_and_skips_unchanged_parse_and_write() -> Result<()> {
         let dir = std::env::temp_dir().join(format!(
-            "cito-file-cache-{}",
-            crate::plugins::random_uuid_v4()
+            "cito-file-cache-{}-{}",
+            std::process::id(),
+            now_ms()
         ));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let result = (|| {

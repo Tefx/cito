@@ -323,6 +323,12 @@ impl Database {
         }
         result
     }
+    /// Connection-local write counter; reading it does not execute SQL.
+    pub fn mutation_revision(&self) -> Result<i32, String> {
+        let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        // SAFETY: the lock owns the live SQLite handle throughout the counter read.
+        Ok(unsafe { sqlite3_total_changes(conn.raw) })
+    }
     pub fn query(&self, sql: &str, values: &[Value]) -> Result<Vec<Value>, String> {
         self.connection
             .lock()

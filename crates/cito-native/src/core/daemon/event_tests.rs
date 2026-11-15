@@ -15,10 +15,14 @@ request = json.loads(sys.stdin.readline())
 harness = sys.argv[1]
 with (root / 'calls.jsonl').open('a') as output:
     output.write(json.dumps(dict(harness=harness, request=request)) + '\n')
+if request['op'] in ('discover_sessions', 'resolve_caller') and (root/'delay').exists():
+    import time
+    time.sleep(float((root/'delay').read_text()))
 result = dict(ok=True)
 if request['op'] == 'setup_inspect': result.update(installed=True, configured=harness=='agent', paths=[])
 elif request['op'] == 'discover_sessions':
     result['sessions'] = [dict(harness=harness, session_id=(root/'session').read_text(), cwd='/workspace', title='Work')]
+elif request['op'] == 'resolve_caller': result['caller'] = dict(harness=harness, session_id='initial', cwd='/workspace')
 elif request['op'] == 'probe': result['status'] = 'closed_definitive' if request['session_id']=='closed' else 'alive'
 print(json.dumps(result))
 "#).map_err(|e| e.to_string())?;
@@ -176,6 +180,97 @@ fn shared_endpoint_probes_keep_session_results_and_generation_fences() -> Result
         .probes
         .values()
         .any(|probe| probe.calm > 0 && probe.due > Instant::now() + Duration::from_secs(1)));
+    Ok(())
+}
+
+#[test]
+fn contention_iterations_back_off_after_the_poll_deadline_expires() -> Result<(), String> {
+    let service = Mutex::new(());
+    let _held = service.lock().unwrap();
+    let last_poll = Instant::now() - Duration::from_secs(2);
+    let start = Instant::now();
+    let mut iterations = 0;
+    while start.elapsed() < Duration::from_millis(140) {
+        assert!(service.try_lock().is_err());
+        crate::support::poll_until(&mut [], Some(poll_deadline(last_poll)))?;
+        iterations += 1;
+    }
+    assert!(
+        iterations <= 3,
+        "Expired periodic deadline caused {iterations} contention iterations"
+    );
+    Ok(())
+}
+
+#[test]
+fn status_refresh_and_caller_share_one_deadline() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    // Either operation alone fits; their sum exceeds the request budget.
+    fs::write(f.root.join("delay"), "1.2").map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    assert!(f
+        .service
+        .tool(
+            "cito_status",
+            &json!({}),
+            &json!({"expected_harness":"agent"})
+        )
+        .is_err());
+    assert!(
+        started.elapsed() < Duration::from_millis(1900),
+        "Provider deadlines stacked: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(f.calls("discover_sessions").len(), 1);
+    assert_eq!(f.calls("resolve_caller").len(), 1);
+    Ok(())
+}
+
+#[test]
+fn disconnected_ui_revokes_all_visibility_demand_before_replacement() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.action(&json!({"op":"open_menu"}))?;
+    f.service.directory_open = true;
+    f.service.active_settings_hub = Some("local".into());
+    let count = f.calls("discover_sessions").len();
+    f.service.disconnect_ui();
+    assert!(!f.service.menu_open);
+    assert!(!f.service.directory_open);
+    assert!(f.service.active_settings_hub.is_none());
+    f.service
+        .session_activity
+        .as_mut()
+        .unwrap()
+        .mark_stale("agent");
+    f.service.poll()?;
+    assert_eq!(f.calls("discover_sessions").len(), count);
+    f.service.action(&json!({"op":"open_menu"}))?;
+    assert_eq!(f.calls("discover_sessions").len(), count + 1);
+    Ok(())
+}
+
+#[test]
+fn visibility_close_actions_emit_no_full_snapshot() -> Result<(), String> {
+    let mut f = Fixture::new()?;
+    f.service.ui = Some(Arc::new(UiMailbox::default()));
+    for close in ["close_menu", "close_settings", "close_directory"] {
+        match close {
+            "close_menu" => f.service.menu_open = true,
+            "close_settings" => f.service.active_settings_hub = Some("local".into()),
+            _ => f.service.directory_open = true,
+        }
+        f.service.push_ui();
+        f.service.ui.take().unwrap().close();
+        let mailbox = Arc::new(UiMailbox::default());
+        f.service.ui = Some(mailbox.clone());
+        f.service.action(&json!({"op":close}))?;
+        // A close emits a cheap status projection without a correlated snapshot.
+        let frame: Value = serde_json::from_slice(&mailbox.next().ok_or("Missing close frame")?)
+            .map_err(|e| e.to_string())?;
+        assert!(frame.get("activity").is_none(), "{close}: {frame}");
+        assert!(frame.get("settings").is_none(), "{close}: {frame}");
+        assert!(frame.get("source_op").is_none(), "{close}: {frame}");
+    }
     Ok(())
 }
 

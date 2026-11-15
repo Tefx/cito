@@ -180,16 +180,7 @@ fn record_effect(req: &Value, sid: &str, text: &str, activity: Option<(u64, u64)
     if let Some((revision, at)) = activity {
         ledger["fallback"] = json!({"revision":revision,"at_ms":at});
     }
-    save_activity(&path, &ledger)
-}
-fn save_activity(path: &Path, value: &Value) -> Result<()> {
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let result =
-        std::fs::write(&temp, value.to_string()).and_then(|_| std::fs::rename(&temp, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(temp);
-    }
-    result.map_err(|_| "Cannot save session activity".into())
+    atomic_write(&path, ledger.to_string().as_bytes())
 }
 fn idle_wake_guard(path: &Path) -> Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd;
@@ -308,7 +299,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                 // remains the durable DB source integer across scans and restarts.
                 let observed = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision});
                 if observed != previous {
-                    save_activity(&cursor_path, &observed)?;
+                    atomic_write(&cursor_path, observed.to_string().as_bytes())?;
                 }
                 if let Some(at) = latest {
                     return Ok(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
@@ -323,7 +314,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     }
     cached["revision"] = json!(revision);
     if cached != previous {
-        save_activity(&cursor_path, &cached)?;
+        atomic_write(&cursor_path, cached.to_string().as_bytes())?;
     }
     if let (Some(effect_revision), Some(effect_at)) = (
         ledger["fallback"]["revision"].as_u64(),

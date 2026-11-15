@@ -149,6 +149,16 @@ pub fn run_daemon(config: &NativeConfig, plugins: &LoadedPlugins) {
     }
 }
 
+fn poll_deadline(last_poll: Instant) -> Instant {
+    let due = last_poll + Duration::from_secs(1);
+    let now = Instant::now();
+    if due <= now {
+        now + Duration::from_millis(50)
+    } else {
+        due
+    }
+}
+
 fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<(), String> {
     if crate::plugins::handover_stale_daemon(config)? {
         return Ok(());
@@ -264,9 +274,7 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             .is_some_and(|u| u.child.try_wait().ok().flatten().is_some())
         {
             let restart = if let Ok(mut s) = service.try_lock() {
-                if let Some(mailbox) = s.ui.take() {
-                    mailbox.close();
-                }
+                s.disconnect_ui();
                 !s.closing && !shutdown_requested()
             } else {
                 false
@@ -313,8 +321,8 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             },
         ];
         let deadline = ui_retry
-            .unwrap_or(last_poll + Duration::from_secs(1))
-            .min(last_poll + Duration::from_secs(1));
+            .unwrap_or_else(|| poll_deadline(last_poll))
+            .min(poll_deadline(last_poll));
         crate::support::poll_until(&mut fds, Some(deadline))?;
         if fds[1].revents != 0 {
             let mut bytes = [0u8; 256];
@@ -1617,12 +1625,25 @@ impl DaemonService {
         }
     }
 
+    fn disconnect_ui(&mut self) {
+        if let Some(mailbox) = self.ui.take() {
+            mailbox.close();
+        }
+        self.menu_open = false;
+        self.directory_open = false;
+        self.active_settings_hub = None;
+        self.update_discovery_demand();
+    }
+
     fn refresh_available(&mut self) -> Result<(), String> {
+        self.refresh_available_until(Instant::now() + Duration::from_millis(1500))
+    }
+
+    fn refresh_available_until(&mut self, deadline: Instant) -> Result<(), String> {
         self.update_discovery_demand();
         let live = self.live_receivers()?;
         if let Some(activity) = self.session_activity.as_mut() {
             activity.refresh_discovery();
-            let deadline = Instant::now() + Duration::from_millis(1500);
             loop {
                 let observed = activity.completion_revision();
                 activity.tick(&self.state, &live)?;

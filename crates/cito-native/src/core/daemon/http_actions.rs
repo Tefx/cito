@@ -63,15 +63,19 @@ pub(super) fn respond(stream: &mut TcpStream, status: u16, value: &Value) {
 fn http_client_pid(stream: &TcpStream) -> Option<u32> {
     let remote = stream.peer_addr().ok()?.port();
     let local = stream.local_addr().ok()?.port();
-    let output = Command::new("/usr/sbin/lsof")
+    let mut command = Command::new("/usr/sbin/lsof");
+    command
         .args([
             "-nP",
             &format!("-iTCP:{remote}"),
             "-sTCP:ESTABLISHED",
             "-Fpn",
         ])
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output =
+        crate::support::run_command_with_timeout(command, Duration::from_millis(250)).ok()??;
     let expected = format!("n127.0.0.1:{remote}->127.0.0.1:{local}");
     let mut pid = None;
     let mut matches = std::collections::HashSet::new();
@@ -1829,7 +1833,12 @@ impl DaemonService {
         // awaits without holding service. Passive cached projections remain usable.
         if !matches!(
             op,
-            "setup_apply" | "setup_remove_app" | "setup_disconnect_all"
+            "setup_apply"
+                | "setup_remove_app"
+                | "setup_disconnect_all"
+                | "close_menu"
+                | "close_settings"
+                | "close_directory"
         ) {
             self.push_ui_result(Some(action));
         }

@@ -252,6 +252,15 @@ pub(super) fn wait_send_receipt(
 
 impl DaemonService {
     pub(super) fn caller(&self, meta: &Value, required: bool) -> Result<Option<Value>, String> {
+        self.caller_until(meta, required, Instant::now() + Duration::from_millis(1500))
+    }
+
+    fn caller_until(
+        &self,
+        meta: &Value,
+        required: bool,
+        deadline: Instant,
+    ) -> Result<Option<Value>, String> {
         let requested_pid = caller_pid_hint(meta)?.or_else(|| meta["_http_client"].as_u64());
         let explicit_pid = meta
             .as_object()
@@ -272,7 +281,6 @@ impl DaemonService {
         {
             return Ok(None);
         }
-        let deadline = Instant::now() + Duration::from_millis(1500);
         let mut failures = Vec::new();
         for plugin in self.plugins.agent_plugins() {
             if Instant::now() >= deadline {
@@ -795,9 +803,10 @@ impl DaemonService {
                 Ok(result)
             }
             "cito_status" => {
-                self.refresh_available()?;
+                let deadline = Instant::now() + Duration::from_millis(1500);
+                self.refresh_available_until(deadline)?;
                 let caller = self
-                    .caller(meta, false)?
+                    .caller_until(meta, false, deadline)?
                     .ok_or("BINDING_REQUIRED: Caller required")?;
                 let row = self.state.active()?.into_iter().find(|r| {
                     r["hub"] == hub

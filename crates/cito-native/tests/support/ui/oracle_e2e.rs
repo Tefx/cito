@@ -2620,7 +2620,7 @@ with open(os.environ['HOME'] + '/ui-frames', 'a') as out:
 #[test]
 fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
     let _lock = serial();
-    let f = Fixture::new(json!({}));
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://","autoListen":false}}}));
     let fake = f.recording_ui();
     let daemon = f.daemon(&[
         ("CITO_DISABLE_UI", "0"),
@@ -2637,6 +2637,39 @@ fn daemon_owns_headless_ui_child_and_reaps_it_on_shutdown() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
+    f.action(json!({"op":"open_menu"}));
+    f.action(json!({"op":"open_directory"}));
+    // A crash closes the connection and replacement starts with every surface
+    // closed. An external mutation then emits status, never a full inventory.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let mut replacement = pid;
+    wait(|| {
+        replacement = fs::read_to_string(f.home.join("ui-pid"))
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(pid);
+        replacement != pid
+    });
+    wait(|| {
+        !fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .is_empty()
+    });
+    f.db("state.sqlite").execute("INSERT INTO local_signals(hub,signal_id,listener_id,seq,binding_generation,from_user,from_host_name,from_title,message,created_at,expires_at_ms,state) VALUES('local','crash-state','target',1,1,'bob','host','Sender','Work','now',?,'RECEIVED')", &[json!(cito_native::plugins::now_ms()+60_000)]).unwrap();
+    let mut frame = Value::Null;
+    wait(|| {
+        frame = fs::read_to_string(f.home.join("ui-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .rfind(|v| v["op"] == "state" && v["unread_count"] == 1)
+            .unwrap_or(Value::Null);
+        !frame.is_null()
+    });
+    assert!(frame.get("settings").is_none(), "{frame}");
+    assert!(frame.get("activity").is_none(), "{frame}");
     f.stop(daemon);
-    wait(|| unsafe { libc::kill(pid, 0) } != 0);
+    wait(|| unsafe { libc::kill(replacement, 0) } != 0);
 }

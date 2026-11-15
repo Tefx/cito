@@ -516,6 +516,16 @@ impl HubEngine {
             }
         }
     }
+    #[cfg(test)]
+    pub fn pause_worker(&self) {
+        self.inner.closed.store(true, Ordering::SeqCst);
+        self.wake_worker();
+        if let Some(worker) = self.inner.worker.lock().unwrap().take() {
+            worker.join().unwrap();
+        }
+        self.inner.closed.store(false, Ordering::SeqCst);
+    }
+
     fn wake_worker(&self) {
         if let Ok(mut version) = self.inner.changed.0.lock() {
             *version = version.wrapping_add(1);
@@ -527,7 +537,7 @@ impl HubEngine {
             let now = now_ms();
             let maintenance = one(c, "SELECT int_val FROM hub_meta WHERE key='last_maintenance_ms'", &[])?
                 .map(|r| n(&r, "int_val") + 60_000).unwrap_or(now);
-            let retry = one(c, "SELECT MIN(CASE WHEN status='in_flight' THEN delivered_ms+60001 ELSE next_retry_ms END) AS due FROM hub_channel_deliveries WHERE status IN ('in_flight','failed') AND (status='in_flight' OR next_retry_ms>?)", &[json!(now)])?
+            let retry = one(c, "SELECT MIN(CASE WHEN status='in_flight' THEN delivered_ms+60001 ELSE next_retry_ms END) AS due FROM hub_channel_deliveries WHERE (status='in_flight' AND delivered_ms+60001>?) OR (status='failed' AND next_retry_ms>?)", &[json!(now),json!(now)])?
                 .and_then(|r| r["due"].as_i64()).unwrap_or(maintenance);
             Ok(Duration::from_millis(maintenance.min(retry).saturating_sub(now).max(1) as u64))
         })
@@ -2223,6 +2233,47 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
+    #[test]
+    fn worker_delay_ignores_expired_reservations_on_disabled_bindings() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-worker-delay-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir)?;
+        hub.pause_worker();
+        let result = (|| {
+            let now = now_ms();
+            hub.inner.db.execute(
+                "UPDATE hub_meta SET int_val=? WHERE key='last_maintenance_ms'",
+                &[json!(now)],
+            )?;
+            hub.inner.db.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,enabled) VALUES('none#alice','fixture',0)", &[])?;
+            hub.inner.db.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,delivered_ms) VALUES('fixture','none#alice','expired',1,'in_flight',?)", &[json!(now-70_000)])?;
+            assert!(hub.worker_delay()? > Duration::from_secs(1));
+            hub.inner.db.execute(
+                "UPDATE hub_channel_deliveries SET delivered_ms=?",
+                &[json!(now - 59_500)],
+            )?;
+            assert!(
+                hub.worker_delay()? < Duration::from_secs(1),
+                "An unexpired reservation still supplies a deadline"
+            );
+            hub.inner.db.execute(
+                "UPDATE hub_channel_deliveries SET status='failed',next_retry_ms=?",
+                &[json!(now + 500)],
+            )?;
+            assert!(hub.worker_delay()? < Duration::from_secs(1));
+            hub.inner.db.execute(
+                "UPDATE hub_channel_deliveries SET next_retry_ms=?",
+                &[json!(now - 1)],
+            )?;
+            assert!(hub.worker_delay()? > Duration::from_secs(1));
+            Ok(())
+        })();
+        hub.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
     #[test]
     fn idle_backlog_and_reservations_do_not_prune_or_write() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!(
