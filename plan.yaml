@@ -12737,7 +12737,7 @@ phases:
 - id: v45
   name: 'V45 Steady-State & Non-Flapping Projections, OIDC/Tailscale/Channel/Plugin
     Resilience & macOS UI Render Deduplication (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
-  status: pending
+  status: in_progress
   gate: 'All binding V45 requirements in docs/DESIGN.md (§1–§8 @ 6ba91cd) for Rust
     Daemon/Hub/Identity/Plugin steady-state resilience and macOS Swift UI render deduplication
     & interaction preservation pass; [REQUIRES_SKILL: contract-and-simplicity] full
@@ -12820,7 +12820,7 @@ phases:
     name: 'V45 Rust Daemon, Hub, Identity & Plugin Steady-State Resilience: OIDC Continuity,
       Capability-Separated Hub Status, Tailscale/Channel Diagnostic Isolation & Plugin
       Timeout Resilience'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/plugins.rs\n\
       \    - crates/cito-native/tests/support/daemon/**\n    - plugins/telegram/**\n\
@@ -12909,6 +12909,8 @@ phases:
     - plugins/claude/native.rs
     - plugins/codex/native.rs
     agent: rust-senior
+    claimed_by: rust-senior
+    claimed_at: '2026-11-15T07:40:06.877392Z'
   - id: v45.ui
     name: V45 macOS Swift UI Render Deduplication, Layout Stability & Interaction
       Preservation
