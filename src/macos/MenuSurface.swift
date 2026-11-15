@@ -19,6 +19,27 @@ extension Companion: NSMenuDelegate {
         return hubs.first(where: { $0.status == "connected" })?.name ?? hubs.first?.name ?? ""
     }
 
+    func updateMenuErrorRow() {
+        if let item = cardMenu.items.first(where: { $0.view?.identifier?.rawValue == "menu_error_row" }) {
+            cardMenu.removeItem(item)
+        }
+        guard let error = menuBannerError else { return }
+        let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
+        row.identifier = NSUserInterfaceItemIdentifier("menu_error_row")
+        row.appearance = testAppearance
+        let label = textLabel(presentationError(error),NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
+        label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=label.stringValue
+        row.addSubview(label)
+        let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
+        dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
+        dismiss.style = .subtleHeader
+        dismiss.toolTip = "Dismiss error"; dismiss.setAccessibilityLabel("Dismiss error")
+        dismiss.pressed = { [weak self] in self?.menuBannerError = nil; self?.rebuild() }
+        row.addSubview(dismiss)
+        let item = NSMenuItem(); item.view = row
+        cardMenu.insertItem(item, at: min(1, cardMenu.numberOfItems))
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
         emit(["op": "refresh_available"])
@@ -68,6 +89,7 @@ extension Companion: NSMenuDelegate {
             updateStatusTooltip(button)
         }
         if renamingSessionKey != nil, renameField?.currentEditor() != nil {
+            updateMenuErrorRow()
             menuRebuildDeferred = true
             return
         }
@@ -134,19 +156,7 @@ extension Companion: NSMenuDelegate {
         subLabel.lineBreakMode = .byTruncatingMiddle; subLabel.toolTip = subtitleText
         header.addSubview(subLabel)
         _ = host(header, id: "header")
-        if let error = menuBannerError {
-            let row = NSView(frame:NSRect(x:0,y:0,width:380,height:36))
-            let label = textLabel(presentationError(error),NSRect(x:12,y:3,width:320,height:30),size:10,color:CitoPalette.dangerText)
-            label.maximumNumberOfLines=2; label.lineBreakMode = .byTruncatingMiddle; label.toolTip=label.stringValue
-            row.addSubview(label)
-            let dismiss = MenuControl("", frame:NSRect(x:340,y:7,width:26,height:22), symbol:"xmark")
-            dismiss.identifier = NSUserInterfaceItemIdentifier("dismiss_menu_error")
-            dismiss.style = .subtleHeader
-            dismiss.toolTip = "Dismiss error"; dismiss.setAccessibilityLabel("Dismiss error")
-            dismiss.pressed = { [weak self] in self?.menuBannerError = nil; self?.rebuild() }
-            row.addSubview(dismiss)
-            _ = host(row,id:"menu_error_row")
-        }
+        updateMenuErrorRow()
         var drawerItems: [String: NSMenuItem] = [:]
         let showHubControls = hubs.count != 1 || hubs.contains {
             !(["local", "default"].contains($0.name) && $0.auth_mode == "none" && $0.status == "connected" && $0.error == nil)

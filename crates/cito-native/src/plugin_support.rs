@@ -344,6 +344,56 @@ pub fn socket_call(path: &Path, req: &Value) -> Result<Value> {
     }
     serde_json::from_str(&line).map_err(|e| e.to_string())
 }
+// Inspect sibling bridges independently, with at most eight owned workers.
+// PID ordering keeps discovery deterministic regardless of response latency.
+pub fn inspect_socket_endpoints(
+    req: &Value,
+    prefix: &str,
+    inspect: impl Fn(u32, &Path) -> Option<Value> + Sync,
+) -> Result<Vec<(u32, Value)>> {
+    let entries = match fs::read_dir(state(req).join("sockets")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut endpoints = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(prefix))
+            .and_then(|name| name.strip_suffix(".sock"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        {
+            endpoints.push((pid, entry.path()));
+        }
+    }
+    endpoints.sort_by_key(|(pid, _)| *pid);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = endpoints
+            .chunks(endpoints.len().div_ceil(8).max(1))
+            .map(|chunk| {
+                let inspect = &inspect;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|(pid, path)| inspect(*pid, path).map(|value| (*pid, value)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut results = Vec::new();
+        for worker in workers {
+            results.extend(
+                worker
+                    .join()
+                    .map_err(|_| "Endpoint inspection worker panicked")?,
+            );
+        }
+        Ok(results)
+    })
+}
 fn pid_key(key: &str) -> bool {
     key.ends_with("_pid") || key.ends_with("Pid")
 }

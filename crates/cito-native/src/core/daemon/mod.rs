@@ -585,7 +585,7 @@ impl DaemonService {
                     {
                         let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
                         let _ = detach_channel_expected(
-                            &old,
+                            old,
                             string(&row, "listener_id"),
                             &channel,
                             &row,

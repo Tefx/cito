@@ -2313,7 +2313,6 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
     let results = [
         json!({"op":"settings","hub":"local","request_id":"gateway-save"}),
         json!({"op":"settings","hub":"local","request_id":"personal-save"}),
-        json!({"op":"settings","hub":"local","confirm_hub_save":true}),
         json!({"op":"settings","hub":"local","ok":true,"source_op":"setup_save_hub"}),
         json!({"op":"state","ok":true,"source_op":"clear_activity_history","request_id":"delete-a"}),
         json!({"op":"state","ok":true,"source_op":"ack_signals","request_id":"read-b"}),

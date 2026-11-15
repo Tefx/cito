@@ -198,38 +198,22 @@ fn retain_confirmed_host(
     probe: Result<Value, ProbeError>,
 ) -> Option<String> {
     match probe {
-        Ok(status) if status["BackendState"].is_string() => tailscale_host_from_status(&status),
+        Ok(status) if status["Self"]["Online"] == false => None,
+        Ok(status) if status["BackendState"] == "Running" => {
+            tailscale_host_from_status(&status).or(previous)
+        }
+        Ok(status)
+            if status["BackendState"].as_str().is_some_and(|state| {
+                matches!(
+                    state,
+                    "Stopped" | "NeedsLogin" | "NeedsMachineAuth" | "NoState"
+                )
+            }) =>
+        {
+            None
+        }
         // An incomplete response carries no confirmed online/offline observation.
         _ => previous,
-    }
-}
-
-#[cfg(test)]
-mod probe_tests {
-    use super::*;
-    #[test]
-    fn probe_errors_retain_last_confirmed_host_until_confirmed_offline() {
-        let host = Some("device.tailnet.ts.net".to_owned());
-        assert_eq!(retain_confirmed_host(host.clone(), Err(ProbeError)), host);
-        assert_eq!(retain_confirmed_host(host.clone(), Ok(json!({}))), host);
-        assert_eq!(
-            retain_confirmed_host(host.clone(), Ok(json!({"BackendState":"Stopped"}))),
-            None
-        );
-        assert_eq!(
-            retain_confirmed_host(
-                host.clone(),
-                Ok(json!({"BackendState":"Running","Self":{"Online":false}}))
-            ),
-            None
-        );
-        assert_eq!(
-            retain_confirmed_host(
-                None,
-                Ok(json!({"BackendState":"Running","Self":{"DNSName":"device.tailnet.ts.net."}}))
-            ),
-            host
-        );
     }
 }
 
@@ -433,5 +417,48 @@ impl DaemonService {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn probe_errors_retain_last_confirmed_host_until_confirmed_offline() {
+        let host = Some("device.tailnet.ts.net".to_owned());
+        assert_eq!(retain_confirmed_host(host.clone(), Err(ProbeError)), host);
+        for status in [
+            json!({}),
+            json!({"BackendState":"Running"}),
+            json!({"BackendState":"Running","Self":null}),
+            json!({"BackendState":"Running","Self":{}}),
+            json!({"BackendState":"Running","Self":{"Online":true,"DNSName":"","TailscaleIPs":[]}}),
+            json!({"BackendState":"Starting"}),
+        ] {
+            assert_eq!(
+                retain_confirmed_host(host.clone(), Ok(status.clone())),
+                host,
+                "{status}"
+            );
+            assert_eq!(retain_confirmed_host(None, Ok(status)), None);
+        }
+        assert_eq!(
+            retain_confirmed_host(host.clone(), Ok(json!({"BackendState":"Stopped"}))),
+            None
+        );
+        assert_eq!(
+            retain_confirmed_host(
+                host.clone(),
+                Ok(json!({"BackendState":"Running","Self":{"Online":false}}))
+            ),
+            None
+        );
+        assert_eq!(
+            retain_confirmed_host(
+                None,
+                Ok(json!({"BackendState":"Running","Self":{"DNSName":"device.tailnet.ts.net."}}))
+            ),
+            host
+        );
     }
 }

@@ -754,7 +754,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                let listener = listeners.first(where: { "\($0.harness):\($0.session_id)" == key }) {
                 let newTitle = textView.string
                 guard !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, newTitle.unicodeScalars.count <= 128 else {
-                    menuBannerError = "Session title must contain 1 to 128 characters."
+                    menuBannerError = "Title must contain 1 to 128 characters."
                     renameField?.textColor = CitoPalette.dangerText
                     renameField?.toolTip = menuBannerError
                     renameField?.setAccessibilityHelp(menuBannerError)

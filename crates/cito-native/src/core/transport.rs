@@ -351,7 +351,7 @@ impl HubClient {
         let current = authenticated && self.observation_recent();
         let status = if !authenticated {
             "auth_required"
-        } else if self.local.is_some() || rpc == "connected" || stream || current {
+        } else if self.local.is_some() || rpc == "connected" || stream {
             "connected"
         } else {
             &rpc

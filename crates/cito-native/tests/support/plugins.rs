@@ -85,6 +85,123 @@ fn live_bridge_rejections_survive_identification_and_wake() {
     }
 }
 #[test]
+fn session_activity_discovers_slow_cached_bridges_within_its_provider_budget() {
+    use cito_native::{
+        core::{session_activity::SessionActivity, state::LocalState},
+        plugins::{parse_manifest_dir, LoadedPlugins, NativeConfig},
+    };
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::{Duration, Instant},
+    };
+    let _lock = serial();
+    for (id, bin) in [("pi", PI), ("claude", CLAUDE)] {
+        let mut f = Fixture::new(json!({}));
+        fs::create_dir_all(f.state.join("sockets")).unwrap();
+        let script = f.dir.join(format!("{id}.mjs"));
+        fs::write(&script, "console.log('ready'); setInterval(()=>{},1000);").unwrap();
+        let mut endpoints = Vec::new();
+        for index in 0..4 {
+            let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+            wait(|| f.output(process, false).contains("ready"));
+            let pid = f.pid(process);
+            if id == "claude" {
+                f.env.insert("CITO_ENDPOINT_PID".into(), pid.to_string());
+                f.plugin(HOOK, json!({"hook_event_name":"SessionStart","session_id":format!("session-{index}"),"cwd":"/repo"}));
+                f.env.remove("CITO_ENDPOINT_PID");
+            }
+            let path = f.state.join(format!("sockets/{id}-pid-{pid}.sock"));
+            let listener = UnixListener::bind(path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            endpoints.push((index, listener));
+        }
+        let mut plugin = parse_manifest_dir(&root().join("plugins").join(id), true).unwrap();
+        // The real provider subprocess receives the fixture's clean environment.
+        plugin.command = std::iter::once("/usr/bin/env".to_owned())
+            .chain(std::iter::once("-i".to_owned()))
+            .chain(f.env.iter().map(|(key, value)| format!("{key}={value}")))
+            .chain(std::iter::once(bin.to_owned()))
+            .collect();
+        let plugins = LoadedPlugins {
+            plugins: vec![plugin],
+            rejected_ids: Default::default(),
+        };
+        let config = NativeConfig {
+            state_dir: f.state.clone(),
+            config_path: f.config.clone(),
+            home_dir: f.home.clone(),
+            daemon_port: f.port,
+            user: "alice".into(),
+            default_hub: "local".into(),
+        };
+        let state = LocalState::open(&f.state).unwrap();
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            for (index, listener) in endpoints {
+                let done = &done;
+                scope.spawn(move || {
+                    let until = Instant::now() + Duration::from_secs(5);
+                    let mut turn = 0;
+                    let mut held = Vec::new();
+                    while !done.load(Ordering::Acquire) && Instant::now() < until {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                                let mut line = String::new();
+                                BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+                                if turn > 0 && index < 3 {
+                                    held.push(stream);
+                                } else {
+                                    writeln!(stream, "{}", json!({"ok":true,"session_id":format!("session-{index}"),
+                                        "cwd":"/repo","session_name":if turn == 0 { "Cached" } else { "Healthy refreshed" },
+                                        "updated_at_ms":1000 + turn})).unwrap();
+                                }
+                                turn += 1;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock =>
+                                std::thread::sleep(Duration::from_millis(2)),
+                            Err(error) => panic!("{error}"),
+                        }
+                    }
+                });
+            }
+            let warm = f.plugin(bin, json!({"op":"discover_sessions"}));
+            assert_eq!(warm["sessions"].as_array().unwrap().len(), 4, "{warm}");
+            let mut activity = SessionActivity::new(&config, &plugins);
+            let started = Instant::now();
+            activity.tick(&state, &[]).unwrap();
+            while activity.discovery_pending() && started.elapsed() < Duration::from_millis(1500) {
+                std::thread::sleep(Duration::from_millis(5));
+                activity.tick(&state, &[]).unwrap();
+            }
+            let elapsed = started.elapsed();
+            let sessions = activity.available(&[], 1);
+            let status = activity.discovery_status();
+            done.store(true, Ordering::Release);
+            activity.shutdown().unwrap();
+            assert!(
+                elapsed < Duration::from_millis(1500),
+                "{id}: {elapsed:?}, {status:?}"
+            );
+            assert_eq!(sessions.len(), 4, "{id}: {sessions:?}, {status:?}");
+            for index in 0..4 {
+                assert!(
+                    sessions.iter().any(|session| session["session_id"]
+                        == format!("session-{index}")
+                        && session["title"]
+                            == if index == 3 {
+                                "Healthy refreshed"
+                            } else {
+                                "Cached"
+                            }),
+                    "{id}: {sessions:?}"
+                );
+            }
+        });
+    }
+}
+
+#[test]
 fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
     use std::io::{BufRead, BufReader, Write};
     let _lock = serial();
@@ -109,7 +226,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         listener.set_nonblocking(true).unwrap();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            for turn in 0..3 {
+            for turn in 0..if id == "pi" { 4 } else { 3 } {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -132,7 +249,7 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
                     .unwrap();
                 match turn {
                     0 => writeln!(stream,"{}",json!({"ok":true,"session_id":"live-session","cwd":"/repo","session_name":"Live work","updated_at_ms":1000})).unwrap(),
-                    1 => { release_rx.recv_timeout(std::time::Duration::from_secs(4)).unwrap(); },
+                    1 | 3 => { let _ = release_rx.recv_timeout(std::time::Duration::from_secs(4)); },
                     _ => writeln!(stream,"{}",json!({"ok":false,"message":"Session closed"})).unwrap(),
                 }
             }
@@ -152,12 +269,18 @@ fn socket_discovery_retains_verified_sessions_across_750ms_timeouts() {
         assert_eq!(slow["sessions"][0]["updated_at_ms"], 1000);
         assert_ne!(slow["sessions"][0]["needs_reload"], true);
         let rejected = f.plugin(bin, json!({"op":"discover_sessions"}));
-        server.join().unwrap();
         assert_eq!(
             rejected["sessions"],
             json!([]),
             "A responding rejection must supersede cached identity: {rejected}"
         );
+        if id == "pi" {
+            assert!(!f.state.join(format!("pi/endpoints/{pid}.json")).exists());
+            let after_rejection = f.plugin(bin, json!({"op":"discover_sessions"}));
+            release_tx.send(()).unwrap();
+            assert_eq!(after_rejection["sessions"], json!([]), "{after_rejection}");
+        }
+        server.join().unwrap();
         fs::remove_file(path).unwrap();
         f.stop(process);
     }

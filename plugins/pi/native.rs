@@ -105,10 +105,14 @@ fn setup(req: &Value) -> Result<Value> {
     Ok(json!({"ok":true,"actions":actions}))
 }
 fn identify(req: &Value, p: u32) -> Result<Value> {
-    socket_call(
+    let response = socket_call(
         &state(req).join(format!("sockets/pi-pid-{p}.sock")),
         &json!({"op":"identify"}),
-    )
+    )?;
+    if response["ok"] != true {
+        let _ = fs::remove_file(state(req).join(format!("pi/endpoints/{p}.json")));
+    }
+    Ok(response)
 }
 fn allow_process_only(req: &Value) -> bool {
     env_value(req, "CITO_PI_PROCESS_DISCOVERY").as_deref() == Some("1")
@@ -276,70 +280,44 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     Ok(())
 }
 fn socket_candidates(req: &Value) -> Result<Vec<(u32, Value)>> {
-    let mut out = vec![];
-    let entries = match fs::read_dir(state(req).join("sockets")) {
-        Ok(entries) => Some(entries),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.to_string()),
-    };
-    if let Some(entries) = entries {
-        for e in entries {
-            let e = e.map_err(|e| e.to_string())?;
-            let n = e.file_name().to_string_lossy().into_owned();
-            if let Some(p) = n
-                .strip_prefix("pi-pid-")
-                .and_then(|s| s.strip_suffix(".sock"))
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
-                let response = match identify(req, p) {
-                    Ok(v) => {
-                        if v["ok"] == true {
-                            if let Ok(identity) = process_identity(p) {
-                                let _ = atomic_write(
-                                    &cache_path,
-                                    json!({"identity":identity,"session":v})
-                                        .to_string()
-                                        .as_bytes(),
-                                );
-                            }
-                        }
-                        Ok(v)
-                    }
-                    Err(error) if error == "Socket request timed out" => {
-                        let cached = read_json(&cache_path).ok();
-                        match (cached, process_identity(p)) {
-                            (Some(cached), Ok(identity))
-                                if alive(p)
-                                    && cached["identity"] == identity
-                                    && matches_process(
-                                        str_at(&identity, "command").unwrap_or(""),
-                                    ) =>
-                            {
-                                Ok(cached["session"].clone())
-                            }
-                            _ => Err(error),
-                        }
-                    }
-                    Err(error) => Err(error),
-                };
-                if let Ok(v) = response {
-                    if v["ok"] == false {
-                        continue;
-                    }
-                    if interactive_candidate(req, p).unwrap_or(false)
-                        && v["ok"] == true
-                        && str_at(&v, "session_id").is_some()
-                        && str_at(&v, "cwd").is_some()
-                    {
-                        out.push((p, v));
+    inspect_socket_endpoints(req, "pi-pid-", |p, _| {
+        let cache_path = state(req).join(format!("pi/endpoints/{p}.json"));
+        let response = match identify(req, p) {
+            Ok(v) => {
+                if v["ok"] == true {
+                    if let Ok(identity) = process_identity(p) {
+                        let _ = atomic_write(
+                            &cache_path,
+                            json!({"identity":identity,"session":v})
+                                .to_string()
+                                .as_bytes(),
+                        );
                     }
                 }
+                Ok(v)
             }
-        }
-    }
-    out.sort_by_key(|(pid, _)| *pid);
-    Ok(out)
+            Err(error) if error == "Socket request timed out" => {
+                let cached = read_json(&cache_path).ok();
+                match (cached, process_identity(p)) {
+                    (Some(cached), Ok(identity))
+                        if alive(p)
+                            && cached["identity"] == identity
+                            && matches_process(str_at(&identity, "command").unwrap_or("")) =>
+                    {
+                        Ok(cached["session"].clone())
+                    }
+                    _ => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let v = response.ok()?;
+        (v["ok"] == true
+            && interactive_candidate(req, p).unwrap_or(false)
+            && str_at(&v, "session_id").is_some()
+            && str_at(&v, "cwd").is_some())
+        .then_some(v)
+    })
 }
 type Candidates = (Vec<(u32, Value)>, bool, Option<String>);
 fn candidates(req: &Value) -> Result<Candidates> {

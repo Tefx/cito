@@ -85,9 +85,7 @@ extension Companion {
                     if entry.scope == "user" && channel.configured && channel.status != "pairing_pending" { ui.resetPersonal(preservePendingPair: true) }
                     ui.savedUntil[entry.scope] = Date().addingTimeInterval(1.5)
                 } else { ui.savedUntil.removeValue(forKey: entry.scope) }
-                DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
-                    if self?.settingsVisible == true { self?.rebuildSettingsPanel() }
-                }
+                rebuildFeedbackAfter(1.5)
             }
             for field in channel.fields {
                 if let sent = acknowledged?.values[field.key], ui.drafts[field.key] == sent {

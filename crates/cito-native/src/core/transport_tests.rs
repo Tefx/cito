@@ -81,6 +81,11 @@ fn rpc_stream_and_observation_capabilities_do_not_overwrite_each_other() {
     assert_eq!(state["rpc_status"], "disconnected");
     assert_eq!(state["sse_live"], true);
     assert_eq!(state["observation_current"], true);
+    client.stream_live.store(false, Ordering::SeqCst);
+    assert!(client.observation_current());
+    assert_eq!(client.capabilities()["rpc_status"], "disconnected");
+    assert_ne!(client.connection_status(), "connected");
+    client.stream_live.store(true, Ordering::SeqCst);
     *client.observed_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
     assert!(!client.observation_current());
     assert_eq!(client.connection_status(), "connected");

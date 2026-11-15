@@ -105,7 +105,8 @@ struct RemotePeer: Decodable, Equatable {
     let listener_id: String, public_id: String, scoped_id: String
     let user: String, host_id: String, host_name: String, harness: String
     let display_address: String
-    let title: String, about: String, scope: String, last_seen_at: String
+    let title: String, about: String, scope: String
+    let last_seen_at: String?
     var session_id: String? = nil
     var custom_title: Bool? = nil
     let cwd: String?, repo: String?, branch: String?

@@ -137,7 +137,6 @@ impl UiMailbox {
         // Passive snapshots coalesce; correlated command results stay ordered.
         let key = if string(&frame, "request_id").is_empty()
             && string(&frame, "source_op").is_empty()
-            && frame["confirm_hub_save"] != true
             && matches!(string(&frame, "op"), "state" | "settings" | "directory")
         {
             Some(format!(

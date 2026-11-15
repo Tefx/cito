@@ -185,7 +185,8 @@ extension Companion {
                 return true
             }
             if op == "test_menu_key", let key = object["key"] as? String, let field = renameField {
-                let editor = NSTextView(); editor.string = field.stringValue
+                let editor = (field.currentEditor() as? NSTextView) ?? NSTextView()
+                if field.currentEditor() == nil { editor.string = field.stringValue }
                 _ = control(field, textView: editor, doCommandBy: key == "escape" ? #selector(NSResponder.cancelOperation(_:)) : #selector(NSResponder.insertNewline(_:)))
                 return true
             }
@@ -684,6 +685,7 @@ extension Companion {
             "directory_selected_id": selectedId, "directory_selected_index": directorySelectedIndex, "directory_items": directoryItems,
             "directory_selection_visible": directoryTableView.map { table in directorySelectedIndex >= 0 && directorySelectedIndex < table.numberOfRows && table.visibleRect.contains(table.rect(ofRow:directorySelectedIndex)) } ?? false,
             "settings_open": settingsVisible, "settings_tab": settingsActiveTab,
+            "settings_rebuild_deferred": settingsRebuildDeferred,
             "settings_launch_at_login": settings?.launch_at_login ?? false, "settings_items": settingsItems,
             "icon_template": statusImage?.isTemplate ?? false, "icon_width": statusImage?.size.width ?? 0,
             "icon_height": statusImage?.size.height ?? 0, "clipboard": effectiveClipboard,

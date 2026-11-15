@@ -262,7 +262,7 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
         json!({"op":"test_hover","id":"copy_dir:personal:stable","hovered":true}),
     );
     let before = inspect(&f, p);
-    remote["last_seen_at"] = json!("2030-01-01T00:00:30Z");
+    remote["last_seen_at"] = Value::Null;
     send_fixture(
         &f,
         p,
@@ -289,12 +289,17 @@ fn v45_directory_timestamp_dedup_hover_copy_and_error_clear() {
             .as_bool()
             .unwrap()
     );
+    remote["title"] = json!("Peer without a timestamp");
     send_fixture(
         &f,
         p,
         json!({"op":"directory","peers":[remote],"online_count":2,"matched_count":1,"warnings":[]}),
     );
     let cleared = inspect(&f, p);
+    assert_eq!(
+        node(&cleared, "directory_items", "dir_title:personal:stable")["text"],
+        "Peer without a timestamp"
+    );
     assert_eq!(
         node(&cleared, "directory_items", "directory_warning")["hidden"],
         true
@@ -366,6 +371,118 @@ fn v45_activity_copy_survives_cell_replacement_and_confirmation_stays_mounted() 
         )["text"],
         "✓ Copied"
     );
+}
+
+#[test]
+fn invalid_rename_shows_banner_without_replacing_the_focused_editor() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    f.send(p, state());
+    control(&f, p, "rename:personal:repo-abcdefghijkl");
+    f.send(p, json!({"op":"test_settings_input","id":"rename_field:personal:repo-abcdefghijkl","value":"   "}));
+    f.send(
+        p,
+        json!({"op":"test_focus_field","id":"rename_field:personal:repo-abcdefghijkl"}),
+    );
+    let before = inspect(&f, p);
+    assert_eq!(before["field_editors"][0]["attached"], true);
+    f.send(p, json!({"op":"test_menu_key","key":"return"}));
+    let rejected = inspect(&f, p);
+    assert!(!node(&rejected, "items", "menu_error_row").is_null());
+    assert_eq!(
+        rejected["rename_field_identity"],
+        before["rename_field_identity"]
+    );
+    for key in [
+        "instance",
+        "id",
+        "attached",
+        "selection_location",
+        "selection_length",
+    ] {
+        assert_eq!(
+            rejected["field_editors"][0][key], before["field_editors"][0][key],
+            "{key}"
+        );
+    }
+    assert!(!f
+        .frames(p)
+        .iter()
+        .any(|frame| frame["op"] == "rename_session"));
+    control(&f, p, "dismiss_menu_error");
+    let dismissed = inspect(&f, p);
+    assert!(node(&dismissed, "items", "menu_error_row").is_null());
+    assert_eq!(
+        dismissed["field_editors"][0]["instance"],
+        before["field_editors"][0]["instance"]
+    );
+}
+
+#[test]
+fn channel_save_expiry_preserves_the_active_marked_text_editor() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["channels"][0]["configured"] = json!(true);
+    cfg["channels"][0]["status"] = json!("ready");
+    cfg["channels"][0]["fields"][1]["configured"] = json!(true);
+    cfg["channels"][0]["fields"][1]["value"] = json!("42");
+    let mut frame = state();
+    frame["settings"] = cfg.clone();
+    f.send(p, frame);
+    control(&f, p, "open_settings");
+    control(&f, p, "settings_tab:channels");
+    control(&f, p, "edit_user_channel:channel");
+    control(&f, p, "save_channel:channel");
+    inspect(&f, p);
+    let save = f
+        .frames(p)
+        .into_iter()
+        .rev()
+        .find(|v| v["op"] == "channel_save")
+        .unwrap();
+    f.send(p, json!({"op":"settings","settings":cfg,"ok":true,"source_op":"channel_save","channel_id":"channel","request_id":save["request_id"]}));
+    let saved = inspect(&f, p);
+    assert!(nodes(&saved["settings_items"])
+        .iter()
+        .any(|n| n["text"] == "✓ Saved"));
+    control(&f, p, "edit_user_channel:channel");
+    f.send(
+        p,
+        json!({"op":"test_focus_field","id":"channel_field:channel:account"}),
+    );
+    f.send(p, json!({"op":"test_editor_marked","value":"composing"}));
+    let editing = inspect(&f, p);
+    assert_eq!(editing["field_editors"][0]["marked"], true);
+    // Observe the real scheduled expiry rather than synthesizing its rebuild.
+    wait(|| {
+        let refreshed = inspect(&f, p);
+        for key in [
+            "instance",
+            "id",
+            "marked",
+            "attached",
+            "can_undo",
+            "selection_location",
+            "selection_length",
+        ] {
+            assert_eq!(
+                refreshed["field_editors"][0][key], editing["field_editors"][0][key],
+                "{key}"
+            );
+        }
+        assert_eq!(
+            node(
+                &refreshed,
+                "settings_items",
+                "channel_field:channel:account"
+            )["instance"],
+            node(&editing, "settings_items", "channel_field:channel:account")["instance"]
+        );
+        refreshed["settings_rebuild_deferred"] == true
+    });
 }
 
 #[test]
