@@ -13576,7 +13576,7 @@ phases:
   steps:
   - id: v47.core
     name: V47 Rust Core, Hub, Daemon, Plugin & Packaging Security/Correctness Remediation
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/**\n\
       \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
@@ -13668,6 +13668,31 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-15T13:56:15.645885Z'
+    done_at: '2026-11-15T14:55:29.090100+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 19f6d9e (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v47.core
+      retained; version 0.21.3, zero release tag).
+
+
+      Verification:
+
+      - cargo fmt --all -- --check && git diff --check -> Passed
+
+      - cargo test -p cito-native --lib -> 253 passed, 0 failed, 4 ignored
+
+      - cargo test -p cito-native --test native plugins:: -> 34 passed, 0 failed
+
+      - cargo test -p cito-native --test native daemon:: -> 62 passed, 0 failed
+
+      - python3 -m unittest discover -s packaging -> 17 passed, 0 failed
+
+      - §1.2 lexical check on crates/cito-native/src/core/ -> 0 matches
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§2.2, §3.2–§3.5, §4.1–§4.3, §5.1, §7.2, §8.1–§8.2 @ e1ec40f)'
   - id: v47.ui
     name: V47 macOS Swift UI Settlement, Menu Rename/Tracking, Accessibility & Keyboard
       Polish
