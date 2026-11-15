@@ -435,26 +435,33 @@ fn resolve(req: &Value) -> Result<String> {
 }
 fn title(req: &Value, sid: &str, cwd: &str) -> Option<String> {
     let p = transcript_dir(req, cwd).join(format!("{sid}.jsonl"));
-    let mut f = fs::File::open(p).ok()?;
-    let size = f.metadata().ok()?.len();
-    let start = size.saturating_sub(128 * 1024);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    s.lines()
-        .rev()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find_map(|v| {
-            if v["type"] != "custom-title" {
-                return None;
-            }
-            str_at(&v, "customTitle").map(|s| {
-                s.chars()
-                    .map(|c| if c.is_control() { ' ' } else { c })
-                    .take(200)
-                    .collect()
-            })
-        })
+    let value = cached_file_projection(req, "claude/transcript-cache", &p, || {
+        let mut f = fs::File::open(&p).map_err(|e| e.to_string())?;
+        let size = f.metadata().map_err(|e| e.to_string())?.len();
+        f.seek(SeekFrom::Start(size.saturating_sub(128 * 1024)))
+            .map_err(|e| e.to_string())?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).map_err(|e| e.to_string())?;
+        let title: Option<String> = s
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find_map(|v| {
+                (v["type"] == "custom-title")
+                    .then(|| {
+                        str_at(&v, "customTitle").map(|s| {
+                            s.chars()
+                                .map(|c| if c.is_control() { ' ' } else { c })
+                                .take(200)
+                                .collect()
+                        })
+                    })
+                    .flatten()
+            });
+        Ok(json!(title))
+    })
+    .ok()?;
+    value.as_str().map(str::to_owned)
 }
 fn badge(req: &Value, sid: &str) -> Result<()> {
     let path = state(req)
@@ -546,6 +553,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                     }
                 }
                 let mut session = caller(
+                    &r,
                     "claude",
                     str_at(&v, "session_id").unwrap_or(""),
                     str_at(&v, "cwd").unwrap_or(""),
@@ -628,7 +636,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 .or_else(|| str_at(req, "cwd"))
                 .unwrap_or("");
             let t = title(req, &sid, cwd);
-            let c = caller("claude", &sid, cwd, pid(req), t.as_deref());
+            let c = caller(req, "claude", &sid, cwd, pid(req), t.as_deref());
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }
@@ -947,11 +955,28 @@ impl SidecarCleanup {
         }
     }
 }
+static SIDECAR_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 static SIDECAR_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 extern "C" fn sidecar_signal(_: libc::c_int) {
     SIDECAR_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    let fd = SIDECAR_PIPE.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: only an async-signal-safe write touches the installed nonblocking pipe.
+        unsafe {
+            libc::write(fd, [1u8].as_ptr().cast(), 1);
+        }
+    }
 }
 fn sidecar_watchdog(cleanup: std::sync::Arc<SidecarCleanup>) {
+    let wake = match WakePipe::new() {
+        Ok(wake) => wake,
+        Err(error) => {
+            eprintln!("Cannot create sidecar shutdown pipe: {error}");
+            cleanup.stop();
+            std::process::exit(1);
+        }
+    };
+    SIDECAR_PIPE.store(wake.write_fd(), std::sync::atomic::Ordering::Relaxed);
     let eof = cleanup.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -962,7 +987,7 @@ fn sidecar_watchdog(cleanup: std::sync::Arc<SidecarCleanup>) {
         eof.stop();
         std::process::exit(0);
     });
-    // SAFETY: the signal handler only sets a lock-free AtomicBool. Filesystem cleanup
+    // SAFETY: the signal handler sets a lock-free atomic and writes a wake byte. Filesystem cleanup
     // and process exit run on an ordinary thread, never inside the signal handler.
     unsafe {
         libc::signal(
@@ -975,8 +1000,15 @@ fn sidecar_watchdog(cleanup: std::sync::Arc<SidecarCleanup>) {
         );
     }
     std::thread::spawn(move || {
-        while !SIDECAR_STOP.load(std::sync::atomic::Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(2));
+        if !SIDECAR_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = poll_until(
+                &mut [libc::pollfd {
+                    fd: wake.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                None,
+            );
         }
         cleanup.stop();
         std::process::exit(0);
@@ -1131,7 +1163,9 @@ fn sidecar(req: Value) -> Result<()> {
                         let Ok(binding) = read_json(&binding_path(&req, other)) else {
                             return false;
                         };
-                        binding["cwd"] == cwd && UnixStream::connect(entry.path()).is_ok()
+                        binding["cwd"] == cwd
+                            && alive(other)
+                            && str_at(&binding, "start").map(str::to_owned) == process_start(other)
                     });
                 if other_endpoint {
                     next = Some(current.clone());

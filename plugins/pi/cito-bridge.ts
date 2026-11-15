@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -194,17 +194,23 @@ export default function citoBridge(pi: BridgeAPI): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     ownsSocket = false;
   }
+  let cachedFallback: { key: string; identity: { session_id: string; session_name: string; cwd: string } } | undefined;
+  function identityFileKey(path: string): string {
+    const meta = statSync(path, { bigint: true });
+    return `${path}:${meta.dev}:${meta.ino}:${meta.size}:${meta.mtimeNs}`;
+  }
   function fallbackIdentity(): { session_id: string; session_name: string; cwd: string } {
     const cwd = process.cwd();
     const folder = join(piHome, "sessions", `--${cwd.replace(/^\//, "").replaceAll("/", "-")}--`);
-    let latest: { path: string; modified: number } | undefined;
+    let latest: { path: string; modified: bigint; key: string } | undefined;
     try {
       for (const entry of readdirSync(folder)) {
         if (!entry.endsWith(".jsonl")) continue;
-        const path = join(folder, entry), modified = statSync(path).mtimeMs;
-        if (!latest || modified > latest.modified || (modified === latest.modified && path > latest.path)) latest = { path, modified };
+        const path = join(folder, entry), modified = statSync(path, { bigint: true }).mtimeNs;
+        if (!latest || modified > latest.modified || (modified === latest.modified && path > latest.path)) latest = { path, modified, key: identityFileKey(path) };
       }
       if (latest) {
+        if (cachedFallback?.key === latest.key) return cachedFallback.identity;
         let id = basename(latest.path, ".jsonl"), name = basename(cwd);
         for (const line of readFileSync(latest.path, "utf8").split("\n")) {
           try {
@@ -214,7 +220,9 @@ export default function citoBridge(pi: BridgeAPI): void {
             if (typeof row.session_name === "string" && row.session_name) name = row.session_name;
           } catch {} // A concurrent trailing partial JSON line is not an identity.
         }
-        return { session_id: id, session_name: name, cwd };
+        const identity = { session_id: id, session_name: name, cwd };
+        if (identityFileKey(latest.path) === latest.key) cachedFallback = { key: latest.key, identity };
+        return identity;
       }
     } catch {} // Missing session storage still has a stable process-scoped identity.
     return { session_id: `pid-${process.pid}`, session_name: basename(cwd), cwd };
@@ -342,7 +350,8 @@ export default function citoBridge(pi: BridgeAPI): void {
   // Load-time startup also serves hosts that loaded the extension after session_start.
   void ensureServer().catch(() => {}); // session_start retries and surfaces failures.
   let repairing = false;
-  const repairTimer = setInterval(() => {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const repairWatcher = watch(directory, { persistent: false }, () => {
     if (shuttingDown || repairing || existsSync(socketPath)) return;
     let configured = false;
     try {
@@ -369,7 +378,8 @@ export default function citoBridge(pi: BridgeAPI): void {
       serverReady = undefined;
       await ensureServer();
     })().catch(() => {}).finally(() => { repairing = false; }); // Retry transient bind failures on the next tick.
-  }, 2000).unref();
+  });
+  repairWatcher.on("error", () => {}); // Session lifecycle events can still retry failed recovery.
   pi.on("session_start", async (_event, ctx) => {
     registerMcpServer();
     lastActiveMs = Date.now();
@@ -472,7 +482,7 @@ export default function citoBridge(pi: BridgeAPI): void {
   pi.on("session_tree", (_event, ctx) => { lastActiveMs = Date.now(); update(ctx); });
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
-    clearInterval(repairTimer);
+    repairWatcher.close();
     await serverReady?.catch(() => {});
     context = undefined;
     activeBadge = undefined;

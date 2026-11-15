@@ -280,9 +280,11 @@ fn hub_patch_guard(p: &Value, caller: Option<&Value>) -> Result<(), String> {
 struct Subscriber {
     principal: Option<Value>,
     tx: mpsc::SyncSender<Value>,
+    wake: Arc<crate::support::WakePipe>,
     identity: Arc<()>,
 }
 pub struct Subscription {
+    pub wake: Arc<crate::support::WakePipe>,
     receiver: mpsc::Receiver<Value>,
     owner: std::sync::Weak<Inner>,
     identity: Arc<()>,
@@ -310,6 +312,7 @@ struct Inner {
     plugins: Mutex<Vec<ChannelPlugin>>,
     processes: Mutex<HashMap<String, Arc<ChannelProcess>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    changed: Arc<(Mutex<u64>, std::sync::Condvar)>,
     lifecycle: Mutex<()>,
     default_human_scope: &'static str,
 }
@@ -396,6 +399,7 @@ impl HubEngine {
                 )?),
                 processes: Mutex::new(HashMap::new()),
                 worker: Mutex::new(None),
+                changed: Arc::new((Mutex::new(0), std::sync::Condvar::new())),
                 lifecycle: Mutex::new(()),
                 default_human_scope: if auth_mode == "none" {
                     "workspace"
@@ -406,17 +410,42 @@ impl HubEngine {
         };
         engine.seed_environment()?;
         engine.restore_attachments()?;
+        // Establish the maintenance epoch before publishing the engine or starting workers.
+        engine.inner.db.transaction(maintain)?;
+        let committed = Arc::downgrade(&engine.inner);
+        engine.inner.db.set_commit_notifier(move || {
+            if let Some(inner) = committed.upgrade() {
+                HubEngine { inner }.wake_worker();
+            }
+        })?;
         let weak = Arc::downgrade(&engine.inner);
+        let changed = engine.inner.changed.clone();
         let worker = thread::spawn(move || loop {
-            thread::sleep(Duration::from_millis(250));
+            let observed = match changed.0.lock() {
+                Ok(v) => *v,
+                Err(_) => break,
+            };
             let Some(inner) = weak.upgrade() else { break };
             if inner.closed.load(Ordering::SeqCst) {
                 break;
             }
             let e = HubEngine { inner };
-            if let Err(err) = e.tick() {
-                eprintln!("cito hub: {err}");
-            }
+            let failed = e
+                .tick()
+                .map_err(|err| eprintln!("cito hub: {err}"))
+                .is_err();
+            let delay = e.worker_delay().unwrap_or(Duration::from_secs(5));
+            drop(e);
+            let Ok(version) = changed.0.lock() else { break };
+            let _ = changed.1.wait_timeout_while(
+                version,
+                if failed {
+                    Duration::from_secs(5)
+                } else {
+                    delay
+                },
+                |v| *v == observed,
+            );
         });
         *engine
             .inner
@@ -438,17 +467,24 @@ impl HubEngine {
     }
     pub fn subscribe(&self, principal: Option<Value>) -> Result<Subscription, String> {
         let (tx, receiver) = mpsc::sync_channel(256);
+        let wake = Arc::new(crate::support::WakePipe::new()?);
         let identity = Arc::new(());
-        self.inner
+        let mut subscribers = self
+            .inner
             .subscribers
             .lock()
-            .map_err(|_| "Subscriber lock poisoned")?
-            .push(Subscriber {
-                principal,
-                tx,
-                identity: identity.clone(),
-            });
+            .map_err(|_| "Subscriber lock poisoned")?;
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err("UNAVAILABLE: Hub is closing".into());
+        }
+        subscribers.push(Subscriber {
+            principal,
+            tx,
+            wake: wake.clone(),
+            identity: identity.clone(),
+        });
         Ok(Subscription {
+            wake,
             receiver,
             owner: Arc::downgrade(&self.inner),
             identity,
@@ -458,7 +494,11 @@ impl HubEngine {
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.wake_worker();
         if let Ok(mut subs) = self.inner.subscribers.lock() {
+            for sub in subs.iter() {
+                sub.wake.notify();
+            }
             subs.clear();
         }
         let processes = self
@@ -476,7 +516,24 @@ impl HubEngine {
             }
         }
     }
+    fn wake_worker(&self) {
+        if let Ok(mut version) = self.inner.changed.0.lock() {
+            *version = version.wrapping_add(1);
+            self.inner.changed.1.notify_all();
+        }
+    }
+    fn worker_delay(&self) -> Result<Duration, String> {
+        self.inner.db.transaction(|c| {
+            let now = now_ms();
+            let maintenance = one(c, "SELECT int_val FROM hub_meta WHERE key='last_maintenance_ms'", &[])?
+                .map(|r| n(&r, "int_val") + 60_000).unwrap_or(now);
+            let retry = one(c, "SELECT MIN(CASE WHEN status='in_flight' THEN delivered_ms+60001 ELSE next_retry_ms END) AS due FROM hub_channel_deliveries WHERE status IN ('in_flight','failed') AND (status='in_flight' OR next_retry_ms>?)", &[json!(now)])?
+                .and_then(|r| r["due"].as_i64()).unwrap_or(maintenance);
+            Ok(Duration::from_millis(maintenance.min(retry).saturating_sub(now).max(1) as u64))
+        })
+    }
     fn emit(&self, frame: Value) {
+        self.wake_worker();
         if let Ok(mut subs) = self.inner.subscribers.lock() {
             subs.retain(|sub| {
                 let permitted = self
@@ -488,7 +545,10 @@ impl HubEngine {
                     return true;
                 }
                 match sub.tx.try_send(frame.clone()) {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        sub.wake.notify();
+                        true
+                    }
                     Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
                         false
                     }
@@ -864,10 +924,13 @@ impl HubEngine {
                     c.execute("DELETE FROM hub_consumer_acks WHERE name=?", &[json!(name)])?;
                     Ok(json!({"deleted":true}))
                 } else {
-                    c.execute(
+                    let inserted = c.execute(
                         "INSERT OR IGNORE INTO hub_consumer_acks(name,seq) VALUES(?,?)",
                         &[json!(name), p["seq"].clone()],
                     )?;
+                    if inserted > 0 {
+                        events.push(json!({"type":"receipt","seq":p["seq"]}));
+                    }
                     c.execute("UPDATE hub_consumers SET last_acked_seq=MAX(last_acked_seq,?) WHERE name=?",&[p["seq"].clone(),json!(name)])?;
                     Ok(json!({"acked":true}))
                 }
@@ -1351,7 +1414,7 @@ impl HubEngine {
         send_error.map_or(Ok(()), Err)
     }
     fn reserve_deliveries(&self, plugin: &ChannelPlugin) -> Result<Vec<Value>, String> {
-        self.inner.db.transaction(|c|{prune(c)?;let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
+        self.inner.db.transaction(|c|{let bindings=c.query("SELECT * FROM hub_human_channels WHERE plugin_id=? AND enabled=1",&[json!(plugin.id)])?;let (service_cfg, _) = service(c, &plugin.id)?;let mut sends=Vec::new();for b in bindings{if !ready(plugin, &service_cfg, "hub") || !ready(plugin, &parse(&b, "user_config_json"), "user") { continue; }let node=find_human(c,&b)?.unwrap_or_else(||listener_id(s(&b,"principal_id"), "human", "default"));if let Some(reg) = kv_row(c,&node)?.map(|r|parse(&r,"value")) { if reg["human_paused"] == true || reg["state"] == "UNLISTENED" { continue; } }let rows=c.query(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND subject=? AND seq>? AND acked_at_ms IS NULL AND NOT EXISTS(SELECT 1 FROM hub_channel_deliveries d WHERE d.plugin_id=? AND d.principal_id=? AND d.signal_id=hub_signals.signal_id AND (d.status IN ('delivered','failed_permanent','effect_unknown') OR d.status='in_flight' AND d.delivered_ms>? OR d.status='failed' AND d.next_retry_ms>?)) ORDER BY seq LIMIT 200"),&[json!(signal_cutoff(c)?),json!(format!("cito.signal.{node}")),b["last_delivered_seq"].clone(),json!(plugin.id),b["principal_id"].clone(),json!(now_ms()-60_000),json!(now_ms())])?;for row in rows{let id=s(&row,"signal_id");if id.is_empty(){continue}let data=parse(&row,"data");let token=random_id("delivery_")?;c.execute("INSERT INTO hub_channel_deliveries(plugin_id,principal_id,signal_id,seq,status,from_listener_id,from_user,from_title,delivered_ms,reservation_id) VALUES(?,?,?,?,'in_flight',?,?,?,?,?) ON CONFLICT(plugin_id,principal_id,signal_id) DO UPDATE SET status='in_flight',delivered_ms=excluded.delivered_ms,reservation_id=excluded.reservation_id,from_listener_id=excluded.from_listener_id",&[json!(plugin.id),b["principal_id"].clone(),json!(id),row["seq"].clone(),data["from"]["listener_id"].clone(),data["from"]["user"].clone(),data["from"]["title"].clone(),json!(now_ms()),json!(token)])?;let already_sent_ids=c.query("SELECT external_msg_id FROM hub_channel_delivery_msgs WHERE plugin_id=? AND principal_id=? AND signal_id=? ORDER BY rowid",&[json!(plugin.id),b["principal_id"].clone(),json!(id)])?.into_iter().map(|r|r["external_msg_id"].clone()).collect::<Vec<_>>();let mut payload=data.clone();payload["created_at_ms"]=row["created_ms"].clone();payload["to"]=json!({"listener_id":node});sends.push(json!({"op":"deliver","already_sent_ids":already_sent_ids,"delivery_id":token,"principal_id":b["principal_id"],"user":b["owner_user"],"config":parse(&b,"user_config_json"),"signal":payload}));}}Ok(sends)})
     }
     fn plugin_frame(&self, id: &str, frame: &Value) -> Option<Value> {
         let result=match s(frame,"op"){
@@ -1370,6 +1433,7 @@ impl HubEngine {
         "inbound_reply"=>self.inbound_reply(id,frame),
         _=>Ok(Value::Null),
     };
+        self.wake_worker();
         match result {
             Ok(v) if v.is_null() => None,
             Ok(v) => Some(v),
@@ -1695,6 +1759,15 @@ fn maintain(c: &Connection) -> Result<(), String> {
     c.execute("INSERT INTO hub_meta(key,int_val) VALUES('last_maintenance_ms',?) ON CONFLICT(key) DO UPDATE SET int_val=excluded.int_val", &[json!(now)])?;
     Ok(())
 }
+fn signal_cutoff(c: &Connection) -> Result<i64, String> {
+    let cfg = stream_info(c, SIGNALS)?["config"].clone();
+    let age = cfg["max_age"].as_i64().unwrap_or(1_800_000_000_000) / 1_000_000;
+    Ok(if age > 0 {
+        now_ms().saturating_sub(age)
+    } else {
+        0
+    })
+}
 fn prune(c: &Connection) -> Result<(), String> {
     let cfg = stream_info(c, SIGNALS)?["config"].clone();
     let now = now_ms();
@@ -1755,6 +1828,16 @@ fn event_allowed(c: &Connection, event: &Value, p: Option<&Value>) -> Result<boo
     }
     match s(event, "type") {
         "kv" => Ok(visible(event, p)),
+        "receipt" => {
+            match one(
+                c,
+                &format!("{SIGNAL_SELECT} WHERE seq=?"),
+                &[event["seq"].clone()],
+            )? {
+                Some(row) => signal_readable(c, &row, p),
+                None => Ok(false),
+            }
+        }
         "nc" | "node_ack" => can_consume(
             c,
             subject_target(s(event, "subject")).unwrap_or(s(event, "node_id")),
@@ -1798,8 +1881,17 @@ fn publish_payload(
             return Err("FORBIDDEN_TARGET_SCOPE: target is private".into());
         }
     }
-    prune(c)?;
     if let Some(mid) = msg_id {
+        let config = stream_info(c, SIGNALS)?["config"].clone();
+        let window = config["duplicate_window"]
+            .as_i64()
+            .unwrap_or(1_800_000_000_000)
+            / 1_000_000;
+        // Reusing an expired idempotency key is part of this publish, not storage pruning.
+        c.execute(
+            "UPDATE hub_signals SET msg_id=NULL WHERE msg_id=? AND created_ms<?",
+            &[json!(mid), json!(now_ms() - window.max(0))],
+        )?;
         if let Some(row) = one(
             c,
             "SELECT seq FROM hub_signals WHERE msg_id=?",
@@ -1853,12 +1945,12 @@ fn backlog_from(
     p: Option<&Value>,
     min_seq: i64,
 ) -> Result<Value, String> {
-    prune(c)?;
     let mut items = Vec::new();
     let mut page_bytes = 0;
     let filter = s(row, "filter_subject");
+    let cutoff = signal_cutoff(c)?;
     let wildcard = filter.is_empty() || filter.contains('*') || filter.contains('>');
-    c.query_while(&format!("{SIGNAL_SELECT} WHERE seq>=? AND (? OR subject=?) AND seq NOT IN(SELECT seq FROM hub_consumer_acks WHERE name=?) ORDER BY seq"),&[json!(min_seq),json!(wildcard),json!(filter),row["name"].clone()],|item| {
+    c.query_while(&format!("{SIGNAL_SELECT} WHERE created_ms>=? AND seq>=? AND (? OR subject=?) AND seq NOT IN(SELECT seq FROM hub_consumer_acks WHERE name=?) ORDER BY seq"),&[json!(cutoff),json!(min_seq),json!(wildcard),json!(filter),row["name"].clone()],|item| {
         if matches(s(&item, "subject"), s(row, "filter_subject"))
             && can_consume(c, subject_target(s(&item, "subject")).unwrap_or(""), p)?
         {
@@ -2132,12 +2224,103 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
 mod resilience_tests {
     use super::*;
     #[test]
+    fn idle_backlog_and_reservations_do_not_prune_or_write() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-maintenance-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir)?;
+        let lifecycle = hub.inner.lifecycle.lock().map_err(|e| e.to_string())?;
+        let result = (|| {
+            hub.inner.db.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES('cito.signal.node','old',?,CAST('{}' AS BLOB))", &[json!(now_ms()-2_000_000)])?;
+            let plugin = ChannelPlugin {
+                id: "fixture".into(),
+                dir: dir.clone(),
+                manifest: json!({}),
+                command: vec![],
+            };
+            let changes = || hub.inner.db.query("SELECT total_changes() AS n", &[]);
+            let before = changes()?;
+            for _ in 0..8 {
+                hub.inner.db.transaction(|c| {
+                    assert!(backlog_from(c,&json!({"name":"consumer","filter_subject":"cito.signal.node","start_seq":1}),None,0)?["backlog"].as_array().is_some_and(Vec::is_empty));
+                    Ok(())
+                })?;
+                assert!(hub.reserve_deliveries(&plugin)?.is_empty());
+            }
+            assert_eq!(
+                changes()?,
+                before,
+                "Read-side idle checks must not issue SQLite cleanup writes"
+            );
+            assert_eq!(
+                hub.inner
+                    .db
+                    .query("SELECT COUNT(*) AS n FROM hub_signals", &[])?[0]["n"],
+                1
+            );
+            hub.inner.db.transaction(maintain)?;
+            assert_eq!(
+                changes()?,
+                before,
+                "Maintenance must honor its persisted 60-second throttle"
+            );
+            hub.inner.db.execute(
+                "UPDATE hub_meta SET int_val=? WHERE key='last_maintenance_ms'",
+                &[json!(now_ms() - 60_001)],
+            )?;
+            hub.inner.db.transaction(maintain)?;
+            assert_eq!(
+                hub.inner
+                    .db
+                    .query("SELECT COUNT(*) AS n FROM hub_signals", &[])?[0]["n"],
+                0
+            );
+            Ok(())
+        })();
+        drop(lifecycle);
+        hub.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+    #[test]
+    fn transport_receipt_hints_are_visible_only_to_the_sender_and_target_principals(
+    ) -> Result<(), String> {
+        let dir =
+            std::env::temp_dir().join(format!("cito-receipt-{}", crate::plugins::random_uuid_v4()));
+        let db = Database::open(&dir.join("hub.sqlite"))?;
+        let result = db.transaction(|c| {
+            for statement in SCHEMA.split(';').map(str::trim).filter(|s|!s.is_empty()) { c.execute(statement,&[])?; }
+            let sender = "https://id.example.com#alice";
+            let target = "https://id.example.com#bob";
+            c.execute("INSERT INTO hub_kv(key,revision,created_ms,value,principal_id,scope) VALUES('target',1,0,CAST(? AS BLOB),?,'self')", &[json!(json!({"principal_id":target}).to_string()),json!(target)])?;
+            c.execute("INSERT INTO hub_signals(subject,signal_id,created_ms,data) VALUES('cito.signal.target','signal',?,CAST(? AS BLOB))", &[json!(now_ms()),json!(json!({"from":{"principal_id":sender}}).to_string())])?;
+            let event = json!({"type":"receipt","seq":1});
+            for (principal,allowed) in [(sender,true),(target,true),("https://id.example.com#charlie",false)] {
+                assert_eq!(event_allowed(c,&event,Some(&json!({"principal_id":principal})))?,allowed);
+            }
+            Ok(())
+        });
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+    #[test]
+    fn sse_keepalive_has_a_calm_cadence_and_never_outlives_authentication() {
+        assert_eq!(sse_wait(None, 1000), Duration::from_secs(30));
+        assert_eq!(sse_wait(Some(100.0), 1000), Duration::from_secs(30));
+        assert_eq!(sse_wait(Some(3.5), 1000), Duration::from_millis(2500));
+        assert_eq!(sse_wait(Some(0.0), 1000), Duration::ZERO);
+    }
+    #[test]
     fn retry_reservation_keeps_warning_and_process_stop_clears_poll_health() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!(
             "cito-channel-health-{}",
             crate::plugins::random_uuid_v4()
         ));
         let hub = HubEngine::open(&dir)?;
+        // Serialize the manually driven channel transitions against the mutation-woken worker.
+        let lifecycle = hub.inner.lifecycle.lock().map_err(|e| e.to_string())?;
         *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
             id: "messenger".into(),
             manifest: json!({"displayName":"Messenger","fields":[]}),
@@ -2166,6 +2349,7 @@ mod resilience_tests {
         assert_eq!(hub.channel_list(&caller)?["channels"][0]["warning"], true);
         hub.tick_channels()?;
         assert_eq!(hub.channel_list(&caller)?["channels"][0]["warning"], false);
+        drop(lifecycle);
         hub.shutdown();
         std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
         Ok(())
@@ -2383,6 +2567,7 @@ pub struct HubServer {
     pub address: SocketAddr,
     pub(super) auth: Arc<HubAuth>,
     stop: Arc<AtomicBool>,
+    wake: Arc<crate::support::WakePipe>,
     sockets: Arc<Mutex<HashMap<u64, TcpStream>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -2391,6 +2576,7 @@ impl HubServer {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.wake.notify();
         if let Ok(sockets) = self.sockets.lock() {
             for socket in sockets.values() {
                 let _ = socket.shutdown(Shutdown::Both);
@@ -2422,6 +2608,8 @@ impl HubEngine {
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(crate::support::WakePipe::new()?);
+        let worker_wake = wake.clone();
         let sockets = Arc::new(Mutex::new(HashMap::<u64, TcpStream>::new()));
         let auth = auth.into();
         let (engine, st, ss, worker_auth) =
@@ -2430,6 +2618,24 @@ impl HubEngine {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
             let mut next_socket = 0u64;
             while !st.load(Ordering::SeqCst) {
+                use std::os::fd::AsRawFd;
+                let mut ready = [
+                    libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: worker_wake.read_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                if crate::support::poll_until(&mut ready, None).is_err()
+                    || st.load(Ordering::SeqCst)
+                {
+                    break;
+                }
                 for i in (0..workers.len()).rev() {
                     if workers[i].is_finished() {
                         let _ = workers.swap_remove(i).join();
@@ -2466,9 +2672,7 @@ impl HubEngine {
                             }
                         }));
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10))
-                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) => {
                         eprintln!("cito hub: accept: {e}");
                         break;
@@ -2488,6 +2692,7 @@ impl HubEngine {
             address,
             auth,
             stop,
+            wake,
             sockets,
             thread: Mutex::new(Some(handle)),
         })
@@ -2523,6 +2728,12 @@ fn http_error(stream: &mut TcpStream, err: &str) {
         error["api_error"] = json!({"err_code":number});
     }
     let _ = http_json(stream, status, &json!({"ok":false,"error":error}));
+}
+fn sse_wait(expires_at: Option<f64>, now: i64) -> Duration {
+    let seconds = expires_at
+        .map(|expires| (expires - now.max(0) as f64 / 1000.0).clamp(0.0, 30.0))
+        .unwrap_or(30.0);
+    Duration::from_secs_f64(seconds)
 }
 fn handle_http(
     mut stream: TcpStream,
@@ -2596,14 +2807,48 @@ fn handle_http(
                 && !engine.inner.closed.load(Ordering::SeqCst)
                 && expires_at.is_none_or(|exp| now_ms().max(0) as f64 / 1000.0 < exp)
             {
-                let remaining = expires_at.map(|exp| {
-                    Duration::from_secs_f64((exp - now_ms().max(0) as f64 / 1000.0).max(0.0))
+                use std::os::fd::AsRawFd;
+                let wait = sse_wait(expires_at, now_ms());
+                let mut fds = [
+                    libc::pollfd {
+                        fd: events.wake.read_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: stream.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let event = match events.try_recv() {
+                    Ok(frame) => Ok(frame),
+                    Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
+                    Err(mpsc::TryRecvError::Empty) => {
+                        events.wake.drain();
+                        // Recheck after draining so a concurrent commit cannot lose its wake byte.
+                        match events.try_recv() {
+                            Ok(frame) => Ok(frame),
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                Err(mpsc::TryRecvError::Disconnected)
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                crate::support::poll_until(
+                                    &mut fds,
+                                    Some(std::time::Instant::now() + wait),
+                                )?;
+                                if fds[1].revents != 0 || stop.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                events.try_recv()
+                            }
+                        }
+                    }
+                }
+                .map_err(|error| match error {
+                    mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
+                    mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
                 });
-                let event = events.recv_timeout(
-                    remaining
-                        .unwrap_or(Duration::from_secs(1))
-                        .min(Duration::from_secs(1)),
-                );
                 if expires_at.is_some_and(|exp| now_ms().max(0) as f64 / 1000.0 >= exp) {
                     break;
                 }
@@ -2812,7 +3057,7 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
             revents: 0,
         }; // SAFETY: pfd is live for the bounded poll.
         unsafe {
-            libc::poll(&mut pfd, 1, 250);
+            libc::poll(&mut pfd, 1, -1);
         }
     }
     server.shutdown();

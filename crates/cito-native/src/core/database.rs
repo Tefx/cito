@@ -57,6 +57,7 @@ extern "C" {
     fn sqlite3_column_text(statement: *mut libc::c_void, column: i32) -> *const u8;
     fn sqlite3_column_bytes(statement: *mut libc::c_void, column: i32) -> i32;
     fn sqlite3_changes(db: *mut libc::c_void) -> i32;
+    fn sqlite3_total_changes(db: *mut libc::c_void) -> i32;
 }
 
 pub struct Connection {
@@ -251,9 +252,12 @@ impl Connection {
         Ok(())
     }
 }
+type CommitNotifier = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    committed: Arc<Mutex<Option<CommitNotifier>>>,
 }
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -281,6 +285,7 @@ impl Database {
         }
         let db = Self {
             connection: Arc::new(Mutex::new(conn)),
+            committed: Arc::new(Mutex::new(None)),
         };
         db.execute(
             "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
@@ -290,11 +295,33 @@ impl Database {
             .map_err(|e| e.to_string())?;
         Ok(db)
     }
-    pub fn execute(&self, sql: &str, values: &[Value]) -> Result<usize, String> {
-        self.connection
+    pub fn set_commit_notifier(
+        &self,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        *self
+            .committed
             .lock()
-            .map_err(|_| "SQLite lock poisoned")?
-            .execute(sql, values)
+            .map_err(|_| "Commit notifier lock poisoned")? = Some(Arc::new(notify));
+        Ok(())
+    }
+    fn notify_committed(&self) {
+        let notify = self.committed.lock().ok().and_then(|notify| notify.clone());
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+    pub fn execute(&self, sql: &str, values: &[Value]) -> Result<usize, String> {
+        let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        // SAFETY: the connection lock owns SQLite throughout both counter reads.
+        let before = unsafe { sqlite3_total_changes(conn.raw) };
+        let result = conn.execute(sql, values);
+        let changed = unsafe { sqlite3_total_changes(conn.raw) } != before;
+        drop(conn);
+        if changed {
+            self.notify_committed();
+        }
+        result
     }
     pub fn query(&self, sql: &str, values: &[Value]) -> Result<Vec<Value>, String> {
         self.connection
@@ -307,6 +334,8 @@ impl Database {
         action: impl FnOnce(&Connection) -> Result<T, String>,
     ) -> Result<T, String> {
         let conn = self.connection.lock().map_err(|_| "SQLite lock poisoned")?;
+        // SAFETY: the connection lock keeps the SQLite handle exclusively owned.
+        let before = unsafe { sqlite3_total_changes(conn.raw) };
         conn.execute("BEGIN IMMEDIATE", &[])?;
         struct Rollback<'a>(&'a Connection, bool);
         impl Drop for Rollback<'_> {
@@ -320,6 +349,12 @@ impl Database {
         let result = action(&conn)?;
         conn.execute("COMMIT", &[])?;
         rollback.1 = true;
+        let changed = unsafe { sqlite3_total_changes(conn.raw) } != before;
+        drop(rollback);
+        drop(conn);
+        if changed {
+            self.notify_committed();
+        }
         Ok(result)
     }
 }

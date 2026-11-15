@@ -3,6 +3,135 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
 #[test]
+fn embedded_and_http_events_invalidate_after_commits_and_shutdown_cleanly() {
+    for http in [false, true] {
+        let dir =
+            std::env::temp_dir().join(format!("cito-events-{}", crate::plugins::random_uuid_v4()));
+        let engine = Arc::new(HubEngine::open(&dir).unwrap());
+        engine.set_plugin_roots(&[]).unwrap();
+        let server = http.then(|| {
+            engine
+                .start_server(
+                    "127.0.0.1",
+                    0,
+                    super::super::auth::HubAuth::new("none", None, None, None).unwrap(),
+                )
+                .unwrap()
+        });
+        let client = HubClient::new(
+            "local".into(),
+            json!({"url":server.as_ref().map(|s|format!("http://{}",s.address)).unwrap_or_else(||"local://".into()),"authMode":"none"}),
+            "alice",
+            (!http).then(|| engine.clone()),
+        );
+        let worker = client.start_events().unwrap();
+        let wait = |condition: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !condition() {
+                assert!(Instant::now() < deadline, "Event notification timed out");
+                thread::sleep(Duration::from_millis(1));
+            }
+        };
+        wait(&|| client.stream_live.load(Ordering::SeqCst));
+        // Outlast the network cancellation deadline; it must not tear down a quiet SSE stream.
+        if http {
+            thread::sleep(Duration::from_millis(1100));
+        }
+        let observed = client.event_revision();
+        let value = STANDARD.encode(json!({"listener_id":"node","harness":"agent","scope":"workspace","principal_id":"none#alice"}).to_string());
+        engine
+            .rpc(
+                "kv_put",
+                &json!({"key":"node","data_b64":value}),
+                Some(&client.identity),
+            )
+            .unwrap();
+        wait(&|| client.event_revision() > observed);
+        assert_eq!(client.directory().unwrap()[0]["listener_id"], "node");
+        let start = Instant::now();
+        client.close();
+        worker.join().unwrap();
+        if let Some(server) = server {
+            server.shutdown();
+        }
+        engine.shutdown();
+        assert!(start.elapsed() < Duration::from_millis(1500));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn sse_failures_back_off_and_auth_failures_wait_for_reconfiguration() {
+    use std::os::fd::AsRawFd;
+    for status in [503, 401] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(crate::support::WakePipe::new().unwrap());
+        let stopped = stop.clone();
+        let (sent, calls) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: stopped.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            crate::support::poll_until(&mut fds, None).unwrap();
+            if fds[1].revents != 0 {
+                break;
+            }
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let _ = write!(
+                socket,
+                "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            sent.send(Instant::now()).unwrap();
+        });
+        let config = json!({"url":format!("http://{address}"),"token":"first"});
+        let client = HubClient::new("work".into(), config.clone(), "alice", None);
+        let worker = client.start_events().unwrap();
+        let first = calls.recv_timeout(Duration::from_secs(2)).unwrap();
+        if status == 503 {
+            let second = calls.recv_timeout(Duration::from_secs(2)).unwrap();
+            let third = calls.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(second.duration_since(first) >= Duration::from_millis(200));
+            assert!(third.duration_since(second) >= Duration::from_millis(450));
+        } else {
+            assert!(
+                calls.recv_timeout(Duration::from_millis(600)).is_err(),
+                "Permanent rejection must suspend the stream"
+            );
+            let mut replacement = HubClient::new("work".into(), config, "alice", None);
+            replacement.bearer = Some("replacement".into());
+            replacement.inherit_authority(&client);
+            calls.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let start = Instant::now();
+        client.close();
+        worker.join().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        stop.notify();
+        server.join().unwrap();
+    }
+}
+
+#[test]
 fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let config = json!({"url":format!("http://{}",listener.local_addr().unwrap()),"authMode":"oidc","token":"old"});
@@ -17,6 +146,8 @@ fn renewal_shares_authority_observations_and_updates_existing_rpc_clients() {
     renewed.expires_at = old.expires_at + 300;
     renewed.inherit_authority(&old);
     assert!(Arc::ptr_eq(&old.closed, &renewed.closed));
+    assert!(Arc::ptr_eq(&old.event_revision, &renewed.event_revision));
+    assert!(Arc::ptr_eq(&old.event_wait, &renewed.event_wait));
     assert!(Arc::ptr_eq(&old.directory_cache, &renewed.directory_cache));
     assert_eq!(renewed.cached_directory()[0]["human_paused"], true);
     assert!(renewed.stream_live.load(Ordering::SeqCst));

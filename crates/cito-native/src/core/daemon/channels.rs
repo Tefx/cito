@@ -221,6 +221,9 @@ pub(super) fn dispatch_channel_action(
             .unwrap_or(&s.config.default_hub)
             .to_string();
         s.active_settings_hub = Some(hub.clone());
+        if kind == ChannelActionKind::Read {
+            s.refresh_available()?;
+        }
         let slot = match s.slot(&hub).cloned() {
             Ok(slot) => slot,
             Err(error) => {
@@ -314,6 +317,6 @@ impl DaemonService {
             _ => {}
         }
         self.emit(json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings_for_hub(hub)}));
-        self.push_ui();
+        self.push_ui_result(Some(action));
     }
 }

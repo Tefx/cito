@@ -378,9 +378,16 @@ struct PollBackoff {
 impl PollBackoff {
     fn failed(&mut self, error: &ApiFailure, jitter_ms: u64) -> (bool, Duration) {
         self.failures = self.failures.saturating_add(1);
-        let permanent = ["HTTP 401:", "HTTP 403:", "API 401:", "API 403:"]
-            .iter()
-            .any(|code| error.message.contains(code));
+        let permanent = [
+            "HTTP 401:",
+            "HTTP 403:",
+            "HTTP 409:",
+            "API 401:",
+            "API 403:",
+            "API 409:",
+        ]
+        .iter()
+        .any(|code| error.message.contains(code));
         let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
         (
             permanent || self.failures >= 3,
@@ -392,9 +399,13 @@ impl PollBackoff {
     }
 }
 
+enum Event {
+    Request(Value),
+    Poll(Value, std::result::Result<Value, ApiFailure>),
+}
 pub fn main() {
-    let input = stdin_watchdog();
-    let (tx, rx) = mpsc::channel::<(Value, std::result::Result<Value, ApiFailure>)>();
+    let (tx, rx) = mpsc::channel::<Event>();
+    stdin_events(tx.clone(), Event::Request);
     let mut runtime = Runtime {
         config: json!({}),
         cursor: 0,
@@ -404,20 +415,37 @@ pub fn main() {
     };
     let mut polling = false;
     let mut backoff = PollBackoff::default();
-    let mut poll_config = runtime.config.clone();
     let mut next_poll = std::time::Instant::now();
+    let mut paused = false;
     loop {
-        while let Ok(req) = input.try_recv() {
-            if !runtime.request(req) {
+        let can_poll = !polling
+            && !paused
+            && runtime.pending.is_empty()
+            && str_at(&runtime.config, "botToken").is_some();
+        let event = if can_poll {
+            match rx.recv_timeout(next_poll.saturating_duration_since(std::time::Instant::now())) {
+                Ok(event) => Some(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(_) => return,
+            }
+        } else {
+            match rx.recv() {
+                Ok(event) => Some(event),
+                Err(_) => return,
+            }
+        };
+        if let Some(Event::Request(req)) = event.as_ref() {
+            let configured = req["op"] == "configure";
+            if !runtime.request(req.clone()) {
                 return;
             }
+            if configured {
+                paused = false;
+                backoff.succeeded();
+                next_poll = std::time::Instant::now();
+            }
         }
-        if poll_config != runtime.config {
-            poll_config = runtime.config.clone();
-            backoff.succeeded();
-            next_poll = std::time::Instant::now();
-        }
-        if let Ok((config, result)) = rx.try_recv() {
+        if let Some(Event::Poll(config, result)) = event {
             polling = false;
             if config == runtime.config {
                 match result {
@@ -446,12 +474,23 @@ pub fn main() {
                                 &json!({"op":"health","error":format!("Cannot receive replies or pair accounts: {e}. {guidance}")}),
                             );
                         }
+                        paused = [
+                            "HTTP 401:",
+                            "HTTP 403:",
+                            "HTTP 409:",
+                            "API 401:",
+                            "API 403:",
+                            "API 409:",
+                        ]
+                        .iter()
+                        .any(|code| e.message.contains(code));
                         next_poll = std::time::Instant::now() + delay;
                     }
                 }
             }
         }
         if !polling
+            && !paused
             && runtime.pending.is_empty()
             && str_at(&runtime.config, "botToken").is_some()
             && std::time::Instant::now() >= next_poll
@@ -466,11 +505,10 @@ pub fn main() {
                     "getUpdates",
                     json!({"offset":cursor,"timeout":25,"allowed_updates":["message"]}),
                 );
-                let _ = tx.send((config, r));
+                let _ = tx.send(Event::Poll(config, r));
             });
             next_poll = std::time::Instant::now() + Duration::from_millis(100);
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -486,7 +524,7 @@ mod tests {
         };
         for message in [
             "Telegram getUpdates request failed",
-            "Telegram getUpdates HTTP 409: Conflict",
+            "Telegram getUpdates HTTP 502: Bad gateway",
         ] {
             let mut backoff = PollBackoff::default();
             assert_eq!(
@@ -510,6 +548,7 @@ mod tests {
         for message in [
             "Telegram getUpdates HTTP 401: Unauthorized",
             "Telegram getUpdates API 403: Forbidden",
+            "Telegram getUpdates HTTP 409: Conflict",
         ] {
             assert!(PollBackoff::default().failed(&failure(message), 0).0);
         }

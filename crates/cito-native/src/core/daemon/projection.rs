@@ -562,16 +562,136 @@ impl DaemonService {
         self.push_ui_result(None);
     }
 
-    pub(super) fn push_ui_result(&self, action: Option<&Value>) {
-        if self.ui.is_some() {
-            if let Ok(mut frame) = self.snapshot() {
-                if let Some(action) = action {
-                    frame["ok"] = json!(true);
-                    frame["request_id"] = action["request_id"].clone();
-                    frame["source_op"] = action["op"].clone();
-                }
-                self.emit(frame);
+    fn ui_revision(&self) -> Result<Value, String> {
+        let changes = self
+            .state
+            .db
+            .query("SELECT total_changes() AS changes", &[])?;
+        let external = self.state.db.query("PRAGMA data_version", &[])?;
+        let mut hubs: Vec<_> = self
+            .slots
+            .iter()
+            .map(|(name, slot)| json!([name, slot.event_revision(), slot.capabilities()]))
+            .collect();
+        hubs.sort_by_key(Value::to_string);
+        Ok(json!([
+            changes,
+            external,
+            hubs,
+            self.config.default_hub,
+            self.session_activity
+                .as_ref()
+                .map(|a| a.completion_revision()),
+            self.menu_open,
+            self.directory_open,
+            self.active_settings_hub
+        ]))
+    }
+
+    /// Keep the existing state wire shape while omitting histories and inventories.
+    /// Closed surfaces retain their last full model until an explicit open refresh.
+    fn status_frame(&self, cached: &Value) -> Result<Value, String> {
+        let mut frame = cached.clone();
+        if let Some(fields) = frame.as_object_mut() {
+            for key in [
+                "settings",
+                "activity",
+                "activity_total",
+                "activity_unread_count",
+                "activity_filter",
+                "activity_query",
+                "ok",
+                "request_id",
+                "source_op",
+            ] {
+                fields.remove(key);
             }
+        }
+        let mut sessions = self.state.active()?;
+        sessions.retain(|row| self.slots.contains_key(string(row, "hub")));
+        for row in &mut sessions {
+            row["scoped_id"] = json!(self.scoped(string(row, "hub"), string(row, "public_id")));
+            row["display_address"] = json!(self.display_address(string(row, "hub"), row));
+            row["custom_title"] = json!(self
+                .state
+                .custom_title(string(row, "harness"), string(row, "session_id"))?
+                .is_some());
+            if let Some(fields) = row.as_object_mut() {
+                fields.remove("hub_url");
+                fields.remove("updated_at");
+            }
+        }
+        let counts = self.state.db.query("SELECT COUNT(*) AS total,COUNT(CASE WHEN acknowledged_at_ms IS NULL THEN 1 END) AS unread FROM local_signals WHERE activity_hidden=0", &[])?;
+        frame["unread_count"] = counts[0]["unread"].clone();
+        frame["activity_has_any"] = json!(counts[0]["total"].as_u64().unwrap_or(0) > 0);
+        frame["activity_all_total"] = counts[0]["total"].clone();
+        frame["status"] = json!(if sessions.is_empty() {
+            "idle"
+        } else {
+            "active"
+        });
+        frame["listeners"] = json!(sessions);
+        frame["sessions"] = frame["listeners"].clone();
+        let hubs: Vec<_> = self.slots.iter().map(|(name, slot)| {
+            let capabilities = slot.capabilities();
+            let mut hub = json!({"name":name,"url":slot.config["url"],"auth_mode":slot.config["authMode"],"enabled":true,
+                "auto_listen":slot.config["autoListen"].as_bool().unwrap_or(false),"status":wire_status(string(&capabilities,"status")),
+                "capabilities":capabilities,"user":slot.identity["owner_user"],"is_default":name==&self.config.default_hub,
+                "error":self.last_hub_errors.get(name).map(|(error,_)|error)});
+            if let (Some(out),Some(projection)) = (hub.as_object_mut(),self.human_projection(name).as_object()) { out.extend(projection.clone()); }
+            hub
+        }).collect();
+        frame["hubs"] = json!(hubs);
+        frame["hub"] = json!(self.config.default_hub);
+        Ok(frame)
+    }
+
+    pub(super) fn push_ui_result(&self, action: Option<&Value>) {
+        if self.ui.is_none() {
+            return;
+        }
+        let revision = match self.ui_revision() {
+            Ok(revision) => revision,
+            Err(_) => return,
+        };
+        if action.is_none()
+            && self
+                .last_ui_revision
+                .lock()
+                .is_ok_and(|previous| previous.as_ref() == Some(&revision))
+        {
+            return;
+        }
+        let cached = self
+            .last_ui_frame
+            .lock()
+            .ok()
+            .and_then(|frame| frame.clone());
+        let full = action.is_some()
+            || self.menu_open
+            || self.directory_open
+            || self.active_settings_hub.is_some()
+            || cached.is_none();
+        let result = if full {
+            self.snapshot()
+        } else {
+            self.status_frame(cached.as_ref().unwrap_or(&Value::Null))
+        };
+        if let Ok(mut frame) = result {
+            if full {
+                if let Ok(mut cached) = self.last_ui_frame.lock() {
+                    *cached = Some(frame.clone());
+                }
+            }
+            if let Some(action) = action {
+                frame["ok"] = json!(true);
+                frame["request_id"] = action["request_id"].clone();
+                frame["source_op"] = action["op"].clone();
+            }
+            if let Ok(mut previous) = self.last_ui_revision.lock() {
+                *previous = Some(revision);
+            }
+            self.emit(frame);
         }
     }
 }

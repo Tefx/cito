@@ -1007,10 +1007,31 @@ fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     let before = activity(&first);
     assert_eq!(before["kind"], "user_turn");
     assert_eq!(before["at_ms"], 1_767_225_600_000u64);
+    let checkpoints = || {
+        use std::os::unix::fs::MetadataExt;
+        let mut rows: Vec<_> = fs::read_dir(f.state.join("activity/codex"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().to_string_lossy().ends_with(".source.json"))
+            .map(|entry| {
+                let m = entry.metadata().unwrap();
+                (entry.path(), m.ino(), m.mtime(), m.mtime_nsec())
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let unchanged = checkpoints();
+    assert!(!unchanged.is_empty());
     assert_eq!(
         activity(&discover(&f)),
         before,
         "Provider restarts and refreshes preserve source revisions"
+    );
+    assert_eq!(
+        checkpoints(),
+        unchanged,
+        "No-op discovery must not rewrite source checkpoints or change their mtimes"
     );
     let binary = f.dir.join("queue");
     script(&binary, "#!/bin/sh\nexit 0\n");
@@ -1971,6 +1992,18 @@ fn claude_sidecar_socket_dedup_session_fencing_and_eof_cleanup() {
     wait(|| f.exited(p));
     assert!(!path.exists());
     assert!(!f.state.join("claude/badges/session-a").exists());
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        let p = f.spawn(CLAUDE, &[], &[]);
+        let mut env = f.env.clone();
+        env.insert("CLAUDE_SESSION_ID".into(), "signal-session".into());
+        f.send(p,json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":endpoint,"cwd":"/repo"}));
+        wait(|| f.frames(p).iter().any(|frame| frame["op"] == "ready"));
+        let started = std::time::Instant::now();
+        f.signal(p, signal);
+        wait(|| f.exited(p));
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        assert!(!path.exists());
+    }
 }
 #[test]
 fn pi_bridge_real_typescript_host_contract_without_npm() {
@@ -2028,6 +2061,47 @@ fn explicit_pid_claims_reject_invalid_conflicting_and_unreachable_endpoints() {
         )["ok"],
         false
     );
+}
+
+#[test]
+fn subprocess_readiness_drains_pipes_and_enforces_a_single_deadline() {
+    use std::time::{Duration, Instant};
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let command = f.command_builder(
+        "python3",
+        &[
+            "-c",
+            "import sys; sys.stdout.write('x'*1048576); sys.stderr.write('y'*1048576)",
+        ],
+    );
+    let output = cito_native::support::run_command_with_timeout(command, Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 1048576);
+    assert_eq!(output.stderr.len(), 1048576);
+    let started = Instant::now();
+    let command = f.command_builder(
+        "python3",
+        &["-c", "import select; select.select([], [], [], 10)"],
+    );
+    assert!(
+        cito_native::support::run_command_with_timeout(command, Duration::from_millis(40))
+            .unwrap()
+            .is_none()
+    );
+    assert!(started.elapsed() < Duration::from_millis(500));
+    for _ in 0..8 {
+        let command = f.command_builder("python3", &["-c", "pass"]);
+        assert!(
+            cito_native::support::run_command_with_timeout(command, Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
 }
 
 #[test]
@@ -2100,7 +2174,20 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
             .lines()
             .count()
             - before;
-        assert_eq!(calls,if token=="poll409" {3} else {1},"Transient poll failures need three consecutive failures; auth errors surface immediately");
+        assert_eq!(calls, 1, "Auth and polling-conflict failures surface immediately and pause until reconfiguration");
+        // Exercise a command barrier while polling is paused, then cross the minimum
+        // retry interval: no additional getUpdates request may run without configure.
+        f.send(p, json!({"op":"on_acked"}));
+        std::thread::sleep(std::time::Duration::from_millis(550));
+        let after = fs::read_to_string(f.home.join("api-methods.jsonl"))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(
+            after,
+            before + 1,
+            "Permanent failures must suspend background polling"
+        );
     }
     f.send(p,json!({"op":"configure","hub_config":{"botToken":"healthy","apiBaseUrl":format!("http://127.0.0.1:{port}")}}));
     wait(|| {
@@ -2110,8 +2197,13 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
     });
     let methods = fs::read_to_string(f.home.join("api-methods.jsonl")).unwrap();
     assert!(!methods.contains("deleteWebhook"));
+    let shutdown = std::time::Instant::now();
     f.eof(p);
     wait(|| f.exited(p));
+    assert!(
+        shutdown.elapsed() < std::time::Duration::from_millis(100),
+        "EOF must interrupt an outstanding network poll"
+    );
 }
 #[test]
 fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {

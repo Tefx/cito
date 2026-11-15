@@ -9,7 +9,6 @@ use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 pub(super) fn replace_host_hub_server(
@@ -147,14 +146,26 @@ fn probe_tailscale_status() -> Result<Value, ProbeError> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| ProbeError)?;
+    let exited = match crate::support::child_exit_fd(child.id()) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ProbeError);
+        }
+    };
     let deadline = Instant::now() + Duration::from_millis(500);
+    let mut eof = false;
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
     loop {
         let mut failed = false;
         loop {
             match output.read(&mut buffer) {
-                Ok(0) => break,
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
                 Ok(n) => {
                     bytes.extend_from_slice(&buffer[..n]);
                     if bytes.len() > 4 * 1024 * 1024 {
@@ -181,7 +192,24 @@ fn probe_tailscale_status() -> Result<Value, ProbeError> {
                 return serde_json::from_slice(&bytes).map_err(|_| ProbeError);
             }
             Ok(None) if !failed && Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(5))
+                use std::os::fd::AsRawFd;
+                let mut fds = [
+                    libc::pollfd {
+                        fd: if eof { -1 } else { output.as_raw_fd() },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: exited.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                if crate::support::poll_until(&mut fds, Some(deadline)).is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProbeError);
+                }
             }
             _ => {
                 // Every timeout/read/wait failure reaps the owned CLI process.

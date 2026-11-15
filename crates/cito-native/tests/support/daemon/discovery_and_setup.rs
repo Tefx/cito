@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn paused_cli_and_mcp_status_discover_sessions_started_after_idle() {
+    let _lock = serial();
+    let f = Fixture::new(json!({"hubs":{"local":{"url":"local://","autoListen":false}}}));
+    f.provider("delivered_unconfirmed");
+    let provider = f.state.join("plugins/fixture");
+    let save = |sid: &str| {
+        fs::write(provider.join("options.json"),json!({"session_id":sid,"sessions":[{"harness":"fixture","session_id":sid,"title":"New work","cwd":"/workspace","needs_reload":true}],"status":"alive","outcome":"delivered_unconfirmed"}).to_string()).unwrap()
+    };
+    save("before-idle");
+    f.daemon(&[]);
+    let calls = || {
+        fs::read_to_string(provider.join("calls.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|request| request["op"] == "discover_sessions")
+            .count()
+    };
+    assert_eq!(
+        calls(),
+        0,
+        "A closed daemon with Auto-Listen off starts no background discovery"
+    );
+    save("after-idle");
+    let started = std::time::Instant::now();
+    let (ok, output, error) = f.command(NATIVE, &["status", "--json"], "");
+    assert!(ok, "{error}");
+    let snapshot: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(snapshot["available"][0]["session_id"], "after-idle");
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+    save("after-cli");
+    let before = calls();
+    let started = std::time::Instant::now();
+    let snapshot = f.tool(
+        "cito_status",
+        json!({}),
+        json!({"expected_harness":"fixture","expected_session_id":"after-cli"}),
+    );
+    assert_eq!(snapshot["registered"], false);
+    assert_eq!(calls(),before+1,"MCP status must request fresh discovery even though its session-scoped DTO omits the available-session list");
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+}
+
+#[test]
 fn u1_discovery_hides_unconfigured_apps_and_refreshes_setup_lifecycle() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

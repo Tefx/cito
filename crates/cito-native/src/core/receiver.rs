@@ -309,13 +309,22 @@ pub fn probe_listener(
         None,
         Some((local, row)),
     )?;
+    apply_probe(local, client, row, &result)
+}
+
+pub(super) fn apply_probe(
+    local: &LocalState,
+    client: &HubClient,
+    row: &Value,
+    result: &Value,
+) -> Result<(), String> {
     if result["ok"] != true {
         return Err(crate::support::response_diagnostic(
-            &result,
+            result,
             "Session probe failed",
         ));
     }
-    let status = string(&result, "status");
+    let status = string(result, "status");
     let failures = if status == "alive" {
         0
     } else {

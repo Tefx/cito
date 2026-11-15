@@ -39,23 +39,9 @@ fn desktop_running(req: &Value) -> Result<bool> {
             str_at(&identity, "command").ok_or("Desktop process command is unavailable")?;
         return Ok(desktop_command(command) || matches_process(command));
     }
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "uid=,command="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err("Desktop process inspection failed".into());
-    }
-    // SAFETY: geteuid only reads this process's effective user ID.
-    let uid = unsafe { libc::geteuid() }.to_string();
-    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-        line.trim_start()
-            .split_once(char::is_whitespace)
-            .is_some_and(|(owner, command)| {
-                owner == uid
-                    && (desktop_command(command.trim_start())
-                        || matches_process(command.trim_start()))
-            })
+    Ok(user_processes()?.into_iter().any(|pid| {
+        process_command(pid)
+            .is_ok_and(|command| desktop_command(&command) || matches_process(&command))
     }))
 }
 fn db(req: &Value) -> PathBuf {
@@ -241,6 +227,7 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
     };
     let cursor_path = path.with_extension("source.json");
     let mut cached = read_json(&cursor_path)?;
+    let previous = cached.clone();
     // Retain the maximum observed source integer, never a refresh counter. This
     // also prevents a source timestamp rollback from decreasing the revision.
     let revision = source_revision.max(cached["revision"].as_u64().unwrap_or(0));
@@ -319,10 +306,10 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                 }
                 // The cursor bounds repeat work, not the activity revision. Revision
                 // remains the durable DB source integer across scans and restarts.
-                save_activity(
-                    &cursor_path,
-                    &json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision}),
-                )?;
+                let observed = json!({"device":metadata.dev(),"inode":metadata.ino(),"offset":offset,"user_at_ms":latest,"saw_effect":saw_effect,"revision":revision});
+                if observed != previous {
+                    save_activity(&cursor_path, &observed)?;
+                }
                 if let Some(at) = latest {
                     return Ok(json!({"revision":revision,"at_ms":at,"kind":"user_turn"}));
                 }
@@ -335,7 +322,9 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
         }
     }
     cached["revision"] = json!(revision);
-    save_activity(&cursor_path, &cached)?;
+    if cached != previous {
+        save_activity(&cursor_path, &cached)?;
+    }
     if let (Some(effect_revision), Some(effect_at)) = (
         ledger["fallback"]["revision"].as_u64(),
         ledger["fallback"]["at_ms"].as_u64(),
@@ -541,7 +530,14 @@ fn row_caller(req: &Value, r: &Value) -> Value {
             "repo":str_at(r,"git_origin_url").and_then(normalize_repo),
             "title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session"))});
     }
-    caller("codex", str_at(r, "id").unwrap_or(""), cwd, pid(req), title)
+    caller(
+        req,
+        "codex",
+        str_at(r, "id").unwrap_or(""),
+        cwd,
+        pid(req),
+        title,
+    )
 }
 pub fn handle(req: &Value) -> Result<Value> {
     let op = str_at(req, "op").unwrap_or("");

@@ -10,6 +10,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1025,6 +1026,7 @@ pub fn plugin_request_with_progress(
                     }
                 }
             }
+            let exited = crate::support::child_exit_fd(child.id())?;
             let mut input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
             input.push(b'\n');
             let mut written = 0;
@@ -1114,7 +1116,33 @@ pub fn plugin_request_with_progress(
                         return Ok(response);
                     }
                 }
-                thread::sleep(Duration::from_millis(5));
+                let mut fds = [
+                    libc::pollfd {
+                        fd: stdin.as_ref().map(|p| p.as_raw_fd()).unwrap_or(-1),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: if out_eof { -1 } else { stdout.as_raw_fd() },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: if err_eof { -1 } else { stderr.as_raw_fd() },
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: exited.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // Progress checks enforce generation fencing and dispatch lease renewal.
+                crate::support::poll_until(
+                    &mut fds,
+                    Some(deadline.min(Instant::now() + Duration::from_millis(250))),
+                )?;
             }
         })();
         if result.is_err() {
@@ -1124,16 +1152,7 @@ pub fn plugin_request_with_progress(
             unsafe {
                 libc::kill(group, libc::SIGTERM);
             }
-            let grace = Instant::now() + Duration::from_millis(50);
-            while Instant::now() < grace {
-                // SAFETY: signal zero observes our still-reserved process group.
-                if unsafe { libc::kill(group, 0) } != 0
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
+            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(50));
             // SAFETY: the child remains unreaped, preserving group ownership on escalation.
             unsafe {
                 libc::kill(group, libc::SIGKILL);
@@ -1380,6 +1399,7 @@ pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), S
     if current.pid != health.pid || current.version != health.version {
         return Err("Daemon identity changed before shutdown".to_string());
     }
+    let exited = crate::support::child_exit_fd(health.pid as u32)?;
     // SAFETY: PID was obtained twice from the matching state directory's health endpoint.
     if unsafe { libc::kill(health.pid, libc::SIGTERM) } != 0 {
         let e = std::io::Error::last_os_error();
@@ -1387,17 +1407,20 @@ pub fn stop_daemon(config: &NativeConfig, health: &DaemonHealth) -> Result<(), S
             return Err(format!("Cannot stop daemon: {e}"));
         }
     }
-    let deadline = Instant::now() + Duration::from_millis(5000);
-    while pid_alive(health.pid) && Instant::now() < deadline {
-        // A daemon launched by this process may have exited as an unreaped child.
-        // SAFETY: waitpid targets only the verified daemon and never blocks.
-        if unsafe { libc::waitpid(health.pid, std::ptr::null_mut(), libc::WNOHANG) } == health.pid {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(20));
+    let ready = crate::support::poll_until(
+        &mut [libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }],
+        Some(Instant::now() + Duration::from_secs(5)),
+    )?;
+    if !ready {
+        return Err("Daemon did not stop within 5000ms".into());
     }
-    if pid_alive(health.pid) {
-        return Err("Daemon did not stop within 5000ms".to_string());
+    // SAFETY: reap only if this process is the daemon's parent; otherwise ECHILD is harmless.
+    unsafe {
+        libc::waitpid(health.pid, std::ptr::null_mut(), libc::WNOHANG);
     }
     Ok(())
 }
@@ -1434,9 +1457,11 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
             Ok(())
         });
     }
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
-
+    let exited = crate::support::child_exit_fd(child.id())?;
+    let mut retry = crate::support::RetryBackoff::default();
     let deadline = Instant::now() + Duration::from_millis(5000);
     while Instant::now() < deadline {
         if let Some(h) = probe_daemon_health(config) {
@@ -1444,7 +1469,17 @@ pub fn ensure_daemon(config: &NativeConfig) -> Result<(), String> {
                 return Ok(());
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        if crate::support::poll_until(
+            &mut [libc::pollfd {
+                fd: exited.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }],
+            Some(deadline.min(Instant::now() + retry.failed())),
+        )? {
+            let _ = child.wait();
+            return Err("Daemon exited before becoming healthy".into());
+        }
     }
     Err(format!(
         "Daemon did not become healthy on 127.0.0.1:{} for {} within 5000ms",

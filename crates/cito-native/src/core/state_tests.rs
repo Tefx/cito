@@ -33,6 +33,41 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+#[test]
+fn current_schema_open_does_not_acquire_a_write_transaction() -> Result<(), String> {
+    let f = Fixture::new()?;
+    let writer = Database::open(&f.dir.join("state.sqlite"))?;
+    let (locked, ready) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        writer.transaction(|_| {
+            locked.send(()).map_err(|e| e.to_string())?;
+            wait.recv_timeout(std::time::Duration::from_secs(2))
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+    });
+    ready
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .map_err(|e| e.to_string())?;
+    let dir = f.dir.clone();
+    let (opened, result) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let _ = opened.send(LocalState::open(&dir));
+    });
+    let fast = result.recv_timeout(std::time::Duration::from_millis(150));
+    let _ = release.send(());
+    owner.join().map_err(|_| "Writer panicked")??;
+    reader.join().map_err(|_| "Reader panicked")?;
+    assert!(
+        fast.is_ok(),
+        "A verified schema must open while another connection holds write authority"
+    );
+    let reopened = fast.map_err(|e| e.to_string())??;
+    assert!(reopened.listener("local", "c_1")?.is_some());
+    Ok(())
+}
+
 fn signal(id: &str, principal: &str, generation: i64) -> Value {
     json!({"signal_id":id,"to":"c_1","target_generation":generation,"from":{"principal_id":principal,"user":"bob","host_name":"other.local","harness":"agent","listener_id":null,"title":"Sender","about":null},"message":"hello <world>","in_reply_to":null})
 }
@@ -882,7 +917,7 @@ fn six_hundred_messages_paginate_into_twelve_fifty_member_batches() -> Result<()
 fn additive_queue_confirmation_upgrade_keeps_v4_data_and_indexes() -> Result<(), String> {
     let f = Fixture::new()?;
     f.seed("s", 1)?;
-    f.state.db.execute("ALTER TABLE local_signals DROP COLUMN queue_confirmed; INSERT INTO daemon_owner VALUES(1,123,456)", &[])?;
+    f.state.db.execute("ALTER TABLE local_signals DROP COLUMN queue_confirmed; PRAGMA user_version=6; INSERT INTO daemon_owner VALUES(1,123,456)", &[])?;
     let reopened = LocalState::open(&f.dir)?;
     assert_eq!(
         reopened

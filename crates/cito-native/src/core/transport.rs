@@ -3,7 +3,7 @@ use super::identity::{principal, string};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -105,6 +105,9 @@ pub struct HubClient {
     // RPC reachability is independent of the optional event-stream hint.
     pub status: Arc<Mutex<String>>,
     stream_live: Arc<AtomicBool>,
+    event_revision: Arc<AtomicU64>,
+    event_wait: Arc<(Mutex<()>, std::sync::Condvar)>,
+    local_event_wake: Arc<Mutex<Option<Arc<crate::support::WakePipe>>>>,
     observed_at: Arc<Mutex<Option<Instant>>>,
     event_credentials: Arc<Mutex<Option<String>>>,
     pub closed: Arc<AtomicBool>,
@@ -135,6 +138,9 @@ impl HubClient {
             local,
             status: Arc::new(Mutex::new(status.into())),
             stream_live: Arc::new(AtomicBool::new(false)),
+            event_revision: Arc::new(AtomicU64::new(1)),
+            event_wait: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
+            local_event_wake: Arc::new(Mutex::new(None)),
             observed_at: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             registration: Arc::new(Mutex::new(())),
@@ -309,6 +315,9 @@ impl HubClient {
         self.server_clock = old.server_clock.clone();
         self.status = old.status.clone();
         self.stream_live = old.stream_live.clone();
+        self.event_revision = old.event_revision.clone();
+        self.event_wait = old.event_wait.clone();
+        self.local_event_wake = old.local_event_wake.clone();
         self.rejected_bearer = old.rejected_bearer.clone();
         self.observed_at = old.observed_at.clone();
         self.closed = old.closed.clone();
@@ -321,6 +330,8 @@ impl HubClient {
                 *rejected = None;
             }
         }
+        let _guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.event_wait.1.notify_all();
     }
     fn observation_recent(&self) -> bool {
         self.local.is_some()
@@ -406,9 +417,84 @@ impl HubClient {
             }
         }
     }
+    pub fn event_revision(&self) -> u64 {
+        self.event_revision.load(Ordering::Acquire)
+    }
+    fn mutation(&self) {
+        {
+            let _guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.event_revision.fetch_add(1, Ordering::Release);
+            self.event_wait.1.notify_all();
+        }
+        super::daemon::wake_daemon();
+    }
+    pub fn wait_for_event(&self, revision: u64, deadline: Instant) {
+        let guard = self.event_wait.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .event_wait
+            .1
+            .wait_timeout_while(
+                guard,
+                deadline.saturating_duration_since(Instant::now()),
+                |_| self.event_revision() == revision && !self.closed.load(Ordering::SeqCst),
+            )
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    pub fn close(&self) {
+        if let Ok(_guard) = self.event_wait.0.lock() {
+            self.closed.store(true, Ordering::SeqCst);
+            self.event_wait.1.notify_all();
+            if let Ok(wake) = self.local_event_wake.lock() {
+                if let Some(wake) = &*wake {
+                    wake.notify();
+                }
+            }
+        }
+    }
     pub fn start_events(&self) -> Option<thread::JoinHandle<()>> {
-        if self.local.is_some() {
-            return None;
+        if let Some(local) = &self.local {
+            let mut subscription = local.subscribe(Some(self.identity.clone())).ok()?;
+            if let Ok(mut wake) = self.local_event_wake.lock() {
+                *wake = Some(subscription.wake.clone());
+            }
+            let client = self.clone();
+            client.stream_live.store(true, Ordering::SeqCst);
+            return Some(thread::spawn(move || {
+                while !client.closed.load(Ordering::SeqCst) {
+                    let mut fds = [libc::pollfd {
+                        fd: subscription.wake.read_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }];
+                    let _ = crate::support::poll_until(&mut fds, None);
+                    subscription.wake.drain();
+                    let mut changed = false;
+                    let disconnected = loop {
+                        match subscription.try_recv() {
+                            Ok(_) => changed = true,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break false,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
+                        }
+                    };
+                    if changed || disconnected {
+                        client.mutation();
+                    }
+                    if disconnected && !client.closed.load(Ordering::SeqCst) {
+                        let Some(local) = &client.local else { break };
+                        let Ok(next) = local.subscribe(Some(client.identity.clone())) else {
+                            break;
+                        };
+                        subscription = next;
+                        if let Ok(mut wake) = client.local_event_wake.lock() {
+                            *wake = Some(subscription.wake.clone());
+                            if client.closed.load(Ordering::SeqCst) {
+                                subscription.wake.notify();
+                            }
+                        }
+                    }
+                }
+                client.stream_live.store(false, Ordering::SeqCst);
+            }));
         }
         if let Ok(mut token) = self.event_credentials.lock() {
             *token = self.bearer.clone();
@@ -417,10 +503,10 @@ impl HubClient {
         client.agent = ureq::AgentBuilder::new()
             .redirects(0)
             .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_millis(2500))
+            .timeout_read(Duration::from_secs(1))
             .build();
         Some(thread::spawn(move || {
-            let mut delay = 250;
+            let mut backoff = crate::support::RetryBackoff::default();
             while !client.closed.load(Ordering::SeqCst) {
                 let url = format!(
                     "{}/v1/events",
@@ -439,37 +525,72 @@ impl HubClient {
                     request = request.set("Authorization", &format!("Bearer {token}"));
                 }
                 let response = request.call();
-                if matches!(&response, Err(ureq::Error::Status(401, _))) {
+                if matches!(&response, Err(ureq::Error::Status(401 | 403, _))) {
                     client.reject_token(&bearer);
+                }
+                if matches!(&response, Err(ureq::Error::Status(401 | 403 | 409, _))) {
+                    let guard = client
+                        .event_wait
+                        .0
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let _guard = client
+                        .event_wait
+                        .1
+                        .wait_while(guard, |_| {
+                            !client.closed.load(Ordering::SeqCst)
+                                && client
+                                    .event_credentials
+                                    .lock()
+                                    .is_ok_and(|token| *token == bearer)
+                        })
+                        .unwrap_or_else(|e| e.into_inner());
+                    continue;
                 }
                 if let Ok(response) = response {
                     client.stream_live.store(true, Ordering::SeqCst);
-                    delay = 250;
                     let mut reader = BufReader::new(response.into_reader());
+                    let connected = Instant::now();
+                    let mut line = String::new();
                     loop {
-                        let mut line = String::new();
-                        let result = reader.by_ref().take(65_536).read_line(&mut line);
+                        let remaining = 65_536usize.saturating_sub(line.len());
+                        if remaining == 0 {
+                            break;
+                        }
+                        let result = reader.by_ref().take(remaining as u64).read_line(&mut line);
                         if client.closed.load(Ordering::SeqCst) {
                             break;
+                        }
+                        if matches!(&result, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
+                        {
+                            continue;
                         }
                         if !matches!(result, Ok(n) if n > 0 && line.ends_with('\n')) {
                             break;
                         }
-                        // The durable consumer backlog is authoritative; events only reduce
-                        // reconnection latency and never advance the persisted cursor.
+                        if connected.elapsed() >= Duration::from_secs(30) {
+                            backoff.reset();
+                        }
+                        if line.starts_with("data:") {
+                            backoff.reset();
+                            // Hints invalidate observations; only the durable consumer advances cursors.
+                            client.mutation();
+                        }
+                        line.clear();
                     }
                 }
                 client.stream_live.store(false, Ordering::SeqCst);
                 if client.closed.load(Ordering::SeqCst) {
                     break;
                 }
-                for _ in 0..delay / 25 {
-                    if client.closed.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(25));
+                if let Ok(guard) = client.event_wait.0.lock() {
+                    let _ = client
+                        .event_wait
+                        .1
+                        .wait_timeout_while(guard, backoff.failed(), |_| {
+                            !client.closed.load(Ordering::SeqCst)
+                        });
                 }
-                delay = (delay * 2).min(2000);
             }
         }))
     }

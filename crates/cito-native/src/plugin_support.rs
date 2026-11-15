@@ -502,14 +502,36 @@ pub fn caller_pid_roots(req: &Value) -> Result<Vec<u32>> {
     Ok(vec![unsafe { libc::getppid() } as u32])
 }
 pub fn process_start(pid: u32) -> Option<String> {
-    ps_field(pid, "lstart=").ok()
+    #[cfg(target_os = "macos")]
+    {
+        process_info(pid)
+            .ok()
+            .map(|info| format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()?
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_owned)
+    }
 }
 pub fn process_parent(p: u32) -> Option<u32> {
-    ps_field(p, "ppid=")
+    #[cfg(target_os = "macos")]
+    let parent = process_info(p).ok()?.pbi_ppid;
+    #[cfg(not(target_os = "macos"))]
+    let parent = std::fs::read_to_string(format!("/proc/{p}/stat"))
         .ok()?
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
         .parse()
-        .ok()
-        .filter(|parent| *parent > 0 && *parent != p)
+        .ok()?;
+    (parent > 0 && parent != p).then_some(parent)
 }
 pub fn pid(req: &Value) -> Option<u32> {
     explicit_pid(req)
@@ -547,27 +569,165 @@ pub fn verify(caller: &Value, req: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn ps_field(pid: u32, field: &str) -> Result<String> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", field])
-        .output()
-        .map_err(|_| "Cannot inspect cached endpoint process")?;
-    if !output.status.success() {
-        return Err("Cached endpoint process is no longer running".into());
+#[cfg(target_os = "macos")]
+fn process_info(pid: u32) -> Result<libc::proc_bsdinfo> {
+    // SAFETY: proc_pidinfo writes exactly the size of this initialized C structure.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as i32;
+    if unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    } != size
+    {
+        return Err("Cannot inspect endpoint process".into());
     }
-    let text = String::from_utf8(output.stdout).map_err(|_| "Invalid process description")?;
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("Cached endpoint process is no longer running".into());
+    Ok(info)
+}
+pub fn process_has_tty(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        process_info(pid).is_ok_and(|info| info.e_tdev != u32::MAX)
     }
-    Ok(text.to_string())
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/{pid}/fd/0"))
+            .is_ok_and(|path| path.starts_with("/dev/pts") || path.starts_with("/dev/tty"))
+    }
+}
+pub fn process_cwd(pid: u32) -> Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as i32;
+        // SAFETY: the C structure is writable and path bytes are bounded by its fixed array.
+        if unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+                size,
+            )
+        } != size
+        {
+            return Err("Cannot inspect endpoint working directory".into());
+        }
+        let bytes = info
+            .pvi_cdir
+            .vip_path
+            .iter()
+            .flatten()
+            .map(|b| *b as u8)
+            .take_while(|b| *b != 0)
+            .collect::<Vec<_>>();
+        String::from_utf8(bytes).map_err(|_| "Invalid endpoint working directory".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|_| "Cannot inspect endpoint working directory".into())
+    }
+}
+pub fn process_command(pid: u32) -> Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
+        let mut bytes = vec![0u8; 1024 * 1024];
+        let mut size = bytes.len();
+        // SAFETY: sysctl borrows the initialized MIB and bounded writable byte buffer.
+        if unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as _,
+                bytes.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+            || size < 4
+        {
+            return Err("Cannot inspect endpoint command".into());
+        }
+        bytes.truncate(size);
+        let argc = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).max(0) as usize;
+        let args = &bytes[4..];
+        let executable_end = args
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or("Invalid endpoint command")?;
+        let args = &args[executable_end..];
+        let start = args.iter().position(|b| *b != 0).unwrap_or(args.len());
+        Ok(args[start..]
+            .split(|b| *b == 0)
+            .take(argc)
+            .map(String::from_utf8_lossy)
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|b| {
+                String::from_utf8_lossy(&b)
+                    .trim_end_matches('\0')
+                    .replace('\0', " ")
+            })
+            .map_err(|_| "Cannot inspect endpoint command".into())
+    }
+}
+/// Enumerate same-user processes without launching one subprocess per endpoint.
+pub fn user_processes() -> Result<Vec<u32>> {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: proc_listpids first reports capacity, then fills our bounded PID array.
+        // libproc's PROC_ALL_PIDS is defined by sys/proc_info.h, absent from libc.
+        const PROC_ALL_PIDS: u32 = 1;
+        let bytes = unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+        if bytes <= 0 {
+            return Err("Cannot enumerate endpoint processes".into());
+        }
+        let mut pids = vec![0u32; bytes as usize / 4 + 128];
+        let count = unsafe {
+            libc::proc_listpids(
+                PROC_ALL_PIDS,
+                0,
+                pids.as_mut_ptr().cast(),
+                (pids.len() * 4) as i32,
+            )
+        };
+        if count < 0 {
+            return Err("Cannot enumerate endpoint processes".into());
+        }
+        pids.truncate(count as usize / 4);
+        let uid = unsafe { libc::geteuid() };
+        pids.retain(|pid| *pid > 0 && process_info(*pid).is_ok_and(|info| info.pbi_uid == uid));
+        Ok(pids)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::geteuid() };
+        Ok(std::fs::read_dir("/proc")
+            .map_err(|_| "Cannot enumerate endpoint processes")?
+            .flatten()
+            .filter(|entry| entry.metadata().is_ok_and(|m| m.uid() == uid))
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+            .collect())
+    }
 }
 pub fn process_identity(pid: u32) -> Result<Value> {
     // The command detects a PID reused by another application; start time also binds
     // a cache entry to one invocation when the replacement runs the same application.
-    let started_at = ps_field(pid, "lstart=")?;
-    let command = ps_field(pid, "command=")?;
-    if ps_field(pid, "lstart=")? != started_at {
+    let started_at = process_start(pid).ok_or("Cannot inspect endpoint process")?;
+    let command = process_command(pid)?;
+    if process_start(pid).as_deref() != Some(&started_at) {
         return Err("Endpoint process changed during inspection".into());
     }
     Ok(json!({"command":command,"started_at":started_at}))
@@ -695,34 +855,183 @@ pub fn normalize_repo(origin: &str) -> Option<String> {
         Some(path.to_string())
     }
 }
+#[derive(Default)]
+pub struct RetryBackoff {
+    failures: u32,
+}
+impl RetryBackoff {
+    pub fn reset(&mut self) {
+        self.failures = 0;
+    }
+    pub fn failed(&mut self) -> Duration {
+        self.failures = self.failures.saturating_add(1);
+        let base = 250u64.saturating_mul(1u64 << self.failures.saturating_sub(1).min(7));
+        let mut random = [0u8; 2];
+        let _ = getrandom::getrandom(&mut random);
+        Duration::from_millis(
+            (base + u16::from_ne_bytes(random) as u64 % (base / 4 + 1)).min(30_000),
+        )
+    }
+}
+
+/// Coalescing nonblocking wake pipe. Ownership keeps descriptors valid during poll.
+pub struct WakePipe {
+    read: std::os::unix::net::UnixStream,
+    write: std::os::unix::net::UnixStream,
+}
+impl WakePipe {
+    pub fn new() -> Result<Self> {
+        let (read, write) = std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
+        read.set_nonblocking(true).map_err(|e| e.to_string())?;
+        write.set_nonblocking(true).map_err(|e| e.to_string())?;
+        Ok(Self { read, write })
+    }
+    pub fn read_fd(&self) -> i32 {
+        use std::os::fd::AsRawFd;
+        self.read.as_raw_fd()
+    }
+    pub fn write_fd(&self) -> i32 {
+        use std::os::fd::AsRawFd;
+        self.write.as_raw_fd()
+    }
+    pub fn notify(&self) {
+        // SAFETY: the owned stream remains valid; a full pipe already represents a wakeup.
+        unsafe {
+            libc::write(self.write_fd(), [1u8].as_ptr().cast(), 1);
+        }
+    }
+    pub fn drain(&self) {
+        let mut bytes = [0u8; 256];
+        // SAFETY: read borrows a writable live buffer and never blocks.
+        while unsafe { libc::read(self.read_fd(), bytes.as_mut_ptr().cast(), bytes.len()) } > 0 {}
+    }
+}
+
+/// Observe an owned, unreaped child without releasing its PID before cleanup.
+pub fn child_exit_fd(pid: u32) -> Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: kqueue returns a new descriptor and kevent borrows initialized data.
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let change = libc::kevent {
+            ident: pid as _,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ONESHOT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        if unsafe { libc::kevent(fd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(owned)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: pidfd_open observes a child whose PID remains reserved until wait.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+/// Block for descriptor readiness, preserving the absolute deadline across signals.
+pub fn poll_until(fds: &mut [libc::pollfd], deadline: Option<std::time::Instant>) -> Result<bool> {
+    loop {
+        let timeout = deadline
+            .map(|at| {
+                at.saturating_duration_since(std::time::Instant::now())
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(i32::MAX as u128) as i32
+            })
+            .unwrap_or(-1);
+        // SAFETY: poll borrows a live initialized slice for the duration of the call.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
+        if n >= 0 {
+            return Ok(n > 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error.to_string());
+        }
+        if deadline.is_some_and(|at| at <= std::time::Instant::now()) {
+            return Ok(false);
+        }
+    }
+}
+
+pub fn wait_child_exit(child: &std::process::Child, timeout: Duration) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+    let fd = child_exit_fd(child.id())?;
+    poll_until(
+        &mut [libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }],
+        Some(std::time::Instant::now() + timeout),
+    )
+}
+
 pub fn run_command_with_timeout(
     mut command: std::process::Command,
     timeout: Duration,
 ) -> Result<Option<std::process::Output>> {
     let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map(Some)
-                    .map_err(|e| e.to_string())
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.to_string());
-            }
-            Ok(None) => {}
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(2));
+    // Drain pipes concurrently: a child may fill stdout before it exits.
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        pipe.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                pipe.read_to_end(&mut bytes).map(|_| bytes)
+            })
+        })
+    };
+    let out = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let err = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let ready = wait_child_exit(&child, timeout);
+    if !matches!(ready, Ok(true)) {
+        let _ = child.kill();
     }
+    let status = child.wait().map_err(|e| e.to_string());
+    let collect =
+        |worker: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>| -> Result<Vec<u8>> {
+            worker
+                .map(|w| {
+                    w.join()
+                        .map_err(|_| "Command reader failed".to_string())?
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap_or_else(|| Ok(Vec::new()))
+        };
+    let stdout = collect(out)?;
+    let stderr = collect(err)?;
+    if !ready? {
+        return Ok(None);
+    }
+    Ok(Some(std::process::Output {
+        status: status?,
+        stdout,
+        stderr,
+    }))
 }
 fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
     use std::process::{Command, Stdio};
@@ -746,13 +1055,129 @@ fn git_value(cwd: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     let text = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    (!text.is_empty()).then_some(text)
 }
-pub fn caller(id: &str, sid: &str, cwd: &str, pid: Option<u32>, title: Option<&str>) -> Value {
+fn git_metadata(req: &Value, cwd: &str) -> (Option<String>, Option<String>) {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let Some((root, marker)) = Path::new(cwd).ancestors().find_map(|path| {
+        let marker = path.join(".git");
+        marker.exists().then_some((path, marker))
+    }) else {
+        return (None, None);
+    };
+    let git = if marker.is_dir() {
+        marker.clone()
+    } else {
+        let Ok(content) = std::fs::read_to_string(&marker) else {
+            return (None, None);
+        };
+        let Some(path) = content.trim().strip_prefix("gitdir: ") else {
+            return (None, None);
+        };
+        root.join(path)
+    };
+    let common = std::fs::read_to_string(git.join("commondir"))
+        .ok()
+        .map(|path| git.join(path.trim()))
+        .unwrap_or_else(|| git.clone());
+    let metadata = || {
+        json!([
+            marker.clone(),
+            git.join("HEAD"),
+            common.join("config"),
+            home(req).join(".gitconfig"),
+            home(req).join(".config/git/config")
+        ]
+        .iter()
+        .map(|path| path.metadata().ok().map(|m| json!([
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec()
+        ])))
+        .collect::<Vec<_>>())
+    };
+    let before = metadata();
+    let path = state(req)
+        .join("git-cache")
+        .join(format!("{:x}.json", Sha256::digest(cwd.as_bytes())));
+    let cached = read_json(&path).unwrap_or(Value::Null);
+    // A slow reconciliation also observes indirect Git configuration includes.
+    if cached["metadata"] == before
+        && cached["at_ms"]
+            .as_u64()
+            .is_some_and(|at| now_ms().saturating_sub(at) < 300_000)
+    {
+        return (
+            cached["repo"].as_str().map(str::to_owned),
+            cached["branch"].as_str().map(str::to_owned),
+        );
+    }
+    let repo =
+        git_value(cwd, &["remote", "get-url", "origin"]).and_then(|url| normalize_repo(&url));
+    let branch = git_value(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .or_else(|| git_value(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]));
+    if before == metadata() && branch.is_some() {
+        let _ = atomic_write(
+            &path,
+            json!({"metadata":before,"at_ms":now_ms(),"repo":repo,"branch":branch})
+                .to_string()
+                .as_bytes(),
+        );
+    }
+    (repo, branch)
+}
+
+/// Cache a file projection by vnode identity, length, and nanosecond modification time.
+/// Save only stable observations; a concurrent writer invalidates the next read.
+pub fn cached_file_projection(
+    req: &Value,
+    namespace: &str,
+    source: &Path,
+    read: impl FnOnce() -> Result<Value>,
+) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let key = || -> Result<Value> {
+        let m = source.metadata().map_err(|e| e.to_string())?;
+        Ok(json!([
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec()
+        ]))
+    };
+    let before = key()?;
+    let path = state(req).join(namespace).join(format!(
+        "{:x}.json",
+        Sha256::digest(source.as_os_str().as_encoded_bytes())
+    ));
+    let cached = read_json(&path).unwrap_or(Value::Null);
+    if cached["metadata"] == before {
+        return Ok(cached["value"].clone());
+    }
+    let value = read()?;
+    if key().is_ok_and(|after| after == before) {
+        atomic_write(
+            &path,
+            json!({"metadata":before,"value":value})
+                .to_string()
+                .as_bytes(),
+        )?;
+    }
+    Ok(value)
+}
+pub fn caller(
+    req: &Value,
+    id: &str,
+    sid: &str,
+    cwd: &str,
+    pid: Option<u32>,
+    title: Option<&str>,
+) -> Value {
     let fallback_cwd = if cwd.trim().is_empty() {
         std::env::current_dir()
             .ok()
@@ -761,9 +1186,7 @@ pub fn caller(id: &str, sid: &str, cwd: &str, pid: Option<u32>, title: Option<&s
         None
     };
     let cwd = fallback_cwd.as_deref().unwrap_or(cwd);
-    let repo = git_value(cwd, &["remote", "get-url", "origin"]).and_then(|s| normalize_repo(&s));
-    let branch = git_value(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .or_else(|| git_value(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]));
+    let (repo, branch) = git_metadata(req, cwd);
     json!({"harness":id,"session_id":sid,"cwd":cwd,"repo":repo,"branch":branch,"title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session")),"endpoint_pid":pid})
 }
 pub fn alive(pid: u32) -> bool {
@@ -777,12 +1200,16 @@ pub fn alive(pid: u32) -> bool {
 // Persistent plugins keep stdin independent of blocking network work. EOF kills all owned threads.
 pub fn stdin_watchdog() -> std::sync::mpsc::Receiver<Value> {
     let (tx, rx) = std::sync::mpsc::channel();
+    stdin_events(tx, |value| value);
+    rx
+}
+pub fn stdin_events<T: Send + 'static>(tx: std::sync::mpsc::Sender<T>, wrap: fn(Value) -> T) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             match line {
                 Ok(s) => match serde_json::from_str(&s) {
                     Ok(v) => {
-                        if tx.send(v).is_err() {
+                        if tx.send(wrap(v)).is_err() {
                             break;
                         }
                     }
@@ -793,7 +1220,6 @@ pub fn stdin_watchdog() -> std::sync::mpsc::Receiver<Value> {
         }
         std::process::exit(0);
     });
-    rx
 }
 
 #[link(name = "sqlite3")]
@@ -946,7 +1372,7 @@ impl ReadOnlySqlite {
             }
         }
         let path = std::ffi::CString::new(uri).map_err(|_| "Invalid session database path")?;
-        loop {
+        {
             let mut db = std::ptr::null_mut();
             // SAFETY: path is a live C string, the output pointer is valid, and
             // every failed open is closed before retrying. Flags request read-only.
@@ -980,13 +1406,7 @@ impl ReadOnlySqlite {
                 reader.rows("PRAGMA schema_version")?;
                 return Ok(reader);
             }
-            if !matches!(rc, 5 | 6) || std::time::Instant::now() >= deadline {
-                return Err(sqlite_diagnostic(rc));
-            }
-            std::thread::sleep(
-                Duration::from_millis(10)
-                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
-            );
+            Err(sqlite_diagnostic(rc))
         }
     }
     pub fn rows(&self, sql: &str) -> Result<Vec<Value>> {
@@ -1003,7 +1423,10 @@ impl ReadOnlySqlite {
             // SAFETY: this owns the connection, SQL lives through exec, and the
             // synchronous callback exclusively borrows rows. SQLite owns err.
             let rc = unsafe {
-                sqlite3_busy_timeout(self.db.get(), remaining.as_millis().min(50) as i32);
+                sqlite3_busy_timeout(
+                    self.db.get(),
+                    remaining.as_millis().min(i32::MAX as u128) as i32,
+                );
                 sqlite3_progress_handler(
                     self.db.get(),
                     1000,
@@ -1031,15 +1454,9 @@ impl ReadOnlySqlite {
             }
             if rc & 255 == 14 {
                 self.prepare_wal_reader()?;
-            } else if !matches!(rc & 255, 5 | 6) {
+            } else {
                 return Err(sqlite_diagnostic(rc));
             }
-            std::thread::sleep(
-                Duration::from_millis(5).min(
-                    self.deadline
-                        .saturating_duration_since(std::time::Instant::now()),
-                ),
-            );
         }
     }
     fn prepare_wal_reader(&self) -> Result<()> {
@@ -1102,6 +1519,120 @@ pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_process_queries_preserve_invocation_parent_and_cwd() -> Result<()> {
+        let pid = std::process::id();
+        let identity = process_identity(pid)?;
+        assert_eq!(
+            process_start(pid).as_deref(),
+            identity["started_at"].as_str()
+        );
+        assert_eq!(process_identity(pid)?, identity);
+        // SAFETY: getppid has no pointer or ownership requirements.
+        assert_eq!(process_parent(pid), Some(unsafe { libc::getppid() } as u32));
+        assert_eq!(
+            std::fs::canonicalize(process_cwd(pid)?).map_err(|e| e.to_string())?,
+            std::env::current_dir().map_err(|e| e.to_string())?
+        );
+        assert!(user_processes()?.contains(&pid));
+        assert!(!str_at(&identity, "command").unwrap_or("").is_empty());
+        assert!(process_identity(u32::MAX).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn file_projection_cache_tracks_metadata_and_skips_unchanged_parse_and_write() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-file-cache-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let source = dir.join("session.jsonl");
+            std::fs::write(&source, "first").map_err(|e| e.to_string())?;
+            let req = json!({"state_dir":dir});
+            let reads = std::cell::Cell::new(0);
+            let read = || {
+                reads.set(reads.get() + 1);
+                Ok(json!(
+                    std::fs::read_to_string(&source).map_err(|e| e.to_string())?
+                ))
+            };
+            assert_eq!(
+                cached_file_projection(&req, "cache", &source, read)?,
+                "first"
+            );
+            assert_eq!(
+                cached_file_projection(&req, "cache", &source, read)?,
+                "first"
+            );
+            assert_eq!(reads.get(), 1);
+            let replacement = dir.join("replacement");
+            std::fs::write(&replacement, "other").map_err(|e| e.to_string())?;
+            std::fs::rename(&replacement, &source).map_err(|e| e.to_string())?;
+            assert_eq!(
+                cached_file_projection(&req, "cache", &source, read)?,
+                "other"
+            );
+            assert_eq!(
+                reads.get(),
+                2,
+                "Same-size replacement invalidates by vnode identity"
+            );
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_reset_restores_the_initial_interval() {
+        let mut backoff = RetryBackoff::default();
+        let first = backoff.failed();
+        assert!((Duration::from_millis(250)..=Duration::from_millis(312)).contains(&first));
+        let second = backoff.failed();
+        assert!(second >= Duration::from_millis(500));
+        for _ in 0..100 {
+            assert!(backoff.failed() <= Duration::from_secs(30));
+        }
+        backoff.reset();
+        assert!(backoff.failed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn wake_pipe_blocks_until_notification_and_coalesces_without_losing_readiness() -> Result<()> {
+        let wake = std::sync::Arc::new(WakePipe::new()?);
+        let worker = wake.clone();
+        let (ready, wait) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ready.send(()).map_err(|e| e.to_string())?;
+            poll_until(
+                &mut [libc::pollfd {
+                    fd: worker.read_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }],
+                None,
+            )
+        });
+        wait.recv_timeout(Duration::from_secs(1))
+            .map_err(|e| e.to_string())?;
+        for _ in 0..10 {
+            wake.notify();
+        }
+        assert!(waiter.join().map_err(|_| "Wake waiter panicked")??);
+        wake.drain();
+        assert!(!poll_until(
+            &mut [libc::pollfd {
+                fd: wake.read_fd(),
+                events: libc::POLLIN,
+                revents: 0
+            }],
+            Some(std::time::Instant::now())
+        )?);
+        Ok(())
+    }
+
     #[test]
     fn structured_diagnostics_bound_envelopes_and_control_characters() {
         assert_eq!(

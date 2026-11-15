@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 mod channels;
+#[cfg(test)]
+mod event_tests;
 mod host_hub;
 mod http_actions;
 mod mcp;
@@ -52,6 +54,16 @@ fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+pub(crate) fn wake_daemon() {
+    let fd = SIGNAL_PIPE.load(Ordering::SeqCst);
+    if fd >= 0 {
+        // SAFETY: the daemon owns this nonblocking descriptor until its workers join.
+        unsafe {
+            libc::write(fd, [1u8].as_ptr().cast(), 1);
+        }
+    }
+}
+
 pub(crate) fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
@@ -63,12 +75,31 @@ struct OidcRecovery {
     worker: thread::JoinHandle<Result<(String, Value), String>>,
 }
 
+struct EndpointProbe {
+    due: Instant,
+    calm: u32,
+    bindings: Vec<String>,
+    worker: Option<thread::JoinHandle<bool>>,
+}
+
 type SetupResult = Result<(bool, bool, Vec<String>), String>;
 
 struct SetupInspection {
     generation: u64,
     value: SetupResult,
+    done: Arc<AtomicBool>,
     worker: Option<(u64, thread::JoinHandle<SetupResult>)>,
+}
+
+struct SetupFinished(Arc<AtomicBool>, Arc<(Mutex<u64>, std::sync::Condvar)>);
+impl Drop for SetupFinished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+        let mut revision = self.1 .0.lock().unwrap_or_else(|e| e.into_inner());
+        *revision = revision.wrapping_add(1);
+        self.1 .1.notify_all();
+        wake_daemon();
+    }
 }
 
 pub struct DaemonService {
@@ -80,7 +111,8 @@ pub struct DaemonService {
     events: Vec<thread::JoinHandle<()>>,
     receivers: HashMap<String, thread::JoinHandle<()>>,
     caller_cache: Mutex<HashMap<u64, Value>>,
-    probes: HashMap<String, (Instant, Option<thread::JoinHandle<()>>)>,
+    probes: HashMap<String, EndpointProbe>,
+    observations: HashMap<String, (u64, Instant)>,
     session_activity: Option<super::session_activity::SessionActivity>,
     ui: Option<Arc<UiMailbox>>,
     logins: HashMap<String, Arc<InteractiveLogin>>,
@@ -92,10 +124,17 @@ pub struct DaemonService {
     host_hub_reload_failed: bool,
     uninstall: Option<bool>,
     active_settings_hub: Option<String>,
+    menu_open: bool,
+    directory_open: bool,
+    last_ui_revision: Mutex<Option<Value>>,
+    last_ui_frame: Mutex<Option<Value>>,
     oidc_recoveries: HashMap<String, OidcRecovery>,
+    auth_backoff: HashMap<String, crate::support::RetryBackoff>,
+    ack_backoff: Mutex<HashMap<String, (Instant, crate::support::RetryBackoff)>>,
     retired_auth: Vec<OidcRecovery>,
     last_app_action: HashMap<String, String>,
     setup_inspections: HashMap<String, SetupInspection>,
+    setup_completion: Arc<(Mutex<u64>, std::sync::Condvar)>,
     last_host_hub_error: Option<String>,
     last_hub_errors: HashMap<String, (String, bool)>,
     channel_inventories: HashMap<String, Arc<ChannelInventory>>,
@@ -149,6 +188,9 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     let write_pipe = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
     unsafe {
         libc::fcntl(write_pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(read_pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(write_pipe.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(read_pipe.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
     }
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     SIGNAL_PIPE.store(write_pipe.as_raw_fd(), Ordering::SeqCst);
@@ -171,6 +213,10 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
     );
     let mut calls: Vec<thread::JoinHandle<()>> = Vec::new();
     let mut last_poll = Instant::now();
+    let mut poll_requested = true;
+    let mut ui_retry = None;
+    let mut ui_backoff = crate::support::RetryBackoff::default();
+    let mut ui_started = Instant::now();
     'running: while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         loop {
             match listener.accept() {
@@ -195,12 +241,13 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
                 }
             }
         }
-        if last_poll.elapsed() > Duration::from_millis(250) {
+        if poll_requested || last_poll.elapsed() >= Duration::from_secs(1) {
             if let Ok(mut s) = service.try_lock() {
                 if let Err(e) = s.poll() {
                     eprintln!("cito poll: {e}");
                 }
                 last_poll = Instant::now();
+                poll_requested = false;
             }
         }
         let mut pending = Vec::new();
@@ -228,8 +275,20 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
                 if let Some(old) = ui.take() {
                     retired_ui.push(old);
                 }
-                ui = spawn_ui(service.clone());
+                if ui_started.elapsed() >= Duration::from_secs(30) {
+                    ui_backoff.reset();
+                }
+                ui_retry = Some(Instant::now() + ui_backoff.failed());
             }
+        }
+        if ui.is_none() && ui_retry.is_some_and(|at| at <= Instant::now()) {
+            ui = spawn_ui(service.clone());
+            ui_started = Instant::now();
+            ui_retry = if ui.is_none() {
+                Some(Instant::now() + ui_backoff.failed())
+            } else {
+                None
+            };
         }
         let mut pending_ui = Vec::new();
         for old in retired_ui.drain(..) {
@@ -241,13 +300,34 @@ fn run_daemon_inner(config: &NativeConfig, plugins: &LoadedPlugins) -> Result<()
             }
         }
         retired_ui = pending_ui;
-        let mut poll = libc::pollfd {
-            fd: read_pipe.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        unsafe {
-            libc::poll(&mut poll, 1, 20);
+        let mut fds = [
+            libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: read_pipe.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let deadline = ui_retry
+            .unwrap_or(last_poll + Duration::from_secs(1))
+            .min(last_poll + Duration::from_secs(1));
+        crate::support::poll_until(&mut fds, Some(deadline))?;
+        if fds[1].revents != 0 {
+            let mut bytes = [0u8; 256];
+            // SAFETY: the read end is live and nonblocking; coalesced hints are drained together.
+            while unsafe {
+                libc::read(
+                    read_pipe.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                )
+            } > 0
+            {}
+            poll_requested = true;
         }
     }
     drop(listener);
@@ -315,6 +395,7 @@ impl DaemonService {
         }
         let plugins = &active_plugins;
         let state = LocalState::open(&config.state_dir)?;
+        state.db.set_commit_notifier(wake_daemon)?;
         // Daemon construction runs only after acquiring the exclusive owner lock.
         state.recover_dispatch_leases()?;
         let local = Arc::new(HubEngine::open(&config.state_dir)?);
@@ -343,6 +424,7 @@ impl DaemonService {
             receivers: HashMap::new(),
             caller_cache: Mutex::new(HashMap::new()),
             probes: HashMap::new(),
+            observations: HashMap::new(),
             session_activity: Some(super::session_activity::SessionActivity::new(
                 config, plugins,
             )),
@@ -356,10 +438,17 @@ impl DaemonService {
             host_hub_reload_failed: false,
             uninstall: None,
             active_settings_hub: None,
+            menu_open: false,
+            directory_open: false,
+            last_ui_revision: Mutex::new(None),
+            last_ui_frame: Mutex::new(None),
             oidc_recoveries: HashMap::new(),
+            auth_backoff: HashMap::new(),
+            ack_backoff: Mutex::new(HashMap::new()),
             retired_auth: Vec::new(),
             last_app_action: HashMap::new(),
             setup_inspections: HashMap::new(),
+            setup_completion: Arc::new((Mutex::new(0), std::sync::Condvar::new())),
             last_host_hub_error: None,
             last_hub_errors: HashMap::new(),
             channel_inventories: HashMap::new(),
@@ -373,6 +462,7 @@ impl DaemonService {
                 SetupInspection {
                     generation: 0,
                     value: super::setup::try_inspect_plugin_setup(plugin),
+                    done: Arc::new(AtomicBool::new(true)),
                     worker: None,
                 },
             );
@@ -401,14 +491,20 @@ impl DaemonService {
             .or_insert_with(|| SetupInspection {
                 generation: 0,
                 value: Err("Setup inspection pending".into()),
+                done: Arc::new(AtomicBool::new(false)),
                 worker: None,
             });
         entry.generation = entry.generation.wrapping_add(1);
         if entry.worker.is_none() {
             if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
+                entry.done.store(false, Ordering::SeqCst);
+                let notice = SetupFinished(entry.done.clone(), self.setup_completion.clone());
                 entry.worker = Some((
                     entry.generation,
-                    thread::spawn(move || super::setup::try_inspect_plugin_setup(&plugin)),
+                    thread::spawn(move || {
+                        let _notice = notice;
+                        super::setup::try_inspect_plugin_setup(&plugin)
+                    }),
                 ));
             }
         }
@@ -418,11 +514,9 @@ impl DaemonService {
     fn refresh_setup_inspections(&mut self) {
         let mut changed = false;
         for (id, entry) in &mut self.setup_inspections {
-            if entry
-                .worker
-                .as_ref()
-                .is_some_and(|(_, worker)| worker.is_finished())
-            {
+            if entry.worker.as_ref().is_some_and(|(_, worker)| {
+                entry.done.load(Ordering::SeqCst) || worker.is_finished()
+            }) {
                 let (generation, worker) = entry.worker.take().unwrap();
                 let value = worker
                     .join()
@@ -438,9 +532,14 @@ impl DaemonService {
             // A superseded completion is discarded and refreshed at the latest generation.
             if let Some(plugin) = self.plugins.find_by_id(id).cloned() {
                 let generation = entry.generation;
+                entry.done.store(false, Ordering::SeqCst);
+                let notice = SetupFinished(entry.done.clone(), self.setup_completion.clone());
                 entry.worker = Some((
                     generation,
-                    thread::spawn(move || super::setup::try_inspect_plugin_setup(&plugin)),
+                    thread::spawn(move || {
+                        let _notice = notice;
+                        super::setup::try_inspect_plugin_setup(&plugin)
+                    }),
                 ));
             }
         }
@@ -643,6 +742,16 @@ impl DaemonService {
                         },
                     );
                 }
+                let failed = recovered.as_ref().is_some_and(|result| result.is_err());
+                let retry_delay = if failed {
+                    self.auth_backoff
+                        .entry(name.clone())
+                        .or_default()
+                        .failed()
+                        .as_millis() as u64
+                } else {
+                    1000
+                };
                 // A background refresh cannot revoke an unexpired, accepted credential.
                 if recovered.as_ref().is_none_or(|result| result.is_err())
                     && rejected_hash.is_none()
@@ -653,7 +762,7 @@ impl DaemonService {
                     })
                 {
                     if let Some(mut old) = previous.take() {
-                        old.auth_retry_at = now_ms() + 5000;
+                        old.auth_retry_at = now_ms() + retry_delay;
                         self.slots.insert(name.clone(), old);
                     }
                     continue;
@@ -661,6 +770,7 @@ impl DaemonService {
                 match recovered.unwrap_or_else(|| Err("AUTH_UNAVAILABLE: recovery pending".into()))
                 {
                     Ok((token, identity)) => {
+                        self.auth_backoff.remove(&name);
                         client.expires_at = token
                             .split('.')
                             .nth(1)
@@ -678,7 +788,7 @@ impl DaemonService {
                     Err(_) => {
                         client.bearer = None;
                         client.expires_at = 0;
-                        client.auth_retry_at = now_ms() + 5000;
+                        client.auth_retry_at = now_ms() + retry_delay;
                         client.auth_rejected_hash = rejected_hash.clone();
                         if let Some(identity) =
                             super::login::offline_identity(&self.config.state_dir, &name, &hub)
@@ -705,7 +815,7 @@ impl DaemonService {
                 if retained {
                     client.inherit_authority(old);
                 } else {
-                    old.closed.store(true, Ordering::SeqCst);
+                    old.close();
                 }
             }
             if !retained {
@@ -759,7 +869,7 @@ impl DaemonService {
         for name in removed {
             self.channel_inventories.remove(&name);
             if let Some(slot) = self.slots.remove(&name) {
-                slot.closed.store(true, Ordering::SeqCst);
+                slot.close();
             }
         }
         if self
@@ -994,9 +1104,19 @@ impl DaemonService {
         }
         for (hub, slot) in &self.slots {
             let key = format!("directory:{hub}");
-            if !self.receivers.contains_key(&key)
+            let revision = slot.event_revision();
+            let due = self
+                .observations
+                .get(&key)
+                .is_none_or(|(seen, at)| *seen != revision || *at <= Instant::now());
+            if due
+                && !self.receivers.contains_key(&key)
                 && (slot.config["authMode"] != "oidc" || slot.bearer.is_some())
             {
+                self.observations.insert(
+                    key.clone(),
+                    (revision, Instant::now() + Duration::from_secs(30)),
+                );
                 let slot = slot.clone();
                 let state = self.state.clone();
                 let host_id = self.host_id.clone();
@@ -1020,37 +1140,9 @@ impl DaemonService {
                 );
             }
         }
+        self.schedule_probes()?;
         for row in self.state.active()? {
             let hub = string(&row, "hub");
-            let probe_key = format!("{hub}:{}", string(&row, "listener_id"));
-            let probe = self
-                .probes
-                .entry(probe_key)
-                .or_insert_with(|| (Instant::now() + Duration::from_secs(1), None));
-            if probe.1.as_ref().is_some_and(|t| t.is_finished()) {
-                if let Some(t) = probe.1.take() {
-                    let _ = t.join();
-                }
-                probe.0 = Instant::now() + Duration::from_millis(500);
-            }
-            if probe.1.is_none() && probe.0 <= Instant::now() && row["harness"] != "human" {
-                if let (Some(plugin), Some(client)) = (
-                    self.plugins.find_by_id(string(&row, "harness")).cloned(),
-                    self.slots
-                        .get(hub)
-                        .filter(|s| !s.closed.load(Ordering::SeqCst))
-                        .cloned(),
-                ) {
-                    let state = self.state.clone();
-                    let captured = row.clone();
-                    let dir = self.config.state_dir.clone();
-                    probe.1 = Some(thread::spawn(move || {
-                        let _ = super::receiver::probe_listener(
-                            &state, &client, &captured, &plugin, &dir,
-                        );
-                    }));
-                }
-            }
             let key = format!("{hub}:{}", string(&row, "listener_id"));
             if self.receivers.contains_key(&key) {
                 continue;
@@ -1061,6 +1153,37 @@ impl DaemonService {
             if slot.config["authMode"] == "oidc" && slot.bearer.is_none() {
                 continue;
             }
+            let revision = slot.event_revision();
+            let retry_due = self
+                .state
+                .db
+                .query(
+                    "SELECT retry_at_ms FROM wake_retries WHERE hub=? AND listener_id=?",
+                    &[row["hub"].clone(), row["listener_id"].clone()],
+                )?
+                .first()
+                .and_then(|r| r["retry_at_ms"].as_u64())
+                .is_some_and(|at| at <= now_ms());
+            let channel = format!("{}:{}", self.host_id, string(&row, "harness"));
+            let heartbeat_due = slot
+                .cached_directory()
+                .iter()
+                .find(|remote| remote["listener_id"] == row["listener_id"])
+                .and_then(|remote| remote["channels"][&channel]["updated_at_ms"].as_u64())
+                .is_some_and(|at| slot.server_now().saturating_sub(at) >= 20_000);
+            if !retry_due
+                && !heartbeat_due
+                && self
+                    .observations
+                    .get(&key)
+                    .is_some_and(|(seen, at)| *seen == revision && *at > Instant::now())
+            {
+                continue;
+            }
+            self.observations.insert(
+                key.clone(),
+                (revision, Instant::now() + Duration::from_secs(30)),
+            );
             let state = self.state.clone();
             let state_dir = self.config.state_dir.clone();
             let host_id = self.host_id.clone();
@@ -1098,6 +1221,7 @@ impl DaemonService {
                 }
             }));
         }
+        self.update_discovery_demand();
         let live = self.live_receivers()?;
         let changed = self
             .session_activity
@@ -1109,6 +1233,116 @@ impl DaemonService {
         if changed || self.last_ui.elapsed() >= Duration::from_secs(1) {
             self.push_ui();
             self.last_ui = Instant::now();
+        }
+        Ok(())
+    }
+
+    fn schedule_probes(&mut self) -> Result<(), String> {
+        let mut groups = std::collections::BTreeMap::<String, Vec<Value>>::new();
+        for row in self
+            .state
+            .active()?
+            .into_iter()
+            .filter(|row| row["harness"] != "human")
+        {
+            let start = row["endpoint_pid"]
+                .as_u64()
+                .and_then(|pid| crate::support::process_start(pid as u32));
+            let key = json!([
+                row["harness"],
+                row["session_id"],
+                row["endpoint_pid"],
+                row["cwd"],
+                start
+            ])
+            .to_string();
+            groups.entry(key).or_default().push(row);
+        }
+        self.probes.retain(|key, probe| {
+            groups.contains_key(key)
+                || probe
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+        });
+        for (key, rows) in groups {
+            let bindings: Vec<String> = rows
+                .iter()
+                .map(|row| -> Result<String,String> {
+                    let pending = !self.state.db.query("SELECT 1 FROM local_signals WHERE hub=? AND listener_id=? AND state IN ('RECEIVED','DISPATCHING') LIMIT 1", &[row["hub"].clone(),row["listener_id"].clone()])?.is_empty();
+                    Ok(json!([row["hub"], row["binding_generation"], row["owner_token"],pending]).to_string())
+                })
+                .collect::<Result<_,_>>()?;
+            let probe = self.probes.entry(key).or_insert_with(|| EndpointProbe {
+                due: Instant::now(),
+                calm: 0,
+                bindings: bindings.clone(),
+                worker: None,
+            });
+            if probe
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+            {
+                let quiet = probe
+                    .worker
+                    .take()
+                    .is_some_and(|worker| worker.join().unwrap_or(false));
+                probe.calm = if quiet {
+                    probe.calm.saturating_add(1).min(5)
+                } else {
+                    0
+                };
+                probe.due = Instant::now() + Duration::from_secs((1u64 << probe.calm).min(30));
+            }
+            if bindings != probe.bindings {
+                probe.bindings = bindings;
+                probe.due = Instant::now();
+                probe.calm = 0;
+            }
+            if probe.worker.is_some() || probe.due > Instant::now() {
+                continue;
+            }
+            let Some(plugin) = self
+                .plugins
+                .find_by_id(string(&rows[0], "harness"))
+                .cloned()
+            else {
+                continue;
+            };
+            let state = self.state.clone();
+            let dir = self.config.state_dir.clone();
+            let targets: Vec<_> = rows
+                .into_iter()
+                .filter_map(|row| {
+                    self.slots
+                        .get(string(&row, "hub"))
+                        .cloned()
+                        .map(|client| (row, client))
+                })
+                .collect();
+            if targets.is_empty() {
+                continue;
+            }
+            probe.worker = Some(thread::spawn(move || {
+                let row = &targets[0].0;
+                let result = super::receiver::plugin_request(
+                    &plugin,
+                    &json!({"op":"probe","session_id":row["session_id"],"endpoint_pid":row["endpoint_pid"],"cwd":row["cwd"],"state_dir":dir}),
+                    None,
+                    None,
+                );
+                let quiet = result
+                    .as_ref()
+                    .is_ok_and(|result| result["ok"] == true && result["status"] == "alive");
+                if let Ok(result) = result {
+                    for (row, client) in targets {
+                        let _ = super::receiver::apply_probe(&state, &client, &row, &result);
+                    }
+                }
+                wake_daemon();
+                quiet
+            }));
         }
         Ok(())
     }
@@ -1360,19 +1594,45 @@ impl DaemonService {
 
     /// Give fast providers a bounded first-render opportunity. Workers retain
     /// ownership after the deadline and are reaped by the regular poll path.
+    fn update_discovery_demand(&mut self) {
+        let configured = self
+            .plugins
+            .agent_plugins()
+            .into_iter()
+            .filter(|plugin| {
+                self.inspect_setup(plugin)
+                    .is_ok_and(|(_, configured, _)| configured)
+            })
+            .map(|plugin| plugin.id.clone())
+            .collect();
+        let background = self.menu_open
+            || self.directory_open
+            || self.active_settings_hub.is_some()
+            || self
+                .slots
+                .values()
+                .any(|slot| slot.config["autoListen"] == true);
+        if let Some(activity) = self.session_activity.as_mut() {
+            activity.discovery_demand(background, configured);
+        }
+    }
+
     fn refresh_available(&mut self) -> Result<(), String> {
+        self.update_discovery_demand();
         let live = self.live_receivers()?;
         if let Some(activity) = self.session_activity.as_mut() {
             activity.refresh_discovery();
-            activity.tick(&self.state, &live)?;
             let deadline = Instant::now() + Duration::from_millis(1500);
-            while activity.discovery_pending() && Instant::now() < deadline && !shutdown_requested()
-            {
-                thread::sleep(
-                    Duration::from_millis(10)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
+            loop {
+                let observed = activity.completion_revision();
                 activity.tick(&self.state, &live)?;
+                if !activity.discovery_pending()
+                    || Instant::now() >= deadline
+                    || shutdown_requested()
+                {
+                    break;
+                }
+                activity.wait_for_completion(observed, deadline);
             }
         }
         self.auto_listen()
@@ -1443,13 +1703,13 @@ impl DaemonService {
             let _ = pending.worker.join();
         }
         for slot in self.slots.values() {
-            slot.closed.store(true, Ordering::SeqCst);
+            slot.close();
         }
         for (_, receiver) in self.receivers.drain() {
             let _ = receiver.join();
         }
-        for (_, (_, probe)) in self.probes.drain() {
-            if let Some(probe) = probe {
+        for (_, probe) in self.probes.drain() {
+            if let Some(probe) = probe.worker {
                 let _ = probe.join();
             }
         }

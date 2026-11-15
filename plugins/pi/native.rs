@@ -122,32 +122,13 @@ fn interactive_candidate(req: &Value, pid: u32) -> Result<bool> {
     if req["op"] != "discover_sessions" {
         return Ok(true);
     }
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "tty=,command="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return if alive(pid) {
-            Err("Cannot inspect live Pi process".into())
-        } else {
-            Ok(false)
-        };
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut words = text.split_whitespace();
-    let Some(tty) = words.next() else {
-        return if alive(pid) {
-            Err("Missing live Pi process description".into())
-        } else {
-            Ok(false)
-        };
-    };
-    if matches!(tty, "?" | "??")
+    let command = process_command(pid)?;
+    if !process_has_tty(pid)
         && env_value(req, "CITO_PI_ALLOW_HEADLESS_DISCOVERY").as_deref() != Some("1")
     {
         return Ok(false);
     }
-    let args: Vec<_> = words.collect();
+    let args: Vec<_> = command.split_whitespace().collect();
     Ok(!args.iter().any(|a| {
         matches!(
             *a,
@@ -168,24 +149,11 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
     if inspection["configured"] != true {
         return Ok(());
     }
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,uid=,command="])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err("Process inspection failed".into());
-    }
-    // SAFETY: geteuid takes no pointers and has no caller obligations.
-    let uid = unsafe { libc::geteuid() };
-    let mut processes: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut columns = line.split_whitespace();
-            let p = columns.next()?.parse().ok()?;
-            (columns.next()?.parse::<u32>().ok()? == uid
-                && !out.iter().any(|(pid, _)| *pid == p)
-                && matches_process(&columns.collect::<Vec<_>>().join(" ")))
-            .then_some(p)
+    let mut processes: Vec<u32> = user_processes()?
+        .into_iter()
+        .filter(|p| {
+            !out.iter().any(|(pid, _)| pid == p)
+                && process_command(*p).is_ok_and(|command| matches_process(&command))
         })
         .collect();
     // Stable ordering makes the shared-cwd session assignment consistent across requests.
@@ -205,17 +173,8 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         if !matches_process(str_at(&identity, "command").unwrap_or("")) {
             continue;
         }
-        let cwd_output = match std::process::Command::new("/usr/sbin/lsof")
-            .args(["-a", "-d", "cwd", "-Fn", "-p", &p.to_string()])
-            .output()
-        {
-            Ok(output) if output.status.success() => output,
-            _ => continue,
-        };
-        let cwd_text = String::from_utf8_lossy(&cwd_output.stdout);
-        let Some(cwd) = cwd_text.lines().find_map(|l| l.strip_prefix('n')) else {
-            continue;
-        };
+        let Ok(cwd) = process_cwd(p) else { continue };
+        let cwd = cwd.as_str();
         let basename = Path::new(cwd)
             .file_name()
             .and_then(|s| s.to_str())
@@ -233,25 +192,32 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         let mut v = json!({"session_id":format!("pid-{p}"),"session_name":basename,"cwd":cwd});
         if let Some((modified, path)) = latest {
             use std::io::BufRead;
-            v["session_id"] = json!(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
-            if let Ok(file) = fs::File::open(path) {
-                for line in std::io::BufReader::new(file)
-                    .lines()
-                    .map_while(std::result::Result::ok)
-                {
+            let projection = cached_file_projection(req, "pi/transcript-cache", &path, || {
+                let mut value =
+                    json!({"session_id":path.file_stem().and_then(|s| s.to_str()).unwrap_or("")});
+                let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+                for line in std::io::BufReader::new(file).lines() {
+                    let line = line.map_err(|e| e.to_string())?;
                     let Ok(row) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
                     if row["type"] == "session" || row.get("type").is_none() {
                         if let Some(id) = str_at(&row, "id") {
-                            v["session_id"] = json!(id);
+                            value["session_id"] = json!(id);
                         }
                     }
                     if let Some(name) =
                         str_at(&row, "session_name").or_else(|| str_at(&row, "name"))
                     {
-                        v["session_name"] = json!(name);
+                        value["session_name"] = json!(name);
                     }
+                }
+                Ok(value)
+            });
+            if let Ok(projection) = projection {
+                v["session_id"] = projection["session_id"].clone();
+                if let Some(name) = projection.get("session_name") {
+                    v["session_name"] = name.clone();
                 }
             }
             v["updated_at_ms"] = json!(modified
@@ -270,7 +236,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
             v["needs_reload"] = json!(true);
             v["reload_hint"] = json!("Run /reload in Pi to enable 1-click listen");
         }
-        // Fence PID reuse while lsof and session metadata were read.
+        // Fence PID reuse while vnode and session metadata were read.
         match process_identity(p) {
             Ok(current) if current == identity => out.push((p, v)),
             Ok(_) => {}
@@ -378,8 +344,9 @@ fn candidates(req: &Value) -> Result<Candidates> {
     process_candidates(req, &mut out)?;
     Ok((out, false, None))
 }
-fn as_caller(p: u32, v: &Value) -> Value {
+fn as_caller(req: &Value, p: u32, v: &Value) -> Value {
     caller(
+        req,
         "pi",
         str_at(v, "session_id").unwrap_or(""),
         str_at(v, "cwd").unwrap_or(""),
@@ -415,7 +382,7 @@ pub fn handle(input: &Value) -> Result<Value> {
     };
     match op {
         "discover_sessions" => Ok(
-            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c["reload_hint"]=v["reload_hint"].clone();c}).collect::<Vec<_>>()}),
+            json!({"ok":true,"sessions":cs.iter().map(|(p,v)|{let mut c=as_caller(req,*p,v);c["updated_at_ms"]=v["updated_at_ms"].clone();c["needs_reload"]=v["needs_reload"].clone();c["reload_hint"]=v["reload_hint"].clone();c}).collect::<Vec<_>>()}),
         ),
         "resolve_caller" | "verify" => {
             if cs.iter().any(|(_, v)| v["needs_reload"] == true) {
@@ -478,7 +445,7 @@ pub fn handle(input: &Value) -> Result<Value> {
                 ));
             }
             let (p, v) = &matches[0];
-            let c = as_caller(*p, v);
+            let c = as_caller(req, *p, v);
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }

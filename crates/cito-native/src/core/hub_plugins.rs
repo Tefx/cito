@@ -2,6 +2,7 @@
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -248,18 +249,7 @@ impl ChannelProcess {
             }
         }
         if let Ok(mut child) = self.child.lock() {
-            let until = Instant::now() + Duration::from_millis(200);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Err(_) => break,
-                    _ => {}
-                }
-                if Instant::now() >= until {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
+            let _ = crate::support::wait_child_exit(&child, Duration::from_millis(200));
             // SAFETY: spawn gave this child its own process group. Kill descendants
             // too: inherited stdout pipes must close before joining the reader.
             unsafe {
@@ -296,7 +286,17 @@ fn send_line(stdin: &Mutex<Option<ChildStdin>>, value: &Value) -> Result<(), Str
             Ok(0) => return Err("PLUGIN_EXEC_FAILED: closed stdin".into()),
             Ok(n) => offset += n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
-                thread::sleep(Duration::from_millis(2))
+                crate::support::poll_until(
+                    &mut [libc::pollfd {
+                        fd: stdin.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    }],
+                    Some(until),
+                )?;
+                if Instant::now() >= until {
+                    return Err("PLUGIN_EXEC_FAILED: channel input timed out".into());
+                }
             }
             Err(e) => return Err(format!("PLUGIN_EXEC_FAILED: {e}")),
         }

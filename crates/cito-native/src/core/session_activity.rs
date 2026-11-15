@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1500);
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const BADGE_TIMEOUT: Duration = Duration::from_millis(1500);
 const BADGE_RETRY: Duration = Duration::from_millis(250);
 const MAX_WORKERS: usize = 4;
@@ -40,6 +40,7 @@ struct Discovery {
     refreshed_revision: u64,
     due: Instant,
     worker: Option<Worker<Vec<Value>>>,
+    complete: Arc<AtomicBool>,
 }
 
 /// A PID addresses one endpoint even when it changes sessions. Without a PID the
@@ -94,6 +95,23 @@ pub struct SessionActivity {
     history_loaded: bool,
     stopping: Arc<AtomicBool>,
     closed: bool,
+    background_discovery: bool,
+    configured: Option<HashSet<String>>,
+    completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+struct DiscoveryFinished {
+    done: Arc<AtomicBool>,
+    completion: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+impl Drop for DiscoveryFinished {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Ok(mut version) = self.completion.0.lock() {
+            *version = version.wrapping_add(1);
+            self.completion.1.notify_all();
+        }
+        super::daemon::wake_daemon();
+    }
 }
 impl SessionActivity {
     pub fn new(config: &NativeConfig, plugins: &LoadedPlugins) -> Self {
@@ -120,12 +138,33 @@ impl SessionActivity {
                     refreshed_revision: 0,
                     due: Instant::now(),
                     worker: None,
+                    complete: Arc::new(AtomicBool::new(false)),
                 })
                 .collect(),
             badges: BTreeMap::new(),
             history_loaded: false,
             stopping: Arc::new(AtomicBool::new(false)),
             closed: false,
+            background_discovery: true,
+            configured: None,
+            completion: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+        }
+    }
+
+    pub fn discovery_demand(&mut self, background: bool, configured: HashSet<String>) {
+        self.background_discovery = background;
+        self.configured = Some(configured);
+    }
+    pub fn completion_revision(&self) -> u64 {
+        self.completion.0.lock().map(|v| *v).unwrap_or(0)
+    }
+    pub fn wait_for_completion(&self, observed: u64, deadline: Instant) {
+        if let Ok(version) = self.completion.0.lock() {
+            let _ = self.completion.1.wait_timeout_while(
+                version,
+                deadline.saturating_duration_since(Instant::now()),
+                |v| *v == observed,
+            );
         }
     }
 
@@ -348,7 +387,15 @@ impl SessionActivity {
             if capacity == 0 {
                 break;
             }
-            if provider.worker.is_some() || provider.due > Instant::now() {
+            if provider.worker.is_some()
+                || provider.due > Instant::now()
+                || self
+                    .configured
+                    .as_ref()
+                    .is_some_and(|ids| !ids.contains(&provider.plugin.id))
+                || (!self.background_discovery
+                    && provider.requested_generation == provider.started_generation)
+            {
                 continue;
             }
             provider.started_revision = provider
@@ -368,10 +415,16 @@ impl SessionActivity {
                 "retained_session_ids":retained,
                 "recent_window_ms":plugin.auto_listen.recent_window_ms.unwrap_or(900_000),"plugin_dir":selected_plugin_dir(&self.state_dir, &plugin)});
             let stopping = self.stopping.clone();
+            provider.complete.store(false, Ordering::Release);
+            let finished = DiscoveryFinished {
+                done: provider.complete.clone(),
+                completion: self.completion.clone(),
+            };
             provider.worker = Some(
                 thread::Builder::new()
                     .name("cito-discovery".into())
                     .spawn(move || {
+                        let _finished = finished;
                         let response = plugin_request_with_progress(
                             &plugin,
                             &request,
@@ -407,7 +460,13 @@ impl SessionActivity {
     fn reap_discovery(&mut self) -> bool {
         let mut changed = false;
         for provider in &mut self.discovery {
-            if !provider.worker.as_ref().is_some_and(|w| w.is_finished()) {
+            if provider.worker.is_none()
+                || (!provider.complete.load(Ordering::Acquire)
+                    && !provider
+                        .worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.is_finished()))
+            {
                 continue;
             }
             if let Some(worker) = provider.worker.take() {

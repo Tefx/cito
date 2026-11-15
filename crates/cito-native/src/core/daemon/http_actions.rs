@@ -7,7 +7,7 @@ use super::{
     mcp::{tools_list, validate_tool_input, wait_send_receipt},
     request_shutdown, shutdown_requested,
     ui_ipc::{bounded_frame, REQUEST_LIMIT},
-    DaemonService, SHUTDOWN_REQUESTED,
+    wake_daemon, DaemonService, SHUTDOWN_REQUESTED,
 };
 use crate::core::{
     config::repair_default_hub,
@@ -25,8 +25,7 @@ use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(super) struct InteractiveLogin {
@@ -111,7 +110,14 @@ pub(super) fn dispatch_action(
     );
     // Await invalidated inspections without holding service. Retain the final
     // guard so another mutation cannot invalidate them before receipt publication.
+    let completion = service
+        .lock()
+        .map_err(|_| "Daemon lock poisoned")?
+        .setup_completion
+        .clone();
+    let deadline = Instant::now() + Duration::from_secs(12);
     let mut s = loop {
+        let before = *completion.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
         if !refresh_setup {
             break s;
@@ -127,8 +133,20 @@ pub(super) fn dispatch_action(
         {
             break s;
         }
+        if Instant::now() >= deadline {
+            result = Err("Setup inspection timed out".into());
+            break s;
+        }
         drop(s);
-        thread::sleep(Duration::from_millis(5));
+        let revision = completion.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = completion
+            .1
+            .wait_timeout_while(
+                revision,
+                deadline.saturating_duration_since(Instant::now()),
+                |revision| *revision == before,
+            )
+            .unwrap_or_else(|e| e.into_inner());
     };
     if interactive_login(action) {
         s.record_hub_result(action, &result, None);
@@ -144,6 +162,8 @@ pub(super) fn dispatch_action(
     } else {
         s.push_ui();
     }
+    drop(s);
+    wake_daemon();
     result
 }
 
@@ -226,7 +246,7 @@ fn dispatch_action_inner(
     }
     let (token, identity) = result?;
     if let Some(old) = s.slots.remove(&hub) {
-        old.closed.store(true, Ordering::SeqCst);
+        old.close();
     }
     for row in s.state.active()?.into_iter().filter(|row| {
         row["hub"] == hub
@@ -555,7 +575,20 @@ impl DaemonService {
         }
         self.reload_slots()?;
         match op {
-            "get_snapshot" => return self.snapshot(),
+            "get_snapshot" => {
+                self.refresh_available()?;
+                self.observations
+                    .retain(|key, _| !key.starts_with("directory:"));
+                wake_daemon();
+                return self.snapshot();
+            }
+            "open_menu" => {
+                self.menu_open = true;
+                self.refresh_available()?;
+            }
+            "close_menu" => {
+                self.menu_open = false;
+            }
             "cli_human_device" => {
                 if action["attach"] == true {
                     let slot = self.slot(&hub)?;
@@ -980,7 +1013,7 @@ impl DaemonService {
                         drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
                     }
                     if let Some(old) = self.slots.remove(&original) {
-                        old.closed.store(true, Ordering::SeqCst);
+                        old.close();
                     }
                     let keys: Vec<_> = self
                         .receivers
@@ -1054,7 +1087,7 @@ impl DaemonService {
                 };
                 if op == "hub_action" && action["action"] == "reconnect" {
                     if let Some(old) = self.slots.remove(&hub) {
-                        old.closed.store(true, Ordering::SeqCst);
+                        old.close();
                     }
                 }
                 self.mutate_config(|v| {
@@ -1454,6 +1487,10 @@ impl DaemonService {
                 )?;
             }
             "open_directory" | "query_directory" => {
+                self.directory_open = true;
+                if op == "open_directory" {
+                    self.refresh_available()?;
+                }
                 self.activity_filter = action["filter"].as_str().unwrap_or("all").into();
                 self.activity_query = if action["mode"] == "activity" {
                     string(action, "query").into()
@@ -1680,7 +1717,7 @@ impl DaemonService {
                         drop(attempt.serial.lock().map_err(|_| "Login lock poisoned")?);
                     }
                     for slot in self.slots.values() {
-                        slot.closed.store(true, Ordering::SeqCst);
+                        slot.close();
                     }
                     for (_, worker) in self.receivers.drain() {
                         let _ = worker.join();
@@ -1782,7 +1819,9 @@ impl DaemonService {
             "close_settings" => {
                 self.active_settings_hub = None;
             }
-            "close_directory" => {}
+            "close_directory" => {
+                self.directory_open = false;
+            }
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
         self.reload_slots()?;

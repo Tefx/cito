@@ -255,6 +255,12 @@ pub(super) fn spawn_ui(service: Arc<Mutex<DaemonService>>) -> Option<UiChild> {
     });
     if let Ok(mut s) = service.lock() {
         s.ui = Some(mailbox);
+        if let Ok(mut previous) = s.last_ui_revision.lock() {
+            *previous = None;
+        }
+        if let Ok(mut previous) = s.last_ui_frame.lock() {
+            *previous = None;
+        }
         s.push_ui();
     }
     let reader = thread::spawn(move || {

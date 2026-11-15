@@ -4,7 +4,6 @@ use super::{
 };
 use crate::core::{
     identity::{hash, iso, listener_id, local_host_name, normalize_slug, sanitize_message, string},
-    receiver::plugin_request,
     registration::{distinct_label, is_generic_session_label},
 };
 use crate::plugins::{now_ms, random_uuid_v4};
@@ -224,6 +223,7 @@ pub(super) fn wait_send_receipt(
         if shutdown_requested() || slot.closed.load(Ordering::SeqCst) {
             return Err("Send interrupted".into());
         }
+        let revision = slot.event_revision();
         let remote = slot.rpc(
             "stream_get_message",
             &json!({"stream":"CITO_SIGNALS","seq":payload["seq"]}),
@@ -236,7 +236,7 @@ pub(super) fn wait_send_receipt(
             payload["held_reason"] = json!("sender_ack_timeout");
             break;
         }
-        thread::sleep(Duration::from_millis(25));
+        slot.wait_for_event(revision, deadline);
     }
     state.db.execute(
         "UPDATE local_sent_idempotency SET status=?,held_reason=? WHERE hub=? AND signal_id=?",
@@ -265,8 +265,19 @@ impl DaemonService {
                 json!({"harness":"human","session_id":"default","cwd":"","title":"Human"}),
             ));
         }
+        if !required
+            && requested_pid.is_none()
+            && expected.is_empty()
+            && string(meta, "expected_session_id").is_empty()
+        {
+            return Ok(None);
+        }
+        let deadline = Instant::now() + Duration::from_millis(1500);
         let mut failures = Vec::new();
         for plugin in self.plugins.agent_plugins() {
+            if Instant::now() >= deadline {
+                break;
+            }
             if !expected.is_empty() && plugin.id != expected {
                 continue;
             }
@@ -283,7 +294,18 @@ impl DaemonService {
                     request["cached_caller"] = cached;
                 }
             }
-            match plugin_request(plugin, &request, None, None) {
+            match crate::plugins::plugin_request_with_progress(
+                plugin,
+                &request,
+                deadline.saturating_duration_since(Instant::now()),
+                |_| {
+                    if shutdown_requested() {
+                        Err("Caller discovery cancelled".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            ) {
                 Ok(reply) if reply["ok"] == true => {
                     let caller = reply["caller"].clone();
                     if string(&caller, "harness") != plugin.id
@@ -773,6 +795,7 @@ impl DaemonService {
                 Ok(result)
             }
             "cito_status" => {
+                self.refresh_available()?;
                 let caller = self
                     .caller(meta, false)?
                     .ok_or("BINDING_REQUIRED: Caller required")?;
@@ -1276,11 +1299,32 @@ impl DaemonService {
     }
     pub(super) fn flush_acks(&self) {
         for (hub, slot) in &self.slots {
+            let key = json!([hub, slot.config["url"], slot.identity["principal_id"]]).to_string();
+            if self.ack_backoff.lock().is_ok_and(|retries| {
+                retries
+                    .get(&key)
+                    .is_some_and(|(at, _)| *at > Instant::now())
+            }) {
+                continue;
+            }
             // Identity filtering precedes the page limit: retained rows for an
             // unavailable/replaced profile must not starve this profile's ACKs.
             let Ok(rows) = self.state.db.query("SELECT * FROM pending_hub_acks WHERE hub=? AND hub_url=? AND principal_id IN (?,?,?) ORDER BY acked_at_ms LIMIT 256",&[json!(hub),slot.config["url"].clone(),slot.identity["principal_id"].clone(),slot.identity["legacy_principal_id"].clone(),slot.identity["canonical_principal_id"].clone()]) else { continue; };
+            let mut failed = false;
             for row in rows {
-                if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok(){let _=self.state.db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone()]);}
+                if slot.rpc("signal_ack",&json!({"node_id":row["node_id"],"signal_ids":[row["signal_id"]],"channel_id":row["channel_id"]})).is_ok() {
+                    let _=self.state.db.execute("DELETE FROM pending_hub_acks WHERE hub=? AND node_id=? AND signal_id=?",&[row["hub"].clone(),row["node_id"].clone(),row["signal_id"].clone()]);
+                } else { failed = true; break; }
+            }
+            if let Ok(mut retries) = self.ack_backoff.lock() {
+                if failed {
+                    let retry = retries.entry(key).or_insert_with(|| {
+                        (Instant::now(), crate::support::RetryBackoff::default())
+                    });
+                    retry.0 = Instant::now() + retry.1.failed();
+                } else {
+                    retries.remove(&key);
+                }
             }
         }
     }

@@ -48,8 +48,15 @@ impl LocalState {
                 .map_err(|e| e.to_string())?;
         }
         let db = Database::open(&dir.join("state.sqlite"))?;
-        db.transaction(|c| {
+        let current = db
+            .query("PRAGMA user_version", &[])?
+            .first()
+            .and_then(|v| v["user_version"].as_i64())
+            .unwrap_or(0);
+        if current != 7 {
+            db.transaction(|c| {
             let version=c.query("PRAGMA user_version",&[])?.first().and_then(|v|v["user_version"].as_i64()).unwrap_or(0);
+            if version == 7 { return Ok(()); }
             if version>7 { return Err(format!("Unsupported state schema version {version}")); }
             if version < 4 {
                 c.execute("DROP TABLE IF EXISTS local_pairwise_wakes; DROP TABLE IF EXISTS local_signals; DROP TABLE IF EXISTS local_listeners; DROP TABLE IF EXISTS local_sent_idempotency; DROP TABLE IF EXISTS pending_hub_acks; DROP TABLE IF EXISTS pending_hub_detaches; DROP TABLE IF EXISTS wake_retries; DROP TABLE IF EXISTS daemon_owner;", &[])?;
@@ -137,6 +144,7 @@ impl LocalState {
             // rows recover after lease expiry, or the daemon's explicit startup hook.
             Ok(())
         })?;
+        }
         Ok(Self {
             db,
             discovery_revisions: Arc::new(Mutex::new(HashMap::new())),

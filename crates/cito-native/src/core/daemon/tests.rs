@@ -2062,7 +2062,9 @@ fn ui_acknowledgements_preserve_other_hubs_with_colliding_signal_ids() -> Result
         service
             .channel_inventories
             .insert("local".into(), inventory);
-        service.slots.insert("local".into(), remote);
+        if let Some(old) = service.slots.insert("local".into(), remote) {
+            old.close();
+        }
         assert_eq!(
             service.human_projection("local")["human_state_status"],
             "unknown"
