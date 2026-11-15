@@ -14195,7 +14195,7 @@ phases:
   - id: v48.ui
     name: V48 macOS AppKit Swift UI Geometry, HeadlessOracle, Capability Gating, Screenshot
       Refresh & UI Test Matrix (U1–U5, C1–C5, C11, P6)
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - site/assets/screenshots/*.png\n  blocked_paths:\n    - plan.yaml\n\n\
@@ -14289,6 +14289,48 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-15T20:08:35.865282Z'
+    done_at: '2026-11-15T20:47:45.115054+00:00'
+    evidence: 'Artifact:
+
+      - Commit: b0b860061669fb1a3d9102a32fc8f0c212a2b0d9 (rebased cleanly onto main;
+      candidate ref refs/vectl/candidates/v48.ui retained; version 0.21.3, zero release
+      tag).
+
+
+      Deliverables (U1–U5, C1–C5, C11, P6):
+
+      - U1–U5: 48pt borderless rounded inbox_control_bar with centered Self/Team &
+      Pause Inbox controls and width-bounded summary; stratum_user expanded top bar
+      aligned to 24pt controls; settings_channel badge/title midY alignment; symmetric
+      12pt insets on settings_hub & MenuSurface; CitoMetrics-derived widths in PaletteAndMetrics;
+      >=6pt top clearance on DirectoryCell Activity rows; HeadlessOracle extended
+      for borderless SurfaceView tight_padding, midY alignment, nested overlap, and
+      truncated_labels without toolTip.
+
+      - C1–C5, P6: Models.swift capability decoding; role-aware Human Channels gating
+      (calm admin notice, prefix/header omission, error-state & personal-form gating,
+      HostHub Copy Token/Invite gating, Hub Sign In gating); Companion.swift post-receipt
+      settlement & scoped addHubError routing; MenuSurface Hub Settings drawer in
+      all non-connected states & unified open/recent readiness classification; DirectorySurface/DirectoryCell
+      authoritative is_self_principal & can_reply; 10 new matrix tests in ui/capabilities.rs
+      & refreshed screenshots.
+
+
+      Verification:
+
+      - cargo fmt --all -- --check && git diff --check -> Passed
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2 cargo
+      test -p cito-native --test native ui:: -> 87 passed, 0 failed, 0 compiler warnings
+
+      - Regenerated 6 screenshots & visually inspected
+
+      - §1.2 Swift lexical check -> only permitted geometry variable slack matched
+
+
+      Spec link:
+
+      - /tmp/cito-v48-arch-spec.md & docs/DESIGN.md §5.1–§5.2 (@ 2f1c179)'
   - id: v48.docs
     name: V48 Audience-Segmented Documentation, Host-a-Hub Guide, Topology SVG, Site
       UX & Clipboard Tests (D1–D5)
