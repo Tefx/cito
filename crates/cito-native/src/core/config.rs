@@ -75,12 +75,14 @@ pub(super) fn publication_target(path: &Path) -> Result<PathBuf, String> {
             Component::ParentDir => {
                 normalized.pop();
             }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    if let (Some(parent), Some(name)) = (normalized.parent(), normalized.file_name()) {
-        if let Ok(parent) = parent.canonicalize() {
-            return Ok(parent.join(name));
+            _ => {
+                normalized.push(component.as_os_str());
+                // Resolve existing ancestors before a following `..`: walking
+                // through a directory symlink changes which parent it denotes.
+                if let Ok(canonical) = normalized.canonicalize() {
+                    normalized = canonical;
+                }
+            }
         }
     }
     Ok(normalized)

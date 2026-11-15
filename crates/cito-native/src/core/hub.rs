@@ -1288,7 +1288,11 @@ impl HubEngine {
         self.configure_process(id, &process)?;
         let code = pair_code()?;
         let expires = now_ms() + 600_000;
-        let result = process.request(json!({"op":"format_pair","code":code,"hub_config":cfg}))?;
+        let prepared = process.request(json!({"op":"format_pair","code":code,"hub_config":cfg}));
+        // Preparation still polls with the persisted credentials. Join its reader
+        // before resetting service state, including when instruction lookup fails.
+        self.stop_process(id)?;
+        let result = prepared?;
         if result["ok"] != true {
             return Err(format!("PLUGIN_EXEC_FAILED: {}", s(&result, "error")));
         }
@@ -1301,7 +1305,7 @@ impl HubEngine {
             Ok(())
         })?;
         let mut result = json!({"ok":true,"committed":true,"code":code,"instruction":instruction,"pairing_command":result["pairing_command"],"pairing_url":result["pairing_url"],"bot_username":result["bot_username"],"expires_at_ms":expires});
-        if let Err(error) = self.configure_process(id, &process) {
+        if let Err(error) = self.ensure_process(&plugin) {
             result["maintenance_warning"] = json!(error);
         }
         Ok(result)

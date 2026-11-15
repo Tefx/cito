@@ -2343,6 +2343,28 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             serde_json::from_str(&fs::read_to_string(&target).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
         assert_eq!(stored["user"], "bob");
+        // Resolve directory symlinks before interpreting a relative parent.
+        fs::remove_file(&config.config_path).map_err(|e| e.to_string())?;
+        fs::create_dir_all(dir.join("real/sub")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink("real/sub", dir.join("linkdir")).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink("linkdir/../settings.json", &config.config_path)
+            .map_err(|e| e.to_string())?;
+        assert!(!dir.join("real/settings.json").exists());
+        service.mutate_config(|value| {
+            value["user"] = json!("charlie");
+            Ok(())
+        })?;
+        let stored: Value = serde_json::from_str(
+            &fs::read_to_string(&config.config_path).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(stored["user"], "charlie");
+        assert!(dir.join("real/settings.json").is_file());
+        assert!(!dir.join("settings.json").exists());
+        assert!(fs::symlink_metadata(&config.config_path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink());
         // Local state contains ownership secrets; every exported session/activity
         // row must cross the DTO projection even in lightweight status updates.
         let active = service.state.active()?;

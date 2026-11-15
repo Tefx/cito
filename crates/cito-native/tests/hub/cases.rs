@@ -849,6 +849,124 @@ fn stopped_channel_process_waits_for_its_reader_callback() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
+fn pairing_preparation_quiesces_old_credential_frames_before_commit() {
+    let dir = temp();
+    let root = fixture(&dir);
+    let e = HubEngine::open(&dir).unwrap();
+    e.pause_worker();
+    let script = r#"
+import json, os, pathlib, sys, time
+credential = None
+for line in sys.stdin:
+    request = json.loads(line)
+    op = request['op']
+    if op == 'configure':
+        credential = request['hub_config'].get('credential')
+    elif op == 'format_pair':
+        print(json.dumps({'op':'rpc_result', 'req_id':request['req_id'],
+                          'ok':True, 'instruction':'Pair with fixture'}), flush=True)
+        following = json.loads(sys.stdin.readline())
+        pathlib.Path('gate.tmp').write_text(json.dumps({'credential':credential, 'following':following}))
+        pathlib.Path('gate.tmp').replace('gate.json')
+        deadline = time.monotonic() + 3
+        while not pathlib.Path('release').exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        frames = [{'op':'cursor_save', 'cursor':'old-credential-cursor'},
+                  {'op':'health', 'error':'Old credential poll failure'}]
+        try:
+            os.write(sys.stdout.fileno(), ''.join(json.dumps(f) + '\n' for f in frames).encode())
+        except BrokenPipeError:
+            pass  # Quiescing preparation can already have closed its reader.
+        if following['op'] == 'shutdown':
+            break
+    elif op == 'test':
+        print(json.dumps({'op':'rpc_result', 'req_id':request['req_id'], 'ok':True}), flush=True)
+    elif op == 'shutdown':
+        break
+"#;
+    let mut plugin = hub_plugins::discover(&[(root, false)], None)
+        .unwrap()
+        .remove(0);
+    plugin.command = vec!["python3".into(), "-c".into(), script.into()];
+    let plugin_dir = plugin.dir.clone();
+    *e.inner.plugins.lock().unwrap() = vec![plugin];
+    e.inner
+        .db
+        .transaction(|c| {
+            save_service(c, "fixture", &json!({"credential":"A"}))?;
+            Ok(())
+        })
+        .unwrap();
+    let caller = json!({"principal_id":"none#alice","owner_user":"alice"});
+    let pairing = {
+        let e = e.clone();
+        let caller = caller.clone();
+        thread::spawn(move || {
+            e.rpc(
+                "human_channel_pair_start",
+                &json!({"plugin_id":"fixture","hub_config":{"credential":"B"}}),
+                Some(&caller),
+            )
+        })
+    };
+    let gate_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for(|| plugin_dir.join("gate.json").exists());
+        let gate: Value =
+            serde_json::from_str(&std::fs::read_to_string(plugin_dir.join("gate.json")).unwrap())
+                .unwrap();
+        // Release the queued A frames at the boundary where the old path would
+        // already have committed B and reconfigured this same polling reader.
+        std::fs::write(plugin_dir.join("release"), "").unwrap();
+        gate
+    }));
+    // Always release the child before joining, including a failed gate assertion.
+    std::fs::write(plugin_dir.join("release"), "").unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let paired = pairing.join().unwrap();
+        let gate = gate_result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        assert_eq!(gate["credential"], "A");
+        assert_eq!(gate["following"]["op"], "shutdown");
+        let paired = paired.unwrap();
+        assert_eq!(paired["committed"], true);
+        assert!(paired["code"].is_string());
+        // Synchronize with the restarted process after it has received B.
+        assert_eq!(
+            e.rpc(
+                "human_channels_test",
+                &json!({"plugin_id":"fixture"}),
+                Some(&caller)
+            )
+            .unwrap()["ok"],
+            true
+        );
+        e.inner
+            .db
+            .transaction(|c| {
+                let (cfg, state) = service(c, "fixture")?;
+                assert_eq!(cfg["credential"], "B");
+                assert!(state.get("cursor").is_none(), "{state}");
+                assert!(state.get("reply_floor").is_none(), "{state}");
+                assert!(state.get("poll_error").is_none(), "{state}");
+                assert_eq!(
+                    c.query(
+                        "SELECT code FROM hub_pairing_codes WHERE consumed_ms IS NULL",
+                        &[]
+                    )?
+                    .len(),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    }));
+    e.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
 fn oidc_admin_can_edit_redacted_service_fields() {
     if std::env::var_os("CITO_TEST_ADMIN_WORKER").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
