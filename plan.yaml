@@ -13906,3 +13906,454 @@ phases:
       \ daemon: 0.0% CPU (0:00.07 TIME), 1,266 CSW / 10s, 0 IDLEW.\n  - cito-ui: 0.0%\
       \ CPU (0:00.10 TIME), 28 CSW / 10s (2.8/s), 0 IDLEW.\n\nSpec link:\n- docs/DESIGN.md\
       \ (§2.2, §3.2–§3.5, §4.1–§4.3, §5.1–§5.2, §7.2, §8.1–§8.2 @ f352828)"
+- id: v48
+  name: 'V48 Symmetric UI Control Geometry, Capability Projections, Interactive Session
+    Origin Conservation, Audience-Segmented Docs & Zero-New-Issues Convergence (v0.21.3)
+    [REQUIRES_SKILL: contract-and-simplicity]'
+  status: pending
+  gate: 'All binding v48 requirements in docs/DESIGN.md (@ 2f1c179) and /tmp/cito-v48-arch-spec.md
+    (Clusters 1–4: U1–U5, C1–C11, P1–P6, D1–D7) pass; iterative 4-slice [REQUIRES_SKILL:
+    contract-and-simplicity] review (pathway-auditor, structural-auditor, uiux-auditor,
+    spec-readiness-auditor) converges with ZERO_NEW_ISSUES across all 4 slices; cargo
+    fmt --all -- --check, git diff --check, cargo clippy --workspace --all-targets
+    -- -D warnings, full cargo test --workspace, cargo build --release (0 warnings
+    updating all 7 staged arm64 binaries with codesign --verify --strict), node crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check (version 0.21.3, NO release tag), python3 -m
+    unittest discover -s packaging, visual asset checks, §1.2 zero-hardcoding check,
+    zero matches for rda\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768 across product/doc
+    paths, and live /Applications/Cito.app rebuild, signature verification, restart,
+    and closed-UI idle power verification pass cleanly.'
+  context: 'Implement finalized docs/DESIGN.md (@ 2f1c179) and /tmp/cito-v48-arch-spec.md
+    (pre-reviewed to ZERO_NEW_ISSUES by pathway-auditor, uiux-auditor, and spec-readiness-auditor)
+    by consuming the converged Round 0–5 Finding Ledger (U1–U5, C1–C11, P1–P6, D1–D7)
+    directly without repeating duplicate Stage 1 discovery, keeping fast affected-module
+    checks inside implementation iterations and reserving heavy full-workspace regression/packaging
+    for v48.review: (1) v48.core (rust-senior, depends_on: []): all Rust Core/Hub/Daemon/CLI/Build
+    and Plugin changes across Clusters 2, 3, and 4 (C1 hub.rs:channel_list & daemon/channels.rs
+    caller-scoped capability & error_origin projections and role/state/inbox-pause-accurate
+    detail strings; C4 daemon/projection.rs Hub affordance flags is_builtin/supports_workspace_scope/can_login,
+    session/peer capabilities is_self_principal/can_set_scope/can_pin/can_rename/can_stop,
+    and activity[*].can_reply; C6 daemon/mcp.rs rejecting _meta.expected_harness ==
+    "human" and args.harness == "human" with FORBIDDEN across all MCP tools and propagating
+    explicit_pid = true for _stdio.endpoint_pid while preserving codex fallback; C7
+    daemon/ui_ipc.rs:bound_fields preserving canonical editable values for listeners[*].title
+    up to 128 chars/512B, settings.hubs[*].{url,issuer,client_id}, settings.channels[*].fields[*].value,
+    and hub_invite fields; C8 hub.rs + plugins/telegram/native.rs claim_until_ms delivery
+    lease preflight, getUpdates bounded limit <= 25 with limit = 1 fallback, and paginated
+    kv_snapshot <= 2 MiB; C9/C10/D4 unified parsed HTTPS URL validator permitting
+    query params on OIDC endpoints and single-label/IPv6/@-in-path on issuer, wiring
+    CITO_OIDC_REDIRECT_PORT and CITO_HUB_URL/CITO_NATS_URL, transport.rs HTTP 500..=599
+    -> NATS_UNAVAILABLE, and setup.rs skipped-harness inspection diagnostics; P1–P6
+    plugin_support.rs:process_has_tty character terminal vnode check + has_harness_ancestor
+    + CITO_ENDPOINT_PID cross-harness boundary, Pi interactive socket gate & shared-cwd
+    .jsonl/PPID protection, Claude interactive gate & hook_endpoint parent session_id
+    fencing & resolve_caller endpoint_pid, Codex desktop_running & try_rows subagent/exec
+    exclusion, SessionActivity::available() deduplication & per-Hub target filtering,
+    and PTY parent + stdin=/dev/null child tests; D3/D6/D7 authenticated HubServer
+    reverse-proxy Host acceptance, build.rs TARGET == "aarch64-apple-darwin" guard
+    before reading ../../src/macos, and plugin.json "./.mcp.json" / "./hooks/hooks.json"
+    paths); (2) v48.ui (senior-engineer, depends_on: ["v48.core"]): all macOS AppKit
+    Swift UI, HeadlessOracle, screenshot refresh, and UI test matrix changes across
+    Clusters 1, 2, and 3 (U1–U5 48pt inbox_control_bar, 24pt stratum_user bar, settings_channel
+    midY, settings_hub/MenuSurface 12pt insets, CitoMetrics widths, DirectoryCell
+    >= 6pt top clearance, and HeadlessOracle borderless/midY/nested-overlap/truncated_labels
+    checks; C1–C5 & C11 Models.swift capability decoding, SettingsSurface non-admin
+    unconfigured hiding + calm notice, single personal stratum without "1. "/"2. "
+    prefixes, capability-gated recovery & personal form buttons, Sign In… & HostHubSummary
+    gating, Companion post-receipt ChannelUiState settlement & scoped addHubError
+    routing, MenuSurface scopeToggle/Hub Settings…/unified open-vs-recent candidate
+    classification, DirectorySurface/DirectoryCell is_self_principal preservation,
+    expanded tests/support/ui/*.rs, and refreshed site/assets/screenshots/*.png);
+    (3) v48.docs (senior-engineer, depends_on: []): Cluster 4 documentation, Pages
+    IA, topology SVG, and site-clipboard.mjs (D1 4-section top nav & audience-grouped
+    sidebars + guide.html cleanup; D2 architecture-topology.svg & IMAGEGEN_PROMPTS.md;
+    D3/D4 site/docs/hosting.html, deploy/hub/README.md, README.md, architecture.html,
+    plugins.html; D5 .docs-table-wrap, #pi/#codex/#claude anchors, code copy buttons,
+    index.html h2, skip-links, prefers-reduced-motion, and updated site-clipboard.mjs
+    — without touching site/assets/screenshots/*.png); (4) v48.review (senior-engineer,
+    depends_on: ["v48.ui", "v48.docs"], [REQUIRES_SKILL: contract-and-simplicity]):
+    iterative 4-slice contract-and-simplicity convergence loop (pathway-auditor, structural-auditor,
+    uiux-auditor, spec-readiness-auditor) until all 4 slices report ZERO_NEW_ISSUES,
+    full §8.1 verification gates at version 0.21.3 with NO release tag, zero forbidden
+    vendor/internal token matches, and live /Applications/Cito.app rebuild, signature
+    verification, restart, and closed-UI idle power verification.'
+  depends_on:
+  - v47
+  steps:
+  - id: v48.core
+    name: V48 Rust Core, Hub, Daemon, CLI, Build & Plugin Remediation (C1, C4, C6–C10,
+      P1–P6, D3–D4, D6–D7)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/build.rs\n    - crates/cito-native/src/**\n\
+      \    - crates/cito-native/tests/support/plugins.rs\n    - crates/cito-native/tests/support/daemon/**\n\
+      \    - plugins/telegram/**\n    - plugins/pi/**\n    - plugins/claude/**\n \
+      \   - plugins/codex/**\n  blocked_paths:\n    - plan.yaml\n    - src/macos/**\n\
+      \    - site/**\n\nDeliver:\n- Consume the converged Round 0–5 Finding Ledger\
+      \ in `docs/DESIGN.md` (`@ 2f1c179`) and `/tmp/cito-v48-arch-spec.md` directly\
+      \ without repeating duplicate Stage 1 discovery, implementing all Rust Core,\
+      \ Hub, Daemon, CLI, Build, and Plugin changes across Clusters 2, 3, and 4:\n\
+      \  1. `C1` — Human Channel Authority & Error-Origin Projections (`crates/cito-native/src/core/hub.rs:channel_list`\
+      \ & `crates/cito-native/src/core/daemon/channels.rs`):\n     - Project caller-scoped\
+      \ capability and error-origin fields on each channel entry: `has_hub_service:\
+      \ bool`, `hub_ready: bool`, `can_configure_hub: bool`, `can_clear_hub: bool`,\
+      \ `can_edit_personal: bool`, `can_pair: bool`, `can_test: bool`, `can_unpair:\
+      \ bool`, and `error_origin: \"hub\" | \"user\" | null`.\n     - Generate role-,\
+      \ state-, and inbox-pause-accurate `detail` strings (`not_configured` when `!can_configure_hub`\
+      \ states `\"Shared service credentials must be configured by the Hub administrator\"\
+      `; `hub_ready` recommends 1-click pairing or personal fields based on `pairing_supported`;\
+      \ `ready`/`paused` when `inbox_paused == true` states delivery is paused while\
+      \ the Human Inbox is paused).\n  2. `C4` — Hub Affordance & Session/Peer/Activity\
+      \ Capability Projections (`crates/cito-native/src/core/daemon/projection.rs`):\n\
+      \     - Project Hub affordance flags (`is_builtin: bool`, `supports_workspace_scope:\
+      \ bool`, `can_login: bool`), session/peer operation capabilities (`is_self_principal:\
+      \ bool`, `can_set_scope: bool`, `can_pin: bool`, `can_rename: bool`, `can_stop:\
+      \ bool`), and `activity[*].can_reply: bool`.\n  3. `C6` — MCP Caller Authority\
+      \ & Explicit PID Provenance (`crates/cito-native/src/core/daemon/mcp.rs`):\n\
+      \     - Reject `_meta.expected_harness == \"human\"` and `args.harness == \"\
+      human\"` with `FORBIDDEN` across **all** MCP tools (`cito_listen`, `cito_unlisten`,\
+      \ `cito_send`, `cito_inbox`, `cito_status`), never synthesizing a Human caller\
+      \ from MCP metadata.\n     - Propagate `explicit_pid = true` for positive PIDs\
+      \ in `_stdio.endpoint_pid` (as well as `_meta` and top-level PID keys) when\
+      \ PID-bound providers (`pi`, `claude`) return actionable endpoint errors (such\
+      \ as `PI_BRIDGE_UNAVAILABLE`), while preserving `codex` fallback when no PID-bound\
+      \ provider matches that PID and preventing `cito_send` from silently downgrading\
+      \ a failed explicit endpoint resolution into an unbound anonymous send.\n  4.\
+      \ `C7` — Non-Destructive UI IPC Canonical Editable Values (`crates/cito-native/src/core/daemon/ui_ipc.rs:bound_fields`):\n\
+      \     - Preserve canonical editable values (`listeners[*].title` up to 128 Unicode\
+      \ chars / 512 UTF-8 bytes, `settings.hubs[*].{url,issuer,client_id}`, `settings.channels[*].fields[*].value`,\
+      \ and `hub_invite` fields from `paste_hub_invite`) without destructive `…` byte\
+      \ truncation so unchanged saves round-trip byte-identically.\n  5. `C8` — Telegram\
+      \ Delivery Lease Preflight, Bounded `getUpdates` & Paginated `kv_snapshot` (`crates/cito-native/src/core/hub.rs`,\
+      \ `crates/cito-native/src/core/transport.rs`, `crates/cito-native/src/core/daemon/`,\
+      \ `plugins/telegram/native.rs`):\n     - Include reservation expiry (`claim_until_ms`\
+      \ or remaining lease budget) in `deliver` frames; verify remaining lease validity\
+      \ in `plugins/telegram/native.rs` before each outbound `sendMessage` call and\
+      \ bound per-request HTTP timeouts so queued items cannot outlive the 60s reservation\
+      \ and double-send.\n     - Pass bounded `limit <= 25` on Telegram `getUpdates`\
+      \ with automatic fallback to `limit = 1` (and oversized single-update skip/advancement\
+      \ with warning) if a response exceeds the `1 MiB` cap or fails JSON parsing.\n\
+      \     - Implement paginated `kv_snapshot` (`after_key: Option<String>`, `next_cursor:\
+      \ Option<String>`, `<= 2 MiB` page budget) in `hub.rs` + `transport.rs` + `daemon/`\
+      \ so directory refreshes iterate pages before atomically updating the directory\
+      \ cache.\n  6. `C9` & `C10` & `D4` — Unified OIDC URL Validator, Env Wiring,\
+      \ HTTP 5xx Classification & Setup Diagnostics (`plugins.rs`, `login.rs`, `auth.rs`,\
+      \ `http_actions.rs`, `transport.rs`, `setup.rs`):\n     - Share one parsed HTTPS\
+      \ URL validator across `plugins.rs`, `login.rs`, `auth.rs`, and `http_actions.rs`\
+      \ permitting and preserving query parameters on `authorization_endpoint`, `token_endpoint`,\
+      \ and `jwks_uri` per RFC 6749, and permitting single-label/IPv6/`@`-in-path\
+      \ on `issuer` (while forbidding userinfo, query, and fragment on `issuer`, and\
+      \ userinfo/fragment on resource endpoints).\n     - Wire `CITO_OIDC_REDIRECT_PORT`\
+      \ fallback in `login.rs` when `redirectPort` is unset/zero, and wire `CITO_HUB_URL`\
+      \ (with `CITO_NATS_URL` compatibility alias) in `plugins.rs`.\n     - Map uncoded\
+      \ HTTP `500..=599` in `transport.rs:parse_rpc_response` to retryable `NATS_UNAVAILABLE`\
+      \ instead of `INVALID_INPUT`.\n     - Preserve skipped-harness plugin inspection\
+      \ warnings/error metadata during default `cito setup` in `setup.rs`.\n  7. `P1–P6`\
+      \ — Interactive Session Origin Conservation, Subagent Exclusion & Unified Candidate\
+      \ Projection (`plugin_support.rs`, `main.rs`, `setup.rs`, `plugins/{pi,claude,codex}/**`,\
+      \ `session_activity.rs`, `cli.rs`, `tests/support/plugins.rs`):\n     - Check\
+      \ `fd 0`/`fd 1` character terminal vnode (`PROC_PIDFDVNODEPATHINFO` `/dev/tty*`\
+      \ or `/dev/pts/*`) in `plugin_support.rs:process_has_tty` on macOS/Linux instead\
+      \ of inherited `e_tdev != u32::MAX`, and add `has_harness_ancestor` excluding\
+      \ same-family descendant processes during `discover_sessions`.\n     - Validate\
+      \ `CITO_ENDPOINT_PID` in `main.rs`/`setup.rs` so it does not cross a closer\
+      \ agent-harness ancestor boundary between `getppid()` and `CITO_ENDPOINT_PID`.\n\
+      \     - Gate `plugins/pi/cito-bridge.ts` socket server startup to interactive\
+      \ sessions (unless `CITO_PI_ALLOW_HEADLESS_DISCOVERY=1`), prevent `fallbackIdentity`\
+      \ and `plugins/pi/native.rs:process_candidates` from stealing shared-`cwd` `.jsonl`\
+      \ transcripts claimed by another live Pi process/socket, and stop `resolve_caller`\
+      \ parent walk at the nearest Pi process.\n     - Enforce interactive gate on\
+      \ `plugins/claude/native.rs` `discover_sessions`/`stdio_sidecar`, stop `hook_endpoint`\
+      \ at the nearest Claude process, refuse to overwrite a live parent endpoint's\
+      \ `session_id` from a descendant hook, and return the bridge's `endpoint_pid`\
+      \ in `resolve_caller`.\n     - Exclude `exec`/`exec-server`/`app-server`/`mcp-server`/`cloud`/`--help`/`--version`\
+      \ and child harness processes in `plugins/codex/native.rs:desktop_running`,\
+      \ and exclude `source` in `('exec', 'subagent')` or JSON containing `\"subagent\"\
+      ` in `try_rows`.\n     - Deduplicate `SessionActivity::available()` by `(harness,\
+      \ session_id, endpoint_pid)` and align `cli.rs` vs `MenuSurface` target-Hub\
+      \ availability filtering.\n     - Add PTY-backed parent + inherited-`e_tdev`\
+      \ (`stdin = /dev/null`) child tests in `crates/cito-native/tests/support/plugins.rs`\
+      \ across `pi`, `claude`, and `codex`.\n  8. `D3` & `D6` & `D7` — Reverse-Proxy\
+      \ `Host` Acceptance, Non-macOS `build.rs` Guard & Plugin Manifests (`core/http_boundary.rs`,\
+      \ `core/hub.rs`, `crates/cito-native/build.rs`, `plugins/{codex,claude}`):\n\
+      \     - Permit any syntactically valid `Host` authority on authenticated `HubServer`\
+      \ (`auth_mode` in `[\"token\", \"oidc\"]`, when `Origin` is absent) while preserving\
+      \ strict loopback/port `Host` checks on `cito daemon` (`:4290`) and `auth_mode\
+      \ == \"none\"` (and rejecting mismatched browser `Origin` with `403`).\n   \
+      \  - Check `TARGET == \"aarch64-apple-darwin\"` in `crates/cito-native/build.rs`\
+      \ before reading `../../src/macos` so non-macOS container builds succeed without\
+      \ `src/macos`.\n     - Update `plugins/codex/.codex-plugin/plugin.json` and\
+      \ `plugins/claude/.claude-plugin/plugin.json` to use `\"./.mcp.json\"` and `\"\
+      ./hooks/hooks.json\"`.\n\nImplementation Notes (Non-Binding):\n- Follow `/tmp/cito-v48-arch-spec.md`\
+      \ Part II and `docs/DESIGN.md §8.2` directly without repeating Stage 1 discovery.\
+      \ Keep inner-loop checks fast (`cargo test -p cito-native --lib`, `plugins::`,\
+      \ `daemon::`, `python3 -m unittest discover -s packaging`, and `TARGET=x86_64-unknown-linux-gnu`\
+      \ `build.rs` check); reserve heavy full-workspace regression and release packaging\
+      \ for `v48.review`.\n\nBoundary:\n- Owner: `rust-senior`. Isolated worktree\
+      \ transaction modifying `crates/cito-native/**` (excluding `tests/support/ui/**`\
+      \ and `tests/support/site-clipboard.mjs`) and `plugins/{telegram,pi,claude,codex}/**`.\n\
+      \nAdmit:\n- Depends on Phase `v47` completion. Witnessed inputs: `docs/DESIGN.md`\
+      \ (`@ 2f1c179`) and `/tmp/cito-v48-arch-spec.md`.\n- Verification: targeted\
+      \ `cargo test -p cito-native` filters (`--lib`, `plugins::`, `daemon::`) and\
+      \ `python3 -m unittest discover -s packaging` pass with 0 warnings. Consumed\
+      \ by `v48.ui` and `v48.review`.\n\nRecovery:\n- Repair any Rust, plugin, or\
+      \ test discrepancy in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native plugins:: && cargo test -p cito-native --test native daemon:: && python3
+      -m unittest discover -s packaging'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/build.rs
+    - crates/cito-native/src/main.rs
+    - crates/cito-native/src/core/hub.rs
+    - crates/cito-native/src/core/http_boundary.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/plugins.rs
+    - crates/cito-native/src/core/login.rs
+    - crates/cito-native/src/core/auth.rs
+    - crates/cito-native/src/core/setup.rs
+    - crates/cito-native/src/core/session_activity.rs
+    - crates/cito-native/src/core/cli.rs
+    - crates/cito-native/src/core/daemon/channels.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/mcp.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/daemon/http_actions.rs
+    - plugins/telegram/native.rs
+    - plugins/pi/cito-bridge.ts
+    - plugins/pi/native.rs
+    - plugins/claude/native.rs
+    - plugins/claude/.claude-plugin/plugin.json
+    - plugins/codex/native.rs
+    - plugins/codex/.codex-plugin/plugin.json
+    - crates/cito-native/src/plugin_support.rs
+    agent: rust-senior
+  - id: v48.ui
+    name: V48 macOS AppKit Swift UI Geometry, HeadlessOracle, Capability Gating, Screenshot
+      Refresh & UI Test Matrix (U1–U5, C1–C5, C11, P6)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \    - site/assets/screenshots/*.png\n  blocked_paths:\n    - plan.yaml\n\n\
+      Deliver:\n- Consume the converged Round 0–5 Finding Ledger in `docs/DESIGN.md`\
+      \ (`@ 2f1c179`) and `/tmp/cito-v48-arch-spec.md` directly without repeating\
+      \ duplicate Stage 1 discovery, implementing all macOS AppKit Swift UI, `HeadlessOracle`,\
+      \ screenshot refresh, and UI test matrix changes across Clusters 1, 2, and 3:\n\
+      \  1. `U1–U5` — Symmetric UI Control Bar Geometry & `HeadlessOracle` Completeness\
+      \ (`src/macos/**`):\n     - `SettingsSurface.swift`: render `inbox_control_bar`\
+      \ as a `48pt` borderless rounded surface (`CitoMetrics.cardRadius`), vertically\
+      \ center `scope:<human_listener_id>` and `toggle_inbox` on `midY = 24`, and\
+      \ bound both `You (@<user>)` and `inbox_control_summary` horizontally to end\
+      \ `>= 10pt` left of the leftmost visible trailing button while keeping resting\
+      \ single-channel states within the `368pt` Settings scroll viewport without\
+      \ vertical scrolling.\n     - `SettingsSurface.swift`: match `stratum_user:<id>`\
+      \ expanded top bar height to its `24pt` control height (`toggle_channel:<id>`,\
+      \ `unpair_channel:<id>`) with `>= 7pt` top/bottom insets and shared `midY`;\
+      \ align `settings_channel:<id>` badge (`24×24`) and header `layoutBar` on a\
+      \ shared `midY` (`<= 1pt` delta); enforce symmetric `12pt` (`CitoMetrics.cardInset`)\
+      \ horizontal insets on `settings_hub:<name>` and `MenuSurface.swift` `LISTENING\
+      \ SESSIONS` top/bottom rows.\n     - `PaletteAndMetrics.swift` & `DirectoryCell.swift`:\
+      \ derive `compactSessionPath` and `activityRowHeight` widths from `CitoMetrics`\
+      \ constants; position `DirectoryPeerCellView` Activity row top header controls\
+      \ with `>= 6pt` top clearance.\n     - `HeadlessOracle.swift`: expand `tightPadding`\
+      \ (`>= 6pt` edge clearance) to inspect all non-root `SurfaceView` containers\
+      \ (`width >= 60, height >= 32`) with visible fills (`fillColor != nil || borderWidth\
+      \ > 0`) plus `DirectoryPeerCellView` rows; verify `midY` alignment (`<= 1.5pt`\
+      \ delta) in `non_anchored_action_bars`; check nested `NSTextField` vs interactive\
+      \ control overlap across card/row subviews in `overlapping_views`; and check\
+      \ single-line non-editable data-row labels in `truncated_labels` unless `.byTruncatingMiddle`/`.byTruncatingTail`\
+      \ is paired with a non-empty `toolTip`.\n  2. `C1–C5` & `C11` & `P6` — Capability\
+      \ Decoding, Role-Aware Channel/Hub/Session Gating, Post-Receipt Settlement &\
+      \ Unified Candidate Readiness (`src/macos/**`, `crates/cito-native/tests/support/ui/**`,\
+      \ `site/assets/screenshots/*.png`):\n     - `Models.swift`: decode `ChannelSetupItem`\
+      \ capabilities (`has_hub_service`, `hub_ready`, `can_configure_hub`, `can_clear_hub`,\
+      \ `can_edit_personal`, `can_pair`, `can_test`, `can_unpair`, `error_origin`),\
+      \ `Hub.capabilities` (`status`, `auth_valid`, `rpc_status`, `sse_live`, `observation_current`)\
+      \ and Hub affordances (`is_builtin`, `supports_workspace_scope`, `can_login`),\
+      \ `Listener`/`RemotePeer` (`is_self_principal`, `can_set_scope`, `can_pin`,\
+      \ `can_rename`, `can_stop`), and `ActivityItem.can_reply`.\n     - `SettingsSurface.swift`:\
+      \ hide unconfigured channels when `!can_configure_hub && !hub_ready` and show\
+      \ the calm administrator notice (`\"External channels are managed by your '<hub>'\
+      \ Hub administrator. None are enabled yet.\"`) when none remain and `channel_inventory_error\
+      \ == nil`; omit `1. Shared Hub Service` and `\"1. \"`/`\"2. \"` prefixes when\
+      \ `!has_hub_service` or `!can_configure_hub && hub_ready && error_origin !=\
+      \ \"hub\"` (showing read-only shared-service error status without `Change Token…`/`Clear\
+      \ Token` when `!can_configure_hub && error_origin == \"hub\"`); gate `unavailable`\
+      \ recovery buttons (`Retry`, `Change Token…`, `Clear Token`, `Send Test`, `Unpair`)\
+      \ and personal `Send Test`/`Save`/`Edit…` on capability bits; gate Hub `Sign\
+      \ In…` on `hub.can_login`; and gate `HostHubSummary` `Copy Token` (`auth_mode\
+      \ == \"token\" && !token.isEmpty`) and `Copy Invite Code` (`hostHub.enabled\
+      \ && hostHub.running`).\n     - `Companion.swift`: move `ChannelUiState.resetAll()`\
+      \ / `resetPersonal()` to confirmed receipt settlement (`ok == true` / `committed\
+      \ == true`) and scope `addHubError` routing strictly to `source_op` in `[\"\
+      setup_save_hub\", \"save_hub\", \"paste_hub_invite\"]` (or matching `pendingHubSave`\
+      \ `request_id`).\n     - `MenuSurface.swift`: gate `scopeToggle` on `hub.supports_workspace_scope\
+      \ && listener.can_set_scope`; include `Hub Settings…` (`open_hub_settings:<hub>`)\
+      \ in all non-connected Hub drawer branches (`connecting`, `auth_required`, `disconnected`,\
+      \ `unreachable`, `error`); and unify `open` vs `recent` candidate classification\
+      \ (`P6`) across `autoCollapsedRecentGroups` and group header counts/nouns.\n\
+      \     - `DirectorySurface.swift` & `DirectoryCell.swift`: preserve authoritative\
+      \ `is_self_principal` in `seedDirectoryPeersIfEmpty` and format human peer titles\
+      \ directly from `is_self_principal`.\n     - Expand `crates/cito-native/tests/support/ui/*.rs`\
+      \ for non-admin OIDC states, team session controls, and `48pt` `inbox_control_bar`,\
+      \ and refresh `site/assets/screenshots/*.png`.\n\nImplementation Notes (Non-Binding):\n\
+      - Follow `/tmp/cito-v48-arch-spec.md` and `docs/DESIGN.md §5.1–§5.2` directly\
+      \ without repeating Stage 1 discovery. Keep inner-loop verification fast with\
+      \ `cargo test -p cito-native --test native ui::`; reserve full-workspace regression\
+      \ and app bundle packaging for `v48.review`.\n\nBoundary:\n- Owner: `senior-engineer`.\
+      \ Isolated worktree transaction modifying `src/macos/**`, `crates/cito-native/tests/support/ui/**`,\
+      \ and `site/assets/screenshots/*.png`.\n\nAdmit:\n- Depends on `v48.core` completion.\
+      \ Witnessed inputs: `docs/DESIGN.md` (`@ 2f1c179`) and `/tmp/cito-v48-arch-spec.md`.\n\
+      - Verification: `cargo test -p cito-native --test native ui::` passes cleanly\
+      \ with zero `HeadlessOracle` violations and refreshed screenshots. Consumed\
+      \ by `v48.review`.\n\nRecovery:\n- Repair any AppKit layout, `HeadlessOracle`,\
+      \ capability gating, screenshot, or `ui::` test discrepancy in place within\
+      \ the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/SettingsSurface.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - src/macos/PaletteAndMetrics.swift
+    - src/macos/Models.swift
+    - src/macos/Companion.swift
+    - src/macos/HeadlessOracle.swift
+    depends_on:
+    - v48.core
+    agent: senior-engineer
+  - id: v48.docs
+    name: V48 Audience-Segmented Documentation, Host-a-Hub Guide, Topology SVG, Site
+      UX & Clipboard Tests (D1–D5)
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - site/index.html\n    - site/docs/**\n    - site/styles/**\n\
+      \    - site/scripts/**\n    - site/assets/art/architecture-topology.svg\n  \
+      \  - site/assets/IMAGEGEN_PROMPTS.md\n    - README.md\n    - deploy/hub/README.md\n\
+      \    - crates/cito-native/tests/support/site-clipboard.mjs\n  blocked_paths:\n\
+      \    - plan.yaml\n    - site/assets/screenshots/*.png\n    - src/macos/**\n\n\
+      Deliver:\n- Consume the converged Round 0–5 Finding Ledger in `docs/DESIGN.md`\
+      \ (`@ 2f1c179`) and `/tmp/cito-v48-arch-spec.md` directly without repeating\
+      \ duplicate Stage 1 discovery, implementing all Cluster 4 documentation, Pages\
+      \ IA, topology SVG, and `site-clipboard.mjs` updates (do NOT touch `site/assets/screenshots/*.png`,\
+      \ owned by `v48.ui`):\n  1. `D1` — Audience-Segmented Navigation & Content Architecture\
+      \ (`site/index.html`, `site/docs/{guide,hosting,plugins,architecture}.html`,\
+      \ `README.md`):\n     - Update top navigation across `site/index.html` and `site/docs/*.html`\
+      \ to **`User Guide`** (`guide.html`), **`Host a Hub`** (`hosting.html`), **`Plugins`**\
+      \ (`plugins.html`), **`Reference`** (`architecture.html`), and **`GitHub`**.\n\
+      \     - Update docs sidebars to audience-grouped sections (`For Users` → `User\
+      \ Guide`; `For Hub Operators` → `Host a Hub`; `For Developers` → `Plugin Authoring`\
+      \ & `Architecture & Reference`).\n     - Strip internal manifest keys/test notes\
+      \ (`pidBound`, `idleTimeoutMs`, `manualDisclosure`) from `guide.html` and `README.md`,\
+      \ and relocate the misplaced `guide.html:235` paragraph.\n  2. `D2` — Accurate\
+      \ Hand-Drawn Topology Diagram (`site/assets/art/architecture-topology.svg`,\
+      \ `site/assets/IMAGEGEN_PROMPTS.md`):\n     - Update `site/assets/art/architecture-topology.svg`\
+      \ (`960 × 420`) and `site/assets/IMAGEGEN_PROMPTS.md` to depict `Agent Session\
+      \ Nodes (Pi Coding Agent, Codex, Claude Code) + cito-mcp & local cito daemon\
+      \ :4290 (Scope: self | workspace)` ↔ `Cito Hub (Embedded local or Shared :4291:\
+      \ HubEngine SQLite WAL, Node Registry & Leases, Durable Signals & Atomic Wake\
+      \ Claims, Auth: Trusted | Token | OIDC PKCE · HTTP / SSE)` ↔ `Human Node (@alice)\
+      \ & Attached Channels (1..K: MacBook Menu Bar & Activity Inbox, Mac Studio Menu\
+      \ Bar, Hub-Hosted Telegram Channel with unified signal_ack / on_acked read-sync)`\
+      \ without internal jargon (`consumer_ack ≠ signal_ack`, `7-day reply`).\n  3.\
+      \ `D3` & `D4` — Operator `Host a Hub` Guide & Reference Alignment (`site/docs/hosting.html`,\
+      \ `deploy/hub/README.md`, `README.md`, `site/docs/architecture.html`, `site/docs/plugins.html`):\n\
+      \     - Author `site/docs/hosting.html` and update `deploy/hub/README.md` &\
+      \ `README.md` covering standalone `cito hub`, Docker Compose, Linux `systemd`\
+      \ unit, generic reverse-proxy SSE/Host requirements with optional Caddy (`flush_interval\
+      \ -1`) and Nginx (`proxy_buffering off`) examples, generic OIDC PKCE + `CITO_OIDC_ADMIN_USERS`\
+      \ + `redirectPort: 8400`, Telegram `409 Conflict` single-poller limit + `CITO_PLUGIN_<ID>_<KEY>`\
+      \ startup seeding, SQLite WAL backup/restore, and complete categorized `CITO_*`\
+      \ Environment Variable Reference tables (Hub Server, Client & Daemon, Agent\
+      \ & Channel Plugins).\n     - Document `--pi` and `cito rename` CLI flags in\
+      \ `site/docs/architecture.html`, `1.5s` `resolve_caller` budget in `site/docs/plugins.html`,\
+      \ Codex `enabled = true` in `config.toml` examples, non-empty `host_hub` token\
+      \ placeholder, and replace `\"redirectPort\": 18768` in `README.md:133` with\
+      \ `8400` (maintaining zero vendor/company/internal names or private ports).\n\
+      \  4. `D5` — Website UX, Accessibility & `site-clipboard.mjs` (`site/**`, `crates/cito-native/tests/support/site-clipboard.mjs`):\n\
+      \     - Wrap `.docs-table` in `<div class=\"docs-table-wrap\">` (`overflow-x:\
+      \ auto`), add `#pi`, `#codex`, `#claude` anchors in `guide.html` linked from\
+      \ `index.html`, add `<pre><code>` copy buttons with `2000 ms` `\"Copied ✓\"\
+      \ → \"Copy\"` reset across `site/docs/*.html`, add a section `<h2>` above `<h3\
+      \ class=\"moment-title\">` on `index.html`, add skip-to-content links, add `@media\
+      \ (prefers-reduced-motion: reduce)`, and update `crates/cito-native/tests/support/site-clipboard.mjs`\
+      \ to validate `docs/hosting.html` and code-block copy buttons.\n\nImplementation\
+      \ Notes (Non-Binding):\n- Follow `/tmp/cito-v48-arch-spec.md` Cluster 4 and\
+      \ `docs/DESIGN.md §7.2` directly without repeating Stage 1 discovery. Do NOT\
+      \ modify `site/assets/screenshots/*.png` so `v48.docs` merges cleanly in parallel\
+      \ with `v48.core` and `v48.ui`.\n\nBoundary:\n- Owner: `senior-engineer`. Isolated\
+      \ worktree transaction modifying `site/**` (excluding `site/assets/screenshots/*.png`),\
+      \ `README.md`, `deploy/hub/README.md`, and `crates/cito-native/tests/support/site-clipboard.mjs`.\n\
+      \nAdmit:\n- Depends on Phase `v47` completion (parallel with `v48.core`). Witnessed\
+      \ inputs: `docs/DESIGN.md` (`@ 2f1c179`) and `/tmp/cito-v48-arch-spec.md`.\n\
+      - Verification: `node crates/cito-native/tests/support/site-clipboard.mjs` passes\
+      \ cleanly. Consumed by `v48.review`.\n\nRecovery:\n- Repair any HTML/CSS/JS/SVG/Markdown\
+      \ or `site-clipboard.mjs` discrepancy in place within the worktree before completion.\n"
+    verification: node crates/cito-native/tests/support/site-clipboard.mjs
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - deploy/hub/README.md
+    - site/index.html
+    - site/docs/guide.html
+    - site/docs/plugins.html
+    - site/docs/architecture.html
+    - site/assets/art/architecture-topology.svg
+    - site/assets/IMAGEGEN_PROMPTS.md
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    agent: senior-engineer
+  - id: v48.review
+    name: 'V48 Iterative 4-Slice Zero-New-Issues Convergence Audit, §8.1 Full Verification
+      & Cito.app Rebuild [REQUIRES_SKILL: contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - bin/**\n    - packaging/**\n    - deploy/**\n    - README.md\n    - site/**\n\
+      \    - docs/DESIGN.md\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Execute\
+      \ the **Mandatory Iterative 4-Slice Zero-New-Issues Convergence Loop** (`[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`):\n  - Run the 4-slice `contract-and-simplicity`\
+      \ review (`pathway-auditor`, `structural-auditor`, `uiux-auditor`, `spec-readiness-auditor`)\
+      \ across the `v48` implementation (`U1–U5`, `C1–C11`, `P1–P6`, `D1–D7`) and\
+      \ iterate targeted repairs + Delta verification until **all 4 slices report\
+      \ `ZERO_NEW_ISSUES`**.\n- Run and verify all `docs/DESIGN.md §8.1` full-workspace\
+      \ verification gates at version `0.21.3` with **NO release tag**:\n  1. `cargo\
+      \ fmt --all -- --check` and `git diff --check`\n  2. `cargo clippy --workspace\
+      \ --all-targets -- -D warnings`\n  3. Full `cargo test --workspace`\n  4. `cargo\
+      \ build --release` (0 warnings) updating all 7 staged arm64 binaries (`bin/cito-ui-darwin-arm64`,\
+      \ `bin/cito-native-darwin-arm64`, and bundled plugin binaries) with `codesign\
+      \ --verify --strict`\n  5. `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \  6. `python3 packaging/release.py check` for version `0.21.3` with NO release\
+      \ tag, and `python3 -m unittest discover -s packaging`\n  7. Visual asset checks\
+      \ (`AppIcon.icns`, `og-card.png`, `architecture-topology.svg`, `site/assets/screenshots/*.png`),\
+      \ `§1.2` zero-hardcoding check across `crates/cito-native/src/core/` and `src/macos/`,\
+      \ and zero case-insensitive matches for `rda\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`\
+      \ across product and documentation paths (`crates/`, `src/`, `plugins/`, `site/`,\
+      \ `deploy/`, `packaging/`, `docs/`, `README.md`, `AGENTS.md`, `.github/`).\n\
+      - Rebuild, sign, and restart live `/Applications/Cito.app` (`codesign --verify\
+      \ --deep --strict /Applications/Cito.app`) and verify closed-UI idle power (`ps`\
+      \ & `top -l 2`).\n\nBoundary:\n- Owner: `senior-engineer` with `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]`. Modifies repository, updates all 7 staged arm64\
+      \ binaries, rebuilds/restarts live `/Applications/Cito.app`, and verifies closed-UI\
+      \ idle power at version `0.21.3` with NO release tag.\n\nAdmit:\n- Depends on\
+      \ `v48.ui` and `v48.docs` completion. Witnessed inputs: `docs/DESIGN.md` (`@\
+      \ 2f1c179`) and `/tmp/cito-v48-arch-spec.md`.\n- Verification: all 4 review\
+      \ slices report `ZERO_NEW_ISSUES`, zero matches for `rda\\.ai|tasca|casdoor|zhaomeng|agentic-hub|18768`\
+      \ across product/doc paths, and all `§8.1` verification gates + live `/Applications/Cito.app`\
+      \ rebuild/restart & closed-UI idle power check pass cleanly.\n\nRecovery:\n\
+      - Repair any audit finding, regression, compiler/clippy warning, packaging/signature\
+      \ issue, or idle power discrepancy in place and re-verify before completion.\n"
+    verification: cargo fmt --all -- --check && git diff --check && cargo clippy --workspace
+      --all-targets -- -D warnings && cargo test --workspace && cargo build --release
+      && node crates/cito-native/tests/support/site-clipboard.mjs && python3 packaging/release.py
+      check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - README.md
+    - deploy/hub/README.md
+    - packaging/release.py
+    - crates/cito-native/tests/support/site-clipboard.mjs
+    depends_on:
+    - v48.ui
+    - v48.docs
+    agent: senior-engineer
