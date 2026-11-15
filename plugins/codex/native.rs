@@ -509,8 +509,10 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
     }
-    if let Some(s) = str_at(req, "explicit_session_id") {
-        ids.push(s.into())
+    if caller_supplied_pid(req)?.is_none() {
+        if let Some(s) = str_at(req, "explicit_session_id") {
+            ids.push(s.into())
+        }
     }
     if caller_supplied_pid(req)?.is_none() && req["meta"]["expected_harness"] == "codex" {
         if let Some(s) = str_at(&req["meta"], "expected_session_id") {

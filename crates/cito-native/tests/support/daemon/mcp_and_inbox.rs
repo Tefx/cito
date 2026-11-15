@@ -14,7 +14,7 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
             .unwrap();
     manifest["command"] = json!([CODEX]);
     fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();
-    // Pin both real providers. Fixture::new sets the builtin directory but does
+    // Pin all real providers. Fixture::new sets the builtin directory but does
     // not substitute a provider; do not rely on staged binaries for this seam.
     let pi = f.state.join("plugins/pi");
     fs::create_dir_all(&pi).unwrap();
@@ -22,6 +22,23 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
         serde_json::from_slice(&fs::read(root().join("plugins/pi/plugin.json")).unwrap()).unwrap();
     manifest["command"] = json!([PI]);
     fs::write(pi.join("plugin.json"), manifest.to_string()).unwrap();
+    let claude = f.state.join("plugins/claude");
+    fs::create_dir_all(&claude).unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("plugins/claude/plugin.json")).unwrap())
+            .unwrap();
+    manifest["command"] = json!([CLAUDE]);
+    fs::write(claude.join("plugin.json"), manifest.to_string()).unwrap();
+    let app = f.dir.join("claude.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("python3", &["-c", "import os,sys; m,s=os.openpty(); os.dup2(s,0); os.set_inheritable(m,True); os.close(s); os.execvp('node',['node',sys.argv[1]])", app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let claude_pid = f.pid(endpoint);
+    let sidecar = f.spawn(CLAUDE, &[], &[]);
+    let mut env = f.env.clone();
+    env.insert("CLAUDE_SESSION_ID".into(), "claude-session".into());
+    f.send(sidecar, json!({"op":"stdio_sidecar","state_dir":f.state,"env":env,"endpoint_pid":claude_pid,"cwd":"/repo"}));
+    wait(|| f.frames(sidecar).iter().any(|row| row["op"] == "ready"));
     let request = json!({"op":"resolve_caller","meta":{"endpoint_pid":std::process::id(),"threadId":"thread-a"}});
     let pi_rejection = f.plugin(PI, request.clone());
     assert_eq!(
@@ -47,7 +64,46 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
         assert_eq!(reply["ok"], false, "{reply}");
         assert_eq!(reply["error_code"], code, "{reply}");
     }
+    let expected = json!({"expected_harness":"codex","endpoint_pid":std::process::id(),"expected_session_id":"thread-a"});
+    let direct = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","explicit_session_id":"thread-a","meta":expected}),
+    );
+    assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    let claude_meta =
+        json!({"endpoint_pid":claude_pid,"expected_session_id":"claude-session","cwd":"/repo"});
+    let direct = f.plugin(
+        CODEX,
+        json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":claude_meta}),
+    );
+    assert_eq!(direct["error_code"], "BINDING_REQUIRED", "{direct}");
+    let direct = f.plugin(
+        CLAUDE,
+        json!({"op":"resolve_caller","explicit_session_id":"claude-session","meta":claude_meta}),
+    );
+    assert_eq!(direct["caller"]["harness"], "claude", "{direct}");
     f.daemon(&[]);
+    let rejected = f.tool_result("cito_status", json!({}), expected);
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    assert!(
+        rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("BINDING_REQUIRED"),
+        "{rejected}"
+    );
+    let routed = f.tool_result(
+        "cito_listen",
+        json!({"about":"Cross-provider expected session routing"}),
+        claude_meta,
+    );
+    assert_ne!(routed["isError"], true, "{routed}");
+    let routed: Value =
+        serde_json::from_str(routed["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(routed["ok"], true, "{routed}");
+    let rows = f.rows("SELECT * FROM local_listeners WHERE harness='claude'");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["session_id"], "claude-session");
     for thread in [false, true] {
         let mut meta = json!({"_stdio":{"endpoint_pid":std::process::id()},"cwd":"/repo"});
         if thread {
@@ -97,6 +153,8 @@ fn stdio_transport_provenance_allows_real_thread_provider_but_fences_bridge_clai
             .contains("INVALID_INPUT"),
         "{rejected}"
     );
+    f.eof(sidecar);
+    wait(|| f.exited(sidecar));
 }
 
 #[test]
