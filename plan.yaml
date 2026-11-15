@@ -12820,7 +12820,7 @@ phases:
     name: 'V45 Rust Daemon, Hub, Identity & Plugin Steady-State Resilience: OIDC Continuity,
       Capability-Separated Hub Status, Tailscale/Channel Diagnostic Isolation & Plugin
       Timeout Resilience'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/plugins.rs\n\
       \    - crates/cito-native/tests/support/daemon/**\n    - plugins/telegram/**\n\
@@ -12911,6 +12911,35 @@ phases:
     agent: rust-senior
     claimed_by: rust-senior
     claimed_at: '2026-11-15T07:40:06.877392Z'
+    done_at: '2026-11-15T08:24:54.306191+00:00'
+    evidence: 'Artifact:
+
+      - Commit: bc589c5c3bf81d7d12ad41b99989bd08c531a0f2 (rebased and merged cleanly
+      to main; candidate ref refs/vectl/candidates/v45.rust retained)
+
+
+      Verification:
+
+      - Run: cargo fmt --all -- --check && git diff --check -> Passed (0 compiler
+      warnings)
+
+      - Run: PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2
+      cargo test -p cito-native --lib -> 220 passed, 4 ignored subprocess workers,
+      0 failed
+
+      - Run: cargo test -p cito-native --test native plugins:: -> 27 passed, 0 failed
+
+      - Run: cargo test -p cito-native --test native daemon:: -> 61 passed, 0 failed
+
+      - Run: Telegram backoff unit test -> Passed
+
+      - §1.2 lexical check on crates/cito-native/src/core/ -> 0 matches
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§1–§8 @ 6ba91cd; V45 OIDC continuity, capability-separated
+      Hub status, Tailscale/channel isolation & plugin timeout resilience)'
   - id: v45.ui
     name: V45 macOS Swift UI Render Deduplication, Layout Stability & Interaction
       Preservation
