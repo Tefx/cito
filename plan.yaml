@@ -13127,7 +13127,7 @@ phases:
 - id: v46
   name: V46 Low-Power & Event-Driven Runtime, Lazy UI Rendering & Native OS Discovery
     (v0.21.3)
-  status: in_progress
+  status: done
   gate: 'All binding v46 Low-Power & Event-Driven Runtime requirements in docs/DESIGN.md
     (§2.2, §3.3, §4.2, §4.3, §5.1, §5.2, §8.1, §8.2 @ 7007410) pass; [REQUIRES_SKILL:
     contract-and-simplicity] convergence audit across v46 deltas completes cleanly;
@@ -13398,7 +13398,7 @@ phases:
     name: 'V46 Full Contract-and-Simplicity Audit, §8.1 Full-Workspace Verification,
       Empirical Idle CPU/Wakeup Check & Cito.app Rebuild/Restart [REQUIRES_SKILL:
       contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
@@ -13445,3 +13445,64 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-15T12:37:42.856738Z'
+    done_at: '2026-11-15T13:40:35.471626+00:00'
+    evidence: 'Artifact:
+
+      - Commit: ec2e30a (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v46.review
+      retained; version 0.21.3, zero release tag).
+
+
+      Contract-and-Simplicity Convergence:
+
+      - Round 1 parallel discovery: uiux-auditor CLEAN; structural-auditor 4 Tier
+      1 + 2 Tier 2; pathway-auditor 6 Tier 1 -> synthesized into F1–F11 and closed
+      in da060e4.
+
+      - Round 2 Delta re-review: structural-auditor ZERO blocking (1 Tier 2 R2-3);
+      pathway-auditor 2 Tier 1 (R2-1, R2-2) -> closed in ec2e30a (UI mailbox generation
+      fence under service lock; single 1500ms budget TOOL_TIMEOUT classification for
+      supported harnesses; 5th pause_worker() cleanup in cases.rs).
+
+      - Round 3 Delta re-review: pathway-auditor ZERO_NEW_ISSUES (Uninspected gaps:
+      NONE within static scope).
+
+
+      Full §8.1 Verification (on ec2e30a):
+
+      - cargo fmt --all -- --check && git diff --check -> Passed
+
+      - cargo clippy --workspace --all-targets -- -D warnings (temporary 1.95.0 preview
+      cleaned up) -> Passed (0 warnings)
+
+      - PATH=/opt/homebrew/opt/python@3.11/libexec/bin:$PATH RUST_TEST_THREADS=2 cargo
+      test --workspace -> 438 passed, 0 failed, 4 ignored
+
+      - cargo build --release -> Passed (0 compiler warnings; all 7 staged binaries
+      codesign --verify --strict OK)
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+      - python3 packaging/release.py check -> Passed (0.21.3)
+
+      - python3 -m unittest discover -s packaging -> 15 passed
+
+      - §1.2 lexical check on core/ and src/macos/ -> Only permitted geometry variable
+      `slack` matched
+
+      - Visual assets (icon, topology, OG card, 6 screenshots) -> Inspected
+
+
+      Empirical Closed-UI Idle & App Bundle Verification:
+
+      - Calibrated 10s closed-UI idle sample (Auto-Listen off): ~0.055% daemon CPU,
+      ~0.0012% headless-UI CPU, 0 IDLEW.
+
+      - Live /Applications/Cito.app (12,383,897 bytes, codesign --verify --strict
+      --deep OK) restarted on Tefx-MBP-Personal: cito-ui (PID 74043) 0.0% CPU, 0:00.10
+      TIME, 8 CSW/10s (0.8/s), 0 IDLEW; cito-native daemon (PID 74033) 0.7% avg CPU
+      (0:00.56 TIME), 0 IDLEW vs pre-v46 PID 37428 (77:01.18 CPU time, 9.51M CSW).
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§2.2, §3.3, §4.2, §4.3, §5.1, §5.2, §8.1–§8.2 @ 7007410)'
