@@ -13718,7 +13718,7 @@ phases:
     agent: senior-engineer
   - id: v47.docs
     name: V47 README, Website Copy Alignment & Structural Site Test Calibration
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - README.md\n    - site/**\n    - crates/cito-native/tests/support/site-clipboard.mjs\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all documentation,\
@@ -13751,6 +13751,36 @@ phases:
     agent: executor
     claimed_by: executor
     claimed_at: '2026-11-15T13:56:15.646024Z'
+    done_at: '2026-11-15T13:58:20.390190+00:00'
+    evidence: 'Artifact:
+
+      - Commit: 22c43d4 (rebased and merged cleanly to main; candidate ref refs/vectl/candidates/v47.docs
+      retained; version 0.21.3, zero release tag).
+
+
+      Deliverables:
+
+      - Qualified offline-Mac alert delivery in README.md and site/docs/{architecture,guide,plugins}.html
+      ("when the selected Hub and its channel service remain online elsewhere").
+
+      - Aligned site/index.html anti-loop copy with actual SELF_SEND_FORBIDDEN and
+      idempotency guards.
+
+      - Replaced unscoped prose substring blacklist in crates/cito-native/tests/support/site-clipboard.mjs
+      with targeted DOM/control structural assertions + local link/anchor validation
+      across all site pages.
+
+
+      Verification:
+
+      - git diff --check -> Passed
+
+      - node crates/cito-native/tests/support/site-clipboard.mjs -> Passed
+
+
+      Spec link:
+
+      - docs/DESIGN.md (§5.2.5, §7.2, §8.1–§8.2 @ e1ec40f)'
   - id: v47.review
     name: 'V47 Iterative 4-Slice Zero-New-Issues Convergence Audit, §8.1 Full Verification
       & Cito.app Rebuild [REQUIRES_SKILL: contract-and-simplicity]'
