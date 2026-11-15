@@ -211,7 +211,8 @@ func presentationError(_ raw: String) -> String {
     for (token, copy) in [("DISCONNECTED_RETAINED", "Temporarily offline"), ("UNLISTENED", "Not listening"), ("EXPIRED", "Offline"), ("ACTIVE", "Active"), ("CITO_OIDC_ISSUER", "OIDC issuer URL"), ("CITO_OIDC_CLIENT_ID", "OIDC client ID"), ("CITO_HUB_TOKEN", "shared access token"), ("CITO_AUTH_MODE", "access mode")] {
         message = message.replacingOccurrences(of:"\\b" + token + "\\b",with:copy,options:.regularExpression)
     }
-    message = message.replacingOccurrences(of:"local://",with:"Built-in on this Mac")
+    message = message.replacingOccurrences(of:"(?i:\\bchannel inventory\\b)",with:"Channel list",options:.regularExpression)
+        .replacingOccurrences(of:"local://",with:"Built-in on this Mac")
         .replacingOccurrences(of:" (http://127.0.0.1 is allowed for tests)",with:"")
     return message
 }

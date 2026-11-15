@@ -9,7 +9,7 @@ extension Companion {
     }
     func rebuildFeedbackAfter(_ seconds: Double) {
         RunLoop.main.add(Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
-            if self?.settingsVisible == true { self?.rebuildSettingsPanel() }
+            if self?.settingsVisible == true { self?.rebuildSettingsPanel(preservingEditor: true) }
         }, forMode: .common)
     }
 
@@ -24,7 +24,9 @@ extension Companion {
             channelUiStates[key, default: ChannelUiState()].drafts.removeValue(forKey: field.key)
         }
     }
-    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) {
+    @discardableResult
+    func acceptSettings(_ value: SettingsPayload, hub: String? = nil, savedChannel: String? = nil, savedRequest: String? = nil, confirmHubSave: Bool = false) -> Bool {
+        let previousUi = channelUiStates
         settings = value
         if !selectedChannelHub.isEmpty && !value.hubs.contains(where: { $0.name == selectedChannelHub && $0.enabled }) {
             selectedChannelHub = value.hubs.first(where: { $0.enabled })?.name ?? ""
@@ -58,8 +60,14 @@ extension Companion {
         for channel in value.channels ?? [] {
             let key=target + "|" + channel.id
             var ui = channelUiStates[key] ?? ChannelUiState()
-            ui.testResultIsLatest = false
-            if channel.configured && (previousChannels.contains(where: { $0.id == channel.id && !$0.configured }) || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) { ui.resetPersonal(preservePendingPair: true) }
+            let previous = previousChannels.first { $0.id == channel.id }
+            if previous?.status != channel.status || previous?.detail != channel.detail || previous?.warning != channel.warning {
+                ui.testResultIsLatest = false
+            }
+            if channel.configured && channel.status != "pairing_pending" &&
+                (previous?.configured == false || (!ui.pairingInstruction.isEmpty && (channel.pairing_instruction ?? "").isEmpty)) {
+                ui.resetPersonal(preservePendingPair: true)
+            }
             // An older acknowledgement cannot clear a newer draft or a failed
             // save, and test/pair result refreshes are not save acknowledgements.
             var acknowledged: (scope: String, values: [String: String], unchanged: Bool)?
@@ -74,7 +82,7 @@ extension Companion {
                 acknowledged = (scope: entry.scope, values: entry.values, unchanged: unchanged)
                 if unchanged {
                     // Settings results retire save UI, not a newer pairing intent.
-                    if entry.scope == "user" && channel.configured { ui.resetPersonal(preservePendingPair: true) }
+                    if entry.scope == "user" && channel.configured && channel.status != "pairing_pending" { ui.resetPersonal(preservePendingPair: true) }
                     ui.savedUntil[entry.scope] = Date().addingTimeInterval(1.5)
                 } else { ui.savedUntil.removeValue(forKey: entry.scope) }
                 DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
@@ -91,11 +99,18 @@ extension Companion {
             if acknowledged?.scope == "hub" && acknowledged?.unchanged == true && (channel.hub_provided || channel.status != "not_configured" || (channel.fields.contains { $0.scope == "hub" } && channel.fields.filter { $0.scope == "hub" }.allSatisfy { $0.configured })) {
                 ui.editingGateway = false
             }
-            ui.pairingInstruction = channel.pairing_instruction ?? ""
-            ui.pairingCommand = channel.pairing_command ?? channel.pairing_code
-            ui.pairingURL = channel.pairing_url
+            if let instruction = channel.pairing_instruction, !instruction.isEmpty {
+                ui.pairingInstruction = instruction
+                ui.pairingCommand = channel.pairing_command ?? channel.pairing_code
+                ui.pairingURL = channel.pairing_url
+            } else if channel.status != "pairing_pending" && ui.pendingPairRequest == nil {
+                ui.pairingInstruction = ""
+                ui.pairingCommand = nil
+                ui.pairingURL = nil
+            }
             channelUiStates[key] = ui
         }
+        return channelUiStates != previousUi
     }
 
     func updateInbox(paused: Bool? = nil, hub: String, scope: String? = nil) {
@@ -260,8 +275,13 @@ extension Companion {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    func rebuildSettingsPanel() {
+    func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false) {
         guard let window = settingsPanel else { return }
+        if preservingEditor, settingsFieldControls.values.contains(where: { $0.currentEditor() === window.firstResponder && $0.currentEditor() != nil }) {
+            settingsRebuildDeferred = true
+            return
+        }
+        settingsRebuildDeferred = false
         let focused = settingsFieldControls.first { $0.value.currentEditor() != nil && $0.value.currentEditor() === window.firstResponder }
         let focusedId = focused?.key
         let selectedRange = (focused?.value.currentEditor() as? NSTextView)?.selectedRange()
@@ -491,6 +511,16 @@ extension Companion {
             cursorY -= 36
         }
 
+        if let error = settings?.channel_inventory_error, !error.isEmpty {
+            let message = presentationError(error)
+            let height = max(16,ceil((message as NSString).boundingRect(with:NSSize(width:480,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:11)]).height))
+            let diagnostic = textLabel(message, NSRect(x:20,y:cursorY-height-4,width:480,height:height),size:11,color:CitoPalette.dangerText)
+            diagnostic.identifier = NSUserInterfaceItemIdentifier("channel_inventory_error")
+            diagnostic.maximumNumberOfLines = 0; diagnostic.lineBreakMode = .byWordWrapping
+            diagnostic.toolTip = message
+            channelsView.addSubview(diagnostic)
+            cursorY -= height + 12
+        }
         let resolvedChannels = channelSettingsByHub[effectiveChannelHub] ?? []
         var chCursorY: CGFloat = cursorY
         for ch in resolvedChannels {
@@ -826,7 +856,7 @@ extension Companion {
         )
         let hubError=(hostHub.error?.trimmingCharacters(in:.whitespacesAndNewlines)).flatMap{$0.isEmpty ? nil : $0}
         let hostingUnavailable = !hostHub.enabled || !hostHub.running || hubError != nil
-        let hostError = (hostHubPortError ?? hubError).flatMap { $0.isEmpty ? nil : $0 } ?? (hostHub.enabled && hostingUnavailable ? (hostHub.running ? "Hub sharing is unavailable" : "Hub server is not running") : nil)
+        let hostError = (hostHubPortError ?? hubError).flatMap { $0.isEmpty ? nil : $0 }
         let hostExpanded = hostHub.enabled || hostHubPortPending || hostHubPortDraft != nil || hostError != nil
         let hasAddressChoice = hostHub.tailscale_url != nil && hostHub.lan_url != nil && hostHub.tailscale_url != hostHub.lan_url
         let hostNotice = hostError ?? (!hostHub.enabled && hostExpanded ? "Choose Start Sharing to accept connections" : nil)
@@ -834,7 +864,8 @@ extension Companion {
         let hostCard = roundedView(NSRect(x: CitoMetrics.settingsInset, y: 356 - hostHeight, width: 480, height: hostHeight), radius: 10,
             color: .labelColor.withAppearanceAlpha(0.045), border: .labelColor.withAppearanceAlpha(0.08))
         hostCard.identifier = NSUserInterfaceItemIdentifier("host_hub_card")
-        let hostTitle=textLabel("Share This Mac as a Hub", NSRect(x:14,y:0,width:280,height:17),size:13,weight:.semibold)
+        let hostTitle=textLabel(hostHub.enabled && !hostHub.running && hostError == nil ? "Share This Mac as a Hub · Starting…" : "Share This Mac as a Hub", NSRect(x:14,y:0,width:280,height:17),size:13,weight:.semibold)
+        hostTitle.identifier = NSUserInterfaceItemIdentifier("host_hub_title")
         hostCard.addSubview(hostTitle)
         if hostExpanded, let error = hostNotice {
             let subtitle = textLabel(presentationError(error), NSRect(x:14,y:hostHeight-52,width:452,height:18), size:11, color:hostError == nil ? CitoPalette.secondaryText : CitoPalette.dangerText)
@@ -929,6 +960,7 @@ extension Companion {
             self.hostHubPortError=nil; self.hostHubPortPending=true; self.hostHubPortSaved=false; self.submittedHostHubPort=port
             self.submittedHostHubRequestId = requestId
             self.emit(["op":"set_host_hub","enabled":hostHub.enabled,"port":port,"request_id":requestId])
+            self.rebuildSettingsPanel()
         }
         hostCard.addSubview(apply)
         layoutBar(in:hostCard,insetLeft:14,insetRight:14,y:48,height:24,flexible:endpointLabel,trailing:inviteActions)
@@ -962,7 +994,7 @@ extension Companion {
             self.addHubDraftGeneration += 1
             self.addHubError=nil; self.pendingHubSave=nil; self.inviteParseRequest=""
             self.addHubFormOpen = wasEditing ? true : !self.addHubFormOpen
-            self.rebuildSettingsPanel()
+            self.rebuildSettingsPanel(revealAddHub: self.addHubFormOpen)
         }
         addBtn.isEnabled = pendingHubSave == nil
         hubsView.addSubview(addBtn)
@@ -1138,7 +1170,7 @@ extension Companion {
                     self.addHubDraftGeneration += 1
                     self.pendingHubSave=nil; self.addHubError=nil; self.inviteParseRequest=""
                     self.editingExistingHub=true; self.editingOriginalHub=hub.name; self.addHubFormOpen=true
-                    self.rebuildSettingsPanel()
+                    self.rebuildSettingsPanel(revealAddHub: true)
                 }
                 row.addSubview(edit)
                 if needsSignIn {
@@ -1269,7 +1301,7 @@ extension Companion {
         }
 
         window.invalidateShadow()
-        if addHubFormOpen && focusedId == nil, let form=root.subviews.compactMap({($0 as? NSScrollView)?.documentView}).flatMap({$0.subviews}).first(where:{$0.identifier?.rawValue=="add_hub_form"}) { form.scrollToVisible(form.bounds) }
+        if revealAddHub && addHubFormOpen, let form=root.subviews.compactMap({($0 as? NSScrollView)?.documentView}).flatMap({$0.subviews}).first(where:{$0.identifier?.rawValue=="add_hub_form"}) { form.scrollToVisible(form.bounds) }
         if let id = focusedId, let field = settingsFieldControls[id] {
             window.makeFirstResponder(field)
             if let range = selectedRange, let editor = field.currentEditor() as? NSTextView { editor.setSelectedRange(range) }

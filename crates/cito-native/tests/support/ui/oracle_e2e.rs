@@ -1290,19 +1290,23 @@ fn u3_u11_visual_states_strata_navigation_labels_and_retina_snapshots() {
         if error == Some("Address already in use") {
             render_png(&f, p, "settings", "r3_host_hub_failed.png");
         }
-        if !running || failure.is_some() {
+        if let Some(failure) = failure {
+            assert_eq!(warning["text"], failure);
+        } else {
+            assert!(warning.is_null());
+            let title = node(&status, "settings_items", "host_hub_title");
             assert_eq!(
-                warning["text"],
-                failure.unwrap_or("Hub server is not running")
+                title["text"].as_str().unwrap().contains("Starting…"),
+                !running
             );
+        }
+        if !running || failure.is_some() {
             assert!(
                 node(&status, "settings_items", "copy_hub_invite")["tooltip"]
                     .as_str()
                     .unwrap()
                     .contains("unavailable")
             );
-        } else {
-            assert!(warning.is_null());
         }
     }
     f.send(

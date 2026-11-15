@@ -131,7 +131,7 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
 }
 
 #[test]
-fn v41_new_test_receipts_override_health_until_the_next_settings_frame() {
+fn v41_new_test_receipts_override_health_until_the_next_changed_health_frame() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
     let p = start(&f);
@@ -159,8 +159,31 @@ fn v41_new_test_receipts_override_health_until_the_next_settings_frame() {
             "settings_items",
             "settings_channel_detail:channel"
         )["text"],
+        "Test accepted",
+        "An unchanged health tick cannot displace the newer test receipt"
+    );
+    cfg["launch_at_login"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
+        "Test accepted",
+        "An unrelated settings change cannot displace the newer test receipt"
+    );
+    cfg["channels"][0]["warning"] = json!(true);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(
+            &inspect(&f, p),
+            "settings_items",
+            "settings_channel_detail:channel"
+        )["text"],
         "Credentials rejected. Update your token."
     );
+    cfg["channels"][0]["warning"] = json!(false);
     cfg["channels"][0]["status"] = json!("ready");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(

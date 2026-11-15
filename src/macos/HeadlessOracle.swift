@@ -110,7 +110,38 @@ extension Companion {
                 let parts = id.split(separator: ":")
                 if parts.count > 1 { channelUiStates["\(effectiveChannelHub)|\(parts[1])", default: ChannelUiState()].editingPersonal = true; rebuildSettingsPanel() }
             }
+            if op == "test_editor_marked", let value = object["value"] as? String {
+                let window = object["surface"] as? String == "menu" ? headlessMenuPanel : settingsPanel
+                if let editor = window?.firstResponder as? NSTextView {
+                    editor.setMarkedText(value, selectedRange:NSRange(location:value.utf16.count,length:0), replacementRange:editor.selectedRange())
+                }
+                return true
+            }
+            if op == "test_end_editing" {
+                for window in [settingsPanel, headlessMenuPanel].compactMap({ $0 }) { window.makeFirstResponder(nil) }
+                return true
+            }
+            if op == "test_reconfigure_rows", let table = directoryTableView {
+                for row in 0..<table.numberOfRows {
+                    guard let cell = table.view(atColumn:0,row:row,makeIfNecessary:false) as? DirectoryPeerCellView else { continue }
+                    if directoryMode == "activity", activityFilteredItems.indices.contains(row) {
+                        let item = activityFilteredItems[row]
+                        cell.configureActivity(with:item,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
+                    } else if directoryFilteredPeers.indices.contains(row) {
+                        let peer = directoryFilteredPeers[row]
+                        cell.configure(with:peer,selected:row==directorySelectedIndex,harnesses:harnessMap,onCopy:{ [weak self] text,c in self?.copyText(text,control:c) },onMessage:{ [weak self] in self?.openComposer(target:peer.display_address,hub:peer.hub ?? "") })
+                    }
+                }
+                return true
+            }
             if op == "test_focus_field", let id = object["id"] as? String {
+                if id.hasPrefix("rename_field:"), let field = renameField, let root = cardMenu.items.compactMap({ $0.view }).first(where: { findTextField(in:$0,id:id) != nil }) {
+                    let panel = headlessMenuPanel ?? KeyPanel(contentRect:NSRect(x:0,y:0,width:380,height:600),styleMask:[.titled],backing:.buffered,defer:false)
+                    headlessMenuPanel = panel
+                    panel.contentView?.addSubview(root)
+                    panel.makeFirstResponder(field); field.selectText(nil)
+                    return true
+                }
                 if id == "directory_table" { directoryPanel?.makeFirstResponder(directoryTableView); return true }
                 for window in [settingsPanel, directoryPanel].compactMap({ $0 }) {
                     if let root = window.contentView, let field = findTextField(in: root, id: id), field.isEditable, field.isEnabled {
@@ -437,7 +468,7 @@ extension Companion {
                 let defaultLayout: Bool
                 switch name(scroll) {
                 case "settings_apps_tab": defaultLayout = (settings?.apps.count ?? 0) <= 3
-                case "settings_channels_tab": defaultLayout = settings?.channels?.count == 1 && !channelUiStates.values.contains(where: { $0.editingGateway || $0.editingPersonal || $0.manualEntry }) && (settings?.channels ?? []).allSatisfy { (channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.pairingInstruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.testResult == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
+                case "settings_channels_tab": defaultLayout = settings?.channel_inventory_error == nil && settings?.channels?.count == 1 && !channelUiStates.values.contains(where: { $0.editingGateway || $0.editingPersonal || $0.manualEntry }) && (settings?.channels ?? []).allSatisfy { (channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.pairingInstruction ?? "").isEmpty && $0.status != "error" && $0.warning != true && channelUiStates["\(effectiveChannelHub)|\($0.id)"]?.testResult == nil } && (settings?.channels?.first?.fields.count ?? 0) <= 2
                 case "settings_hubs_tab": defaultLayout = !addHubFormOpen && (settings?.hubs.count ?? 0) <= 2 && (settings?.hubs ?? []).allSatisfy { $0.status == "connected" && $0.error == nil }
                 default: defaultLayout = false
                 }
@@ -505,7 +536,7 @@ extension Companion {
                     }
                 }
             }
-            var result: [String: Any] = ["id": (view as? DirectoryPeerCellView)?.inspectionId ?? view.identifier?.rawValue ?? "", "width": view.frame.width,
+            var result: [String: Any] = ["instance": String(describing:ObjectIdentifier(view)), "id": (view as? DirectoryPeerCellView)?.inspectionId ?? view.identifier?.rawValue ?? "", "width": view.frame.width,
                 "height": view.frame.height, "x": view.frame.origin.x, "y": view.frame.origin.y,
                 "radius": view.layer?.cornerRadius ?? 0, "hidden": view.isHidden,
                 "children": childViews.map { project($0, visible: visible, background: surface, opacity: opacity, enabled: enabled) }]
@@ -633,14 +664,16 @@ extension Companion {
                     "hidden_title": window.titleVisibility == .hidden, "transparent_titlebar": window.titlebarAppearsTransparent,
                     "hidden_window_buttons": [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].allSatisfy { window.standardWindowButton($0)?.isHidden != false }]
             },
-            "field_editors": [settingsPanel, directoryPanel].compactMap { window -> [String: Any]? in
+            "field_editors": [settingsPanel, directoryPanel, headlessMenuPanel].compactMap { window -> [String: Any]? in
                 guard let editor = window?.firstResponder as? NSTextView else { return nil }
-                return ["id": (editor.delegate as? NSTextField)?.identifier?.rawValue ?? "", "selection_length": editor.selectedRange().length,
+                return ["id": (editor.delegate as? NSTextField)?.identifier?.rawValue ?? "", "instance": String(describing:ObjectIdentifier(editor)),
+                    "marked": editor.hasMarkedText(), "selection_length": editor.selectedRange().length,
                     "selection_location": editor.selectedRange().location, "editable": editor.isEditable,
                     "can_undo": editor.undoManager?.canUndo ?? false, "undo_groups": editor.undoManager?.groupingLevel ?? -1,
                     "automatic_groups": editor.undoManager?.groupsByEvent ?? false,
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
             },
+            "activity_copy_remaining": activityCopiedUntil.mapValues { max(0,$0.timeIntervalSinceNow) },
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),

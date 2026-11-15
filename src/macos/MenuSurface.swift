@@ -25,6 +25,7 @@ extension Companion: NSMenuDelegate {
     }
     func menuDidClose(_ menu: NSMenu) {
         renamingSessionKey = nil
+        if menuRebuildDeferred { DispatchQueue.main.async { [weak self] in self?.rebuild() } }
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
     }
 
@@ -59,8 +60,6 @@ extension Companion: NSMenuDelegate {
     }
 
     func rebuild() {
-        MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
-        rebuildCount += 1
         let count = uniqueSessionCount
         let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
         statusImage = makeCitoStatusIcon(warning ? .warning : (listeners.contains { $0.harness != "human" } || unreadCount > 0) ? .active : .idle)
@@ -68,6 +67,13 @@ extension Companion: NSMenuDelegate {
             formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
             updateStatusTooltip(button)
         }
+        if renamingSessionKey != nil, renameField?.currentEditor() != nil {
+            menuRebuildDeferred = true
+            return
+        }
+        menuRebuildDeferred = false
+        MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
+        rebuildCount += 1
         let menu = cardMenu
         let existingRenameField = renamingSessionKey == nil ? nil : renameField
         let renameEditor = existingRenameField?.currentEditor() as? NSTextView
@@ -198,7 +204,7 @@ extension Companion: NSMenuDelegate {
                 layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
             }
             let item = host(drawer, id: "drawer:\(hub.name)")
-            let autoExpand = hub.status != "connected" || hub.error != nil
+            let autoExpand = (hub.status != "connected" && hub.status != "connecting") || hub.error != nil
             item.isHidden = !(hubDrawerVisibility[hub.name] ?? autoExpand)
             drawerItems[hub.name] = item
         }
@@ -398,7 +404,7 @@ extension Companion: NSMenuDelegate {
                 card.addSubview(field); renameField = field
                 if existingRenameField == nil || renameSelection != nil {
                     RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self, weak field] in
-                        guard let self = self, let field = field, self.renameField === field else { return }
+                        guard let self = self, let field = field, self.renameField === field, field.currentEditor() == nil else { return }
                         field.window?.makeFirstResponder(field)
                         if let selection = renameSelection { (field.currentEditor() as? NSTextView)?.setSelectedRange(selection) }
                         else { field.selectText(nil) }
@@ -432,7 +438,6 @@ extension Companion: NSMenuDelegate {
             scroll.documentView = doc; _ = host(scroll, id: "active_scroll")
         }
         if orderedListeners.isEmpty {
-            if available.isEmpty {
                 let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 92))
                 let card = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 86), radius: 10, color: .labelColor.withAppearanceAlpha(0.045))
                 let icon = NSImageView(frame: NSRect(x: 12, y: 22, width: 24, height: 24))
@@ -452,16 +457,6 @@ extension Companion: NSMenuDelegate {
                 channels.pressed={ [weak self] in self?.settingsActiveTab="channels"; self?.openSettingsPanel() }
                 card.addSubview(channels)
                 row.addSubview(card); _ = host(row, id: "empty")
-            } else {
-                let row = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 34))
-                let pill = roundedView(NSRect(x: CitoMetrics.menuInset, y: 3, width: CitoMetrics.menuRailWidth, height: 28), radius: 8, color: .labelColor.withAppearanceAlpha(0.045))
-                let icon = NSImageView(frame: NSRect(x: 12, y: 7, width: 14, height: 14))
-                icon.image = NSImage(systemSymbolName: "waveform.slash", accessibilityDescription: "No active listeners")
-                icon.contentTintColor = CitoPalette.secondaryText; pill.addSubview(icon)
-                pill.addSubview(textLabel("No agent sessions listening — click + Listen below",
-                    NSRect(x: 32, y: 6, width: 316, height: 16), size: 11, color: CitoPalette.secondaryText))
-                row.addSubview(pill); _ = host(row, id: "empty")
-            }
         }
         // Zone 2 — My Other Hosts
         if !myRemote.isEmpty {

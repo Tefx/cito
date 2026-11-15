@@ -551,11 +551,16 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             layoutBar(in: bar, insetRight: 16, y: 5, height: 22, trailing: [markRead,clear])
         }
         guard let bar=directoryFacetBar else{return}
-        bar.subviews.filter { $0.identifier?.rawValue.hasPrefix("activity_clear_confirm") == true }.forEach { $0.removeFromSuperview() }
+        let mounted = bar.subviews.filter { $0.identifier?.rawValue.hasPrefix("activity_clear_confirm") == true }
+        if !(isActivity && activityClearConfirm) { mounted.forEach { $0.removeFromSuperview() } }
         if isActivity && activityClearConfirm {
-            bar.subviews.filter { $0 is MenuControl || $0.identifier?.rawValue == "activity_filter_track" }.forEach { $0.isHidden=true }
+            bar.subviews.filter { ($0 is MenuControl || $0.identifier?.rawValue == "activity_filter_track") && $0.identifier?.rawValue.hasPrefix("activity_clear_confirm") != true }.forEach { $0.isHidden=true }
             let count=serverActivityFilter==activityFilter && serverActivityQuery==directoryQuery ? activityTotal : activityFilteredItems.count
             let description = directoryQuery.isEmpty ? "Clear \(count) \(activityFilter == "me" ? "For Me" : activityFilter == "all" ? "All Activity" : "Unread") messages?" : "Clear \(count) matching messages?"
+            if let label = mounted.first(where: { $0 is NSTextField }) as? NSTextField {
+                label.stringValue = description; label.toolTip = description
+                return
+            }
             let label=textLabel(description,NSRect(x:16,y:7,width:300,height:18),size:11,weight:.medium)
             label.identifier=NSUserInterfaceItemIdentifier("activity_clear_confirm_label"); label.lineBreakMode = .byTruncatingTail; label.toolTip=description
             let cancel=MenuControl("Cancel",frame:NSRect(x:0,y:5,width:MenuControl.intrinsicWidth("Cancel"),height:22))
@@ -831,7 +836,10 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func copyActivity(_ item: ActivityItem, control: MenuControl) {
-        if item.message_truncated != true { latestDirectoryActionRequestId = nil; clearDirectoryActionError(); copyText(item.message,control:control); return }
+        if item.message_truncated != true {
+            activityCopiedUntil["\(item.hub)|\(item.signal_id)"] = Date().addingTimeInterval(1.2)
+            latestDirectoryActionRequestId = nil; clearDirectoryActionError(); copyText(item.message,control:control); return
+        }
         let request = UUID().uuidString
         pendingMessageCopy = PendingMessageCopy(requestId:request,hub:item.hub,signalId:item.signal_id)
         emit(["op":"copy_activity_message","request_id":request,"hub":item.hub,"signal_id":item.signal_id])
@@ -856,6 +864,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self = self else { return }
                 self.replyToActivity(item)
             }
+            restoreActivityCopyFeedback(item, cell: cell)
             return cell
         }
         guard directoryFilteredPeers.indices.contains(row) else { return nil }
@@ -867,8 +876,14 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
             guard let self = self else { return }
             self.openComposer(target: peer.display_address, hub: peer.hub ?? "", replySignalId: nil)
         }
-        if Date() < (directoryCopiedUntil[peer.scoped_id] ?? .distantPast) { cell.copyControl.copied() }
+        let remaining = (directoryCopiedUntil[peer.scoped_id] ?? .distantPast).timeIntervalSinceNow
+        if remaining > 0 && cell.copyControl.feedbackTimer?.isValid != true { cell.copyControl.copied(for: remaining) }
         return cell
+    }
+
+    func restoreActivityCopyFeedback(_ item: ActivityItem, cell: DirectoryPeerCellView) {
+        let remaining = (activityCopiedUntil["\(item.hub)|\(item.signal_id)"] ?? .distantPast).timeIntervalSinceNow
+        if remaining > 0 && cell.copyControl.feedbackTimer?.isValid != true { cell.copyControl.copied(for: remaining) }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -885,6 +900,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 if let cell = table.view(atColumn:0,row:index,makeIfNecessary:false) as? DirectoryPeerCellView {
                     let item = activityFilteredItems[index]
                     cell.configureActivity(with:item,selected:index==row,harnesses:harnessMap,onCopy:{ [weak self] c in self?.copyActivity(item,control:c) },onDelete:{ [weak self] in self?.deleteActivity(item) },onReply:{ [weak self] in self?.replyToActivity(item) })
+                    restoreActivityCopyFeedback(item, cell: cell)
                 }
             }
         }

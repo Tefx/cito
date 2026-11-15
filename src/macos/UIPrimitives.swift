@@ -50,8 +50,9 @@ func layoutBar(in container: NSView, insetLeft: CGFloat = CitoMetrics.cardInset,
     for case let control as MenuControl in leftItems + rightItems where !control.label.isHidden
         && control.subviews.allSatisfy({ $0 === control.label || $0 === control.leadingSymbolView || $0 === control.leadingDotView || $0 === control.centerSymbolView }) {
         let id = control.identifier?.rawValue ?? ""
+        // Timed feedback retains the resting width so its label fits after expiry.
         // Address chips reserve copy feedback space; scope toggles keep a uniform width.
-        let reservedWidth = id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
+        let reservedWidth = control.feedbackTimer?.isValid == true || id.hasPrefix("copy:") || id.hasPrefix("copy_remote:") || id.hasPrefix("scope:") ? control.frame.width : 0
         let pairedWidth = MenuControl.toggleWidth(id, title:control.label.stringValue, font: control.label.font ?? .systemFont(ofSize:11,weight:.medium))
         control.frame.size.width = min(control.maximumWidth, max(reservedWidth, pairedWidth, MenuControl.intrinsicWidth(control.label.stringValue,
             font:control.label.font ?? .systemFont(ofSize:11,weight:.medium),
@@ -508,7 +509,7 @@ final class MenuControl: NSControl {
         super.viewDidChangeEffectiveAppearance()
         applyVisualState()
     }
-    func copied(_ message: String = "✓ Copied") {
+    func copied(_ message: String = "✓ Copied", for seconds: TimeInterval = 1.2) {
         if feedbackTimer == nil {
             restingTitle = label.stringValue
             restingAccessibilityLabel = accessibilityLabel()
@@ -517,7 +518,7 @@ final class MenuControl: NSControl {
         leadingSymbolView?.isHidden = true
         label.stringValue = message; label.textColor = CitoPalette.successText
         layoutContents()
-        let restore = Timer(timeInterval: 1.2, repeats: false) { [weak self] _ in
+        let restore = Timer(timeInterval: max(0.001, seconds), repeats: false) { [weak self] _ in
             guard let self = self else { return }
             if self.leadingSymbolView != nil {
                 self.leadingSymbolView?.isHidden = false

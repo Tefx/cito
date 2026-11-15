@@ -66,6 +66,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var directoryAllPeers: [RemotePeer] = []
     var directoryFilteredPeers: [RemotePeer] = []
     var directoryCopiedUntil: [String: Date] = [:]
+    var activityCopiedUntil: [String: Date] = [:]
+    var settingsRebuildDeferred = false
+    var menuRebuildDeferred = false
+    var headlessMenuPanel: KeyPanel?
     var directoryVisible = false
     var directoryQuery = ""
     var directoryScopeFilter = "all" { didSet { if oldValue != directoryScopeFilter { clearDirectoryActionError() } } }
@@ -386,6 +390,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                     let index = directoryMode == "activity" ? activityFilteredItems.firstIndex { $0.hub == pending.hub && $0.signal_id == pending.signalId } : nil
                     let cell = index.flatMap { directoryTableView?.view(atColumn:0,row:$0,makeIfNecessary:false) as? DirectoryPeerCellView }
                     let sameItem = cell?.activityItem?.hub == pending.hub && cell?.activityItem?.signal_id == pending.signalId
+                    activityCopiedUntil["\(pending.hub)|\(pending.signalId)"] = Date().addingTimeInterval(1.2)
                     copyText(pending.buffer, control:sameItem ? cell?.copyControl : nil)
                 }
                 else { pendingMessageCopy = pending }
@@ -407,7 +412,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             }
             return
         }
-        if let hasAny=frame.activity_has_any { activityHasAny=hasAny }
+        let activityPresenceChanged = frame.activity_has_any.map { $0 != activityHasAny } ?? false
         if frame.op == "error" || actionFailure {
             if let request = frame.request_id { pendingAppChecks.removeValue(forKey: request) }
             let sourceOp = frame.source_op ?? ""
@@ -460,23 +465,26 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             else { menuBannerError = error }
             diagnostic("error \(error)")
             rebuild()
-            if settingsPanel != nil { rebuildSettingsPanel() }
+            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
         if frame.op == "settings", let value = frame.settings {
+            let target = value.settings_hub ?? value.channel_hub ?? frame.hub ?? effectiveChannelHub
+            let changed = value != settings || channelSettingsByHub[target] != (value.channels ?? [])
+            let receipt = settledControl || (frame.request_id != nil && frame.source_op != nil)
             if let request = frame.request_id, let app = pendingAppChecks.removeValue(forKey: request),
                frame.ok == true && frame.source_op == "setup_apply" {
                 appCheckedUntil[app] = Date().addingTimeInterval(1.5)
                 DispatchQueue.main.asyncAfter(deadline:.now()+1.5) { [weak self] in
-                    if self?.settingsVisible == true { self?.rebuildSettingsPanel() }
+                    if self?.settingsVisible == true { self?.rebuildSettingsPanel(preservingEditor: true) }
                 }
             }
             if hubInvitePending && frame.request_id == hubInviteRequest && frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? "") {
                 hubInvitePending=false; hubInvitePastedUntil=Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2)
             }
             let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil
-            acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? ""))
-            if settingsPanel != nil { rebuildSettingsPanel() }
+            let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? ""))
+            if (changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId) && settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
         if frame.op == "pair_code", let id = frame.channel_id {
@@ -489,19 +497,20 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             ui.pairingURL = frame.pairing_url
             if let command = frame.pairing_command { copyText(command); ui.pairCopiedUntil = Date().addingTimeInterval(1.2); rebuildFeedbackAfter(1.2) }
             channelUiStates[key] = ui
-            if settingsPanel != nil { rebuildSettingsPanel() }
+            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
         if frame.op == "channel_test_result", let id = frame.channel_id {
             let key = "\(frame.hub ?? effectiveChannelHub)|\(id)"
             channelUiStates[key, default: ChannelUiState()].testResult = (ok: frame.ok == true, detail: frame.detail ?? frame.error ?? (frame.ok == true ? "Test sent" : "Test failed"))
             channelUiStates[key, default: ChannelUiState()].testResultIsLatest = true
-            if settingsPanel != nil { rebuildSettingsPanel() }
+            if settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
         if frame.op == "state", let h = frame.hubs, let l = frame.listeners,
            h.allSatisfy({ ["connected", "connecting", "auth_required", "disconnected", "unreachable", "error"].contains($0.status) && ["none", "token", "oidc"].contains($0.auth_mode) }),
            l.allSatisfy({ ["self", "workspace"].contains($0.scope) }) {
+            if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
             let a = frame.available ?? []
             let discoveryChanged = discovery != (frame.discovery ?? discovery)
             discovery = frame.discovery ?? discovery
@@ -509,7 +518,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             let onlineCount = frame.directory_online_count ?? max(directoryOnlineCount, r.count)
             let nextUnread = frame.unread_count ?? unreadCount
             let nextActivity = frame.activity ?? activityAllItems
-            let activityChanged = nextUnread != unreadCount || nextActivity != activityAllItems || (frame.activity_total != nil && frame.activity_total != activityTotal)
+            let activityChanged = activityPresenceChanged || nextUnread != unreadCount || nextActivity != activityAllItems ||
+                (frame.activity_total != nil && frame.activity_total != activityTotal) ||
+                (frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount) != activityUnreadCount ||
+                frame.activity_filter != serverActivityFilter || (frame.activity_query ?? "") != serverActivityQuery
             activityTotal = frame.activity_total ?? activityTotal
             activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
             serverActivityFilter = frame.activity_filter
@@ -522,8 +534,8 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if harnessesChanged { harnesses = nextHarnesses }
             let nextSettings = frame.settings ?? settings
             // An unchanged save acknowledgement still needs to refresh the settings feedback.
-            let settingsChanged = nextSettings != settings || hostHubPortPending
-            if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name) }
+            let settingsChanged = nextSettings != settings || (hostHubPortPending && frame.request_id == submittedHostHubRequestId)
+            if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name, savedRequest: frame.request_id) }
             if let error = frame.composer_error, !error.isEmpty { setComposerStatus(error) }
             if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
                 let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
@@ -548,7 +560,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                 }
                 if directoryVisible && directoryMembershipChanged { queryDirectory() }
                 if (settingsChanged || settledControl || directoryMembershipChanged) && settingsPanel != nil {
-                    rebuildSettingsPanel()
+                    rebuildSettingsPanel(preservingEditor: true)
                 }
             }
             if !hasCheckedFirstLaunchOnboarding, let s = settings, !s.apps.isEmpty {
@@ -569,11 +581,32 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if headless { diagnostic("state hubs=\(h.count) listeners=\(l.count)" + (a.isEmpty ? "" : " available=\(a.count)")) }
         } else if frame.op == "directory", let peers = frame.peers {
             guard frame.request_id == directoryRequestId && frame.query == directoryQuery && frame.scope == directoryScopeFilter && frame.harness == directoryHarnessFilter else { return }
+            if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
+            let scopeChanged = listeners.contains { listener in
+                guard listener.harness != "human", hubs.first(where: { $0.name == listener.hub })?.auth_mode != "oidc" else { return false }
+                let user = [listener.user, listener.owner_user, hubs.first { $0.name == listener.hub }?.user]
+                    .compactMap { $0 }.first { !$0.isEmpty } ?? hubs.first { $0.name == effectiveTargetHub }?.user ?? "local"
+                guard !listeners.contains(where: { $0.hub == listener.hub && !($0.user ?? "").isEmpty && $0.user != user }) else { return false }
+                return peers.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user }) !=
+                    directoryAllPeers.contains(where: { $0.hub == listener.hub && !$0.user.isEmpty && $0.user != user })
+            }
+            let menuChanged = activityPresenceChanged || (frame.unread_count ?? unreadCount) != unreadCount ||
+                (frame.online_count ?? peers.count) != directoryOnlineCount || scopeChanged
+            let rowsChanged = activityPresenceChanged || (frame.unread_count ?? unreadCount) != unreadCount ||
+                serverDirectoryQuery == nil || serverDirectoryQuery != directoryQuery ||
+                serverDirectoryScope != directoryScopeFilter || serverDirectoryHarness != directoryHarnessFilter ||
+                directoryAllPeers != peers || serverDirectoryMatchedCount != (frame.matched_count ?? peers.count) ||
+                directoryOnlineCount != (frame.online_count ?? peers.count) ||
+                (frame.activity ?? activityAllItems) != activityAllItems ||
+                (frame.activity_total ?? activityTotal) != activityTotal ||
+                (frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount) != activityUnreadCount ||
+                frame.activity_filter != serverActivityFilter || (frame.activity_query ?? "") != serverActivityQuery
+            let warningsChanged = directoryQueryError != nil || (frame.warnings ?? directoryWarnings) != directoryWarnings
             activityTotal = frame.activity_total ?? activityTotal
             activityUnreadCount = frame.activity_unread_count ?? frame.unread_count ?? activityUnreadCount
             directoryWarnings = frame.warnings ?? directoryWarnings
             directoryQueryError = nil
-            updateDirectoryWarnings()
+            if warningsChanged { updateDirectoryWarnings() }
             serverActivityFilter = frame.activity_filter
             serverActivityQuery = frame.activity_query ?? ""
             directoryAllPeers = peers
@@ -584,14 +617,16 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             directoryOnlineCount = frame.online_count ?? peers.count
             if let act = frame.activity { activityAllItems = act }
             if let u = frame.unread_count { unreadCount = u }
-            updateDirectoryModePills()
-            rebuildDirectoryFacetBar()
-            if directoryMode == "activity" {
-                applyActivityFilter()
-            } else {
-                applyDirectoryFilter(fromDaemonFrame: true, daemonMatchedCount: frame.matched_count)
+            if rowsChanged {
+                updateDirectoryModePills()
+                rebuildDirectoryFacetBar()
+                if directoryMode == "activity" {
+                    applyActivityFilter()
+                } else {
+                    applyDirectoryFilter(fromDaemonFrame: true, daemonMatchedCount: frame.matched_count)
+                }
             }
-            if hasRenderedState { rebuild() }
+            if hasRenderedState && (menuChanged || settledControl) { rebuild() }
             if headless { diagnostic("directory peers=\(peers.count) matched=\(directoryMatchedCount) online=\(directoryOnlineCount)") }
         }
     }
@@ -607,6 +642,10 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             outgoing["request_id"] = request
             latestDirectoryActionRequestId = request
             clearDirectoryActionError()
+        }
+        if operation == "channel_test", let id = action["channel_id"] as? String {
+            let key = "\(action["hub"] as? String ?? effectiveChannelHub)|\(id)"
+            channelUiStates[key, default: ChannelUiState()].testResultIsLatest = false
         }
         if operation == "channel_pair", let id=action["channel_id"] as? String {
             let request=UUID().uuidString
@@ -656,6 +695,15 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         guard let data = try? JSONSerialization.data(withJSONObject: outgoing, options: [.sortedKeys]) else { return }
         FileHandle.standardOutput.write(data + Data([10]))
     }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Wait until AppKit releases the shared field editor before replacing views.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.settingsRebuildDeferred { self.rebuildSettingsPanel(preservingEditor: true) }
+            if self.menuRebuildDeferred { self.rebuild() }
+        }
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         if let field = obj.object as? NSSearchField, field === directorySearchField {
             activityClearConfirm = false; clearDirectoryActionError(); updateDirectoryFacetStyles()
@@ -706,7 +754,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
                let listener = listeners.first(where: { "\($0.harness):\($0.session_id)" == key }) {
                 let newTitle = textView.string
                 guard !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, newTitle.unicodeScalars.count <= 128 else {
-                    menuBannerError = "Session title must contain 1 to 128 characters."; rebuild(); return true
+                    menuBannerError = "Session title must contain 1 to 128 characters."
+                    renameField?.textColor = CitoPalette.dangerText
+                    renameField?.toolTip = menuBannerError
+                    renameField?.setAccessibilityHelp(menuBannerError)
+                    rebuild(); return true
                 }
                 emit(["op":"rename_session", "harness":listener.harness, "session_id":listener.session_id, "title":newTitle])
                 renamingSessionKey = nil; rebuild(); return true

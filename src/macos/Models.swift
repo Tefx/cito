@@ -92,6 +92,13 @@ struct Candidate: Decodable, Equatable {
     let custom_title: Bool?
     let needs_reload: Bool?
     let reload_hint: String?
+
+    // Discovery timestamps do not affect any rendered candidate field.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.harness == rhs.harness && lhs.session_id == rhs.session_id && lhs.title == rhs.title && lhs.cwd == rhs.cwd &&
+        lhs.branch == rhs.branch && lhs.endpoint_pid == rhs.endpoint_pid && lhs.listening_hubs == rhs.listening_hubs &&
+        lhs.custom_title == rhs.custom_title && lhs.needs_reload == rhs.needs_reload && lhs.reload_hint == rhs.reload_hint
+    }
 }
 struct RemotePeer: Decodable, Equatable {
     let hub: String?
@@ -105,6 +112,15 @@ struct RemotePeer: Decodable, Equatable {
     let is_self_principal: Bool?
     let channels: [String]?
     var attachments: [ChannelAttachment]? = nil
+
+    // Hub lease refreshes leave the displayed peer unchanged.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.hub == rhs.hub && lhs.listener_id == rhs.listener_id && lhs.public_id == rhs.public_id && lhs.scoped_id == rhs.scoped_id &&
+        lhs.user == rhs.user && lhs.host_id == rhs.host_id && lhs.host_name == rhs.host_name && lhs.harness == rhs.harness &&
+        lhs.display_address == rhs.display_address && lhs.title == rhs.title && lhs.about == rhs.about && lhs.scope == rhs.scope &&
+        lhs.session_id == rhs.session_id && lhs.custom_title == rhs.custom_title && lhs.cwd == rhs.cwd && lhs.repo == rhs.repo &&
+        lhs.branch == rhs.branch && lhs.is_self_principal == rhs.is_self_principal && lhs.channels == rhs.channels && lhs.attachments == rhs.attachments
+    }
 }
 struct ActivityItem: Decodable, Equatable {
     let hub: String
@@ -215,6 +231,7 @@ struct SettingsPayload: Decodable, Equatable {
     let channel_hub: String?
     let settings_hub: String?
     let channels: [ChannelSetupItem]?
+    var channel_inventory_error: String? = nil
     let hubs: [HubConfigItem]
     let host_hub: HostHubSummary
     let launch_at_login: Bool
@@ -261,7 +278,7 @@ struct Frame: Decodable {
     let complete: Bool?
 }
 
-struct ChannelUiState {
+struct ChannelUiState: Equatable {
     var editingGateway = false
     var editingPersonal = false
     var manualEntry = false
@@ -274,6 +291,14 @@ struct ChannelUiState {
     var savedUntil: [String: Date] = [:]
     var testResult: (ok: Bool, detail: String)?
     var testResultIsLatest = false
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.editingGateway == rhs.editingGateway && lhs.editingPersonal == rhs.editingPersonal && lhs.manualEntry == rhs.manualEntry &&
+        lhs.drafts == rhs.drafts && lhs.pendingPairRequest == rhs.pendingPairRequest && lhs.pairingInstruction == rhs.pairingInstruction &&
+        lhs.pairingCommand == rhs.pairingCommand && lhs.pairingURL == rhs.pairingURL && lhs.pairCopiedUntil == rhs.pairCopiedUntil &&
+        lhs.savedUntil == rhs.savedUntil && lhs.testResult?.ok == rhs.testResult?.ok && lhs.testResult?.detail == rhs.testResult?.detail &&
+        lhs.testResultIsLatest == rhs.testResultIsLatest
+    }
 
     mutating func resetPersonal(preservePendingPair: Bool = false) {
         editingPersonal = false
