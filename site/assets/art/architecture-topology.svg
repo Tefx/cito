@@ -51,7 +51,7 @@
     <text x="717" y="205" font-size="11" fill="#C7CBD4">Simultaneous presence</text>
     <text x="717" y="250">3 · Telegram Bot Gateway</text>
     <text x="717" y="265" font-size="10" fill="#C7CBD4">@BotFather · 7-day reply</text>
-    <text x="717" y="279" font-size="10" fill="#C7CBD4">on_acked → auto read-clear</text>
+    <text x="717" y="279" font-size="10" fill="#C7CBD4">on_acked · Hub read-sync</text>
     <text x="688" y="325" font-size="11" fill="#C7CBD4">Fan-out to 1..K Channels (@self)</text>
     <text x="688" y="344" font-size="11" fill="#C7CBD4">1-line reply → wake + signal_ack</text>
     <text x="355" y="356" fill="#A5B4FC" font-weight="600">Remote / Team Hubs</text>

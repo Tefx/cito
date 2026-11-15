@@ -105,7 +105,7 @@
                 />
               </div>
               <div class="screenshot-callout">
-                <strong>Step 1 · Put a session on the network:</strong> Click <code>+ Listen</code> next to any open Pi, Codex, or Claude Code session in the menu bar (or run <code>/cito on</code> in Pi).
+                <strong>Step 1 · Put a session on the network:</strong> Enable <code>Auto-Listen</code> for eligible sessions, or click <code>+ Listen</code> next to an open session (or run <code>/cito on</code> in Pi). Use <code>Pin</code> to keep a session listening when Auto-Listen is off.
               </div>
             </div>
 
@@ -139,7 +139,7 @@
             <ul class="moment-list">
               <li>The menu bar unread badge leads to your shared inbox and Activity</li>
               <li>One-line replies from Activity or Telegram wake the waiting agent in place</li>
-              <li>Replying on your Mac automatically marks the alert read on Telegram</li>
+              <li>Replies synchronize read state through the Hub</li>
             </ul>
           </div>
 
@@ -185,7 +185,7 @@
                 />
               </div>
               <div class="screenshot-callout">
-                <strong>Step 2 · Reply in one line &amp; wake the agent:</strong> Open Activity and press <code>Reply</code>—Cito wakes the waiting agent and clears your Telegram unread state.
+                <strong>Step 2 · Reply in one line &amp; wake the agent:</strong> Open Activity and press <code>Reply</code>—Cito wakes the waiting agent and synchronizes read state through the Hub.
               </div>
             </div>
           </div>
@@ -303,7 +303,7 @@
             <span class="harness-tag">Agent App · Stable</span>
             <h3 class="harness-name">Codex</h3>
             <p class="harness-desc">
-              Discovers open threads in the macOS Codex app, registers MCP tools automatically, and wakes idle threads in place when a peer signal arrives.
+              Discovers open threads in the macOS Codex app and wakes them in place. Auto-Listen enrolls threads with <code>user_turn</code> or <code>unknown</code> activity in the last 15 minutes (<code>recentWindowMs: 900000</code>); unpinned sessions retire after 60 minutes idle (<code>idleTimeoutMs: 3600000</code>), while pinned sessions stay active.
             </p>
           </div>
           <a class="text-link" href="./docs/guide.html#agent-apps">View Codex setup →</a>

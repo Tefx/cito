@@ -17,7 +17,7 @@ Cito uses a clean cobalt identity and real AppKit screenshots. Assets must descr
 
 Capture real headless AppKit views at 2× Retina resolution with the integration test `v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility` and `CITO_TEST_SNAPSHOT_DIR`. Inspect every image before copying it into `site/assets/screenshots/`:
 
-- `menu-dark.png`: Slim menu starting with LISTENING SESSIONS, Stop actions, AVAILABLE SESSIONS, unread navigation, and Stop All. No dedicated inbox card; paused inboxes show one compact notice opening Human Channels.
+- `menu-dark.png`: Slim menu starting with LISTENING SESSIONS, Stop actions, Pin, Auto-Listen, AVAILABLE SESSIONS, unread navigation, and Stop All. No dedicated inbox card; paused inboxes show one compact notice opening Human Channels.
 - `directory-dark.png`: Unified Nodes, readable addresses, All Nodes/Mine filters, and Message actions.
 - `activity-dark.png`: Unread messages and an inline one-line reply composer.
 - `settings-apps-dark.png`: App setup states, status dots, and Check & Repair.
@@ -28,8 +28,8 @@ Do not generate mock UI artwork or modify labels in an image editor. Screenshot 
 
 ## Social preview
 
-`site/assets/og-card.png` is 1200 × 630. Use a neutral slate dot-grid, cobalt Cito lockup, the headline “Signals that wake the right session.”, and `brew install --cask tefx/tap/cito`. Composite the current menu and Activity captures at their original aspect ratios. Keep the install command readable at social-preview scale.
+`site/assets/og-card.png` is 1200 × 630. Use a neutral slate dot-grid, cobalt Cito lockup, the headline “Signals that wake the right session.”, the subtitle “One inbox. Every device. Your coding apps.”, a cobalt `brew install --cask tefx/tap/cito` pill, and the labels “Menubar badge + Activity replies” and “Human ↔ Hub ↔ Agent”. Composite the current menu and Activity captures at their original aspect ratios. Keep the install command readable at social-preview scale.
 
 ## Architecture diagram
 
-`site/assets/art/architecture-topology.svg` is an editable 960 × 420 vector diagram. Show symmetric Human and Agent Session Nodes, attached Channels, the single-authority HubEngine, and remote Hubs. Use Cito Blue for the Hub and primary paths, readable neutral cards, and semantic plugin colors with accessible contrast. Label the Mac interaction `Unread badge + 1-line reply`. Keep protocol labels editable; do not substitute a raster illustration.
+`site/assets/art/architecture-topology.svg` is an editable 960 × 420 vector diagram. Show symmetric Human and Agent Session Nodes, attached Channels, the single-authority HubEngine, and remote Hubs. Use Cito Blue for the Hub and primary paths, readable neutral cards, and semantic plugin colors with accessible contrast. Label the Mac interaction `Unread badge + 1-line reply` and the Telegram acknowledgment `on_acked · Hub read-sync`; Telegram does not clear unread badges on acknowledgment. Keep protocol labels editable; do not substitute a raster illustration.

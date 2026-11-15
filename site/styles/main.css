@@ -550,15 +550,6 @@ code, pre {
   line-height: 1.6;
 }
 
-.section-links-row {
-  margin-top: var(--space-lg);
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 1.5rem;
-  font-size: 0.98rem;
-}
-
 .text-link {
   display: inline-flex;
   align-items: center;
@@ -572,8 +563,7 @@ code, pre {
 }
 
 /* Section 4: Closing CTA & Footer */
-.cta-banner,
-.closing-card {
+.cta-banner {
   max-width: var(--container-narrow);
   margin: 0 auto;
   padding: var(--space-xl) var(--space-lg);

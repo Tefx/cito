@@ -17,8 +17,6 @@
   --accent-primary: #38BDF8;
   --accent-primary-soft: rgba(56, 189, 248, 0.14);
   --accent-primary-glow: rgba(56, 189, 248, 0.24);
-  --accent-green: #10B981;
-  --accent-teal: #14B8A6;
   --accent-blue: var(--accent-primary);
 
   /* Typography */

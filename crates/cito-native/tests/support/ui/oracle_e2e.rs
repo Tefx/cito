@@ -141,6 +141,7 @@ fn v40_four_surface_captures_clear_confirmation_and_dynamic_accessibility() {
     let p = start(&f);
     let mut frame = state();
     let mut cfg = settings();
+    cfg["apps"][0]["display_name"] = json!("Pi Coding Agent");
     cfg["apps"][2]["id"] = json!("claude");
     cfg["apps"][2]["display_name"] = json!("Claude Code");
     cfg["channels"][0]["id"] = json!("telegram");
