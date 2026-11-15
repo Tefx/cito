@@ -12734,3 +12734,286 @@ phases:
       Spec link:
 
       - docs/DESIGN.md (§3.4, §4.2, §8.1) & v43.review Round 2 pathway-auditor closure'
+- id: v45
+  name: 'V45 Steady-State & Non-Flapping Projections, OIDC/Tailscale/Channel/Plugin
+    Resilience & macOS UI Render Deduplication (v0.21.3) [REQUIRES_SKILL: contract-and-simplicity]'
+  status: pending
+  gate: 'All binding V45 requirements in docs/DESIGN.md (§1–§8 @ 6ba91cd) for Rust
+    Daemon/Hub/Identity/Plugin steady-state resilience and macOS Swift UI render deduplication
+    & interaction preservation pass; [REQUIRES_SKILL: contract-and-simplicity] full
+    audit across v45 deltas completes cleanly; cargo fmt --all -- --check, cargo clippy
+    --workspace --all-targets -- -D warnings, cargo test --workspace, cargo build
+    --release (0 warnings updating all 7 staged binaries), node crates/cito-native/tests/support/site-clipboard.mjs,
+    python3 packaging/release.py check, python3 -m unittest discover -s packaging,
+    and §1.2 zero-hardcoding check pass; local /Applications/Cito.app is rebuilt,
+    verified (codesign --verify --deep --strict), and restarted; main is pushed to
+    origin/main at version 0.21.3 with NO release tag.'
+  context: 'Implement docs/DESIGN.md (1..EOF, §1–§8 @ 6ba91cd) and close the pre-reviewed
+    V45 Steady-State & Non-Flapping Projections Finding Ledger without repeating Stage
+    1 discovery (Option A defaults: retain discovery_errors_and_panics_clear_stale_candidates
+    safety rule while fixing plugin transient resilience; retain existing 3-strike
+    "transient_error" hard_exit policy): (1) v45.rust (rust-senior): OIDC continuity
+    (§2.2: bind ChannelInventory/directory/Human cache ownership to (hub_endpoint,
+    verified_principal) instead of rotating bearer bytes; keep valid existing slot,
+    SSE stream, and cached projections alive during pre-expiry OIDC background renewal,
+    atomically replacing credentials once verified and clearing caches only on actual
+    expiry/rejection, principal change, or endpoint change); Capability-separated
+    Hub & freshness status (§3.1, §3.3: represent authentication validity, RPC reachability,
+    SSE stream liveness, and cached observation freshness independently in core/transport.rs
+    and core/daemon/projection.rs so SSE reconnects and single RPC errors do not overwrite
+    one shared connection status string or cause hubs[*].status vs human_state_status
+    mismatches within one snapshot; RemotePeer.last_seen_at outputs authoritative
+    observation time rather than serialization now_ms(); core/identity.rs display_address
+    uses Hub server_now_ms / registration_now); Tailscale & channel diagnostic isolation
+    (§3.3, §4.3: core/daemon/host_hub.rs & projection.rs distinguish ProbeError from
+    confirmed Tailscale unavailability, retaining last confirmed tailscale_url across
+    transient probe failures and clearing only on confirmed offline status; projection.rs
+    replaces synthetic "inventory" element appended into channels[] with channel_inventory_error
+    (string?, omitted/null when healthy, uniformly for local and remote Hubs; initial
+    uncached failures leave channels[] empty with channel_inventory_error set) and
+    preserves channel_inventory_error under core/daemon/ui_ipc.rs 256 KiB frame shedding;
+    core/hub.rs channel_list retains retry warning visibility (warning: true, detail:
+    last_error) while a failed delivery is ''in_flight'' with attempts > 0 and non-empty
+    last_error, and clears stale poll_error when a channel process is deactivated;
+    plugins/telegram/native.rs applies consecutive-failure hysteresis + exponential/jittered
+    backoff before emitting transient poll_error frames on getUpdates timeouts/409
+    spikes while surfacing permanent auth errors immediately); Plugin discovery &
+    probe resilience (§4.2: plugins/pi/native.rs retains pi-pid-<pid>.sock-backed
+    sessions across transient 750 ms identify timeouts without downgrading to needs_reload:
+    true and isolates per-PID ps/lsof transient errors; plugins/claude/native.rs falls
+    back to verified binding_path (process_start + matches_process) on transient 750
+    ms bridge timeout when endpoint PID is alive; plugins/codex/native.rs probe maps
+    transient ReadOnlySqlite SQLITE_BUSY/deadline timeouts to "transient_error" while
+    preserving structural/I/O error propagation on archived = 1); (2) v45.ui (senior-engineer,
+    depends on v45.rust): Frame & render equality deduplication (§5.1: Companion.swift
+    & Models.swift deduplicate settings and directory frames alongside state, excluding
+    Candidate.updated_at_ms and RemotePeer.last_seen_at from UI render equality, preserving
+    pending settlement receipts, initial empty directory replies when serverDirectoryQuery
+    == nil, directoryQueryError clears, activity/unread_count/warnings updates, and
+    triggering MenuSurface.rebuild() from directory frames only when menu-visible
+    counters or scope state change); Interaction, scroll & geometry stability (§5.2.3,
+    §5.2.4, §5.2.5: MenuSurface.swift does not auto-expand a single-Hub drawer:<hub>
+    solely on transient reconnects when RPC/cached state remains usable, keeps empty
+    card height constant when available transiently empties, and defers destructive
+    menu.removeAllItems() rebuilds while inline renamingSessionKey has an active field
+    editor; SettingsSurface.swift preserves Settings scroll offset across background
+    rebuilds, scrolls add_hub_form into view only on explicit open, preserves active
+    text editor focus, undo stack, and IME composition, resets testResultIsLatest
+    only when channel health/status/warning changes or a new test starts, preserves
+    active pairingInstruction while pairing is pending, renders channel_inventory_error
+    via a non-card diagnostic banner/bar without collapsing or duplicating real Channel
+    strata, and renders hostHub.enabled && !running without an explicit error inside
+    the existing header row "Starting…" instead of injecting a 28pt host_hub_error
+    banner; DirectorySurface.swift & DirectoryCell.swift persist activityCopiedUntil
+    in Companion matching directoryCopiedUntil, preserve cell hover and copy feedback
+    across identical row reconfigures, and avoid recreating mounted activity_clear_confirm_*
+    controls); plus targeted UI tests (settings_channels.rs:395-417, oracle_e2e.rs:1250-1305,
+    and headless UI regression tests); (3) v45.review (senior-engineer, depends on
+    v45.ui, [REQUIRES_SKILL: contract-and-simplicity]): Full contract-and-simplicity
+    audit across v45 deltas, full §8.1 verification suite, 7 staged binaries rebuild
+    + /Applications/Cito.app rebuild & restart (codesign --verify --deep --strict),
+    and push main to origin/main at version 0.21.3 with NO release tag.'
+  depends_on:
+  - v44
+  steps:
+  - id: v45.rust
+    name: 'V45 Rust Daemon, Hub, Identity & Plugin Steady-State Resilience: OIDC Continuity,
+      Capability-Separated Hub Status, Tailscale/Channel Diagnostic Isolation & Plugin
+      Timeout Resilience'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/src/**\n    - crates/cito-native/tests/support/plugins.rs\n\
+      \    - crates/cito-native/tests/support/daemon/**\n    - plugins/telegram/**\n\
+      \    - plugins/pi/**\n    - plugins/claude/**\n    - plugins/codex/**\n  blocked_paths:\n\
+      \    - plan.yaml\n\nDeliver:\n- Implement all Rust daemon, Hub, identity, transport,\
+      \ and subprocess plugin (`telegram`, `pi`, `claude`, `codex`) steady-state resilience\
+      \ requirements in `docs/DESIGN.md` (`1..EOF`, `§1`–`§8` @ `6ba91cd`, with Option\
+      \ A defaults retaining `discovery_errors_and_panics_clear_stale_candidates`\
+      \ safety rule and the 3-strike `\"transient_error\"` `hard_exit` policy):\n\
+      \  1. OIDC Continuity (`§2.2`):\n     - In `crates/cito-native/src/core/daemon/mod.rs`\
+      \ (`reload_slots`), `crates/cito-native/src/core/daemon/channels.rs` (`remote_channels_identity`),\
+      \ `crates/cito-native/src/core/transport.rs`, and `crates/cito-native/src/core/daemon/projection.rs`,\
+      \ bind `ChannelInventory`, directory, and Human inbox cache ownership to `(hub_endpoint,\
+      \ verified_principal)` instead of rotating bearer bytes.\n     - Keep the valid\
+      \ existing slot, SSE stream, and cached projections alive during pre-expiry\
+      \ OIDC background renewal, atomically replacing credentials once verified and\
+      \ clearing caches only on actual expiry/rejection, principal change, or endpoint\
+      \ change.\n  2. Capability-Separated Hub & Freshness Status (`§3.1`, `§3.3`):\n\
+      \     - In `crates/cito-native/src/core/transport.rs` and `crates/cito-native/src/core/daemon/projection.rs`,\
+      \ represent authentication validity, RPC reachability, SSE stream liveness,\
+      \ and cached observation freshness independently so SSE reconnects and single\
+      \ RPC errors do not overwrite one shared connection status string or cause `hubs[*].status`\
+      \ vs `human_state_status` mismatches within one snapshot.\n     - Update `crates/cito-native/src/core/daemon/projection.rs`\
+      \ so `RemotePeer.last_seen_at` outputs authoritative observation time rather\
+      \ than snapshot serialization `now_ms()`.\n     - Update `crates/cito-native/src/core/identity.rs`\
+      \ (`display_address`) to evaluate peer liveness using Hub `server_now_ms` (`registration_now`).\n\
+      \  3. Tailscale & Channel Diagnostic Isolation (`§3.3`, `§4.3`):\n     - `crates/cito-native/src/core/daemon/host_hub.rs`\
+      \ & `projection.rs`: distinguish probe execution/timeout failure (`ProbeError`)\
+      \ from confirmed Tailscale unavailability, retaining the last confirmed `tailscale_url`\
+      \ across transient probe failures and clearing only on confirmed offline status.\n\
+      \     - `crates/cito-native/src/core/daemon/projection.rs` & `ui_ipc.rs`: replace\
+      \ the synthetic `\"inventory\"` element appended into `channels[]` with `channel_inventory_error`\
+      \ (`Option<String>`, omitted/`null` when healthy, uniformly for local and remote\
+      \ Hubs; initial uncached failures leave `channels[]` empty with `channel_inventory_error`\
+      \ set) and preserve `channel_inventory_error` under `core/daemon/ui_ipc.rs`\
+      \ `256 KiB` frame shedding.\n     - `crates/cito-native/src/core/hub.rs` (`channel_list`):\
+      \ retain retry warning visibility (`warning: true`, `detail: last_error`) while\
+      \ a failed delivery is `'in_flight'` with `attempts > 0` and non-empty `last_error`;\
+      \ clear stale `poll_error` when a channel process is deactivated.\n     - `plugins/telegram/native.rs`:\
+      \ apply consecutive-failure hysteresis + exponential/jittered backoff before\
+      \ emitting transient `poll_error` frames on `getUpdates` timeouts/`409` spikes\
+      \ while surfacing permanent auth errors immediately.\n  4. Plugin Discovery\
+      \ & Probe Resilience (`§4.2`):\n     - `plugins/pi/native.rs`: in `discover_sessions`,\
+      \ retain `pi-pid-<pid>.sock`-backed sessions across transient `750 ms` `identify`\
+      \ timeouts without downgrading to `needs_reload: true`, and isolate per-PID\
+      \ `ps`/`lsof` transient errors rather than failing the whole batch.\n     -\
+      \ `plugins/claude/native.rs`: in `discover_sessions`, fall back to verified\
+      \ `binding_path` (`process_start` + `matches_process`) on transient `750 ms`\
+      \ bridge timeout when the endpoint PID is alive instead of dropping live sessions.\n\
+      \     - `plugins/codex/native.rs`: in `probe`, map transient `ReadOnlySqlite`\
+      \ `SQLITE_BUSY`/deadline timeouts to `\"transient_error\"` while preserving\
+      \ structural/I/O error propagation on `archived = 1`.\n  5. Targeted Tests (`§8.1`):\n\
+      \     - Update/add fast targeted tests (`cargo test -p cito-native <filter>`\
+      \ and `cargo test -p cito-native --test native <filter>`) covering OIDC pre-expiry\
+      \ continuity, RPC vs SSE capability separation, Tailscale probe failure retention,\
+      \ `channel_inventory_error` & shedding, `'in_flight'` retry warning continuity,\
+      \ Telegram `poll_error` hysteresis + stop cleanup, Pi/Claude `750 ms` timeout\
+      \ resilience, Codex `probe` `\"transient_error\"`, `display_address` Hub-clock\
+      \ parity, and authoritative `RemotePeer.last_seen_at`.\n\nImplementation Notes\
+      \ (Non-Binding):\n- Follow `docs/DESIGN.md` `§8.2` hazard map. Keep inner-loop\
+      \ verification fast with targeted affected-module filters (`cargo test -p cito-native\
+      \ --lib`, `plugins::`, `daemon::`); reserve full-workspace clippy, release builds,\
+      \ and UI/packaging suites for `v45.review`.\n\nBoundary:\n- Owner: `rust-senior`.\
+      \ Isolated worktree transaction modifying `crates/cito-native/src/**`, `plugins/{telegram,pi,claude,codex}/**`,\
+      \ and `crates/cito-native/tests/support/{plugins.rs,daemon/**}`.\n\nAdmit:\n\
+      - Depends on Phase `v44` completion. Witnessed inputs: `docs/DESIGN.md` (`1..EOF`,\
+      \ `§1`–`§8` @ `6ba91cd`) and converged V45 Finding Ledger.\n- Verification:\
+      \ targeted `cargo test -p cito-native --lib`, `plugins::`, and `daemon::` filters\
+      \ pass with 0 compiler warnings. Consumed by `v45.ui` and `v45.review`.\n\n\
+      Recovery:\n- Reconcile any state, projection, plugin timeout, or test discrepancy\
+      \ in place within the worktree before completion.\n"
+    verification: 'cargo test -p cito-native --lib && cargo test -p cito-native --test
+      native plugins:: && cargo test -p cito-native --test native daemon::'
+    refs:
+    - docs/DESIGN.md
+    - crates/cito-native/src/core/daemon/mod.rs
+    - crates/cito-native/src/core/daemon/channels.rs
+    - crates/cito-native/src/core/daemon/projection.rs
+    - crates/cito-native/src/core/daemon/host_hub.rs
+    - crates/cito-native/src/core/daemon/ui_ipc.rs
+    - crates/cito-native/src/core/transport.rs
+    - crates/cito-native/src/core/identity.rs
+    - crates/cito-native/src/core/hub.rs
+    - plugins/telegram/native.rs
+    - plugins/pi/native.rs
+    - plugins/claude/native.rs
+    - plugins/codex/native.rs
+    agent: rust-senior
+  - id: v45.ui
+    name: V45 macOS Swift UI Render Deduplication, Layout Stability & Interaction
+      Preservation
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all macOS Swift\
+      \ UI render deduplication, layout stability, interaction preservation, and headless\
+      \ UI test requirements in `docs/DESIGN.md` (`§5.1`, `§5.2.3`, `§5.2.4`, `§5.2.5`,\
+      \ `§8.1`–`§8.2` @ `6ba91cd`):\n  1. Frame & Render Equality Deduplication (`§5.1`):\n\
+      \     - `src/macos/Companion.swift` & `src/macos/Models.swift`: deduplicate\
+      \ `settings` and `directory` frames (alongside `state`, excluding `Candidate.updated_at_ms`\
+      \ and `RemotePeer.last_seen_at` from UI render equality), preserving pending\
+      \ settlement receipts, initial empty `directory` replies (`serverDirectoryQuery\
+      \ == nil`), `directoryQueryError` clears, `activity`/`unread_count`/`warnings`\
+      \ updates, and triggering `MenuSurface.rebuild()` from `directory` frames only\
+      \ when menu-visible counters or scope state change.\n  2. Interaction, Scroll\
+      \ & Geometry Stability (`§5.2.3`, `§5.2.4`, `§5.2.5`):\n     - `src/macos/MenuSurface.swift`:\
+      \ do not auto-expand a single-Hub `drawer:<hub>` solely on transient reconnects\
+      \ when RPC/cached state remains usable; keep `empty` card height constant when\
+      \ `available` transiently empties; defer destructive `menu.removeAllItems()`\
+      \ rebuilds while inline `renamingSessionKey` has an active field editor.\n \
+      \    - `src/macos/SettingsSurface.swift`: preserve `Settings` scroll offset\
+      \ across background rebuilds (scroll `add_hub_form` into view only on explicit\
+      \ open) and preserve active text editor focus, undo stack, and IME composition;\
+      \ reset `testResultIsLatest` only when channel health/status/warning changes\
+      \ or a new test starts; preserve active `pairingInstruction` while pairing is\
+      \ pending; render `channel_inventory_error` via a non-card diagnostic banner/bar\
+      \ without collapsing or duplicating real `Channel` strata; render `hostHub.enabled\
+      \ && !running` without an explicit error inside the existing header row (`\"\
+      Starting…\"`) instead of injecting a `28pt` `host_hub_error` banner.\n     -\
+      \ `src/macos/DirectorySurface.swift` & `src/macos/DirectoryCell.swift`: persist\
+      \ `activityCopiedUntil` in `Companion` (matching `directoryCopiedUntil`), preserve\
+      \ cell hover and copy feedback across identical row reconfigures, and avoid\
+      \ recreating mounted `activity_clear_confirm_*` controls.\n  3. Targeted UI\
+      \ Tests (`§8.1`, `§8.2`):\n     - Update `crates/cito-native/tests/support/ui/settings_channels.rs:395-417`\
+      \ (send a changed health update to clear `testResultIsLatest` under `settings`\
+      \ deduplication).\n     - Update `crates/cito-native/tests/support/ui/oracle_e2e.rs:1250-1305`\
+      \ (assert `host_hub_error.is_null()` and header `\"Starting…\"` when `hostHub.enabled\
+      \ && !running` without an explicit error).\n     - Add headless UI regression\
+      \ tests covering `settings`/`directory` deduplication, scroll/test-result/pairing/rename/hover/`activityCopiedUntil`\
+      \ preservation, `channel_inventory_error` banner, and `Menu` `empty`/drawer\
+      \ stability (`cargo test -p cito-native --test native ui::`).\n\nImplementation\
+      \ Notes (Non-Binding):\n- Follow `docs/DESIGN.md` `§8.2` hazard map. Keep inner-loop\
+      \ verification fast with `cargo build -p cito-native` and targeted `cargo test\
+      \ -p cito-native --test native ui::` filters; reserve full-workspace clippy/test/release\
+      \ sweeps for `v45.review`.\n\nBoundary:\n- Owner: `senior-engineer`. Isolated\
+      \ worktree transaction modifying `src/macos/**` and `crates/cito-native/tests/support/ui/**`.\n\
+      \nAdmit:\n- Depends on `v45.rust` completion.\n- Verification: targeted `cargo\
+      \ test -p cito-native --test native ui::` suite passes cleanly. Consumed by\
+      \ `v45.review`.\n\nRecovery:\n- Repair any AppKit geometry, deduplication, editor\
+      \ focus/scroll, or `ui::` test discrepancy in place within the worktree before\
+      \ completion.\n"
+    verification: 'cargo test -p cito-native --test native ui::'
+    refs:
+    - docs/DESIGN.md
+    - src/macos/Companion.swift
+    - src/macos/Models.swift
+    - src/macos/MenuSurface.swift
+    - src/macos/SettingsSurface.swift
+    - src/macos/DirectorySurface.swift
+    - src/macos/DirectoryCell.swift
+    - crates/cito-native/tests/support/ui/settings_channels.rs
+    - crates/cito-native/tests/support/ui/oracle_e2e.rs
+    depends_on:
+    - v45.rust
+    agent: senior-engineer
+  - id: v45.review
+    name: 'V45 Full Contract-and-Simplicity Review, §8.1 Verification Suite, Staged
+      Binaries & Cito.app Rebuild/Restart, and Push to main (No Release Tag) [REQUIRES_SKILL:
+      contract-and-simplicity]'
+    status: pending
+    description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
+      \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
+      \    - bin/**\n    - packaging/**\n    - README.md\n    - site/**\n    - docs/DESIGN.md\n\
+      \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Execute `[REQUIRES_SKILL:\
+      \ contract-and-simplicity]` full audit across `v45` deltas (`v45.rust` and `v45.ui`\
+      \ against `docs/DESIGN.md` `1..EOF`, `§1`–`§8` @ `6ba91cd`, without repeating\
+      \ Stage 1 discovery on untouched areas), fixing any identified wiring, state-transition,\
+      \ or test-calibration issues in place.\n- Run and verify the full `docs/DESIGN.md`\
+      \ `§8.1` suite:\n  1. `cargo fmt --all -- --check`\n  2. `cargo clippy --workspace\
+      \ --all-targets -- -D warnings`\n  3. `cargo test --workspace`\n  4. `cargo\
+      \ build --release` (0 compiler warnings) updating all 7 staged binaries (`bin/cito-ui-darwin-arm64`,\
+      \ `bin/cito-native-darwin-arm64`, and bundled plugin binaries) with `codesign\
+      \ --verify --strict`\n  5. `node crates/cito-native/tests/support/site-clipboard.mjs`\n\
+      \  6. `python3 packaging/release.py check` and `python3 -m unittest discover\
+      \ -s packaging`\n  7. `§1.2` semantic zero-hardcoding check across `crates/cito-native/src/core/`\
+      \ and `src/macos/`\n- Rebuild and restart local `/Applications/Cito.app` and\
+      \ verify bundle signature (`codesign --verify --deep --strict /Applications/Cito.app`).\n\
+      - Push `main` to `origin/main` at version `0.21.3` with **NO release tag**.\n\
+      \nBoundary:\n- Owner: `senior-engineer` with `[REQUIRES_SKILL: contract-and-simplicity]`.\
+      \ Modifies repository, updates all 7 staged binaries, rebuilds/restarts local\
+      \ `/Applications/Cito.app`, and pushes `main` to `origin/main` at version `0.21.3`\
+      \ without creating a release tag.\n\nAdmit:\n- Depends on `v45.ui` completion\
+      \ (`v45.rust` -> `v45.ui`).\n- Verification: full `§8.1` check suite, `§1.2`\
+      \ zero-hardcoding check, 7 staged binaries + `/Applications/Cito.app` codesign\
+      \ verification, and `git push origin main` pass cleanly.\n\nRecovery:\n- Repair\
+      \ any review finding, regression, compiler/clippy warning, or packaging/app\
+      \ bundle discrepancy in place and re-verify before pushing `main` to `origin/main`.\n"
+    verification: cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+      -- -D warnings && cargo test --workspace && cargo build --release && node crates/cito-native/tests/support/site-clipboard.mjs
+      && python3 packaging/release.py check && python3 -m unittest discover -s packaging
+    refs:
+    - docs/DESIGN.md
+    - packaging/release.py
+    depends_on:
+    - v45.ui
+    agent: senior-engineer
