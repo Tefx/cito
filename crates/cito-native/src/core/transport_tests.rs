@@ -351,7 +351,12 @@ fn fixture(bind: &str, https: bool) -> (Fixture, HubClient) {
                     if line.to_ascii_lowercase().starts_with("content-length:") {
                         length = line.split(':').nth(1).unwrap().trim().parse().unwrap();
                     }
-                    headers.push_str(&line);
+                    // The TLS terminator forwards to a different destination authority.
+                    if line.to_ascii_lowercase().starts_with("host:") {
+                        headers.push_str(&format!("Host: {target}\r\n"));
+                    } else {
+                        headers.push_str(&line);
+                    }
                     if line == "\r\n" {
                         break;
                     }

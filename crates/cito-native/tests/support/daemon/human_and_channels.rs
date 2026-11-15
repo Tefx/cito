@@ -1545,12 +1545,7 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
             )
             .unwrap()
     };
-    for op in [
-        "save_hub_service",
-        "channel_save",
-        "channel_pair",
-        "channel_test",
-    ] {
+    for op in ["save_hub_service", "channel_save"] {
         let (status,v)=f.action(json!({"op":op,"scope":"hub","hub":"remote","channel_id":"channel","enabled":true,"user_config":{"address":"injected"},"display_label":"injected","values":{"credential":op,"address":"must-not-save"}}));
         assert_eq!(status, 200, "{v}");
         assert!(rows().is_empty());
@@ -1567,6 +1562,25 @@ fn r1_remote_schema_hub_only_saves_never_create_or_resume_personal_rows() {
             json!({"credential":op}),
             "Selected remote schema must override conflicting local field scopes"
         );
+    }
+    for op in ["channel_pair", "channel_test"] {
+        let (status, value) = f.action(json!({"op":op,"scope":"hub","hub":"remote","channel_id":"channel","values":{"credential":"must-not-save"}}));
+        assert_eq!(status, 400, "{value}");
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("INVALID_INPUT:"));
+        assert!(rows().is_empty());
+        let config = owner
+            .db("hub/hub.sqlite")
+            .query(
+                "SELECT config_json FROM hub_plugin_services WHERE plugin_id='channel'",
+                &[],
+            )
+            .unwrap();
+        let config: Value =
+            serde_json::from_str(config[0]["config_json"].as_str().unwrap()).unwrap();
+        assert_eq!(config, json!({"credential":"channel_save"}));
     }
     assert_eq!(f.action(json!({"op":"channel_save","hub":"remote","channel_id":"channel","enabled":true,"values":{"address":"personal"}})).0,200);
     assert_eq!(rows()[0]["enabled"], 1);

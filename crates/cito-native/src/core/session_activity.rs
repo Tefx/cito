@@ -1270,6 +1270,21 @@ print(json.dumps(response), flush=True)
             crate::setup::apply_plugin_setup(&plugin, false, false).unwrap_err(),
             "PROVIDER_OFFLINE: The provider is unavailable"
         );
+        let status = crate::setup::inspect_setup_json(
+            &f.config.state_dir,
+            &f.config.config_path,
+            &f.config.home_dir,
+            &LoadedPlugins {
+                plugins: vec![plugin],
+                rejected_ids: HashSet::new(),
+            },
+        );
+        assert_eq!(status["harnesses"][0]["status"], "error");
+        assert!(status["harnesses"][0]["configured"].is_null());
+        assert!(status["harnesses"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("provider is unavailable"));
         Ok(())
     }
     #[test]

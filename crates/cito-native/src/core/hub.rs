@@ -897,7 +897,7 @@ impl HubEngine {
                 let row = consumer(c, &name, caller)?;
                 let backlog = backlog_from(c, &row, caller, n(&row, "start_seq"))?;
                 Ok(
-                    json!({"name":name,"stream_name":stream,"config":cfg,"backlog":backlog["backlog"]}),
+                    json!({"name":name,"stream_name":stream,"config":cfg,"backlog":backlog["backlog"],"server_now_ms":backlog["server_now_ms"]}),
                 )
             }
             "consumer_backlog" => {
@@ -1217,7 +1217,7 @@ impl HubEngine {
                     replace_destination(c, &plugin, s(caller,"principal_id"), old.as_ref().map(|b|parse(b,"user_config_json")).as_ref(), &config)?;
                     if let Some(value) = p.get("display_label") { label = value.clone(); }
                     let enabled = !reset_user && p["enabled"].as_bool().unwrap_or_else(|| old.as_ref().is_none_or(|b| n(b,"enabled")==1));
-                    let boundary = if enabled && old.as_ref().is_none_or(|b| n(b,"enabled")==0 && !identity_changed) { max_seq(c)? } else { old.as_ref().map(|b| n(b,"last_delivered_seq")).unwrap_or(0) };
+                    let boundary = if enabled && old.as_ref().is_none_or(|b| n(b,"enabled")==0) { max_seq(c)? } else { old.as_ref().map(|b| n(b,"last_delivered_seq")).unwrap_or(0) };
                     c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET owner_user=excluded.owner_user,enabled=excluded.enabled,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
                         &[caller["principal_id"].clone(),json!(id),caller["owner_user"].clone(),json!(if enabled{1}else{0}),json!(config.to_string()),label,json!(boundary),json!(now_ms())])?;
                 }
@@ -1507,7 +1507,7 @@ impl HubEngine {
             replace_destination(c, &plugin, s(&row,"principal_id"), old.as_ref().map(|b|parse(b,"user_config_json")).as_ref(), &config)?;
             let (service_cfg, _) = service(c, id)?;
             let active = ready(&plugin, &service_cfg, "hub") && ready(&plugin, &config, "user");
-            let boundary = if let Some(old) = old.as_ref() { n(old,"last_delivered_seq") } else { max_seq(c)? };
+            let boundary = if let Some(old) = old.as_ref().filter(|old| n(old,"enabled") != 0) { n(old,"last_delivered_seq") } else { max_seq(c)? };
             c.execute("INSERT INTO hub_human_channels(principal_id,plugin_id,owner_user,enabled,user_config_json,display_label,last_delivered_seq,updated_ms) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(principal_id,plugin_id) DO UPDATE SET enabled=1,user_config_json=excluded.user_config_json,display_label=excluded.display_label,last_delivered_seq=excluded.last_delivered_seq,updated_ms=excluded.updated_ms",
                 &[row["principal_id"].clone(), json!(id), row["owner_user"].clone(), json!(config.to_string()), f["display_label"].clone(), json!(boundary), json!(now_ms())])?;
             c.execute("UPDATE hub_channel_deliveries SET status='failed',attempts=0,next_retry_ms=0,last_error=NULL WHERE plugin_id=? AND principal_id=? AND status IN ('failed','failed_permanent')", &[json!(id),row["principal_id"].clone()])?;
@@ -1974,7 +1974,9 @@ fn backlog_from(
         }
         Ok(true)
     })?;
-    Ok(json!({"filterSubject":row["filter_subject"],"startSeq":row["start_seq"],"backlog":items}))
+    Ok(
+        json!({"filterSubject":row["filter_subject"],"startSeq":row["start_seq"],"backlog":items,"server_now_ms":now_ms()}),
+    )
 }
 fn ids(p: &Value) -> Result<Vec<String>, String> {
     let array = p["signal_ids"]
@@ -2225,7 +2227,14 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
     } else {
         (
             "failed",
-            now + (2_000_i64 << attempts.clamp(0, 5)).min(60_000),
+            now.saturating_add(
+                (2_000_i64 << attempts.clamp(0, 5)).min(60_000).max(
+                    frame["retry_after"]
+                        .as_u64()
+                        .map(|seconds| seconds.saturating_mul(1000).min(i64::MAX as u64) as i64)
+                        .unwrap_or(0),
+                ),
+            ),
         )
     }
 }
@@ -2233,6 +2242,15 @@ fn delivery_transition(frame: &Value, attempts: i64, now: i64) -> (&'static str,
 #[cfg(test)]
 mod resilience_tests {
     use super::*;
+    #[test]
+    fn delivery_retry_honors_channel_retry_after() {
+        let frame = json!({"ok":false,"retryable":true,"retry_after":120});
+        assert_eq!(delivery_transition(&frame, 0, 1000), ("failed", 121_000));
+        assert_eq!(
+            delivery_transition(&json!({"ok":false,"retryable":true}), 0, 1000),
+            ("failed", 3000)
+        );
+    }
     #[test]
     fn worker_delay_ignores_expired_reservations_on_disabled_bindings() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!(
@@ -2716,8 +2734,9 @@ impl HubEngine {
                         }
                         let (e, a, s, connections) =
                             (engine.clone(), worker_auth.clone(), st.clone(), ss.clone());
+                        let shutdown_wake = worker_wake.clone();
                         workers.push(thread::spawn(move || {
-                            handle_http(stream, e, a, s);
+                            handle_http(stream, e, a, s, address, shutdown_wake);
                             if let Ok(mut list) = connections.lock() {
                                 list.remove(&socket_id);
                             }
@@ -2759,6 +2778,7 @@ fn http_json(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Resu
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         _ => "Service Unavailable",
     };
     write!(stream,"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",bytes.len(),bytes)?;
@@ -2791,6 +2811,8 @@ fn handle_http(
     engine: HubEngine,
     auth: Arc<HubAuth>,
     stop: Arc<AtomicBool>,
+    bound: SocketAddr,
+    shutdown_wake: Arc<crate::support::WakePipe>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -2834,10 +2856,24 @@ fn handle_http(
                 .split_once(':')
                 .ok_or("INVALID_INPUT: malformed HTTP header")?;
             let key = k.trim().to_ascii_lowercase();
-            if headers.insert(key.clone(), v.trim().to_owned()).is_some() && key == "content-length"
-            {
-                return Err("INVALID_INPUT: duplicate content-length".into());
+            if headers.insert(key, v.trim().to_owned()).is_some() {
+                return Err("INVALID_INPUT: duplicate header".into());
             }
+        }
+        if let Err((status, message)) = crate::core::http_boundary::validate(
+            bound,
+            &method,
+            headers.get("host").map(String::as_str),
+            headers.get("origin").map(String::as_str),
+            headers.get("content-type").map(String::as_str),
+        ) {
+            http_json(
+                &mut stream,
+                status,
+                &json!({"ok":false,"error":{"message":message}}),
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(());
         }
         if path == "/" && method == "GET" {
             let body = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Cito Hub</title><style>body{background:#12151c;color:#f3f4f6;font:18px system-ui;max-width:42rem;margin:12vh auto;padding:2rem}h1{color:#7dd3fc}code{color:#7dd3fc}</style><body><h1>Cito Hub</h1><p>This Hub is running. On another Mac, open Cito → Settings… → Hubs &amp; Network → Join from Clipboard to connect using a copied invite.</p><p>Your shared inbox connects all attached Macs and channels. Incoming messages appear in the menu bar unread badge and Activity, where you can reply in one line.</p></body></html>";
@@ -2868,6 +2904,11 @@ fn handle_http(
                     },
                     libc::pollfd {
                         fd: stream.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: shutdown_wake.read_fd(),
                         events: libc::POLLIN,
                         revents: 0,
                     },
@@ -3055,13 +3096,7 @@ fn hub_cli(args: &[String]) -> Result<(), String> {
     )?;
     let raw = value("--data-dir", "CITO_HUB_DATA_DIR").unwrap_or_else(|| "~/.cito/hub".into());
     let home = env_value("HOME").unwrap_or_else(|| ".".into());
-    let data_dir = if raw == "~" {
-        PathBuf::from(home)
-    } else if let Some(rest) = raw.strip_prefix("~/") {
-        PathBuf::from(home).join(rest)
-    } else {
-        PathBuf::from(raw)
-    };
+    let data_dir = super::plugins::expand_home_dir(&raw, "CITO_HUB_DATA_DIR", Some(&home))?;
     let engine = HubEngine::open_with_auth_mode(&data_dir, &mode)?;
     let server = engine.start_server(&bind, port, auth)?;
     eprintln!("cito hub: ready on http://{} (auth={mode})", server.address);

@@ -233,6 +233,12 @@ impl LocalState {
         clippy::too_many_arguments,
         reason = "Preserve the existing typed persistence transition API."
     )]
+    /// Convert the Hub's remaining lifetime once; all local queues and badge
+    /// expiry queries then use this local deadline without client clock skew.
+    pub(super) fn signal_deadline(created: u64, hub_now: u64, local_now: u64) -> u64 {
+        local_now.saturating_add(created.saturating_add(1_800_000).saturating_sub(hub_now))
+    }
+
     pub fn admit(
         &self,
         hub: &str,

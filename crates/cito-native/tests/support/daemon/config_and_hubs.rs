@@ -421,7 +421,8 @@ fn ui_invites_and_config_mutations_validate_before_persistent_effects() {
         );
         assert!(!ok, "{host}: {out}");
         assert!(
-            err.contains("INVALID_INPUT: This invite code belongs to this Mac's own shared Hub"),
+            err.contains("This invite code belongs to this Mac's own shared Hub")
+                && !err.contains("INVALID_INPUT:"),
             "{host}: {err}"
         );
         assert_eq!(fs::read(&f.config).unwrap(), committed);

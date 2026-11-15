@@ -320,25 +320,23 @@ pub(super) fn handle_http(
                 };
                 length = n;
             }
-            headers.insert(k, json!(v.trim()));
+            if headers.insert(k, json!(v.trim())).is_some() {
+                respond(&mut stream, 400, &json!({"error":"Duplicate header"}));
+                return;
+            }
         }
     }
-    if headers
-        .get("origin")
-        .and_then(Value::as_str)
-        .is_some_and(|origin| {
-            !url::Url::parse(origin).ok().is_some_and(|url| {
-                matches!(url.scheme(), "http" | "https")
-                    && match url.host() {
-                        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-                        Some(url::Host::Ipv4(host)) => host == std::net::Ipv4Addr::LOCALHOST,
-                        Some(url::Host::Ipv6(host)) => host == std::net::Ipv6Addr::LOCALHOST,
-                        None => false,
-                    }
-            })
-        })
-    {
-        respond(&mut stream, 403, &json!({"error":"Forbidden Origin"}));
+    let Ok(bound) = stream.local_addr() else {
+        return;
+    };
+    if let Err((status, error)) = crate::core::http_boundary::validate(
+        bound,
+        method,
+        headers.get("host").and_then(Value::as_str),
+        headers.get("origin").and_then(Value::as_str),
+        headers.get("content-type").and_then(Value::as_str),
+    ) {
+        respond(&mut stream, status, &json!({"error":error}));
         return;
     }
     if length > REQUEST_LIMIT {
@@ -432,20 +430,7 @@ pub(super) fn handle_http(
             match tool {
                 Ok(mut payload) => {
                     if name == "cito_send" {
-                        if let Err(error) = wait_send_receipt(&service, &mut payload) {
-                            let (code, message) = error
-                                .split_once(':')
-                                .filter(|(c, _)| {
-                                    c.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
-                                })
-                                .unwrap_or(("NATS_UNAVAILABLE", &error));
-                            payload = json!({"ok":false,"error":{"code":code,"message":message.trim(),"retryable":true}});
-                            return respond(
-                                &mut stream,
-                                200,
-                                &json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":payload.to_string()}]}}),
-                            );
-                        }
+                        wait_send_receipt(&service, &mut payload);
                     }
                     json!({"isError":false,"content":[{"type":"text","text":payload.to_string()}]})
                 }

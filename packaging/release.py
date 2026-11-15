@@ -133,6 +133,17 @@ def verify_bundle(app, expected):
     if result.stdout.strip() != f"cito v{expected}":
         raise ReleaseError("Bundled CLI version does not match the release version.")
     executables = [app / "Contents/Helpers" / name for name in ("cito-native", "cito-ui")]
+    for manifest in sorted((app / "Contents/Resources/plugins").glob("*/plugin.json")):
+        try:
+            command = json.loads(manifest.read_text())["command"]
+            if not isinstance(command, list) or not command or not isinstance(command[0], str) or not command[0]:
+                raise ValueError("command must name an executable")
+            executable = manifest.parent / command[0]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise ReleaseError(f"Invalid bundled plugin manifest {manifest}: {error}") from error
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ReleaseError(f"Bundled plugin command is missing or not executable: {executable}")
+        executables.append(executable)
     executables.extend(sorted(path for path in (app / "Contents/Resources/plugins").glob("*/bin/*") if path.is_file() and os.access(path, os.X_OK)))
     for executable in executables:
         if run(["/usr/bin/lipo", "-archs", executable]).stdout.strip() != "arm64":

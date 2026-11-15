@@ -34,6 +34,36 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn hub_clock_remaining_lifetime_survives_client_skew_at_admission() -> Result<(), String> {
+    for skew in [-1_860_000i64, 1_860_000] {
+        let f = Fixture::new()?;
+        let local_now = now_ms();
+        let hub_now = (local_now as i64 + skew) as u64;
+        let created = hub_now - 60_000;
+        let expires = LocalState::signal_deadline(created, hub_now, local_now);
+        assert_eq!(expires, local_now + 1_740_000);
+        let signal = signal("skewed", "none#bob", 1);
+        f.state.admit(
+            "local",
+            &f.listener()?,
+            &signal,
+            1,
+            "2026-01-01T00:00:00Z",
+            expires,
+            &Value::Null,
+        )?;
+        let rows = f.state.claim_wake_batch("local", "c_1")?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["signal_id"], "skewed");
+        assert!(rows[0]["batch_expires_at_ms"].as_u64().unwrap() > local_now);
+        assert_eq!(
+            LocalState::signal_deadline(hub_now - 1_800_001, hub_now, local_now),
+            local_now
+        );
+    }
+    Ok(())
+}
+#[test]
 fn current_schema_open_does_not_acquire_a_write_transaction() -> Result<(), String> {
     let f = Fixture::new()?;
     let writer = Database::open(&f.dir.join("state.sqlite"))?;

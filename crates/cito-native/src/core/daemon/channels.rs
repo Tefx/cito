@@ -53,8 +53,14 @@ impl ChannelInventory {
         // No pre-mutation inventory can satisfy or overwrite this acknowledgement.
         let refresh = self.fetch_locked(slot);
         match result {
-            Ok(value) => {
-                refresh?;
+            Ok(mut value) => {
+                if let Err(error) = refresh {
+                    if let Some(fields) = value.as_object_mut() {
+                        fields.insert("inventory_warning".into(), json!(error));
+                    } else {
+                        eprintln!("Channel inventory refresh: {error}");
+                    }
+                }
                 Ok(value)
             }
             Err(error) => Err(error),
@@ -124,15 +130,26 @@ fn channel_id(action: &Value) -> Result<&str, String> {
         .ok_or_else(|| "INVALID_INPUT: channel_id required".into())
 }
 
-fn channel_rpc(action: &Value) -> &'static str {
-    if action["op"] == "save_hub_service" || action["scope"] == "hub" {
-        "human_channels_configure"
-    } else {
-        match string(action, "op") {
-            "channel_pair" => "human_channel_pair_start",
-            "channel_test" | "test_human_channel" => "human_channels_test",
-            _ => "human_channels_configure",
-        }
+fn channel_rpc(action: &Value) -> Result<&'static str, String> {
+    let op = string(action, "op");
+    let scope = action["scope"].as_str();
+    if scope.is_some_and(|scope| !matches!(scope, "hub" | "user"))
+        || (scope == Some("hub") && !matches!(op, "save_hub_service" | "channel_save"))
+        || (scope == Some("user") && op == "save_hub_service")
+    {
+        return Err("INVALID_INPUT: Channel scope is incompatible with operation".into());
+    }
+    match op {
+        "channel_pair" => Ok("human_channel_pair_start"),
+        "channel_test" | "test_human_channel" => Ok("human_channels_test"),
+        "save_hub_service"
+        | "channel_save"
+        | "channel_toggle"
+        | "channel_unpair"
+        | "channel_cancel_pair"
+        | "clear_channel_service"
+        | "disconnect_human_channel" => Ok("human_channels_configure"),
+        _ => Err("INVALID_INPUT: Unknown channel operation".into()),
     }
 }
 
@@ -141,6 +158,7 @@ fn run_channel_action(
     plugins: &LoadedPlugins,
     action: &Value,
 ) -> Result<Value, String> {
+    let rpc = channel_rpc(action)?;
     let id = channel_id(action)?;
     let op = string(action, "op");
     let mut params = action.clone();
@@ -193,7 +211,6 @@ fn run_channel_action(
             .unwrap_or_else(|| json!({}));
         params = json!({"plugin_id":id,"hub_config":hub_config});
     }
-    let rpc = channel_rpc(action);
     let result = slot.rpc(rpc, &params)?;
     if matches!(rpc, "human_channel_pair_start" | "human_channels_test") && !result.is_object() {
         Err("INVALID_INPUT: Channel result must be an object".into())
@@ -259,7 +276,7 @@ pub(super) fn dispatch_channel_action(
         (slot, inventory, s.plugins.clone(), observed_gen)
     };
     // All waits and channel I/O use the shared per-hub owner without service.
-    let result = match kind {
+    let mut result = match kind {
         ChannelActionKind::Read => inventory
             .refresh(&slot, observed_gen)
             .map(|_| json!({"ok":true})),
@@ -269,13 +286,21 @@ pub(super) fn dispatch_channel_action(
     if s.closing || shutdown_requested() {
         return Err("Shutting down".into());
     }
-    s.reload_slots()?;
+    if let Err(error) = s.reload_slots() {
+        result = after_channel_action(result, kind, error);
+        if kind == ChannelActionKind::Mutation {
+            s.finish_channel_action(&slot.name, action, &result);
+        }
+        return result;
+    }
     if slot.closed.load(Ordering::SeqCst)
         || !s
             .slots
             .get(&slot.name)
             .is_some_and(|current| remote_channels_identity(current) == inventory.identity)
     {
+        // Authority replacement is a deliberate fence, not a failed refresh.
+        // Never acknowledge the old operation against a new principal or Hub.
         let result = Err("NATS_UNAVAILABLE: Hub changed during channel request".into());
         if kind == ChannelActionKind::Mutation {
             s.finish_channel_action(&slot.name, action, &result);
@@ -288,6 +313,115 @@ pub(super) fn dispatch_channel_action(
         s.emit(json!({"op":"settings","hub":slot.name,"settings":s.settings_for_hub(&slot.name)}));
     }
     result
+}
+
+fn after_channel_action(
+    result: Result<Value, String>,
+    kind: ChannelActionKind,
+    error: String,
+) -> Result<Value, String> {
+    if kind == ChannelActionKind::Read {
+        return Err(error);
+    }
+    result.map(|mut value| {
+        if let Some(fields) = value.as_object_mut() {
+            fields.insert("maintenance_warning".into(), json!(error));
+        } else {
+            eprintln!("Channel maintenance: {error}");
+        }
+        value
+    })
+}
+
+#[cfg(test)]
+mod remediation_tests {
+    use super::*;
+    #[test]
+    fn operation_routing_rejects_scope_hijacks() {
+        for op in [
+            "channel_pair",
+            "channel_test",
+            "test_human_channel",
+            "channel_toggle",
+            "channel_unpair",
+        ] {
+            assert!(channel_rpc(&json!({"op":op,"scope":"hub"}))
+                .unwrap_err()
+                .starts_with("INVALID_INPUT:"));
+        }
+        assert_eq!(
+            channel_rpc(&json!({"op":"channel_pair"})).unwrap(),
+            "human_channel_pair_start"
+        );
+        assert_eq!(
+            channel_rpc(&json!({"op":"channel_test"})).unwrap(),
+            "human_channels_test"
+        );
+        assert_eq!(
+            channel_rpc(&json!({"op":"channel_save","scope":"hub"})).unwrap(),
+            "human_channels_configure"
+        );
+    }
+    #[test]
+    fn committed_channel_result_survives_inventory_failure() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            for expected in ["human_channels_configure", "human_channels_list"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(request["op"], expected);
+                let body = if expected == "human_channels_configure" { json!({"ok":true,"result":{"ok":true,"committed":true}}) } else { json!({"ok":false,"error":{"code":"UNAVAILABLE","message":"Inventory unavailable"}}) }.to_string();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let slot = HubClient::new(
+            "work".into(),
+            json!({"url":format!("http://{address}"),"authMode":"none"}),
+            "alice",
+            None,
+        );
+        let inventory = ChannelInventory::new(remote_channels_identity(&slot));
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let result = inventory
+            .mutate(
+                &slot,
+                &plugins,
+                &json!({"op":"channel_toggle","channel_id":"sample","enabled":true}),
+            )
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(result["committed"], true);
+        assert!(result["inventory_warning"]
+            .as_str()
+            .unwrap()
+            .contains("Inventory unavailable"));
+        assert_eq!(inventory.cached.lock().unwrap().value["status"], "error");
+    }
 }
 
 impl DaemonService {
@@ -305,7 +439,7 @@ impl DaemonService {
 
     fn finish_channel_action(&self, hub: &str, action: &Value, result: &Result<Value, String>) {
         let id = channel_id(action).unwrap_or_default();
-        let rpc = channel_rpc(action);
+        let rpc = channel_rpc(action).unwrap_or_default();
         match result {
             Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
                 let mut frame = result.clone();

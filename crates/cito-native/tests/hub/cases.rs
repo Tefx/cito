@@ -585,7 +585,7 @@ fn destination_replacement_isolates_prefixes_fences_late_results_and_preserves_u
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
+fn configure_destination_resume_skips_disabled_backlog_and_preserves_paired_labels() {
     let dir = temp();
     let root = fixture(&dir);
     let path = root.join("fixture/plugin.json");
@@ -618,17 +618,20 @@ fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
     let node = listener_id("none#alice", "human", "default");
     send(&e, &node, "pending-destination");
     configure(json!({"user_config":{"address":"42"},"enabled":true}));
-    assert_eq!(binding()["last_delivered_seq"], cursor);
+    assert!(binding()["last_delivered_seq"].as_i64().unwrap() > cursor.as_i64().unwrap());
+    assert!(e
+        .reserve_deliveries(&e.plugin("fixture").unwrap())
+        .unwrap()
+        .is_empty());
+    send(&e, &node, "new-destination");
     wait_for(|| {
-        !e.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='pending-destination' AND status='delivered'", &[]).unwrap().is_empty()
+        !e.inner.db.query("SELECT 1 FROM hub_channel_deliveries WHERE signal_id='new-destination' AND status='delivered'", &[]).unwrap().is_empty()
     });
     let frames = std::fs::read_to_string(root.join("fixture/frames.jsonl")).unwrap();
     let delivery = frames
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|frame| {
-            frame["op"] == "deliver" && frame["signal"]["signal_id"] == "pending-destination"
-        })
+        .find(|frame| frame["op"] == "deliver" && frame["signal"]["signal_id"] == "new-destination")
         .unwrap();
     assert_eq!(delivery["config"]["address"], "42");
     e.inner
@@ -651,13 +654,13 @@ fn configure_destination_resume_preserves_pending_cursor_and_paired_labels() {
     assert_eq!(warned["channels"][0]["status"], "ready");
     assert!(s(&warned["channels"][0], "detail").contains("409"));
     e.plugin_frame("fixture", &json!({"op":"health","error":null}));
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Response lost' WHERE signal_id='pending-destination'", &[]).unwrap();
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='effect_unknown',last_error='Response lost' WHERE signal_id='new-destination'", &[]).unwrap();
     let unknown = e
         .rpc("human_channels_list", &json!({}), Some(&owner))
         .unwrap();
     assert_eq!(unknown["channels"][0]["warning"], true);
     assert!(s(&unknown["channels"][0], "detail").contains("outcome unknown"));
-    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='pending-destination'", &[]).unwrap();
+    e.inner.db.execute("UPDATE hub_channel_deliveries SET status='delivered',last_error=NULL WHERE signal_id='new-destination'", &[]).unwrap();
     assert_eq!(
         e.rpc("human_channels_list", &json!({}), Some(&owner))
             .unwrap()["channels"][0]["warning"],
@@ -2438,13 +2441,104 @@ fn accepted_http_connections_wait_for_fragmented_headers() {
     thread::sleep(Duration::from_millis(40));
     client.write_all(b"GET /health HTTP/1.1\r\n").unwrap();
     thread::sleep(Duration::from_millis(40));
-    client.write_all(b"Host: localhost\r\n\r\n").unwrap();
+    write!(client, "Host: {}\r\n\r\n", server.address).unwrap();
     let mut response = String::new();
     client.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     server.shutdown();
     e.shutdown();
     std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn http_browser_boundary_and_idle_sse_shutdown() {
+    for bind in ["127.0.0.1", "0.0.0.0"] {
+        let dir = temp();
+        let engine = HubEngine::open(&dir).unwrap();
+        engine.set_plugin_roots(&[]).unwrap();
+        let server = engine
+            .start_server(bind, 0, HubAuth::new("none", None, None, None).unwrap())
+            .unwrap();
+        let address = format!("127.0.0.1:{}", server.port());
+        let base = format!("http://{address}");
+        for (host, origin, media, status) in [
+            (address.clone(), None, "application/json", 200),
+            (
+                address.clone(),
+                Some(base.clone()),
+                "application/json; charset=utf-8",
+                200,
+            ),
+            (
+                address.clone(),
+                Some(format!("http://127.0.0.1:{}", server.port() + 1)),
+                "application/json",
+                403,
+            ),
+            (
+                address.clone(),
+                Some(format!("https://{address}")),
+                "application/json",
+                403,
+            ),
+            (
+                format!("127.0.0.1:{}", server.port() + 1),
+                None,
+                "application/json",
+                403,
+            ),
+            (address.clone(), None, "text/plain", 415),
+            (
+                format!("hub.example:{}", server.port()),
+                None,
+                "application/json",
+                if bind == "0.0.0.0" { 200 } else { 403 },
+            ),
+        ] {
+            let mut request = ureq::post(&format!("{base}/v1/rpc"))
+                .set("Host", &host)
+                .set("Content-Type", media);
+            if let Some(origin) = origin {
+                request = request.set("Origin", &origin);
+            }
+            let actual = match request.send_string(r#"{"op":"account_info"}"#) {
+                Ok(response) => response.status(),
+                Err(ureq::Error::Status(status, _)) => status,
+                Err(error) => panic!("{error}"),
+            };
+            assert_eq!(actual, status, "bind={bind} host={host} media={media}");
+        }
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            let mut client = TcpStream::connect(&address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            write!(client, "GET /v1/events HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("200"), "{line}");
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == ":ok\n" {
+                    break;
+                }
+            }
+            clients.push(reader);
+        }
+        let start = std::time::Instant::now();
+        server.shutdown();
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(engine.rpc("account_info", &json!({}), None).is_ok());
+        drop(clients);
+        engine.shutdown();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 #[test]
 fn http_wire_and_stoppable_shared_engine() {
@@ -3180,6 +3274,25 @@ fn personal_pause_and_delivery_retry_ledger_are_durable_without_io() {
             .unwrap()
             .is_empty(),
         "first identity assignment retires legacy destination mappings"
+    );
+    e.inner
+        .db
+        .execute("UPDATE hub_human_channels SET enabled=0", &[])
+        .unwrap();
+    send(&e, &node, "while-disabled");
+    let boundary = e.inner.db.transaction(max_seq).unwrap();
+    assert!(boundary > old_boundary.as_i64().unwrap());
+    e.inner.db.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms) VALUES('cito-reenable','fixture','none#alice','alice',?,?)",&[json!(now_ms()),json!(now_ms()+60_000)]).unwrap();
+    e.redeem("fixture",&json!({"code":"cito-reenable","is_private_chat":true,"external_chat_id":"room","external_user_id":"alice","user_config_patch":{}})).unwrap();
+    assert_eq!(
+        e.inner
+            .db
+            .query(
+                "SELECT last_delivered_seq,enabled FROM hub_human_channels",
+                &[]
+            )
+            .unwrap()[0],
+        json!({"last_delivered_seq":boundary,"enabled":1})
     );
     assert!(e.inner.processes.lock().unwrap().is_empty());
     e.inner.plugins.lock().unwrap().clear();

@@ -153,6 +153,7 @@ fn process_candidates(req: &Value, out: &mut Vec<(u32, Value)>) -> Result<()> {
         .into_iter()
         .filter(|p| {
             !out.iter().any(|(pid, _)| pid == p)
+                && !state(req).join(format!("sockets/pi-pid-{p}.sock")).exists()
                 && process_command(*p).is_ok_and(|command| matches_process(&command))
         })
         .collect();
@@ -452,6 +453,22 @@ pub fn handle(input: &Value) -> Result<Value> {
         "probe" => {
             if let Some(reason) = rejection {
                 return Ok(json!({"ok":true,"status":"transient_error","reason":reason}));
+            }
+            if let Some(p) = pid(req) {
+                if let Ok(current) = process_identity(p) {
+                    let cached = read_json(&state(req).join(format!("pi/endpoints/{p}.json"))).ok();
+                    if !matches_process(str_at(&current, "command").unwrap_or(""))
+                        || cached.as_ref().is_some_and(|cached| {
+                            cached["identity"].is_object() && cached["identity"] != current
+                        })
+                        || (req["process_identity"].is_object()
+                            && req["process_identity"] != current)
+                    {
+                        return Ok(
+                            json!({"ok":true,"status":"closed_definitive","reason":"Endpoint process identity changed"}),
+                        );
+                    }
+                }
             }
             if endpoint_responded && cs.is_empty() {
                 return Ok(

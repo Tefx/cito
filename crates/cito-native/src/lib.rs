@@ -1,5 +1,6 @@
 #[path = "../../../plugins/claude/native.rs"]
-pub mod claude;
+mod claude;
+pub use claude::{hook_main as run_claude_hook, main as run_claude_plugin};
 pub mod core;
 pub use core::{daemon, database, hub, plugins, setup};
 mod oidc_constants;

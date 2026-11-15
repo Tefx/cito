@@ -205,7 +205,14 @@ pub(super) fn tools_list() -> Value {
     tools
 }
 
-pub(super) fn wait_send_receipt(
+pub(super) fn wait_send_receipt(service: &Arc<Mutex<DaemonService>>, payload: &mut Value) {
+    if let Err(error) = read_send_receipt(service, payload) {
+        payload["receipt_status"] = json!("unknown");
+        payload["receipt_warning"] = json!(error);
+    }
+}
+
+fn read_send_receipt(
     service: &Arc<Mutex<DaemonService>>,
     payload: &mut Value,
 ) -> Result<(), String> {
@@ -884,8 +891,13 @@ impl DaemonService {
                     }
                     result => result,
                 };
-                self.poll()?;
-                result
+                let maintenance = self.poll();
+                result.map(|mut value| {
+                    if let Err(error) = maintenance {
+                        value["maintenance_warning"] = json!(error);
+                    }
+                    value
+                })
             }
             "cito_inbox" => self.inbox(&hub, args, meta),
             _ => Err(format!("INVALID_INPUT: Unknown tool: {name}")),

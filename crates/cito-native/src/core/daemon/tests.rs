@@ -2307,6 +2307,152 @@ fn packaged_app_resolves_ui_and_honors_overrides() -> Result<(), String> {
     result
 }
 #[test]
+fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let dir = std::env::temp_dir().join(format!("cito-boundary-{}", random_uuid_v4()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let target = dir.join("managed.json");
+    fs::write(&target, "{}").map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    std::os::unix::fs::symlink(&target, &config.config_path).map_err(|e| e.to_string())?;
+    let plugins = LoadedPlugins {
+        plugins: vec![],
+        rejected_ids: Default::default(),
+    };
+    let mut service = DaemonService::open(&config, &plugins)?;
+    let result = (|| -> Result<(), String> {
+        service.mutate_config(|value| {
+            value["user"] = json!("bob");
+            Ok(())
+        })?;
+        assert!(fs::symlink_metadata(&config.config_path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink());
+        let stored: Value =
+            serde_json::from_str(&fs::read_to_string(&target).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        assert_eq!(stored["user"], "bob");
+        // Local state contains ownership secrets; every exported session/activity
+        // row must cross the DTO projection even in lightweight status updates.
+        let active = service.state.active()?;
+        assert!(!active.is_empty());
+        let snapshot = service.snapshot()?;
+        for key in ["listeners", "sessions"] {
+            assert!(!snapshot[key].as_array().unwrap().is_empty());
+            for row in snapshot[key].as_array().unwrap() {
+                assert!(row.get("owner_token").is_none());
+                assert!(row.get("dispatcher_token").is_none());
+                assert!(row.get("hub_url").is_none());
+            }
+        }
+        let row = &active[0];
+        let signal = json!({"signal_id":"dto-signal","target_generation":row["binding_generation"],"from":{"principal_id":row["principal_id"],"user":"alice","host_name":"desktop"},"message":"hello"});
+        service.state.admit(
+            "local",
+            row,
+            &signal,
+            1,
+            "2026-01-01T00:00:00Z",
+            now_ms() + 60_000,
+            &Value::Null,
+        )?;
+        service.state.db.execute(
+            "UPDATE local_signals SET dispatcher_token='secret-dispatcher'",
+            &[],
+        )?;
+        let activity = service.snapshot()?["activity"].clone();
+        assert!(!activity.as_array().unwrap().is_empty());
+        assert!(!activity.to_string().contains("secret-dispatcher"));
+        assert!(activity[0].get("dispatcher_token").is_none());
+        assert_eq!(activity[0]["message"], "hello");
+        service.state.db.execute("DROP TABLE wake_retries", &[])?;
+        let sent = service.tool("cito_send", &json!({"to":"@self","message":"committed despite maintenance failure","idempotency_key":"maintenance"}), &json!({}))?;
+        assert_eq!(sent["ok"], true);
+        assert!(sent["signal_id"].as_str().unwrap().contains("sig_"));
+        assert!(sent["maintenance_warning"].is_string(), "{sent}");
+        let reservation = service
+            .state
+            .db
+            .query("SELECT * FROM local_sent_idempotency", &[])?;
+        assert_eq!(reservation.len(), 1);
+        assert_eq!(reservation[0]["status"], "wake_accepted");
+        Ok(())
+    })();
+    let shared = Arc::new(Mutex::new(service));
+    let http_result = (|| -> Result<(), String> {
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        for (headers, status) in [
+            (format!("Host: {address}\r\n"), 200),
+            (
+                format!("Host: {address}\r\nOrigin: http://{address}\r\n"),
+                200,
+            ),
+            (
+                format!(
+                    "Host: {address}\r\nOrigin: http://127.0.0.1:{}\r\n",
+                    address.port() + 1
+                ),
+                403,
+            ),
+            (
+                format!("Host: attacker.example:{}\r\n", address.port()),
+                403,
+            ),
+            (
+                format!("Host: {address}\r\nContent-Type: text/plain\r\n"),
+                415,
+            ),
+        ] {
+            let service = shared.clone();
+            let mut client = TcpStream::connect(address).map_err(|e| e.to_string())?;
+            let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
+            let worker = thread::spawn(move || {
+                super::http_actions::handle_http(stream, service, Arc::new(json!({})))
+            });
+            let method = if status == 415 {
+                "POST /mcp"
+            } else {
+                "GET /health"
+            };
+            write!(
+                client,
+                "{method} HTTP/1.1\r\n{headers}Content-Length: 2\r\n\r\n{{}}"
+            )
+            .map_err(|e| e.to_string())?;
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .map_err(|e| e.to_string())?;
+            worker.join().map_err(|_| "HTTP worker panicked")?;
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+        }
+        let mut committed =
+            json!({"ok":true,"signal_id":"missing:sig_committed","seq":1,"status":"wake_accepted"});
+        super::mcp::wait_send_receipt(&shared, &mut committed);
+        assert_eq!(committed["signal_id"], "missing:sig_committed");
+        assert_eq!(committed["ok"], true);
+        assert_eq!(committed["receipt_status"], "unknown");
+        Ok(())
+    })();
+    shared.lock().map_err(|e| e.to_string())?.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result.and(http_result)
+}
+
+#[test]
 fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
     let mailbox = UiMailbox::default();
     for i in 0..40 {
@@ -2330,7 +2476,7 @@ fn coalesced_snapshots_retain_command_results() -> Result<(), String> {
         mailbox.pending.lock().map_err(|e| e.to_string())?.len(),
         1 + results.len()
     );
-    for expected in std::iter::once(snapshot).chain(results) {
+    for expected in results.into_iter().chain(std::iter::once(snapshot)) {
         let bytes = mailbox.next().ok_or("Missing UI frame")?;
         let actual: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         assert_eq!(actual, expected);

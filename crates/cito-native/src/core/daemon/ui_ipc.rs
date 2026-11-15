@@ -164,14 +164,7 @@ impl UiMailbox {
         }
         if let Ok(mut pending) = self.pending.lock() {
             if let Some(key) = key.as_ref() {
-                if let Some((_, frame)) = pending
-                    .iter_mut()
-                    .find(|(old, _)| old.as_ref() == Some(key))
-                {
-                    *frame = bytes;
-                    self.ready.notify_one();
-                    return;
-                }
+                pending.retain(|(old, _)| old.as_ref() != Some(key));
             }
             const MAX_PENDING: usize = 64;
             if pending.len() >= MAX_PENDING {

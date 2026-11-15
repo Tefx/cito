@@ -139,6 +139,7 @@ export default function citoBridge(pi: BridgeAPI): void {
     const port = candidatePorts.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535) ?? 4290;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",

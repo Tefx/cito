@@ -38,7 +38,7 @@ pub fn repair_default_hub(v: &mut Value) {
 
 static CONFIG_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
-fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn publication_target(path: &Path) -> Result<PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -81,7 +81,7 @@ pub fn with_config_lock_mode<T>(
     dry_run: bool,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let path = absolute_path(path)?;
+    let path = publication_target(path)?;
     let lock = CONFIG_LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()

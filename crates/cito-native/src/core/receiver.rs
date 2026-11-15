@@ -179,6 +179,10 @@ pub fn poll_listener(
     let backlog = client
         .rpc("consumer_backlog", &json!({"name":name}))
         .unwrap_or(added);
+    let hub_now = backlog["server_now_ms"]
+        .as_u64()
+        .unwrap_or_else(|| client.server_now());
+    let observed = std::time::Instant::now();
     let registration = local.registration_lock(hub)?;
     let registration_guard = if row["harness"] == "human" {
         let guard = registration
@@ -218,7 +222,9 @@ pub fn poll_listener(
             continue;
         }
         signal["to"] = json!(id);
-        let created = item["created_ms"].as_u64().unwrap_or_else(now_ms);
+        let admission_hub_now =
+            hub_now.saturating_add(observed.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        let created = item["created_ms"].as_u64().unwrap_or(admission_hub_now);
         let acked = item
             .get("acked_at_ms")
             .filter(|v| v.is_number())
@@ -230,7 +236,7 @@ pub fn poll_listener(
             &signal,
             item["seq"].as_u64().unwrap_or(0),
             &iso(created),
-            created + 1_800_000,
+            LocalState::signal_deadline(created, admission_hub_now, now_ms()),
             acked,
         )?;
         if admitted && !acked.is_number() {

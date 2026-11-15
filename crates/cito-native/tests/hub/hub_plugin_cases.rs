@@ -2,6 +2,48 @@ use super::*;
 use std::fs;
 
 #[test]
+fn shutdown_after_reap_leaves_descendants_unsignaled_and_interrupts_idle_reader() {
+    let dir =
+        std::env::temp_dir().join(format!("cito-reaped-{}", crate::plugins::random_uuid_v4()));
+    fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("driver.py");
+    fs::write(&script,"import subprocess,sys,pathlib\np=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\npathlib.Path('descendant').write_text(str(p.pid))\n").unwrap();
+    let plugin = ChannelPlugin {
+        id: "sample".into(),
+        dir: dir.clone(),
+        manifest: json!({}),
+        command: vec!["python3".into(), script.to_string_lossy().into_owned()],
+    };
+    let process = ChannelProcess::spawn(&plugin, Arc::new(|_| None)).unwrap();
+    assert!(crate::support::wait_child_exit(
+        &process.child.lock().unwrap(),
+        Duration::from_secs(2)
+    )
+    .unwrap());
+    let pid = fs::read_to_string(dir.join("descendant"))
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    struct Descendant(i32);
+    impl Drop for Descendant {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let cleanup = Descendant(pid);
+    assert!(process.child.lock().unwrap().try_wait().unwrap().is_some());
+    let started = Instant::now();
+    process.shutdown();
+    assert!(started.elapsed() < Duration::from_millis(200));
+    // A post-reap group SIGKILL would kill this still-live descendant.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    drop(cleanup);
+    drop(process);
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
 fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {
     let root = std::env::temp_dir().join(format!(
         "cito-manifest-parity-{}",
@@ -21,7 +63,7 @@ fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {
         manifest[field] = invalid;
         fs::write(dir.join("plugin.json"), manifest.to_string()).unwrap();
         assert!(super::super::plugins::parse_manifest_dir(&dir, false).is_err());
-        assert!(discover(&roots, Some(&root)).is_err());
+        assert!(discover(&roots, Some(&root)).unwrap().is_empty());
     }
     let mut script = valid.clone();
     script.as_object_mut().unwrap().remove("command");
@@ -30,7 +72,9 @@ fn native_and_hub_manifests_share_validation_and_script_entrypoint_rules() {
     assert!(super::super::plugins::parse_manifest_dir(&dir, true).is_err());
     let native = super::super::plugins::parse_manifest_dir(&dir, false).unwrap();
     let hub = discover(&roots, Some(&root)).unwrap();
-    assert!(discover(&[(root.clone(), true)], Some(&root)).is_err());
+    assert!(discover(&[(root.clone(), true)], Some(&root))
+        .unwrap()
+        .is_empty());
     assert_eq!(hub[0].command, native.command);
     script["scope"] = json!("user");
     fs::write(dir.join("plugin.json"), script.to_string()).unwrap();
@@ -79,8 +123,22 @@ fn hub_root_subdirectories_have_deterministic_validation_order() {
         fs::create_dir_all(dir.join(name)).unwrap();
         fs::write(dir.join(name).join("plugin.json"), "{malformed").unwrap();
     }
-    let error = discover(&[(dir.clone(), false)], None).err().unwrap();
-    assert!(error.contains("a-invalid/plugin.json"), "{error}");
+    let valid = dir.join("sample");
+    fs::create_dir_all(&valid).unwrap();
+    fs::write(
+        valid.join("plugin.json"),
+        json!({"id":"sample","displayName":"Sample","kind":"human-channel","command":["./driver"]})
+            .to_string(),
+    )
+    .unwrap();
+    let found = discover(&[(dir.clone(), false)], None).unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|plugin| plugin.id.as_str())
+            .collect::<Vec<_>>(),
+        ["sample"]
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -244,7 +302,7 @@ fn packaged_roots_worker() {
         .any(|p| p.id == "telegram"));
     fs::remove_dir_all(user).unwrap();
     assert!(
-        discover(&roots, Some(&data.join("plugins"))).is_err(),
-        "An unshadowed malformed manifest must still fail"
+        discover(&roots, Some(&data.join("plugins"))).is_ok(),
+        "An unshadowed malformed manifest must not abort other channel discovery"
     );
 }

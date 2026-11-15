@@ -17,6 +17,67 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
+const SESSION_FIELDS: &[&str] = &[
+    "hub",
+    "listener_id",
+    "public_id",
+    "tag",
+    "principal_id",
+    "owner_user",
+    "host_id",
+    "host_name",
+    "harness",
+    "session_id",
+    "endpoint_pid",
+    "cwd",
+    "repo",
+    "branch",
+    "title",
+    "about",
+    "scope",
+    "status",
+    "listen_mode",
+    "custom_title",
+    "scoped_id",
+    "display_address",
+    "channels",
+    "attachments",
+];
+const ACTIVITY_FIELDS: &[&str] = &[
+    "hub",
+    "signal_id",
+    "listener_id",
+    "from_user",
+    "from_host_name",
+    "from_harness",
+    "from_listener_id",
+    "from_title",
+    "from_about",
+    "message",
+    "held_reason",
+    "in_reply_to",
+    "created_at",
+    "state",
+    "acknowledged_at_ms",
+    "unread",
+    "target_harness",
+    "target_title",
+    "target_scoped_id",
+    "target_display_address",
+    "from_scoped_id",
+    "from_display_address",
+    "message_truncated",
+    "for_me",
+];
+fn project_fields(row: &Value, fields: &[&str]) -> Value {
+    Value::Object(
+        fields
+            .iter()
+            .filter_map(|key| row.get(*key).map(|value| ((*key).into(), value.clone())))
+            .collect(),
+    )
+}
+
 pub(super) fn wire_status(raw: &str) -> &str {
     match raw {
         "reconnecting" | "connecting" => "connecting",
@@ -356,7 +417,7 @@ impl DaemonService {
                 ));
                 row["message_truncated"] = json!(string(&row, "message").len() > 512);
                 row["for_me"] = json!(target["harness"] == "human");
-                row
+                project_fields(&row, ACTIVITY_FIELDS)
             })
             .collect()
     }
@@ -399,11 +460,7 @@ impl DaemonService {
             .filter(|row| self.slots.contains_key(string(row, "hub")))
             .collect();
         for row in &mut sessions {
-            // Profile provenance is local persistence metadata, not a UI wire field.
-            if let Some(fields) = row.as_object_mut() {
-                fields.remove("hub_url");
-                fields.remove("updated_at");
-            }
+            *row = project_fields(row, SESSION_FIELDS);
             if row["harness"] == "human" {
                 let directory = self
                     .slots
@@ -616,10 +673,7 @@ impl DaemonService {
                 .state
                 .custom_title(string(row, "harness"), string(row, "session_id"))?
                 .is_some());
-            if let Some(fields) = row.as_object_mut() {
-                fields.remove("hub_url");
-                fields.remove("updated_at");
-            }
+            *row = project_fields(row, SESSION_FIELDS);
         }
         let counts = self.state.db.query("SELECT COUNT(*) AS total,COUNT(CASE WHEN acknowledged_at_ms IS NULL THEN 1 END) AS unread FROM local_signals WHERE activity_hidden=0", &[])?;
         frame["unread_count"] = counts[0]["unread"].clone();

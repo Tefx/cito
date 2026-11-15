@@ -1,3 +1,3 @@
 fn main() {
-    cito_native::claude::hook_main();
+    cito_native::run_claude_hook();
 }

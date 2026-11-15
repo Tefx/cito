@@ -127,7 +127,7 @@ impl Drop for FileLock {
         }
     }
 }
-pub fn clean_sidecars(path: &Path) {
+fn clean_sidecars(path: &Path) {
     let Some(parent) = path.parent() else { return };
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return;
@@ -148,7 +148,13 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         fs::create_dir_all(p).map_err(|e| e.to_string())?;
     }
     let mut tmp_name = path.as_os_str().to_os_string();
-    tmp_name.push(format!(".tmp-{}-{}", std::process::id(), now_ms()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    tmp_name.push(format!(
+        ".tmp-{}-{}-{}",
+        std::process::id(),
+        now_ms(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let tmp = PathBuf::from(tmp_name);
     let permissions = fs::metadata(path).ok().map(|m| m.permissions());
     let mut f = OpenOptions::new()
@@ -546,7 +552,7 @@ pub fn pid(req: &Value) -> Option<u32> {
                 .and_then(|roots| roots.into_iter().next())
         })
 }
-pub fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
+fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
     if let Some(expected) = str_at(meta, "expected_harness") {
         if caller["harness"] != expected {
             return Err("Conflicting caller metadata".into());
@@ -1550,9 +1556,6 @@ impl Drop for ReadOnlySqlite {
             }
         }
     }
-}
-pub fn sqlite_rows(path: &Path, sql: &str) -> Result<Vec<Value>> {
-    ReadOnlySqlite::open(path, Duration::from_millis(1200))?.rows(sql)
 }
 #[cfg(test)]
 mod tests {

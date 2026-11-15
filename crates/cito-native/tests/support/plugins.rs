@@ -948,6 +948,73 @@ fn codex_multiline_toml_and_complete_subtree_removal() {
     }
 }
 #[test]
+fn pi_probe_rejects_reused_pid_behind_stale_socket() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let process = f.spawn(
+        "node",
+        &["-e", "console.log('ready'); setInterval(()=>{},1000)"],
+        &[],
+    );
+    wait(|| f.output(process, false).contains("ready"));
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    fs::write(
+        f.state
+            .join(format!("sockets/pi-pid-{}.sock", f.pid(process))),
+        "stale socket",
+    )
+    .unwrap();
+    let response = f.plugin(
+        PI,
+        json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":"session-a"}),
+    );
+    assert_eq!(response["status"], "closed_definitive", "{response}");
+    f.stop(process);
+}
+#[test]
+fn codex_rollout_errors_are_isolated_and_non_utf8_lines_are_lossy() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let process = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    fs::create_dir_all(f.home.join(".codex")).unwrap();
+    let db = cito_native::database::Database::open(&f.home.join(".codex/state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,recency_at_ms INTEGER,rollout_path TEXT)",&[]).unwrap();
+    let valid = f.dir.join("valid.jsonl");
+    let lossy = f.dir.join("lossy.jsonl");
+    fs::write(&valid,b"{\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"valid\"}}\n").unwrap();
+    fs::write(&lossy,b"{\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"bad\xffencoding\"}}\n").unwrap();
+    for (sid, path) in [
+        ("valid", valid),
+        ("lossy", lossy),
+        ("unreadable", f.dir.clone()),
+    ] {
+        db.execute(
+            "INSERT INTO threads VALUES(?,'/repo',0,1767225600000,?)",
+            &[json!(sid), json!(path)],
+        )
+        .unwrap();
+    }
+    let response = f.plugin(CODEX, json!({"op":"discover_sessions"}));
+    assert_eq!(response["ok"], true, "{response}");
+    let rows = response["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    for sid in ["valid", "lossy"] {
+        assert_eq!(
+            rows.iter().find(|row| row["session_id"] == sid).unwrap()["activity"]["kind"],
+            "user_turn"
+        );
+    }
+    assert!(rows
+        .iter()
+        .find(|row| row["session_id"] == "unreadable")
+        .unwrap()["activity"]
+        .is_null());
+    f.stop(process);
+}
+#[test]
 fn codex_activity_is_durable_unbounded_and_wal_errors_reach_probe() {
     let _lock = serial();
     let mut f = Fixture::new(json!({}));
@@ -1622,6 +1689,8 @@ fn codex_queue_literal_arguments_and_open_retry_do_not_duplicate_insertion() {
     let result = f.plugin(CODEX, retry.clone());
     assert_eq!(result["outcome"], "delivered_unconfirmed");
     assert_eq!(result["open_confirmed"], true);
+    retry["queue_confirmed"] = json!(true);
+    assert_eq!(f.plugin(CODEX, retry.clone())["outcome"], "delivered");
     script(
         std::path::Path::new(&f.env["CITO_OPEN_BIN"]),
         "#!/bin/sh\nexit 1\n",
@@ -1861,6 +1930,73 @@ fn claude_offline_hook_retires_output_only_after_identity_bound_durable_ack() {
         ),
         json!({})
     );
+}
+#[test]
+fn claude_hook_routes_alias_and_session_acks_and_requires_confirmed_counts() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    f.env.insert(
+        "CITO_DAEMON_PORT".into(),
+        listener.local_addr().unwrap().port().to_string(),
+    );
+    fs::create_dir_all(f.state.join("claude/aliases")).unwrap();
+    fs::write(f.state.join("claude/aliases/session-a"), "claude-42\n").unwrap();
+    for (sid, batch, text) in [
+        ("claude-42", "alias-batch", "alias wake"),
+        ("session-a", "sid-batch", "session wake"),
+    ] {
+        f.plugin(
+            CLAUDE,
+            json!({"op":"wake","session_id":sid,"batch_id":batch,"text":text,"wake":false,"signals":[{"signal_id":"first"},{"signal_id":"second"}]}),
+        );
+    }
+    for confirmed in [false, true] {
+        let hook = f.spawn(HOOK, &[], &[]);
+        f.send(
+            hook,
+            json!({"hook_event_name":"UserPromptSubmit","session_id":"session-a","cwd":"/repo"}),
+        );
+        f.eof(hook);
+        for (sid, batch) in [("claude-42", "alias-batch"), ("session-a", "sid-batch")] {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse::<u64>().unwrap();
+                    }
+                }
+            }
+            let request: Value = serde_json::from_reader(reader.by_ref().take(length)).unwrap();
+            assert_eq!(request["params"]["_meta"]["claudeSessionId"], sid);
+            assert_eq!(request["params"]["arguments"]["ack_ids"], json!([batch]));
+            let response = json!({"jsonrpc":"2.0","id":1,"result":{"isError":false,"content":[{"type":"text","text":json!({"ok":true,"acknowledged_count":if confirmed{2}else{1}}).to_string()}]}}).to_string();
+            write!(reader.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+        }
+        wait(|| f.exited(hook));
+        f.stop(hook);
+        for sid in ["claude-42", "session-a"] {
+            let path = f.state.join(format!("claude/wakes/{sid}.jsonl"));
+            assert_eq!(path.exists(), !confirmed);
+            if !confirmed {
+                assert!(fs::read_to_string(path)
+                    .unwrap()
+                    .contains("\"output_delivered\":true"));
+            }
+        }
+    }
 }
 #[test]
 fn claude_hook_ack_prefers_environment_daemon_port_over_config() {
@@ -2241,6 +2377,51 @@ fn telegram_poll_health_reports_conflicts_and_credentials_without_mutating_webho
     );
 }
 #[test]
+fn telegram_control_and_eof_stay_responsive_during_outbound_http() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let api = root().join("crates/cito-native/tests/support/telegram-api.py");
+    let server = f.spawn("python3", &[api.to_str().unwrap()], &[]);
+    wait(|| !f.frames(server).is_empty());
+    let port = f.frames(server)[0]["port"].as_u64().unwrap();
+    let config = json!({"botToken":"test","apiBaseUrl":format!("http://127.0.0.1:{port}")});
+    let p = f.spawn(TELEGRAM, &[], &[]);
+    f.send(p, json!({"op":"configure","hub_config":config}));
+    f.send(p,json!({"op":"deliver","delivery_id":"slow","config":{"chatId":"stall"},"signal":{"message":"Slow HTTP"}}));
+    wait(|| {
+        fs::read_to_string(f.home.join("api-methods.jsonl"))
+            .unwrap_or_default()
+            .contains("sendMessage")
+    });
+    let start = std::time::Instant::now();
+    f.send(
+        p,
+        json!({"op":"format_pair","req_id":"responsive","code":"cito-test","hub_config":config}),
+    );
+    wait(|| {
+        f.frames(p)
+            .iter()
+            .any(|frame| frame["req_id"] == "responsive")
+    });
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "Control request stalled behind delivery: {:?}",
+        start.elapsed()
+    );
+    assert!(!f
+        .frames(p)
+        .iter()
+        .any(|frame| frame["delivery_id"] == "slow" && frame["progress"] != true));
+    let start = std::time::Instant::now();
+    f.eof(p);
+    wait(|| f.exited(p));
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(100),
+        "{:?}",
+        start.elapsed()
+    );
+}
+#[test]
 fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
@@ -2315,7 +2496,7 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         .find(|v| v["op"] == "delivered" && v["progress"] != true)
         .unwrap();
     assert_eq!(frame["ok"], true);
-    assert_eq!(frame["external_msg_ids"].as_array().unwrap().len(), 3);
+    assert_eq!(frame["external_msg_ids"].as_array().unwrap().len(), 4);
     let sent = fs::read_to_string(f.home.join("api-sends.jsonl")).unwrap();
     let chunks = sent
         .lines()
@@ -2323,8 +2504,10 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         .filter(|v| v["chat_id"] == "large")
         .map(|v| v["text"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(chunks.len(), 3);
-    assert!(chunks.iter().all(|text| text.chars().count() <= 4096));
+    assert_eq!(chunks.len(), 4);
+    assert!(chunks
+        .iter()
+        .all(|text| text.encode_utf16().count() <= 4096));
     assert_eq!(chunks.concat(), expected);
     let outcome = |delivery_id: &str| {
         wait(|| {
@@ -2346,6 +2529,10 @@ fn telegram_persistent_pair_reply_cursor_and_unicode_chunk_contract() {
         assert_eq!(frame["ok"], false);
         assert_eq!(frame["retryable"], matches!(status, 408 | 429 | 500..=599));
         assert_eq!(frame["effect_unknown"], false);
+        assert_eq!(
+            frame["retry_after"],
+            if status == 429 { json!(7) } else { Value::Null }
+        );
         assert_eq!(
             frame["error"],
             format!("Telegram sendMessage HTTP {status}: Rejected by fixture")

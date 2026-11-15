@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod database;
+mod http_boundary;
 pub mod hub;
 pub mod hub_plugins;
 pub mod identity;

@@ -175,8 +175,23 @@ fn ensure_plugins_staged<'a>(
     state_dir: &Path,
     plugins: impl Iterator<Item = &'a PluginDescriptor>,
 ) -> Result<Vec<PathBuf>, String> {
+    let runtime = state_dir.join("runtime");
+    fs::create_dir_all(&runtime).map_err(|e| e.to_string())?;
+    let _lock = crate::support::FileLock::acquire(&runtime.join("staging.lock"))?;
     super::plugins::cleanup_retired_companion(state_dir)?;
-    let bin_dir = state_dir.join("bin");
+    let candidate = runtime.join(format!(".staging-{}", try_random_hex(12)?));
+    fs::create_dir(&candidate).map_err(|e| e.to_string())?;
+    struct Candidate(PathBuf);
+    impl Drop for Candidate {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Candidate(candidate.clone());
+    let bin_dir = candidate.join("bin");
+    if state_dir.join("bin").exists() {
+        copy_dir_recursive(&state_dir.join("bin"), &bin_dir)?;
+    }
     fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let exe = env::current_exe().map_err(|e| e.to_string())?;
@@ -202,10 +217,24 @@ fn ensure_plugins_staged<'a>(
             || fs::canonicalize(source).ok() != fs::canonicalize(&target).ok()
         {
             if fs::canonicalize(source).ok() != fs::canonicalize(&target).ok() {
-                if target.exists() {
-                    fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+                let staged = candidate.join(&plugin.id);
+                copy_dir_recursive(source, &staged)?;
+                let parsed = super::plugins::parse_manifest_dir(&staged, true)?;
+                let executable = staged.join(&parsed.command[0]);
+                if !executable.is_file()
+                    || fs::metadata(&executable)
+                        .map_err(|e| e.to_string())?
+                        .permissions()
+                        .mode()
+                        & 0o111
+                        == 0
+                {
+                    return Err(format!(
+                        "PLUGIN_LOAD_ERROR: Invalid staged executable for {}",
+                        plugin.id
+                    ));
                 }
-                copy_dir_recursive(source, &target)?;
+                publish_directory(&staged, &target)?;
             }
             written.push(target);
         }
@@ -228,9 +257,44 @@ fn ensure_plugins_staged<'a>(
         fs::write(&shim_path, script).map_err(|e| e.to_string())?;
         fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
-        written.push(shim_path);
+        written.push(state_dir.join("bin").join(bin_name));
     }
+    publish_directory(&bin_dir, &state_dir.join("bin"))?;
     Ok(written)
+}
+
+/// Publish a validated directory generation without exposing a missing target.
+fn publish_directory(candidate: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if !target.exists() {
+        return fs::rename(candidate, target).map_err(|e| e.to_string());
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let from =
+        std::ffi::CString::new(candidate.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    let to = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    // SAFETY: both paths are live NUL-terminated strings on the same filesystem.
+    // Exchange preserves the old generation at candidate until cleanup on return.
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) };
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result = -1;
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
 }
 
 pub fn launch_agent_plist_path(home_dir: &Path) -> PathBuf {
@@ -575,7 +639,14 @@ pub fn inspect_setup_json(
     }
     let mut harnesses = Vec::new();
     for p in plugins.agent_plugins() {
-        let (installed, configured, paths) = inspect_plugin_setup(p);
+        let (installed, configured, paths) = match try_inspect_plugin_setup(p) {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                harnesses.push(json!({"id":p.id,"displayName":p.display_name,"tier":p.tier,
+                    "installed":null,"configured":null,"paths":[],"status":"error","error":crate::core::cli::presentation_error(&error)}));
+                continue;
+            }
+        };
         if paths.is_empty() && !p.is_builtin {
             continue;
         }
@@ -1366,6 +1437,10 @@ pub fn run_setup_cli(args: &[String]) {
                     for h in hs {
                         let id = h.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         let tier = h.get("tier").and_then(|v| v.as_str()).unwrap_or("stable");
+                        if let Some(error) = h["error"].as_str() {
+                            println!("  - harness {id} [{tier}]: status=unknown, error={error}");
+                            continue;
+                        }
                         let inst = h
                             .get("installed")
                             .and_then(|v| v.as_bool())
@@ -1657,7 +1732,7 @@ pub fn run_setup_cli(args: &[String]) {
         }
         Ok(None) => {}
         Err(err) => {
-            eprintln!("cito setup: {err}");
+            eprintln!("cito setup: {}", crate::core::cli::presentation_error(&err));
             std::process::exit(1);
         }
     }
@@ -1737,6 +1812,51 @@ mod tests {
         )
     }
 
+    #[test]
+    fn setup_status_reports_inspection_errors_instead_of_false_absence() {
+        let (root, plugins) = fixture();
+        fs::write(plugins.plugins[0].plugin_dir.join("bin/sample"), "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"error_code\":\"PLUGIN_EXEC_FAILED\",\"message\":\"Inspection timed out (os error 60)\"}'\n").unwrap();
+        let result = cli_child(&root, &root, &["--status"]);
+        let output = String::from_utf8_lossy(&result.stdout);
+        assert!(result.status.success(), "{:?}", result);
+        assert!(
+            output.contains("status=unknown, error=Inspection timed out"),
+            "{output}"
+        );
+        assert!(
+            !output.lines().any(|line| line.contains("harness sample")
+                && line.contains("installed=false, configured=false")),
+            "{output}"
+        );
+        assert!(!output.contains("os error"), "{output}");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn validated_plugin_and_shim_generations_preserve_working_files_on_failure() {
+        let (root, mut plugins) = fixture();
+        plugins.plugins[0].is_builtin = true;
+        let state = root.join("installed");
+        ensure_cli_shims_native(&state, &plugins).unwrap();
+        let staged = staged_plugins_dir(&state).join("sample");
+        let previous = fs::read(staged.join("bin/sample")).unwrap();
+        let shim = fs::read(state.join("bin/cito")).unwrap();
+        fs::write(staged.join("obsolete"), "old generation").unwrap();
+        let source = &plugins.plugins[0].plugin_dir;
+        fs::write(source.join("bin/sample"), "#!/bin/sh\necho updated\n").unwrap();
+        ensure_cli_shims_native(&state, &plugins).unwrap();
+        assert!(!staged.join("obsolete").exists());
+        assert_ne!(fs::read(staged.join("bin/sample")).unwrap(), previous);
+        let valid = fs::read(staged.join("bin/sample")).unwrap();
+        fs::remove_file(source.join("bin/sample")).unwrap();
+        assert!(ensure_cli_shims_native(&state, &plugins).is_err());
+        assert_eq!(fs::read(staged.join("bin/sample")).unwrap(), valid);
+        assert_eq!(fs::read(state.join("bin/cito")).unwrap(), shim);
+        assert!(fs::read_dir(state.join("runtime"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")));
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn bundled_plugin_resolution_covers_distribution_layouts() {
         let (root, _) = fixture();
@@ -1850,7 +1970,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         assert!(!result.status.success());
         let error = String::from_utf8_lossy(&result.stderr);
-        assert!(error.contains("os error 13"), "{error}");
+        assert!(error.contains("Permission denied"), "{error}");
+        assert!(!error.contains("os error"), "{error}");
     }
 
     #[test]

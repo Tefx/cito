@@ -13,11 +13,11 @@ import {join} from 'node:path';
 import bridge from '../../../../plugins/pi/cito-bridge.ts';
 const state=process.env.CITO_STATE_DIR, path=join(state,'sockets',`pi-pid-${process.pid}.sock`);
 const handlers=new Map(), messages=[], badges=[], notices=[], registrations=[], calls=[];
-let session='session-a', renderer, command, attempts=0, failSend=false;
+let session='session-a', renderer, command, attempts=0, failSend=false, stallHttp=false;
 const context={cwd:'/repo',sessionManager:{getSessionId:()=>session,getSessionName:()=> 'Work'},ui:{setStatus:(_k,v)=>badges.push(v),notify:(s,t)=>notices.push({s,t})}};
 const api={on:(n,f)=>handlers.set(n,f),registerMcpServer:(name,config)=>{if(++attempts===1)throw Error('Registry not ready');registrations.push({name,config});},registerMessageRenderer:(_n,r)=>{renderer=r},registerCommand:(_n,c)=>{command=c},sendMessage:(m,o)=>{if(failSend)throw Error('Retry');messages.push({m,o});}};
 function request(value,fragment=false){return new Promise((resolve,reject)=>{const s=createConnection(path);let data='';s.setTimeout(2000,()=>s.destroy(Error('Timeout')));s.on('error',reject);s.on('connect',()=>{const raw=JSON.stringify(value)+'\n';if(fragment){s.write(raw.slice(0,5));s.end(raw.slice(5));}else s.write(raw);});s.on('data',c=>{data+=c;if(data.includes('\n')){s.destroy();resolve(JSON.parse(data));}});});}
-const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;calls.push(JSON.parse(body));res.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'alice-agent',scope:'self'})}]}}));});
+const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;calls.push(JSON.parse(body));if(stallHttp)return;res.end(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[{type:'text',text:JSON.stringify({ok:true,listener_id:'alice-agent',scope:'self'})}]}}));});
 try {
  mkdirSync(join(state,'sockets'),{recursive:true});execFileSync('python3',['-c','import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()',path]);
  const interval=globalThis.setInterval;
@@ -72,6 +72,12 @@ try {
  process.env.CITO_DAEMON_PORT='0';process.env.CITO_CONFIG_PATH='~/bridge-config.json';writeFileSync(join(process.env.HOME,'bridge-config.json'),JSON.stringify({daemonPort:port}));await command.handler('on',context);assert.equal(calls.length,4);
  await command.handler('on --hub INVALID!',context);assert.equal(calls.length,4);assert.equal(notices.at(-1).t,'warning');
  assert.deepEqual(command.getArgumentCompletions('t'),[{value:'team',label:'team'}]);
+ // Exercise actual fetch cancellation without a 15-second wall-clock test.
+ const timeout=AbortSignal.timeout;let timeoutRequested;
+ AbortSignal.timeout=milliseconds=>{timeoutRequested=milliseconds;return timeout(20);};
+ stallHttp=true;
+ try {await command.handler('on',context);assert.equal(timeoutRequested,15000);assert.equal(notices.at(-1).t,'error');}
+ finally {AbortSignal.timeout=timeout;stallHttp=false;}
  // U2: recover an unlinked socket only while the package remains configured.
  const home=join(process.env.HOME,'.pi','agent');mkdirSync(home,{recursive:true});
  const custom=join(process.env.HOME,'custom-pi');mkdirSync(custom,{recursive:true});

@@ -253,18 +253,19 @@ fn source_activity(req: &Value, row: &Value) -> Result<Value> {
                 file.seek(SeekFrom::Start(offset))
                     .map_err(|_| "Cannot read session activity")?;
                 let mut reader = BufReader::new(file);
-                let mut line = String::new();
+                let mut line = Vec::new();
                 loop {
                     line.clear();
                     let n = reader
-                        .read_line(&mut line)
+                        .read_until(b'\n', &mut line)
                         .map_err(|_| "Cannot read session activity")?;
                     // Never checkpoint a partially appended JSONL record.
-                    if n == 0 || !line.ends_with('\n') {
+                    if n == 0 || !line.ends_with(b"\n") {
                         break;
                     }
                     offset += n as u64;
-                    let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                    let Ok(event) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line))
+                    else {
                         continue;
                     };
                     let payload = &event["payload"];
@@ -548,7 +549,9 @@ pub fn handle(req: &Value) -> Result<Value> {
                     .iter()
                     .map(|r| {
                         let mut c = row_caller(req, r);
-                        c["activity"] = source_activity(req, r)?;
+                        // One unreadable rollout must not discard unrelated threads.
+                        // Unknown activity cannot enroll an idle activity-mode session.
+                        c["activity"] = source_activity(req, r).unwrap_or(Value::Null);
                         c["updated_at_ms"] = json!(str_at(r, "recency_at_ms")
                             .or_else(|| str_at(r, "updated_at"))
                             .and_then(|s| s.parse::<u64>().ok())
@@ -774,7 +777,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 }
             }
             Ok(
-                json!({"ok":true,"outcome":if !already_queued && queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{attribution_error}else{Some("Codex open effect was not confirmed".into())}}),
+                json!({"ok":true,"outcome":if queue_confirmed && opened {"delivered"}else{"delivered_unconfirmed"},"queue_written":true,"queue_confirmed":queue_confirmed,"insertion_unknown":!queue_confirmed,"open_confirmed":opened,"reason":if opened{attribution_error}else{Some("Codex open effect was not confirmed".into())}}),
             )
         }
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),

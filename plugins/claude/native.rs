@@ -171,7 +171,7 @@ pub fn append_wake(req: &Value, sid: &str) -> Result<()> {
             f.write_all(b"\n").map_err(|e| e.to_string())?;
         }
     }
-    let row = json!({"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"created_at_ms":now_ms()});
+    let row = json!({"batch_id":req["batch_id"],"content":req["text"],"wake":req["wake"]!=false,"created_at_ms":now_ms(),"expected_ack_count":req["signals"].as_array().map(|signals|signals.len().max(1)).unwrap_or(1)});
     writeln!(f, "{row}").map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
@@ -202,19 +202,20 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
             }
         }
         staged.sort();
-        paths.extend(staged);
-        paths.push(path);
+        paths.extend(staged.into_iter().map(|path| ((*sid).to_owned(), path)));
+        paths.push(((*sid).to_owned(), path));
     }
     let mut rows = vec![];
     let mut seen = HashSet::new();
-    for p in paths {
+    for (source_session, p) in paths {
         let Some(s) = read_optional(&p)? else {
             continue;
         };
         for line in s.lines() {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Ok(mut v) = serde_json::from_str::<Value>(line) {
                 if let (Some(id), Some(_)) = (str_at(&v, "batch_id"), v["content"].as_str()) {
-                    if seen.insert(id.to_string()) {
+                    if seen.insert((source_session.clone(), id.to_string())) {
+                        v["ack_session"] = json!(source_session);
                         rows.push(v)
                     }
                 }
@@ -224,7 +225,10 @@ fn drain_wakes(req: &Value, sessions: &[&str]) -> Result<Vec<Value>> {
     Ok(rows)
 }
 fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool) -> Result<()> {
-    let ids: HashSet<_> = wakes.iter().filter_map(|w| str_at(w, "batch_id")).collect();
+    let ids: HashSet<_> = wakes
+        .iter()
+        .filter_map(|w| Some((str_at(w, "ack_session")?, str_at(w, "batch_id")?)))
+        .collect();
     let mut sessions = sessions.to_vec();
     sessions.sort();
     sessions.dedup();
@@ -257,7 +261,9 @@ fn settle_wakes(req: &Value, sessions: &[String], wakes: &[Value], retire: bool)
             let mut retained = Vec::new();
             for line in content.lines() {
                 if let Ok(mut value) = serde_json::from_str::<Value>(line) {
-                    if str_at(&value, "batch_id").is_some_and(|id| ids.contains(id)) {
+                    if str_at(&value, "batch_id")
+                        .is_some_and(|id| ids.contains(&(sid.as_str(), id)))
+                    {
                         if !retire {
                             value["output_delivered"] = json!(true);
                             retained.push(value.to_string());
@@ -290,7 +296,9 @@ fn persist_hook_acks(req: &Value, sessions: &[String], wakes: &[Value]) -> Resul
                     str_at(&row, "listener_id").unwrap_or(""),
                 )?
                 .ok_or("ACK listener missing")?;
-            if !sessions.iter().any(|sid| listener["session_id"] == *sid) {
+            if !sessions.iter().any(|sid| listener["session_id"] == *sid)
+                || listener["session_id"] != wake["ack_session"]
+            {
                 return Err("ACK session mismatch".into());
             }
             local.acknowledge(
@@ -725,6 +733,26 @@ pub fn handle(req: &Value) -> Result<Value> {
         _ => Ok(error("INVALID_INPUT", "Unknown plugin operation")),
     }
 }
+fn hook_ack_confirmed(response: &Value, expected: usize) -> bool {
+    response.get("error").is_none()
+        && response["result"]["isError"] != true
+        && response["result"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| {
+                item["text"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .is_some_and(|value| {
+                        value["ok"] == true
+                            && value["acknowledged_count"]
+                                .as_u64()
+                                .is_some_and(|count| count >= expected as u64)
+                    })
+            })
+}
+
 pub fn hook_main() {
     if std::env::args().any(|s| s == "--help" || s == "-h") {
         eprintln!("Usage: cito-claude-hook (reads a hook JSON payload on stdin)");
@@ -795,11 +823,7 @@ pub fn hook_main() {
         let mut wakes = drain_wakes(&req, &sessions)?;
         // Drain order follows recovered staging files, then the active queue.
         let mut seen = HashSet::new();
-        wakes.retain(|w| {
-            str_at(w, "batch_id")
-                .map(|s| seen.insert(s.to_string()))
-                .unwrap_or(false)
-        });
+        wakes.retain(|w| seen.insert((w["ack_session"].clone(), w["batch_id"].clone())));
         if wakes.is_empty() {
             return Ok(json!({}));
         }
@@ -840,14 +864,20 @@ pub fn hook_main() {
                     .filter(|p| *p > 0)
             })
             .unwrap_or(4290);
-        let ack_session = alias.as_deref().unwrap_or(&sid);
-        let ack = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":wakes.iter().map(|r|r["batch_id"].clone()).collect::<Vec<_>>()},"_meta":{"claudeSessionId":ack_session,"cwd":req["cwd"]}}});
+        let acks: Vec<_> = sessions.iter().filter_map(|session| {
+            let ids: Vec<_> = wakes.iter().filter(|wake| wake["ack_session"] == *session).map(|wake| wake["batch_id"].clone()).collect();
+            if ids.is_empty() { return None; }
+            let expected = wakes.iter().filter(|wake| wake["ack_session"] == *session)
+                .map(|wake| wake["expected_ack_count"].as_u64().unwrap_or(1).max(1) as usize)
+                .fold(0usize, usize::saturating_add);
+            Some((expected, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cito_inbox","arguments":{"ack_all":false,"ack_ids":ids},"_meta":{"claudeSessionId":session,"cwd":req["cwd"]}}})))
+        }).collect();
         continuation = Some((
             req.clone(),
             sessions.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             wakes.clone(),
             port,
-            ack,
+            acks,
         ));
         if content.is_empty() {
             Ok(json!({}))
@@ -871,21 +901,22 @@ pub fn hook_main() {
             {
                 return;
             }
-            if let Some((req, sessions, wakes, port, ack)) = continuation {
+            if let Some((req, sessions, wakes, port, acks)) = continuation {
                 if let Err(error) = settle_wakes(&req, &sessions, &wakes, false) {
                     eprintln!("cito-claude-hook: {error}");
                     return;
                 }
-                let confirmed = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
-                    .timeout(Duration::from_millis(500))
-                    .send_json(ack)
-                    .ok()
-                    .and_then(|r| r.into_json::<Value>().ok())
-                    .is_some_and(|r| {
-                        r.get("result").is_some()
-                            && r.get("error").is_none()
-                            && r["result"]["isError"] != true
-                    });
+                let mut confirmed = true;
+                for (expected, ack) in acks {
+                    let response = ureq::post(&format!("http://127.0.0.1:{port}/mcp"))
+                        .timeout(Duration::from_millis(500))
+                        .send_json(ack)
+                        .ok()
+                        .and_then(|r| r.into_json::<Value>().ok());
+                    confirmed &= response
+                        .as_ref()
+                        .is_some_and(|r| hook_ack_confirmed(r, expected));
+                }
                 if confirmed || persist_hook_acks(&req, &sessions, &wakes).is_ok() {
                     if let Err(error) = settle_wakes(&req, &sessions, &wakes, true) {
                         eprintln!("cito-claude-hook: {error}");

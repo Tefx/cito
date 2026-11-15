@@ -1062,6 +1062,7 @@ impl DaemonService {
     }
 
     pub fn poll(&mut self) -> Result<(), String> {
+        self.events.retain(|event| !event.is_finished());
         self.refresh_setup_inspections();
         self.reload_slots()?;
         self.flush_acks();
@@ -1688,8 +1689,14 @@ impl DaemonService {
         if let Some(parent) = self.config.config_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        crate::plugins::with_config_lock(&self.config.config_path, || {
-            let mut raw = self.raw_config()?;
+        let target = crate::core::config::publication_target(&self.config.config_path)?;
+        crate::plugins::with_config_lock(&target, || {
+            let mut raw = match fs::read_to_string(&target) {
+                Ok(text) => serde_json::from_str(&text)
+                    .map_err(|e| format!("INVALID_INPUT: Invalid config: {e}"))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+                Err(error) => return Err(error.to_string()),
+            };
             if !raw.is_object() {
                 return Err("INVALID_INPUT: Config must be an object".into());
             }
@@ -1712,14 +1719,11 @@ impl DaemonService {
                     }
                 }
             }
-            let tmp = self
-                .config
-                .config_path
-                .with_extension(format!("json.{}.tmp", std::process::id()));
+            let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
             fs::write(&tmp, rendered).map_err(|e| e.to_string())?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
                 .map_err(|e| e.to_string())?;
-            fs::rename(tmp, &self.config.config_path).map_err(|e| e.to_string())?;
+            fs::rename(tmp, &target).map_err(|e| e.to_string())?;
             Ok(())
         })
     }

@@ -682,7 +682,7 @@ fn load_plugins_with_cleanup(state_dir: &Path, cleanup_legacy: bool) -> LoadedPl
     )
 }
 
-fn load_plugins_from_roots(
+pub(super) fn load_plugins_from_roots(
     external_roots: &[PathBuf],
     builtin_roots: &[PathBuf],
     user_root: Option<&Path>,

@@ -35,7 +35,7 @@ pub fn parse_cli(
         {
             if let Some(old) = meta.get("expected_harness") {
                 if old != &plugin.id {
-                    return Err("Conflicting harness flags".into());
+                    return Err("INVALID_INPUT: Conflicting harness flags".into());
                 }
             }
             meta.insert("expected_harness".into(), json!(plugin.id));
@@ -59,10 +59,14 @@ pub fn parse_cli(
                 input.insert("hub".into(), json!(read_value(args, &mut i, flag)?));
             }
             "--harness" => {
-                meta.insert(
-                    "expected_harness".into(),
-                    json!(read_value(args, &mut i, flag)?),
-                );
+                let harness = read_value(args, &mut i, flag)?;
+                if meta
+                    .get("expected_harness")
+                    .is_some_and(|old| old != &harness)
+                {
+                    return Err("INVALID_INPUT: Conflicting harness flags".into());
+                }
+                meta.insert("expected_harness".into(), json!(harness));
             }
             "--session" => {
                 meta.insert(
@@ -173,9 +177,11 @@ pub fn parse_cli(
     }
     if matches!(cmd, "listen" | "unlisten")
         && meta.get("expected_harness") == Some(&json!("human"))
-        && (input.contains_key("scope") || !positionals.is_empty())
+        && (input.contains_key("scope")
+            || !positionals.is_empty()
+            || meta.contains_key("expected_session_id"))
     {
-        return Err("INVALID_INPUT: Human device commands do not accept policy flags or descriptions; use cito inbox".into());
+        return Err("INVALID_INPUT: Human device commands do not accept session selectors, policy flags or descriptions; use cito inbox".into());
     }
     if cmd == "unlisten" && input.contains_key("scope") {
         return Err("INVALID_INPUT: Use cito inbox for scope policy".into());
@@ -251,7 +257,7 @@ pub fn parse_cli(
     );
     Ok((Value::Object(input), Value::Object(meta)))
 }
-fn presentation_error(raw: &str) -> String {
+pub(super) fn presentation_error(raw: &str) -> String {
     let protocol_code = |code: &str| {
         code.len() >= 3
             && ((code.starts_with(|c: char| c.is_ascii_uppercase())
@@ -594,6 +600,30 @@ pub fn run_cli_command(cmd: &str, args: &[String], config: &NativeConfig, plugin
 mod tests {
     use super::*;
     #[test]
+    fn explicit_and_plugin_harness_selectors_conflict_in_both_orders() {
+        let descriptor = super::super::plugins::parse_manifest(
+            std::path::Path::new("/tmp/editor"),
+            false,
+            &json!({"id":"editor","displayName":"Editor","cliFlag":true,"command":["./driver"]}),
+        )
+        .unwrap();
+        let plugins = LoadedPlugins {
+            plugins: vec![descriptor],
+            rejected_ids: Default::default(),
+        };
+        for args in [
+            vec!["--editor", "--harness", "human"],
+            vec!["--harness", "human", "--editor"],
+        ] {
+            let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(parse_cli("listen", &args, &plugins)
+                .unwrap_err()
+                .starts_with("INVALID_INPUT: Conflicting harness"));
+        }
+        let args = ["--editor", "--harness", "editor"].map(str::to_owned);
+        assert!(parse_cli("listen", &args, &plugins).is_ok());
+    }
+    #[test]
     fn human_device_policy_rejection_distinguishes_generated_description() {
         let plugins = LoadedPlugins {
             plugins: vec![],
@@ -605,6 +635,8 @@ mod tests {
                 vec!["--team"],
                 vec!["Description"],
                 vec!["--about", "Description"],
+                vec!["--session", "default"],
+                vec!["--session", "session-a"],
             ] {
                 let args = [vec!["--harness", "human"], extra]
                     .concat()

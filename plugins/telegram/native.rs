@@ -14,6 +14,7 @@ struct ApiFailure {
     message: String,
     retryable: bool,
     effect_unknown: bool,
+    retry_after: Option<u64>,
 }
 impl std::fmt::Display for ApiFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,6 +43,7 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
         message: "Bot Token is required".into(),
         retryable: false,
         effect_unknown: false,
+        retry_after: None,
     })?;
     let base = str_at(config, "apiBaseUrl")
         .unwrap_or("https://api.telegram.org")
@@ -61,6 +63,9 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
                 ),
                 retryable: matches!(status, 408 | 429 | 500..=599),
                 effect_unknown: false,
+                retry_after: (status == 429)
+                    .then(|| v["parameters"]["retry_after"].as_u64())
+                    .flatten(),
             });
         }
         Err(ureq::Error::Transport(e)) => {
@@ -82,6 +87,7 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
                 message: format!("Telegram {method} request failed"),
                 retryable: before_send,
                 effect_unknown: !before_send && method == "sendMessage",
+                retry_after: None,
             });
         }
     };
@@ -91,6 +97,7 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
                 message: format!("Telegram {method} response was incomplete"),
                 retryable: false,
                 effect_unknown: method == "sendMessage",
+                retry_after: None,
             }
         })?;
     if v["ok"] != true {
@@ -102,14 +109,32 @@ fn api(config: &Value, method: &str, body: Value) -> std::result::Result<Value, 
             ),
             retryable: matches!(status, 408 | 429 | 500..=599),
             effect_unknown: false,
+            retry_after: (status == 429)
+                .then(|| v["parameters"]["retry_after"].as_u64())
+                .flatten(),
         });
     }
     Ok(v["result"].clone())
 }
+fn chunks(text: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let (mut start, mut units) = (0, 0);
+    for (offset, character) in text.char_indices() {
+        if units + character.len_utf16() > 4096 {
+            chunks.push(&text[start..offset]);
+            start = offset;
+            units = 0;
+        }
+        units += character.len_utf16();
+    }
+    if start < text.len() {
+        chunks.push(&text[start..]);
+    }
+    chunks
+}
 fn send(config: &Value, chat: &str, text: &str) -> Result<Vec<String>> {
     let mut ids = vec![];
-    for chunk in text.chars().collect::<Vec<_>>().chunks(4096) {
-        let text: String = chunk.iter().collect();
+    for text in chunks(text) {
         let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
         ids.push(id(&r["message_id"]).ok_or("Telegram message_id is missing")?);
     }
@@ -127,20 +152,20 @@ fn delivery(config: &Value, req: &Value) -> Value {
             message: "Chat ID is required".into(),
             retryable: false,
             effect_unknown: false,
+            retry_after: None,
         })?;
         let s = &req["signal"];
         let from = str_at(&s["from"], "title")
             .or_else(|| str_at(&s["from"], "listener_id"))
             .unwrap_or("sender");
         let text = format!("Cito · {from}\n\n{}", s["message"].as_str().unwrap_or(""));
-        let chars: Vec<char> = text.chars().collect();
-        for chunk in chars.chunks(4096).skip(ids.len()) {
-            let text: String = chunk.iter().collect();
+        for text in chunks(&text).into_iter().skip(ids.len()) {
             let r = api(config, "sendMessage", json!({"chat_id":chat,"text":text}))?;
             ids.push(id(&r["message_id"]).ok_or_else(|| ApiFailure {
                 message: "Telegram message_id is missing".into(),
                 retryable: false,
                 effect_unknown: true,
+                retry_after: None,
             })?);
             emit(
                 &json!({"op":"delivered","delivery_id":req["delivery_id"],"progress":true,"external_msg_ids":ids}),
@@ -148,11 +173,17 @@ fn delivery(config: &Value, req: &Value) -> Value {
         }
         Ok(())
     })();
-    let (ok, retryable, effect_unknown, error) = match result {
-        Ok(()) => (true, false, false, None),
-        Err(e) => (false, e.retryable, e.effect_unknown, Some(e.message)),
+    let (ok, retryable, effect_unknown, error, retry_after) = match result {
+        Ok(()) => (true, false, false, None, None),
+        Err(e) => (
+            false,
+            e.retryable,
+            e.effect_unknown,
+            Some(e.message),
+            e.retry_after,
+        ),
     };
-    json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":ok,"retryable":retryable,"effect_unknown":effect_unknown,"external_msg_id":ids.last(),"external_msg_ids":ids,"error":error})
+    json!({"op":"delivered","delivery_id":req["delivery_id"],"ok":ok,"retryable":retryable,"effect_unknown":effect_unknown,"external_msg_id":ids.last(),"external_msg_ids":ids,"error":error,"retry_after":retry_after})
 }
 fn rpc(config: &Value, req: &Value) -> Value {
     let c = if req["hub_config"].is_object() {
@@ -199,7 +230,59 @@ struct Pending {
     key: Option<String>,
     done: bool,
 }
+struct Outbound {
+    deliveries: mpsc::SyncSender<(Value, Value)>,
+    control: mpsc::SyncSender<(Value, Value)>,
+}
+impl Outbound {
+    fn new() -> Self {
+        fn worker() -> mpsc::SyncSender<(Value, Value)> {
+            let (tx, rx) = mpsc::sync_channel::<(Value, Value)>(64);
+            std::thread::spawn(move || {
+                while let Ok((config, request)) = rx.recv() {
+                    match str_at(&request, "op").unwrap_or("") {
+                        "deliver" => emit(&delivery(&config, &request)),
+                        "_send" => {
+                            if let Err(error) = send(
+                                &config,
+                                str_at(&request, "chat").unwrap_or(""),
+                                str_at(&request, "text").unwrap_or(""),
+                            ) {
+                                eprintln!("Telegram confirmation: {error}");
+                            }
+                        }
+                        _ => emit(&rpc(&config, &request)),
+                    }
+                }
+            });
+            tx
+        }
+        Self {
+            deliveries: worker(),
+            control: worker(),
+        }
+    }
+    fn submit(&self, config: &Value, request: Value) {
+        let tx = if request["op"] == "deliver" {
+            &self.deliveries
+        } else {
+            &self.control
+        };
+        if tx.try_send((config.clone(), request.clone())).is_err() {
+            if request["op"] == "deliver" {
+                emit(
+                    &json!({"op":"delivered","delivery_id":request["delivery_id"],"ok":false,"retryable":true,"effect_unknown":false,"error":"Outbound queue is full"}),
+                );
+            } else if request["op"] != "_send" {
+                emit(
+                    &json!({"op":"rpc_result","req_id":request["req_id"],"ok":false,"error":"Outbound queue is full"}),
+                );
+            }
+        }
+    }
+}
 struct Runtime {
+    outbound: Outbound,
     config: Value,
     cursor: u64,
     pending: VecDeque<Pending>,
@@ -319,8 +402,7 @@ impl Runtime {
                         .max(id(&r["cursor"]).and_then(|s| s.parse().ok()).unwrap_or(0));
                 }
             }
-            "format_pair" | "test" => emit(&rpc(&self.config, &r)),
-            "deliver" => emit(&delivery(&self.config, &r)),
+            "format_pair" | "test" | "deliver" => self.outbound.submit(&self.config, r.clone()),
             "reply_ack" => {
                 if let Some(key) = id(&r["update_id"]) {
                     if let Some(chat) = self.reply_chats.remove(&key) {
@@ -335,9 +417,8 @@ impl Runtime {
                                 str_at(&r, "error").unwrap_or("Target unavailable")
                             )
                         };
-                        if let Err(e) = send(&self.config, &chat, &text) {
-                            eprintln!("Telegram reply confirmation: {e}");
-                        }
+                        self.outbound
+                            .submit(&self.config, json!({"op":"_send","chat":chat,"text":text}));
                         self.done(&key);
                     }
                 }
@@ -356,9 +437,8 @@ impl Runtime {
                                 str_at(&r, "error").unwrap_or("Invalid or expired code")
                             )
                         };
-                        if let Err(e) = send(&self.config, &chat, &text) {
-                            eprintln!("Telegram pairing confirmation: {e}");
-                        }
+                        self.outbound
+                            .submit(&self.config, json!({"op":"_send","chat":chat,"text":text}));
                         self.done(&key);
                     }
                 }
@@ -391,7 +471,8 @@ impl PollBackoff {
         let delay = 500u64.saturating_mul(1 << self.failures.saturating_sub(1).min(6));
         (
             permanent || self.failures >= 3,
-            Duration::from_millis(delay + jitter_ms.min(499)),
+            Duration::from_millis(delay + jitter_ms.min(499))
+                .max(Duration::from_secs(error.retry_after.unwrap_or(0))),
         )
     }
     fn succeeded(&mut self) {
@@ -407,6 +488,7 @@ pub fn main() {
     let (tx, rx) = mpsc::channel::<Event>();
     stdin_events(tx.clone(), Event::Request);
     let mut runtime = Runtime {
+        outbound: Outbound::new(),
         config: json!({}),
         cursor: 0,
         pending: VecDeque::new(),
@@ -521,6 +603,7 @@ mod tests {
             message: message.into(),
             retryable: false,
             effect_unknown: false,
+            retry_after: None,
         };
         for message in [
             "Telegram getUpdates request failed",
@@ -556,6 +639,7 @@ mod tests {
     #[test]
     fn configure_retains_monotonic_cursor_and_ack_without_keyboard_is_noop() {
         let mut runtime = Runtime {
+            outbound: Outbound::new(),
             config: json!({"botToken":"first"}),
             cursor: 20,
             pending: VecDeque::new(),
