@@ -86,9 +86,8 @@ extension Companion: NSMenuDelegate {
         statusUpdateCount += 1
     }
     func scopeToggle(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl? {
-        let hasOtherUsers = directoryAllPeers.contains { $0.hub == hub && !$0.user.isEmpty && $0.user != user }
-            || listeners.contains { $0.hub == hub && !($0.user ?? "").isEmpty && $0.user != user }
-        guard hubs.first(where: { $0.name == hub })?.auth_mode == "oidc" || hasOtherUsers else { return nil }
+        guard hubs.first(where: { $0.name == hub })?.supports_workspace_scope == true,
+              listeners.first(where: { $0.hub == hub && ($0.scoped_id == id || $0.listener_id == id) })?.can_set_scope == true else { return nil }
         let team = scope == "workspace"
         let control = MenuControl(team ? "Team" : "Self", frame:NSRect(x:0,y:y,width:68,height:22), leadingSymbol:team ? "person.2.fill" : "lock.fill")
         control.identifier = NSUserInterfaceItemIdentifier("scope:\(id)")
@@ -184,7 +183,7 @@ extension Companion: NSMenuDelegate {
         updateMenuErrorRow()
         var drawerItems: [String: NSMenuItem] = [:]
         let showHubControls = hubs.count != 1 || hubs.contains {
-            !(["local", "default"].contains($0.name) && $0.auth_mode == "none" && $0.status == "connected" && $0.error == nil)
+            !($0.is_builtin == true && $0.status == "connected" && $0.error == nil)
         }
         for hub in hubs where showHubControls {
             let drawer = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 32))
@@ -202,11 +201,9 @@ extension Companion: NSMenuDelegate {
             case "connecting":
                 buttons = [("Hub Settings…", "open_hub_settings", false, disconnectRun)]
             case "auth_required":
-                buttons = [("Sign In…", "login", true, loginRun), ("Hub Settings…", "open_hub_settings", false, disconnectRun)]
+                buttons = (hub.can_login == true ? [("Sign In…", "login", true, loginRun)] : []) + [("Hub Settings…", "open_hub_settings", false, disconnectRun)]
             default:
-                buttons = hub.auth_mode == "oidc"
-                    ? [("Connect", "reconnect", true, reconnectRun), ("Sign In…", "login", false, loginRun)]
-                    : [("Connect", "reconnect", true, reconnectRun)]
+                buttons = [("Connect", "reconnect", true, reconnectRun)] + (hub.can_login == true ? [("Sign In…", "login", false, loginRun)] : []) + [("Hub Settings…", "open_hub_settings", false, disconnectRun)]
             }
             var drawerControls: [NSView] = []
             for (title, action, primary, run) in buttons {
@@ -227,7 +224,8 @@ extension Companion: NSMenuDelegate {
                 color: hub.error != nil || hub.status == "auth_required" ? .labelColor : CitoPalette.secondaryText)
             detail.lineBreakMode = .byTruncatingMiddle
             detail.toolTip = statusText; drawer.addSubview(detail)
-            if hub.error != nil {
+            layoutBar(in: drawer, y: 5, height: 22, spacing: 4, flexible: detail, trailing: drawerControls)
+            if hub.error != nil || measureTextWidth(statusText,font:detail.font ?? .systemFont(ofSize:11)) > detail.frame.width {
                 detail.identifier = NSUserInterfaceItemIdentifier("hub_error:\(hub.name)")
                 detail.maximumNumberOfLines = 0; detail.lineBreakMode = .byWordWrapping
                 let width = CitoMetrics.menuWidth - 24
@@ -248,7 +246,7 @@ extension Companion: NSMenuDelegate {
         var hubPills: [NSView] = []
         for hub in hubs where showHubControls {
             let color = hub.name == effectiveTargetHub && hub.status == "connected" && hub.error == nil ? NSColor.white : statusColor(hub.status)
-            let isSingleDefault = hubs.count == 1 && (hub.name == "default" || hub.name == "local")
+            let isSingleDefault = hubs.count == 1 && hub.is_builtin == true
             let isCompactIcon = isSingleDefault && hub.auth_mode == "none" && hub.status == "connected" && hub.error == nil
             let title: String
             if isCompactIcon {
@@ -397,7 +395,7 @@ extension Companion: NSMenuDelegate {
             let path = textLabel(pathText,
                 NSRect(x: titleX + copyWidth + 8, y: 8, width: max(0, card.bounds.width - CitoMetrics.cardInset - titleX - copyWidth - 8), height: 16), size: 11, color: CitoPalette.secondaryText)
             path.lineBreakMode = .byTruncatingMiddle; path.toolTip = pathText; path.isHidden = pathText.isEmpty; card.addSubview(path)
-            if hubs.first(where: { $0.name == listener.hub })?.auto_listen == true || listener.listen_mode == "auto" {
+            if listener.can_pin == true && (hubs.first(where: { $0.name == listener.hub })?.auto_listen == true || listener.listen_mode == "auto") {
                 let pinned = listener.listen_mode != "auto"
                 let activityTimed = map[listener.harness]?.idle_timeout_ms != nil
                 let pin = MenuControl("Pin", frame:NSRect(x:0,y:cardHeight-28,width:22,height:22), symbol:pinned ? "pin.fill" : "pin")
@@ -426,9 +424,10 @@ extension Companion: NSMenuDelegate {
             stop.style = .neutral; stop.maximumWidth = 48
             stop.identifier = NSUserInterfaceItemIdentifier("stop:\(listener.scoped_id)")
             let unlisten = { self.emit(["op": "unlisten_session", "hub": listener.hub, "harness": listener.harness, "session_id": listener.session_id]) }
+            stop.isHidden = listener.can_stop != true
             stop.pressed = unlisten; card.addSubview(stop); sessionActions.append(stop)
             layoutBar(in: card, insetLeft: titleX, y: cardHeight - 28, height: 22, spacing: 4, trailing: sessionActions)
-            let rightEdge = sessionActions.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
+            let rightEdge = sessionActions.filter { !$0.isHidden }.map(\.frame.minX).min() ?? (card.bounds.width - CitoMetrics.cardInset)
             if renamingSessionKey == sessionKey {
                 title.isHidden = true
                 let field = existingRenameField ?? NSTextField(string: renameDraft ?? listener.title)
@@ -453,9 +452,10 @@ extension Companion: NSMenuDelegate {
                 renameBtn.identifier = NSUserInterfaceItemIdentifier("rename:\(listener.scoped_id)")
                 renameBtn.style = .subtleHeader; renameBtn.toolTip = "Rename session"
                 renameBtn.pressed = { [weak self] in self?.renameField = nil; self?.renamingSessionKey = sessionKey; self?.rebuild() }
+                renameBtn.isHidden = listener.can_rename != true
                 card.addSubview(renameBtn)
             }
-            layoutBar(in: card, insetLeft: titleX, insetRight: 10, y: 7, height: 19, leading: [copy], flexible: path)
+            layoutBar(in: card, insetLeft: titleX, insetRight: CitoMetrics.cardInset, y: 7, height: 19, leading: [copy], flexible: path)
         }
         if activeRows.count <= 4 {
             for (id, row) in activeRows { _ = host(row, id: id) }
@@ -620,10 +620,13 @@ extension Companion: NSMenuDelegate {
                 let vb = resolveHarnessVisual(b, harnesses: map)
                 return va.order != vb.order ? va.order < vb.order : a < b
             }
+            func candidateIsOpen(_ candidate: Candidate) -> Bool {
+                candidate.needs_reload == true || candidate.endpoint_pid != nil || map[candidate.harness]?.pid_bound == false
+            }
             let groupedCandidates = orderedHarnesses.map { (harness: $0, items: groupsByHarness[$0]!) }
             for (harness, items) in groupedCandidates {
                 let recentKey = "\(targetHub):\(harness)"
-                if autoListen && map[harness]?.pid_bound != false && items.allSatisfy({ $0.endpoint_pid == nil && $0.needs_reload != true }) && autoCollapsedRecentGroups.insert(recentKey).inserted {
+                if autoListen && items.allSatisfy({ !candidateIsOpen($0) }) && autoCollapsedRecentGroups.insert(recentKey).inserted {
                     collapsedGroups.insert(recentKey)
                 }
             }
@@ -632,7 +635,7 @@ extension Companion: NSMenuDelegate {
                 let groupKey = "\(targetHub):\(harness)"
                 let isCollapsed = collapsedGroups.contains(groupKey)
                 let visual = resolveHarnessVisual(harness, harnesses: map)
-                let openCount = items.filter { $0.endpoint_pid != nil }.count
+                let openCount = items.filter { candidateIsOpen($0) }.count
                 let noun = openCount == items.count ? "open" : openCount == 0 ? "recent" : "sessions"
                 let groupTitle = "\(visual.name) · \(items.count) \(noun)"
                 let groupRow = NSView(frame: NSRect(x: 0, y: 0, width: CitoMetrics.menuWidth, height: 28))

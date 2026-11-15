@@ -139,7 +139,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let availWidth = max(120, 544 - copyWidth - msgWidth - 66)
         let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
         let normalizedTitle = nodeDisplayTitle(peer.title, harness: peer.harness, user: peer.user, about: peer.about, harnessName: visual.name, customTitle: peer.custom_title == true)
-        let displayTitle = peer.harness == "human" && normalizedTitle == "You (@\(peer.user))" ? "@\(peer.user)" + (peer.is_self_principal == true ? " (You)" : "") : normalizedTitle
+        let displayTitle = peer.harness == "human" && peer.custom_title != true ? "@\(peer.user)" + (peer.is_self_principal == true ? " (You)" : "") : normalizedTitle
         let titleW = min(availWidth, measureTextWidth(displayTitle, font: titleFont) + 4)
         line1TitleLabel.stringValue = displayTitle
         line1TitleLabel.frame = NSRect(x: 52, y: 26, width: titleW, height: 18)
@@ -154,6 +154,10 @@ final class DirectoryPeerCellView: NSTableCellView {
         let repoText = (context.isEmpty ? "" : " · \(context)") + branchSuffix
         line1RepoLabel.font = .systemFont(ofSize:11)
         line1RepoLabel.isHidden = false
+        line1TitleLabel.toolTip = displayTitle
+        line1TitleLabel.lineBreakMode = .byTruncatingMiddle
+        line1RepoLabel.toolTip = repoText
+        line1RepoLabel.lineBreakMode = .byTruncatingMiddle
         line1RepoLabel.stringValue = repoText
         line1RepoLabel.frame = NSRect(x: 52 + titleW, y: 26, width: max(0, availWidth - titleW), height: 18)
         line1RepoLabel.identifier = NSUserInterfaceItemIdentifier("dir_repo:\(peer.scoped_id)")
@@ -198,7 +202,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         let visual = resolveHarnessVisual(item.from_harness ?? item.target_harness, harnesses:harnesses)
         badgeView.frame.origin.y = rowHeight - 40
         configureBadge(badgeView,icon:badgeIcon,id:item.from_harness ?? item.target_harness,symbol:visual.symbol,title:visual.name,tint:visual.tint,inset:6)
-        let canReply = item.for_me && !(item.from_display_address ?? item.from_scoped_id ?? "").isEmpty
+        let canReply = item.can_reply == true
         let copyFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         let copyW = max(66, MenuControl.intrinsicWidth("✓ Copied", font:copyFont, leadingSymbol:"doc.on.doc"))
         let copyX = 514 - copyW
@@ -208,13 +212,13 @@ final class DirectoryPeerCellView: NSTableCellView {
         unreadAccentBar.frame = NSRect(x:4,y:8,width:3,height:rowHeight-16)
         rowDivider.isHidden = false; rowDivider.frame = NSRect(x:0,y:0,width:560,height:1)
         deleteControl.isHidden = false
-        deleteControl.frame = NSRect(x:520,y:rowHeight-26,width:24,height:22)
+        deleteControl.frame = NSRect(x:520,y:rowHeight-30,width:24,height:22)
         deleteControl.identifier = NSUserInterfaceItemIdentifier("delete_activity:\(item.signal_id)")
         deleteControl.toolTip = "Delete message"
         deleteControl.pressed = onDelete
         msgControl.isHidden = !canReply
         msgControl.style = .neutral
-        msgControl.frame = NSRect(x:copyX-6-replyW,y:rowHeight-26,width:replyW,height:22)
+        msgControl.frame = NSRect(x:copyX-6-replyW,y:rowHeight-30,width:replyW,height:22)
         msgControl.setLeadingSymbol("arrowshape.turn.up.left")
         msgControl.label.stringValue = "Reply"
         msgControl.setAccessibilityLabel("Reply")
@@ -229,7 +233,7 @@ final class DirectoryPeerCellView: NSTableCellView {
             copyControl.label.stringValue = "Copy"
         }
         copyControl.style = .neutral
-        copyControl.frame = NSRect(x:copyX,y:rowHeight-26,width:copyW,height:22)
+        copyControl.frame = NSRect(x:copyX,y:rowHeight-30,width:copyW,height:22)
         copyControl.setLeadingSymbol("doc.on.doc")
         copyControl.leadingSymbolView?.isHidden = keepCopyFeedback
         copyControl.label.font = copyFont
@@ -246,20 +250,22 @@ final class DirectoryPeerCellView: NSTableCellView {
         line1TitleLabel.stringValue = "@\(item.from_user)" + (senderTitle.map { " (\($0))" } ?? "") + " → " + (item.target_harness == "human" ? "You" : item.target_title)
         line1TitleLabel.font = .systemFont(ofSize:12.5,weight:item.unread ? .semibold : .medium)
         line1TitleLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
-        line1TitleLabel.frame = NSRect(x:52,y:rowHeight-24,width:max(0,textW),height:18)
+        line1TitleLabel.frame = NSRect(x:52,y:rowHeight-28,width:max(0,textW),height:18)
+        line1TitleLabel.lineBreakMode = .byTruncatingMiddle
+        line1TitleLabel.toolTip = line1TitleLabel.stringValue
         line1TitleLabel.identifier = NSUserInterfaceItemIdentifier("act_title:\(item.signal_id)")
         let time=relativeTime(item.created_at)
         let timeWidth=ceil(measureTextWidth(time,font:.systemFont(ofSize:10.5)))+4
         line1RepoLabel.isHidden=false; line1RepoLabel.stringValue=time
         line1RepoLabel.font = .systemFont(ofSize:10.5); line1RepoLabel.textColor=CitoPalette.secondaryText
-        line1RepoLabel.frame=NSRect(x:52+textW-timeWidth,y:rowHeight-24,width:timeWidth,height:18)
+        line1RepoLabel.frame=NSRect(x:52+textW-timeWidth,y:rowHeight-28,width:timeWidth,height:18)
         line1RepoLabel.identifier=NSUserInterfaceItemIdentifier("act_time:\(item.signal_id)")
         heldBadge?.removeFromSuperview(); heldBadge=nil
         var heldWidth:CGFloat=0
         if let reason=held {
             let badge=makePillBadge("Held: " + reason,id:"act_held:\(item.signal_id)",height:16,font:.systemFont(ofSize:8.5,weight:.medium),textColor:CitoPalette.warningText,fill:CitoPalette.warningSurface,border:CitoPalette.warningBorder,paddingX:5,minWidth:0)
             heldWidth=min(badge.frame.width,max(0,textW-timeWidth-52))
-            badge.frame=NSRect(x:52+textW-timeWidth-heldWidth-6,y:rowHeight-23,width:heldWidth,height:16)
+            badge.frame=NSRect(x:52+textW-timeWidth-heldWidth-6,y:rowHeight-27,width:heldWidth,height:16)
             badge.toolTip="Held: " + reason
             addSubview(badge); heldBadge=badge
         }
@@ -272,7 +278,7 @@ final class DirectoryPeerCellView: NSTableCellView {
         line2MetaLabel.font = .systemFont(ofSize:12)
         line2MetaLabel.textColor = item.unread ? .labelColor : CitoPalette.secondaryText
         let messageHeight = expanded ? rowHeight - 42 : 18
-        line2MetaLabel.frame = NSRect(x:52,y:rowHeight - 34 - messageHeight,width:492,height:messageHeight)
+        line2MetaLabel.frame = NSRect(x:52,y:rowHeight - 34 - messageHeight,width:CitoMetrics.activityTextWidth,height:messageHeight)
         msgControl.layoutContents(); copyControl.layoutContents()
         line2MetaLabel.identifier = NSUserInterfaceItemIdentifier("act_msg:\(item.signal_id)")
     }

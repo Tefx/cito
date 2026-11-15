@@ -9,6 +9,13 @@ enum CitoMetrics {
     static let settingsInset: CGFloat = 20
     static let cardInset: CGFloat = 12
     static let headerInset: CGFloat = 14
+    static let cardRadius: CGFloat = 10
+    static let sessionTextX: CGFloat = 48
+    static let sessionPathWidth = menuRailWidth - sessionTextX - cardInset - 52
+    static let directoryWidth: CGFloat = 560
+    static let directoryTextX: CGFloat = 52
+    static let directoryInset: CGFloat = 16
+    static let activityTextWidth = directoryWidth - directoryTextX - directoryInset
 }
 
 func normalizedHubURL(_ raw: String) -> String {
@@ -41,7 +48,7 @@ func proposedHubName(_ raw: String, url: String, existing: [HubConfigItem], crea
         if slug.isEmpty { slug = "remote" }
         let base = slug
         var suffix = 2
-        while slug == "local" || existing.contains(where:{(creating || $0.name != original) && $0.name == slug && normalizedHubURL($0.url) != url}) {
+        while existing.contains(where:{(creating || $0.name != original) && $0.name == slug && ($0.is_builtin == true || normalizedHubURL($0.url) != url)}) {
             let ending = "-\(suffix)"
             slug = String(base.prefix(32-ending.count)).trimmingCharacters(in:CharacterSet(charactersIn:"-")) + ending
             suffix += 1
@@ -136,7 +143,7 @@ func compactAddressLabel(_ address: String, maxWidth: CGFloat, font: NSFont, pad
     return "…"
 }
 
-func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = 244,
+func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFloat = CitoMetrics.sessionPathWidth,
                         font: NSFont = .systemFont(ofSize: 10.5)) -> String {
     let full = shortCwd + branchSuffix
     guard measureTextWidth(full, font: font) > maxWidth else { return full }
@@ -150,8 +157,8 @@ func compactSessionPath(_ shortCwd: String, branchSuffix: String, maxWidth: CGFl
 
 func activityRowHeight(_ text: String, selected: Bool) -> CGFloat {
     let font = NSFont.systemFont(ofSize: 12)
-    guard selected && (measureTextWidth(text, font: font) > 492 || text.contains("\n")) else { return 60 }
-    let wrappedRect = (text as NSString).boundingRect(with: NSSize(width: 492, height: CGFloat.greatestFiniteMagnitude),
+    guard selected && (measureTextWidth(text, font: font) > CitoMetrics.activityTextWidth || text.contains("\n")) else { return 60 }
+    let wrappedRect = (text as NSString).boundingRect(with: NSSize(width: CitoMetrics.activityTextWidth, height: CGFloat.greatestFiniteMagnitude),
         options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font])
     return min(108, max(60, 44 + ceil(wrappedRect.height)))
 }

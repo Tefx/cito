@@ -54,7 +54,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         cancel.frame.size.width=MenuControl.intrinsicWidth(cancel.label.stringValue)
         cancel.toolTip=composerReplySignalId == nil ? "Close draft (Esc)" : "Cancel reply (Esc)"
         layoutBar(in:bar,insetLeft:16,insetRight:12,y:composerError.isEmpty ? 10 : 26,height:24,spacing:6,leading:[target],flexible:input,trailing:[send,cancel])
-        composerErrorLabel?.frame=NSRect(x:16,y:5,width:528,height:15)
+        composerErrorLabel?.frame=NSRect(x:16,y:6,width:528,height:15)
     }
     func setComposerStatus(_ message: String) {
         composerError = presentationError(message)
@@ -238,7 +238,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                     target_title: item.target_title, target_scoped_id: item.target_scoped_id,
                     message: item.message, held_reason: item.held_reason,
                     in_reply_to: item.in_reply_to, created_at: item.created_at,
-                    unread: false, for_me: item.for_me, from_listener_id:item.from_listener_id
+                    unread: false, for_me: item.for_me, from_listener_id:item.from_listener_id, can_reply:item.can_reply
                 )
             }
             self.updateDirectoryModePills()
@@ -363,7 +363,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func updateDirectoryShortcuts() {
-        let canReply = activityFilteredItems.indices.contains(directorySelectedIndex) && activityFilteredItems[directorySelectedIndex].for_me && !(activityFilteredItems[directorySelectedIndex].from_display_address ?? activityFilteredItems[directorySelectedIndex].from_scoped_id ?? "").isEmpty
+        let canReply = activityFilteredItems.indices.contains(directorySelectedIndex) && activityFilteredItems[directorySelectedIndex].can_reply == true && !(activityFilteredItems[directorySelectedIndex].from_display_address ?? activityFilteredItems[directorySelectedIndex].from_scoped_id ?? "").isEmpty
         directoryShortcutsLabel?.stringValue = !(directoryComposerBar?.isHidden ?? true)
             ? (composerReplySignalId == nil ? "↵ Send    ⎋ Close Draft" : "↵ Send    ⎋ Cancel Reply")
             : (directoryMode == "activity" ? (canReply ? "↵ Reply    ⎋ Close" : "⎋ Close") : "↵ Copy Address   ⇧↵ Message   ⎋ Close")
@@ -692,8 +692,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
                 user: user, host_id: listener.host_id ?? "", host_name: host.isEmpty ? "This Mac" : host, harness: listener.harness,
                 display_address: listener.display_address, title: listener.title, about: listener.about ?? "",
                 scope: listener.scope, last_seen_at: "", session_id: listener.session_id, custom_title: listener.custom_title, cwd: listener.cwd, repo: listener.repo,
-                branch: listener.branch, is_self_principal: true, channels: listener.channels,
-                attachments:listener.attachments ?? (listener.harness == "human" ? hubs.first(where:{$0.name == listener.hub})?.attachments : nil))
+                branch: listener.branch, is_self_principal: listener.is_self_principal, channels: listener.channels,
+                attachments:listener.attachments ?? (listener.harness == "human" ? hubs.first(where:{$0.name == listener.hub})?.attachments : nil),
+                can_set_scope:listener.can_set_scope, can_pin:listener.can_pin, can_rename:listener.can_rename, can_stop:listener.can_stop)
         } + myRemote
         applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
     }
@@ -931,7 +932,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func replyToActivity(_ item: ActivityItem) {
-        guard item.for_me, let target = item.from_display_address ?? item.from_scoped_id, !target.isEmpty else { return }
+        guard item.can_reply == true, let target = item.from_display_address ?? item.from_scoped_id, !target.isEmpty else { return }
         if item.unread { emit(["op":"ack_signals","hub":item.hub,"signal_ids":[item.signal_id]]) }
         openComposer(target: target, hub: item.hub, replySignalId: item.signal_id)
     }

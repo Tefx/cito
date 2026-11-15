@@ -82,6 +82,13 @@ fn inbox_scope_gating_read_all_search_and_confirmed_empty_directory() {
     frame["hubs"][0]["human_listener_id"] = json!("inbox");
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_scope"] = json!("workspace");
+    let mut human = listener();
+    human["harness"] = json!("human");
+    human["listener_id"] = json!("inbox");
+    human["scoped_id"] = json!("personal:inbox");
+    human["public_id"] = json!("inbox");
+    human["display_address"] = json!("@alice");
+    frame["listeners"].as_array_mut().unwrap().push(human);
     frame["listeners"][0]["scope"] = json!("workspace");
     let agent_id = frame["listeners"][0]["scoped_id"]
         .as_str()
@@ -260,6 +267,7 @@ fn appkit_directory_human_labels_normalize_legacy_defaults_and_preserve_custom_d
         human["harness"] = json!("human");
         human["display_address"] = json!("@bob");
         human["title"] = json!(title);
+        human["custom_title"] = json!(title == "Review desk");
         human["about"] = json!(about);
         human["attachments"] = json!([{"channel_id":"remote:human","location":"device","host_id":"remote","display_name":"laptop","availability":"ACTIVE","is_local":false}]);
         let mut agent = peer("agent");
@@ -518,7 +526,7 @@ fn appkit_activity_reply_filters_navigation_and_read_all() {
     let f = Fixture::new(json!({}));
     let p = start(&f);
     let mut frame = state();
-    let activity = json!([{"hub":"personal","signal_id":"personal:sig_unread","listener_id":"c_human","from_user":"bob","from_host_name":"laptop","from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Approve?","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true},{"hub":"personal","signal_id":"personal:sig_read","listener_id":"c_other","from_user":"alice","from_host_name":"desktop","from_harness":"fixture","from_title":"Other","from_scoped_id":"personal:two","target_harness":"fixture","target_title":"Other","target_scoped_id":"personal:other","message":"Done","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
+    let activity = json!([{"hub":"personal","signal_id":"personal:sig_unread","listener_id":"c_human","from_user":"bob","from_host_name":"laptop","from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Approve?","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true},{"hub":"personal","signal_id":"personal:sig_read","listener_id":"c_other","from_user":"alice","from_host_name":"desktop","from_harness":"fixture","from_title":"Other","from_scoped_id":"personal:two","target_harness":"fixture","target_title":"Other","target_scoped_id":"personal:other","message":"Done","held_reason":null,"in_reply_to":null,"created_at":"2030-01-01T00:00:00Z","unread":false,"for_me":false}]);
     frame["activity"] = activity.clone();
     frame["unread_count"] = json!(1);
     f.send(p, frame);
@@ -940,7 +948,7 @@ fn r1_passive_refresh_preserves_viewports_errors_and_pending_composer() {
         120
     );
     send_fixture(&f, p, json!({"op":"directory","peers":[peer("one")]}));
-    frame["activity"]=json!((0..12).map(|i|json!({"hub":"personal","signal_id":format!("sig-{i}"),"listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Review","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Review ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})).collect::<Vec<_>>());
+    frame["activity"]=json!((0..12).map(|i|json!({"hub":"personal","signal_id":format!("sig-{i}"),"listener_id":"me","from_user":"bob","from_host_name":"laptop","from_title":"Review","from_scoped_id":"personal:one","target_harness":"human","target_title":"Me","target_scoped_id":"personal:me","message":"Review ready","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true})).collect::<Vec<_>>());
     f.send(p, frame.clone());
     control(&f, p, "open_activity");
     f.send(
@@ -1383,7 +1391,7 @@ fn appkit_directory_keyboard_navigation_shortcuts_and_preserved_peers() {
                 "listener_id":"c_human","from_user":"bob","from_host_name":"laptop",
                 "from_harness":"fixture","from_title":"Schema work","from_scoped_id":"personal:one",
                 "target_harness":"human","target_title":"Me","target_scoped_id":"personal:me",
-                "message":"Approve?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true})
+                "message":"Approve?","created_at":"2030-01-01T00:00:00Z","unread":true,"for_me":true,"can_reply":true})
         })
         .collect();
     let mut frame = state();
@@ -1636,6 +1644,7 @@ fn v29_full_message_copy_is_correlated_and_never_copies_a_preview() {
     }
     let mut state = f.action(json!({"op":"get_snapshot"})).1;
     state["settings"]["host_hub"]["enabled"] = json!(true);
+    state["settings"]["host_hub"]["running"] = json!(true);
     state["settings"]["host_hub"]["token"] = json!("fixture-token");
     state["settings"]["host_hub"]["auth_mode"] = json!("token");
     state["settings"]["host_hub"]["invite_command"] =

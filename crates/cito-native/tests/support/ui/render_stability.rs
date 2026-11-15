@@ -7,6 +7,7 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
     let p = start(&f);
     let mut state_frame = state();
     state_frame["hubs"][0]["auth_mode"] = json!("none");
+    state_frame["hubs"][0]["supports_workspace_scope"] = json!(false);
     state_frame["listeners"][0]["user"] = json!("alice");
     f.send(p, state_frame);
     control(&f, p, "open_directory");
@@ -26,8 +27,11 @@ fn v45_directory_rebuilds_menu_only_for_visible_counters_or_scope_changes() {
         json!({"op":"directory","peers":[remote.clone()],"online_count":2,"matched_count":1}),
     );
     let scope = inspect(&f, p);
-    assert!(!node(&scope, "items", "scope:personal:repo-abcdefghijkl").is_null());
-    assert!(scope["rebuilds"].as_u64().unwrap() > before["rebuilds"].as_u64().unwrap());
+    assert!(node(&scope, "items", "scope:personal:repo-abcdefghijkl").is_null());
+    assert_eq!(
+        scope["rebuilds"], before["rebuilds"],
+        "Directory identities cannot change Hub affordances"
+    );
     remote["title"] = json!("Updated title");
     send_fixture(
         &f,
@@ -224,6 +228,7 @@ fn v45_pairing_instruction_survives_pending_health_updates_and_receipts_settle()
     )
     .is_null());
     control(&f, p, "cancel_pair_channel:channel");
+    confirm_channel_action(&f, p, "channel_cancel_pair");
     let s = inspect(&f, p);
     assert!(node(&s, "settings_items", "copy_pair_command:channel").is_null());
     control(&f, p, "settings_tab:apps");

@@ -238,7 +238,7 @@ fn v41_menu_pid_bound_group_counts_discovery_and_scoped_pending_stop() {
     let s = inspect(&f, p);
     assert_eq!(
         node(&s, "items", "toggle_group:fixture")["text"],
-        "Fixture · 1 recent"
+        "Fixture · 1 open"
     );
     assert!(!node(&s, "items", "candidate:fixture:recent").is_null());
     control(&f, p, "toggle_group:fixture");
@@ -323,7 +323,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.control("settings_tab:channels");
     let s = inspect(&f, l.ui);
     let row_id = "inbox_control_bar";
-    assert_eq!(node(&s, "settings_items", row_id)["height"], 44);
+    assert_eq!(node(&s, "settings_items", row_id)["height"], 48);
     let ready = l.until(|s| node(s, "settings_items", "toggle_inbox")["enabled"] == true);
     let pause = node(&ready, "settings_items", "toggle_inbox");
     assert_eq!(pause["text"], "Pause Inbox");
@@ -336,7 +336,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     l.until(|s| node(s, "settings_items", "toggle_inbox")["enabled"] == true);
     l.control("toggle_inbox");
     let s = l.until(|s| node(s, "settings_items", "toggle_inbox")["text"] == "Pause Inbox");
-    assert_eq!(node(&s, "settings_items", row_id)["height"], 44);
+    assert_eq!(node(&s, "settings_items", row_id)["height"], 48);
     assert!(nodes(&s["settings_items"])
         .iter()
         .any(|n| n["text"] == "You (@alice)"));
@@ -430,7 +430,7 @@ fn c1_c2_human_only_counter_and_real_disable_enable_normalize_title() {
     let paused_settings = l.until(|s| !node(s, "settings_items", "inbox_control_bar").is_null());
     assert_eq!(paused_settings["low_contrast_labels"], json!([]));
     l.control("toggle_inbox");
-    l.until(|s| node(s, "settings_items", row_id)["height"] == 44);
+    l.until(|s| node(s, "settings_items", row_id)["height"] == 48);
     l.control("close_settings");
     assert_eq!(
         f.action(json!({"op":"get_snapshot"})).1["hubs"][0]["human_about"],
@@ -479,7 +479,7 @@ fn c1_c3_c5_agent_counter_semantic_contrast_and_explicit_entries_in_both_appeara
         control(&f, p, "settings_tab:channels");
         let s = inspect(&f, p);
         let row = node(&s, "settings_items", "inbox_control_bar");
-        assert_eq!(row["height"], 44);
+        assert_eq!(row["height"], 48);
         let title = nodes(&row["children"])
             .into_iter()
             .find(|n| n["text"] == format!("You (@{user})"))
@@ -1060,6 +1060,8 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     .is_null());
     control(&f, p, "copy:personal:repo-abcdefghijkl");
     assert_eq!(inspect(&f, p)["clipboard"], "alice/fixture#abcd");
+    next["hubs"][1]["supports_workspace_scope"] = json!(false);
+    f.send(p, next.clone());
     control(&f, p, "hub:work");
     assert!(!node(&inspect(&f, p), "items", "session:work:repo-workabcdefgh").is_null());
     assert!(
@@ -1084,11 +1086,12 @@ fn appkit_card_tree_geometry_icon_hover_copy_and_multi_hub_identity() {
     next["listeners"].as_array_mut().unwrap().push(other);
     f.send(p, next.clone());
     assert!(
-        !node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
-        "Another user makes visibility meaningful even on token Hubs"
+        node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh").is_null(),
+        "Other users cannot grant a Hub capability"
     );
     next["listeners"].as_array_mut().unwrap().pop();
     next["hubs"][1]["auth_mode"] = json!("oidc");
+    next["hubs"][1]["supports_workspace_scope"] = json!(true);
     f.send(p, next.clone());
     let scope_before = node(&inspect(&f, p), "items", "scope:work:repo-workabcdefgh");
     assert_eq!(scope_before["width"], 68);

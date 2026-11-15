@@ -11,6 +11,13 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
     frame["hubs"][0]["human_state_status"] = json!("current");
     frame["hubs"][0]["human_listener_id"] = json!("inbox");
     frame["hubs"][0]["human_control_revision"] = json!(4);
+    let mut human = listener();
+    human["harness"] = json!("human");
+    human["listener_id"] = json!("inbox");
+    human["scoped_id"] = json!("personal:inbox");
+    human["public_id"] = json!("inbox");
+    human["display_address"] = json!("@alice");
+    frame["listeners"].as_array_mut().unwrap().push(human);
     frame["hubs"][0]["auth_mode"] = json!("oidc");
     let device = json!({"channel_id":"here:human","location":"device","display_name":"MacBook Pro.local","availability":"ACTIVE","is_local":true});
     let external = json!({"channel_id":"hub:telegram","location":"hub","display_name":"Telegram","availability":"ACTIVE","is_local":false});
@@ -50,7 +57,7 @@ fn v41_inbox_bar_deduplicates_attachments_and_fits_paused_remote_defaults() {
                 assert_eq!(node(&s, "items", "inbox_paused_notice").is_null(), !paused);
                 assert_eq!(
                     node(&s, "settings_items", "inbox_control_bar")["height"],
-                    44
+                    48
                 );
                 let scroll = node(&s, "settings_items", "settings_channels_tab");
                 assert_eq!(scroll["height"], 368);
@@ -413,6 +420,7 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
     }
     control(&f, p, "edit_user_channel:channel");
     control(&f, p, "unpair_channel:channel");
+    confirm_channel_action(&f, p, "channel_unpair");
     cfg["channels"][0]["configured"] = json!(false);
     cfg["channels"][0]["status"] = json!("hub_ready");
     cfg["channels"][0]["fields"][1]["configured"] = json!(false);
@@ -443,6 +451,7 @@ fn v39_personal_edit_unpair_repair_and_cancel_reset_transient_ui() {
         );
         if round == 0 {
             control(&f, p, "cancel_pair_channel:channel");
+            confirm_channel_action(&f, p, "channel_cancel_pair");
             f.send(p, json!({"op":"settings","settings":cfg}));
             let s = inspect(&f, p);
             assert!(node(&s, "settings_items", "copy_pair_command:channel").is_null());
@@ -619,7 +628,18 @@ fn v39_pairing_invalidation_rejects_late_receipts_without_clipboard_or_instructi
         .is_null());
         f.send(p, json!({"op":"test_clipboard","text":"keep clipboard"}));
         control(&f, p, &format!("{transition}:channel"));
-        // Check before any cancellation/unpair acknowledgement: local invalidation is immediate.
+        // Destructive UI retirement belongs to the correlated committed receipt.
+        let pending = inspect(&f, p);
+        assert!(!node(&pending, "settings_items", "pairing_instruction:channel").is_null());
+        confirm_channel_action(
+            &f,
+            p,
+            match transition {
+                "cancel_pair_channel" => "channel_cancel_pair",
+                "unpair_channel" => "channel_unpair",
+                _ => "disconnect_human_channel",
+            },
+        );
         let s = inspect(&f, p);
         assert!(
             node(&s, "settings_items", "pairing_instruction:channel").is_null(),
@@ -1189,6 +1209,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
         for ok in [false, true] {
             cfg["channels"][0]["configured"] = json!(false);
             cfg["channels"][0]["status"] = json!("not_configured");
+            cfg["channels"][0]["hub_ready"] = json!(false);
             cfg["channels"][0]["fields"][0]["configured"] = json!(false);
             cfg["channels"][0]["fields"][0]["value"] = json!("");
             f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
@@ -1212,6 +1233,7 @@ fn lifecycle_channel_test_results_survive_refresh_until_mutation() {
             if action == "clear_channel_service" {
                 // Clear Token becomes available once the hub service is configured.
                 cfg["channels"][0]["status"] = json!("hub_ready");
+                cfg["channels"][0]["hub_ready"] = json!(true);
                 cfg["channels"][0]["fields"][0]["configured"] = json!(true);
                 f.send(p, json!({"op":"settings","hub":"personal","settings":cfg}));
                 assert_eq!(
@@ -1278,6 +1300,10 @@ fn lifecycle_channel_ui_retains_redacted_secret_and_preserves_pairing_on_refresh
         "Saved — enter replacement"
     );
     assert!(node(&s, "settings_items", "channel_setup_guide:channel").is_null());
+    f.send(
+        p,
+        json!({"op":"test_settings_input","id":"channel_field:channel:account","value":"42"}),
+    );
     for (button, op) in [
         ("save_channel:channel", "channel_save"),
         ("test_channel:channel", "channel_test"),
@@ -1409,6 +1435,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
         json!({"account":"keep-personal"})
     );
     control(&f, p, "unpair_channel:channel");
+    confirm_channel_action(&f, p, "channel_unpair");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert!(node(
         &inspect(&f, p),
@@ -1429,6 +1456,8 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
         f.send(p, json!({"op":"test_settings_input","id":format!("channel_field:channel:{field}"),"value":value}));
     }
     control(&f, p, "clear_channel_service:channel");
+    confirm_channel_action(&f, p, "disconnect_human_channel");
+    cfg["channels"][0]["hub_ready"] = json!(false);
     cfg["channels"][0]["configured"] = json!(false);
     cfg["channels"][0]["status"] = json!("not_configured");
     for field in cfg["channels"][0]["fields"].as_array_mut().unwrap() {
@@ -1449,6 +1478,7 @@ fn channel_cancel_unpair_and_clear_discard_only_their_scope_drafts() {
         "An unconfigured gateway submits the empty field, never the discarded secret draft"
     );
     cfg["channels"][0]["fields"][0]["configured"] = json!(true);
+    cfg["channels"][0]["hub_ready"] = json!(true);
     cfg["channels"][0]["status"] = json!("hub_ready");
     f.send(p, json!({"op":"settings","settings":cfg}));
     assert_eq!(

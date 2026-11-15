@@ -60,6 +60,9 @@ struct DiscoveryState: Decodable, Equatable {
     let harness: String, status: String
     let error: String?
 }
+struct HubCapabilities: Decodable, Equatable {
+    let status: String?, auth_valid: Bool?, rpc_status: String?, sse_live: Bool?, observation_current: Bool?
+}
 struct Hub: Decodable, Equatable {
     let name: String, status: String, auth_mode: String
     let user: String?, error: String?
@@ -71,6 +74,10 @@ struct Hub: Decodable, Equatable {
     var human_scope: String? = nil
     var human_state_status: String? = nil
     var attachments: [ChannelAttachment]? = nil
+    var capabilities: HubCapabilities? = nil
+    var is_builtin: Bool? = nil
+    var supports_workspace_scope: Bool? = nil
+    var can_login: Bool? = nil
 }
 struct Listener: Decodable, Equatable {
     let hub: String, listener_id: String, public_id: String, scoped_id: String
@@ -84,6 +91,11 @@ struct Listener: Decodable, Equatable {
     let host_id: String?
     let channels: [String]?
     let attachments: [ChannelAttachment]?
+    var is_self_principal: Bool? = nil
+    var can_set_scope: Bool? = nil
+    var can_pin: Bool? = nil
+    var can_rename: Bool? = nil
+    var can_stop: Bool? = nil
 }
 struct Candidate: Decodable, Equatable {
     let harness: String, session_id: String, title: String, cwd: String
@@ -113,6 +125,10 @@ struct RemotePeer: Decodable, Equatable {
     let is_self_principal: Bool?
     let channels: [String]?
     var attachments: [ChannelAttachment]? = nil
+    var can_set_scope: Bool? = nil
+    var can_pin: Bool? = nil
+    var can_rename: Bool? = nil
+    var can_stop: Bool? = nil
 
     // Hub lease refreshes leave the displayed peer unchanged.
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -120,7 +136,8 @@ struct RemotePeer: Decodable, Equatable {
         lhs.user == rhs.user && lhs.host_id == rhs.host_id && lhs.host_name == rhs.host_name && lhs.harness == rhs.harness &&
         lhs.display_address == rhs.display_address && lhs.title == rhs.title && lhs.about == rhs.about && lhs.scope == rhs.scope &&
         lhs.session_id == rhs.session_id && lhs.custom_title == rhs.custom_title && lhs.cwd == rhs.cwd && lhs.repo == rhs.repo &&
-        lhs.branch == rhs.branch && lhs.is_self_principal == rhs.is_self_principal && lhs.channels == rhs.channels && lhs.attachments == rhs.attachments
+        lhs.branch == rhs.branch && lhs.is_self_principal == rhs.is_self_principal && lhs.channels == rhs.channels && lhs.attachments == rhs.attachments &&
+        lhs.can_set_scope == rhs.can_set_scope && lhs.can_pin == rhs.can_pin && lhs.can_rename == rhs.can_rename && lhs.can_stop == rhs.can_stop
     }
 }
 struct ActivityItem: Decodable, Equatable {
@@ -145,6 +162,7 @@ struct ActivityItem: Decodable, Equatable {
     let unread: Bool
     let for_me: Bool
     var from_listener_id: String? = nil
+    var can_reply: Bool? = nil
 }
 struct ChannelFieldItem: Decodable, Equatable {
     let key: String
@@ -185,6 +203,26 @@ struct ChannelSetupItem: Decodable, Equatable {
     let fields: [ChannelFieldItem]
     let setup_guide: [String]?
     let pairing_help_text: String?
+    var has_hub_service: Bool? = nil
+    var hub_ready: Bool? = nil
+    var can_configure_hub: Bool? = nil
+    var can_clear_hub: Bool? = nil
+    var can_edit_personal: Bool? = nil
+    var can_pair: Bool? = nil
+    var can_test: Bool? = nil
+    var can_unpair: Bool? = nil
+    var error_origin: String? = nil
+
+    func canSendTest(drafts: [String: String], visibleFields: [ChannelFieldItem]) -> Bool {
+        guard can_test == true else { return false }
+        let required = visibleFields.filter { $0.required }
+        let blanked = required.contains { field in
+            drafts[field.key].map { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } == true
+        }
+        return (configured && !blanked) || required.allSatisfy {
+            !(drafts[$0.key] ?? $0.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
 }
 struct AppSetupItem: Decodable, Equatable {
     let id: String
@@ -226,6 +264,10 @@ struct HubConfigItem: Decodable, Equatable {
     var human_paused: Bool? = nil
     var human_about: String? = nil
     var human_state_status: String? = nil
+    var capabilities: HubCapabilities? = nil
+    var is_builtin: Bool? = nil
+    var supports_workspace_scope: Bool? = nil
+    var can_login: Bool? = nil
 }
 struct SettingsPayload: Decodable, Equatable {
     let apps: [AppSetupItem]

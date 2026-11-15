@@ -130,6 +130,21 @@ extension Companion {
                     if kind == "low_contrast_labels" { c.normalColor = CitoPalette.surfaceBackground.withAlphaComponent(0.01); c.applyVisualState() }
                 }
                 if kind == "bar_anchor", let c = control(object["id"] as? String ?? "quit") { c.frame.origin.x -= 24 }
+                if kind == "bar_midY", let c = control("toggle_inbox") { c.frame.origin.y -= 4 }
+                if let bar = control("toggle_inbox")?.superview {
+                    if kind == "borderless_padding" { bar.subviews.first { $0.identifier?.rawValue == "inbox_control_title" }?.frame.origin.x = 2 }
+                    if kind == "nested_overlap", let button = control("toggle_inbox") {
+                        let stack = NSView(frame:bar.bounds)
+                        let label = textLabel("Nested label",button.frame,size:11)
+                        label.identifier = NSUserInterfaceItemIdentifier("nested_label_probe")
+                        stack.addSubview(label); bar.addSubview(stack)
+                    }
+                    if kind == "data_row_truncation" {
+                        let label = textLabel("Unprotected data label",NSRect(x:12,y:6,width:10,height:15),size:11)
+                        label.identifier = NSUserInterfaceItemIdentifier("dir_oracle_probe")
+                        bar.addSubview(label)
+                    }
+                }
                 if kind == "card_padding", let card = roots.flatMap({$0.subviews}).first(where:{$0 is SurfaceView && ($0.layer?.borderWidth ?? 0)>0 && $0.frame.width>=60 && $0.frame.height>=32}), let child = card.subviews.first(where:{!$0.isHidden && !($0 is NSVisualEffectView)}) { child.frame.origin.x = 2 }
                 if kind == "address_mismatches", let listener = listeners.first { control("copy:\(listener.scoped_id)")?.label.stringValue = "wrong address" }
                 let row = object["row"] as? Int ?? 0
@@ -439,6 +454,8 @@ extension Companion {
         var truncatedLabels: [String] = []
         var overlappingSiblings: [String] = []
         var clippedViews: [String] = []
+        var tightPadding: [String] = []
+        var nonAnchoredActionBars: [String] = []
         var lowContrastLabels: [String] = []
         var jargonLeaks: [String] = []
         var addressMismatches: [String] = []
@@ -450,7 +467,7 @@ extension Companion {
             var ancestor: NSView? = view
             while let current = ancestor {
                 let id = current.identifier?.rawValue ?? ""
-                if id == "host_hub_endpoint" || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || id.hasPrefix("channel_summary:") || current is DirectoryPeerCellView { return true }
+                if ["host_hub_endpoint","inbox_control_title","inbox_control_summary"].contains(id) || id.hasPrefix("dir_") || id.hasPrefix("act_") || id.hasPrefix("session:") || id.hasPrefix("candidate:") || id.hasPrefix("remote:") || id.hasPrefix("channel_summary:") || current is DirectoryPeerCellView { return true }
                 ancestor = current.superview
             }
             return false
@@ -509,7 +526,8 @@ extension Companion {
                 if label.frame.width < 48 || measureTextWidth(label.placeholderString ?? "", font:label.font ?? .systemFont(ofSize:12)) > label.frame.width - 8 { truncatedLabels.append(name(label)) }
             }
             if visible, let label = view as? NSTextField, !label.isEditable,
-               (label.superview is MenuControl || !isDataRow(label) || name(label).hasPrefix("dir_user:")) {
+               (!isDataRow(label) || label.maximumNumberOfLines == 1),
+               !(isDataRow(label) && (label.lineBreakMode == .byTruncatingMiddle || label.lineBreakMode == .byTruncatingTail) && !(label.toolTip ?? "").isEmpty) {
                 let font = label.font ?? .systemFont(ofSize:12)
                 let truncated: Bool
                 if label.maximumNumberOfLines == 1 {
@@ -607,28 +625,65 @@ extension Companion {
                     // are all zero. Compare them in the table's coordinate space.
                     view is NSTableView ? child.convert(child.bounds,to:view) : child.frame
                 }
-                let edgeItems = children.filter { child in child.frame.height > 5 && (child is NSControl || ["settings_app_tier:","stratum_hub_status:"].contains { child.identifier?.rawValue.hasPrefix($0) == true }) }
+                let edgeItems = children.filter { child in child.frame.height > 5 && (child is NSControl || ["settings_app_tier:","stratum_hub_status:","settings_channel_status:","settings_channel_badge:"].contains { child.identifier?.rawValue.hasPrefix($0) == true }) }
                 let id = name(view)
                 if ["header_hub_strip", "targetStrip"].contains(id), let scroll = view as? NSScrollView, !children.isEmpty {
                     let trailingInset: CGFloat = id == "header_hub_strip" ? 2 : 0
                     if (children.map { $0.frame.maxX }.max() ?? 0) < scroll.contentSize.width - trailingInset - 2 { clippedViews.append(id + ": trailing pills are not edge anchored") }
                 }
                 let stratum = ["stratum_hub:","stratum_user:"].contains(where: { id.hasPrefix($0) })
-                if ["footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
+                if ["inbox_control_bar","footer","settings_footer","directory_footer"].contains(id) || stratum || ["settings_channel:","settings_hub:","settings_app:"].contains(where: { id.hasPrefix($0) }) || id == "directory_facet_bar" && directoryMode == "activity" {
+                    let barItems = edgeItems.filter { item in
+                        if id == "inbox_control_bar" { return item is MenuControl }
+                        return !((item as? NSTextField)?.isEditable ?? false)
+                    }
+                    if id == "inbox_control_bar", barItems.contains(where: { abs($0.frame.midY-parentBounds.midY)>1.5 }) {
+                        let issue = id + ": controls are not centered in the bar"
+                        nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                    }
                     var rows: [(String,CGFloat)] = []
-                    if let top = edgeItems.map({ $0.frame.midY }).max() { rows.append(("top",top)) }
-                    if stratum, let bottom = edgeItems.map({ $0.frame.midY }).min(), bottom != rows.first?.1 { rows.append(("bottom",bottom)) }
+                    if let top = barItems.map({ $0.frame.midY }).max() { rows.append(("top",top)) }
+                    if stratum, let bottom = barItems.map({ $0.frame.midY }).min(), bottom != rows.first?.1 { rows.append(("bottom",bottom)) }
                     for (row,y) in rows {
-                        let items = edgeItems.filter { abs($0.frame.midY - y) <= 8 }
-                        if (items.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 { clippedViews.append(id + ": " + row + " row is not edge anchored") }
+                        let items = barItems.filter { abs($0.frame.midY - y) <= 8 }
+                        if (items.map { $0.frame.maxX }.max() ?? 0) < parentBounds.width - 20.5 {
+                            let issue = id + ": " + row + " row is not edge anchored"
+                            nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                        }
+                        if let minY = items.map({ $0.frame.midY }).min(), let maxY = items.map({ $0.frame.midY }).max(), maxY-minY > 1.5 {
+                            let issue = id + ": " + row + " row controls are not vertically centered"
+                            nonAnchoredActionBars.append(issue); clippedViews.append(issue)
+                        }
+                    }
+                }
+                // Compare authored leaf labels with controls even through nested
+                // layout groups, including rounded text/status containers.
+                if view is SurfaceView || view is DirectoryPeerCellView || view.identifier != nil {
+                    func leaves(_ parent: NSView) -> [NSView] {
+                        parent.subviews.filter { !$0.isHidden }.flatMap { child -> [NSView] in
+                            if child is NSTextField || child is MenuControl || child is NSButton || child is NSSegmentedControl || child is NSSwitch { return [child] }
+                            if child is DirectoryPeerCellView || child is NSScrollView { return [] }
+                            return leaves(child)
+                        }
+                    }
+                    let descendants = leaves(view)
+                    let labels = descendants.compactMap { $0 as? NSTextField }.filter { !$0.isEditable }
+                    let controls = descendants.filter { $0 is MenuControl || $0 is NSButton || $0 is NSSegmentedControl || $0 is NSSwitch }
+                    for label in labels {
+                        let labelFrame = label.convert(label.bounds,to:view).insetBy(dx:0.5,dy:0.5)
+                        for control in controls where labelFrame.intersects(control.convert(control.bounds,to:view).insetBy(dx:0.5,dy:0.5)) {
+                            overlappingSiblings.append("\(id): \(name(label)) / \(name(control)) (nested)")
+                        }
                     }
                 }
                 for (index, child) in children.enumerated() {
                     let f = frame(child)
-                    if view is SurfaceView && (view.layer?.borderWidth ?? 0)>0 && view.frame.width>=60 && view.frame.height>=32
-                       && !["settings_panel","directory_panel"].contains(id),
-                       f.minX<5.5 || f.minY<5.5 || f.maxX>parentBounds.width-5.5 || f.maxY>parentBounds.height-5.5 {
-                        clippedViews.append("\(name(view)) > \(name(child)): card padding < 6pt")
+                    let paddedSurface = (view as? SurfaceView).map { $0.fillColor.alphaComponent > 0 || ($0.layer?.borderWidth ?? 0)>0 } ?? false
+                    if (paddedSurface || view is DirectoryPeerCellView) && view.frame.width>=60 && view.frame.height>=32
+                       && !["settings_panel","directory_panel"].contains(id) && f.width>5 && f.height>5,
+                       f.minX<6 || f.minY<6 || f.maxX>parentBounds.width-6 || f.maxY>parentBounds.height-6 {
+                        let issue = "\(name(view)) > \(name(child)): card padding < 6pt"
+                        tightPadding.append(issue); clippedViews.append(issue)
                     }
                     if f.minX < -0.5 || f.minY < -0.5 || f.maxX > parentBounds.width + 0.5 || f.maxY > parentBounds.height + 0.5 {
                         clippedViews.append("\(name(view)) > \(name(child))")
@@ -760,7 +815,7 @@ extension Companion {
         let font = button.flatMap { $0.attributedTitle.length > 0 ? $0.attributedTitle.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil }
         let traits = font?.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
         let effectiveClipboard = !clipboardString.isEmpty ? clipboardString : (appPasteboard.string(forType: .string) ?? "")
-        let snapshot: [String: Any] = ["items": items, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
+        let snapshot: [String: Any] = ["items": items, "tight_padding": tightPadding, "non_anchored_action_bars": nonAnchoredActionBars, "overlapping_views": overlappingSiblings, "truncated_labels": truncatedLabels, "overlapping_siblings": overlappingSiblings, "clipped_views": clippedViews, "icon_alpha": probes, "count": uniqueSessionCount,
             "home_basename": (NSHomeDirectory() as NSString).lastPathComponent,
             "rename_field_identity": renameField.map { String(describing:ObjectIdentifier($0)) } ?? "",
             "tracking_cancellations": (cardMenu as? HeadlessMenu)?.trackingCancellations ?? 0,
