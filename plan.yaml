@@ -12943,7 +12943,7 @@ phases:
   - id: v45.ui
     name: V45 macOS Swift UI Render Deduplication, Layout Stability & Interaction
       Preservation
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Implement all macOS Swift\
@@ -13007,6 +13007,8 @@ phases:
     depends_on:
     - v45.rust
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-15T08:25:03.165254Z'
   - id: v45.review
     name: 'V45 Full Contract-and-Simplicity Review, §8.1 Verification Suite, Staged
       Binaries & Cito.app Rebuild/Restart, and Push to main (No Release Tag) [REQUIRES_SKILL:
