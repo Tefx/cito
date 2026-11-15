@@ -2329,6 +2329,8 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
     };
     let mut service = DaemonService::open(&config, &plugins)?;
     let result = (|| -> Result<(), String> {
+        // Publication must follow a dangling symlink instead of replacing it.
+        fs::remove_file(&target).map_err(|e| e.to_string())?;
         service.mutate_config(|value| {
             value["user"] = json!("bob");
             Ok(())
@@ -2391,13 +2393,15 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
     let http_result = (|| -> Result<(), String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
-        for (headers, status) in [
-            (format!("Host: {address}\r\n"), 200),
+        for (method, headers, status) in [
+            ("GET /health", format!("Host: {address}\r\n"), 200),
             (
+                "GET /health",
                 format!("Host: {address}\r\nOrigin: http://{address}\r\n"),
                 200,
             ),
             (
+                "GET /health",
                 format!(
                     "Host: {address}\r\nOrigin: http://127.0.0.1:{}\r\n",
                     address.port() + 1
@@ -2405,13 +2409,18 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
                 403,
             ),
             (
+                "GET /health",
                 format!("Host: attacker.example:{}\r\n", address.port()),
                 403,
             ),
             (
+                "POST /mcp",
                 format!("Host: {address}\r\nContent-Type: text/plain\r\n"),
                 415,
             ),
+            ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\n"), 200),
+            ("POST /mcp", format!("Host: {address}\r\nContent-Type: application/json\r\nOrigin: http://127.0.0.1:{}\r\n", address.port() + 1), 403),
+            ("POST /mcp", format!("Host: attacker.example:{}\r\nContent-Type: application/json\r\n", address.port()), 403),
         ] {
             let service = shared.clone();
             let mut client = TcpStream::connect(address).map_err(|e| e.to_string())?;
@@ -2419,14 +2428,10 @@ fn remediation_http_config_dtos_and_committed_receipts() -> Result<(), String> {
             let worker = thread::spawn(move || {
                 super::http_actions::handle_http(stream, service, Arc::new(json!({})))
             });
-            let method = if status == 415 {
-                "POST /mcp"
-            } else {
-                "GET /health"
-            };
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}).to_string();
             write!(
                 client,
-                "{method} HTTP/1.1\r\n{headers}Content-Length: 2\r\n\r\n{{}}"
+                "{method} HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()
             )
             .map_err(|e| e.to_string())?;
             let mut response = String::new();

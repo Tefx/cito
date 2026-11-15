@@ -282,16 +282,17 @@ pub(super) fn dispatch_channel_action(
             .map(|_| json!({"ok":true})),
         ChannelActionKind::Mutation => inventory.mutate(&slot, &plugins, action),
     };
+    if kind == ChannelActionKind::Mutation {
+        if let Ok(value) = &mut result {
+            value["receipt_authority"] = json!({"hub":slot.name,"url":slot.config["url"],"principal_id":slot.identity["principal_id"]});
+        }
+    }
     let mut s = service.lock().map_err(|_| "Daemon lock poisoned")?;
     if s.closing || shutdown_requested() {
-        return Err("Shutting down".into());
+        return after_channel_action(result, kind, "Shutting down after channel request".into());
     }
     if let Err(error) = s.reload_slots() {
-        result = after_channel_action(result, kind, error);
-        if kind == ChannelActionKind::Mutation {
-            s.finish_channel_action(&slot.name, action, &result);
-        }
-        return result;
+        return after_channel_action(result, kind, error);
     }
     if slot.closed.load(Ordering::SeqCst)
         || !s
@@ -299,13 +300,17 @@ pub(super) fn dispatch_channel_action(
             .get(&slot.name)
             .is_some_and(|current| remote_channels_identity(current) == inventory.identity)
     {
-        // Authority replacement is a deliberate fence, not a failed refresh.
-        // Never acknowledge the old operation against a new principal or Hub.
-        let result = Err("NATS_UNAVAILABLE: Hub changed during channel request".into());
-        if kind == ChannelActionKind::Mutation {
-            s.finish_channel_action(&slot.name, action, &result);
-        }
-        return result;
+        // Return the original authority\'s receipt only to this caller. Never
+        // publish its settings or completion frames against the replacement Hub.
+        return after_channel_action(
+            result,
+            kind,
+            "Hub authority changed after channel request committed".into(),
+        )
+        .map(|mut value| {
+            value["authority_changed"] = json!(true);
+            value
+        });
     }
     if kind == ChannelActionKind::Mutation {
         s.finish_channel_action(&slot.name, action, &result);
@@ -325,12 +330,46 @@ fn after_channel_action(
     }
     result.map(|mut value| {
         if let Some(fields) = value.as_object_mut() {
+            fields.insert("committed".into(), json!(true));
             fields.insert("maintenance_warning".into(), json!(error));
         } else {
             eprintln!("Channel maintenance: {error}");
         }
         value
     })
+}
+
+impl DaemonService {
+    pub(super) fn channel_inventory(&mut self, slot: &HubClient) -> Arc<ChannelInventory> {
+        let identity = remote_channels_identity(slot);
+        let entry = self
+            .channel_inventories
+            .entry(slot.name.clone())
+            .or_insert_with(|| Arc::new(ChannelInventory::new(identity.clone())));
+        if entry.identity != identity {
+            *entry = Arc::new(ChannelInventory::new(identity));
+        }
+        entry.clone()
+    }
+
+    fn finish_channel_action(&self, hub: &str, action: &Value, result: &Result<Value, String>) {
+        let id = channel_id(action).unwrap_or_default();
+        let rpc = channel_rpc(action).unwrap_or_default();
+        match result {
+            Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
+                let mut frame = result.clone();
+                frame["op"] = json!(if rpc == "human_channel_pair_start" { "pair_code" } else { "channel_test_result" });
+                frame["channel_id"] = json!(id);
+                frame["hub"] = json!(hub);
+                frame["request_id"] = action["request_id"].clone();
+                self.emit(frame);
+            }
+            Err(error) => self.emit(json!({"op":if rpc == "human_channels_test" {"channel_test_result"} else {"error"},"channel_id":id,"channel":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
+            _ => {}
+        }
+        self.emit(json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings_for_hub(hub)}));
+        self.push_ui_result(Some(action));
+    }
 }
 
 #[cfg(test)]
@@ -362,6 +401,132 @@ mod remediation_tests {
             "human_channels_configure"
         );
     }
+    #[test]
+    fn dispatcher_preserves_committed_receipt_when_hub_is_disabled() -> Result<(), String> {
+        use crate::plugins::{random_uuid_v4, NativeConfig};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        let dir = std::env::temp_dir().join(format!("cito-authority-{}", random_uuid_v4()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        let (committed_tx, committed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let post = line.starts_with("POST");
+            let mut length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            if !post {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                continue;
+            }
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            let last = request["op"] == "human_channels_list";
+            let result = if last {
+                committed_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                json!({"channels":[{"id":"messenger","enabled":true}]})
+            } else if request["op"] == "kv_snapshot" || request["op"] == "human_device_attach" {
+                json!({"entries":[]})
+            } else {
+                assert_eq!(request["op"], "human_channels_configure");
+                json!({"ok":true,"committed":true,"receipt":"original"})
+            };
+            let body = if request["op"] == "human_device_attach" {
+                json!({"ok":false,"error":{"code":"FORBIDDEN","message":"Inbox not enrolled in this channel fixture"}})
+            } else { json!({"ok":true,"result":result}) }.to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            if last {
+                break;
+            }
+        });
+        let config = NativeConfig {
+            state_dir: dir.join("state"),
+            config_path: dir.join("config.json"),
+            home_dir: dir.join("home"),
+            daemon_port: 0,
+            user: "alice".into(),
+            default_hub: "work".into(),
+        };
+        let url = format!("http://{address}");
+        std::fs::write(
+            &config.config_path,
+            json!({"default_hub":"work","hubs":{"work":{"url":url,"authMode":"none"}}}).to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        let plugins = LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: Default::default(),
+        };
+        let service = Arc::new(Mutex::new(DaemonService::open(&config, &plugins)?));
+        let dispatcher = {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                dispatch_channel_action(
+                    &service,
+                    &json!({"op":"channel_toggle","hub":"work","channel_id":"messenger","enabled":true}),
+                    ChannelActionKind::Mutation,
+                    None,
+                )
+            })
+        };
+        committed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        {
+            let mut s = service.lock().unwrap();
+            s.mutate_config(|raw| {
+                raw["hubs"]["work"]["enabled"] = json!(false);
+                Ok(())
+            })?;
+            s.reload_slots()?;
+            assert!(!s.slots.contains_key("work"));
+        }
+        release_tx.send(()).map_err(|e| e.to_string())?;
+        let result = dispatcher.join().map_err(|_| "Dispatcher panicked")??;
+        server.join().map_err(|_| "Authority server panicked")?;
+        assert_eq!(result["receipt"], "original");
+        assert_eq!(result["committed"], true);
+        assert_eq!(result["authority_changed"], true);
+        assert_eq!(
+            result["receipt_authority"],
+            json!({"hub":"work","url":url,"principal_id":"none#alice"})
+        );
+        assert!(result["maintenance_warning"].is_string());
+        {
+            let mut s = service.lock().unwrap();
+            assert!(!s.channel_inventories.contains_key("work"));
+            s.shutdown();
+        }
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     #[test]
     fn committed_channel_result_survives_inventory_failure() {
         use std::io::{BufRead, BufReader, Read, Write};
@@ -421,38 +586,5 @@ mod remediation_tests {
             .unwrap()
             .contains("Inventory unavailable"));
         assert_eq!(inventory.cached.lock().unwrap().value["status"], "error");
-    }
-}
-
-impl DaemonService {
-    pub(super) fn channel_inventory(&mut self, slot: &HubClient) -> Arc<ChannelInventory> {
-        let identity = remote_channels_identity(slot);
-        let entry = self
-            .channel_inventories
-            .entry(slot.name.clone())
-            .or_insert_with(|| Arc::new(ChannelInventory::new(identity.clone())));
-        if entry.identity != identity {
-            *entry = Arc::new(ChannelInventory::new(identity));
-        }
-        entry.clone()
-    }
-
-    fn finish_channel_action(&self, hub: &str, action: &Value, result: &Result<Value, String>) {
-        let id = channel_id(action).unwrap_or_default();
-        let rpc = channel_rpc(action).unwrap_or_default();
-        match result {
-            Ok(result) if matches!(rpc, "human_channel_pair_start" | "human_channels_test") => {
-                let mut frame = result.clone();
-                frame["op"] = json!(if rpc == "human_channel_pair_start" { "pair_code" } else { "channel_test_result" });
-                frame["channel_id"] = json!(id);
-                frame["hub"] = json!(hub);
-                frame["request_id"] = action["request_id"].clone();
-                self.emit(frame);
-            }
-            Err(error) => self.emit(json!({"op":if rpc == "human_channels_test" {"channel_test_result"} else {"error"},"channel_id":id,"channel":id,"hub":hub,"action":action["op"],"source_op":action["op"],"request_id":action["request_id"],"ok":false,"error":error,"detail":error})),
-            _ => {}
-        }
-        self.emit(json!({"op":"settings","hub":hub,"channel_id":id,"ok":result.is_ok(),"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings_for_hub(hub)}));
-        self.push_ui_result(Some(action));
     }
 }

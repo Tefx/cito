@@ -448,7 +448,17 @@ pub fn handle(input: &Value) -> Result<Value> {
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
             }
-            Ok(json!({"ok":true,"caller":remember_process(c)}))
+            let c = remember_process(c);
+            if c["process_identity"].is_object() {
+                // Manual process-only enrollment has no socket-discovery cache.
+                // Persist the invocation identity for subsequent background probes.
+                let entry = json!({"identity":c["process_identity"],"session":v});
+                atomic_write(
+                    &state(req).join(format!("pi/endpoints/{p}.json")),
+                    entry.to_string().as_bytes(),
+                )?;
+            }
+            Ok(json!({"ok":true,"caller":c}))
         }
         "probe" => {
             if let Some(reason) = rejection {

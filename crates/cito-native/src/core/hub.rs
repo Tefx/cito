@@ -1232,18 +1232,28 @@ impl HubEngine {
                 audit(c,s(caller,"principal_id"),"channel_configure",id,&json!({"enabled":p["enabled"]}))?;
                 Ok(())
             })?;
-            let process = self
-                .inner
-                .processes
-                .lock()
-                .map_err(|_| "Process lock poisoned")?
-                .get(id)
-                .cloned();
-            if let Some(process) = process {
-                self.configure_process(id, &process)?;
+            let mut result = json!({"ok":true,"committed":true});
+            let maintenance = (|| {
+                let process = self
+                    .inner
+                    .processes
+                    .lock()
+                    .map_err(|_| "Process lock poisoned")?
+                    .get(id)
+                    .cloned();
+                if let Some(process) = process {
+                    self.configure_process(id, &process)?;
+                }
+                self.tick_channels()
+            })();
+            if let Err(error) = maintenance {
+                result["maintenance_warning"] = json!(error);
             }
-            self.tick_channels()?;
-            return self.channel_list(caller);
+            match self.channel_list(caller) {
+                Ok(inventory) => result["channels"] = inventory["channels"].clone(),
+                Err(error) => result["inventory_warning"] = json!(error),
+            }
+            return Ok(result);
         }
         if op == "human_channel_poll" {
             self.tick_channels()?;
@@ -1271,8 +1281,9 @@ impl HubEngine {
         }
         if changed {
             self.stop_process(id)?;
-            self.inner.db.transaction(|c| save_service(c, id, &cfg))?;
         }
+        // Prepare the pairing instruction before committing either configuration
+        // or the code, so an unavailable executable leaves no partial mutation.
         let process = self.ensure_process(&plugin)?;
         self.configure_process(id, &process)?;
         let code = pair_code()?;
@@ -1283,14 +1294,17 @@ impl HubEngine {
         }
         let instruction = required(&result, "instruction")?;
         self.inner.db.transaction(|c| {
+            if changed { save_service(c, id, &cfg)?; }
             cancel_pair(c,id,caller)?;
             c.execute("INSERT INTO hub_pairing_codes(code,plugin_id,principal_id,owner_user,created_ms,expires_ms,instruction,pairing_command,pairing_url,bot_username,initial_human_scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 &[json!(code),json!(id),caller["principal_id"].clone(),caller["owner_user"].clone(),json!(now_ms()),json!(expires),json!(instruction),result["pairing_command"].clone(),result["pairing_url"].clone(),result["bot_username"].clone(),json!(initial_human_scope(caller, self.inner.default_human_scope))])?;
             Ok(())
         })?;
-        Ok(
-            json!({"code":code,"instruction":instruction,"pairing_command":result["pairing_command"],"pairing_url":result["pairing_url"],"bot_username":result["bot_username"],"expires_at_ms":expires}),
-        )
+        let mut result = json!({"ok":true,"committed":true,"code":code,"instruction":instruction,"pairing_command":result["pairing_command"],"pairing_url":result["pairing_url"],"bot_username":result["bot_username"],"expires_at_ms":expires});
+        if let Err(error) = self.configure_process(id, &process) {
+            result["maintenance_warning"] = json!(error);
+        }
+        Ok(result)
     }
     fn stop_process(&self, id: &str) -> Result<(), String> {
         let old = self
@@ -1487,7 +1501,7 @@ impl HubEngine {
     }
     fn redeem(&self, id: &str, f: &Value) -> Result<Value, String> {
         let plugin = self.plugin(id)?;
-        let result = self.inner.db.transaction(|c| {
+        let mut result = self.inner.db.transaction(|c| {
             if f["is_private_chat"] != true {
                 return Err("FORBIDDEN: pairing requires a private conversation".into());
             }
@@ -1525,7 +1539,9 @@ impl HubEngine {
             .ok()
             .and_then(|p| p.get(id).cloned());
         if let Some(p) = process {
-            self.configure_process(id, &p)?;
+            if let Err(error) = self.configure_process(id, &p) {
+                result["maintenance_warning"] = json!(error);
+            }
         }
         Ok(result)
     }
@@ -2381,6 +2397,40 @@ mod resilience_tests {
         assert_eq!(sse_wait(Some(3.5), 1000), Duration::from_millis(2500));
         assert_eq!(sse_wait(Some(0.0), 1000), Duration::ZERO);
     }
+    #[test]
+    fn committed_channel_configuration_survives_missing_executable() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "cito-channel-commit-{}",
+            crate::plugins::random_uuid_v4()
+        ));
+        let hub = HubEngine::open(&dir)?;
+        *hub.inner.plugins.lock().map_err(|e| e.to_string())? = vec![ChannelPlugin {
+            id: "messenger".into(),
+            manifest: json!({"displayName":"Messenger","fields":[{"key":"destination","scope":"user","type":"text","required":true}]}),
+            dir: dir.clone(),
+            command: vec![dir.join("unavailable").to_string_lossy().into_owned()],
+        }];
+        let caller = json!({"principal_id":"none#alice","owner_user":"alice"});
+        let result = hub.rpc(
+            "human_channels_configure",
+            &json!({"plugin_id":"messenger","enabled":true,"user_config":{"destination":"room"}}),
+            Some(&caller),
+        )?;
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["committed"], true);
+        assert!(result["maintenance_warning"].is_string(), "{result}");
+        let inventory = hub.rpc("human_channels_list", &json!({}), Some(&caller))?;
+        assert_eq!(inventory["channels"][0]["enabled"], true);
+        let stored = hub
+            .inner
+            .db
+            .query("SELECT user_config_json FROM hub_human_channels", &[])?;
+        assert_eq!(parse(&stored[0], "user_config_json")["destination"], "room");
+        hub.shutdown();
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     #[test]
     fn retry_reservation_keeps_warning_and_process_stop_clears_poll_health() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!(

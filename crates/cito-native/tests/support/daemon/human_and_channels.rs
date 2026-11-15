@@ -537,8 +537,8 @@ server.serve_forever()
     assert_eq!(snapshot["settings"]["channels"][0]["status"], "ready");
     assert_eq!(snapshot["settings"]["channels"][0]["configured"], true);
 
-    // A replaced slot cannot acknowledge an in-flight mutation against the new
-    // identity, even when its remote mutation already committed before replacement.
+    // Preserve a committed receipt under its original authority without applying
+    // its personal inventory or UI completion to the replacement identity.
     gate("unpair-post", "bob", "next-credential", false);
     gate("replacement", "charlie", "replacement-credential", false);
     std::thread::scope(|scope| {
@@ -555,14 +555,15 @@ server.serve_forever()
         config["hubs"]["shared"]["user"] = json!("charlie");
         fs::write(&f.config, config.to_string()).unwrap();
         wait(|| seen("replacement"));
-        let failure = changed.join().unwrap().unwrap_err();
-        match *failure {
-            ureq::Error::Status(400, response) => assert!(response
-                .into_string()
-                .unwrap()
-                .contains("Hub changed during channel request")),
-            other => panic!("Unexpected mutation failure: {other}"),
-        }
+        let receipt: Value = changed.join().unwrap().unwrap().into_json().unwrap();
+        assert_eq!(receipt["committed"], true);
+        assert_eq!(receipt["authority_changed"], true);
+        assert_eq!(receipt["receipt_authority"]["hub"], "shared");
+        assert_eq!(receipt["receipt_authority"]["principal_id"], "none#bob");
+        assert!(receipt["maintenance_warning"]
+            .as_str()
+            .unwrap()
+            .contains("authority changed"));
     });
     assert_eq!(local("/health")["ok"], true);
     release("replacement");

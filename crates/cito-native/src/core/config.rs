@@ -46,8 +46,27 @@ pub(super) fn publication_target(path: &Path) -> Result<PathBuf, String> {
             .map_err(|e| e.to_string())?
             .join(path)
     };
-    if let Ok(canonical) = absolute.canonicalize() {
-        return Ok(canonical);
+    // Follow even a dangling leaf symlink before choosing the atomic rename
+    // destination. Bound the walk so a cycle cannot recurse indefinitely.
+    let mut absolute = absolute;
+    for _ in 0..40 {
+        if let Ok(canonical) = absolute.canonicalize() {
+            return Ok(canonical);
+        }
+        let Ok(target) = fs::read_link(&absolute) else {
+            break;
+        };
+        absolute = if target.is_absolute() {
+            target
+        } else {
+            absolute
+                .parent()
+                .ok_or("Configuration path has no parent")?
+                .join(target)
+        };
+    }
+    if fs::read_link(&absolute).is_ok() {
+        return Err("Configuration symlink chain exceeds 40 links".into());
     }
     let mut normalized = PathBuf::new();
     for component in absolute.components() {

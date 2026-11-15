@@ -176,13 +176,17 @@ pub fn poll_listener(
     let hub = &client.name;
     let name = format!("{}_{}", string(row, "host_id"), id);
     let added=client.rpc("consumer_add",&json!({"stream":"CITO_SIGNALS","config":{"durable_name":name,"filter_subject":format!("cito.signal.{id}"),"deliver_policy":"all"}}))?;
-    let backlog = client
-        .rpc("consumer_backlog", &json!({"name":name}))
-        .unwrap_or(added);
-    let hub_now = backlog["server_now_ms"]
-        .as_u64()
-        .unwrap_or_else(|| client.server_now());
-    let observed = std::time::Instant::now();
+    // A fallback response keeps its own clock observation, including time spent
+    // waiting for a failing backlog request.
+    let added_observed = std::time::Instant::now();
+    let (backlog, observed) = match client.rpc("consumer_backlog", &json!({"name":name})) {
+        Ok(backlog) => (backlog, std::time::Instant::now()),
+        Err(_) => (added, added_observed),
+    };
+    let (hub_now, observed) = match backlog["server_now_ms"].as_u64() {
+        Some(now) => (now, observed),
+        None => (client.server_now(), std::time::Instant::now()),
+    };
     let registration = local.registration_lock(hub)?;
     let registration_guard = if row["harness"] == "human" {
         let guard = registration

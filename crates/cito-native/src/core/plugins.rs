@@ -1391,6 +1391,14 @@ fn daemon_health_from_json(config: &NativeConfig, val: &Value) -> Option<DaemonH
     })
 }
 
+#[cfg(test)]
+#[test]
+fn pid_alive_rejects_non_process_ids() {
+    assert!(!pid_alive(0));
+    assert!(!pid_alive(u32::MAX as i32));
+    assert!(pid_alive(std::process::id() as i32));
+}
+
 pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;

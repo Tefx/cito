@@ -349,7 +349,11 @@ impl DaemonService {
                         .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
                     {
                         if let Ok(mut cache) = self.caller_cache.lock() {
-                            cache.retain(|pid, _| crate::plugins::pid_alive(*pid as i32));
+                            cache.retain(|pid, _| {
+                                i32::try_from(*pid)
+                                    .ok()
+                                    .is_some_and(crate::plugins::pid_alive)
+                            });
                             cache.insert(pid, caller.clone());
                             if let Some(requested_pid) = requested_pid {
                                 cache.insert(requested_pid, caller.clone());

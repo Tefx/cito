@@ -1234,6 +1234,9 @@ pub fn caller(
     json!({"harness":id,"session_id":sid,"cwd":cwd,"repo":repo,"branch":branch,"title":title.unwrap_or_else(||Path::new(cwd).file_name().and_then(|s|s.to_str()).unwrap_or("session")),"endpoint_pid":pid})
 }
 pub fn alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
     // SAFETY: signal 0 checks existence without changing the process.
     unsafe {
         libc::kill(pid as i32, 0) == 0
@@ -1560,6 +1563,13 @@ impl Drop for ReadOnlySqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn alive_rejects_process_group_and_out_of_range_ids() {
+        assert!(!alive(0));
+        assert!(!alive(u32::MAX));
+        assert!(alive(std::process::id()));
+    }
+
     #[test]
     fn native_process_queries_preserve_invocation_parent_and_cwd() -> Result<()> {
         let pid = std::process::id();

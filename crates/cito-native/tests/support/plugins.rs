@@ -972,6 +972,49 @@ fn pi_probe_rejects_reused_pid_behind_stale_socket() {
     f.stop(process);
 }
 #[test]
+fn pi_manual_enrollment_probe_fences_same_command_pid_reuse() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    let script = f.dir.join("pi.mjs");
+    fs::write(&script, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let process = f.spawn("node", &[script.to_str().unwrap()], &[]);
+    wait(|| f.output(process, false).contains("ready"));
+    f.env.insert("CITO_PI_PROCESS_DISCOVERY".into(), "1".into());
+    assert_eq!(f.plugin(PI, json!({"op":"setup_apply"}))["ok"], true);
+    let enrolled = f.plugin(
+        PI,
+        json!({"op":"resolve_caller","endpoint_pid":f.pid(process),"cwd":f.dir}),
+    );
+    assert_eq!(enrolled["ok"], true, "{enrolled}");
+    let cache_path = f
+        .state
+        .join(format!("pi/endpoints/{}.json", f.pid(process)));
+    let mut cached: Value =
+        serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    assert_eq!(cached["identity"], enrolled["caller"]["process_identity"]);
+    let probe = || {
+        f.plugin(PI, json!({"op":"probe","endpoint_pid":f.pid(process),"session_id":enrolled["caller"]["session_id"]}))
+    };
+    assert_eq!(probe()["status"], "alive");
+    fs::create_dir_all(f.state.join("sockets")).unwrap();
+    fs::write(
+        f.state
+            .join(format!("sockets/pi-pid-{}.sock", f.pid(process))),
+        "stale socket",
+    )
+    .unwrap();
+    assert_eq!(probe()["status"], "transient_error");
+    // Simulate the retained identity of an earlier invocation with the same
+    // command. Only the start time differs; command-only checks cannot catch it.
+    cached["identity"]["started_at"] = json!("previous-invocation");
+    fs::write(&cache_path, cached.to_string()).unwrap();
+    let response = probe();
+    assert_eq!(response["status"], "closed_definitive", "{response}");
+    assert_eq!(response["reason"], "Endpoint process identity changed");
+    f.stop(process);
+}
+
+#[test]
 fn codex_rollout_errors_are_isolated_and_non_utf8_lines_are_lossy() {
     let _lock = serial();
     let f = Fixture::new(json!({}));
