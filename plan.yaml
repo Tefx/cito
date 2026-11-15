@@ -14195,7 +14195,7 @@ phases:
   - id: v48.ui
     name: V48 macOS AppKit Swift UI Geometry, HeadlessOracle, Capability Gating, Screenshot
       Refresh & UI Test Matrix (U1–U5, C1–C5, C11, P6)
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - src/macos/**\n    - crates/cito-native/tests/support/ui/**\n\
       \    - site/assets/screenshots/*.png\n  blocked_paths:\n    - plan.yaml\n\n\
@@ -14287,6 +14287,8 @@ phases:
     depends_on:
     - v48.core
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-15T20:08:35.865282Z'
   - id: v48.docs
     name: V48 Audience-Segmented Documentation, Host-a-Hub Guide, Topology SVG, Site
       UX & Clipboard Tests (D1–D5)
