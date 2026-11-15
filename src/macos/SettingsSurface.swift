@@ -9,7 +9,7 @@ extension Companion {
     }
     func rebuildFeedbackAfter(_ seconds: Double) {
         RunLoop.main.add(Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
-            if self?.settingsVisible == true { self?.rebuildSettingsPanel(preservingEditor: true) }
+            self?.rebuildSettingsPanel(preservingEditor: true)
         }, forMode: .common)
     }
 
@@ -144,7 +144,7 @@ extension Companion {
             let root = SurfaceView(frame:NSRect(x:0,y:0,width:520,height:460),radius:14,color:.clear,border:.labelColor.withAppearanceAlpha(0.15))
             root.identifier=NSUserInterfaceItemIdentifier("settings_panel"); root.layer?.masksToBounds=true
             let effect=NSVisualEffectView(frame:root.bounds)
-            effect.material = .popover; effect.blendingMode = .behindWindow; effect.state = .active
+            effect.material = .popover; effect.blendingMode = .behindWindow; effect.state = .followsWindowActiveState
             root.addSubview(effect); window.contentView=root
             settingsPanel = window
         }
@@ -274,12 +274,15 @@ extension Companion {
     }
 
     func rebuildSettingsPanel(preservingEditor: Bool = false, revealAddHub: Bool = false) {
-        guard let window = settingsPanel else { return }
+        settingsDirty = true
+        guard settingsVisible || renderingForInspection, let window = settingsPanel else { return }
         if preservingEditor, settingsFieldControls.values.contains(where: { $0.currentEditor() === window.firstResponder && $0.currentEditor() != nil }) {
             settingsRebuildDeferred = true
             return
         }
         settingsRebuildDeferred = false
+        settingsDirty = false
+        settingsRebuildCount += 1
         let focused = settingsFieldControls.first { $0.value.currentEditor() != nil && $0.value.currentEditor() === window.firstResponder }
         let focusedId = focused?.key
         let selectedRange = (focused?.value.currentEditor() as? NSTextView)?.selectedRange()
@@ -1307,8 +1310,8 @@ extension Companion {
     }
 
     func openSettingsPanel() {
-        ensureSettingsPanel()
         settingsVisible = true
+        ensureSettingsPanel()
         emit(["op": "open_settings", "hub": effectiveChannelHub])
         if !headless, let window = settingsPanel {
             NSApp.setActivationPolicy(.regular)
@@ -1331,6 +1334,7 @@ extension Companion {
         settingsVisible = false
         settingsBannerError = nil; hostHubPortError = nil
         uninstallConfirmOpen = false; uninstallPurgeData = false
+        settingsDirty = true
         settingsPanel?.orderOut(nil)
         if !headless && !settingsVisible && !directoryVisible { NSApp.setActivationPolicy(.accessory) }
         if emitAction { emit(["op": "close_settings"]) }

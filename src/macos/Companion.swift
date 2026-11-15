@@ -12,6 +12,19 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var menuScrollKeys: [String: String] = [:]
     var menuScrollAnchors: [String: (rowId: String, deltaY: CGFloat)] = [:]
     var statusImage: NSImage?
+    static let statusIcons: [StatusIconState: NSImage] = [
+        .idle: makeCitoStatusIcon(.idle), .active: makeCitoStatusIcon(.active), .warning: makeCitoStatusIcon(.warning)
+    ]
+    var lastStatusPresentation: (icon: StatusIconState, unread: Int, tooltip: String)?
+    var statusUpdateCount = 0
+    var menuOpen = false
+    var menuDirty = true
+    var directoryDirty = true
+    var settingsDirty = true
+    var settingsRebuildCount = 0
+    var directoryReloadCount = 0
+    // Inspection flushes views without opening surfaces or emitting visibility IPC.
+    var renderingForInspection = false
     var testAppearance: NSAppearance?
     var hubs: [Hub] = []
     var listeners: [Listener] = []
@@ -285,15 +298,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         else {
             status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             status?.menu = cardMenu
-            statusImage = makeCitoStatusIcon(.idle)
-            if let button = status?.button {
-                formatStatusButton(button, unreadCount: 0, image: statusImage)
-            }
             hoverEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .scrollWheel, .mouseExited, .leftMouseDown, .rightMouseDown]) { event in
                 MenuControl.reconcileActiveHover()
                 return event
             }
         }
+        updateStatusItem()
         DispatchQueue.global().async { [weak self] in
             var buffer = Data()
             var dropping = false
@@ -482,7 +492,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             }
             let saved = frame.ok == true && ["channel_save","save_hub_service"].contains(frame.source_op ?? "") ? frame.channel_id : nil
             let uiChanged = acceptSettings(value, hub: frame.hub, savedChannel: saved, savedRequest: frame.request_id, confirmHubSave: frame.ok == true && ["setup_save_hub","save_hub"].contains(frame.source_op ?? ""))
-            if (changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId) && settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+            if changed || receipt || uiChanged || frame.request_id == submittedHostHubRequestId { rebuildSettingsPanel(preservingEditor: true) }
             return
         }
         if frame.op == "pair_code", let id = frame.channel_id {
@@ -536,28 +546,15 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settingsChanged, let value = nextSettings { acceptSettings(value, hub: frame.hub ?? value.hubs.first(where: { $0.is_default })?.name ?? h.first?.name, savedRequest: frame.request_id) }
             if let error = frame.composer_error, !error.isEmpty { setComposerStatus(error) }
             if hasRenderedState && !settledControl && !discoveryChanged && !pendingMutation && !harnessesChanged && !settingsChanged && !activityChanged && h == hubs && l == listeners && a == available && r == myRemote && onlineCount == directoryOnlineCount {
-                let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
-                statusImage = makeCitoStatusIcon(warning ? .warning : (listeners.contains { $0.harness != "human" } || unreadCount > 0) ? .active : .idle)
-                if let button = status?.button ?? headlessStatusButton {
-                    formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
-                    updateStatusTooltip(button)
-                }
+                updateStatusItem()
             } else {
                 hubs = h; listeners = l; available = a; myRemote = r; directoryOnlineCount = onlineCount
                 seedDirectoryPeersIfEmpty()
                 hasRenderedState = true; pendingMutation = false
                 rebuild()
-                if directoryPanel != nil {
-                    updateDirectoryModePills()
-                    rebuildDirectoryFacetBar()
-                    if directoryMode == "activity" {
-                        applyActivityFilter()
-                    } else if harnessesChanged {
-                        directoryTableView?.reloadData()
-                    }
-                }
+                refreshDirectoryViews()
                 if directoryVisible && directoryMembershipChanged { queryDirectory() }
-                if (settingsChanged || settledControl || directoryMembershipChanged) && settingsPanel != nil {
+                if settingsChanged || settledControl || directoryMembershipChanged {
                     rebuildSettingsPanel(preservingEditor: true)
                 }
             }
@@ -615,15 +612,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             directoryOnlineCount = frame.online_count ?? peers.count
             if let act = frame.activity { activityAllItems = act }
             if let u = frame.unread_count { unreadCount = u }
-            if rowsChanged {
-                updateDirectoryModePills()
-                rebuildDirectoryFacetBar()
-                if directoryMode == "activity" {
-                    applyActivityFilter()
-                } else {
-                    applyDirectoryFilter(fromDaemonFrame: true, daemonMatchedCount: frame.matched_count)
-                }
-            }
+            if rowsChanged { refreshDirectoryViews() }
             if hasRenderedState && (menuChanged || settledControl) { rebuild() }
             if headless { diagnostic("directory peers=\(peers.count) matched=\(directoryMatchedCount) online=\(directoryOnlineCount)") }
         }

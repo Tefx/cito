@@ -1,6 +1,15 @@
 import AppKit
 
 extension Companion {
+    func flushDirtyViews() {
+        guard headless else { return }
+        renderingForInspection = true
+        defer { renderingForInspection = false }
+        if menuDirty && hasRenderedState { rebuild() }
+        if settingsDirty, settingsPanel != nil { rebuildSettingsPanel(preservingEditor: true) }
+        if directoryDirty, directoryPanel != nil { refreshDirectoryViews() }
+    }
+
     func handleHeadlessTestCommand(_ data: Data) -> Bool {
         // Headless hooks exercise the same four-surface control handlers.
         if headless, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -14,9 +23,67 @@ extension Companion {
                     window.contentView?.appearance = testAppearance
                 }
             }
+            if op == "test_open_panel" {
+                if object["surface"] as? String == "settings" { openSettingsPanel() }
+                else { openDirectoryPanel(mode: object["mode"] as? String ?? "directory") }
+                return true
+            }
+            if op == "test_render_state" {
+                let snapshot: [String: Any] = [
+                    "menu_open": menuOpen, "menu_dirty": menuDirty, "menu_rebuilds": rebuildCount,
+                    "directory_open": directoryVisible, "directory_dirty": directoryDirty, "directory_reloads": directoryReloadCount,
+                    "settings_open": settingsVisible, "settings_dirty": settingsDirty, "settings_rebuilds": settingsRebuildCount,
+                    "status_updates": statusUpdateCount, "unread_count": unreadCount,
+                    "status_image": statusImage.map { String(describing: ObjectIdentifier($0)) } ?? "",
+                    "button_tooltip": (status?.button ?? headlessStatusButton)?.toolTip ?? "",
+                    "listeners": listeners.count, "directory_peers": directoryAllPeers.count,
+                    "settings_launch_at_login": settings?.launch_at_login ?? false,
+                    "hover_watch_active": MenuControl.hoverWatchActive,
+                    "hovered": MenuControl.activeHovered?.identifier?.rawValue ?? "",
+                    "panel_effect_states": [settingsPanel, directoryPanel].compactMap { $0?.contentView }.flatMap { $0.subviews.compactMap { ($0 as? NSVisualEffectView)?.state.rawValue } }
+                ]
+                diagnostic("render-state " + String(data: try! JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]), encoding: .utf8)!)
+                return true
+            }
+            if op == "test_text_metrics" {
+                let strings = object["strings"] as? [String] ?? []
+                let widths = [CGFloat(10.5), 11, 12, 13, 15].flatMap { size in
+                    [NSFont.Weight.regular, .medium, .semibold, .bold].flatMap { weight in
+                        strings.map { text -> [String: Any] in
+                            let font = NSFont.systemFont(ofSize: size, weight: weight)
+                            let reference = NSTextField(labelWithString: text); reference.font = font
+                            return ["text": text, "size": size, "expected": ceil(reference.fittingSize.width), "actual": measureTextWidth(text, font: font)]
+                        }
+                    }
+                }
+                let dates = (object["timestamps"] as? [String] ?? []).map { timestamp -> [String: Any] in
+                    let reference = ISO8601DateFormatter()
+                    reference.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                    let date = reference.date(from: timestamp) ?? {
+                        reference.formatOptions = [.withInternetDateTime]
+                        return reference.date(from: timestamp)
+                    }()
+                    return ["timestamp": timestamp, "expected": date?.timeIntervalSince1970 as Any? ?? NSNull(), "actual": activityDate(timestamp)?.timeIntervalSince1970 as Any? ?? NSNull(), "relative": relativeTime(timestamp)]
+                }
+                diagnostic("text-metrics " + String(data: try! JSONSerialization.data(withJSONObject: ["widths": widths, "dates": dates], options: [.sortedKeys]), encoding: .utf8)!)
+                return true
+            }
+            if op == "test_hover_exit" {
+                if let control = MenuControl.activeHovered,
+                   let event = NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                       windowNumber: control.window?.windowNumber ?? 0, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil) {
+                    control.mouseExited(with: event)
+                }
+                return true
+            }
+            if op == "test_panel_resign_key" {
+                (object["surface"] as? String == "directory" ? directoryPanel : settingsPanel)?.resignKey()
+                return true
+            }
+            if op.hasPrefix("test_"), !["test_menu_open", "test_menu_close"].contains(op) { flushDirtyViews() }
             if op == "test_inspect" || op == "test_inspect_menu" { inspectMenu(); return true }
             if op == "test_oracle_calibration", let kind = object["kind"] as? String {
-                if kind == "reset" { rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; updateDirectoryFacetStyles(); return true }
+                if kind == "reset" { lastStatusPresentation = nil; rebuild(); if settingsPanel != nil { rebuildSettingsPanel() }; updateDirectoryFacetStyles(); flushDirtyViews(); return true }
                 let roots = cardMenu.items.compactMap { $0.view } + [settingsPanel?.contentView,directoryPanel?.contentView].compactMap { $0 }
                 func control(_ id: String) -> MenuControl? {
                     for root in roots { if let c = findControl(in:root,id:id) { return c } }
@@ -248,6 +315,7 @@ extension Companion {
 
     // Headless inspection projects real AppKit objects; it does not synthesize a parallel menu model.
     func renderPNG(surface: String, path: String) {
+        flushDirtyViews()
         var restored: [(NSMenuItem, NSView, NSView?, NSRect)] = []
         let view: NSView
         var compositeWindow: NSPanel?
@@ -335,6 +403,7 @@ extension Companion {
     }
 
     func inspectMenu() {
+        flushDirtyViews()
         var truncatedLabels: [String] = []
         var overlappingSiblings: [String] = []
         var clippedViews: [String] = []

@@ -239,6 +239,7 @@ fn settings() -> Value {
 }
 
 mod directory;
+mod lazy_rendering;
 mod menu;
 mod oracle_e2e;
 mod render_stability;

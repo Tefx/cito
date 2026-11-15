@@ -16,6 +16,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func updateDirectoryWarnings() {
+        guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
         let hasError = directoryError != nil
         let hasWarning = hasError || !directoryWarnings.isEmpty
         directoryWarningLabel?.isHidden = !hasWarning
@@ -96,7 +97,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         let effect = NSVisualEffectView(frame: root.bounds)
         effect.material = .popover
         effect.blendingMode = .behindWindow
-        effect.state = .active
+        effect.state = .followsWindowActiveState
         root.addSubview(effect)
 
         window.onKey = { [weak self] key in self?.handleDirectoryKey(key) }
@@ -367,6 +368,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func updateDirectoryModePills() {
+        guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
         updateDirectoryShortcuts()
         directoryModeDirPill?.style = directoryMode == "directory" ? .prominent : .subtleHeader
         directoryModeActPill?.style = directoryMode == "activity" ? .prominent : .subtleHeader
@@ -474,6 +476,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func rebuildDirectoryFacetBar() {
+        guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
         guard let facetBar = directoryFacetBar else { return }
         let map = harnessMap
         let unionHarnesses = Set<String>(harnesses.filter { $0.id != "human" && ($0.kind == nil || $0.kind == "agent" || $0.kind == "agent-harness") }.map { $0.id })
@@ -526,6 +529,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func updateDirectoryFacetStyles() {
+        guard directoryVisible || renderingForInspection else { directoryDirty = true; return }
         directoryFacetControls["activity_mark_all_read"]?.isEnabled = (serverActivityFilter == activityFilter && serverActivityQuery == directoryQuery ? activityUnreadCount : activityFilteredItems.filter { $0.unread }.count) > 0
         directoryFacetControls["activity_clear"]?.isEnabled = !activityFilteredItems.isEmpty
         let isActivity = directoryMode == "activity"
@@ -627,6 +631,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         root.addSubview(box)
     }
     func applyActivityFilter(revealSelection: Bool = false) {
+        directoryDirty = true
         let offset = directoryScrollView?.contentView.bounds.origin
         let top = directoryTableView.map { $0.rows(in:$0.visibleRect).location } ?? NSNotFound
         let anchor = activityFilteredItems.indices.contains(top) ? activityFilteredItems[top] : nil
@@ -650,12 +655,15 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         } ?? (activityFilteredItems.isEmpty ? 0 : min(max(0, directorySelectedIndex), activityFilteredItems.count - 1))
         let current = activityFilteredItems.indices.contains(directorySelectedIndex) ? activityFilteredItems[directorySelectedIndex] : nil
         let selectionChanged = selected?.hub != current?.hub || selected?.signal_id != current?.signal_id
+        guard directoryVisible || renderingForInspection, directoryPanel != nil else { return }
+        directoryDirty = false
         updateDirectoryShortcuts()
         updateDirectoryEmptyState()
         updateDirectoryFacetStyles()
         let count = serverMatches ? max(activityTotal, activityFilteredItems.count) : activityFilteredItems.count
         directorySummaryLabel?.stringValue = "\(count) message\(count == 1 ? "" : "s") · \(serverMatches ? activityUnreadCount : activityFilteredItems.filter { $0.unread }.count) unread"
         if let table = directoryTableView {
+            directoryReloadCount += 1
             table.reloadData()
             if !activityFilteredItems.isEmpty {
                 table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)
@@ -688,6 +696,14 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
     }
 
+    func refreshDirectoryViews(revealSelection: Bool = false) {
+        updateDirectoryWarnings()
+        updateDirectoryModePills()
+        rebuildDirectoryFacetBar()
+        if directoryMode == "activity" { applyActivityFilter(revealSelection: revealSelection) }
+        else { applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil) }
+    }
+
     func openDirectoryPanel(mode: String = "directory") {
         activityClearConfirm = false
         ensureDirectoryPanel()
@@ -695,15 +711,9 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         directoryVisible = true
         if directoryMode != mode { latestDirectoryActionRequestId = nil; clearDirectoryActionError() }
         directoryMode = mode
-        updateDirectoryWarnings()
         queryDirectory(op:"open_directory")
-        updateDirectoryModePills()
+        refreshDirectoryViews(revealSelection: true)
         updateDirectoryFacetStyles()
-        if mode == "activity" {
-            applyActivityFilter(revealSelection:true)
-        } else {
-            applyDirectoryFilter(fromDaemonFrame: false, daemonMatchedCount: nil)
-        }
         if !headless, let window = directoryPanel {
             NSApp.setActivationPolicy(.regular)
             if let screen = NSScreen.main {
@@ -724,6 +734,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         activityClearConfirm=false; updateDirectoryFacetStyles()
         MenuControl.clearHoverWhere { $0.window === self.directoryPanel }
         directoryVisible = false
+        directoryDirty = true
         clearDirectoryActionError()
         directoryPanel?.orderOut(nil)
         if !headless && !settingsVisible && !directoryVisible { NSApp.setActivationPolicy(.accessory) }
@@ -731,6 +742,7 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func applyDirectoryFilter(fromDaemonFrame: Bool, daemonMatchedCount: Int?) {
+        directoryDirty = true
         let offset = directoryScrollView?.contentView.bounds.origin
         let top = directoryTableView.map { $0.rows(in:$0.visibleRect).location } ?? NSNotFound
         let anchorId = directoryFilteredPeers.indices.contains(top) ? directoryFilteredPeers[top].scoped_id : nil
@@ -752,9 +764,12 @@ extension Companion: NSTableViewDataSource, NSTableViewDelegate {
         }
         let currentSelectedId = directoryFilteredPeers.indices.contains(directorySelectedIndex) ? directoryFilteredPeers[directorySelectedIndex].scoped_id : nil
         let selectionChanged = previousSelectedId != currentSelectedId
+        guard directoryVisible || renderingForInspection, directoryPanel != nil else { return }
+        directoryDirty = false
         updateDirectoryEmptyState()
         directorySummaryLabel?.stringValue = "\(directoryMatchedCount) of \(directoryOnlineCount) online"
         if let table = directoryTableView {
+            directoryReloadCount += 1
             table.reloadData()
             if !directoryFilteredPeers.isEmpty {
                 table.selectRowIndexes(IndexSet(integer: directorySelectedIndex), byExtendingSelection: false)

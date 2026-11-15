@@ -42,21 +42,41 @@ extension Companion: NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
-        emit(["op": "refresh_available"])
+        menuOpen = true
+        MenuControl.menuTracking = true
+        emit(["op": "open_menu"], userInitiated: false)
+        if menuDirty { rebuild() }
     }
     func menuDidClose(_ menu: NSMenu) {
+        menuOpen = false
+        MenuControl.menuTracking = false
+        if renamingSessionKey != nil { menuDirty = true }
         renamingSessionKey = nil
-        if menuRebuildDeferred { DispatchQueue.main.async { [weak self] in self?.rebuild() } }
+        emit(["op": "close_menu"], userInitiated: false)
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
     }
 
-    func updateStatusTooltip(_ button: NSButton) {
+    var statusTooltip: String {
         let attention=hubs.contains { $0.status != "connected" || $0.error != nil }
         let count=uniqueSessionCount
         var detail=count > 0 ? "\(count) session\(count == 1 ? "" : "s") listening" : (humanListening ? "Personal inbox active" : (hubs.first { $0.name == effectiveTargetHub }?.human_paused == true ? "Inbox paused" : "Not listening"))
         if unreadCount > 0 { detail += " · \(unreadCount) unread" }
         if attention { detail="Hub connection needs attention" }
-        button.toolTip="Cito · " + detail; button.setAccessibilityLabel(button.toolTip)
+        return "Cito · " + detail
+    }
+
+    func updateStatusItem() {
+        let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
+        let icon: StatusIconState = warning ? .warning : (listeners.contains { $0.harness != "human" } || unreadCount > 0) ? .active : .idle
+        let tooltip = statusTooltip
+        guard lastStatusPresentation?.icon != icon || lastStatusPresentation?.unread != unreadCount || lastStatusPresentation?.tooltip != tooltip,
+              let button = status?.button ?? headlessStatusButton else { return }
+        statusImage = Self.statusIcons[icon]
+        formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
+        button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
+        lastStatusPresentation = (icon, unreadCount, tooltip)
+        statusUpdateCount += 1
     }
     func scopeToggle(hub: String, user: String, scope: String, id: String, y: CGFloat) -> MenuControl? {
         let hasOtherUsers = directoryAllPeers.contains { $0.hub == hub && !$0.user.isEmpty && $0.user != user }
@@ -81,19 +101,17 @@ extension Companion: NSMenuDelegate {
     }
 
     func rebuild() {
+        updateStatusItem()
+        menuDirty = true
+        guard menuOpen || renderingForInspection else { return }
         let count = uniqueSessionCount
-        let warning = hubs.contains { $0.status != "connected" || $0.error != nil }
-        statusImage = makeCitoStatusIcon(warning ? .warning : (listeners.contains { $0.harness != "human" } || unreadCount > 0) ? .active : .idle)
-        if let button = status?.button ?? headlessStatusButton {
-            formatStatusButton(button, unreadCount: unreadCount, image: statusImage)
-            updateStatusTooltip(button)
-        }
         if renamingSessionKey != nil, renameField?.currentEditor() != nil {
             updateMenuErrorRow()
             menuRebuildDeferred = true
             return
         }
         menuRebuildDeferred = false
+        menuDirty = false
         MenuControl.clearHoverWhere { $0.enclosingMenuItem != nil || ($0.window !== self.directoryPanel && $0.window !== self.settingsPanel) }
         rebuildCount += 1
         let menu = cardMenu
@@ -789,7 +807,6 @@ extension Companion: NSMenuDelegate {
         directoryShortcut.target = self; directoryShortcut.keyEquivalentModifierMask = [.command]
         directoryShortcut.isHidden = true; directoryShortcut.allowsKeyEquivalentWhenHidden = true
         menu.addItem(directoryShortcut)
-        menu.update()
     }
     @objc func openDirectoryShortcut() { cardMenu.cancelTracking(); openDirectoryPanel(mode:"directory") }
     @objc func openSettingsShortcut() { cardMenu.cancelTracking(); openSettingsPanel() }

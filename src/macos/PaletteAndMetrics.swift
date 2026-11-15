@@ -237,13 +237,25 @@ func displayAttachments(_ attachments: [ChannelAttachment]) -> [ChannelAttachmen
     return unique.values.sorted { ($0.location, $0.display_name) < ($1.location, $1.display_name) }
 }
 
-func relativeTime(_ timestamp: String) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let date = formatter.date(from: timestamp) ?? {
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: timestamp)
+private enum ActivityDateFormatters {
+    static let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
     }()
+    static let whole: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+}
+
+func activityDate(_ timestamp: String) -> Date? {
+    ActivityDateFormatters.fractional.date(from: timestamp) ?? ActivityDateFormatters.whole.date(from: timestamp)
+}
+
+func relativeTime(_ timestamp: String) -> String {
+    let date = activityDate(timestamp)
     guard let date = date else { return "Just now" }
     let seconds = max(0, Date().timeIntervalSince(date))
     if seconds < 60 { return "Just now" }

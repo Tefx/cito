@@ -1,7 +1,7 @@
 import AppKit
 import QuartzCore
 
-enum StatusIconState { case active, idle, warning }
+enum StatusIconState: Hashable { case active, idle, warning }
 func makeCitoStatusIcon(_ state: StatusIconState) -> NSImage {
     let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { _ in
         let center = NSPoint(x: 9.2, y: 10.0)
@@ -152,9 +152,8 @@ func statusLabel(_ text: String, frame: NSRect, color: NSColor, filled: Bool = t
     return row
 }
 func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
-    let field = NSTextField(labelWithString: text)
-    field.font = font
-    return ceil(field.fittingSize.width)
+    // A borderless label cell reserves two points on each horizontal edge.
+    return ceil((text as NSString).size(withAttributes: [.font: font]).width + 4)
 }
 
 private var pluginIconCache: [String: NSImage] = [:]
@@ -241,6 +240,10 @@ final class KeyPanel: NSPanel {
     var onKey: ((String) -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+    override func resignKey() {
+        super.resignKey()
+        MenuControl.clearHoverWhere { $0.window === self }
+    }
     @discardableResult
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         let accepted = super.makeFirstResponder(responder)
@@ -346,6 +349,8 @@ final class MenuControl: NSControl {
     private var trackingArea: NSTrackingArea?
     static weak var activeHovered: MenuControl?
     private static var hoverWatchTimer: Timer?
+    static var hoverWatchActive: Bool { hoverWatchTimer != nil }
+    static var menuTracking = false { didSet { updateHoverWatchTimer() } }
     // Headless hooks exercise logical transitions without a visible window or physical pointer.
     static var tracksPhysicalPointer = true
     override var wantsUpdateLayer: Bool { true }
@@ -421,15 +426,14 @@ final class MenuControl: NSControl {
         }
         isHovered = hovered
         applyVisualState()
-        if MenuControl.activeHovered != nil { MenuControl.startHoverWatchTimer() }
-        else { MenuControl.stopHoverWatchTimerIfIdle() }
+        MenuControl.updateHoverWatchTimer()
     }
     static func clearHoverWhere(_ predicate: (MenuControl) -> Bool) {
         if let control = activeHovered, predicate(control) { control.setHovered(false) }
-        stopHoverWatchTimerIfIdle()
+        updateHoverWatchTimer()
     }
     static func reconcileActiveHover() {
-        guard let control = activeHovered else { stopHoverWatchTimerIfIdle(); return }
+        guard let control = activeHovered else { updateHoverWatchTimer(); return }
         guard tracksPhysicalPointer else { return }
         guard let window = control.window, window.isVisible, !control.isHiddenOrHasHiddenAncestor,
               control.enclosingMenuItem?.isHidden != true else { control.setHovered(false); return }
@@ -437,17 +441,17 @@ final class MenuControl: NSControl {
         let localPoint = control.convert(windowPoint, from: nil)
         if !control.visibleRect.contains(localPoint) { control.setHovered(false) }
     }
-    private static func startHoverWatchTimer() {
+    private static func updateHoverWatchTimer() {
+        // NSMenu tracking can lose exit events. Panels use mouseExited/resignKey.
+        guard menuTracking, activeHovered?.enclosingMenuItem != nil else {
+            hoverWatchTimer?.invalidate()
+            hoverWatchTimer = nil
+            return
+        }
         guard hoverWatchTimer == nil else { return }
         let timer = Timer(timeInterval: 0.08, repeats: true) { _ in reconcileActiveHover() }
         hoverWatchTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
         RunLoop.main.add(timer, forMode: .eventTracking)
-    }
-    private static func stopHoverWatchTimerIfIdle() {
-        guard activeHovered == nil else { return }
-        hoverWatchTimer?.invalidate()
-        hoverWatchTimer = nil
     }
     override var isEnabled: Bool { didSet { applyVisualState() } }
     func applyVisualState() {
