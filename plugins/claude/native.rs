@@ -445,7 +445,7 @@ fn metadata_session(req: &Value) -> Result<Option<String>> {
                 explicit.push(validate_session(s)?);
             }
         }
-        if source["expected_harness"] == "claude" {
+        if str_at(source, "expected_harness") == Some("claude") {
             if let Some(s) = str_at(source, "expected_session_id") {
                 explicit.push(validate_session(s)?);
             }

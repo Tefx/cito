@@ -519,7 +519,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
             }
         }
         for source in [&req["meta"], &req["_meta"]] {
-            if source["expected_harness"] == "codex" {
+            if str_at(source, "expected_harness") == Some("codex") {
                 if let Some(s) = str_at(source, "expected_session_id") {
                     ids.push(s.into())
                 }
@@ -528,7 +528,7 @@ fn metadata_id(req: &Value) -> Result<Option<String>> {
     }
     if let Some(s) = env_value(req, "CODEX_THREAD_ID") {
         if !s.trim().is_empty() {
-            ids.push(s)
+            ids.push(s.trim().to_owned())
         }
     }
     ids.sort();
@@ -554,7 +554,10 @@ fn row_caller(req: &Value, r: &Value) -> Value {
     caller(
         req,
         "codex",
-        str_at(r, "id").unwrap_or(""),
+        r["id"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(""),
         cwd,
         pid(req),
         title,
@@ -656,7 +659,7 @@ pub fn handle(req: &Value) -> Result<Value> {
                 || (pid(req).is_none()
                     && ([&req["meta"], &req["_meta"]]
                         .iter()
-                        .any(|source| source["expected_harness"] == "codex")
+                        .any(|source| str_at(source, "expected_harness") == Some("codex"))
                         || (req["http_transport"] != true
                             && [&req["meta"], &req["_meta"]]
                                 .iter()

@@ -535,17 +535,13 @@ pub fn process_parent(p: u32) -> Option<u32> {
     (parent > 0 && parent != p).then_some(parent)
 }
 pub fn pid(req: &Value) -> Option<u32> {
-    explicit_pid(req)
-        .ok()
-        .flatten()
-        .or_else(|| positive_pid(&req["http_client_pid"]))
-        .or_else(|| {
-            let mut context = req.clone();
-            context["http_transport"] = json!(true);
-            caller_pid_roots(&context)
-                .ok()
-                .and_then(|roots| roots.into_iter().next())
-        })
+    explicit_pid(req).ok().flatten().or_else(|| {
+        let mut context = req.clone();
+        context["http_transport"] = json!(true);
+        caller_pid_roots(&context)
+            .ok()
+            .and_then(|roots| roots.into_iter().next())
+    })
 }
 fn verify_expected_identity(caller: &Value, meta: &Value) -> Result<()> {
     if let Some(expected) = str_at(meta, "expected_harness") {
@@ -887,7 +883,7 @@ pub fn remember_process(mut caller: Value) -> Value {
 pub fn has_generic_session_mismatch(req: &Value, actual_sid: &str) -> bool {
     ["meta", "_meta"]
         .iter()
-        .all(|key| str_at(&req[key], "expected_harness").is_none_or(str::is_empty))
+        .all(|key| str_at(&req[key], "expected_harness").is_none())
         && ["meta", "_meta"]
             .iter()
             .any(|key| str_at(&req[key], "expected_session_id").is_some_and(|id| id != actual_sid))
@@ -911,7 +907,9 @@ pub fn cached_caller(
             "Cached caller harness does not match the plugin",
         ));
     }
-    let session = str_at(cached, "session_id")
+    let session = cached["session_id"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| error("INVALID_INPUT", "Cached session identity is missing"))?;
     validate_session(session).map_err(|e| error("INVALID_INPUT", e))?;
     let pid = pid(req)

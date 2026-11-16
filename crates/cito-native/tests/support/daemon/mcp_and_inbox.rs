@@ -378,6 +378,7 @@ fn provider_session_metadata_has_envelope_parity() {
             .map(|key| json!({*key:"selected-session"}))
             .collect();
         metadata.push(json!({"expected_harness":harness,"expected_session_id":"selected-session"}));
+        metadata.push(json!({"expected_harness":format!(" {harness} "),"expected_session_id":"selected-session"}));
         if harness == "codex" {
             metadata.push(json!({"x-codex-turn-metadata":"{\"thread_id\":\"selected-session\"}"}));
         }
@@ -406,21 +407,27 @@ fn provider_session_metadata_has_envelope_parity() {
     assert_eq!(unfenced["error_code"], "BINDING_REQUIRED", "{unfenced}");
     for envelope in ["meta", "_meta"] {
         let mut fenced = req.clone();
-        fenced[envelope] = json!({"expected_harness":"codex"});
+        fenced[envelope] = json!({"expected_harness":" codex "});
         let resolved = f.plugin(CODEX, fenced);
         assert_eq!(
             resolved["caller"]["session_id"], "indexed-session",
             "{resolved}"
         );
     }
-    source
-        .execute("UPDATE threads SET id=' selected-session '", &[])
-        .unwrap();
-    for envelope in ["meta", "_meta"] {
-        let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo"});
-        req[envelope] = json!({"expected_session_id":"selected-session"});
-        let rejected = f.plugin(CODEX, req);
-        assert_eq!(rejected["error_code"], "BINDING_REQUIRED", "{rejected}");
+    for sql in [
+        "UPDATE threads SET id=' selected-session '",
+        "ALTER TABLE threads DROP COLUMN git_branch",
+    ] {
+        source.execute(sql, &[]).unwrap();
+        for envelope in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo"});
+            req[envelope] = json!({"expected_session_id":"selected-session"});
+            let rejected = f.plugin(CODEX, req);
+            assert_eq!(
+                rejected["error_code"], "BINDING_REQUIRED",
+                "{sql}: {rejected}"
+            );
+        }
     }
     source
         .execute("UPDATE threads SET id='selected-session'", &[])
@@ -501,6 +508,113 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         }
         f.stop(endpoint);
     }
+}
+
+#[test]
+fn codex_padded_metadata_and_raw_cached_session_have_consistent_fences() {
+    let _lock = serial();
+    let mut f = Fixture::new(json!({}));
+    for thread_id in [" selected-session ", "   "] {
+        f.env.insert("CODEX_THREAD_ID".into(), thread_id.into());
+        for envelope in ["meta", "_meta"] {
+            let mut req = json!({"op":"resolve_caller","require_open":false,"cwd":"/repo","http_transport":true});
+            req[envelope] = json!({"threadId":"selected-session","expected_harness":" codex ","expected_session_id":"selected-session"});
+            let resolved = f.plugin(CODEX, req);
+            assert_eq!(
+                resolved["caller"]["session_id"], "selected-session",
+                "{resolved}"
+            );
+        }
+    }
+    f.env.remove("CODEX_THREAD_ID");
+    let app = f.dir.join("codex.mjs");
+    fs::write(&app, "console.log('ready'); setInterval(()=>{},1000)").unwrap();
+    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.output(endpoint, false).contains("ready"));
+    let cached = cito_native::support::remember_process(
+        json!({"harness":"codex","session_id":" selected-session ","endpoint_pid":f.pid(endpoint)}),
+    );
+    assert!(cached["process_identity"].is_object());
+    for op in ["resolve_caller", "verify"] {
+        let req = json!({"op":op,"require_open":false,"http_transport":true,
+            "http_client_pid":f.pid(endpoint),"cached_caller":cached});
+        let resolved = f.plugin(CODEX, req.clone());
+        assert_eq!(
+            resolved["caller"]["session_id"], " selected-session ",
+            "{resolved}"
+        );
+        for envelope in ["meta", "_meta"] {
+            let mut fenced = req.clone();
+            fenced[envelope] = json!({"expected_session_id":"selected-session"});
+            let rejected = f.plugin(CODEX, fenced.clone());
+            assert_eq!(rejected["error_code"], "BINDING_REQUIRED", "{rejected}");
+            fenced[envelope]["expected_harness"] = json!(" codex ");
+            let rejected = f.plugin(CODEX, fenced);
+            assert_eq!(rejected["error_code"], "INVALID_INPUT", "{rejected}");
+        }
+    }
+    f.stop(endpoint);
+}
+
+#[test]
+fn pi_padded_bridge_identity_survives_live_and_cached_resolution() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let app = f.dir.join("pi.mjs");
+    fs::write(&app, r#"import fs from 'node:fs';import net from 'node:net';import readline from 'node:readline';
+const dir=process.env.CITO_STATE_DIR+'/sockets';fs.mkdirSync(dir,{recursive:true});
+let failures=0, calls=0;
+net.createServer(c=>c.once('data',()=>{
+ calls++;
+ if(failures>0){failures--;c.end('unavailable\n');}
+ else c.end(JSON.stringify({ok:true,session_id:' selected-session ',cwd:'/repo',pi_pid:process.pid})+'\n');
+ console.log(JSON.stringify({op:'identify',calls}));
+})).listen(dir+'/pi-pid-'+process.pid+'.sock',()=>console.log(JSON.stringify({op:'ready'})));
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const req=JSON.parse(line);failures=req.failures;calls=0;console.log(JSON.stringify({op:'reset',token:req.token}));
+});
+"#).unwrap();
+    let endpoint = f.spawn("node", &[app.to_str().unwrap()], &[]);
+    wait(|| f.frames(endpoint).iter().any(|v| v["op"] == "ready"));
+    let pid = f.pid(endpoint);
+    let mut cached = Value::Null;
+    let mut token = 0;
+    for use_cache in [false, true] {
+        for envelope in [None, Some("meta"), Some("_meta")] {
+            token += 1;
+            // Fail the ancestor lookup and socket scan only. The third exchange
+            // must validate the cached caller against the live padded identity.
+            f.send(
+                endpoint,
+                json!({"failures":if use_cache {2} else {0},"token":token}),
+            );
+            wait(|| {
+                f.frames(endpoint)
+                    .iter()
+                    .any(|v| v["op"] == "reset" && v["token"] == token)
+            });
+            let mut req = json!({"op":"resolve_caller","require_open":false,
+                "endpoint_pid":pid,"cached_caller":if use_cache {cached.clone()} else {Value::Null}});
+            if let Some(key) = envelope {
+                req[key] = json!({"expected_session_id":"selected-session"});
+            }
+            let resolved = f.plugin(PI, req);
+            assert_eq!(
+                resolved["caller"]["session_id"], "selected-session",
+                "{use_cache}/{envelope:?}: {resolved}"
+            );
+            assert_eq!(resolved["caller"]["endpoint_pid"], pid, "{resolved}");
+            cached = resolved["caller"].clone();
+            assert!(cached["process_identity"].is_object());
+            let calls = if use_cache { 3 } else { 1 };
+            wait(|| {
+                f.frames(endpoint)
+                    .last()
+                    .is_some_and(|v| v["op"] == "identify" && v["calls"] == calls)
+            });
+        }
+    }
+    f.stop(endpoint);
 }
 
 #[test]

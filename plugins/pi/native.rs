@@ -419,7 +419,8 @@ pub fn handle(input: &Value) -> Result<Value> {
                         if !allow_process_only(req)
                             && !pid(&c).is_some_and(|p| {
                                 identify(req, p).is_ok_and(|v| {
-                                    v["ok"] == true && v["session_id"] == c["session_id"]
+                                    v["ok"] == true
+                                        && str_at(&v, "session_id") == str_at(&c, "session_id")
                                 })
                             })
                         {
@@ -434,36 +435,19 @@ pub fn handle(input: &Value) -> Result<Value> {
                     Ok(None) => {}
                 }
             }
-            let had_live = !cs.is_empty();
-            let matches: Vec<_> = cs
-                .into_iter()
-                .filter(|(_, v)| {
-                    str_at(req, "explicit_session_id").is_none_or(|s| v["session_id"] == s)
-                        && [&req["meta"], &req["_meta"]].iter().all(|source| {
-                            str_at(source, "expected_session_id")
-                                .is_none_or(|s| v["session_id"] == s)
-                        })
-                })
-                .collect();
-            if matches.len() != 1 {
+            if cs.len() != 1 {
                 return Ok(error(
-                    if had_live && matches.is_empty() {
-                        "INVALID_INPUT"
-                    } else if pid(req)
+                    if pid(req)
                         .is_some_and(|p| process_command(p).is_ok_and(|cmd| matches_process(&cmd)))
                     {
                         "PI_BRIDGE_UNAVAILABLE"
                     } else {
                         "BINDING_REQUIRED"
                     },
-                    if had_live && matches.is_empty() {
-                        "Conflicting caller metadata"
-                    } else {
-                        "No caller socket bridge found"
-                    },
+                    "No caller socket bridge found",
                 ));
             }
-            let (p, v) = &matches[0];
+            let (p, v) = &cs[0];
             let c = as_caller(req, *p, v);
             if let Err(e) = verify(&c, req) {
                 return Ok(error("INVALID_INPUT", e));
