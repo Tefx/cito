@@ -14990,7 +14990,7 @@ phases:
   - id: v49.fix
     name: 'V49 Round 2 Admitted Ledger Closure & Release Binary Staging (V49-R2-1–V49-R2-7,
       F8) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: pending
+    status: claimed
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n- Resolve all\
@@ -15082,3 +15082,5 @@ phases:
     depends_on:
     - v49.consolidate
     agent: senior-engineer
+    claimed_by: senior-engineer
+    claimed_at: '2026-11-16T13:28:58.006261Z'
