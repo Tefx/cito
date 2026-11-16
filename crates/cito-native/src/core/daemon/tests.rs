@@ -10,6 +10,100 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 
 #[test]
+fn authoritative_commits_survive_secondary_local_projection_failures() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("cito-commit-projection-{}", random_uuid_v4()));
+    fs::create_dir_all(dir.join("home")).map_err(|e| e.to_string())?;
+    let config = NativeConfig {
+        state_dir: dir.join("state"),
+        config_path: dir.join("config.json"),
+        home_dir: dir.join("home"),
+        daemon_port: 0,
+        user: "alice".into(),
+        default_hub: "local".into(),
+    };
+    fs::write(&config.config_path, "{}").map_err(|e| e.to_string())?;
+    let mut service = DaemonService::open(
+        &config,
+        &LoadedPlugins {
+            plugins: vec![],
+            rejected_ids: HashSet::new(),
+        },
+    )?;
+    let result = (|| -> Result<(), String> {
+        service.local.set_plugin_roots(&[])?;
+        let registered = service.action(&json!({"op":"cli_human_device","attach":true}))?;
+        let id = string(&registered, "canonical_listener_id");
+        assert!(!id.is_empty(), "{registered}");
+        let client = service.slot("local")?.clone();
+        let agent = service.listen(
+            "local",
+            &json!({"about":"Receiver","scope":"self"}),
+            &json!({"harness":"fixture","session_id":"session","title":"Receiver"}),
+        )?;
+        let agent_id = string(&agent, "canonical_listener_id");
+        assert!(!agent_id.is_empty(), "{agent}");
+        service.state.db.execute("CREATE TRIGGER fail_projection BEFORE UPDATE ON local_listeners BEGIN SELECT RAISE(ABORT,'injected projection failure'); END",&[])?;
+        for action in [
+            json!({"op":"human_inbox_update","scope":"self"}),
+            json!({"op":"set_scope","listener_id":id,"scope":"workspace"}),
+            json!({"op":"set_scope","listener_id":agent_id,"scope":"workspace"}),
+        ] {
+            let target = action["listener_id"].as_str().unwrap_or(id);
+            let original = service
+                .state
+                .listener("local", target)?
+                .ok_or("Missing local receiver")?;
+            let result = service.action(&action)?;
+            assert_eq!(result["committed"], true, "{result}");
+            assert!(
+                string(&result, "warning").contains("injected projection failure"),
+                "{result}"
+            );
+            assert_eq!(
+                client
+                    .kv_get(target)?
+                    .ok_or("Missing authoritative record")?
+                    .0["scope"],
+                action["scope"]
+            );
+            assert_eq!(
+                service.state.listener("local", target)?.unwrap()["scope"],
+                original["scope"]
+            );
+        }
+        let before = client.kv_get(id)?.unwrap().0;
+        let rejected = service
+            .action(&json!({"op":"human_inbox_update","paused":true,"expected_control_revision":0}))
+            .unwrap_err();
+        assert!(
+            !rejected.contains("injected projection failure"),
+            "{rejected}"
+        );
+        assert_eq!(client.kv_get(id)?.unwrap().0, before);
+        let saved = service.action(&json!({"op":"set_user","user":"bob"}))?;
+        assert_eq!(saved["committed"], true, "{saved}");
+        assert!(
+            string(&saved, "warning").contains("injected projection failure"),
+            "{saved}"
+        );
+        assert_eq!(service.raw_config()?["user"], "bob");
+        assert!(Arc::ptr_eq(&service.slot("local")?.closed, &client.closed));
+        assert!(
+            !client.closed.load(Ordering::SeqCst),
+            "Failed reload must retain the old event owner until replacement"
+        );
+        service
+            .state
+            .db
+            .execute("DROP TRIGGER fail_projection", &[])?;
+        Ok(())
+    })();
+    service.shutdown();
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    result
+}
+
+#[test]
 fn hub_discovery_releases_service_and_config_locks_and_fences_concurrent_edits(
 ) -> Result<(), String> {
     use std::io::Write;

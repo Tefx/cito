@@ -692,7 +692,9 @@ impl DaemonService {
                 continue;
             }
             let registration = self.state.registration_lock(&name)?;
-            let mut previous = self.slots.remove(&name);
+            // Keep the old authority owned until every fallible local fence
+            // succeeds, so reload failure cannot orphan its event worker.
+            let mut previous = self.slots.get(&name).cloned();
             if let Some(old) = &previous {
                 let changed = old.config["url"] != hub["url"]
                     || (auth != "oidc"
@@ -836,16 +838,6 @@ impl DaemonService {
                         string(&client.identity, "principal_id"),
                     )
             });
-            if let Some(old) = &previous {
-                if retained {
-                    client.inherit_authority(old);
-                } else {
-                    old.close();
-                }
-            }
-            if !retained {
-                self.channel_inventories.remove(&name);
-            }
             // Disabled profiles have no previous slot. Durable binding identity must
             // still be checked before any receiver can use the replacement client.
             for row in self.state.db.query(
@@ -865,6 +857,16 @@ impl DaemonService {
                     // Legacy bindings predate URL persistence; record the first known profile.
                     self.state.db.execute("UPDATE local_listeners SET hub_url=? WHERE hub=? AND listener_id=? AND hub_url IS NULL", &[hub["url"].clone(),row["hub"].clone(),row["listener_id"].clone()])?;
                 }
+            }
+            if let Some(old) = &previous {
+                if retained {
+                    client.inherit_authority(old);
+                } else {
+                    old.close();
+                }
+            }
+            if !retained {
+                self.channel_inventories.remove(&name);
             }
             if !retained && (auth != "oidc" || client.bearer.is_some()) {
                 if let Some(events) = client.start_events() {

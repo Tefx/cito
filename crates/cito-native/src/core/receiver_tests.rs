@@ -276,7 +276,12 @@ fn probe_transport_and_negative_responses_count_toward_retirement() -> Result<()
     ] {
         let f = Fixture::new()?;
         let plugin = f.plugin(body);
+        f.seed("probe-retry")?;
         f.state.schedule_wake_retry_for(&f.row, 5000)?;
+        assert_eq!(
+            f.state.db.query("SELECT * FROM wake_retries", &[])?.len(),
+            1
+        );
         for failures in 1..=3 {
             let row = f
                 .state

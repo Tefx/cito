@@ -472,3 +472,167 @@ fn v49_payload_free_failures_settle_app_and_invite_and_truncated_frames_keep_cac
     );
     assert!(!node(&after, "settings_items", "settings_hub:personal").is_null());
 }
+
+#[test]
+fn passive_bounded_hubs_preserve_complete_nested_attachments_and_update_scalars() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut frame = state();
+    frame["hubs"][0]["attachments"] = json!((0..129).map(|i| json!({"channel_id":format!("device-{i}"),"location":"device","display_name":format!("Device {i}"),"availability":"ACTIVE","is_local":false})).collect::<Vec<_>>());
+    f.send(p, frame.clone());
+    assert_eq!(inspect(&f, p)["hub_attachment_counts"]["personal"], 129);
+    frame["unread_count"] = json!(9);
+    frame["hubs"][0]["status"] = json!("disconnected");
+    let bounded: Value =
+        serde_json::from_slice(&cito_native::core::daemon::bounded_frame(frame).unwrap()).unwrap();
+    assert_eq!(
+        bounded["hubs"][0]["attachments"].as_array().unwrap().len(),
+        128
+    );
+    assert_eq!(bounded["truncated"], true);
+    f.send(p, bounded);
+    let s = inspect(&f, p);
+    assert_eq!(s["hub_attachment_counts"]["personal"], 129);
+    assert_eq!(s["unread_count"], 9);
+    assert!(s["items"].to_string().contains("Offline"));
+}
+
+#[test]
+fn bounded_state_receipts_redraw_controls_without_collections_and_keep_drafts() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["hubs"][0]["human_state_status"] = json!("current");
+    open(&f, p, &cfg, "channels");
+    control(&f, p, "open_directory");
+    for (operation, id, surface) in [
+        ("human_inbox_update", "toggle_inbox", "settings_items"),
+        ("unlisten_all", "stop_all", "items"),
+    ] {
+        control(&f, p, id);
+        let request = latest(&f, p, operation);
+        assert_eq!(node(&inspect(&f, p), surface, id)["enabled"], false);
+        input(&f, p, "channel_field:channel:account", "newer draft");
+        let mut receipt = state();
+        receipt["settings"] = cfg.clone();
+        receipt["settings"]["hubs"][0]["url"] =
+            json!("x".repeat(cito_native::core::daemon::FRAME_LIMIT));
+        receipt["source_op"] = json!(operation);
+        receipt["request_id"] = request["request_id"].clone();
+        receipt["ok"] = json!(true);
+        receipt["committed"] = json!(true);
+        let bounded: Value =
+            serde_json::from_slice(&cito_native::core::daemon::bounded_frame(receipt).unwrap())
+                .unwrap();
+        assert!(bounded.get("hubs").is_none());
+        assert!(bounded.get("listeners").is_none());
+        assert!(bounded.get("settings").is_none());
+        f.send(p, bounded.clone());
+        let s = inspect(&f, p);
+        assert_eq!(s["pending_controls"], json!([]));
+        assert_eq!(node(&s, surface, id)["enabled"], true);
+        assert_eq!(
+            node(&s, "settings_items", "settings_error_label")["text"],
+            bounded["warning"]
+        );
+        assert_eq!(
+            node(&s, "settings_items", "channel_field:channel:account")["text"],
+            "newer draft"
+        );
+    }
+}
+
+#[test]
+fn retained_oidc_draft_advances_committed_baseline_before_second_url_change() {
+    let _lock = serial();
+    for override_issuer in [false, true] {
+        let f = Fixture::new(json!({}));
+        let p = start(&f);
+        let mut cfg = settings();
+        cfg["hubs"][0] = json!({"name":"personal","url":"https://a.example.com","auth_mode":"oidc","enabled":true,"is_default":true,"status":"connected","issuer":"https://id-a.example.com","client_id":"a-client","redirect_port":8400,"is_builtin":false});
+        open(&f, p, &cfg, "hubs");
+        control(&f, p, "edit_hub:personal");
+        input(&f, p, "settings_hub_url", "https://b.example.com");
+        control(&f, p, "submit_add_hub");
+        let first = latest(&f, p, "setup_save_hub");
+        input(&f, p, "settings_hub_name", "personal-new");
+        if override_issuer {
+            input(&f, p, "settings_hub_issuer", "https://override.example.com");
+        }
+        cfg["hubs"][0]["url"] = json!("https://b.example.com");
+        cfg["hubs"][0]["issuer"] = json!("https://id-b.example.com");
+        cfg["hubs"][0]["client_id"] = json!("b-client");
+        cfg["hubs"][0]["redirect_port"] = json!(8500);
+        f.send(p,json!({"op":"settings","ok":true,"committed":true,"source_op":"setup_save_hub","request_id":first["request_id"],"settings":cfg}));
+        let s = inspect(&f, p);
+        assert_eq!(
+            node(&s, "settings_items", "settings_hub_name")["text"],
+            "personal-new"
+        );
+        assert_eq!(
+            node(&s, "settings_items", "settings_hub_client_id")["text"],
+            "b-client"
+        );
+        input(&f, p, "settings_hub_url", "https://a.example.com");
+        control(&f, p, "submit_add_hub");
+        let second = latest(&f, p, "setup_save_hub");
+        for key in ["client_id", "redirect_port"] {
+            assert!(second.get(key).is_none(), "{second}");
+        }
+        if override_issuer {
+            assert_eq!(second["issuer"], "https://override.example.com");
+        } else {
+            assert!(second.get("issuer").is_none(), "{second}");
+        }
+        assert_eq!(second["original_name"], "personal");
+    }
+}
+
+#[test]
+fn delayed_inventory_error_settles_origin_without_leaking_into_selected_hub() {
+    let _lock = serial();
+    let f = Fixture::new(json!({}));
+    let p = start(&f);
+    let mut cfg = settings();
+    cfg["settings_hub"] = json!("personal");
+    open(&f, p, &cfg, "channels");
+    control(&f, p, "save_channel:channel");
+    let request = latest(&f, p, "channel_save");
+    control(&f, p, "channel_hub_selector:work");
+    cfg["settings_hub"] = json!("work");
+    cfg["channel_inventory_error"] = json!("Work inventory unavailable");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "channel_inventory_error")["text"],
+        "Work inventory unavailable"
+    );
+    cfg["settings_hub"] = json!("personal");
+    cfg["channel_inventory_error"] = json!("Personal inventory unavailable");
+    f.send(p,json!({"op":"settings","ok":true,"source_op":"channel_save","request_id":request["request_id"],"hub":"personal","channel_id":"channel","settings":cfg}));
+    let s = inspect(&f, p);
+    assert_eq!(s["pending_controls"], json!([]));
+    assert_eq!(
+        node(&s, "settings_items", "channel_inventory_error")["text"],
+        "Work inventory unavailable"
+    );
+    control(&f, p, "channel_hub_selector:personal");
+    assert_eq!(
+        node(&inspect(&f, p), "settings_items", "channel_inventory_error")["text"],
+        "Personal inventory unavailable"
+    );
+    control(&f, p, "channel_hub_selector:work");
+    cfg["settings_hub"] = json!("work");
+    cfg["channel_inventory_error"] = Value::Null;
+    cfg["channels"][0]["can_configure_hub"] = json!(false);
+    cfg["channels"][0]["hub_ready"] = json!(false);
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    assert!(!node(&inspect(&f, p), "settings_items", "channels_managed_notice").is_null());
+    cfg["settings_hub"] = json!("personal");
+    cfg["channel_inventory_error"] = json!("Personal inventory unavailable");
+    f.send(p, json!({"op":"settings","settings":cfg}));
+    let selected = inspect(&f, p);
+    assert!(node(&selected, "settings_items", "channel_inventory_error").is_null());
+    assert!(!node(&selected, "settings_items", "channels_managed_notice").is_null());
+}

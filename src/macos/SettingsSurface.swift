@@ -66,12 +66,28 @@ extension Companion {
                     // Newer edits to the acknowledged Hub are an explicit edit,
                     // not a new create that could overwrite a different URL.
                     editingExistingHub = true; editingOriginalHub = pending.name
+                    if let saved = saved {
+                        if addHubIssuer == pending.issuer {
+                            addHubIssuer = saved.issuer ?? ""
+                            settingsFieldControls["settings_hub_issuer"]?.stringValue = addHubIssuer
+                        }
+                        if addHubClientId == pending.clientId {
+                            addHubClientId = saved.client_id ?? ""
+                            settingsFieldControls["settings_hub_client_id"]?.stringValue = addHubClientId
+                        }
+                        if addHubRedirectPort == pending.redirectPort {
+                            addHubRedirectPort = saved.redirect_port.map(String.init) ?? ""
+                            settingsFieldControls["settings_hub_redirect_port"]?.stringValue = addHubRedirectPort
+                        }
+                        editingInitialHub = saved
+                    }
                 }
             }
         }
         let target = value.settings_hub ?? value.channel_hub ?? hub ?? effectiveChannelHub
         let previousChannels = channelSettingsByHub[target] ?? []
         channelSettingsByHub[target] = value.channels ?? []
+        channelInventoryErrorsByHub[target] = value.channel_inventory_error
         for channel in value.channels ?? [] {
             let key=target + "|" + channel.id
             var ui = channelUiStates[key] ?? ChannelUiState()
@@ -620,7 +636,7 @@ extension Companion {
             cursorY -= 36
         }
 
-        if let error = settings?.channel_inventory_error, !error.isEmpty {
+        if let error = channelInventoryErrorsByHub[effectiveChannelHub], !error.isEmpty {
             let message = presentationError(error)
             let height = max(16,ceil((message as NSString).boundingRect(with:NSSize(width:480,height:CGFloat.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:NSFont.systemFont(ofSize:11)]).height))
             let diagnostic = textLabel(message, NSRect(x:20,y:cursorY-height-4,width:480,height:height),size:11,color:CitoPalette.dangerText)
@@ -632,7 +648,7 @@ extension Companion {
         }
         let resolvedChannels = channelSettingsByHub[effectiveChannelHub] ?? []
         let visibleChannels = resolvedChannels.filter { $0.can_configure_hub == true || $0.hub_ready == true }
-        if !resolvedChannels.isEmpty && visibleChannels.isEmpty && settings?.channel_inventory_error == nil {
+        if !resolvedChannels.isEmpty && visibleChannels.isEmpty && channelInventoryErrorsByHub[effectiveChannelHub] == nil {
             let notice = textLabel("External channels are managed by your '\(effectiveChannelHub)' Hub administrator. None are enabled yet.", NSRect(x:20,y:cursorY-42,width:480,height:36),size:11,color:CitoPalette.secondaryText)
             notice.identifier = NSUserInterfaceItemIdentifier("channels_managed_notice")
             notice.maximumNumberOfLines = 0; notice.lineBreakMode = .byWordWrapping
@@ -1270,7 +1286,8 @@ extension Companion {
                         if self.addHubRedirectPort == (initial.redirect_port.map(String.init) ?? "") { action.removeValue(forKey:"redirect_port") }
                     }
                 }
-                let pending = PendingHubSave(name:name, requestId:UUID().uuidString, generation:self.addHubDraftGeneration)
+                let pending = PendingHubSave(name:name, requestId:UUID().uuidString, generation:self.addHubDraftGeneration,
+                    issuer:self.addHubIssuer, clientId:self.addHubClientId, redirectPort:self.addHubRedirectPort)
                 self.pendingHubSave=pending; self.addHubError=nil
                 action["request_id"]=pending.requestId
                 self.emit(action)

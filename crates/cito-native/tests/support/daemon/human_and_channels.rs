@@ -1,6 +1,105 @@
 use super::*;
 
 #[test]
+fn disabled_hub_retirement_reaches_durable_agent_and_human_bindings() {
+    let _lock = serial();
+    for route in [
+        "mcp",
+        "cli-agent",
+        "cli_human_device",
+        "cli-human",
+        "unlisten_session",
+        "unlisten_session-hub",
+    ] {
+        let f = Fixture::new(json!({}));
+        let (_, port) = f.hub();
+        fs::write(&f.config, json!({"hubs":{"local":{"url":"local://"},"work":{"url":format!("http://127.0.0.1:{port}")}}}).to_string()).unwrap();
+        let meta = f.provider("accepted");
+        f.daemon(&[]);
+        let agent = route == "mcp" || route == "cli-agent";
+        let harness = if agent { "fixture" } else { "human" };
+        let registration = if agent {
+            f.tool(
+                "cito_listen",
+                json!({"hub":"work","about":"Receiver"}),
+                meta.clone(),
+            )
+        } else {
+            let (status, result) =
+                f.action(json!({"op":"cli_human_device","hub":"work","attach":true}));
+            assert_eq!(status, 200, "{result}");
+            result
+        };
+        assert!(registration["listener_id"].is_string());
+        let before = f.rows(&format!(
+            "SELECT * FROM local_listeners WHERE hub='work' AND harness='{harness}'"
+        ))[0]
+            .clone();
+        let id = before["listener_id"].as_str().unwrap();
+        let (status, result) =
+            f.action(json!({"op":"setup_toggle_hub","hub":"work","enabled":false}));
+        assert_eq!(status, 200, "{result}");
+        match route {
+            "mcp" => {
+                let result = f.tool_result("cito_unlisten", json!({"hub":"work"}), meta);
+                assert_eq!(result["isError"], true, "{result}");
+                assert!(result.to_string().contains("DETACH_PENDING"), "{result}");
+            }
+            "cli-agent" | "cli-human" => {
+                let mut args = vec!["unlisten", "--hub", "work", "--harness", harness, "--json"];
+                if agent {
+                    args.extend(["--session", "session-1"]);
+                }
+                let (ok, out, err) = f.command(NATIVE, &args, "");
+                assert!(!ok, "{out} {err}");
+                assert!(
+                    format!("{out} {err}").contains("DETACH_PENDING"),
+                    "{out} {err}"
+                );
+            }
+            _ => {
+                let action = if route == "cli_human_device" {
+                    json!({"op":route,"hub":"work","attach":false})
+                } else if route == "unlisten_session-hub" {
+                    json!({"op":"unlisten_session","hub":"work","harness":"human","session_id":"default"})
+                } else {
+                    json!({"op":"unlisten_session","harness":"human","session_id":"default"})
+                };
+                let (status, result) = f.action(action);
+                assert_eq!(status, 400, "{result}");
+                assert!(result.to_string().contains("DETACH_PENDING"), "{result}");
+                assert_ne!(result["committed"], true);
+            }
+        }
+        let after = f.rows(&format!(
+            "SELECT * FROM local_listeners WHERE hub='work' AND listener_id='{id}'"
+        ))[0]
+            .clone();
+        assert_eq!(after["status"], "UNLISTENED");
+        assert_eq!(after["hub_url"], before["hub_url"]);
+        assert_eq!(
+            f.rows(&format!(
+                "SELECT * FROM pending_hub_detaches WHERE hub='work' AND listener_id='{id}'"
+            ))
+            .len(),
+            1
+        );
+        let remote = f
+            .db("hub/hub.sqlite")
+            .query("SELECT value FROM hub_kv WHERE key=?", &[json!(id)])
+            .unwrap();
+        let remote: Value = serde_json::from_str(remote[0]["value"].as_str().unwrap()).unwrap();
+        assert_eq!(remote["state"], "ACTIVE");
+        if !agent {
+            assert_ne!(
+                remote["human_paused"], true,
+                "Detaching a device must not change inbox policy"
+            );
+        }
+    }
+}
+
+#[test]
 fn oversized_committed_channel_values_get_payload_free_success_receipts() {
     let _lock = serial();
     let f = Fixture::new(json!({}));

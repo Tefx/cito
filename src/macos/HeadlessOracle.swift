@@ -843,6 +843,7 @@ extension Companion {
                     "attached": (editor.delegate as? NSTextField)?.currentEditor() === editor]
             },
             "activity_copy_remaining": activityCopiedUntil.mapValues { max(0,$0.timeIntervalSinceNow) },
+            "hub_attachment_counts": Dictionary(uniqueKeysWithValues: hubs.map { ($0.name, $0.attachments?.count ?? 0) }),
             "available_count": available.count, "rebuilds": rebuildCount,
             "directory_open": directoryVisible, "directory_mode": directoryMode, "activity_filter": activityFilter,
             "unread_count": unreadCount, "composer_open": !(directoryComposerBar?.isHidden ?? true),

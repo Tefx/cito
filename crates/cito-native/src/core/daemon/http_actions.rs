@@ -103,6 +103,18 @@ pub(super) fn interactive_login(action: &Value) -> bool {
             && matches!(action["action"].as_str(), Some("login" | "switch_account")))
 }
 
+/// Authoritative success survives failures rebuilding a secondary local view.
+fn committed_projection(mut result: Value, projection: Result<(), String>) -> Value {
+    if result["ok"] != false {
+        result["ok"] = json!(true);
+        result["committed"] = json!(true);
+        if let Err(error) = projection {
+            result["warning"] = json!(format!("Saved successfully; local refresh failed: {error}"));
+        }
+    }
+    result
+}
+
 pub(super) fn dispatch_action(
     service: &Arc<Mutex<DaemonService>>,
     action: &Value,
@@ -129,7 +141,9 @@ pub(super) fn dispatch_action(
             break s;
         }
         if s.closing || shutdown_requested() {
-            result = Err("Shutting down".into());
+            result = result.map(|value| {
+                committed_projection(value, Err("Shutting down before local refresh".into()))
+            });
             break s;
         }
         s.refresh_setup_inspections();
@@ -140,7 +154,8 @@ pub(super) fn dispatch_action(
             break s;
         }
         if Instant::now() >= deadline {
-            result = Err("Setup inspection timed out".into());
+            result = result
+                .map(|value| committed_projection(value, Err("Setup inspection timed out".into())));
             break s;
         }
         drop(s);
@@ -165,7 +180,7 @@ pub(super) fn dispatch_action(
         );
     }
     if refresh_setup && result.is_ok() {
-        s.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings()}));
+        s.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":s.settings(),"warning":result.as_ref().ok().and_then(|value| value.get("warning"))}));
         s.push_ui_result(Some(action));
     } else {
         s.push_ui();
@@ -681,7 +696,10 @@ impl DaemonService {
             });
         self.record_hub_result(action, &result, resolved_hub.as_deref());
         if result.is_ok() && matches!(string(action, "op"), "setup_save_hub" | "save_hub") {
-            self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings()}));
+            self.emit(json!({"op":"settings","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"settings":self.settings(),"warning":result.as_ref().ok().and_then(|value| value.get("warning"))}));
+        }
+        if let Some(warning) = result.as_ref().ok().and_then(|value| value.get("warning")) {
+            self.emit(json!({"op":"state","ok":true,"committed":true,"source_op":action["op"],"request_id":action["request_id"],"warning":warning}));
         }
         if result
             .as_ref()
@@ -804,12 +822,7 @@ impl DaemonService {
                     let slot = self.slot(&hub)?;
                     return self.listen(&hub,&json!({"about":"Human"}),&json!({"harness":"human","session_id":"default","cwd":"","title":"Human","principal_id":slot.identity["principal_id"]}));
                 }
-                let id = crate::core::registration::local_node_id(
-                    &self.state,
-                    self.slot(&hub)?,
-                    "human",
-                    "default",
-                )?;
+                let id = self.session_node_id(&hub, "human", "default")?;
                 let removed = self.unlisten_id(&hub, &id)?;
                 return Ok(json!({"ok":true,"removed":u8::from(removed)}));
             }
@@ -843,8 +856,13 @@ impl DaemonService {
                         .unwrap_or(json!(1));
                 }
                 let result = slot.human_request("human_inbox_update", &params)?;
-                Self::reconcile_human_scope(&self.state, slot, &self.host_id, &result["record"])?;
-                return Ok(result);
+                let projection = Self::reconcile_human_scope(
+                    &self.state,
+                    slot,
+                    &self.host_id,
+                    &result["record"],
+                );
+                return Ok(committed_projection(result, projection));
             }
             "cli_rename" => {
                 let caller = self
@@ -910,17 +928,12 @@ impl DaemonService {
                 }
                 if action["harness"] == "human" && action["session_id"] == "default" {
                     // Fence automatic enrollment that has not committed a local row yet.
-                    for (name, slot) in &self.slots {
-                        if !action["hub"].is_null() && name != &hub {
+                    for name in self.session_hubs("human", "default")? {
+                        if !action["hub"].is_null() && name != hub {
                             continue;
                         }
-                        let id = crate::core::registration::local_node_id(
-                            &self.state,
-                            slot,
-                            "human",
-                            "default",
-                        )?;
-                        if let Err(error) = self.unlisten_id(name, &id) {
+                        let id = self.session_node_id(&name, "human", "default")?;
+                        if let Err(error) = self.unlisten_id(&name, &id) {
                             detach_errors.push(format!("{name}: {error}"));
                         }
                     }
@@ -1323,7 +1336,8 @@ impl DaemonService {
                     repair_default_hub(v);
                     Ok(())
                 })?;
-                self.purge_hub_state(&hub)?;
+                let projection = self.purge_hub_state(&hub).and_then(|_| self.reload_slots());
+                return Ok(committed_projection(json!({"ok":true}), projection));
             }
             "test_hub" => return self.slot(&hub)?.rpc("account_info", &json!({})),
             "paste_hub_invite" => {
@@ -1643,13 +1657,13 @@ impl DaemonService {
                     }
                     if row["harness"] == "human" {
                         let result = slot.human_request("human_inbox_update",&json!({"node_id":id,"expected_control_revision":row["human_control_revision"],"scope":scope}))?;
-                        Self::reconcile_human_scope(
+                        let projection = Self::reconcile_human_scope(
                             &self.state,
                             slot,
                             &self.host_id,
                             &result["record"],
-                        )?;
-                        return Ok(result);
+                        );
+                        return Ok(committed_projection(result, projection));
                     }
                     row["scope"] = json!(scope);
                     match slot.kv_save(id, &row, Some(rev)) {
@@ -1660,10 +1674,15 @@ impl DaemonService {
                         Err(_) => {}
                     }
                 }
-                self.state.db.execute(
-                    "UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=?",
-                    &[json!(scope), json!(hub), json!(id)],
-                )?;
+                let projection = self
+                    .state
+                    .db
+                    .execute(
+                        "UPDATE local_listeners SET scope=? WHERE hub=? AND listener_id=?",
+                        &[json!(scope), json!(hub), json!(id)],
+                    )
+                    .map(|_| ());
+                return Ok(committed_projection(json!({"ok":true}), projection));
             }
             "open_directory" | "query_directory" => {
                 self.directory_open = true;
@@ -2003,12 +2022,14 @@ impl DaemonService {
             }
             _ => return Err(format!("INVALID_INPUT: Unknown UI action: {op}")),
         }
-        self.reload_slots()?;
+        let reload = self.reload_slots();
+        if mutating_action(action) {
+            return Ok(committed_projection(json!({"ok":true}), reload));
+        }
+        reload?;
         // Setup receipts require the refreshed inspection, which dispatch_action
         // awaits without holding service. Passive cached projections remain usable.
-        if !mutating_action(action)
-            && !matches!(op, "close_menu" | "close_settings" | "close_directory")
-        {
+        if !matches!(op, "close_menu" | "close_settings" | "close_directory") {
             self.push_ui_result(Some(action));
         }
         Ok(json!({"ok":true}))

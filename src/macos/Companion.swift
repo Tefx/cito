@@ -144,6 +144,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         let name: String
         let requestId: String
         let generation: Int
+        let issuer: String, clientId: String, redirectPort: String
     }
     var pendingHubSave: PendingHubSave?
     var settingsBannerError: String?
@@ -188,6 +189,7 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
     var pendingChannelValues: [String: (hub: String, channelId: String, scope: String, values: [String: String])] = [:]
     var selectedChannelHub = ""
     var channelSettingsByHub: [String: [ChannelSetupItem]] = [:]
+    var channelInventoryErrorsByHub: [String: String] = [:]
     var settingsScrollOffsets: [String: CGFloat] = [:]
     var pendingOnboardingMarker: String?
     var settingsKeyMonitor: Any?
@@ -381,7 +383,12 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         if (frame.op == "settings" && frame.settings == nil) ||
            (frame.authority_changed == true && ["settings", "pair_code", "channel_test_result"].contains(frame.op)) {
             let settled = settleReceiptOnly(frame)
-            if settled && settingsVisible { rebuildSettingsPanel() }
+            if settled {
+                if let warning = frame.warning { menuBannerError = warning }
+                rebuild()
+                refreshDirectoryViews()
+                if settingsVisible { rebuildSettingsPanel() }
+            }
             return
         }
         // Passive collection shedding cannot replace a complete cache. Scalar
@@ -507,6 +514,17 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             if settingsPanel != nil { rebuildSettingsPanel() }
             return
         }
+        // State receipts still pass through normal failure and Directory action
+        // correlation above; only successful commits may omit their projection.
+        if frame.op == "state", frame.ok == true, frame.committed == true,
+           frame.request_id != nil, frame.hubs == nil || frame.listeners == nil {
+            _ = settleReceiptOnly(frame)
+            if let warning = frame.warning { settingsBannerError = warning; menuBannerError = warning }
+            rebuild()
+            refreshDirectoryViews()
+            if settingsVisible { rebuildSettingsPanel() }
+            return
+        }
         if frame.op == "settings", let value = frame.settings {
             let target = value.settings_hub ?? value.channel_hub ?? frame.hub ?? effectiveChannelHub
             let changed = value != settings || channelSettingsByHub[target] != (value.channels ?? [])
@@ -547,7 +565,11 @@ final class Companion: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
             return
         }
         if frame.op == "state", let observedHubs = frame.hubs, let observedListeners = frame.listeners {
-            let h = preserveCollections && hasRenderedState ? hubs.map { old in observedHubs.first { $0.name == old.name } ?? old } : observedHubs
+            let h = preserveCollections && hasRenderedState ? hubs.map { old in
+                guard var updated = observedHubs.first(where: { $0.name == old.name }) else { return old }
+                updated.attachments = old.attachments
+                return updated
+            } : observedHubs
             let l = preserveCollections && hasRenderedState ? listeners : observedListeners
             if let hasAny = frame.activity_has_any { activityHasAny = hasAny }
             let a = preserveCollections && hasRenderedState ? available : frame.available ?? []

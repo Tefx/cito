@@ -449,6 +449,19 @@ impl DaemonService {
         hubs.dedup();
         Ok(hubs)
     }
+    /// Resolve retirement from live identity or the durable offline binding.
+    pub(super) fn session_node_id(
+        &self,
+        hub: &str,
+        harness: &str,
+        session: &str,
+    ) -> Result<String, String> {
+        match self.slot(hub) {
+            Ok(slot) => super::super::registration::local_node_id(&self.state, slot, harness, session),
+            Err(error) => self.state.db.query("SELECT listener_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY binding_generation DESC LIMIT 1", &[json!(hub),json!(harness),json!(session)])?.first().map(|row| string(row,"listener_id").to_owned()).ok_or(error),
+        }
+    }
+
     /// Stop intent exists even if this session has never been enrolled.
     pub(super) fn ensure_agent_stop_row(
         &self,
@@ -461,7 +474,7 @@ impl DaemonService {
         }
         let slot = match self.slot(hub) {
             Ok(slot) => slot,
-            Err(error) => return self.state.db.query("SELECT listener_id FROM local_listeners WHERE hub=? AND harness=? AND session_id=? AND status!='FENCED_INACTIVE' ORDER BY binding_generation DESC LIMIT 1", &[json!(hub),json!(harness),json!(session)])?.first().map(|row| string(row,"listener_id").to_owned()).ok_or(error),
+            Err(_) => return self.session_node_id(hub, harness, session),
         };
         let lock = self.state.registration_lock(hub)?;
         let _guard = lock
@@ -767,7 +780,7 @@ impl DaemonService {
             .as_str()
             .unwrap_or(&self.config.default_hub)
             .to_string();
-        if name != "cito_unlisten" || args["hub"].is_string() {
+        if name != "cito_unlisten" {
             self.slot(&hub)?;
         }
         match name {
