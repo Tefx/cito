@@ -14850,7 +14850,7 @@ phases:
   - id: v49.consolidate
     name: 'V49 Round 1 Admitted Ledger Consolidation, Cross-Layer Settlement, Site
       Docs & Release Binary Staging (V49-C1–V49-C8) [REQUIRES_SKILL: contract-and-simplicity]'
-    status: claimed
+    status: done
     description: "step_type: implementation\nrepo_change_policy: modifies_repo\nscope:\n\
       \  allowed_paths:\n    - crates/cito-native/**\n    - plugins/**\n    - src/macos/**\n\
       \    - site/**\n    - bin/**\n  blocked_paths:\n    - plan.yaml\n\nDeliver:\n\
@@ -14960,3 +14960,27 @@ phases:
     agent: senior-engineer
     claimed_by: senior-engineer
     claimed_at: '2026-11-16T10:34:46.147241Z'
+    done_at: '2026-11-16T11:25:17.892902+00:00'
+    evidence: 'Completed v49.consolidate (candidate refs/vectl/candidates/v49.consolidate
+      -> 55889d2d9d154505a45a467835f424be4785faae, fast-forwarded onto main; 26 files
+      changed across crates/cito-native/**, plugins/**, src/macos/**, site/**, and
+      bin/**):
+
+      - Closed all 8 Round 1 Frozen Ledger obligations (V49-C1 through V49-C8): ui_ipc
+      collection-only `truncated` + Companion passive cache guard; `set_host_hub`
+      `ok`/`committed`/`source_op` receipts; `wake_retries` terminal cleanup across
+      human/clear/empty-batch/all-acked-claim-loss while preserving genuine unread
+      survivors; `mutating_action` completeness + `paste_hub_invite` `settleReceiptOnly`;
+      CLI `--remove-hub` purge preserving disabled/legacy rows; targeted-probe badge
+      intent restore on closed surfaces; URL-only OIDC edit omission of inherited
+      metadata; config normalization delegation, `claude` stale-socket unlink, Telegram
+      shared-deadline test, `site/docs/{hosting,architecture}.html` sync, and signed
+      release binary staging (`7/7` binaries).
+
+      - Verified on committed 55889d2: `cargo fmt --all -- --check` & `git diff --check`
+      passed; Rust 1.95.0 `clippy --workspace --all-targets -- -D warnings` 0 warnings;
+      detached `os.setsid()` `cargo test --workspace` (**546 passed, 0 failed, 4 ignored**);
+      `cargo build --release` 0 warnings + **7/7 strict codesign** passed; `packaging/release.py
+      check` (`0.21.3`, no tag); **17 packaging unit tests** passed; `site-clipboard.mjs`
+      passed; 0 neutral-name/`§1.2`/popup violations; `~/.cito` live sockets & absent
+      `/Applications/Cito.app` untouched.'
